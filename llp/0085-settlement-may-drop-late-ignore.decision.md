@@ -7,6 +7,15 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-07
 **Related:** LLP 0027, LLP 0049, LLP 0050, LLP 0070, LLP 0083
+**Extended-by:** LLP 0312 (#settle-purity: an enricher's `settle` must be pure
+and idempotent, because compaction calls it speculatively and discards the
+result), LLP 0254 (#scope: accepted 2026-08-17; the Claude OTEL
+listener resolves the policy at ingest with cwd already in hand, so the race
+this backstop exists for does not arise there and the late drop does not run on
+that path; it stands unchanged for the live proxy and for transcript backfill),
+LLP 0286 (#endpoints-evicted-last: session-context compaction pins a session's
+session-start record, so the at-or-before selection this doc specifies still
+has a record to find once the file is over cap)
 
 > When a Claude exchange raced past the capture seam with `cwd = null` (the
 > session-start hook record had not landed yet), the flush-time settlement

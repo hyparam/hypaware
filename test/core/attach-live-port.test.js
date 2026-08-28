@@ -175,7 +175,7 @@ test('attach reports already-attached (no-op) when the recorded port matches the
     mkdirSync(path.join(home, '.claude'), { recursive: true })
     writeFileSync(
       path.join(home, '.claude', 'settings.json'),
-      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555 } })
+      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555, mode: 'otel' } })
     )
     seedDaemonRun(home, 55555)
     /** @type {Array<{ name: string, endpoint: string }>} */
@@ -197,7 +197,7 @@ test('attach installs client assets even when the settings are already attached 
     mkdirSync(path.join(home, '.claude'), { recursive: true })
     writeFileSync(
       path.join(home, '.claude', 'settings.json'),
-      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555 } })
+      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555, mode: 'otel' } })
     )
     seedDaemonRun(home, 55555)
     const source = path.join(home, 'contrib', 'helper')

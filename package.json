@@ -1,6 +1,6 @@
 {
   "name": "hypaware",
-  "version": "1.23.0",
+  "version": "1.28.0",
   "type": "module",
   "description": "HypAware: AI agent observability with a plugin kernel. Records Claude Code, Codex, OTEL, and raw AI gateway traffic into one queryable history, kept on your machine or shared across machines and teams.",
   "bin": {
@@ -28,6 +28,13 @@
     "./core/query": {
       "types": "./types/core/query/index.d.ts",
       "import": "./src/core/query/index.js"
+    },
+    "./core/search": {
+      "types": "./types/core/search/index.d.ts",
+      "import": "./src/core/search/index.js"
+    },
+    "./core/search/types.js": {
+      "types": "./src/core/search/types.d.ts"
     },
     "./core/util": {
       "types": "./types/core/util/index.d.ts",
@@ -63,29 +70,38 @@
     "test": "node scripts/run-tests.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:types": "tsc -p tsconfig.build.json",
+    "bench:icebird-real": "node --expose-gc benchmarks/icebird-real-data.mjs",
+    "bench:normal-cpu": "node benchmarks/normal-usage-cpu.mjs",
     "prepare": "npm run build:types",
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1109.0",
-    "@aws-sdk/credential-provider-ini": "3.973.13",
-    "hyparquet": "1.28.2",
+    "@aws-sdk/client-s3": "3.1120.0",
+    "@aws-sdk/credential-provider-ini": "3.973.15",
+    "hyparquet": "1.29.2",
     "hyparquet-compressors": "1.1.1",
-    "icebird": "0.8.22",
-    "marked": "18.0.9",
-    "squirreling": "0.15.3"
+    "hypgrep": "0.5.1",
+    "hysnappy": "1.1.1",
+    "icebird": "0.8.26",
+    "marked": "18.0.11",
+    "squirreling": "0.16.3"
   },
   "optionalDependencies": {
-    "hyparquet-writer": "0.16.6",
+    "hyparquet-writer": "0.16.8",
     "hypvector": "0.2.2"
   },
   "overrides": {
     "icebird": {
-      "hyparquet-writer": "0.16.6"
+      "hyparquet": "1.29.2",
+      "hyparquet-writer": "0.16.8"
+    },
+    "hypgrep": {
+      "hyparquet": "1.29.2",
+      "hyparquet-writer": "0.16.8"
     }
   },
   "devDependencies": {
-    "@types/node": "26.2.0",
+    "@types/node": "26.4.0",
     "typescript": "7.0.2"
   }
 }

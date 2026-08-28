@@ -86,6 +86,32 @@ async function seedShrinkablePartition(cacheRoot, waves) {
   }
 }
 
+/**
+ * A fragmented identity-partitioned table: `waves` ingest waves over the
+ * same `sessions` tuples, so every tuple holds `waves` small files and the
+ * in-place pass (LLP 0310) has real victims to merge.
+ *
+ * @param {string} cacheRoot
+ * @param {number} sessions
+ * @param {number} waves
+ * @param {(i: number) => string | null} [attributesFor]
+ */
+async function seedFragmentedPartition(cacheRoot, sessions, waves, attributesFor) {
+  for (let wave = 0; wave < waves; wave++) {
+    const rows = Array.from({ length: sessions }, (_, i) => ({
+      id: wave * sessions + i,
+      session_id: `s-${i}`,
+      attributes: attributesFor
+        ? attributesFor(i)
+        : `{"gateway":{"session":"s-${i}","wave":${wave}}}`,
+    }))
+    await appendRowsToSourceTable(
+      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS, rows,
+      { declaration: SESSION_DECLARATION }
+    )
+  }
+}
+
 /** @param {string} cacheRoot @returns {string} */
 function partitionDir(cacheRoot, dataset = 'ai_gateway_messages') {
   return path.join(cacheRoot, 'datasets', dataset, 'source=claude')
@@ -118,7 +144,9 @@ async function liveDataFiles(dir) {
   const dataDir = path.join(dir, cursor.tableDir ?? 'table', 'data')
   const entries = await fs.readdir(dataDir, { withFileTypes: true })
   return entries
-    .filter((e) => e.isFile() && e.name.endsWith('.parquet'))
+    // Data files only: compaction now leaves a grep sidecar beside each
+    // one, and truncating a sidecar would not make the rewrite fail.
+    .filter((e) => e.isFile() && e.name.endsWith('.parquet') && !e.name.endsWith('.index.parquet'))
     .map((e) => path.join(dataDir, e.name))
 }
 
@@ -168,7 +196,10 @@ test('a compaction that cannot reduce the file count records that it did not', a
 
 // @ref LLP 0217#retry-on-writer-change [tests]: the frozen partition from
 // issue #723 thaws exactly once when the writer that froze it is replaced.
-test('a partition frozen by an ineffective compaction is retried once under a new compaction writer', async () => {
+// Under LLP 0310 that one owed attempt is a reassessment, not a rewrite: the
+// in-place pass lists the live files, finds every tuple already at one file,
+// and records the ineffectiveness verdict by inspection.
+test('a partition frozen by an ineffective compaction is reassessed once under a new compaction writer', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-thaw-'))
   try {
     await seedUnshrinkablePartition(cacheRoot, 8)
@@ -190,21 +221,29 @@ test('a partition frozen by an ineffective compaction is retried once under a ne
     // compact_avg_file_bytes) and its live count sits exactly on the
     // recorded baseline. Before the fix the baseline gate read that as
     // convergence and skipped it forever, whatever the writer could now do.
+    // The owed attempt finds nothing mergeable (one file per tuple is the
+    // floor) and records that verdict without a rewrite (LLP 0310).
     const thaw = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(thaw.totalCompacted, 0, 'the reassessment must not rewrite a partition at its floor')
+    assert.equal(thaw.partitions[0].compacted, false)
     assert.equal(
-      thaw.totalCompacted, 1,
-      'a partition whose recorded compaction achieved nothing must be retried when the writer changes'
+      thaw.partitions[0].compactionIneffective, true,
+      'the owed attempt still produces the verdict the stale record lacked'
     )
-    assert.equal(thaw.partitions[0].compacted, true)
+    assert.equal(thaw.partitions[0].compactionIneffectiveFiles, 8)
+    const record = compactionRecord(dir)
+    assert.equal(typeof record.writerGeneration, 'number', 'the reassessment spends the writer generation')
+    assert.equal(record.resettleBaselineFiles, 8)
+    assert.equal(record.dataFilesBefore, 8)
 
-    // And it converges again immediately: the retry is once per writer
-    // generation, not once per tick.
+    // And it converges again immediately: the reassessment is once per
+    // writer generation, not once per tick.
     const settled = await maintainCache({ cacheRoot, compactOnly: true })
-    assert.equal(settled.totalCompacted, 0, 'the retry must not become a rewrite-forever loop')
+    assert.equal(settled.totalCompacted, 0, 'the reassessment must not become a loop')
     const third = await maintainCache({ cacheRoot, compactOnly: true })
     assert.equal(third.totalCompacted, 0)
 
-    // The retry is a real rewrite, so it must still be lossless.
+    // Nothing was rewritten, so the rows are untouched by construction.
     const cursor = readCursorSync(dir)
     const rows = await readRowsFromTable(path.join(dir, cursor.tableDir ?? 'table'))
     assert.equal(rows.length, 8)
@@ -247,14 +286,17 @@ test('a compaction that did reduce the file count is never retried', async () =>
     }
 
     // Control: the same partition, the same stamp-less record, differing
-    // only in what the last rewrite achieved. The tick compacts, which is
-    // what proves the assertion above is about effectiveness and not about
-    // the partition being too healthy to flag at all.
+    // only in what the last rewrite achieved. One more ingest wave gives
+    // the reassessment something mergeable, and the planted baseline sits
+    // on the live count so only the stale verdict can thaw it. The tick
+    // compacts, which is what proves the assertion above is about
+    // effectiveness and not about the partition being too healthy to flag.
+    await seedShrinkablePartition(cacheRoot, 1)
     await plantCompactionRecord(dir, {
       previousTableDir: 'table',
       compactedAt: '2026-08-12T21:55:35.168Z',
-      resettleBaselineFiles: after,
-      dataFilesBefore: after,
+      resettleBaselineFiles: after + 1,
+      dataFilesBefore: after + 1,
     })
     const retried = await maintainCache({ cacheRoot, compactOnly: true })
     assert.equal(retried.totalCompacted, 1)
@@ -278,8 +320,9 @@ test('a compaction that did reduce the file count is never retried', async () =>
 test('a retry whose rewrite throws still spends its writer generation', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-throw-'))
   try {
-    await seedUnshrinkablePartition(cacheRoot, 8)
-    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    // Fragmented, so the owed attempt is a real in-place merge (LLP 0310)
+    // rather than a floor reassessment that reads no data files.
+    await seedFragmentedPartition(cacheRoot, 4, 2)
 
     const dir = partitionDir(cacheRoot)
     // The stamp-less cursor from issue #723 again: this partition is owed
@@ -290,7 +333,7 @@ test('a retry whose rewrite throws still spends its writer generation', async ()
       resettleBaselineFiles: 8,
     })
     // A torn write: one live data file truncated to a stub no parquet
-    // reader can decode, so the retry's scan throws part-way through.
+    // reader can decode, so the retry's merge throws part-way through.
     const [torn] = await liveDataFiles(dir)
     await fs.truncate(torn, 4)
 
@@ -332,8 +375,9 @@ test('a retry whose rewrite throws still spends its writer generation', async ()
 test('a partition frozen by a failed retry is reported as skipped on every later tick', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-throw-report-'))
   try {
-    await seedUnshrinkablePartition(cacheRoot, 8)
-    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    // Fragmented, so the owed attempt is a real in-place merge (LLP 0310)
+    // that has to read the torn file.
+    await seedFragmentedPartition(cacheRoot, 4, 2)
 
     const dir = partitionDir(cacheRoot)
     // The stamp-less cursor from issue #723: one attempt is owed under the
@@ -395,11 +439,18 @@ test('a partition frozen by a failed retry is reported as skipped on every later
 // partition whose rewrite committed a verdict before the tick threw is
 // described by that verdict, which says something about the partition, and not
 // by the bare fact that the attempt ended in an error, which does not.
-test('a committed ineffective verdict outranks the failed attempt that followed it', async () => {
+test('a committed verdict outranks the failed attempt that followed it', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-verdict-wins-'))
   try {
-    await seedUnshrinkablePartition(cacheRoot, 8)
-    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    // The late-throw shape needs the generation-swap rewrite, which routine
+    // dueness no longer takes (LLP 0310). Fallback-marked rows plus a settle
+    // context route the tick there: victims carrying committed fallback rows
+    // are the in-place pass's own escape to the full rewrite.
+    await seedFragmentedPartition(
+      cacheRoot, 4, 2, () => '{"gateway":{"identity_source":"gateway_fallback"}}'
+    )
+    const storage = /** @type {any} */ ({})
+    const getSettleHook = () => async (/** @type {Record<string, unknown>[]} */ rows) => rows.map((r) => ({ ...r }))
 
     const dir = partitionDir(cacheRoot)
     await plantCompactionRecord(dir, {
@@ -414,7 +465,7 @@ test('a committed ineffective verdict outranks the failed attempt that followed 
     const retiringDir = path.join(dir, retiring)
     await fs.chmod(retiringDir, 0o555)
     try {
-      const attempt = await maintainCache({ cacheRoot, compactOnly: true })
+      const attempt = await maintainCache({ cacheRoot, compactOnly: true, storage, getSettleHook })
       assert.equal(attempt.partitions[0].failed, true, 'fixture invariant: the tick must fail on this partition')
     } finally {
       await fs.chmod(retiringDir, 0o755)
@@ -425,9 +476,12 @@ test('a committed ineffective verdict outranks the failed attempt that followed 
       'fixture invariant: the throw also stamped a failed attempt, so the two records really do compete'
     )
 
-    const after = await maintainCache({ cacheRoot, compactOnly: true })
-    assert.equal(after.partitions[0].compactionIneffective, true, 'the recorded verdict is what the skip is about')
-    assert.equal(after.partitions[0].compactionIneffectiveFiles, 8)
+    // The committed rewrite reduced 8 files to one per tuple, and THAT
+    // verdict is what later ticks act on: the partition converges silently
+    // instead of being reported for the error that followed the commit.
+    const after = await maintainCache({ cacheRoot, compactOnly: true, storage, getSettleHook })
+    assert.equal(after.totalCompacted, 0)
+    assert.equal(after.partitions[0].compactionIneffective, undefined, 'an effective verdict is not an ineffective one')
     assert.equal(
       after.partitions[0].compactionAttemptFailed, undefined,
       'the rewrite proved something about this partition, so report that and not the error that followed'
@@ -448,8 +502,13 @@ test('a committed ineffective verdict outranks the failed attempt that followed 
 test('a rewrite that throws after committing its cursor keeps the generation it committed', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-compact-throw-late-'))
   try {
-    await seedUnshrinkablePartition(cacheRoot, 8)
-    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    // Routed to the generation-swap rewrite the same way as the test above:
+    // fallback-marked victims plus a settle context (LLP 0310).
+    await seedFragmentedPartition(
+      cacheRoot, 4, 2, () => '{"gateway":{"identity_source":"gateway_fallback"}}'
+    )
+    const storage = /** @type {any} */ ({})
+    const getSettleHook = () => async (/** @type {Record<string, unknown>[]} */ rows) => rows.map((r) => ({ ...r }))
 
     const dir = partitionDir(cacheRoot)
     // The stamp-less cursor from issue #723 again: one attempt is owed.
@@ -467,7 +526,7 @@ test('a rewrite that throws after committing its cursor keeps the generation it 
     const retiringDir = path.join(dir, retiring)
     await fs.chmod(retiringDir, 0o555)
     try {
-      const attempt = await maintainCache({ cacheRoot, compactOnly: true })
+      const attempt = await maintainCache({ cacheRoot, compactOnly: true, storage, getSettleHook })
       assert.equal(
         attempt.partitions[0].failed, true,
         'fixture invariant: the rewrite must commit its cursor and then fail'

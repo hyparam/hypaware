@@ -9,6 +9,7 @@ import {
   computeMessageId,
   createAiGatewayConversationState,
   createAiGatewayMessageProjector,
+  rollbackAiGatewayStateJournal,
   SESSION_INDEX_REBUILD_MS,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
@@ -806,6 +807,43 @@ test('seeding: sessions with no committed rows share one index build and skip th
   assert.equal(messageScanReads, 0, 'no fresh session pays the per-session committed-row scan')
 })
 
+test('seeding uses a targeted session read when storage supports it', async () => {
+  const targeted = []
+  let fullReads = 0
+  const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/p', epoch: 0, rowCount: 100_000 }]
+    },
+    async *readRows() {
+      fullReads++
+      yield { session_id: 'some-other-session', message_id: 'old' }
+    },
+    async *readRowsWhere(tablePath, columns, whereIn) {
+      targeted.push({ tablePath, columns, whereIn })
+    },
+  }))
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('native', {
+      project: () => ({
+        provider: 'native',
+        session_id: 'sess-targeted',
+        messages: [{ role: 'user', content: 'fresh', message_id: 'uuid-fresh' }],
+      }),
+    })],
+    storage,
+  })
+
+  const rows = await projector.projectExchange(exchange())
+  assert.equal(rows.length, 1)
+  assert.equal(fullReads, 0, 'the global committed-session scan is bypassed')
+  assert.deepEqual(targeted, [{
+    tablePath: '/p',
+    columns: ['message_id', 'session_id'],
+    whereIn: { session_id: ['sess-targeted'] },
+  }])
+})
+
 function freshSessionIndexStorage() {
   let discoverCalls = 0
   const storage = /** @type {ExtendedQueryStorageService} */ (/** @type {unknown} */ ({
@@ -1421,3 +1459,140 @@ function collectingLogger(sink) {
     error: make('error'),
   }
 }
+
+/**
+ * The live projector's dedup state is per-listener and outlives every
+ * exchange, and row expansion commits to it before the caller's
+ * `appendRows` has had a chance to fail. `journal` + rollback is how a
+ * caller keeps that state describing what landed. Issue #879.
+ */
+test('a journaled projection can be rolled back so the same exchange projects again', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('ok', { project: () => projection('ok') })],
+  })
+  /** @type {(() => void)[]} */
+  const journal = []
+  const first = await projector.projectExchange(exchange(), { journal })
+  assert.ok(first.length > 0)
+
+  // Stand-in for the append the caller could not complete.
+  rollbackAiGatewayStateJournal(journal)
+  assert.equal(journal.length, 0)
+
+  const retry = await projector.projectExchange(exchange())
+  assert.deepEqual(retry.map((r) => r.part_id), first.map((r) => r.part_id))
+  assert.deepEqual(retry.map((r) => r.previous_message_id), first.map((r) => r.previous_message_id))
+})
+
+test('without a rollback a re-projected exchange still dedups to nothing', async () => {
+  const projector = createAiGatewayMessageProjector({
+    gatewayId: 'gw-test',
+    projectors: [registered('ok', { project: () => projection('ok') })],
+  })
+  const first = await projector.projectExchange(exchange())
+  assert.ok(first.length > 0)
+  const again = await projector.projectExchange(exchange())
+  assert.equal(again.length, 0)
+})
+
+/**
+ * A journal is replayed by ONE exchange, but the state it rewinds belongs to
+ * the whole listener and the proxy runs its finalizers concurrently. So a
+ * rollback must not unwind the thread from under turns another exchange
+ * already chained and wrote: those turns stay in `chain.seen`, nothing
+ * re-chains them, and the tail would silently settle before them.
+ *
+ * The buried exchange still has to come back with the links it was projected
+ * with, though. Reading the CURRENT tail on the replay would emit the
+ * thread's opening turns claiming to follow turns that follow them, and the
+ * later exchange already links back to one of them, so the stored
+ * `previous_message_id` graph would contain a cycle: this column's contract
+ * is that the full ancestry is the transitive closure of the link (LLP
+ * 0026#consequences), so a consumer walking it would not terminate.
+ */
+test('a rollback does not rewind a thread past turns a later exchange chained', () => {
+  const state = createAiGatewayConversationState()
+  /** @param {string} id @param {string} role */
+  const message = (id, role) => ({ role, content: `c-${id}`, message_id: id, provider_uuid: id })
+  /** @param {string[]} ids */
+  const turns = (ids) => ({
+    provider: 'anthropic',
+    session_id: 's1',
+    conversation_id: 'c1',
+    client_name: 'claude',
+    conversation_source: 'claude_code',
+    messages: ids.map((id) => message(id, id.startsWith('u') ? 'user' : 'assistant')),
+  })
+
+  // Exchange A projects the first turn and is still awaiting its append.
+  /** @type {(() => void)[]} */
+  const journalA = []
+  const rowsA = aiGatewayRowsFromProjectedExchange(/** @type {any} */ (turns(['u1', 'a1'])), {
+    state,
+    journal: journalA,
+  })
+  assert.deepEqual(rowsA.map((r) => r.message_id), ['u1', 'a1'])
+
+  // Exchange B replays those, chains the second turn, and lands.
+  const rowsB = aiGatewayRowsFromProjectedExchange(/** @type {any} */ (turns(['u1', 'a1', 'u2', 'a2'])), {
+    state,
+    journal: [],
+  })
+  assert.deepEqual(rowsB.map((r) => r.message_id), ['u2', 'a2'])
+  assert.deepEqual(rowsB[0].previous_message_id, ['a1'])
+
+  // Only now does A's append fail.
+  rollbackAiGatewayStateJournal(journalA)
+
+  const rowsC = aiGatewayRowsFromProjectedExchange(
+    /** @type {any} */ (turns(['u1', 'a1', 'u2', 'a2', 'u3'])),
+    { state },
+  )
+  const u3 = rowsC.find((r) => r.message_id === 'u3')
+  assert.ok(u3, 'the new turn projects')
+  assert.deepEqual(u3.previous_message_id, ['a2'], 'the thread still runs through the turn B wrote')
+
+  // A's rows come back as A projected them, not hung off B's tail.
+  assert.deepEqual(
+    rowsC.map((r) => [r.message_id, r.previous_message_id]),
+    [['u1', []], ['a1', ['u1']], ['u3', ['a2']]],
+    'the replay rebuilds the rows the failed append never wrote',
+  )
+})
+
+test('a rollback of the newest exchange restores the thread tail exactly', () => {
+  const state = createAiGatewayConversationState()
+  /** @param {string[]} ids */
+  const turns = (ids) => ({
+    provider: 'anthropic',
+    session_id: 's2',
+    conversation_id: 'c2',
+    client_name: 'claude',
+    conversation_source: 'claude_code',
+    messages: ids.map((id) => ({
+      role: id.startsWith('u') ? 'user' : 'assistant',
+      content: `c-${id}`,
+      message_id: id,
+      provider_uuid: id,
+    })),
+  })
+
+  aiGatewayRowsFromProjectedExchange(/** @type {any} */ (turns(['u1', 'a1'])), { state })
+  /** @type {(() => void)[]} */
+  const journal = []
+  const second = aiGatewayRowsFromProjectedExchange(
+    /** @type {any} */ (turns(['u1', 'a1', 'u2', 'a2'])),
+    { state, journal },
+  )
+  assert.deepEqual(second.map((r) => r.previous_message_id), [['a1'], ['u2']])
+
+  rollbackAiGatewayStateJournal(journal)
+
+  const retry = aiGatewayRowsFromProjectedExchange(
+    /** @type {any} */ (turns(['u1', 'a1', 'u2', 'a2'])),
+    { state },
+  )
+  assert.deepEqual(retry.map((r) => r.message_id), ['u2', 'a2'])
+  assert.deepEqual(retry.map((r) => r.previous_message_id), [['a1'], ['u2']])
+})

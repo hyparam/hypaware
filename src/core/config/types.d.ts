@@ -11,7 +11,7 @@ import type {
   BackfillRegistry,
   PluginLogger,
   JsonObject,
-  AiGatewayCapability,
+  ClientRegistry,
   AgentRegistry,
   SkillRegistry,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
@@ -359,6 +359,32 @@ export interface ActionMarker {
    * markers (treated as stale → re-attach once, which records one).
    */
   assets_key?: string
+  /**
+   * The attach mode the adapter reported (recorded on a `done` attach marker
+   * from its `--json` payload). The third freshness key beside `endpoint` and
+   * `assets_key`, and the only one that can see a `claude` machine still
+   * carrying a proxy attach: it sits at the same gateway endpoint with the
+   * same asset set, so re-performing on a mode other than `otel` is what
+   * migrates it (LLP 0262 §Migration). Absent on pre-LLP-0262 attach markers
+   * and on markers whose adapter payload did not parse.
+   */
+  mode?: string
+  /**
+   * `true` when an earlier pass at this request key reached `done`, i.e. the
+   * handler applied an effect that is still on disk. Recorded only on a
+   * `failed`/`refused` marker rewritten over such a pass; a `done` marker says
+   * the same thing with its `status`.
+   *
+   * `installed_assets` is the same evidence for the half of an attach that
+   * copies files, and it is the only half a client whose attach writes settings
+   * and copies nothing ever produces. Without this bit such a rewrite was
+   * indistinguishable from a terminal marker whose attach never applied
+   * anything, and the reconciler's reverse gap dropped it, stranding the
+   * settings write with nothing naming it (LLP 0250, extending LLP 0138
+   * §marker-undo and LLP 0186). Absent on pre-LLP-0250 markers, which read as
+   * "no prior done" and keep master's behaviour.
+   */
+  prior_done?: boolean
   /** Handler-specific extra fields merged from `ActionOutcome.detail`. */
   [extra: string]: unknown
 }
@@ -441,12 +467,11 @@ export interface ActionContext {
    */
   clientDescriptors?: Map<string, ClientDescriptor>
   /**
-   * Runtime gateway capability, used only to *invoke* a client's effect
-   * (`getClient(name).attach(...)`). Present when the AI gateway plugin is
-   * enabled; `desired()` guards on `getClient(name)` so it never names a
-   * client `perform()` cannot reach (LLP 0045 §Part 1).
+   * Runtime client registry used to invoke attach effects. Gateway-backed and
+   * endpoint-free adapters share it; `desired()` still guards on
+   * `getClient(name)` before naming an action (LLP 0045 §Part 1).
    */
-  clients?: AiGatewayCapability
+  clients?: ClientRegistry
   /**
    * Kernel skill / subagent registries, threaded so an org-driven attach
    * materializes the same client assets a manual attach does rather than
@@ -532,11 +557,8 @@ export interface ReconcileInput {
    * Absent on a plain CLI boot.
    */
   clientDescriptors?: Map<string, ClientDescriptor>
-  /**
-   * Runtime gateway capability for invoking a client's attach effect, present
-   * when the AI gateway plugin is enabled (LLP 0045 §Part 1).
-   */
-  clients?: AiGatewayCapability
+  /** Runtime registry for gateway-backed and endpoint-free client attaches. */
+  clients?: ClientRegistry
   /**
    * Kernel skill / subagent registries, so an org-driven attach materializes
    * the client's helper assets (LLP 0107 §every-attach). Absent on a plain

@@ -5,6 +5,7 @@ import { buildResource } from './resource.js'
 import { installTracerProvider } from './tracer.js'
 import { installLoggerProvider } from './logger.js'
 import { installMeterProvider, resetKernelInstruments } from './meter.js'
+import { installRuntimeMetrics } from './runtime_metrics.js'
 
 /**
  * @import { LoggerProvider, MeterProvider, TracerProvider } from './runtime.js'
@@ -30,7 +31,8 @@ export function installObservability(opts = {}) {
   const tracer = installTracerProvider({ env, resource })
   const logger = installLoggerProvider({ env, resource })
   const meter = installMeterProvider({ env, resource })
-  installed = buildHandle({ env, resource, tracer, logger, meter })
+  const runtimeMetrics = installRuntimeMetrics({ env, provider: meter.provider })
+  installed = buildHandle({ env, resource, tracer, logger, meter, runtimeMetrics })
   return installed
 }
 
@@ -40,16 +42,23 @@ export function installObservability(opts = {}) {
  *   resource: { attributes: Record<string, string|number|boolean> },
  *   tracer: { provider: TracerProvider|null },
  *   logger: { provider: LoggerProvider|null },
- *   meter: { provider: MeterProvider|null, readers: MetricReader[] }
+ *   meter: { provider: MeterProvider|null, readers: MetricReader[] },
+ *   runtimeMetrics: { active: true, intervalMs: number, stop: () => void }|null
  * }} parts
  */
-function buildHandle({ env, resource, tracer, logger, meter }) {
+function buildHandle({ env, resource, tracer, logger, meter, runtimeMetrics }) {
   // @ref LLP 0021#shutdown-and-flush [implements]: close exporters reverse order; dev gets 5s budget + forceFlush
   async function shutdown() {
+    runtimeMetrics?.stop()
     const timeoutMs = env.devTelemetry ? 5_000 : 500
     for (const reader of meter.readers ?? []) {
       if (env.devTelemetry) await safe(() => withTimeout(reader.forceFlush(), timeoutMs))
       await safe(() => withTimeout(reader.shutdown(), timeoutMs))
+    }
+    const meterProvider = meter.provider
+    if (meterProvider) {
+      if (env.devTelemetry) await safe(() => withTimeout(meterProvider.forceFlush(), timeoutMs))
+      await safe(() => withTimeout(meterProvider.shutdown(), timeoutMs))
     }
     const loggerProvider = logger.provider
     if (loggerProvider) {
@@ -64,7 +73,7 @@ function buildHandle({ env, resource, tracer, logger, meter }) {
     resetKernelInstruments()
     installed = null
   }
-  return { env, resource, tracer, logger, meter, shutdown }
+  return { env, resource, tracer, logger, meter, runtimeMetrics, shutdown }
 }
 
 /**

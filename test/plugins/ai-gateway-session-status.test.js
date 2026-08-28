@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createControlHandler } from '../../hypaware-core/plugins-workspace/ai-gateway/src/control.js'
+import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 import {
@@ -154,7 +154,7 @@ test('hyp session status names the folder governor rather than omitting it (R7)'
     await runSessionStatus([], ctx.ctx)
     const text = ctx.stdout()
     assert.match(text, /not ignored/)
-    assert.match(text, /hyp policy show/, 'the session verb must point at the other, independent governor')
+    assert.match(text, /hyp privacy show/, 'the session verb must point at the other, independent governor')
   })
 })
 

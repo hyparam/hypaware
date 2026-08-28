@@ -27,8 +27,12 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *  - Detach twice succeeds (second call is a no-op).
  *  - Attach after detach restores the expected state.
  *  - Unrelated user keys survive every attach/detach cycle.
- *  - Claude attach writes the marker, env.ANTHROPIC_BASE_URL, and the
- *    managed session-context hooks.
+ *  - Claude attach writes the marker, the LLP 0258 telemetry env block
+ *    (`otel` mode: no base URL, no proxy keys), and the managed
+ *    session-context hooks.
+ *  - Below the Claude Code version floor, attach refuses the switch:
+ *    exit 1, the `claude update` hint on stderr, and the settings file
+ *    byte-identical to before the attempt (LLP 0258 #version-floor).
  *  - Codex attach writes `model_provider = "hypaware"`, the
  *    `[model_providers.hypaware]` table with `base_url`,
  *    `wire_api = "responses"`, and `requires_openai_auth = true`.
@@ -86,6 +90,11 @@ export async function run({ harness, expect }) {
   const previousCodexHome = process.env.CODEX_HOME
   process.env.HOME = fakeHome
   process.env.CODEX_HOME = codexHome
+  // Pin the version the LLP 0258 floor check sees, so the flow never depends
+  // on whatever `claude` binary the machine running it carries. The refusal
+  // section below lowers it deliberately, then restores this value.
+  const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
+  process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
 
   try {
     // ----------------------------------------------------------------
@@ -195,6 +204,42 @@ export async function run({ harness, expect }) {
       afterSecondClaude?._hypaware,
       (v) => v !== null && typeof v === 'object' && typeof v.port === 'number'
     )
+    // The `otel` attach surface: the telemetry block landed, the marker says
+    // which mode wrote it and where the spool is, and no routing key exists
+    // (the Remote Control predicate holds with no override keys).
+    // @ref LLP 0258#marker-and-spool [tests]: the marker records the mode and the spool directory
+    expect.that(
+      'claude settings: marker records mode=otel with the spool directory',
+      afterSecondClaude?._hypaware,
+      (v) =>
+        v !== null &&
+        typeof v === 'object' &&
+        v.mode === 'otel' &&
+        typeof v.spool_dir === 'string' &&
+        v.spool_dir.endsWith(path.join('spool', 'claude-bodies'))
+    )
+    expect.that(
+      'claude settings: telemetry env block present (endpoint + spool + enable flag)',
+      afterSecondClaude?.env,
+      (v) =>
+        v !== null &&
+        typeof v === 'object' &&
+        v.CLAUDE_CODE_ENABLE_TELEMETRY === '1' &&
+        typeof v.OTEL_EXPORTER_OTLP_ENDPOINT === 'string' &&
+        /^http:\/\/127\.0\.0\.1:\d+$/.test(v.OTEL_EXPORTER_OTLP_ENDPOINT) &&
+        typeof v.OTEL_LOG_RAW_API_BODIES === 'string' &&
+        v.OTEL_LOG_RAW_API_BODIES.startsWith('file:')
+    )
+    expect.that(
+      'claude settings: no base URL and no proxy keys were written',
+      afterSecondClaude?.env,
+      (v) =>
+        v !== null &&
+        typeof v === 'object' &&
+        !Object.hasOwn(v, 'ANTHROPIC_BASE_URL') &&
+        !Object.hasOwn(v, 'HTTPS_PROXY') &&
+        !Object.hasOwn(v, 'NODE_EXTRA_CA_CERTS')
+    )
     // Attach manages two SessionStart hooks (session-context and the
     // local-only classify-cwd hook); idempotency means one entry each.
     expect.that(
@@ -235,6 +280,35 @@ export async function run({ harness, expect }) {
       detach2Stdout.text(),
       (v) => typeof v === 'string' && v.includes('No HypAware marker found')
     )
+
+    // ----------------------------------------------------------------
+    // Version floor: below 2.1.193 the switch to `otel` is refused.
+    // The settings file (back at its seed state here) must not move,
+    // and the failure must carry the upgrade hint. No fallback to any
+    // other mode.
+    // @ref LLP 0258#version-floor [tests]: refusal leaves the settings untouched and prints the `claude update` hint
+    // ----------------------------------------------------------------
+    process.env.HYP_CLAUDE_CODE_VERSION = '2.1.100'
+    const floorStderr = makeBuf()
+    code = await runAttach(['--client', 'claude'], {
+      registry,
+      kernel,
+      env: smokeEnv(harness),
+      stderr: floorStderr,
+    })
+    expect.that('claude attach below the version floor exited 1', code, (v) => v === 1)
+    expect.that(
+      'floor refusal: stderr carries the claude update hint',
+      floorStderr.text(),
+      (v) => typeof v === 'string' && v.includes('claude update')
+    )
+    const afterFloorRefusal = await fs.readFile(claudeSettingsPath, 'utf8')
+    expect.that(
+      'floor refusal: settings file is byte-identical to the pre-attempt state',
+      afterFloorRefusal,
+      (v) => v === seedClaudeBody
+    )
+    process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
 
     code = await runAttach(['--client', 'claude'], { registry, kernel, env })
     expect.that('claude attach after detach exited 0', code, (v) => v === 0)
@@ -303,9 +377,11 @@ export async function run({ harness, expect }) {
       (v) => typeof v === 'string' && /\[model_providers\.hypaware\]/.test(v)
     )
     expect.that(
-      'codex config: base_url points at the local gateway /v1',
+      // One neutral prefix in both auth modes, so a login switch cannot leave
+      // this line disagreeing with the credential Codex sends (LLP 0313).
+      'codex config: base_url points at the local gateway /backend-api/codex',
       afterFirstCodex,
-      (v) => typeof v === 'string' && /base_url\s*=\s*"http:\/\/127\.0\.0\.1:\d+\/v1"/.test(v)
+      (v) => typeof v === 'string' && /base_url\s*=\s*"http:\/\/127\.0\.0\.1:\d+\/backend-api\/codex"/.test(v)
     )
     expect.that(
       'codex config: wire_api = "responses" (Responses API support)',
@@ -406,15 +482,15 @@ export async function run({ harness, expect }) {
       (v) => v === 'attach'
     )
     expect.that(
-      'codex attach --json: base_url echoes gateway /v1 endpoint',
+      'codex attach --json: base_url echoes the neutral gateway endpoint',
       codexAttachJson?.base_url,
-      (v) => typeof v === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/v1$/.test(v)
+      (v) => typeof v === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/backend-api\/codex$/.test(v)
     )
 
     await kernel.sources.stop('ai-gateway')
 
     // ----------------------------------------------------------------
-    // Kernel #2: NO ai-gateway. `hyp attach` must exit 1 at the
+    // Kernel #2: NO ai-gateway. `hyp client attach` must exit 1 at the
     // capability gate, and the gate reports which enablement state the
     // requested name is in rather than one message for both.
     // ----------------------------------------------------------------
@@ -428,7 +504,7 @@ export async function run({ harness, expect }) {
     const capMissingStdout = makeBuf()
     const capMissingStderr = makeBuf()
     const capMissingCode = await dispatch(
-      ['attach', '--client', 'claude'],
+      ['client', 'attach', 'claude'],
       {
         stdout: capMissingStdout,
         stderr: capMissingStderr,
@@ -461,7 +537,7 @@ export async function run({ harness, expect }) {
     const unknownStdout = makeBuf()
     const unknownStderr = makeBuf()
     const unknownCode = await dispatch(
-      ['attach', '--client', 'frobnicator'],
+      ['client', 'attach', 'frobnicator'],
       {
         stdout: unknownStdout,
         stderr: unknownStderr,
@@ -503,10 +579,18 @@ export async function run({ harness, expect }) {
       claudeAttachSpans,
       (rows) => rows.every((/** @type {any} */ s) => s.attributes?.hyp_client === 'claude')
     )
+    // One deliberate failure rides this flow now: the version-floor refusal.
+    // Everything else stays ok, and the refusal is visible as exactly one
+    // failed adapter span rather than disappearing into the ok count.
     expect.that(
-      'traces: every claude client.attach span has status=ok',
+      'traces: exactly one claude client.attach span failed (the floor refusal)',
       claudeAttachSpans,
-      (rows) => rows.every((/** @type {any} */ s) => s.attributes?.status === 'ok')
+      (rows) => rows.filter((/** @type {any} */ s) => s.attributes?.status === 'failed').length === 1
+    )
+    expect.that(
+      'traces: at least 4 claude client.attach spans have status=ok',
+      claudeAttachSpans,
+      (rows) => rows.filter((/** @type {any} */ s) => s.attributes?.status === 'ok').length >= 4
     )
 
     const codexAttachSpans = traces.filter(
@@ -592,6 +676,8 @@ export async function run({ harness, expect }) {
     else process.env.HOME = previousHome
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME
     else process.env.CODEX_HOME = previousCodexHome
+    if (previousClaudeVersion === undefined) delete process.env.HYP_CLAUDE_CODE_VERSION
+    else process.env.HYP_CLAUDE_CODE_VERSION = previousClaudeVersion
   }
 }
 
@@ -613,7 +699,7 @@ function smokeEnv(harness) {
  * }} opts
  */
 async function runAttach(extra, opts) {
-  return dispatch(['attach', ...extra], {
+  return dispatch(['client', 'attach', ...extra], {
     stdout: opts.stdout ?? makeBuf(),
     stderr: opts.stderr ?? makeBuf(),
     kernel: opts.kernel,
@@ -633,7 +719,7 @@ async function runAttach(extra, opts) {
  * }} opts
  */
 async function runDetach(extra, opts) {
-  return dispatch(['detach', ...extra], {
+  return dispatch(['client', 'detach', ...extra], {
     stdout: opts.stdout ?? makeBuf(),
     stderr: opts.stderr ?? makeBuf(),
     kernel: opts.kernel,

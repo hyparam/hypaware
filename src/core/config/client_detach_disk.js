@@ -5,9 +5,11 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
+import { captureSpoolRoot, isCaptureSpoolDir, sweepCaptureSpool } from '../capture_spool.js'
 import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { removeLaunchdEnv } from '../daemon/launchd_env.js'
 import { Attr, getLogger } from '../observability/index.js'
+import { readObservabilityEnv } from '../observability/env.js'
 import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 import { errCode, getAtDottedPath, isPlainObject, redactUrlUserinfo } from '../util/json_util.js'
 import { isOwnedProviderEntry } from './provider_entry_ownership.js'
@@ -146,6 +148,9 @@ export async function detachClientFromDisk({
   if (probe.format === 'toml') {
     return await detachTomlManagedBlock({ settingsPath, fs })
   }
+  if (probe.format === 'managed_file' && probe.marker_text) {
+    return await detachManagedFile({ settingsPath, markerText: probe.marker_text, fs })
+  }
   // @ref LLP 0172#lane-a-detach [implements]: the json_path branch LLP 0143 removed returns, reshaped for two provider entries plus a cache purge
   if (probe.format === 'json_path') {
     return await detachJsonPathProviders({
@@ -160,6 +165,34 @@ export async function detachClientFromDisk({
   }
   // Unknown/incomplete probe: nothing this core routine knows how to reverse.
   return { changed: false, settingsPath }
+}
+
+/**
+ * Remove a whole managed file only while its ownership marker is intact.
+ * A user replacement at the same path is left in place and reported.
+ *
+ * @param {{ settingsPath: string, markerText: string, fs: typeof fsp }} args
+ * @returns {Promise<DetachFromDiskResult>}
+ * @ref LLP 0306#managed-plugin-file [implements]: detach removes only the
+ *   still-marked HypAware plugin file
+ */
+async function detachManagedFile({ settingsPath, markerText, fs }) {
+  let raw
+  try {
+    raw = await fs.readFile(settingsPath, 'utf8')
+  } catch (err) {
+    if (errCode(err) === 'ENOENT') return { changed: false, settingsPath }
+    throw err
+  }
+  if (!raw.includes(markerText)) {
+    return {
+      changed: false,
+      settingsPath,
+      warning: 'managed file ownership marker is missing; leaving file in place',
+    }
+  }
+  await fs.unlink(settingsPath)
+  return { changed: true, settingsPath }
 }
 
 /* ------------------------------- JSON format ------------------------------ */
@@ -324,6 +357,12 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, pla
   // @ref LLP 0238#ca-survives-detach [implements]: the CA is deliberately NOT deleted here
   // @ref LLP 0239#launchctl-setenv [implements]: detach reverses the launchd env
   await releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform, runCommand })
+
+  // And the body spool an `otel`-mode attach pointed the client at. Same
+  // ordering rule: the settings write has landed, so the client is no longer
+  // producing bodies, and a sweep that fails leaves a warning rather than an
+  // un-detached client.
+  await sweepMarkerSpool({ marker, env, fs, warnings })
 
   const warning = joinWarnings(warnings)
 
@@ -648,8 +687,31 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
     // HTTPS request the client makes rather than merely its capture, and the
     // `prev_env` backup would be deleted along with the marker. Reverse the
     // proxy keys by the same still-ours-then-restore-or-remove rule.
+    //
+    // `recordDamaged`, not `markerPort !== undefined`: every genuine pre-record
+    // legacy marker carries a `port`, so gating on the port ran this on plain
+    // base-URL legacy detaches too. Proxy mode did not exist when those markers
+    // were written, so any `HTTPS_PROXY` or `NODE_EXTRA_CA_CERTS` beside one is
+    // the user's own - and the reversal reported it as HypAware residue of
+    // unknown provenance (#886 finding 2).
+    //
+    // And never when `mode` positively names a non-proxy attach. `mode` is one
+    // of the fields that routes a marker here as damaged in the first place, so
+    // it usually survives, and only a proxy attach ever writes these two keys;
+    // without this the same false provenance claim comes back one case over,
+    // for a damaged base-URL or otel marker beside the user's own corporate
+    // bundle. Absent `mode` is *not* that evidence, though, so it still runs:
+    // a marker damaged badly enough to lose `mode` as well can still be a proxy
+    // one holding `prev_env`, and skipping it there would leave `HTTPS_PROXY`
+    // pointing at a gateway that no longer exists. That is safe because every
+    // mutation below is separately gated on the value being ours (`HTTPS_PROXY`
+    // must still equal our gateway URL) or on a recorded prior; only the
+    // warnings claim provenance, and with no `mode` at all "the undo record is
+    // unreadable" is exactly true.
     // @ref LLP 0232#detach-restores-any-managed-key [implements]: the damaged-record branch reverses proxy keys too
-    if (markerPort !== undefined) {
+    // @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [constrained-by]: only a damaged current-shape marker, never a genuine legacy one
+    const modeSaysNotProxy = marker.mode === 'base_url' || marker.mode === 'otel'
+    if (recordDamaged && !modeSaysNotProxy && markerPort !== undefined) {
       reverseLegacyProxyKeys(envObj, markerPort, prevEnv, warnings)
     }
 
@@ -667,6 +729,11 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
   // that routes a current-shape marker here at all), so the launchd release
   // still runs; the CA stays, exactly as on the record-driven branch.
   await releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform, runCommand })
+
+  // `spool_dir` is a top-level marker field, so it survives a damaged undo
+  // record the same way `mode` does. Sweeping it here is what keeps the one
+  // branch that reverses by convention from leaving raw prompt bodies behind.
+  await sweepMarkerSpool({ marker, env, fs, warnings })
 
   const warning = joinWarnings(warnings)
 
@@ -731,6 +798,67 @@ async function releaseProxyModeLaunchdEnv({ marker, homeDir, warnings, platform,
       'run `launchctl unsetenv NODE_USE_SYSTEM_CA` by hand'
     )
   }
+}
+
+/**
+ * Empty the raw-body spool an `otel`-mode attach recorded on its marker.
+ *
+ * The path comes off the marker rather than being recomputed, because the
+ * config that produced it is gone by the time detach runs and a machine whose
+ * HypAware home moved would otherwise sweep the wrong directory (or none).
+ * That makes the path *settings-file input*, which a hand edit can reach, so it
+ * is honored only when it is a direct child of this install's
+ * `<hyp-home>/spool`: without that gate, "empty the directory the marker names"
+ * would be a recursive delete pointed anywhere. A path that fails the gate is
+ * left alone and reported, never guessed at.
+ *
+ * Best effort and never fatal, like the launchd release above: the settings
+ * undo has already landed, and a spool we could not empty is a leftover the
+ * user can be told about, not a reason to fail a detach that succeeded.
+ *
+ * @ref LLP 0253#purge-and-detach-sweep [implements]: detach removes the spool
+ *   directory's contents, using the path the marker recorded
+ * @ref LLP 0258#marker-and-spool [constrained-by]: the marker records the spool
+ *   directory precisely so this undo does not have to compute it
+ * @param {{
+ *   marker: Record<string, unknown>,
+ *   env: NodeJS.ProcessEnv | undefined,
+ *   fs: typeof fsp,
+ *   warnings: string[],
+ * }} args
+ */
+async function sweepMarkerSpool({ marker, env, fs, warnings }) {
+  const recorded = marker.spool_dir
+  if (recorded === undefined) return
+
+  const { hypHome } = readObservabilityEnv(env)
+  if (!isCaptureSpoolDir(recorded, hypHome)) {
+    warnings.push(
+      `the attach marker names a body spool outside ${captureSpoolRoot(hypHome)}; ` +
+      'it was left in place, so delete it by hand if it holds captured bodies'
+    )
+    return
+  }
+
+  const dir = /** @type {string} */ (recorded)
+  const swept = await sweepCaptureSpool(dir, { fs })
+  if (swept.failed > 0) {
+    warnings.push(
+      `${swept.failed} item${swept.failed === 1 ? '' : 's'} in the body spool could not be removed; ` +
+      `empty ${dir} by hand`
+    )
+  }
+  if (swept.filesRemoved === 0 && swept.failed === 0) return
+  // Counts, never filenames: a spooled body's name is the client's and its
+  // content is a raw prompt.
+  getLogger('client-detach').info('client.detach.spool_swept', {
+    [Attr.COMPONENT]: 'client-detach',
+    [Attr.OPERATION]: 'client.detach.spool_sweep',
+    [Attr.STATUS]: swept.failed > 0 ? 'partial' : 'ok',
+    files_removed: swept.filesRemoved,
+    bytes_removed: swept.bytesRemoved,
+    failed: swept.failed,
+  })
 }
 
 /**

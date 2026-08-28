@@ -6,7 +6,8 @@ import { CLASS_RANK, createUsagePolicyResolver } from '../usage-policy/matcher.j
 import { localOnlyListPath } from '../usage-policy/local_only.js'
 
 /**
- * @import { AsyncDataSource, AsyncRow } from 'squirreling'
+ * @import { AsyncRow } from 'squirreling'
+ * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { UsageClass, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { LocalOnlyVisibilityReport } from '../../../src/core/query/types.js'
@@ -69,6 +70,32 @@ export function callerSeesEverything(callerRank) {
 }
 
 /**
+ * The one row-level withholding rule: a row whose `cwd` resolves to a class
+ * that outranks the caller's on the restrictiveness lattice is withheld.
+ * `withLocalOnlyVisibility` below applies it on the SQL read path; the grep
+ * service applies it per scanned row on its file walk (which cannot route
+ * through an `AsyncDataSource` wrapper). One exported predicate rather than
+ * two copies, so the two read surfaces cannot drift on what "local-only"
+ * hides. A cwd-less value returns false: those rows are `full`-class by
+ * construction on cwd-bearing datasets (see the wrapper's contract below).
+ *
+ * A corrupt machine-local list makes `resolve` throw
+ * (LocalOnlyListUnreadableError); callers let it propagate so the read
+ * fails loudly rather than silently resolving to "nothing withheld".
+ *
+ * @ref LLP 0105 [implements]: caller class >= row class on the lattice, the shared predicate form
+ * @ref LLP 0302#visibility-predicate [implements]: the lattice is shared as a predicate because the grep walk has no data source to wrap
+ * @param {UsagePolicyResolver} resolver
+ * @param {number} callerRank
+ * @param {unknown} cwd
+ * @returns {boolean}
+ */
+export function cwdWithheldFromCaller(resolver, callerRank, cwd) {
+  if (typeof cwd !== 'string' || cwd === '') return false
+  return CLASS_RANK[resolver.resolve(cwd).class] > callerRank
+}
+
+/**
  * Decorate one dataset's data source so every row the engine pulls honors
  * LLP 0105's invariant: content may only surface in a context at least as
  * non-exported as the content itself.
@@ -111,21 +138,21 @@ export function callerSeesEverything(callerRank) {
  *
  * @ref LLP 0105 [implements]: the one shared filter at the query read path; caller class >= row class on the lattice, never per-command
  * @ref LLP 0105#graph-provenance [implements]: rows lacking per-row cwd provenance get their declared content-bearing columns suppressed, never surfaced
- * @param {AsyncDataSource} source
+ * @param {ScannableDataSource} source
  * @param {{
  *   resolver: UsagePolicyResolver,
  *   callerRank: number,
  *   contentColumns: string[],
  *   report: LocalOnlyVisibilityReport,
  * }} opts
- * @returns {AsyncDataSource}
+ * @returns {ScannableDataSource}
  */
 export function withLocalOnlyVisibility(source, opts) {
   const { resolver, callerRank, report } = opts
   const hasCwd = source.columns.includes('cwd')
   const declaredContent = opts.contentColumns.filter((c) => source.columns.includes(c))
 
-  /** @type {AsyncDataSource} */
+  /** @type {ScannableDataSource} */
   const guarded = {
     // numRows intentionally absent (see fast-path discipline above).
     columns: source.columns,
@@ -153,7 +180,7 @@ export function withLocalOnlyVisibility(source, opts) {
               // (LocalOnlyListUnreadableError); let it propagate so the query
               // fails loudly rather than silently resolving to "nothing
               // withheld", matching the export seam's fail-safe polarity.
-              if (CLASS_RANK[resolver.resolve(cwd).class] > callerRank) {
+              if (cwdWithheldFromCaller(resolver, callerRank, cwd)) {
                 report.withheldRows += 1
                 continue
               }

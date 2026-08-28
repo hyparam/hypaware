@@ -4,13 +4,22 @@ import { execFile } from 'node:child_process'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { appendSessionContext } from './session_context.js'
+import {
+  DEFAULT_SPOOL_MAX_BYTES,
+  claudeBodySpoolDir,
+  enforceClaudeBodySpoolCap,
+} from './telemetry/spool.js'
 
 /**
  * @import { CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
 const execFileAsync = promisify(execFile)
+
+/** The plugin whose v2 config slice carries the spool cap this hook applies. */
+const PLUGIN_NAME = '@hypaware/claude'
 
 /**
  * `hyp claude-hook session-context --state-file <absolute-path>`
@@ -37,21 +46,60 @@ const execFileAsync = promisify(execFile)
  * least has `cwd`, collapsing the session-start race window from "hook
  * latency + 2 git execs" to ~one file append.
  *
+ * Every invocation also enforces the raw-body spool's byte cap on its way out
+ * (see {@link sweepBodySpool}), which is the half of LLP 0253's bound the
+ * daemon cannot deliver on its own.
+ *
  * @ref LLP 0085 [implements]: part (a) - shrink the null-cwd window at the
  * source by writing cwd before the git lookups.
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ gitBranch?: typeof currentGitBranch, gitRepoFacts?: typeof gitRepoFacts }} [deps]
- *   injectable git lookups (tests); default to the real subprocess helpers.
+ * @param {{ gitBranch?: typeof currentGitBranch, gitRepoFacts?: typeof gitRepoFacts, sweepSpool?: typeof sweepBodySpool }} [deps]
+ *   injectable git lookups and spool sweep (tests); default to the real
+ *   subprocess helpers and the real sweep.
  */
 export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
   if (argv.includes('--help') || argv.includes('-h')) {
     ctx.stdout.write('usage: hyp claude-hook session-context --state-file <absolute-path>\n')
     return 0
   }
+
+  // The recording half is already internally fault-tolerant, but it is wrapped
+  // here too so the invariant holds structurally: whatever it does, the hook
+  // exits 0 and the sweep below still runs.
+  try {
+    await recordSessionContext(argv, ctx, deps)
+  } catch {
+    /* hook MUST never throw back into Claude Code */
+  }
+
+  // LAST, and on EVERY invocation, including the ones that recorded no
+  // context. A malformed event or a missing `--state-file` says nothing about
+  // whether Claude Code is filling the spool, and running last means a slow
+  // directory can never delay the records above: the projector waits on
+  // those, nothing waits on this.
+  try {
+    await (deps.sweepSpool ?? sweepBodySpool)(ctx)
+  } catch {
+    /* a spool that cannot be swept is never worth interrupting Claude for */
+  }
+  return 0
+}
+
+/**
+ * Append the session-context record(s) for one hook event. Extracted from
+ * {@link runClaudeSessionContextHook} so every "nothing to record" exit still
+ * reaches the spool sweep that follows it.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @param {{ gitBranch?: typeof currentGitBranch, gitRepoFacts?: typeof gitRepoFacts }} deps
+ * @returns {Promise<void>}
+ */
+async function recordSessionContext(argv, ctx, deps) {
   const parsed = parseArgs(argv)
   const stateFile = parsed.stateFile ?? (parsed.legacyPort ? legacyStateFile(ctx.env) : undefined)
-  if (!stateFile) return 0
+  if (!stateFile) return
 
   const input = await readStdin(ctx.stdin ?? process.stdin)
   /** @type {Record<string, unknown>} */
@@ -62,12 +110,12 @@ export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
       ? /** @type {Record<string, unknown>} */ (parsedEvent)
       : {}
   } catch {
-    return 0
+    return
   }
 
   const sessionId = str(event.session_id)
   const cwd = str(event.new_cwd) ?? str(event.cwd)
-  if (!sessionId || !cwd) return 0
+  if (!sessionId || !cwd) return
   const transcriptPath = str(event.transcript_path)
 
   // Minimal record FIRST: cwd is what the .hypignore policy check needs and it
@@ -79,7 +127,7 @@ export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
   try {
     await appendSessionContext(stateFile, /** @type {any} */ (minimal))
   } catch {
-    /* hook MUST never throw back into Claude: exit 0 even on write failure */
+    /* hook MUST never throw back into Claude: a write failure records nothing */
   }
 
   // Enriched record SECOND: run the (slower) git subprocesses, then append the
@@ -109,9 +157,89 @@ export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
       await appendSessionContext(stateFile, /** @type {any} */ (record))
     }
   } catch {
-    /* git or write failure: the minimal record already landed; exit 0 */
+    /* git or write failure: the minimal record already landed */
   }
-  return 0
+}
+
+/**
+ * Enforce the raw-body spool's byte cap from OUTSIDE the daemon.
+ *
+ * LLP 0253 #byte-cap names the window the cap exists for: "the window this
+ * exists for is precisely the one where the reader is not running". Every
+ * enforcement that decision shipped with, though, lives inside the listener
+ * source (its one-shot sweep at start and its 60-second timer), so the one
+ * window it names is the one window nothing swept. Claude Code keeps writing
+ * bodies whether or not the daemon is up, and the daemon is legitimately down
+ * for a crashed service, a machine where one was never started, an uninstall
+ * that skipped detach, and the attach-before-first-start path the port
+ * resolver deliberately supports. In every one of those the directory grew at
+ * roughly 145 KB per request with nothing bounding it: unbounded retention of
+ * raw prompts, not merely a disk nit, because the attach turns
+ * `OTEL_LOG_USER_PROMPTS` and `OTEL_LOG_ASSISTANT_RESPONSES` on.
+ *
+ * The hook is the right second enforcer because it already runs in its own
+ * process at exactly the cadence bodies are written (SessionStart, CwdChanged,
+ * UserPromptSubmit, and PostToolUse on Bash: LLP 0085), so the spool cannot
+ * outrun it, and because it needs nothing the daemon owns.
+ *
+ * It deletes only what the daemon's own sweep would have deleted: the same
+ * `enforceClaudeBodySpoolCap` over the same directory at the same cap, with
+ * the same oldest-first order. The hook never widens the deletion rule, it
+ * only runs the existing one while the daemon cannot.
+ *
+ * Cost is one `readdir` plus a `stat` per file. On an attached machine with
+ * the daemon up the directory is near-empty, because the listener deletes what
+ * it projects; on a proxy-attached or unattached machine it does not exist and
+ * the sweep returns on `enforceClaudeBodySpoolCap`'s ENOENT arm without a
+ * single stat. Either way it is well under the two git subprocesses the same
+ * hook already spawns.
+ *
+ * @ref LLP 0263#hook-enforces-the-cap [implements]: the client hook is the
+ *   second enforcer, so the cap holds in the window the daemon is down
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<void>}
+ */
+async function sweepBodySpool(ctx) {
+  const dir = claudeBodySpoolDir(readObservabilityEnv(ctx.env).hypHome)
+  await enforceClaudeBodySpoolCap(dir, readSpoolMaxBytes(ctx.config))
+}
+
+/**
+ * The cap this hook applies, read from the same `telemetry.spool_max_bytes`
+ * key the listener's `readSpoolConfig` reads, out of the `@hypaware/claude`
+ * slice of the v2 config the hook already carries. Matching the listener's
+ * validation (a positive integer, anything else is the default) is what keeps
+ * the two enforcers from disagreeing about how large the spool may be.
+ *
+ * A bad value falls back silently rather than warning: the listener already
+ * warns about exactly this key, and a hook has no output surface that would
+ * not push text at Claude Code.
+ *
+ * @ref LLP 0263#hook-enforces-the-cap [constrained-by]: the hook applies the
+ *   operator's cap, never a rule of its own
+ * @param {unknown} config
+ * @returns {number}
+ */
+function readSpoolMaxBytes(config) {
+  const plugins = obj(config)?.plugins
+  if (!Array.isArray(plugins)) return DEFAULT_SPOOL_MAX_BYTES
+  const entry = plugins.find((p) => obj(p)?.name === PLUGIN_NAME)
+  const raw = obj(obj(obj(entry)?.config)?.telemetry)?.spool_max_bytes
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 1) return raw
+  return DEFAULT_SPOOL_MAX_BYTES
+}
+
+/**
+ * Narrow a value to a plain object, so the config walk above can step through
+ * a hand-edited config without a `TypeError` reaching Claude Code.
+ *
+ * @param {unknown} value
+ * @returns {Record<string, unknown> | undefined}
+ */
+function obj(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? /** @type {Record<string, unknown>} */ (value)
+    : undefined
 }
 
 /**
@@ -139,6 +267,10 @@ function parseArgs(argv) {
 
 /** @param {NodeJS.ProcessEnv} env */
 function legacyStateFile(env) {
+  // No os.homedir() fallback here on purpose: a legacy `--port` hook with no
+  // env-provided home stays inert rather than writing into the invoking
+  // user's real home. Legacy hooks predate win32 support, so the fallback
+  // that LLP 0300 prescribes for read-side resolution buys nothing here.
   const home = env.HOME
   const hypHome = env.HYP_HOME || (home ? path.join(home, '.hyp') : undefined)
   if (!hypHome) return undefined

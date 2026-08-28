@@ -73,6 +73,44 @@ export function urlToPath(url) {
 }
 
 /**
+ * The name {@link localWriter} stages a write under before it publishes:
+ * `<final name>.tmp.<pid>.<epoch ms>.<random>`. Unique per attempt, so two
+ * writers racing the same destination never share a staging file.
+ *
+ * @param {string} filePath
+ * @returns {string}
+ */
+function stagedNameFor(filePath) {
+  return `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`
+}
+
+/**
+ * Anchored to the end because the staged name is a SUFFIX on the final one,
+ * so `v3.metadata.json.tmp.1.2.ab` is staged and `v3.metadata.json` is not.
+ * The random tail is base-36 and can come out short, or empty when
+ * `Math.random()` returns a value with no fractional digits to spare, so it
+ * is `*` and not `+`.
+ */
+const STAGED_NAME_RE = /\.tmp\.\d+\.\d+\.[a-z0-9]*$/
+
+/**
+ * Is `name` a staged write {@link localWriter} left behind?
+ *
+ * A crash between staging and publish, or between the publishing `link` and
+ * the `rm` that drops the staged name, leaves one of these in the table
+ * directory. Nothing reads it, but nothing reclaims it either unless a sweep
+ * can recognize it, which is why the maintenance sweep imports this instead
+ * of carrying its own copy of the pattern.
+ *
+ * @ref LLP 0316#staged-writes-are-reclaimed [implements]: the writer that mints the name owns the pattern that recognizes it.
+ * @param {string} name  a basename, or a full path
+ * @returns {boolean}
+ */
+export function isStagedWriteName(name) {
+  return STAGED_NAME_RE.test(name)
+}
+
+/**
  * @param {Uint8Array} bytes
  * @returns {AsyncBuffer}
  */
@@ -89,10 +127,10 @@ function asyncBufferFromBytes(bytes) {
 }
 
 /**
- * Build a `hyparquet-writer` Writer that finalizes onto the local
- * filesystem with an atomic rename. `ifNoneMatch === '*'` is honored
- * to surface `412` collisions on concurrent commits, matching the
- * conditional-write semantics `icebird`'s file catalog expects.
+ * Build a `hyparquet-writer` Writer that publishes onto the local
+ * filesystem in one syscall. `ifNoneMatch === '*'` is honored to surface
+ * `412` collisions on concurrent commits, matching the conditional-write
+ * semantics `icebird`'s file catalog expects.
  *
  * The writer implements the optional `flush()` hook, which
  * `hyparquet-writer` calls after every row group: buffered bytes are
@@ -138,7 +176,7 @@ function localWriter(ByteWriter, filePath, options) {
     if (fd !== null) return
     fs.mkdirSync(path.dirname(filePath), { recursive: true })
     if (tmp === null) {
-      tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`
+      tmp = stagedNameFor(filePath)
       fd = fs.openSync(tmp, 'w')
       return
     }
@@ -202,25 +240,95 @@ function localWriter(ByteWriter, filePath, options) {
     writer.index = 0
   }
 
+  // @ref LLP 0316#link-is-the-commit-point [implements]: the create-only publish is one `link`, and that call is the whole of the cache's concurrency control.
   writer.finish = async function () {
-    if (options?.ifNoneMatch === '*' && fs.existsSync(filePath)) {
-      if (fd !== null) {
-        fs.closeSync(fd)
-        fs.rmSync(/** @type {string} */ (tmp), { force: true })
-        fd = null
-      }
-      throw collision(filePath)
-    }
     openTmp()
     if (writer.index) fs.writeSync(/** @type {number} */ (fd), writer.getBytes())
     fs.closeSync(/** @type {number} */ (fd))
     fd = null
     writer.index = 0
-    if (options?.ifNoneMatch === '*' && fs.existsSync(filePath)) {
-      fs.rmSync(/** @type {string} */ (tmp), { force: true })
-      throw collision(filePath)
+    const staged = /** @type {string} */ (tmp)
+    if (options?.ifNoneMatch !== '*') {
+      fs.renameSync(staged, filePath)
+      tmp = null
+      return
     }
-    fs.renameSync(/** @type {string} */ (tmp), filePath)
+    // `ifNoneMatch: '*'` is a create-only precondition, so the publish
+    // itself has to be the thing that refuses to overwrite. `rename`
+    // cannot be: POSIX rename replaces the destination silently, so an
+    // `existsSync` in front of it is check-then-act and two committers
+    // racing the same `v(N+1).metadata.json` can both find it absent,
+    // both publish, and the loser's snapshot is lost with no error for
+    // the retry loop to catch. `link` fails with EEXIST when the
+    // destination exists, atomically and with no window, which is
+    // exactly the guarantee the precondition promises. The cache has no
+    // external catalog to arbitrate for it, so this one call is the whole
+    // of its concurrency control.
+    try {
+      fs.linkSync(staged, filePath)
+    } catch (err) {
+      const code = /** @type {NodeJS.ErrnoException} */ (err).code
+      // The link did not land, so the staged name is dead weight. Reclaiming
+      // it is best-effort for the same reason it is on the success path: an
+      // `rmSync` that throws here would replace the reason the publish
+      // failed, and an `EEXIST` that reaches `commitWithRetry` as anything
+      // other than a 412 is rethrown rather than reloaded, turning the
+      // retryable race this call exists to expose back into a hard failure.
+      try {
+        fs.rmSync(staged, { force: true })
+      } catch {
+        // The publish already failed; a leftover temp name is the lesser
+        // problem, and clearing `tmp` stops `abort()` retrying the same rm.
+      }
+      tmp = null
+      if (code === 'EEXIST') throw collision(filePath)
+      // `staged` is a sibling of `filePath`, so this can never be EXDEV.
+      // What it can be is a filesystem with no hard links at all (FAT and
+      // exFAT volumes, and some FUSE or cloud-sync mounts), which answers
+      // every `link` with EPERM/ENOSYS/ENOTSUP. libuv has no name for POSIX
+      // `EOPNOTSUPP`, so that spelling never reaches JS on the platforms
+      // Node maps - `util.getSystemErrorMap()` carries `ENOTSUP` and not
+      // `EOPNOTSUPP` - and it stays listed only for a runtime that passes it
+      // through. Any of them wedges every conditional commit, and a bare
+      // errno does not say why, so name the cause. Falling back to a
+      // check-then-act `rename` is not on the table: that is the defect this
+      // call exists to remove. Supporting such a filesystem would mean
+      // publishing through `open(filePath, 'wx')` instead, trading atomic
+      // content for atomic creation, which is the trade the `local-fs` blob
+      // store makes.
+      if (code === 'EPERM' || code === 'ENOSYS' || code === 'ENOTSUP' || code === 'EOPNOTSUPP') {
+        const unsupported = /** @type {Error & { code?: string }} */ (
+          new Error(
+            `local iceberg conditional commit needs hard links: link() failed with ${code} on ` +
+              `${filePath}. The cache directory must be on a filesystem that supports link(2).`,
+            { cause: err }
+          )
+        )
+        unsupported.code = code
+        throw unsupported
+      }
+      throw err
+    }
+    // The link is the commit point: the file is published, and `staged` is
+    // now just a second name for the same inode that nothing reads.
+    // Dropping that name is cleanup, so a failure here must not be reported
+    // as a failed commit - the caller would be told its snapshot did not
+    // land when it did, and `commitWithRetry` does not retry a non-412.
+    // The leftover is unreadable rather than free: `v<N>.metadata.json.tmp.*`
+    // matches neither icebird's anchored version regex nor any path the
+    // table's own metadata carries, so nothing resolves it - but
+    // `measureMetadataDir` sizes the WHOLE metadata directory, so its bytes
+    // are counted by the metadata figure `hyp query status` reports and by
+    // the epoch layout's metadata-size compaction trigger. The
+    // unreferenced-file sweep recognizes the staged suffix
+    // ({@link isStagedWriteName}) and reclaims it once it is past the orphan
+    // grace window.
+    try {
+      fs.rmSync(staged, { force: true })
+    } catch {
+      // Already published; the temp name is the only thing left behind.
+    }
+    tmp = null
   }
   return writer
 }

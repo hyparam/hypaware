@@ -31,7 +31,7 @@ export const FOLDER_ASK_OPTIONS = [
   {
     value: 'sync',
     label: 'Sync them all',
-    summary: 'No question at session start; mark exceptions with hyp policy set',
+    summary: 'No question at session start; mark exceptions with hyp privacy set',
   },
   {
     value: 'ask',
@@ -104,7 +104,7 @@ export async function runWizardFolderAsk(opts) {
     if (isPromptBackError(err)) return await finishSpan({ back: true, mode: before }, opts)
     if (!isPromptCancelledError(err)) throw err
     try {
-      opts.stderr.write('hyp init: cancelled\n')
+      opts.stderr.write('hyp setup: cancelled\n')
     } catch {
       // best-effort: stderr might be closed during cleanup
     }
@@ -137,7 +137,7 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
     const detail = err instanceof Error ? err.message : String(err)
     opts.stderr.write(
       `warning: could not record the new-folder answer (${detail}); ` +
-      `it stays '${before}' - set it later with 'hyp policy folders ${mode}'\n`
+      `it stays '${before}' - set it later with 'hyp privacy folders ${mode}'\n`
     )
     return await finishSpan({ mode: before, skipped: true }, opts)
   }
@@ -145,7 +145,7 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
   // Two short lines rather than one long one: what is now true, then the
   // command that changes it, indented so it reads as a footnote to the
   // first rather than a second announcement.
-  const undo = mode === 'sync' ? 'hyp policy folders ask' : 'hyp policy folders sync'
+  const undo = mode === 'sync' ? 'hyp privacy folders ask' : 'hyp privacy folders sync'
   const said = mode === 'sync'
     ? 'New folders will sync without asking.'
     : 'You will be asked once per new folder.'

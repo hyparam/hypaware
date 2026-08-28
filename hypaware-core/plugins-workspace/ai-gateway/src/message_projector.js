@@ -9,7 +9,7 @@ export const SCHEMA_VERSION = 7
  * @import { AiGatewayExchangeInput, AiGatewayProjectedExchange, AiGatewayProjectedMessage, CachePartitionMeta, ColumnSpec, PluginLogger, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { UsagePolicyDrop } from '../../../../src/core/usage-policy/types.js'
- * @import { RegisteredProjector } from './types.js'
+ * @import { RegisteredProjector, ThreadChain } from './types.js'
  */
 
 const DATASET_NAME = 'ai_gateway_messages'
@@ -186,9 +186,14 @@ export function createAiGatewayMessageProjector(opts) {
   return {
     /**
      * @param {AiGatewayExchangeInput | Record<string, unknown>} exchange
+     * @param {{ journal?: (() => void)[] }} [projectOpts] Pass a `journal`
+     *   array to have every dedupe-state mutation this projection makes
+     *   record its undo, so a caller whose append fails can hand it to
+     *   `rollbackAiGatewayStateJournal` instead of leaving the shared state
+     *   claiming rows that never landed.
      * @returns {Promise<Record<string, unknown>[]>}
      */
-    async projectExchange(exchange) {
+    async projectExchange(exchange, projectOpts = {}) {
       const input = /** @type {AiGatewayExchangeInput} */ (exchange)
       const projection = await dispatchProjector(projectors, input, log, isSessionIgnored)
       // An intentional `.hypignore` usage-policy drop is a TERMINAL success, not
@@ -246,6 +251,7 @@ export function createAiGatewayMessageProjector(opts) {
         gatewayAttributes: buildGatewayAttributes(input),
         tsStart: stringValue(input.ts_start) ?? new Date().toISOString(),
         state,
+        ...(projectOpts.journal ? { journal: projectOpts.journal } : {}),
       })
     },
   }
@@ -329,11 +335,12 @@ function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log
 }
 
 /**
- * Seed one session's seen-set, consulting the committed-session index
- * first: a session with no committed rows anywhere has nothing to seed,
- * so the (whole-table) per-session scan is skipped. Same best-effort
- * posture as the scan itself: an index that cannot answer errs toward
- * scanning.
+ * Seed one session's seen-set. A storage that can push `session_id` down
+ * (the real cache) probes the sort key directly, so there is nothing for the
+ * index to save. Anything else consults the committed-session index first: a
+ * session with no committed rows anywhere has nothing to seed, so the
+ * (whole-table) per-session scan is skipped. Same best-effort posture as the
+ * scan itself: an index that cannot answer errs toward scanning.
  *
  * @param {string} sessionId
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
@@ -343,6 +350,12 @@ function seedSeenMessagesForSession(sessionId, state, seedPromises, storage, log
  * @returns {Promise<void>}
  */
 async function seedSessionIfCommitted(sessionId, state, storage, log, sessionIndex) {
+  // @ref LLP 0311#context [implements]: the real cache probes the leading
+  // session sort key directly instead of rebuilding a global session index
+  if (typeof storage?.readRowsWhere === 'function') {
+    await scanCommittedMessageIds(sessionId, state, storage, log)
+    return
+  }
   if (sessionIndex && !(await sessionIndex.mightHaveCommittedRows(sessionId))) return
   await scanCommittedMessageIds(sessionId, state, storage, log)
 }
@@ -567,16 +580,45 @@ async function scanCommittedMessageIds(sessionId, state, storage, log) {
     // that don't carry the key in their path.
     const partitionSession = part.partition?.session_id
     if (typeof partitionSession === 'string' && partitionSession !== sessionId) continue
+    const targeted = typeof storage.readRowsWhere === 'function'
     try {
-      for await (const row of storage.readRows(tablePath, ['message_id', 'session_id'])) {
-        if (stringValue(row.session_id) !== sessionId) continue
-        const messageId = stringValue(row.message_id)
-        if (messageId) state.seenMessages.add(messageId)
-      }
+      await collectSeenMessageIds(storage, tablePath, targeted ? sessionId : undefined, sessionId, state)
     } catch {
-      // Skip an unreadable partition; others still contribute.
+      // A scoped read can fail where an unrestricted one succeeds (a partition
+      // whose schema predates `session_id`). An unseeded message replays as a
+      // fresh row, so fall back to the full read before skipping the
+      // partition; only a genuinely unreadable one contributes nothing.
+      if (targeted) {
+        try {
+          await collectSeenMessageIds(storage, tablePath, undefined, sessionId, state)
+        } catch { /* unreadable partition; others still contribute */ }
+      }
       continue
     }
+  }
+}
+
+/**
+ * Fold one partition's committed `message_id`s for `sessionId` into
+ * `state.seenMessages`. `scopeTo` selects the pushed-down read; leaving it
+ * undefined reads the partition unrestricted. The row-level `session_id`
+ * check is the correctness backstop either way, so both shapes agree.
+ *
+ * @param {ExtendedQueryStorageService | QueryStorageService} storage
+ * @param {string} tablePath
+ * @param {string | undefined} scopeTo
+ * @param {string} sessionId
+ * @param {ReturnType<typeof createAiGatewayConversationState>} state
+ * @returns {Promise<void>}
+ */
+async function collectSeenMessageIds(storage, tablePath, scopeTo, sessionId, state) {
+  const rows = scopeTo !== undefined && typeof storage.readRowsWhere === 'function'
+    ? storage.readRowsWhere(tablePath, ['message_id', 'session_id'], { session_id: [scopeTo] })
+    : storage.readRows(tablePath, ['message_id', 'session_id'])
+  for await (const row of rows) {
+    if (stringValue(row.session_id) !== sessionId) continue
+    const messageId = stringValue(row.message_id)
+    if (messageId) state.seenMessages.add(messageId)
   }
 }
 
@@ -605,7 +647,7 @@ function canScanCommittedRows(storage) {
  * identical expansion logic scopes naturally to that one conversation.
  */
 export function createAiGatewayConversationState() {
-  /** @type {Map<string, { seen: Set<string>, last: string | undefined }>} */
+  /** @type {Map<string, ThreadChain>} */
   const messageIdsByConversation = new Map()
   /** @type {Map<string, string>} */
   const conversationStartedAt = new Map()
@@ -633,13 +675,13 @@ export function createAiGatewayConversationState() {
  * @param {ReturnType<typeof createAiGatewayConversationState>} state
  * @param {string} threadScope
  * @param {string | undefined} agentId
- * @returns {{ seen: Set<string>, last: string | undefined }}
+ * @returns {ThreadChain}
  */
 function threadMessageIds(state, threadScope, agentId) {
   const key = agentId ? `${threadScope}\u0000${agentId}` : threadScope
   let chain = state.messageIdsByConversation.get(key)
   if (!chain) {
-    chain = { seen: new Set(), last: undefined }
+    chain = { seen: new Set(), last: undefined, replayLinks: new Map() }
     state.messageIdsByConversation.set(key, chain)
   }
   return chain
@@ -666,17 +708,26 @@ function threadMessageIds(state, threadScope, agentId) {
  * caller. Live capture passes one persistent state per listener;
  * backfill passes a fresh state per conversation item (the default).
  *
+ * Expansion MUTATES `state` (the dedup set and the per-thread chain) as it
+ * builds rows, but the append that makes those rows real happens after this
+ * returns. Pass `journal` and every such mutation records its undo, so a
+ * caller whose append failed can call `rollbackAiGatewayStateJournal` and
+ * leave the shared state describing what actually landed rather than what
+ * was merely attempted (issue #879).
+ *
  * @param {AiGatewayProjectedExchange} projection
  * @param {{
  *   gatewayId?: string,
  *   gatewayAttributes?: Record<string, unknown>,
  *   tsStart?: string,
  *   state?: ReturnType<typeof createAiGatewayConversationState>,
+ *   journal?: (() => void)[],
  * }} [opts]
  * @returns {Record<string, unknown>[]}
  */
 export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
   const gatewayId = opts.gatewayId || 'hypaware-local'
+  const journal = opts.journal
   const state = opts.state ?? createAiGatewayConversationState()
   const gatewayAttributes = opts.gatewayAttributes ?? {}
   const tsStart = opts.tsStart ?? stringValue(projection.conversation_started_at) ?? new Date().toISOString()
@@ -734,11 +785,20 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       lastMessageId: chain.last,
     })
 
+    // A message a rollback un-marked but could NOT unchain (a later
+    // exchange had already chained past it) keeps the predecessor it was
+    // first projected with: this re-projection has to rebuild the row the
+    // failed append never wrote, not hang the thread's earlier turns off
+    // whatever tail has since been chained on. Issue #879. Only the
+    // gateway-derived link is restored, because a projector-supplied
+    // `previous_message_id` already replays identically.
+    const buriedLink = chain.replayLinks.get(identity.messageId)
+    if (buriedLink && !Array.isArray(message.previous_message_id)) {
+      identity.previousMessageId = buriedLink
+    }
+
     if (state.seenMessages.has(identity.messageId)) {
-      if (!chain.seen.has(identity.messageId)) {
-        chain.seen.add(identity.messageId)
-        chain.last = identity.messageId
-      }
+      chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
       continue
     }
 
@@ -771,14 +831,92 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       rows.push(stripToSchema(row))
     }
 
+    // Journaled, not merely applied: this is the mutation that makes a
+    // re-delivery of the same batch project zero rows, so a caller whose
+    // append then fails has to be able to take it back (issue #879).
     state.seenMessages.add(identity.messageId)
-    if (!chain.seen.has(identity.messageId)) {
-      chain.seen.add(identity.messageId)
-      chain.last = identity.messageId
-    }
+    journal?.push(() => { state.seenMessages.delete(identity.messageId) })
+    chainMessageId(chain, identity.messageId, identity.previousMessageId, journal)
   }
 
   return rows
+}
+
+/**
+ * Record one message in its thread chain (membership plus the
+ * `previous_message_id` tail), pushing the undo onto `journal` when the
+ * caller asked for one.
+ *
+ * The chain undo has TWO shapes, because one conversation state is shared by
+ * every in-flight exchange of a listener (the proxy fires
+ * `onExchangeFinished` into an unserialized pending set, and
+ * `projectExchange` awaits before it expands), so a later exchange can have
+ * chained further turns onto the same thread by the time a rollback runs:
+ *
+ *  - Still the tail (the sequential case, and the last-in-first-out order
+ *    this journal replays in): unchain it. The re-projection re-walks the
+ *    thread and rebuilds the identical link.
+ *  - No longer the tail: leave `chain.seen` and `chain.last` alone and
+ *    record the link this message HAD in `chain.replayLinks`. Unchaining a
+ *    buried message would strand the turns chained after it, which stay in
+ *    `chain.seen` so nothing re-chains them, settling the tail before them
+ *    and making every later row's `previous_message_id` skip a turn. But
+ *    leaving it at that is not enough either: the re-projection would emit
+ *    the buried message hanging off the CURRENT tail, so the thread's
+ *    opening turns would claim to follow turns that actually follow them
+ *    (a forward link, and a cycle once the later turn already links back to
+ *    this one). The replay link is what keeps both properties.
+ *
+ * `chain.replayLinks` entries are deliberately not consumed on read: a
+ * second failed attempt has to replay the same link, and they are bounded by
+ * `chain.seen`, which is already one entry per message.
+ *
+ * @param {ThreadChain} chain
+ * @param {string} messageId
+ * @param {string[]} previousMessageId The link this message was projected
+ *   with, restored verbatim if a rollback cannot unchain it.
+ * @param {(() => void)[] | undefined} journal
+ * @returns {void}
+ */
+function chainMessageId(chain, messageId, previousMessageId, journal) {
+  if (chain.seen.has(messageId)) return
+  const previousLast = chain.last
+  chain.seen.add(messageId)
+  chain.last = messageId
+  journal?.push(() => {
+    if (chain.last !== messageId) {
+      chain.replayLinks.set(messageId, previousMessageId)
+      return
+    }
+    chain.seen.delete(messageId)
+    chain.last = previousLast
+  })
+}
+
+/**
+ * Undo, newest first, every state mutation a journaled row expansion made,
+ * then empty the journal so it cannot be replayed.
+ *
+ * The dedup set and the thread chain are process-lifetime state shared by
+ * every live producer of `ai_gateway_messages`, and expansion commits to
+ * them before the rows reach storage. Without this, one failed
+ * `appendRows` makes that batch permanently unwritable: the producer's
+ * retry re-projects the same messages, every one of them is now "seen",
+ * and the call returns `rowsWritten: 0` as though there had been nothing
+ * to write - a silent loss, not an error. Rolling back is the cheap
+ * direction of the trade, because re-projecting a row that DID land is
+ * caught by the `part_id` dedupe, while a row wrongly marked seen is gone
+ * until transcript backfill finds it.
+ *
+ * @ref LLP 0252#projection-unchanged [implements]: the dataset's `part_id`
+ *   dedupe absorbs a row projected twice, which is what makes rolling the
+ *   seen-set back safe
+ * @param {(() => void)[]} journal
+ * @returns {void}
+ */
+export function rollbackAiGatewayStateJournal(journal) {
+  for (let i = journal.length - 1; i >= 0; i--) journal[i]()
+  journal.length = 0
 }
 
 /**
@@ -1021,7 +1159,9 @@ function expandMessageParts(ctx) {
     const toolName = extractToolName(block, toolCallId, ctx.conversationLookup)
     const row = {
       ...base,
-      part_id: `${ctx.identity.messageId}#${partIndex}`,
+      // @ref LLP 0306#recovery-lane [implements]: an adapter-supplied native
+      //   part id is the canonical dedupe identity across live and replay
+      part_id: stringValue(block.part_id) ?? `${ctx.identity.messageId}#${partIndex}`,
       part_index: partIndex,
       part_type: partType,
       provider_type: stringValue(ctx.message.provider_type),
@@ -1029,7 +1169,7 @@ function expandMessageParts(ctx) {
       content_text: extractContentText(block),
       tool_name: toolName,
       tool_call_id: toolCallId,
-      tool_args: blockType === 'tool_use' || blockType === 'server_tool_use'
+      tool_args: blockType === 'tool_use' || blockType === 'server_tool_use' || blockType === 'tool_result'
         ? readKey(block, 'input')
         : undefined,
       caller_type: readCallerType(block),
@@ -1042,7 +1182,9 @@ function expandMessageParts(ctx) {
       is_error: readKey(block, 'is_error') === true ? true : undefined,
       status: buildStatus(block, isLast, ctx.role, finishReason),
       attributes: mergeJsonObjects(baseClientAttributes, isLast ? messageAttributes : nonCarrierAttributes),
-      raw_frame: isPlainObject(ctx.message.raw_frame) ? ctx.message.raw_frame : undefined,
+      raw_frame: isPlainObject(block.raw_frame)
+        ? block.raw_frame
+        : isPlainObject(ctx.message.raw_frame) ? ctx.message.raw_frame : undefined,
     }
     if (
       partType === 'tool_call' &&
@@ -1245,6 +1387,10 @@ function extractToolCallId(block) {
 function extractToolName(block, tool_call_id, lookup) {
   if (!isPlainObject(block)) return undefined
   if (block.type === 'tool_use' || block.type === 'server_tool_use') return stringValue(block.name)
+  if (block.type === 'tool_result' || block.type === 'web_search_tool_result') {
+    const direct = stringValue(block.name)
+    if (direct) return direct
+  }
   if ((block.type === 'tool_result' || block.type === 'web_search_tool_result') && tool_call_id && lookup) {
     return lookup.get(tool_call_id)?.tool_name
   }
@@ -1314,6 +1460,11 @@ function buildGatewayAttributes(exchange) {
     upstream: stringValue(exchange.upstream),
     method: stringValue(exchange.method ?? undefined),
     path: stringValue(exchange.path ?? undefined),
+    // Set iff the gateway rerouted the request off the path it arrived on,
+    // which makes the reroute a queryable fact on the message row rather
+    // than something only the exchange log knew.
+    // @ref LLP 0313#the-row-records-where-the-request-was-sent [implements]
+    upstream_path: readMetadataString(exchange, 'upstream_path'),
     status_code: exchange.status_code ?? undefined,
     request_bytes: exchange.request_bytes ?? undefined,
     response_bytes: exchange.response_bytes ?? undefined,
@@ -1383,6 +1534,17 @@ function utcDate(value) {
   const date = new Date(typeof value === 'bigint' ? Number(value) : /** @type {any} */ (value))
   if (Number.isNaN(date.getTime())) return new Date().toISOString().slice(0, 10)
   return date.toISOString().slice(0, 10)
+}
+
+/**
+ * @param {AiGatewayExchangeInput} exchange
+ * @param {string} key
+ * @returns {string | undefined}
+ */
+function readMetadataString(exchange, key) {
+  const metadata = parseMaybeJson(exchange.metadata)
+  if (!isPlainObject(metadata)) return undefined
+  return stringValue(metadata[key])
 }
 
 /** @param {AiGatewayExchangeInput} exchange */

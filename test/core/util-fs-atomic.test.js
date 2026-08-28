@@ -52,7 +52,7 @@ test('atomicWriteFile leaves no temp file behind on success or failure', async (
   }
 })
 
-test('atomicWriteFile applies the requested file mode', async () => {
+test('atomicWriteFile applies the requested file mode', { skip: process.platform === 'win32' && 'no POSIX mode bits on win32' }, async () => {
   const dir = await makeTmpDir()
   try {
     const target = path.join(dir, 'secret.json')
@@ -151,7 +151,9 @@ test('readFileIfExists/readJsonIfExists return null only for ENOENT', async () =
     // A non-ENOENT error (path through a file) propagates.
     const file = path.join(dir, 'plain.txt')
     await fs.writeFile(file, 'x')
-    await assert.rejects(readFileIfExists(path.join(file, 'child')))
+    // win32 reports a path through a file as ENOENT, not ENOTDIR, so this
+    // scenario cannot probe the non-ENOENT contract there.
+    if (process.platform !== 'win32') await assert.rejects(readFileIfExists(path.join(file, 'child')))
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

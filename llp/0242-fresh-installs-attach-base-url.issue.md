@@ -5,7 +5,10 @@
 **Systems:** Config, Plugins, Gateway
 **Author:** Phil / Claude
 **Date:** 2026-08-17
-**Related:** LLP 0231, LLP 0232, LLP 0233, LLP 0174
+**Related:** LLP 0231, LLP 0232, LLP 0233, LLP 0174, LLP 0251
+**Extended-by:** LLP 0262 (accepted 2026-08-17; the resolution below is
+itself migrated: the `claude` client's attach target becomes the OTEL mode,
+so proxy mode stops being what fresh installs compose for it)
 
 > Proxy-mode capture shipped (LLP 0231-0239) but nothing writes
 > `proxy_mode: true`, so every install path still lands on the base-URL

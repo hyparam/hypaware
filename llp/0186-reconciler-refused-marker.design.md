@@ -5,6 +5,7 @@
 **Systems:** Config, Daemon
 **Generated-by:** neutral
 **Related:** LLP 0036, LLP 0041, LLP 0086, LLP 0109, LLP 0184
+**Extended-by:** LLP 0250 (#how-the-reconciler-distinguishes-it-from-done: the reverse gap's drop also reads a `prior_done` bit, so a settings-only attach rewritten to `refused` is reversed rather than dropped), LLP 0295 (#re-arm-explicit-hyp-attach-re-run-only: the re-arm fires at every success exit of the explicit re-run, including the daemon-managed one that calls no adapter `attach()`)
 
 > [LLP 0184](./0184-reconciler-retries-permanent-failures.issue.md) reports
 > that the action reconciler ([LLP 0036](./0036-central-config-driven-client-actions.decision.md)

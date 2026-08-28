@@ -61,7 +61,7 @@ test('sync leads, is the bare-enter default, and both rows state their consequen
   assert.deepEqual(result, { mode: 'sync' })
   assert.equal(await readFolderAskMode({ stateDir }), 'sync')
   assert.match(stdout.text(), /New folders will sync without asking/)
-  assert.match(stdout.text(), /hyp policy folders ask/)
+  assert.match(stdout.text(), /hyp privacy folders ask/)
 })
 
 test('choosing the ask buys the per-folder question and says how to undo it', async () => {
@@ -76,7 +76,7 @@ test('choosing the ask buys the per-folder question and says how to undo it', as
   assert.deepEqual(result, { mode: 'ask' })
   assert.equal(await readFolderAskMode({ stateDir }), 'ask')
   assert.match(stdout.text(), /asked once per new folder/)
-  assert.match(stdout.text(), /hyp policy folders sync/)
+  assert.match(stdout.text(), /hyp privacy folders sync/)
 })
 
 test('the answer is recorded even when it matches the default, so status can read it back', async () => {
@@ -141,7 +141,7 @@ test('autoAccept states the question and records the default without prompting (
   // with the answer as one more line of that block rather than a second
   // flush-left announcement repeating the subject.
   assert.match(stdout.text(), /When you start a session in a new folder:/)
-  assert.match(stdout.text(), /^ {2}Syncing them all; change later with hyp policy folders ask$/m)
+  assert.match(stdout.text(), /^ {2}Syncing them all; change later with hyp privacy folders ask$/m)
 })
 
 test('an unwritable preference warns and leaves the previous mode standing', async () => {
@@ -161,7 +161,7 @@ test('an unwritable preference warns and leaves the previous mode standing', asy
   // #fail-safe) and that is the mode left standing.
   assert.equal(result.mode, 'ask', 'the mode already in force is what is reported')
   assert.match(stderr.text(), /could not record the new-folder answer/)
-  assert.match(stderr.text(), /hyp policy folders ask/)
+  assert.match(stderr.text(), /hyp privacy folders ask/)
 })
 
 test('the two options are exactly sync and ask', () => {

@@ -43,8 +43,29 @@ export function createInstanceWatermarkStore({ paths, instanceName }) {
   if (!instanceName) {
     throw new Error('createInstanceWatermarkStore: instanceName is required')
   }
-  const stateDir = path.join(paths.stateDir, INSTANCE_DIR, sanitizeInstance(instanceName))
-  return createSinkWatermarkStore({ stateDir })
+  return createSinkWatermarkStore({
+    stateDir: instanceWatermarkStateDir(paths.stateDir, instanceName),
+  })
+}
+
+/**
+ * Where one sink instance's watermarks live under its plugin `stateDir`.
+ *
+ * Split out of {@link createInstanceWatermarkStore} because a *reader* needs the
+ * same directory without a `PluginPaths` bag: the `hyp sync` consent preview
+ * counts what is queued for a destination and has only the sink handle's plugin
+ * name and instance name to go on. Two spellings of this join would eventually
+ * disagree, and a preview reading the wrong file would report a backlog of zero
+ * on a machine that has one.
+ *
+ * @param {string} pluginStateDir the plugin's `PluginPaths.stateDir`
+ * @param {string} instanceName sink instance name
+ * @returns {string}
+ */
+export function instanceWatermarkStateDir(pluginStateDir, instanceName) {
+  if (!pluginStateDir) throw new Error('instanceWatermarkStateDir: pluginStateDir is required')
+  if (!instanceName) throw new Error('instanceWatermarkStateDir: instanceName is required')
+  return path.join(pluginStateDir, INSTANCE_DIR, sanitizeInstance(instanceName))
 }
 
 /**

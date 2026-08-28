@@ -227,7 +227,20 @@ export function resetCentralLayerToSeed(stateRoot) {
     'config.a.etag',
     'config.b.etag',
   ]) {
-    fs.rmSync(path.join(controlDir, name), { force: true })
+    const target = path.join(controlDir, name)
+    if (name === ACTIVE_BASENAME) {
+      // `rmSync(..., { force: true })` first follows an existence check and
+      // leaves a dangling or looping symlink untouched. The active pointer is
+      // allowed to be exactly those damaged shapes, so unlink it as a directory
+      // entry instead of asking whether its target exists.
+      try {
+        fs.unlinkSync(target)
+      } catch (err) {
+        if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
+      }
+      continue
+    }
+    fs.rmSync(target, { force: true })
   }
   return { supersededActiveSlot }
 }

@@ -38,7 +38,7 @@ commands:
 
 options:
   --root <dir>          sandbox root (default: $HYP_SANDBOX_ROOT or ~/.hyp-sandbox)
-  --spawn               mock launchctl really starts the plist's program
+  --spawn               mock launchctl/systemctl really starts the service
   --refuse-trust        `security add-trusted-cert` acts like a cancelled dialog
   --trust-from-daemon <grant|refuse>
                         whether a daemon-issued `add-trusted-cert` succeeds.
@@ -155,7 +155,7 @@ case "$CMD" in
     echo "HYP_HOME     : $SANDBOX_HYP_HOME"
     echo "npm prefix   : $NPM_PREFIX"
     echo "shims        : $SANDBOX_BIN (launchctl, security, systemctl)"
-    echo "spawn mode   : $SPAWN (1 = mock launchctl really starts the daemon)"
+    echo "spawn mode   : $SPAWN (1 = mock service manager really starts the daemon)"
     echo "daemon trust : $TRUST_FROM_DAEMON (assumption: whether a background LaunchAgent can raise the macOS password dialog)"
     echo
     # Non-login, non-rc bash: a login shell would re-run /etc/profile and

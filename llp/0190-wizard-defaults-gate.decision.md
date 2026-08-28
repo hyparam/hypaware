@@ -7,6 +7,7 @@
 **Date:** 2026-08-04
 **Related:** LLP 0188 (#never-silent: the sync-scope step this reshapes), LLP 0135 (#pick: the pick lane this reshapes), LLP 0129 (fork/join/pick order, unchanged), LLP 0011 (autodetect seeds the default), LLP 0130 (picker descriptors)
 **Extended-by:** [LLP 0201](./0201-express-defaults-gate.decision.md) (one express gate now precedes the lanes and can accept every gate below at once; each lane keeps its gate, its statement, and its default, and an auto-accepted gate prints its statement instead of prompting)
+**Extended-by:** [LLP 0274](./0274-pick-menu-keeps-its-checked-state.decision.md) (#sync-gate below: the `enterKeepsChecked` opt-in widens from "the sync menu" to any menu that arrives with a checked state, so the wizard pick menu sets it too; that section's line "the pick menus keep the historical semantics untouched" is corrected for that menu, and `runPickerWalkthrough` is untouched)
 
 > Extends [LLP 0188 §never-silent](./0188-enrolled-default-sync-with-client-optout.decision.md#never-silent)
 > and the prompt flow of [LLP 0135 §pick](./0135-install-experience-overhaul.design.md).
@@ -92,6 +93,15 @@ prompt; and readline's `close` resolves the pending ask instead of
 leaving it unsettled, which is the EOF hang `rl.question` has always
 had and the loop turned into a crash.
 
+> **Corrected by [LLP 0274](./0274-pick-menu-keeps-its-checked-state.decision.md):**
+> "the pick menus keep the historical semantics untouched" holds for
+> `runPickerWalkthrough`, and held for the wizard pick menu when this was
+> written, where the boxes were a detection hint. LLP 0183 later made them
+> the read-back of the config on disk, so a bare enter discarded the user's
+> own recorded answer and the run rewrote the config from it: the same
+> invisible-default defect this paragraph is about. That menu now sets the
+> flag whenever a box is checked, and only then.
+
 Where the fallback lands when it runs out of answers is the question's
 *stated* default, never a different one. A spent budget takes what a
 bare enter takes - the checked rows here, the empty selection elsewhere
@@ -130,6 +140,47 @@ everything behind the prompt - the store schema, editor semantics over
 shown candidates, seam enforcement, corrupt-store fail-closed - is
 LLP 0188's and is unchanged.
 
+<a id="eof-everywhere"></a>**The EOF rule is the tree's, not this
+lane's, and the asker that implements it is shared.** The defect is
+`node:readline`'s, so it is at every readline prompt HypAware has, and
+the rule above answers all of them: **a stdin that can no longer answer
+takes the default the prompt printed; a prompt whose enter has no
+default settles as a cancel or a failure instead, never as an invented
+answer.** ([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md)
+§eof-declines narrows the first clause wherever a printed default would
+*proceed*: that is not what a spent stdin takes, because EOF is the
+proof nobody is there to want it. `askYesNo` applies this to every
+`[Y/n]` confirm; the select factory applies it only where a question
+names an `eofValue`, which today is the disconnect gate of
+§fork-disconnect. Every other default named below still declines to
+act, so the answers this section gives are unchanged.) `queuedLineAsker` moves out of `walkthrough.js` into
+`src/core/cli/line_asker.js`, beside `stdio.js` and `flush-streams.js`,
+where a plugin workspace can import it too; `askLineOnce` joins it for
+the prompts that ask once on an interface that may be a real terminal,
+keeping `rl.question` as the thing that writes the query (readline
+redraws a terminal line from its own bookkeeping, so a query it never
+saw is a query it cannot redraw) and replacing only its promise.
+
+Applied outward, the rule settles the exit code the class kept raising.
+The wizard's fork menu prints `default 3`, and LLP 0129 #fork already
+settled that the default is Quit, so EOF there is Quit and the wizard
+exits 0 having written nothing: the same result the fork's TUI path
+already returns for a real ctrl+c at that screen. 130 is not the answer
+for a dropped terminal at a prompt that advertised a default, because a
+prompt with a default cannot tell a dropped terminal from a bare enter
+and should not pretend to; 130 stays where LLP 0135's cancel put it, at
+the prompts whose enter answers nothing. The two `[y/N]` confirms
+(`src/core/cli/confirm.js`, `src/core/plugin_install/confirm.js`) take
+their printed no, which is the safe direction for the irreversible verbs
+behind them, and their callers' exit codes are unchanged: an EOF decline
+is reported exactly as a typed `n` is. (`confirm.js` since grew `[Y/n]`
+prompts; per LLP 0299 §eof-declines those decline at EOF too, so the
+answer this paragraph gives is unchanged - only its derivation is.) The one prompt with no default is
+`claude-account login`'s `Code: ` paste, and it does not invent one: with
+no loopback listener left to finish the sign-in, EOF is a failure that
+says so, and with a listener up the paste lane stays pending rather than
+losing a race the browser may still win.
+
 <a id="prompt-shape"></a>**One gate prompt shape for both lanes.** The
 gate is a `ConfirmSelectQuestion` asked through
 `defaultConfirmSelectPromptFactory`: a TUI select on a real TTY, a
@@ -148,8 +199,13 @@ a silent surprise for the user who meant "switch this machine to
 local-only". Both intents are real, so the wizard now asks at the moment
 of intent: on a managed machine, choosing local raises one yes/no -
 "This machine syncs to your team server. Disconnect and go local-only?"
-with "No, stay connected" as the default (a bare enter never
-disconnects). Yes runs the real `hyp leave` (LLP 0063: central-layer
+with "Yes, disconnect" as the default
+([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md):
+disconnecting destroys nothing, so yes leads). It is the one gate here
+whose default *acts*, so it is also the one that names an `eofValue`: a
+stdin that can no longer answer stays connected rather than taking the
+printed default, because §eof-everywhere's rule is about what the person
+at the terminal wants and EOF proves there is none. Yes runs the real `hyp leave` (LLP 0063: central-layer
 removal, org-attach reversal, identity drop) and the run continues as a
 true solo install - no locked rows, no sync lane, the local 120-day
 retention default. No keeps today's behavior: the org's rows stay

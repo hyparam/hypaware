@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
 
@@ -16,6 +17,7 @@ import { materializeClientAssets } from '../runtime/client_assets.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { detectPickerSources } from './detect.js'
+import { queuedLineAsker } from './line_asker.js'
 import { withSpinner } from './spinner.js'
 import { multiselect, select } from './tui/index.js'
 import { PromptBackRequestedError, PromptCancelledError, isPromptCancelledError } from './tui/runtime.js'
@@ -30,8 +32,7 @@ import { shouldUseTui } from './tui-router.js'
 export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
 
 /**
- * @import { Interface } from 'node:readline/promises'
- * @import { AiGatewayCapability, CapabilityRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, CapabilityRegistry, ClientRegistration, ClientRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions, DaemonInstallPlan } from '../../../src/core/daemon/types.js'
  * @import { ClientAssetInstall, ClientAssetRemoval } from '../../../src/core/runtime/types.js'
@@ -71,88 +72,28 @@ export const LOCAL_INSTALL_RETENTION_DAYS = 120
  */
 export function resolveHypHome(env) {
   if (env.HYP_HOME) return env.HYP_HOME
-  const home = env.HOME ?? ''
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make this cwd-relative)
+  const home = env.HOME || os.homedir()
   return path.join(home, '.hyp')
 }
 
 /**
- * How many extra times a question that opted in may re-ask after an
- * answer that names no row. One: enough to catch a typo, small enough
- * that a pipe of garbage costs a fixed two lines of output and then
- * moves on. Questions that do not opt in never re-ask at all.
+ * How many extra times a prompt may re-ask after an answer that names no
+ * row. One: enough to catch a typo, small enough that a pipe of garbage
+ * costs a fixed two lines of output and then moves on. Every confirm-select
+ * gate re-asks (LLP 0299: only a bare enter may take a default that acts);
+ * among the multi-select pick menus, only a question that opted in with
+ * `enterKeepsChecked` does, and the rest never re-ask at all.
  *
- * @ref LLP 0190#sync-gate [implements]: the malformed-answer re-ask is capped and gated
+ * @ref LLP 0190#sync-gate [implements]: the malformed-answer re-ask is capped
  */
 const MAX_MALFORMED_REASKS = 1
 
-/**
- * Ceiling on the answer lines held for a still-unasked prompt. An
- * interface asks at most `1 + MAX_MALFORMED_REASKS` questions and is
- * closed straight after, so anything past a handful is unreadable
- * backlog: a pipe that floods stdin (`yes |`) must not grow an array
- * for as long as the prompt is on screen.
- */
-const MAX_QUEUED_LINES = 4
-
-/**
- * Read answer lines off a readline interface without losing one and
- * without ever waiting on a stream that can no longer answer.
- *
- * `rl.question()` cannot do either job here. It registers its `line`
- * listener only when it is called, so a second answer line arriving in
- * the same chunk as the first ("y\n3\n" from a pipe) is emitted and
- * dropped before a re-ask can ask: readline emits both synchronously
- * and the next `question()` is a microtask away. And at EOF its promise
- * is left permanently unsettled - the interface closes, `question`
- * neither resolves nor rejects - which is a hang, or a silent
- * "unsettled top-level await" exit. Queueing every line from
- * construction fixes the first; resolving the pending ask as `null` on
- * `close` fixes the second.
- *
- * `close` alone is not enough for the second job. Readline registers its
- * `end` listener when the interface is built, so an interface built over
- * a stream that has ALREADY ended never sees an `end` and never emits
- * `close` - the second prompt asked on a spent stdin would wait forever
- * even though the first resolved. The stream's own `readableEnded` is
- * the answer readline can no longer give, so it seeds `closed` here.
- *
- * @param {Interface} rl
- * @param {NodeJS.ReadableStream} input
- * @param {NodeJS.WritableStream} output
- * @returns {(prompt: string) => Promise<string | null>} writes one prompt and takes the next line, `null` once the stream is spent
- */
-function queuedLineAsker(rl, input, output) {
-  /** @type {string[]} */
-  const queued = []
-  /** @type {((line: string | null) => void) | null} */
-  let waiting = null
-  let closed = /** @type {{ readableEnded?: boolean }} */ (input).readableEnded === true
-  const take = () => {
-    const resolve = waiting
-    waiting = null
-    return resolve
-  }
-  rl.on('line', (line) => {
-    const resolve = take()
-    if (resolve) resolve(line)
-    else if (queued.length < MAX_QUEUED_LINES) queued.push(line)
-  })
-  rl.on('close', () => {
-    closed = true
-    const resolve = take()
-    if (resolve) resolve(null)
-  })
-  return function askLine(prompt) {
-    // Byte-identical to what `rl.question` writes: with `terminal: false`
-    // readline puts the query straight on the output stream.
-    output.write(prompt)
-    if (queued.length > 0) return Promise.resolve(/** @type {string} */ (queued.shift()))
-    if (closed) return Promise.resolve(null)
-    return new Promise((resolve) => {
-      waiting = resolve
-    })
-  }
-}
+// `queuedLineAsker` used to live here, module-private. It is now shared
+// from `./line_asker.js`: the same EOF defect it was written for exists at
+// every readline prompt in the tree (the wizard's fork menu, the y/N
+// confirms, a plugin's OAuth paste fallback), and one asker they all read
+// through is what keeps the answer in one place.
 
 /**
  * Build the default interactive prompt. Uses Node's `readline` against
@@ -450,20 +391,44 @@ function legacyConfirmSelectPromptFactory(opts) {
       })
       const fallback = question.default ?? question.options[0].value
       const fallbackIdx = question.options.findIndex((o) => o.value === fallback)
-      // `askLine` rather than `rl.question`, which never settles at EOF. The
-      // gate prints its default in the prompt (`select [2]`), so a stdin that
-      // can no longer answer takes that default instead of hanging the wizard.
+      const prompt = question.allowBack
+        ? `select [${fallbackIdx + 1}, b back]: `
+        : `select [${fallbackIdx + 1}]: `
+      // A stdin that cannot answer, and an answer this cannot read, are the
+      // same thing here: neither is a person choosing. Both land on
+      // `eofValue` where the question named one, else on the printed
+      // default. Only the bare enter the prompt advertises takes the default
+      // as a choice - an answer that is neither a row number nor empty is
+      // re-asked, because rounding it to the default silently picks a row
+      // the reader did not, and since LLP 0299 that row can be the one that
+      // acts (`hyp leave` at the fork, a send at the sync gate).
       // @ref LLP 0190#sync-gate [implements]: a spent stdin lands on the prompt's stated default
-      const answer = (await askLine(
-        question.allowBack ? `select [${fallbackIdx + 1}, b back]: ` : `select [${fallbackIdx + 1}]: `
-      )) ?? ''
-      // The readline form of the TUI's escape (LLP 0191).
-      if (question.allowBack && answer.trim().toLowerCase() === 'b') throw new PromptBackRequestedError()
-      const n = Number.parseInt(answer.trim(), 10)
-      if (Number.isInteger(n) && n >= 1 && n <= question.options.length) {
-        return question.options[n - 1].value
+      // @ref LLP 0299#eof-declines [implements]: a stdin that cannot answer declines the gates that would act
+      const unanswered = () => (question.eofValue !== undefined ? question.eofValue : fallback)
+      // The row values are internal tokens ('stay', 'accept', 'now'), so the
+      // line that says which row was taken has to name it the way the menu
+      // above it did.
+      const labelOf = (/** @type {string} */ value) =>
+        question.options.find((o) => o.value === value)?.label ?? value
+      const attempts = 1 + MAX_MALFORMED_REASKS
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const line = await askLine(prompt)
+        if (line === null) return unanswered()
+        const answer = line.trim()
+        // The readline form of the TUI's escape (LLP 0191).
+        if (question.allowBack && answer.toLowerCase() === 'b') throw new PromptBackRequestedError()
+        if (answer === '') return fallback
+        const n = Number.parseInt(answer, 10)
+        if (Number.isInteger(n) && n >= 1 && n <= question.options.length) {
+          return question.options[n - 1].value
+        }
+        if (attempt < attempts) {
+          output.write(`nothing matched '${answer}' - enter a number from 1 to ${question.options.length}\n`)
+        } else {
+          output.write(`nothing matched '${answer}' - taking '${labelOf(unanswered())}'\n`)
+        }
       }
-      return fallback
+      return unanswered()
     } finally {
       rl.close()
     }
@@ -574,6 +539,9 @@ export function backfillConsentTitle(providers, retentionDays) {
  * their manifest marks them `hidden` (LLP 0202). Keep the ids in this
  * array and their descriptors in the catalog - see
  * {@link visiblePickerDescriptors} for what still depends on them.
+ * `claude-desktop` is hidden too (LLP 0297) and, like every id absent from
+ * this array, sorts after the known ones; nothing needs to change here if
+ * it is ever unhidden.
  *
  * @type {string[]}
  */
@@ -773,7 +741,7 @@ export async function runPickerWalkthrough(opts) {
     ...(overwriteConfirm ? { confirmOverwrite: overwriteConfirm } : {}),
   })
   if (!guard.proceed) {
-    opts.stderr.write(`hyp init: ${guard.message}\n`)
+    opts.stderr.write(`hyp setup: ${guard.message}\n`)
     return overwriteAbortedResult({ opts, configPath, config, picks })
   }
   if (guard.backupPath) {
@@ -812,6 +780,7 @@ export async function runPickerWalkthrough(opts) {
       finale: opts.finale,
       clientsPicked,
       capabilities,
+      ...(opts.clients ? { clients: opts.clients } : {}),
       sources: opts.sources,
       skills: opts.skills,
       agents: opts.agents,
@@ -1104,6 +1073,33 @@ function contributedPlugins(compose) {
     ...(compose.plugin ? [compose.plugin] : []),
     ...(Array.isArray(compose.plugins) ? compose.plugins : []),
   ]
+}
+
+/**
+ * Does {@link configuredPickerSources} read this row back off plugins the
+ * row itself contributes, rather than off state some other row also
+ * composes?
+ *
+ * This is the derivative-read-back test LLP 0202 #carry-through argued
+ * from and LLP 0297 #own-plugins names. A row whose whole `compose`
+ * contribution is an upstream (`raw-anthropic`, `raw-openai`) reads as
+ * configured whenever *any* row supplying that upstream is picked, so its
+ * seeded state is evidence about the config, not about the user. A row
+ * that contributes plugins of its own (`claude-desktop`) is in the config
+ * only because something put it there deliberately, so its seeded state
+ * is a recorded answer and a hidden row may be carried on it.
+ *
+ * `requires_gateway` alone does not count: every gateway-backed row asks
+ * for `@hypaware/ai-gateway`, so its presence separates nothing.
+ *
+ * @param {PickerDescriptor} descriptor
+ * @returns {boolean}
+ * @ref LLP 0297#own-plugins [implements]: the read-back is non-derivative exactly when the row contributes plugins of its own
+ */
+export function readsBackFromOwnPlugins(descriptor) {
+  const compose = descriptor.compose
+  if (!compose) return false
+  return contributedPlugins(compose).length > 0
 }
 
 /**
@@ -1563,7 +1559,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
   if (!caWait.ready) {
     stderr.write(
       'warning: the daemon did not mint the proxy CA in time; clients may attach by ' +
-      "base URL. Re-run 'hyp attach <client>' once the daemon is up to switch them.\n"
+      "base URL. Re-run 'hyp client attach <client>' once the daemon is up to switch them.\n"
     )
   }
   return { waited: true, ready: caWait.ready }
@@ -1585,6 +1581,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   finale: PickerFinaleActions,
  *   clientsPicked: string[],
  *   capabilities: CapabilityRegistry,
+ *   clients?: ClientRegistry,
  *   sources?: { stopAll?: () => Promise<void> },
  *   skills?: { list(): { name: string, clients: string[], sourceDir: string }[] },
  *   agents?: { list(): { name: string, clients: string[], sourceFile: string }[] },
@@ -1621,6 +1618,11 @@ export async function runPickerFinale(args) {
   // it unset and the line is not printed.
   // @ref LLP 0135#progress [implements]: the finale lane counts once, and prints its position where it starts
   if (args.progress) stdout.write(`${args.progress}\n`)
+  // `?? ''`, not os.homedir(): '' is the "no home, stay inert" sentinel this
+  // whole finale keys on - the materialize/prune guards, the attach probe,
+  // and the conditional homeDir spreads below all read it as "write
+  // nothing". Same seam as attachedAssetOptions in action_attach.js;
+  // LLP 0300's homedir fallback is for read-side resolution, not here.
   const homeDir = env.HOME ?? ''
   const skipInstall = finale.skipDaemon === true || finale.skipDaemonInstall === true
 
@@ -1714,11 +1716,27 @@ export async function runPickerFinale(args) {
     )
   }
 
-  if (clientsPicked.length > 0 && capabilities.has('hypaware.ai-gateway')) {
+  // The intrinsic registry is the superset of attachable clients: gateway
+  // adapters delegate their registration into it, and an endpoint-free adapter
+  // registers only there. Resolving through the gateway capability alone hid
+  // every endpoint-free client from this lane - a solo pick skipped attach
+  // outright, and a mixed pick reported the adapterless success that LLP 0115
+  // means for a plugin with no runtime adapter at all.
+  // @ref LLP 0306#endpoint-free-clients [implements]: the finale resolves adapters through the intrinsic registry, not the gateway capability
+  /** @type {AiGatewayCapability | undefined} */
+  const gateway = capabilities.has('hypaware.ai-gateway')
+    ? capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
+    : undefined
+  /** @param {string} name @returns {ClientRegistration | undefined} */
+  const resolveAdapter = (name) => args.clients?.getClient(name) ?? gateway?.getClient(name)
+  const anyAdapterPicked = clientsPicked.some((client) => resolveAdapter(client) !== undefined)
+
+  if (clientsPicked.length > 0 && (anyAdapterPicked || gateway)) {
     // Skipped when no daemon was installed (the join lane restarts only
     // after attach, so no CA can appear before it) and on dry runs; the
-    // wait-or-skip decision itself lives in the helper.
-    if (!dryRun && !skipInstall) {
+    // wait-or-skip decision itself lives in the helper. Also skipped when no
+    // gateway is active at all: there is no proxy CA to wait for.
+    if (!dryRun && !skipInstall && gateway) {
       await waitForProxyCaBeforeAttach({
         config,
         env,
@@ -1726,14 +1744,12 @@ export async function runPickerFinale(args) {
         ...(args.waitForCaFn ? { waitForCaFn: args.waitForCaFn } : {}),
       })
     }
-    /** @type {AiGatewayCapability} */
-    const gateway = capabilities.require('hyp-core/walkthrough', 'hypaware.ai-gateway', '^2.0.0')
     for (const client of clientsPicked) {
       if (args.skipAttachClients?.has(client)) {
         summary.attach.push({ client, dryRun, ok: true, skipped: true })
         continue
       }
-      const adapter = gateway.getClient(client)
+      const adapter = resolveAdapter(client)
       if (!adapter) {
         // Not attachable, not failed: `contributes.client` also covers plugins
         // that own skill/agent dirs but deliberately register no runtime
@@ -1752,11 +1768,15 @@ export async function runPickerFinale(args) {
       // @ref LLP 0114#fixed-default-port [implements]: an unpinned install attaches at the known default rather than a port nothing can bind
       let endpoint = configuredGatewayEndpoint(config) ?? DEFAULT_GATEWAY_ENDPOINT
       try {
-        endpoint = gateway.localEndpoint()
+        if (gateway) endpoint = gateway.localEndpoint()
       } catch {}
+      // An endpoint-free adapter writes a managed file rather than pointing a
+      // client at a bound port, so it is handed no endpoint at all, the same
+      // way the reconciler's attach action calls it.
+      const attachEndpoint = adapter.requiresEndpoint === false ? undefined : endpoint
       try {
         await adapter.attach({
-          endpoint,
+          ...(attachEndpoint ? { endpoint: attachEndpoint } : {}),
           config: {},
           stdout,
           stderr,
@@ -1986,7 +2006,7 @@ function writeAttachedNotConfiguredWarning({ clients, stdout, dryRun }) {
   stdout.write('These tools still send their requests through the HypAware gateway,\n')
   stdout.write('but this setup no longer collects them, so their requests can start\n')
   stdout.write('failing. Point each one back at its provider with:\n')
-  for (const client of clients) stdout.write(`  hyp detach --client ${client}\n`)
+  for (const client of clients) stdout.write(`  hyp client detach ${client}\n`)
 }
 
 /**
@@ -2018,7 +2038,7 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
   stdout.write('\n')
   stdout.write(`${dryRun ? '(dry-run) ' : ''}Still attached, no longer collected: ${clients.join(', ')}\n`)
   stdout.write('Their requests can start failing until you run:\n')
-  for (const client of clients) stdout.write(`  hyp detach --client ${client}\n`)
+  for (const client of clients) stdout.write(`  hyp client detach ${client}\n`)
 }
 
 /**
@@ -2274,7 +2294,9 @@ export function ridersInDefaultSet(composeWith) {
 
 /**
  * The descriptors the interactive picker menu renders: everything except
- * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`).
+ * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`,
+ * widened by `@ref LLP 0297#claude-desktop` to a row that is hidden because
+ * its setup does not belong in a checkbox).
  *
  * Display is the ONLY thing this filters. A hidden row keeps every other
  * property of a picker source, and each one is load-bearing somewhere:
@@ -2538,7 +2560,7 @@ async function cancelledResult(opts) {
  */
 function writeCancelledNotice(stderr) {
   try {
-    stderr.write('hyp init: cancelled\n')
+    stderr.write('hyp setup: cancelled\n')
   } catch {
     // best-effort: stderr might be closed during cleanup
   }

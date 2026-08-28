@@ -1,6 +1,8 @@
 import type {
   CapabilityRegistry,
+  ClientRegistry,
   HypAwareV2Config,
+  VerbInputSchema,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type {
   ExtendedSinkRegistry,
@@ -44,6 +46,13 @@ export interface ConfirmSelectQuestion {
   /** Value returned on a bare enter; defaults to the first option. */
   default?: string
   /**
+   * Value returned when stdin can no longer answer, for the gates whose
+   * printed default acts rather than declines (LLP 0299 #eof-declines).
+   * Unset questions keep taking `default` at EOF, which is what the
+   * sync gate's stated-default fallback relies on (LLP 0190 #sync-gate).
+   */
+  eofValue?: string
+  /**
    * Back-navigation opt-in (LLP 0191): the TUI select's escape and the
    * readline fallback's `b` answer throw `PromptBackRequestedError`
    * instead of cancelling, returning the user to the previous screen.
@@ -62,6 +71,7 @@ export type AsyncConfirmSelectPrompt = (question: ConfirmSelectQuestion) => Prom
 export type PickerSource =
   | 'claude'
   | 'codex'
+  | 'opencode'
   | 'claude-desktop'
   | 'openclaw'
   | 'hermes'
@@ -177,6 +187,13 @@ export interface PickerFinaleActions {
 
 export interface RunPickerWalkthroughOptions {
   capabilities: CapabilityRegistry
+  /**
+   * Kernel-owned client registry. The superset of attachable clients: the
+   * gateway capability's `getClient`/`listClients` filter to registrations
+   * with a gateway upstream, so an endpoint-free adapter (LLP 0306) is only
+   * reachable here.
+   */
+  clients?: ClientRegistry
   sources?: { stopAll?: () => Promise<void> }
   skills?: {
     list(): { name: string; clients: ('claude' | 'codex')[]; sourceDir: string }[]
@@ -463,4 +480,19 @@ export interface ClientResult {
   error_kind?: string
   /** Human-readable error message on the error path. */
   error?: string
+}
+
+/**
+ * The whole argument surface of one core command: the schema its parser
+ * enforces and the usage line the registry advertises, authored together
+ * so a flag can never appear in one and not the other. Lives in
+ * `src/core/cli/command_args.js`.
+ */
+export interface CoreCommandArgSpec {
+  /** Registered usage line, without the `usage: ` prefix. */
+  usage: string
+  /** Schema `parseCommandArgv` enforces for this command. */
+  schema: VerbInputSchema
+  /** argv token aliases, e.g. `{ '-y': '--yes' }`. */
+  aliases?: Record<string, string>
 }

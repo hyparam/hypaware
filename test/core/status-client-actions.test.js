@@ -330,7 +330,7 @@ test('text renderer prints the client actions section with per-state detail', as
   // The repair-hint line's exact text (LLP 0186#hyp-status-attention-needed-surface).
   assert.match(
     text,
-    /backfill @acme\/refused-plugin {2}\[refused\] {2}\(ownership conflict\) {2}run 'hyp attach @acme\/refused-plugin' after fixing the cause/
+    /backfill @acme\/refused-plugin {2}\[refused\] {2}\(ownership conflict\) {2}run 'hyp client attach @acme\/refused-plugin' after fixing the cause/
   )
 })
 
@@ -355,7 +355,7 @@ test('a refused marker with no reason still renders the repair hint, never a bar
 
   assert.match(
     stdout.text(),
-    /attach claude {2}\[refused\] {2}run 'hyp attach claude' after fixing the cause/
+    /attach claude {2}\[refused\] {2}run 'hyp client attach claude' after fixing the cause/
   )
 })
 

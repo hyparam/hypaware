@@ -13,6 +13,7 @@ import { resolveIcebergDir } from '../../src/core/cache/storage.js'
 import { readRowsFromTable, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { runPurge } from '../../src/core/commands/purge.js'
 import { scopeGovernance, scopeGoverns } from '../../src/core/usage-policy/matcher.js'
+import { claudeBodySpoolDir } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/spool.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -354,6 +355,57 @@ test('runPurge --all --yes deletes everything and reports counts', async () => {
   }
 })
 
+// The spool holds raw request and response bodies that have not been projected
+// yet. Leaving them behind would let the next received batch write rows the
+// user just deleted, so every purge empties it - a targeted purge included,
+// because a spooled body carries no cwd for a target to match against.
+// @ref LLP 0253#purge-and-detach-sweep [tests]: `hyp purge` removes the spool
+//   directory's contents
+test('runPurge empties the capture spool and reports what it removed', async () => {
+  const cacheRoot = await makeTmpDir('cli-spool')
+  const hypHome = await makeTmpDir('cli-spool-home')
+  try {
+    await seed(cacheRoot)
+    const spoolDir = claudeBodySpoolDir(hypHome)
+    await fs.mkdir(spoolDir, { recursive: true })
+    await fs.writeFile(path.join(spoolDir, 'req-1.json'), '{"messages":["a raw prompt"]}')
+    await fs.writeFile(path.join(spoolDir, 'resp-1.json'), '{"content":["a raw reply"]}')
+
+    const { ctx, stdout } = makeCtx({ cacheRoot, hypHome })
+    const code = await runPurge(['--all', '--yes', '--json'], ctx)
+    assert.equal(code, 0)
+    assert.equal(JSON.parse(stdout.text).spoolFilesRemoved, 2)
+    assert.deepEqual(await fs.readdir(spoolDir), [], 'the directory survives, its contents do not')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('runPurge sweeps the spool for a targeted purge too, and says nothing when it is empty', async () => {
+  const cacheRoot = await makeTmpDir('cli-spool-target')
+  const hypHome = await makeTmpDir('cli-spool-target-home')
+  try {
+    await seed(cacheRoot)
+    const spoolDir = claudeBodySpoolDir(hypHome)
+    await fs.mkdir(spoolDir, { recursive: true })
+    await fs.writeFile(path.join(spoolDir, 'req-1.json'), '{"messages":["a raw prompt"]}')
+
+    const { ctx, stdout } = makeCtx({ cacheRoot, hypHome })
+    assert.equal(await runPurge([REPO_B, '--yes'], ctx), 0)
+    assert.match(stdout.text, /emptied the capture spool: 1 raw body file deleted/)
+    assert.deepEqual(await fs.readdir(spoolDir), [])
+
+    // A second purge finds nothing and stays quiet about it.
+    const second = makeCtx({ cacheRoot, hypHome })
+    assert.equal(await runPurge([REPO_B, '--yes'], second.ctx), 0)
+    assert.doesNotMatch(second.stdout.text, /capture spool/)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 test('runPurge subtree warns about resurrection when the dir still resolves full', async () => {
   const cacheRoot = await makeTmpDir('cli-warn')
   const hypHome = await makeTmpDir('cli-warn-home')
@@ -365,7 +417,7 @@ test('runPurge subtree warns about resurrection when the dir still resolves full
     assert.equal(code, 0)
     assert.match(stderr.text, /still record and will be re-imported/)
     assert.match(stderr.text, /home\/u\/repoA/)
-    assert.match(stderr.text, /hyp policy set <path> ignore/)
+    assert.match(stderr.text, /hyp privacy set <path> ignore/)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
     await fs.rm(hypHome, { recursive: true, force: true })

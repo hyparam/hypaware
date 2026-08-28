@@ -9,7 +9,7 @@ import { dryRunActivate } from './dry_run.js'
 
 /**
  * @import { PluginManifest } from '../../../hypaware-plugin-kernel-types.js'
- * @import { DoctorReport, DryRunResult, PluginDiagnostic, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
+ * @import { DoctorReport, DryRunResult, NameListKey, PluginDiagnostic, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
  */
 
 const GUIDE = 'docs/PLUGIN_AUTHORING.md'
@@ -24,7 +24,7 @@ const GUIDE = 'docs/PLUGIN_AUTHORING.md'
  * to attach a validator is optional (most real plugins declare a section
  * without one). Flagging it would false-positive across the bundled set.
  *
- * @type {Array<{ key: keyof RegisteredSnapshot, nameField: 'name' | 'section', label: string, register: string, anchor: string }>}
+ * @type {Array<{ key: NameListKey, nameField: 'name' | 'section', label: string, register: string, anchor: string }>}
  */
 const CONTRIBUTIONS = [
   { key: 'sources', nameField: 'name', label: 'source', register: "ctx.sources.register({ name: '%s', plugin, start })", anchor: 'registering-sources' },
@@ -84,6 +84,7 @@ export async function diagnosePlugin(rootDir, opts = {}) {
   const reachedActivation = dry.ok || dry.error?.kind === 'activate_threw'
   if (reachedActivation) {
     checkContributions(manifest, dry.registered, diagnostics)
+    checkCommandHelp(manifest, dry.registered, diagnostics)
   }
   if (dry.ok) {
     checkProvidedCapabilities(manifest, dry.registered, diagnostics)
@@ -294,6 +295,142 @@ function checkContributions(manifest, registered, out) {
 }
 
 /**
+ * Compare the command help the manifest advertises with the help the runtime
+ * registration actually renders.
+ *
+ * These are two independent sources for the same text. `hyp --help` runs
+ * before any plugin is loaded and reads `contributes.commands` out of the
+ * manifest; `hyp <group> --help` and `hyp <command> --help` run after boot and
+ * read the command registry. LLP 0009 #layered-help says the two levels
+ * "cannot drift" because they read the same registry, which holds for core and
+ * does not hold for a plugin: nothing compared the manifest text with the
+ * registered text, and `@hypaware/context-graph-enrich` shipped two summaries
+ * that disagreed.
+ *
+ * Name agreement is {@link checkContributions}. This is about what the two
+ * surfaces *say*, and about a command the manifest advertises that help then
+ * refuses to show.
+ *
+ * @ref LLP 0267#d1 [implements]: the manifest text and the registered text are one contract, compared rather than assumed to agree
+ * @ref LLP 0009#layered-help [constrained-by]: the levels are only drift-proof while they read one source; a plugin manifest is a second one
+ * @param {PluginManifest} manifest
+ * @param {RegisteredSnapshot} registered
+ * @param {PluginDiagnostic[]} out
+ */
+function checkCommandHelp(manifest, registered, out) {
+  const declared = declaredCommands(manifest)
+  for (const command of registered.commandDetails) {
+    const declaration = declared.get(command.name)
+    if (declaration === undefined) continue
+    const declaredSummary = declaration.summary
+    if (declaredSummary !== command.summary) {
+      // `summary` is optional on a manifest command entry, so the blank case
+      // is the common one and deserves to be named rather than reported as
+      // two wordings. It is still drift: top-level help renders the blank,
+      // group help renders the registration.
+      const blank = declaredSummary.length === 0
+      out.push({
+        kind: 'command_help_drift',
+        severity: 'error',
+        location: '/contributes/commands',
+        message: blank
+          ? `command '${command.name}' has no summary in the manifest, but activate() registers ` +
+            `'${command.summary}': top-level help lists the command with no description`
+          : `command '${command.name}' has two different summaries: the manifest says ` +
+            `'${declaredSummary}' and activate() registers '${command.summary}'`,
+        repair: blank
+          ? [
+              `Top-level help reads the manifest, so an entry with no summary lists the command blank`,
+              `Add "summary": "${command.summary}" to the contributes.commands entry for '${command.name}'`,
+            ]
+          : [
+              `Top-level help reads the manifest and group help reads the registration, so the two disagree on screen`,
+              `Pick one wording and use it in both hypaware.plugin.json and ctx.commands.register`,
+            ],
+      })
+    }
+    if (declaration.hidden !== Boolean(command.hidden)) {
+      out.push({
+        kind: 'command_help_drift',
+        severity: 'error',
+        location: '/contributes/commands',
+        message:
+          `command '${command.name}' has different visibility: the manifest marks it ` +
+          `${declaration.hidden ? 'hidden' : 'visible'} but activate() registers it as ` +
+          `${command.hidden ? 'hidden' : 'visible'}`,
+        repair: [
+          `The manifest controls pre-boot help and the registration controls post-boot help`,
+          `Set hidden: true on both sides for an internal mechanism, or omit it from both for CLI surface`,
+        ],
+      })
+    }
+  }
+
+  for (const group of registered.commandGroups) {
+    // A group prefix is not always one token: `resolveGroupHelp` walks every
+    // leading prefix (`lead.slice(0, depth).join(' ')`), so `query cache` is a
+    // registrable group. Comparing head tokens only would warn about a group
+    // that renders correctly for `hyp query cache --help`.
+    if ([...declared.keys()].some((name) => name === group.name || name.startsWith(`${group.name} `))) continue
+    // Third-party plugins written before manifest visibility existed can still
+    // register an all-hidden group without a manifest declaration. The missing
+    // command receives the ordinary contribution warning; avoid adding a
+    // second warning for its group shell.
+    // @ref LLP 0268#not-deletion [constrained-by]: new hidden commands stay declared, with visibility matched on both sides
+    if (registersOnlyHidden(registered, group.name)) continue
+    out.push({
+      kind: 'command_help_drift',
+      severity: 'warn',
+      location: '/contributes/commands',
+      message:
+        `activate() describes command group '${group.name}' but the manifest declares no command under it, ` +
+        `so top-level help never lists the group the description belongs to`,
+      repair: [
+        `Declare the group's subcommands in contributes.commands, or drop the registerGroup call`,
+      ],
+    })
+  }
+}
+
+/**
+ * Is every command registered under `group` hidden? A group with nothing
+ * registered under it answers false: an empty namespace is exactly the case
+ * the group warning exists for, and a description with neither a declared nor
+ * a registered command under it describes nothing.
+ *
+ * @param {RegisteredSnapshot} registered
+ * @param {string} group
+ * @returns {boolean}
+ */
+function registersOnlyHidden(registered, group) {
+  const under = registered.commandDetails.filter((c) => c.name === group || c.name.startsWith(`${group} `))
+  return under.length > 0 && under.every((c) => c.hidden)
+}
+
+/**
+ * `contributes.commands` as a name to help metadata map. A declared command
+ * with no summary keeps the empty string, which is exactly what top-level help
+ * renders for it.
+ *
+ * @param {PluginManifest} manifest
+ * @returns {Map<string, { summary: string, hidden: boolean }>}
+ */
+function declaredCommands(manifest) {
+  /** @type {Map<string, { summary: string, hidden: boolean }>} */
+  const byName = new Map()
+  const entries = manifest.contributes?.commands
+  if (!Array.isArray(entries)) return byName
+  for (const entry of entries) {
+    if (!isObject(entry) || typeof entry.name !== 'string' || entry.name.length === 0) continue
+    byName.set(entry.name, {
+      summary: typeof entry.summary === 'string' ? entry.summary : '',
+      hidden: entry.hidden === true,
+    })
+  }
+  return byName
+}
+
+/**
  * @param {PluginManifest} manifest
  * @param {RegisteredSnapshot} registered
  * @param {PluginDiagnostic[]} out
@@ -366,7 +503,7 @@ function checkRequiredCapabilities(manifest, knownCapabilities, out) {
 
 /**
  * @param {NonNullable<PluginManifest['contributes']>} contributes
- * @param {keyof RegisteredSnapshot} key
+ * @param {NameListKey} key
  * @param {'name' | 'section'} nameField
  * @returns {string[]}
  */

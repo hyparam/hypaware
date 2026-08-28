@@ -725,7 +725,7 @@ test('runInitWizard: ctrl+c at the disconnect question cancels the run instead o
   assert.equal(result.exitCode, 130)
   assert.equal(result.cancelled, true)
   assert.equal(forkCalls, 2, 'the fork ran once per pathway choice and never a third time')
-  assert.match(stderr.text(), /hyp init: cancelled/)
+  assert.match(stderr.text(), /hyp setup: cancelled/)
   // The enrollment the cancel cannot undo is still narrated (LLP 0190
   // #abort-narration), and nothing was disconnected.
   assert.match(stdout.text(), /This machine is enrolled/)
@@ -791,9 +791,13 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
     'b',    // pick menu: step back one screen - the express gate
     'b',    // express gate: step back one screen - the fork
     '2',    // fork: Collect agent logs locally
-    '1',    // disconnect?: No, stay connected
+    '2',    // disconnect?: No, stay connected
     '2',    // express gate (asked again on this pass): step by step
-    'all',  // pick menu: record everything offered
+    '1',    // pick menu: Record all - this defaults-gate is a confirm-select
+            // (LLP 0299), so an unrecognized answer like "all" now re-asks
+            // instead of silently rounding to the default; picking "Record
+            // all" outright is the answer that still means "record
+            // everything offered".
     '1',    // sync gate: Sync all
     '1',    // new folders: Sync them all
   ])

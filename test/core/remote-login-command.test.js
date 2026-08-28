@@ -349,7 +349,7 @@ test('an enrolling login into an org with no config times out the wait and point
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 0)
   assert.match(out.join(''), /forwarding logs to the 'prod' server/)
-  assert.match(out.join(''), /no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture/)
+  assert.match(out.join(''), /no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture/)
 })
 
 test('a failed daemon install reports it and does not wait for attach', async () => {
@@ -383,7 +383,7 @@ test('an enrolling login whose attach poll throws still reports the timeout fall
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 0) // the throw did not discard the enrollment
   assert.match(out.join(''), /forwarding logs to the 'prod' server/)
-  assert.match(out.join(''), /no clients attached yet - check 'hyp status', or run 'hyp attach <client>' to capture/)
+  assert.match(out.join(''), /no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture/)
 })
 
 test('the enrolling login announces the attach wait on stderr before polling (Major 2)', async () => {
@@ -532,6 +532,20 @@ test('--no-forward signs in for queries only and provisions nothing (LLP 0063 D3
   // No sink and no forward identity were written.
   await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
   await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json')))
+})
+
+// The codec accepts `--flag=true` for a boolean, so the gate blessed
+// `--no-forward=true` while `argv.includes('--no-forward')` did not see it:
+// the opt-out was dropped in silence and the machine enrolled for forwarding.
+test('--no-forward=true is the same opt-out as the bare flag (LLP 0063 D3)', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-forward=true'], ctx, { login })
+  assert.equal(code, 0)
+  assert.match(out.join(''), /signed in for queries only/)
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
 })
 
 test('login to a different server than the one this machine is enrolled to is rejected before the browser (LLP 0063 D4)', async () => {
@@ -1120,7 +1134,7 @@ test('a --no-daemon login prints the durable hint and provisions the sink (LLP 0
 
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(err.join(''), /hyp policy set \[path\] local-only/, 'the durable command stays discoverable')
+  assert.match(err.join(''), /hyp privacy set \[path\] local-only/, 'the durable command stays discoverable')
   await fs.access(seedPath) // the sink is still provisioned
   assert.match(out.join(''), /forwarding logs to the 'prod' server/)
 })
@@ -1135,7 +1149,7 @@ test('a fresh enroll prints the durable hint and never polls a capture wait (LLP
 
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 0)
-  assert.match(err.join(''), /hyp policy set \[path\] local-only/)
+  assert.match(err.join(''), /hyp privacy set \[path\] local-only/)
   assert.match(out.join(''), /capturing @hypaware\/claude/)
 })
 
@@ -1150,7 +1164,7 @@ test('a failed daemon install still prints the durable hint before returning (LL
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 3)
   assert.equal(waited, false, 'a failed install does not wait for attach')
-  assert.match(err.join(''), /hyp policy set \[path\] local-only/)
+  assert.match(err.join(''), /hyp privacy set \[path\] local-only/)
   assert.match(err.join(''), /the daemon install did not finish/)
 })
 
@@ -1164,7 +1178,7 @@ test('a re-login (already-enrolled, re-seed path) prints the durable hint (LLP 0
 
   const code = await runRemoteLogin(['prod'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(err.join(''), /hyp policy set \[path\] local-only/)
+  assert.match(err.join(''), /hyp privacy set \[path\] local-only/)
   assert.match(out.join(''), /seeded forwarding identity for sink 'fwd'/)
 })
 
@@ -1383,4 +1397,3 @@ test('--no-forward writes no first-sync hold (declines enrollment entirely)', as
   assert.equal(code, 0)
   assert.equal(await holdExists(hypHome), false)
 })
-

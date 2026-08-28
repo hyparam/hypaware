@@ -30,8 +30,8 @@ export async function attach(opts) {
     port,
     version,
     configPath = defaultConfigPath(),
-    baseUrl = `http://127.0.0.1:${port}/v1`,
-    providerName = 'HypAware OpenAI Gateway',
+    baseUrl = `http://127.0.0.1:${port}/backend-api/codex`,
+    providerName = 'HypAware Codex Gateway',
   } = opts
   validatePort(port)
   validateVersion(version)

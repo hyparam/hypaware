@@ -46,13 +46,14 @@ function ctxWithStdin(input) {
 }
 
 /**
- * @param {{ configExists?: boolean, configValid?: boolean, hasCentral?: boolean }} over
+ * @param {{ configExists?: boolean, configValid?: boolean, configRecordsAnswer?: boolean, hasCentral?: boolean }} over
  */
 function fixtureReport(over = {}) {
-  const { configExists = true, configValid = true, hasCentral = false } = over
+  const { configExists = true, configValid = true, configRecordsAnswer = true, hasCentral = false } = over
   return /** @type {any} */ ({
     configExists,
     configValid,
+    configRecordsAnswer,
     layered: hasCentral
       ? { hasCentral: true, centralPlugins: [], centralSinks: [], drops: [], centralQueryIgnored: false }
       : null,
@@ -158,6 +159,47 @@ test('evaluateReturningGate: a managed machine with no config at all is still ma
   const gate = await evaluateReturningGate(opts)
   assert.equal(gate.action, 'first-run')
   assert.equal(gate.managed, true)
+})
+
+// The residual LLP 0277 §consequences left open. `hyp remote add` before the
+// first `hyp init` (the documented team onboarding order) writes a config
+// holding only `query.remotes`: it exists, it validates, and it records no
+// answer to the pick question. Fronting onboarding with the "already set up"
+// summary over a machine that collects nothing is the misreading LLP 0277
+// took out of the pick lane; the gate now keys on the same discriminator.
+// @ref LLP 0281#returning-gate [tests]:
+test('evaluateReturningGate: a valid config that records no pick answer is the first-run path', async () => {
+  const { opts, stdout } = ctxWithStdin('\n')
+  opts.collectStatus = async () => fixtureReport({ configRecordsAnswer: false })
+  const gate = await evaluateReturningGate(opts)
+  assert.equal(gate.action, 'first-run')
+  assert.equal(gate.managed, false)
+  // No summary screen: the gate never rendered.
+  assert.doesNotMatch(stdout.text(), /already configured/)
+  assert.doesNotMatch(stdout.text(), /Reconfigure/)
+})
+
+// `managed` is read before the early return on this branch too, for the same
+// reason the invalid-config branch pins it: the caller locks the org's rows
+// off it, and an editable org row composes into the local layer.
+// @ref LLP 0281#returning-gate [tests]:
+test('evaluateReturningGate: an answer-less config on a managed machine is first-run and still managed', async () => {
+  const { opts } = ctxWithStdin('\n')
+  opts.collectStatus = async () => fixtureReport({ configRecordsAnswer: false, hasCentral: true })
+  const gate = await evaluateReturningGate(opts)
+  assert.equal(gate.action, 'first-run')
+  assert.equal(gate.managed, true)
+})
+
+// The boundary the discriminator draws: a recorded answer still fronts the
+// gate, so the fix cannot be read as "the returning gate is gone".
+// @ref LLP 0281#returning-gate [tests]:
+test('evaluateReturningGate: a config that records a pick answer still fronts the returning gate', async () => {
+  const { opts, stdout } = ctxWithStdin('1\n')
+  opts.collectStatus = async () => fixtureReport({ configRecordsAnswer: true })
+  const gate = await evaluateReturningGate(opts)
+  assert.equal(gate.action, 'reconfigure')
+  assert.match(stdout.text(), /1\) Reconfigure/)
 })
 
 test('evaluateReturningGate: managed machine, Reconfigure is the same row it is on a solo machine', async () => {

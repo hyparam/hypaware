@@ -5,6 +5,7 @@ import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { countGatewayFallbackRows } from './gateway_fallback.js'
 import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
 import { cacheTablePath, datasetsRoot } from './paths.js'
 
@@ -17,6 +18,31 @@ import { cacheTablePath, datasetsRoot } from './paths.js'
 const CURSOR_FILE = 'cursor.json'
 const SPOOL_DIR = '_hypaware_spool'
 const RETIRED_DIR = '.retired'
+
+/** @type {Map<string, Promise<unknown>>} */
+const partitionMutationLocks = new Map()
+
+/**
+ * Serialize cursor-coupled mutations of one logical cache partition inside
+ * the process. Flush and maintenance run on independent daemon timers, but a
+ * compaction cursor swap must not strand an append in the retired generation.
+ *
+ * @ref LLP 0301#requirements [implements]: keep the replacement-generation cursor swap atomic with respect to daemon flushes
+ * @template T
+ * @param {string} partitionDir
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export function withPartitionMutationLock(partitionDir, fn) {
+  const previous = partitionMutationLocks.get(partitionDir) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(fn)
+  partitionMutationLocks.set(partitionDir, current)
+  return current.finally(() => {
+    if (partitionMutationLocks.get(partitionDir) === current) {
+      partitionMutationLocks.delete(partitionDir)
+    }
+  })
+}
 
 /**
  * Read the cursor for a logical partition directory.  Returns the
@@ -65,6 +91,9 @@ export function tryReadCursorSync(partitionDir) {
     if (parsed.retention && typeof parsed.retention === 'object') {
       cursor.retention = parsed.retention
     }
+    if (typeof parsed.pendingFallbacks === 'number') {
+      cursor.pendingFallbacks = parsed.pendingFallbacks
+    }
     return cursor
   } catch {
     return null
@@ -104,20 +133,33 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, sourceSegments)
-  const cursor = readCursorSync(partitionDir)
-  const tableDir = cursor.tableDir ?? 'table'
-  const icebergDir = path.join(partitionDir, tableDir)
-  const declaration = options?.declaration
-  const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
-  await writeCursor(partitionDir, {
-    epoch: cursor.epoch,
-    rowCount: cursor.rowCount + rows.length,
-    compaction: cursor.compaction,
-    layout: 'source-table',
-    tableDir,
-    retention: cursor.retention,
+  // @ref LLP 0027#re-settle-sweep [implements]: the sweep's gate is this
+  // count, so the write path is where it is maintained - maintenance reading
+  // the cursor is only cheap because nothing here forgets to tally. Rows
+  // arrive after the flush-time settle hook has run, so a marker still
+  // present is a genuinely unsettled row.
+  const fallbackAppended = countGatewayFallbackRows(rows)
+  return withPartitionMutationLock(partitionDir, async () => {
+    const cursorOnDisk = tryReadCursorSync(partitionDir)
+    const cursor = cursorOnDisk ?? { epoch: 0, rowCount: 0, compaction: null }
+    const tableDir = cursor.tableDir ?? 'table'
+    const icebergDir = path.join(partitionDir, tableDir)
+    // Asked BEFORE the append, which creates the table on first use: after
+    // it every partition looks like one that already held rows.
+    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, icebergDir)
+    const declaration = options?.declaration
+    const result = await appendRowsToTable(icebergDir, columns, rows, declaration ? { declaration } : undefined)
+    await writeCursor(partitionDir, {
+      epoch: cursor.epoch,
+      rowCount: cursor.rowCount + rows.length,
+      compaction: cursor.compaction,
+      layout: 'source-table',
+      tableDir,
+      retention: cursor.retention,
+      ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
+    })
+    return result
   })
-  return result
 }
 
 /**
@@ -137,15 +179,70 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, partitionSegments)
-  const cursor = readCursorSync(partitionDir)
-  const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
-  const result = await appendRowsToTable(epochDir, columns, rows)
-  await writeCursor(partitionDir, {
-    epoch: cursor.epoch,
-    rowCount: cursor.rowCount + rows.length,
-    compaction: cursor.compaction,
+  // @ref LLP 0027#re-settle-sweep [implements]: as above - the legacy epoch
+  // layout is not settle-eligible today, but a cursor field maintained on
+  // only one of two write paths is a count that drifts the day it is.
+  const fallbackAppended = countGatewayFallbackRows(rows)
+  return withPartitionMutationLock(partitionDir, async () => {
+    const cursorOnDisk = tryReadCursorSync(partitionDir)
+    const cursor = cursorOnDisk ?? { epoch: 0, rowCount: 0, compaction: null }
+    const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
+    // As above: asked before the append creates the epoch's table.
+    const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, epochDir)
+    const result = await appendRowsToTable(epochDir, columns, rows)
+    await writeCursor(partitionDir, {
+      epoch: cursor.epoch,
+      rowCount: cursor.rowCount + rows.length,
+      compaction: cursor.compaction,
+      ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
+    })
+    return result
   })
-  return result
+}
+
+/**
+ * May this partition already hold committed rows that no cursor count
+ * covers? Yes whenever a `cursor.json` is present - deliberately NOT "did
+ * {@link tryReadCursorSync} return a cursor", which also answers null for a
+ * file that exists but cannot be parsed, and a partition whose cursor is
+ * unreadable is not a fresh one. Yes also when the cursor is gone but the
+ * Iceberg table is not: that is what a crash between an append and its
+ * cursor write leaves behind, and a source-table partition in that state is
+ * invisible to {@link discoverCachePartitions} until an append restores its
+ * cursor, so nothing else would ever re-derive the count for it.
+ *
+ * Only when NEITHER exists is the partition provably new, and only then may
+ * an append claim a concrete zero.
+ *
+ * @param {string} partitionDir
+ * @param {string} tableDir  the Iceberg table this append writes into
+ * @returns {boolean}
+ */
+function partitionHasCommittedRows(partitionDir, tableDir) {
+  return fs.existsSync(path.join(partitionDir, CURSOR_FILE)) || icebergTableExists(tableDir)
+}
+
+/**
+ * The `pendingFallbacks` entry an append should write, as a spreadable
+ * fragment. A first write to a provably new partition starts the count at
+ * the appended tally, so tables born after the field existed always carry a
+ * concrete number. Over anything that may already hold committed rows an
+ * absent count means "unknown" (a cursor written before the field existed,
+ * an unreadable one, or a table whose cursor was lost), and an append of
+ * zero marker rows must preserve that: claiming zero would let maintenance
+ * skip that table's one seeding scan and strand its split twins. Once a
+ * marker row lands the count turns concrete regardless - an undercount only
+ * until the next rewrite records the exact remainder, and any positive
+ * value routes to that rewrite.
+ *
+ * @param {PartitionCursor} cursor
+ * @param {boolean} mayHoldUncountedRows see {@link partitionHasCommittedRows}
+ * @param {number} fallbackAppended
+ * @returns {{ pendingFallbacks?: number }}
+ */
+function pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended) {
+  if (mayHoldUncountedRows && cursor.pendingFallbacks === undefined && fallbackAppended === 0) return {}
+  return { pendingFallbacks: (cursor.pendingFallbacks ?? 0) + fallbackAppended }
 }
 
 /**

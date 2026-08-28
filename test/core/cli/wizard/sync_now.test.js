@@ -42,7 +42,7 @@ const DEADLINE = Date.now() + 6 * 60 * 60_000
 function opts(over = {}) {
   const stdout = makeBuf()
   const stderr = makeBuf()
-  /** @type {{ title: string, options: { value: string, label: string }[], default?: string }[]} */
+  /** @type {{ title: string, options: { value: string, label: string }[], default?: string, eofValue?: string }[]} */
   const asked = []
   return {
     stdout,
@@ -112,17 +112,16 @@ test('a non-interactive run is never asked, and never sends', async () => {
   assert.match(o.stdout.text(), /To send it sooner, run `hyp sync`/)
 })
 
-// @ref LLP 0203#offer [tests]: waiting leads and is the default, so a stray enter cannot release
-test('the question offers wait first, as the default, and declining spawns nothing', async () => {
+test('the question offers send-now first, as the default, and declining spawns nothing', async () => {
   const o = opts({ answer: 'wait' })
   const result = await runWizardSyncNow(o.args)
 
   assert.equal(o.asked.length, 1)
   const question = o.asked[0]
-  assert.equal(question.options[0].value, 'wait')
-  assert.equal(question.default, 'wait')
-  assert.match(question.options[0].label, /^Wait until /)
-  assert.equal(question.options[1].value, 'now')
+  assert.equal(question.options[0].value, 'now')
+  assert.equal(question.default, 'now')
+  assert.equal(question.options[1].value, 'wait')
+  assert.match(question.options[1].label, /^Wait until /)
   assert.deepEqual(result, { asked: true, released: false, reason: 'declined' })
   // The narration upstream dropped its `hyp sync` sentence for this offer,
   // and the offer's own frame is cleared when it resolves, so the wait has
@@ -130,6 +129,25 @@ test('the question offers wait first, as the default, and declining spawns nothi
   // @ref LLP 0188#never-silent [tests]: the modal wait still names the release verb
   assert.match(o.stdout.text(), /Nothing was sent/)
   assert.match(o.stdout.text(), /run `hyp sync` any time/)
+})
+
+// The default here acts: `now` spawns `hyp sync` on this terminal. The child's
+// own confirm is not the backstop it looks like, because it inherits the
+// terminal rather than the stream - on a real tty a ctrl+D is a keypress, not
+// a spent stream, so the child asks again instead of declining, and a terminal
+// that gave up ends on a sync it started. So the question names waiting as the
+// answer for "there is nobody left to press enter".
+//
+// @ref LLP 0299#eof-declines [tests]: a select whose stated default acts names an eofValue that does not
+test('the send-now offer names waiting as its eofValue, so a spent stdin never starts the sync', async () => {
+  const spawn = fakeSpawn({ code: 0 })
+  const o = opts({ answer: 'wait', spawnFn: spawn.spawnFn })
+  await runWizardSyncNow(o.args)
+
+  assert.equal(o.asked.length, 1)
+  assert.equal(o.asked[0].eofValue, 'wait')
+  assert.notEqual(o.asked[0].eofValue, o.asked[0].default, 'the acting default must not also be the EOF answer')
+  assert.equal(spawn.calls.length, 0)
 })
 
 // @ref LLP 0203#child-process [tests]: the release is a real `hyp sync` in a fresh process, not an in-wizard reimplementation

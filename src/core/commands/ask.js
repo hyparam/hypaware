@@ -2,6 +2,7 @@
 
 import { collectHypAwareStatus } from '../daemon/status.js'
 import { buildWalkthroughClientDescriptorMap } from '../cli/walkthrough.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { isTty } from '../cli/stdio.js'
 import { OVERVIEW_DATASET, OVERVIEW_PROBE_SQL, overviewRunnerFromCtx } from '../query/overview.js'
 import {
@@ -19,31 +20,38 @@ import {
 /**
  * `hyp ask [question]`
  *
- * The wizard's closing first ask, made durable. Setup teaches every other
- * closing surface as something you can get back to (the first look prints
- * "See this again anytime: hyp query overview"); a question menu reachable
- * only by re-running `hyp init` would be the exception.
+ * The verb that makes setup's closing questions runnable. Setup prints
+ * them and stops there, deliberately: it may have been invoked from an
+ * installer or a directory the user does not want an agent session rooted
+ * in, so the launch waits for a command run from a directory they chose.
  *
  * With no argument it renders the same four questions and starts the
  * chosen client on the pick. With a question it skips the menu entirely,
  * which is the shape a user reaches for once they know what they want:
  * `hyp ask "which sessions touched the auth module"`.
  *
- * @ref LLP 0198#re-runnable [implements]: the closing list is a verb, not a one-off screen
+ * The working directory is `process.cwd()` by construction: nothing here
+ * overrides it, because where the client starts is the whole reason this
+ * is a separate command.
+ *
+ * @ref LLP 0198#re-runnable [implements]: the questions need a verb, or they are four sentences to retype
+ * @ref LLP 0198#onboarding-list [constrained-by]: the launch boundary is where the user chose the directory
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
  */
 export async function runAsk(argv, ctx) {
+  const parsed = parseCoreCommandArgv('ask', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const clients = await askableClients(ctx)
   const descriptors = await buildWalkthroughClientDescriptorMap()
 
-  if (argv.includes('--list')) {
+  if (parsed.params.list === true) {
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
-    writeSuggestedPrompts({ stdout: ctx.stdout, launchable: launchers.length > 0 })
+    writeSuggestedPrompts({ stdout: ctx.stdout, footer: launchers.length > 0 ? 'ask' : 'paste' })
     return 0
   }
-  const question = argv.filter((a) => !a.startsWith('-')).join(' ').trim()
+  const question = String(parsed.params.question ?? '').trim()
 
   if (question.length > 0) {
     // A named question wants a launch, not a menu: resolve directly and
@@ -52,7 +60,7 @@ export async function runAsk(argv, ctx) {
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
     if (launchers.length === 0) {
       ctx.stderr.write('hyp ask: no attached client can be started here.\n')
-      ctx.stderr.write('  Attach one with `hyp attach claude` (or `codex`), and make sure its CLI is on your PATH.\n')
+      ctx.stderr.write('  Attach one with `hyp client attach claude` (or `codex`), and make sure its CLI is on your PATH.\n')
       return 1
     }
     ctx.stdout.write(`\nStarting ${launchers[0].label}...\n\n`)

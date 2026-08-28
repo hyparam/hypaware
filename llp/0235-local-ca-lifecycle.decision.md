@@ -9,6 +9,11 @@
 **Superseded-by (in part):** LLP 0237 (#client-scoped-trust), LLP 0238
 (#detach-removes-the-ca, #ca-name-constraints mint-from-routing-table,
 #ca-lifecycle one-year validity)
+**Extended-by:** LLP 0262 (accepted 2026-08-17; the `claude` client's
+attach no longer depends on the CA; the CA lifecycle stands for any client
+still routed through the proxy), LLP 0275 (accepted 2026-08-19;
+#minted-in-process gains GeneralizedTime for dates from 2050 and refuses
+IP-literal hosts)
 
 > The machine-local certificate authority is generated in-process with no
 > `openssl` shell-out and no new dependency, constrained to the hosts it
@@ -39,6 +44,12 @@ Node can parse and verify certificates but cannot generate them.
 ## Decision
 
 ### Minted in process
+
+*Extended by LLP 0275#generalized-time-past-2049: "UTCTime only" rested on
+nothing minted living longer than a year, which LLP 0238's ten-year CA
+outlived, so dates from 2050 are encoded as GeneralizedTime. LLP
+0275#ip-literals-are-refused adds that a certificate host must be a DNS name,
+which is what the IP-exclusion below already implied.*
 
 **Option 3.** Certificates are assembled as DER in
 about two hundred lines and signed with `node:crypto`, scoped deliberately to EC

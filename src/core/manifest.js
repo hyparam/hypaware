@@ -168,6 +168,10 @@ export function validateManifest(value) {
       /** @type {Record<string, unknown>} */ (m.contributes).picker
     )
     if (!pickerCheck.ok) return pickerCheck
+    const commandCheck = validateCommandContributions(
+      /** @type {Record<string, unknown>} */ (m.contributes).commands
+    )
+    if (!commandCheck.ok) return commandCheck
   }
   /** @type {PluginManifest} */
   const manifest = {
@@ -186,6 +190,39 @@ export function validateManifest(value) {
   if (isStringArray(m.compose_with)) manifest.compose_with = /** @type {PluginName[]} */ (m.compose_with)
   if (isPlainObject(m.contributes)) manifest.contributes = /** @type {PluginContributionManifest} */ (m.contributes)
   return { ok: true, manifest }
+}
+
+/**
+ * Validate the `hidden` flag on `contributes.commands` rows, and only
+ * that flag. Everything else about a command entry (`name`, `summary`,
+ * `usage`, unknown fields) stays opaque here, like every sibling
+ * contribution category, and keeps its existing home: each read site
+ * already coerces defensively, and `hyp plugin doctor` reports a
+ * malformed entry with its field path and a repair line. A fatal
+ * manifest rejection cannot do that - it aborts `loadManifest`, so the
+ * doctor never reaches its shape checks, and a mistyped help summary
+ * takes the plugin's sources, sinks and datasets down with it.
+ *
+ * `hidden` is the exception because it is not help metadata: it decides
+ * whether a command is CLI surface at all, so a manifest spelling it
+ * `"true"` would advertise an internal mechanism with nothing to say
+ * so. That is worth refusing the manifest over; a mistyped summary is
+ * not.
+ *
+ * @param {unknown} commands
+ * @returns {{ ok: true } | { ok: false, errorKind: ManifestErrorKind, message: string }}
+ * @ref LLP 0268#field [implements]: internal commands stay declared and are marked, not deleted
+ */
+function validateCommandContributions(commands) {
+  if (!Array.isArray(commands)) return { ok: true }
+  for (const row of commands) {
+    if (!isPlainObject(row)) continue
+    const hidden = /** @type {Record<string, unknown>} */ (row).hidden
+    if (hidden !== undefined && typeof hidden !== 'boolean') {
+      return invalid('contributes.commands hidden must be a boolean when present')
+    }
+  }
+  return { ok: true }
 }
 
 /**

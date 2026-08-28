@@ -424,7 +424,7 @@ test('codex undo strips the managed blocks and restores model_provider byte-for-
     const result = await detachClientFromDisk({ descriptor: CODEX_DESCRIPTOR, homeDir: home })
     assert.equal(result.changed, true)
     assert.equal(result.restoredValue, 'openai')
-    assert.equal(result.removed, 'http://127.0.0.1:4388/v1')
+    assert.equal(result.removed, 'http://127.0.0.1:4388/backend-api/codex')
     assert.equal(result.settingsPath, configPath)
 
     assert.equal(await fs.readFile(configPath, 'utf8'), original)
@@ -1106,6 +1106,161 @@ test('#500 finding 3: `hyp detach --json` echoes restored_paths, and never the c
     // Same leak check as the prose assertion above, and the same reason for
     // stripping `settings_path` first.
     assert.equal(out.replaceAll(settingsPath, '').includes('sk-x'), false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+// #886 finding 2. The proxy-key reversal on the legacy branch exists for a
+// *damaged current-shape* marker, but it was gated on the marker carrying a
+// `port` - which every genuine pre-record legacy marker does. So a plain
+// base-URL legacy detach ran it too, and told a user their own corporate
+// `NODE_EXTRA_CA_CERTS` was HypAware residue of unknown provenance.
+// @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [tests]
+test('#886: a genuine LEGACY marker leaves the user own proxy env alone and unreported', async () => {
+  const home = await stageHome()
+  try {
+    const fixture = {
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+        // The user's own corporate settings. HypAware never wrote either.
+        NODE_EXTRA_CA_CERTS: '/etc/corp/ca.pem',
+        HTTPS_PROXY: 'http://proxy.corp.example:3128',
+      },
+      _hypaware: { version: '0.2.0', port: 4123 }, // legacy shape, no managed record
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.equal(result.removed, 'http://127.0.0.1:4123')
+    // Nothing to report: this attach never touched either key.
+    assert.equal('warning' in result, false, `unexpected warning: ${result.warning}`)
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.env.NODE_EXTRA_CA_CERTS, '/etc/corp/ca.pem')
+    assert.equal(parsed.env.HTTPS_PROXY, 'http://proxy.corp.example:3128')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+// The case the reversal *was* written for still runs: a current-shape proxy
+// marker whose `managed` record has been corrupted away still carries the
+// fields that route it here, and `HTTPS_PROXY` pointing at a gateway that is no
+// longer attached breaks every HTTPS request the client makes.
+// @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [tests]
+test('#886: a DAMAGED proxy marker still has its proxy keys reversed', async () => {
+  const home = await stageHome()
+  try {
+    const fixture = {
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+        HTTPS_PROXY: 'http://127.0.0.1:4123',
+        NODE_EXTRA_CA_CERTS: '/somewhere/hypaware/tls/ca-cert.pem',
+      },
+      // `mode` survived; the `managed` undo record did not.
+      _hypaware: { version: '0.2.0', port: 4123, mode: 'proxy' },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({
+      descriptor: CLAUDE_DESCRIPTOR,
+      homeDir: home,
+      platform: 'linux',
+    })
+    assert.equal(result.changed, true)
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal('HTTPS_PROXY' in (parsed.env ?? {}), false, 'our gateway proxy URL is removed')
+    // Provenance is unknowable without the record, so the CA path stays and is
+    // reported rather than guessed at.
+    assert.equal(parsed.env.NODE_EXTRA_CA_CERTS, '/somewhere/hypaware/tls/ca-cert.pem')
+    assert.match(String(result.warning), /NODE_EXTRA_CA_CERTS was left in place/)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+// The same false-provenance claim, one case over: `recordDamaged` is true for a
+// damaged marker in ANY mode (`mode` is itself one of the fields that routes a
+// marker to the legacy branch as damaged), so a corrupted base-URL marker beside
+// the user's own corporate bundle still reported it as HypAware residue. Only a
+// proxy attach ever writes `HTTPS_PROXY` / `NODE_EXTRA_CA_CERTS`, and `mode`
+// survived to say this was not one.
+// @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [tests]
+test('#886: a DAMAGED base-URL marker leaves the user own proxy env alone and unreported', async () => {
+  const home = await stageHome()
+  try {
+    const fixture = {
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+        // The user's own corporate settings, beside a base-URL attach that
+        // could not have written either.
+        NODE_EXTRA_CA_CERTS: '/etc/corp/ca.pem',
+        HTTPS_PROXY: 'http://proxy.corp.example:3128',
+      },
+      // `mode` survived; the `managed` undo record did not.
+      _hypaware: { version: '0.2.0', port: 4123, mode: 'base_url' },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({
+      descriptor: CLAUDE_DESCRIPTOR,
+      homeDir: home,
+      platform: 'linux',
+    })
+    assert.equal(result.changed, true)
+    assert.equal(result.removed, 'http://127.0.0.1:4123')
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(parsed.env.NODE_EXTRA_CA_CERTS, '/etc/corp/ca.pem')
+    assert.equal(parsed.env.HTTPS_PROXY, 'http://proxy.corp.example:3128')
+    // The damaged record is still reported (it is genuinely unreadable), but
+    // never as a claim about these two keys.
+    assert.doesNotMatch(String(result.warning ?? ''), /NODE_EXTRA_CA_CERTS/)
+    assert.doesNotMatch(String(result.warning ?? ''), /HTTPS_PROXY/)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+// Review round on #898. Narrowing the gate to `mode === 'proxy'` also removed
+// the one *mutation* the branch exists for. A marker damaged badly enough to
+// lose `mode` along with `managed` can still be a proxy one - it still holds
+// `prev_env` - and skipping it leaves `HTTPS_PROXY` pointing at a gateway that
+// no longer exists, which breaks every HTTPS request the client makes rather
+// than merely its capture. The mutation is safe there because it only fires on
+// a value that is still ours.
+// @ref LLP 0275#legacy-proxy-reversal-needs-a-damaged-record [tests]
+test('#898: a DAMAGED proxy marker that lost its mode still has HTTPS_PROXY reversed', async () => {
+  const home = await stageHome()
+  try {
+    const fixture = {
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123',
+        HTTPS_PROXY: 'http://127.0.0.1:4123',
+      },
+      // Neither `managed` nor `mode` survived; `prev_env` did, which is what
+      // still routes this to the legacy branch as damaged.
+      _hypaware: {
+        version: '0.2.0',
+        port: 4123,
+        prev_env: { HTTPS_PROXY: 'http://proxy.corp.example:3128' },
+      },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({
+      descriptor: CLAUDE_DESCRIPTOR,
+      homeDir: home,
+      platform: 'linux',
+    })
+    assert.equal(result.changed, true)
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    // The recorded prior goes back rather than the dead gateway URL surviving.
+    assert.equal(parsed.env.HTTPS_PROXY, 'http://proxy.corp.example:3128')
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }

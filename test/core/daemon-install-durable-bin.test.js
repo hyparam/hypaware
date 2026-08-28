@@ -23,12 +23,22 @@ import { runDaemonInstall } from '../../src/core/commands/daemon.js'
 
 const OK = { exitCode: 0, stdout: '', stderr: '' }
 
-/** A launchctl that reports the agent as not loaded and bootstraps cleanly. */
+/**
+ * A launchctl that reports the agent as not loaded, bootstraps cleanly, and
+ * then reports it running: the installer will not call an install a success
+ * until launchd shows it a pid (#1036).
+ */
 function fakeLaunchctl() {
+  let running = false
   return {
-    print: () => Promise.resolve({ exitCode: 1, stdout: '', stderr: '' }),
+    print: () => Promise.resolve(running
+      ? { exitCode: 0, stdout: 'pid = 4242\n', stderr: '' }
+      : { exitCode: 1, stdout: '', stderr: '' }),
     bootout: () => Promise.resolve(OK),
-    bootstrap: () => Promise.resolve(OK),
+    bootstrap: () => {
+      running = true
+      return Promise.resolve(OK)
+    },
     kickstart: () => Promise.resolve(OK),
   }
 }

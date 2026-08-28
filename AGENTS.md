@@ -5,6 +5,24 @@ HypAware is the active codebase. Prefer files under `src/`, `hypaware-core/`,
 repo; do not assume its tests, package scripts, or agent notes are available
 unless a task explicitly provides that context.
 
+## Adding things
+
+Make the smallest change that fixes the problem. When a bigger change looks
+right, land the small one and defer the rest. File a GitHub issue autonomously
+only when the follow-up is concrete, consequential, and clearly outside the
+current task. Do not file issues for speculative improvements, minor cleanup,
+or observations that are adequately captured in the PR description.
+
+- **No new runtime dependencies.** Use the standard library and the code already
+  here. If nothing here can do the job, keep the fix small and apply the same
+  follow-up threshold above.
+- **Do not invent columns, config keys, or schema fields.** Reuse or derive.
+  Add one only when the task calls for it, and a rejected one stays rejected.
+- **Reuse before you add** a file, helper, wrapper, or abstraction, unless the
+  existing one is the wrong home for it.
+- **Stop when tests pass.** Note unasked-for docs, cleanups, or adjacent fixes
+  in the PR description; do not land them.
+
 ## Design docs (LLP)
 
 Design rationale lives in numbered **LLP documents** under `llp/`, following
@@ -12,6 +30,9 @@ Linked Literate Programming. Start at [`llp/0000-hypaware.explainer.md`](llp/000
 for the subsystem map, and [LLP 0002](llp/0002-v1-scope.decision.md) for what
 actually shipped in V1.
 
+- **Most changes need no LLP.** Bug fixes, null handling, tests, renames,
+  behavior-preserving refactors, and version bumps get none. Write one when a
+  real design decision is made or changed, not as a record of a fix.
 - **Read before you change.** Before modifying a subsystem, read the LLP tagged
   with its `Systems` value (e.g. `Sources`, `Sinks`, `Plugins`, `Config`).
 - **Annotate non-obvious decisions.** When you implement or change code that
@@ -37,6 +58,14 @@ actually shipped in V1.
   rationale-order view; `/llp-create <title>` scaffolds a new doc; `/llp-list`
   surveys the corpus; `/llp-grill` stress-tests a plan against the LLP corpus
   before you write code.
+- **A new number comes from `node scripts/llp-numbers.js next`**, after a
+  `git fetch --prune`. Numbers are minted on every branch at once, so the tree
+  you have checked out is not the corpus: three branches each read
+  `max(llp/) + 1` and each got the same answer (issue #907). The same script
+  gates it: `check` in the `cross-branch-numbers` CI job, which fetches every
+  branch first, and in `npm test` wherever the clone carries them (a shallow or
+  single-branch checkout skips it and says so). `survey` shows every collision
+  across every ref.
 
 ## Code Style
 
@@ -44,6 +73,11 @@ actually shipped in V1.
 - No em dashes (the U+2014 character) anywhere: code, comments, JSDoc, strings,
   or docs. In prose, use the punctuation the sentence wants (a comma, colon,
   parentheses, or a sentence split); in runtime strings, prefer `-`.
+- No raw NUL bytes (U+0000) in tracked text. grep classifies a file holding one
+  as binary and silently skips it, so the file drops out of every text search
+  with no error to say so. When a string genuinely needs a NUL (a dedup-key
+  separator, say), write the escape `\0`: it yields the same value and keeps the
+  bytes on disk searchable.
 - Types are defined in JSDoc comments, not TypeScript.
 - Never use inline `import('...')` types. Declare type imports at the top of
   the file with `@import` JSDoc comments, then reference the bare names.
@@ -104,6 +138,26 @@ Written acceptance procedures:
   Proves Desktop traffic reaches `ai_gateway_messages` by both the live
   gateway route and the `~/.codex/sessions` backfill route, and is
   attributable via `entrypoint`. See `docs/ACCEPTANCE.md`.
+- `codex_login_switch_reroute`: opt-in/manual, needs the Codex CLI and both a
+  ChatGPT subscription and an OpenAI API key. Proves a login switch needs no
+  re-attach, no daemon restart, and no client restart, and proves the half a
+  fixture cannot: that `api.openai.com/v1/responses` accepts the body Codex
+  builds for the neutral provider block. See `docs/ACCEPTANCE.md`.
+- `openclaw_capture`: opt-in/manual, needs OpenClaw with both `anthropic` and
+  `openai` credentials. Proves both capture lanes (live gateway and the
+  scheduled transcript sweep) and that a turn both lanes observe settles to
+  one row. See `docs/ACCEPTANCE.md`.
+- `opencode_cli_desktop_capture`: opt-in/manual, needs OpenCode CLI and Desktop
+  sharing one config home. Proves both capture lanes (the managed global
+  JavaScript plugin and the bounded `opencode export` recovery), that the live
+  `entrypoint` distinguishes CLI from Desktop, and that detach removes only the
+  marker-owned plugin file. See `docs/ACCEPTANCE.md`.
+- `claude_otel_shape_check`: opt-in/manual, needs a real Claude Code 2.1.214
+  or newer. The release gate against upstream drift on the OTEL attach path:
+  proves the installed Claude Code still honors the managed `env` block and
+  still emits the event names, attributes, and raw body fields the telemetry
+  listener reads, then checks the rows and the `hyp status` capture-health
+  line agree. See `docs/ACCEPTANCE.md`.
 
 Good acceptance smoke candidates (no written procedure yet):
 
@@ -179,10 +233,11 @@ src/
     cli/                # dispatch, walkthrough, core_commands
     config/             # v2 schema, validator
     daemon/             # platform installers (launchd / systemd) + lifecycle
+    otlp/               # shared OTLP http/json listener machinery
     plugin_install/     # resolver, fetch, lock, update_check
     sinks/              # cron driver + encoder utility
 hypaware-core/
-  smoke/                # `hyp smoke <name>` flows
+  smoke/                # `hyp dev smoke <name>` flows
   plugins-workspace/
     ai-gateway/         # @hypaware/ai-gateway
     otel/               # @hypaware/otel
@@ -210,20 +265,23 @@ npm pack --dry-run        # verify the published file set
 Re-run the smoke battery and confirm every one is green:
 
 ```sh
-hyp smoke package_bin_boot
-hyp smoke cli_bundled_plugins_activated
-hyp smoke daemon_foreground_start_stop
-hyp smoke daemon_install_render
-hyp smoke walkthrough_picker_to_first_query
-hyp smoke client_attach_idempotent
-hyp smoke gateway_claude_capture
-hyp smoke gateway_codex_capture
-hyp smoke hypignore_capture_drop
-hyp smoke local_only_export_withhold
-hyp smoke source_optout_export_withhold
-hyp smoke otel_loopback_capture
-hyp smoke local_parquet_export
-hyp smoke status_diagnostics
+hyp dev smoke package_bin_boot
+hyp dev smoke cli_bundled_plugins_activated
+hyp dev smoke daemon_foreground_start_stop
+hyp dev smoke daemon_install_render
+hyp dev smoke walkthrough_picker_to_first_query
+hyp dev smoke client_attach_idempotent
+hyp dev smoke gateway_claude_capture
+hyp dev smoke gateway_codex_capture
+hyp dev smoke claude_telemetry_capture
+hyp dev smoke hypignore_capture_drop
+hyp dev smoke local_only_export_withhold
+hyp dev smoke source_optout_export_withhold
+hyp dev smoke opencode_capture
+hyp dev smoke otel_loopback_capture
+hyp dev smoke local_parquet_export
+hyp dev smoke query_grep_roundtrip
+hyp dev smoke status_diagnostics
 ```
 
 Finally, exercise the manual gate end-to-end on at least one macOS host
@@ -243,6 +301,18 @@ hypaware daemon uninstall
 If the release touched a client adapter, run the matching procedure in
 [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) and record the result in the
 release notes.
+
+If the release touched the **claude** adapter (`@hypaware/claude`, the
+telemetry listener, the body spool, or the attach settings writer), the
+matching procedure is
+[`claude_otel_shape_check`](docs/ACCEPTANCE.md#claude_otel_shape_check). It is
+not optional for those releases and it is not substitutable by the hermetic
+smokes: `claude_telemetry_capture` POSTs a fixture we wrote, so it agrees with
+itself no matter what upstream did. Only a real Claude Code can tell you it
+renamed an event, dropped a flag, or changed the raw body format, and the
+failure mode is silent (null columns, not an error). Record the observed
+`claude --version` and the full event-name list in the release notes so the
+next release has a baseline to diff against.
 
 <!-- neutral:llp-conventions -->
 ## LLP conventions

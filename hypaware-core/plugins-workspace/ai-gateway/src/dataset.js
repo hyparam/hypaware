@@ -10,7 +10,7 @@ import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from '
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
 /**
- * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { GatewayState } from './types.js'
  * @import { AsyncDataSource } from 'squirreling'
@@ -120,6 +120,7 @@ export async function refreshPartition() {
  *
  * @param {QueryPartition[]} partitions
  * @param {DatasetDataSourceContext} ctx
+ * @returns {Promise<ScannableDataSource>}
  */
 export async function createDataSource(partitions, ctx) {
   const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
@@ -137,7 +138,7 @@ export async function createDataSource(partitions, ctx) {
     tablePaths.add(p.path)
   }
 
-  /** @type {AsyncDataSource[]} */
+  /** @type {ScannableDataSource[]} */
   const sources = []
   for (const tablePath of tablePaths) {
     const source = await storage.dataSourceForTable(tablePath)
@@ -169,12 +170,12 @@ const SCHEMA_COLUMN_NAMES = AI_GATEWAY_SCHEMA_COLUMNS.map((c) => c.name)
  * (LLP 0015#multi-partition-union).
  *
  * @ref LLP 0032#capture [implements]: additive columns stay queryable over old partitions; no partition-label bump / cache wipe needed
- * @param {AsyncDataSource} source
- * @returns {AsyncDataSource}
+ * @param {ScannableDataSource} source
+ * @returns {ScannableDataSource}
  */
 function withSchemaColumns(source) {
   const columns = Array.from(new Set([...source.columns, ...SCHEMA_COLUMN_NAMES]))
-  /** @type {AsyncDataSource} */
+  /** @type {ScannableDataSource} */
   const wrapped = {
     columns,
     numRows: source.numRows,
@@ -200,8 +201,12 @@ function withSchemaColumns(source) {
   // engine's streaming fast path. A partition that physically lacks the
   // requested column (the additive schema-drift case this wrapper exists
   // for) surfaces its values as `undefined` holes in the chunk; normalize
-  // them to null, the same "this partition predates the column" value the
-  // row path reads, so accumulators see one representation either way.
+  // them to null so every partition's chunk reads the same way and an
+  // accumulator sees one representation across the merged stream. This is
+  // NOT the value the row path reads: `scan` above pads an absent cell with
+  // `undefined` (LLP 0241 §alignment), and 0241 deliberately left the
+  // null/undefined split between the two paths unsettled, so nothing may
+  // branch on which one it got.
   //
   // A `where` naming a DECLARED-but-physically-absent column can't be
   // handed to the source: this wrapper is the only layer that knows the
@@ -230,6 +235,20 @@ function withSchemaColumns(source) {
           }
         },
       }
+    }
+  }
+  // Native batches are transparent only when the physical prepared schema
+  // already covers the full declared schema. A drifted source stays on the
+  // row/column paths above, which own its absent-column semantics.
+  // @ref LLP 0294#schema-drift [implements]: prepared batches never invent a value for a declared-but-absent field
+  if (source.schema && source.prepareScan) {
+    const prepareScan = source.prepareScan
+    const fieldsByName = new Map(source.schema.fields.map((field) => [field.name, field]))
+    if (columns.every((column) => fieldsByName.has(column))) {
+      wrapped.schema = {
+        fields: columns.map((column) => /** @type {NonNullable<ReturnType<typeof fieldsByName.get>>} */ (fieldsByName.get(column))),
+      }
+      wrapped.prepareScan = (request) => prepareScan.call(source, request)
     }
   }
   return wrapped
@@ -273,16 +292,17 @@ export function aiGatewayDatasetRegistration(state) {
         fallback: 'unknown',
       },
       iceberg: {
-        // @ref LLP 0030#breaking: the required identity partition field
-        // is session_id (always present), not conversation_id (now
-        // nullable). @ref LLP 0022#within-partition-sort: these identity
-        // fields, in declared order, also seed the export sort order, so
-        // session_id leads the clustering and conversation_id rides along
-        // as a secondary thread-lookup sort key.
+        // @ref LLP 0311#date-partition [implements]: the cache partitions on
+        // date alone; the identity columns are sortOnly lookup columns, so
+        // the table sorts by them without the one-file-per-session floor.
+        // @ref LLP 0022#within-partition-sort: these identity fields, in
+        // declared order, still seed the export sort order (sortOnly does
+        // not affect the export), so session_id leads the clustering and
+        // conversation_id rides along as a secondary thread-lookup sort key.
         fields: [
-          { column: 'session_id', transform: 'identity', required: true },
-          { column: 'conversation_id', transform: 'identity' },
-          { column: 'cwd', transform: 'identity' },
+          { column: 'session_id', transform: 'identity', required: true, sortOnly: true },
+          { column: 'conversation_id', transform: 'identity', sortOnly: true },
+          { column: 'cwd', transform: 'identity', sortOnly: true },
           { column: 'date', transform: 'identity', required: true },
         ],
       },
@@ -487,7 +507,7 @@ async function dedupeByPartId(rows, ctx) {
     const key = partIdKey(row)
     if (key !== undefined) batchKeys.add(key)
   }
-  const seen = await scanExistingPartIds(storage, batchKeys)
+  const seen = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
   /** @type {Record<string, unknown>[]} */
   const fresh = []
   for (const row of rows) {
@@ -498,6 +518,70 @@ async function dedupeByPartId(rows, ctx) {
     fresh.push(row)
   }
   return fresh
+}
+
+/**
+ * Pre-write `part_id` dedupe for a LIVE producer that is not the proxy
+ * recorder: the OTEL telemetry listener of `@hypaware/claude`. Same
+ * membership question the backfill materializer asks, with the same two
+ * seeds (committed partitions plus the spool), but restricted to the
+ * keys of the batch in hand so a per-exchange call stays O(batch).
+ *
+ * Folding the spool in is safe here and required: the rows being tested
+ * have NOT been spooled yet, so a spool hit means another producer
+ * (the proxy, or a backfill run) already wrote this part. That is the
+ * whole overlap story of the migration window. The hazard note on
+ * `scanSpooledPartIds` applies to the FLUSH path only, which passes
+ * rows that are themselves the spool.
+ *
+ * Best-effort with respect to storage, like every other dedupe here: a
+ * stub without the read surface lets every row through.
+ *
+ * @ref LLP 0252#projection-unchanged [implements]: a third producer writes the
+ *   same dataset and its overlap with the proxy and backfill producers collapses
+ *   on `part_id` before the write, not after
+ * @param {Record<string, unknown>[]} rows
+ * @param {QueryStorageService | undefined} storage
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+export async function dedupeStoredPartIds(rows, storage) {
+  if (rows.length === 0 || !canScanExistingRows(storage)) return rows
+  /** @type {Set<string>} */
+  const batchKeys = new Set()
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key !== undefined) batchKeys.add(key)
+  }
+  const seen = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
+  await scanSpooledPartIds(storage, seen, batchKeys)
+  /** @type {Record<string, unknown>[]} */
+  const fresh = []
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key === undefined) { fresh.push(row); continue }
+    if (seen.has(key)) continue
+    seen.add(key)
+    fresh.push(row)
+  }
+  return fresh
+}
+
+/**
+ * Return every session scope represented by a batch. If a malformed or legacy
+ * row lacks its required session id, disable targeting and preserve the
+ * original full scan.
+ *
+ * @param {Record<string, unknown>[]} rows
+ * @returns {string[] | undefined}
+ */
+function batchSessionIds(rows) {
+  const ids = new Set()
+  for (const row of rows) {
+    const sessionId = row.session_id
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    ids.add(sessionId)
+  }
+  return [...ids]
 }
 
 /** @param {Record<string, unknown>} row */
@@ -640,6 +724,42 @@ function canScanExistingRows(storage) {
 }
 
 /**
+ * Widest session list the scoped committed read is allowed to carry. Past it
+ * the scan reverts to the unrestricted full read.
+ *
+ * A scoped read is not an index probe. Iceberg prunes a file or row group on
+ * an `IN` list only when EVERY listed value falls outside the chunk
+ * `session_id` bounds, so each value added is another chance to keep the
+ * chunk and pruning decays toward nothing as the list widens. Every row that
+ * survives is then matched by hyparquet walking the whole value list. So the
+ * scoped read costs O(rows scanned x sessions) where the full read costs
+ * O(rows scanned), and past a crossover it is slower than the scan it exists
+ * to avoid, by an unbounded factor rather than a bounded one. Measured against
+ * a 200k-row committed partition: 0.93x the full read at 200 sessions, 1.9x
+ * at 500, 5.4x at 1,000, 13.8x at 4,000, crossing over near 220.
+ *
+ * The cap sits under that measured crossover, but the number it caps is the
+ * linear term, not the crossover: the shape is O(sessions) on every layout,
+ * while where it crosses 1x moves with file count, row width, and how tight
+ * the per-file `session_id` bounds are. So the guarantee the cap buys is
+ * bounded cost, not a specific multiple. On a layout whose crossover sits
+ * below the cap, a batch at the cap costs a small multiple of the full read
+ * instead of slightly less than it, and above the cap it IS the full read.
+ * Read the numbers as calibration, not as a portable constant.
+ *
+ * Choosing the full read is always safe: it answers the same membership
+ * question over a superset of the rows, so its seen-set is a superset of the
+ * scoped one and it can only find MORE committed twins, never fewer. It
+ * cannot miss a duplicate the scoped read would have caught, and it is the
+ * shape this scan already takes for a batch with no usable session ids.
+ *
+ * @ref LLP 0311#context [constrained-by]: bounds on the leading `session_id`
+ * sort key prune a session lookup, which is a claim about ONE narrow lookup;
+ * a batch-wide list of them is not one.
+ */
+const MAX_SCOPED_SESSION_IDS = 200
+
+/**
  * Scan committed `ai_gateway_messages` partitions and collect the set of
  * `part_id`s already present. Reads are projected to the three identity
  * columns so the scan stays cheap, and every failure mode (unreadable
@@ -653,11 +773,21 @@ function canScanExistingRows(storage) {
  * holds O(batch) memory; backfill omits it because its per-run memo
  * legitimately needs the full committed set (see createBackfillDedupe).
  *
+ * `sessionIds` scopes hot-path reads to the batch's exact sessions. The cache
+ * is sorted by `session_id`, so Iceberg can prune unrelated files while the
+ * lookup still searches every date that may contain that session. A partition
+ * that cannot answer the scoped read (a schema with no `session_id` column)
+ * degrades to the full read rather than being skipped: skipping it would
+ * report a committed row as fresh and write a duplicate. A list wider than
+ * `MAX_SCOPED_SESSION_IDS` degrades the same way, for cost rather than
+ * capability.
+ *
  * @param {QueryStorageService} storage
  * @param {ReadonlySet<string>} [restrictTo]
+ * @param {string[]} [sessionIds]
  * @returns {Promise<Set<string>>}
  */
-async function scanExistingPartIds(storage, restrictTo) {
+async function scanExistingPartIds(storage, restrictTo, sessionIds) {
   /** @type {Set<string>} */
   const seen = new Set()
   if (restrictTo && restrictTo.size === 0) return seen
@@ -668,27 +798,73 @@ async function scanExistingPartIds(storage, restrictTo) {
   } catch {
     return seen
   }
+  const targeted = !!sessionIds && sessionIds.length <= MAX_SCOPED_SESSION_IDS &&
+    typeof storage.readRowsWhere === 'function'
   for (const part of partitions ?? []) {
     const tablePath = part?.path
     if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
     try {
-      for await (const row of storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'])) {
-        const key = partIdKey(row)
-        if (key === undefined) continue
-        if (restrictTo) {
-          if (!restrictTo.has(key)) continue
-          seen.add(key)
-          if (seen.size >= restrictTo.size) return seen
-        } else {
-          seen.add(key)
-        }
+      if (await collectPartIds(storage, tablePath, targeted ? sessionIds : undefined, seen, restrictTo)) {
+        return seen
       }
     } catch {
-      // Skip an unreadable partition; other partitions still contribute.
+      // A TARGETED read can fail where the unrestricted one succeeds: the
+      // predicate names `session_id`, and a partition whose schema predates
+      // that column (LLP 0030 bumped the label to `proxy_messages_v5`, but a
+      // cache upgraded rather than recreated still carries the older table)
+      // rejects it outright. Skipping the partition would answer "not
+      // committed" for a row that IS committed, and the caller writes a
+      // duplicate on that answer, so degrade to the full read before giving up
+      // on the partition.
+      if (targeted) {
+        try {
+          if (await collectPartIds(storage, tablePath, undefined, seen, restrictTo)) return seen
+        } catch {
+          // Genuinely unreadable; other partitions still contribute.
+        }
+      }
       continue
     }
   }
   return seen
+}
+
+/**
+ * Fold one partition's `part_id`s into `seen`, honouring `restrictTo`.
+ * Returns true once every restricted key has been found, so the caller can
+ * stop opening partitions. Re-running it over a partition is harmless (`seen`
+ * is a set), which is what lets the caller retry a failed targeted read as an
+ * unrestricted one.
+ *
+ * @param {QueryStorageService} storage
+ * @param {string} tablePath
+ * @param {string[] | undefined} sessionIds
+ * @param {Set<string>} seen
+ * @param {ReadonlySet<string>} [restrictTo]
+ * @returns {Promise<boolean>}
+ */
+async function collectPartIds(storage, tablePath, sessionIds, seen, restrictTo) {
+  // @ref LLP 0311#context [implements]: session_id leads the table sort,
+  // so a session-scoped read prunes cold files while searching every date
+  const rows = sessionIds && typeof storage.readRowsWhere === 'function'
+    ? storage.readRowsWhere(
+        tablePath,
+        ['part_id', 'message_id', 'part_index'],
+        { session_id: sessionIds },
+      )
+    : storage.readRows(tablePath, ['part_id', 'message_id', 'part_index'])
+  for await (const row of rows) {
+    const key = partIdKey(row)
+    if (key === undefined) continue
+    if (restrictTo) {
+      if (!restrictTo.has(key)) continue
+      seen.add(key)
+      if (seen.size >= restrictTo.size) return true
+    } else {
+      seen.add(key)
+    }
+  }
+  return false
 }
 
 /**
@@ -714,16 +890,24 @@ async function scanExistingPartIds(storage, restrictTo) {
  *   "backfill-vs-spool same-id duplicates" residue by scanning spooled
  *   rows in the materializer (not the settle path).
  *
+ * `restrictTo`, when supplied, keeps only the keys of the batch in hand
+ * (the live-producer caller, `dedupeStoredPartIds`); backfill omits it
+ * because its per-run memo legitimately needs every spooled key.
+ *
  * @param {QueryStorageService} storage
  * @param {Set<string>} seen
+ * @param {ReadonlySet<string>} [restrictTo]
  * @returns {Promise<void>}
  */
-async function scanSpooledPartIds(storage, seen) {
+async function scanSpooledPartIds(storage, seen, restrictTo) {
   if (!canScanSpooledRows(storage)) return
+  if (restrictTo && restrictTo.size === 0) return
   try {
     for await (const row of storage.readSpooledRows(DATASET_NAME, ['part_id', 'message_id', 'part_index'])) {
       const key = partIdKey(row)
-      if (key !== undefined) seen.add(key)
+      if (key === undefined) continue
+      if (restrictTo && !restrictTo.has(key)) continue
+      seen.add(key)
     }
   } catch {
     // Spool unreadable mid-scan: keep whatever we folded in already.

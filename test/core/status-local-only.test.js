@@ -143,7 +143,7 @@ test('the new-folder line is enrolled-only, and states either mode', async () =>
   const syncOut = makeBuf()
   renderStatusText({ report: enrolled, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: syncOut })
   assert.match(syncOut.text(), /new folders:\s+sync without asking/)
-  assert.match(syncOut.text(), /hyp policy folders ask/)
+  assert.match(syncOut.text(), /hyp privacy folders ask/)
 
   await writeFolderAskMode({ stateDir: stateRoot, mode: 'ask' })
   const asked = await collectHypAwareStatus({ env: env(hypHome) })
@@ -157,5 +157,5 @@ test('the new-folder line is enrolled-only, and states either mode', async () =>
     clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout: askOut,
   })
   assert.match(askOut.text(), /new folders:\s+asked about once each/)
-  assert.match(askOut.text(), /hyp policy folders sync/)
+  assert.match(askOut.text(), /hyp privacy folders sync/)
 })

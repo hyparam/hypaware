@@ -65,6 +65,29 @@ function sandboxRoot(t, label = 'com.hyperparam.hypaware.test') {
   return { root, plist, label, target: `gui/501/${label}` }
 }
 
+/**
+ * A sandbox root with a systemd user unit in it.
+ *
+ * @param {import('node:test').TestContext} t
+ * @param {string} [unit]
+ */
+function systemdRoot(t, unit = 'hypaware.service') {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-shim-systemd-test-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const home = path.join(root, 'home')
+  const unitDir = path.join(home, '.config', 'systemd', 'user')
+  const unitPath = path.join(unitDir, unit)
+  fs.mkdirSync(unitDir, { recursive: true })
+  fs.writeFileSync(unitPath, [
+    '[Service]',
+    'Type=simple',
+    'ExecStart=/bin/sleep 30',
+    'Restart=no',
+    '',
+  ].join('\n'))
+  return { root, home, unit }
+}
+
 test('launchctl mock: bootstrap → print → bootout round trip', (t) => {
   const { root, plist, label, target } = sandboxRoot(t)
 
@@ -116,6 +139,26 @@ test('launchctl mock: setenv / getenv / unsetenv', (t) => {
 
   assert.equal(shim(root, 'launchctl', ['unsetenv', 'NODE_USE_SYSTEM_CA']).code, 0)
   assert.equal(shim(root, 'launchctl', ['getenv', 'NODE_USE_SYSTEM_CA']).stdout, '')
+})
+
+test('systemctl mock: --spawn starts the unit and reports its MainPID', async (t) => {
+  const { root, home, unit } = systemdRoot(t)
+  const env = { HOME: home, HYP_SANDBOX_SPAWN: '1' }
+  t.after(() => shim(root, 'systemctl', ['--user', 'stop', unit], env))
+
+  assert.equal(shim(root, 'systemctl', ['--user', 'restart', unit], env).code, 0)
+
+  let shown
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    shown = shim(root, 'systemctl', [
+      '--user', 'show', unit, '--property=LoadState,ActiveState,MainPID',
+    ], env)
+    if (/^MainPID=[1-9]\d*$/m.test(shown.stdout)) break
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.equal(shown.code, 0)
+  assert.match(shown.stdout, /^MainPID=[1-9]\d*$/m)
+  assert.match(shown.stdout, /^ActiveState=active$/m)
 })
 
 test('security mock: verify → trust → verify → delete round trip', (t) => {

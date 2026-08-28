@@ -3,10 +3,41 @@
 import fs from 'node:fs/promises'
 
 import { argvToParams, parseControlFlags, usageForVerb } from './verb_codec.js'
+import { VerbUsageError } from './verb_errors.js'
 
 /**
  * @import { CommandRegistration, CommandRunContext, PluginLogger, VerbOperationContext, VerbRegistration, VerbRenderResult } from '../../../hypaware-plugin-kernel-types.js'
  */
+
+/**
+ * The mark this module stamps on every command it projects from a verb.
+ *
+ * `VerbRegistry.unregister` retracts the CLI half of a released verb name
+ * and has to tell that command apart from a plugin's own command of the
+ * same name. Provenance answers that; "did *this* verb registry project it"
+ * does not, because the kernel projects a core verb twice over one command
+ * registry: `registerCoreCommands` pre-projects it so `hyp --help` renders
+ * before boot, and the verb registry then skips its own projection because
+ * the name is already taken. A per-registry ledger calls that pre-boot
+ * command somebody else's and leaves `hyp query sql` routed at the verb a
+ * host just displaced.
+ *
+ * The mark is a property rather than a `WeakSet` membership because the
+ * command registry stores a copy of the registration it is handed, so the
+ * object `unregister` later reads is never the one `verbToCommand`
+ * returned. It is a symbol so it stays out of `Object.keys`, JSON, and the
+ * declared `CommandRegistration` shape, and it is enumerable so an object
+ * spread carries it onto the stored record.
+ *
+ * Enumerable is also what makes it copyable: unlike the `WeakSet`, which
+ * nothing outside this file could add to, this mark can be lifted off any
+ * projected command with `Object.getOwnPropertySymbols` and stamped onto
+ * another object. That is accepted, not overlooked. The mark separates a
+ * projection from a plugin command that happens to share the name, and the
+ * only thing forging it buys a plugin is having its own command retracted
+ * when that verb name is released. There is no privilege here to steal.
+ */
+const VERB_PROJECTION = Symbol('hypaware.verbProjection')
 
 /**
  * Project a verb into a kernel CLI command. The wrapper owns all argv
@@ -20,8 +51,12 @@ import { argvToParams, parseControlFlags, usageForVerb } from './verb_codec.js'
  * @ref LLP 0034#verbs [implements]: one declaration → a CLI command and an MCP tool; the kernel owns both adapters so the flag set and the tool schema never drift
  */
 export function verbToCommand(verb) {
-  return {
+  /** @type {CommandRegistration} */
+  const command = {
     name: verb.name,
+    ...(verb.aliases ? { aliases: verb.aliases } : {}),
+    ...(verb.category ? { category: verb.category } : {}),
+    ...(verb.audience ? { audience: verb.audience } : {}),
     ...(verb.plugin ? { plugin: verb.plugin } : {}),
     summary: verb.summary,
     usage: usageForVerb(verb.name, verb.inputSchema),
@@ -33,6 +68,41 @@ export function verbToCommand(verb) {
     ...(verb.help !== undefined ? { help: verb.help } : {}),
     run: (argv, ctx) => runVerbCommand(verb, argv, ctx),
   }
+  return markVerbProjection(command)
+}
+
+/**
+ * Stamp the projection mark. Assigned rather than declared in the literal
+ * because the mark is deliberately outside `CommandRegistration`: nothing
+ * that consumes a registration can name it, read it, or depend on it.
+ *
+ * @param {CommandRegistration} command
+ * @returns {CommandRegistration}
+ */
+function markVerbProjection(command) {
+  const marked = /** @type {any} */ (command)
+  marked[VERB_PROJECTION] = true
+  return command
+}
+
+/**
+ * Whether `command` is a CLI command this module projected from a verb,
+ * and so the command a released verb name is entitled to retract. A
+ * plugin's own command that merely shares the name is not.
+ *
+ * Total on a missing command, `null` included. The caller is
+ * `VerbRegistry.unregister`, reading the command back out of a registry the
+ * kernel accepts by injection, and a throw on that path takes daemon boot
+ * down. `WeakSet.has` was total for free; a property read is not, so both
+ * nullish cases are named here rather than left to the caller's guard.
+ *
+ * @param {CommandRegistration | undefined | null} command
+ * @returns {boolean}
+ * @ref LLP 0264#verb [implements]: releasing a verb name gives the CLI surface back whichever kernel path projected it, and never takes somebody else's command
+ */
+export function isVerbProjection(command) {
+  if (command === undefined || command === null) return false
+  return /** @type {any} */ (command)[VERB_PROJECTION] === true
 }
 
 /**
@@ -94,6 +164,17 @@ export async function runVerbCommand(verb, argv, ctx) {
       result = await verb.operation(parsed.params, buildOperationContext(ctx, ctrl.controls.refresh))
     } catch (err) {
       ctx.stderr.write(`hyp ${verb.name}: ${err instanceof Error ? err.message : String(err)}\n`)
+      // An operation refusing its own arguments exits like the codec's own
+      // refusal above, usage line included. Only a schema of independent
+      // properties fits in `inputSchema`, so the rules it cannot state
+      // (a cross-field window, a value shape with no schema word) are
+      // checked in the operation; without this branch they would exit 1
+      // and read to a script as "the work failed", not "you typed it wrong".
+      // @ref LLP 0302#usage-exit [implements]: the operation's own argument refusal reaches the caller as a usage error
+      if (err instanceof VerbUsageError) {
+        ctx.stderr.write(`usage: ${usageForVerb(verb.name, verb.inputSchema)}\n`)
+        return 2
+      }
       return 1
     }
   }

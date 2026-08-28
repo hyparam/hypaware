@@ -30,11 +30,11 @@
       { "name": "enrich-curate", "summary": "T2 curator (ongoing): cluster + curate pending prospects via the Batch API (submit-and-collect)" }
     ],
     "commands": [
-      { "name": "enrich", "summary": "Context-graph enrichment (subcommands: propose, curate, backfill, status)" },
-      { "name": "enrich propose", "summary": "Run one T1 propose tick now" },
-      { "name": "enrich curate", "summary": "Run one T2 curate tick now" },
-      { "name": "enrich backfill", "summary": "Enrich ALL history (propose every session, curate via the Batch API)" },
-      { "name": "enrich status", "summary": "Show enrichment watermarks and prospect/committed counts" }
+      { "name": "enrichment", "aliases": ["enrich"], "category": "additional", "audience": "operator", "summary": "Context-graph enrichment (subcommands: propose, curate, backfill, status)" },
+      { "name": "enrichment propose", "aliases": ["enrich propose"], "category": "additional", "audience": "operator", "summary": "Run one T1 propose tick now" },
+      { "name": "enrichment curate", "aliases": ["enrich curate"], "category": "additional", "audience": "operator", "summary": "Run one T2 curate tick now" },
+      { "name": "enrichment backfill", "aliases": ["enrich backfill"], "category": "additional", "audience": "operator", "summary": "Enrich ALL history (propose every session, curate via the Batch API)" },
+      { "name": "enrichment status", "aliases": ["enrich status"], "category": "additional", "audience": "operator", "summary": "Show enrichment watermarks and prospect/committed counts" }
     ]
   }
 }

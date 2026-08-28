@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-13
 **Related:** LLP 0098 (pushed the predicate down through `scanColumn`; this one settles *whose* converter does the pushing), LLP 0015
+**Extended-by:** [LLP 0272](./0272-string-literals-typed-by-the-column.decision.md) (the converter still folds only what the AST already types, so the kernel types bare string literals against the column *before* handing the statement over; issue #860)
 
 > The kernel keeps no WHERE-to-`ParquetQueryFilter` converter of its own.
 > `src/core/query/parquet-pushdown.js` re-exports icebird's

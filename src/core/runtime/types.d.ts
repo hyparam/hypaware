@@ -6,6 +6,7 @@ import type {
   CommandRegistry,
   ConfigControlFacade,
   ConfigRegistry,
+  ClientRegistry,
   HypAwareV2Config,
   InitPresetRegistry,
   JsonObject,
@@ -173,6 +174,7 @@ export interface KernelRuntime {
   initPresets: InitPresetRegistry
   backfills: BackfillRegistry
   backfillMaterializers: BackfillMaterializerRegistry
+  clients: ClientRegistry
   activationContexts: Map<PluginName, PluginActivationContext>
   /**
    * Plugin-facing facade of the daemon's config apply engine. Set only

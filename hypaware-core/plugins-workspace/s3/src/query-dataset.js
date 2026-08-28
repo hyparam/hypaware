@@ -7,8 +7,7 @@ import { parquetDataSource, unionSources, emptySource } from 'hypaware/core/quer
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
- * @import { AsyncDataSource } from 'squirreling/src/types.js'
- * @import { BlobStore, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRegistration, PluginName, QueryPartition } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { BlobStore, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRegistration, PluginName, QueryPartition, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { S3QuerySourceConfig } from './types.js'
  */
 
@@ -35,7 +34,7 @@ export function buildS3QueryDataset({ source, blobStore, plugin }) {
     /**
      * @param {QueryPartition[]} partitions
      * @param {DatasetDataSourceContext} _ctx
-     * @returns {Promise<AsyncDataSource>}
+     * @returns {Promise<ScannableDataSource>}
      */
     createDataSource: (partitions, _ctx) => createDataSource(source, blobStore, partitions),
   }
@@ -74,13 +73,13 @@ async function discoverPartitions(source, blobStore) {
  * @param {S3QuerySourceConfig} source
  * @param {BlobStore} blobStore
  * @param {QueryPartition[]} partitions
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function createDataSource(source, blobStore, partitions) {
   if (source.format === 'iceberg') {
     return createIcebergDataSource(source, blobStore)
   }
-  /** @type {AsyncDataSource[]} */
+  /** @type {ScannableDataSource[]} */
   const sources = []
   for (const partition of partitions) {
     const key = partition.tableUrl
@@ -103,7 +102,7 @@ async function createDataSource(source, blobStore, partitions) {
  *
  * @param {S3QuerySourceConfig} source
  * @param {BlobStore} blobStore
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function createIcebergDataSource(source, blobStore) {
   // Guard against a missing/empty table the way the local cache does

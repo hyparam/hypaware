@@ -65,29 +65,59 @@ export class ClientSettingsPathError extends Error {
  * first-run source detector can share it without pulling in either
  * module's heavier import graph.
  *
+ * The same contract covers every home-relative manifest path core resolves,
+ * not only `settings_file`: `activity_probe.dir` (the capture-health scan)
+ * resolves through here too, with `field` naming which manifest key a
+ * violation should blame.
+ *
  * @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [implements]: reject an absolute settings_file rather than re-anchoring it under $HOME, and reject a relative one that climbs out of the base
  * @param {string} clientName
  * @param {string} settingsFile
  * @param {NodeJS.ProcessEnv | undefined} env
  * @param {string} homeDir
+ * @param {{ field?: string }} [opts]
  * @returns {string}
  * @throws {ClientSettingsPathError} when `settingsFile` is absolute, or resolves outside its base
  */
-export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir) {
+export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir, opts = {}) {
+  const field = opts.field ?? 'settings_file'
   if (path.isAbsolute(settingsFile)) {
     throw new ClientSettingsPathError(
-      `client '${clientName}' declares an absolute settings_file '${settingsFile}'; ` +
-        "settings_file must be relative to $HOME (e.g. '.codex/config.toml')",
+      `client '${clientName}' declares an absolute ${field} '${settingsFile}'; ` +
+        `${field} must be relative to $HOME (e.g. '.codex/config.toml')`,
       { code: 'settings_file_absolute' }
     )
+  }
+  // OpenCode follows the XDG config contract and does not define
+  // OPENCODE_HOME. Its manifest paths are written in their default
+  // home-relative spelling so the existing picker schema can represent them;
+  // relocate only the `.config/opencode` prefix when XDG_CONFIG_HOME is set.
+  // @ref LLP 0306#managed-plugin-file [implements]: honor upstream's XDG
+  //   config root without inventing OPENCODE_HOME behavior
+  if (clientName === 'opencode') {
+    const xdgConfig = env?.XDG_CONFIG_HOME
+    const parts = settingsFile.split('/')
+    if (
+      typeof xdgConfig === 'string' && xdgConfig.length > 0 &&
+      parts[0] === '.config' && parts[1] === 'opencode'
+    ) {
+      return withinBase(
+        clientName,
+        settingsFile,
+        xdgConfig,
+        path.join(xdgConfig, 'opencode', ...parts.slice(2)),
+        field
+      )
+    }
+    return withinBase(clientName, settingsFile, homeDir, path.join(homeDir, ...parts), field)
   }
   const envKey = `${clientName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_HOME`
   const override = env?.[envKey]
   if (typeof override === 'string' && override.length > 0) {
     const parts = settingsFile.split('/')
-    return withinBase(clientName, settingsFile, override, path.join(override, ...parts.slice(1)))
+    return withinBase(clientName, settingsFile, override, path.join(override, ...parts.slice(1)), field)
   }
-  return withinBase(clientName, settingsFile, homeDir, path.join(homeDir, ...settingsFile.split('/')))
+  return withinBase(clientName, settingsFile, homeDir, path.join(homeDir, ...settingsFile.split('/')), field)
 }
 
 /**
@@ -117,16 +147,17 @@ export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir
  * @param {string} settingsFile  the declared value, named in the error rather than the resolved path
  * @param {string} base
  * @param {string} joined
+ * @param {string} field
  * @returns {string}
  * @throws {ClientSettingsPathError} when `joined` falls outside `base`
  */
-function withinBase(clientName, settingsFile, base, joined) {
+function withinBase(clientName, settingsFile, base, joined, field) {
   const root = path.resolve(base)
   const target = path.resolve(joined)
   if (target !== root && !target.startsWith(root + path.sep)) {
     throw new ClientSettingsPathError(
-      `client '${clientName}' declares a settings_file '${settingsFile}' that resolves outside ` +
-        `'${root}'; settings_file must stay under the client's config home`,
+      `client '${clientName}' declares a ${field} '${settingsFile}' that resolves outside ` +
+        `'${root}'; ${field} must stay under the client's config home`,
       { code: 'settings_file_escapes_base' }
     )
   }

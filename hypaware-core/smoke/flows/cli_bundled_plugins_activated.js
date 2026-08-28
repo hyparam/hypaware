@@ -15,11 +15,11 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
  *
  *  1. `hyp plugin list` shows active bundled plugins from the
  *     generated config (both text and `--json` form).
- *  2. `hyp attach --client claude --dry-run` reaches the Claude
+ *  2. `hyp client attach claude --dry-run` reaches the Claude
  *     adapter (the adapter's own `client.attach` span fires with
  *     `dry_run=true` and the dry-run banner lands on stdout).
- *  3. `hyp attach --client codex --dry-run` reaches the Codex adapter
- *     (same shape), and `hyp attach --client openclaw --dry-run`
+ *  3. `hyp client attach codex --dry-run` reaches the Codex adapter
+ *     (same shape), and `hyp client attach openclaw --dry-run`
  *     reaches the OpenClaw adapter against a seeded OPENCLAW_HOME.
  *  4. `hyp status --json` emits a stable JSON document listing the
  *     configured sources, sinks, clients, and active plugins. Because
@@ -61,7 +61,7 @@ export async function run({ harness, expect }) {
     plugins: [
       {
         // A concrete `listen` port (not `:0`) is load-bearing for the
-        // OpenClaw dry-run below: `hyp attach --dry-run` derives the
+        // OpenClaw dry-run below: `hyp client attach --dry-run` derives the
         // gateway endpoint from this configured `listen` (the source is
         // never started in a CLI dispatch, so `localEndpoint()` is
         // unavailable), and the OpenClaw adapter only runs
@@ -85,7 +85,7 @@ export async function run({ harness, expect }) {
         name: '@hypaware/otel',
         config: { listen_host: '127.0.0.1', listen_port: 0 },
       },
-      { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/claude' },
       { name: '@hypaware/codex', config: { proxy: '@hypaware/ai-gateway' } },
       { name: '@hypaware/openclaw' },
       { name: '@hypaware/local-fs' },
@@ -155,14 +155,14 @@ export async function run({ harness, expect }) {
       !v.includes('@hypaware/gascity')
   )
 
-  // ----- 2. hyp attach --client claude --dry-run -----
+  // ----- 2. hyp client attach claude --dry-run -----
   const claudeStdout = makeBuf()
   const claudeStderr = makeBuf()
   const claudeCode = await dispatch(
-    ['attach', '--client', 'claude', '--dry-run'],
+    ['client', 'attach', 'claude', '--dry-run'],
     { stdout: claudeStdout, stderr: claudeStderr, env: baseEnv }
   )
-  expect.that('dispatch: hyp attach --client claude --dry-run exited 0', claudeCode, (v) => v === 0)
+  expect.that('dispatch: hyp client attach claude --dry-run exited 0', claudeCode, (v) => v === 0)
   expect.that(
     'stderr: claude attach dry-run had no errors',
     claudeStderr.text(),
@@ -174,14 +174,14 @@ export async function run({ harness, expect }) {
     (v) => typeof v === 'string' && v.includes('(dry-run) Would attach Claude Code')
   )
 
-  // ----- 3. hyp attach --client codex --dry-run -----
+  // ----- 3. hyp client attach codex --dry-run -----
   const codexStdout = makeBuf()
   const codexStderr = makeBuf()
   const codexCode = await dispatch(
-    ['attach', '--client', 'codex', '--dry-run'],
+    ['client', 'attach', 'codex', '--dry-run'],
     { stdout: codexStdout, stderr: codexStderr, env: baseEnv }
   )
-  expect.that('dispatch: hyp attach --client codex --dry-run exited 0', codexCode, (v) => v === 0)
+  expect.that('dispatch: hyp client attach codex --dry-run exited 0', codexCode, (v) => v === 0)
   expect.that(
     'stderr: codex attach dry-run had no errors',
     codexStderr.text(),
@@ -193,7 +193,7 @@ export async function run({ harness, expect }) {
     (v) => typeof v === 'string' && v.includes('(dry-run) Would attach Codex')
   )
 
-  // ----- 3b. hyp attach --client openclaw --dry-run -----
+  // ----- 3b. hyp client attach openclaw --dry-run -----
   // Seeded OPENCLAW_HOME keeps the step hermetic: the adapter refuses a
   // missing settings file or a non-Anthropic primary (LLP 0109), so the
   // real user HOME must never leak into this dispatch. The placeholder
@@ -224,7 +224,7 @@ export async function run({ harness, expect }) {
   let openclawCode
   try {
     openclawCode = await dispatch(
-      ['attach', '--client', 'openclaw', '--dry-run'],
+      ['client', 'attach', 'openclaw', '--dry-run'],
       { stdout: openclawStdout, stderr: openclawStderr, env: openclawEnv }
     )
   } finally {
@@ -233,7 +233,7 @@ export async function run({ harness, expect }) {
     if (prevAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY
     else process.env.ANTHROPIC_API_KEY = prevAnthropicKey
   }
-  expect.that('dispatch: hyp attach --client openclaw --dry-run exited 0', openclawCode, (v) => v === 0)
+  expect.that('dispatch: hyp client attach openclaw --dry-run exited 0', openclawCode, (v) => v === 0)
   expect.that(
     'stderr: openclaw attach dry-run had no errors',
     openclawStderr.text(),
@@ -332,11 +332,11 @@ export async function run({ harness, expect }) {
   // excluded-from-default set never reaches the skip loop). Bumps
   // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST without joining
   // this flow's config: currently format-jsonl, s3, format-iceberg,
-  // context-graph, ai-gateway-graph, and hermes (6).
+  // context-graph, ai-gateway-graph, hermes, and opencode (7).
   expect.that(
-    'traces: at least one config-profile boot reports plugins_skipped=6',
+    'traces: at least one config-profile boot reports plugins_skipped=7',
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_skipped),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 6)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === 7)
   )
 
   const activateSpans = traces.filter((/** @type {any} */ t) => t.name === 'plugin.activate')

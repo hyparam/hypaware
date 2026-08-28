@@ -26,7 +26,7 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  */
 
 /**
- * Phase 5 V1-milestone smoke. Drives `hyp init --yes --client claude
+ * Phase 5 V1-milestone smoke. Drives `hyp setup --yes --client claude
  * --client codex --source otel --export local-parquet --retention-days
  * 30 --dry-run --bin <stable-bin>` end-to-end against a tmp HYP_HOME
  * with all six first-party plugins active (ai-gateway, otel, local-fs,
@@ -50,7 +50,7 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *   under the same `dev_run_id`.
  * - The wizard pick-phase span contract (`wizard.pick.start`,
  *   `wizard.pick.write_config`, `daemon.install`, `client.attach`,
- *   `skills.install`, `wizard.pick.finish`) is honored (`hyp init` routes
+ *   `skills.install`, `wizard.pick.finish`) is honored (`hyp setup` routes
  *   through `runInitWizard` -> `runWizardPick` now, LLP 0135).
  *
  * @param {{ harness: any, expect: any }} args
@@ -104,6 +104,10 @@ export async function run({ harness, expect }) {
   await fs.mkdir(path.join(fakeHome, '.codex'), { recursive: true })
   const previousHome = process.env.HOME
   process.env.HOME = fakeHome
+  // Pin the version the LLP 0258 floor check sees, so the init-driven attach
+  // never depends on whatever `claude` binary the machine running it carries.
+  const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
+  process.env.HYP_CLAUDE_CODE_VERSION = '2.1.233'
 
   // Pre-existing settings files would let us detect that dry-runs do
   // not modify them. Seed harmless baselines and snapshot them.
@@ -179,12 +183,12 @@ export async function run({ harness, expect }) {
   try {
     await activateInjectedPlugins(kernel, 'picker_activate')
 
-    // ----- 1. hyp init via Phase 5 flags -----
+    // ----- 1. hyp setup via Phase 5 flags -----
     const initStdout = makeBuf()
     const initStderr = makeBuf()
     const initCode = await dispatch(
       [
-        'init',
+        'setup',
         '--yes',
         '--client', 'claude',
         '--client', 'codex',
@@ -204,9 +208,9 @@ export async function run({ harness, expect }) {
         env: smokeEnv(harness),
       }
     )
-    expect.that('dispatch: hyp init Phase 5 flags exited 0', initCode, (v) => v === 0)
+    expect.that('dispatch: hyp setup Phase 5 flags exited 0', initCode, (v) => v === 0)
     expect.that(
-      'stderr: hyp init had no errors',
+      'stderr: hyp setup had no errors',
       initStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
     )
@@ -398,7 +402,7 @@ export async function run({ harness, expect }) {
     const realInitStderr = makeBuf()
     const realInitCode = await dispatch(
       [
-        'init',
+        'setup',
         '--yes',
         '--force',
         '--source', 'claude',
@@ -415,9 +419,9 @@ export async function run({ harness, expect }) {
         env: smokeEnv(harness),
       }
     )
-    expect.that('dispatch: real hyp init attach exited 0', realInitCode, (v) => v === 0)
+    expect.that('dispatch: real hyp setup attach exited 0', realInitCode, (v) => v === 0)
     expect.that(
-      'stderr: real hyp init attach had no errors',
+      'stderr: real hyp setup attach had no errors',
       realInitStderr.text(),
       (v) => typeof v === 'string' && v.length === 0
     )
@@ -430,10 +434,20 @@ export async function run({ harness, expect }) {
       realClaudeSettings?._hypaware?.port,
       (v) => v === 18521
     )
+    // `otel` attach (LLP 0258): the telemetry block is written and the base
+    // URL is not; the marker's port above is what carries the gateway
+    // endpoint for the drift check.
     expect.that(
-      'real init attach: claude base URL uses the default gateway endpoint',
-      realClaudeSettings?.env?.ANTHROPIC_BASE_URL,
-      (v) => v === 'http://127.0.0.1:18521'
+      'real init attach: the telemetry endpoint points at the loopback listener',
+      realClaudeSettings?.env?.OTEL_EXPORTER_OTLP_ENDPOINT,
+      (v) => typeof v === 'string' && /^http:\/\/127\.0\.0\.1:\d+$/.test(v)
+    )
+    expect.that(
+      'real init attach: no base URL was written (mode=otel)',
+      realClaudeSettings,
+      (v) =>
+        v?._hypaware?.mode === 'otel' &&
+        !Object.hasOwn(v?.env ?? {}, 'ANTHROPIC_BASE_URL')
     )
 
     // ----- 7. Span + log assertions -----
@@ -444,14 +458,14 @@ export async function run({ harness, expect }) {
     const startSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.start'
     )
-    // 8 bundled picker rows: claude, codex, claude-desktop, openclaw,
-    // hermes, raw-anthropic, raw-openai, otel.
+    // 9 bundled picker rows: claude, codex, opencode, claude-desktop,
+    // openclaw, hermes, raw-anthropic, raw-openai, otel.
     expect.that(
-      'traces: wizard.pick.start span emitted with sources_available=8',
+      'traces: wizard.pick.start span emitted with sources_available=9',
       startSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_available === 8
+        v.sources_available === 9
     )
 
     const writeSpans = traces.filter(
@@ -548,6 +562,8 @@ export async function run({ harness, expect }) {
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
+    if (previousClaudeVersion === undefined) delete process.env.HYP_CLAUDE_CODE_VERSION
+    else process.env.HYP_CLAUDE_CODE_VERSION = previousClaudeVersion
     await echo.close()
   }
 }
@@ -580,8 +596,19 @@ export async function run({ harness, expect }) {
  *
  * Reading only `loaded` keeps the default-activation boundary without
  * restating it: it agrees with the cut `ridersInDefaultSet` makes, because
- * the allowlist and the excluded set together cover every bundled plugin and
- * `loadPickerCatalog` reads only those two buckets.
+ * the allowlist and the excluded set are disjoint, so nothing in `loaded` is
+ * something that filter drops. A plugin in neither list is invisible to both
+ * sides: it is not in `loaded`, and `loadPickerCatalog` reads only those two
+ * buckets. It is disjointness, not coverage, that does the work here: the
+ * union can span the whole bundled workspace while a name sits in both sets,
+ * and `discoverBundledPlugins` checks the allowlist before the exclude set,
+ * so that name stays in `loaded`. For a rider that is a live disagreement:
+ * this function composes it into the golden while `ridersInDefaultSet` drops
+ * it from what the install writes. A name that declares no `compose_with`
+ * never reaches that filter, so the two reads here still agree and this
+ * smoke stays green; `computeSelectedPlugins` (src/core/runtime/boot.js) is
+ * where an overlap bites in that case.
+ * `test/core/bundled-sets.test.js` guards the disjointness.
  *
  * @param {string[]} picked  plugin names the picker composed from its rows
  * @returns {Promise<string[]>}
@@ -618,12 +645,13 @@ async function goldenPickerConfig(hypHome) {
       name: '@hypaware/ai-gateway',
       config: {
         upstreams: [
-          { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages', provider: 'anthropic' },
           { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1', provider: 'openai' },
           { name: 'chatgpt', base_url: 'https://chatgpt.com', path_prefix: '/backend-api/codex', provider: 'chatgpt' },
         ],
-        // @ref LLP 0243#composed-default [tests]: the picked claude row makes the composed gateway a proxy-mode gateway
-        proxy_mode: true,
+        // No `proxy_mode`: no bundled picker row declares proxy attach since
+        // the claude client went otel-only, so the wizard composes a gateway
+        // that mints no CA.
+        // @ref LLP 0262#requirements [tests]: R5 - a composed claude install needs no CA and no keychain trust
       },
     },
     {
@@ -632,10 +660,7 @@ async function goldenPickerConfig(hypHome) {
     },
     { name: '@hypaware/local-fs' },
     { name: '@hypaware/format-parquet' },
-    {
-      name: '@hypaware/claude',
-      config: { proxy: '@hypaware/ai-gateway' },
-    },
+    { name: '@hypaware/claude' },
     {
       name: '@hypaware/codex',
       config: { proxy: '@hypaware/ai-gateway' },

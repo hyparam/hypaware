@@ -32,7 +32,7 @@ import { colorizeStderr } from './style.js'
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
- * @import { ActivePlugin, BlobSinkConfigInstance, CommandRunContext, HypAwareV2Config, JsonObject, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, BlobSinkConfigInstance, CommandRunContext, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { BootProfile } from '../../../src/core/runtime/types.js'
  * @import { DispatchOptions } from '../../../src/core/cli/types.js'
  * @import { MaterializeError } from '../../../src/core/sinks/types.js'
@@ -260,7 +260,7 @@ export async function dispatch(argv, opts = {}) {
   if (opts.kernel) {
     kernel = opts.kernel
   } else {
-    const bootProfile = decideBootProfile(argv)
+    const bootProfile = decideBootProfile(argv, registry)
     const boot = await bootKernel({
       hypHome: obsEnv.hypHome,
       mode: 'cli',
@@ -310,11 +310,11 @@ export async function dispatch(argv, opts = {}) {
   }
 
   if (argv.length === 0) {
-    // TTY + empty argv → re-enter as `init` so the walkthrough is the
+    // TTY + empty argv re-enters as `setup` so the walkthrough is the
     // no-arg behavior. Pass the booted kernel + registry through so
     // we don't pay the boot cost twice.
     try {
-      return await runCommandByName('init', [], { stdout, stderr, env, cwd, registry, kernel })
+      return await runCommandByName('setup', [], { stdout, stderr, env, cwd, registry, kernel })
     } finally {
       if (ownsKernel) {
         await stopBootStartedSources(kernel)
@@ -353,36 +353,23 @@ export async function dispatch(argv, opts = {}) {
     }
     // Not a group either. Before the generic "unknown command", see whether
     // the leading token exactly names a command declared by a plugin that is
-    // bundled/installed but NOT active in the effective config. If so the
-    // command is *unavailable*, not unknown: report which plugin provides it
-    // and how to enable it, instead of implying the feature does not exist. A
+    // bundled/installed but whose commands never reached the registry: not
+    // selected by the effective config, or selected and not activated. If so
+    // the command is *unavailable*, not unknown: report which plugin provides
+    // it and what to do, instead of implying the feature does not exist. A
     // genuine typo matches nothing here and still gets the generic message.
     // @ref LLP 0153#unavailable-not-unknown [implements]: dispatch miss on a known-but-inactive plugin command reports unavailable + repair, not unknown
-    const inactive = await findInactivePluginForCommand(helpDiscovery, argv[0])
+    const inactive = await findInactivePluginForCommand(helpDiscovery, argv, failedPlugins)
     if (inactive) {
-      stderr.write(
-        `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which is not in the active config\n`
-      )
-      // The repair depends on *why* the plugin is inactive. Absent from
-      // plugins[] → add it (LLP 0153, byte-identical). Present but
-      // `enabled: false` → the entry exists, so tell the user to flip it, and
-      // when the fleet (central) layer is what disabled it, say it cannot be
-      // enabled locally at all rather than send them editing a local entry the
-      // additive merge would drop (collides_with_central).
+      // One renderer for both miss paths (here and the group probe below), so
+      // the same condition cannot print two different repair lines depending
+      // on which path detected it. The repair branches on *why* the plugin is
+      // inactive: absent from plugins[] → add it; `enabled: false` → flip it;
+      // disabled by the organization (central) layer → it cannot be enabled
+      // locally at all, because the additive merge would drop a local entry
+      // whose name central already declares (collides_with_central).
       // @ref LLP 0154#decision [implements]: repair wording branches on absent vs disabled-local vs disabled-central
-      if (inactive.state === 'disabled-central') {
-        stderr.write(
-          `  repair: ${inactive.plugin} is disabled by the fleet (central) config and cannot be enabled locally; ask your fleet admin to enable it\n`
-        )
-      } else if (inactive.state === 'disabled-local') {
-        stderr.write(
-          `  repair: set "enabled": true on the {"name": "${inactive.plugin}"} entry in plugins[] in ${displayConfigPath(helpDiscovery.configPath, env)}\n`
-        )
-      } else {
-        stderr.write(
-          `  repair: add {"name": "${inactive.plugin}"} to plugins[] in ${displayConfigPath(helpDiscovery.configPath, env)}\n`
-        )
-      }
+      renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
     } else {
       stderr.write(`hyp: unknown command '${argv.join(' ')}'\n`)
       stderr.write(`run 'hyp --help' for the list of available commands\n`)
@@ -393,12 +380,50 @@ export async function dispatch(argv, opts = {}) {
     return 2
   }
 
+  // A core-owned group whose every subcommand is contributed by ONE plugin
+  // (`session`, filled entirely by @hypaware/ai-gateway) has no children at
+  // all when that plugin is inactive, and the group shell still matches. Its
+  // empty subcommand table, and its `expected one of:` with nothing after it,
+  // are the "unknown" answer LLP 0153 exists to prevent, and they contradict
+  // what top-level help promises ("run it anyway: hyp names the plugin that
+  // provides it").
+  const emptyGroup =
+    matched.command.group === true && listGroupChildren(registry, matched.command.name).length === 0
+
+  // A canonical task group (`client`, `query`, `privacy`) is core-owned, so it
+  // still matches when a deeper plugin command is inactive. Check that miss
+  // before running the group command or an unavailable plugin leaf would be
+  // misreported as an unknown subcommand. An empty group is probed on its own
+  // canonical tokens instead of argv, so `hyp session`, `hyp session --help`,
+  // and `hyp session zzz` all resolve to the same answer: no subcommand of an
+  // absent plugin can be reached by any spelling.
+  // @ref LLP 0153#unavailable-not-unknown [implements]: an empty core group reports the plugin that fills it, not an empty list
+  // @ref LLP 0248#aliases [implements]: canonical and legacy plugin paths preserve inactive-plugin repair
+  if (matched.command.group === true && (emptyGroup || (matched.rest.length > 0 && !isHelpFlag(matched.rest[0])))) {
+    const probe = emptyGroup ? matched.command.name.split(' ') : argv
+    const inactive = await findInactivePluginForCommand(helpDiscovery, probe, failedPlugins)
+    // A non-empty group already matched, so only a *deeper* command can be the
+    // unavailable one. `longestCommandPrefix` falls back to the flag-stripped
+    // invocation, which collapses `hyp query --json` to the bare group token
+    // and would match any inactive plugin contributing anything under `query`:
+    // that blames a plugin for what is really an unknown subcommand. Requiring
+    // the match to be deeper than the tokens the group consumed keeps the
+    // probe answering the question it was added for.
+    const groupDepth = argv.length - matched.rest.length
+    if (inactive && (emptyGroup || inactive.token.split(' ').length > groupDepth)) {
+      renderInactivePluginError({ stderr, inactive, discovery: helpDiscovery, env })
+      if (ownsKernel) await stopBootStartedSources(kernel)
+      return 2
+    }
+  }
+
   const devRunId = env.DEV_RUN_ID
   const attrs = buildAttrs({
     [Attr.COMPONENT]: 'cmd-dispatch',
     [Attr.OPERATION]: 'command.run',
     command_name: matched.command.name,
     hyp_command: matched.command.name,
+    invoked_command: matched.invokedName,
     argv_count: argv.length,
     ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
   })
@@ -416,6 +441,7 @@ export async function dispatch(argv, opts = {}) {
     plugins: activePlugins,
     failedPlugins,
     capabilities: kernel.capabilities,
+    clients: kernel.clients,
     query: kernel.query,
     // In-process command dispatch seam. A thin `run(name, argv)` wrapper
     // over the module-private `runCommandByName`, populated here the same
@@ -609,7 +635,7 @@ function isInteractiveStream(stream) {
 }
 
 /**
- * Pick the boot profile based on the requested command. `hyp init`
+ * Pick the boot profile based on the resolved semantic command. `hyp setup`
  * (interactive walkthrough or preset) needs bundled defaults plus
  * installed plugins loaded so the picker can list plugin presets before
  * the user has written a config. Lifecycle and diagnostics commands
@@ -618,12 +644,27 @@ function isInteractiveStream(stream) {
  * plugins listed in config.
  *
  * @param {string[]} argv
+ * @param {ReturnType<typeof createCommandRegistry>} registry
  * @returns {BootProfile}
  */
-function decideBootProfile(argv) {
+export function decideBootProfile(argv, registry) {
   if (argv.length === 0) return 'all-available'
-  if (argv[0] === 'init') return 'all-available'
-  if (argv[0] === 'daemon' || argv[0] === 'status' || argv[0] === 'smoke' || argv[0] === 'version') return { activate: [] }
+  // Resolve aliases before choosing activation. Canonical and compatibility
+  // spellings are one registration and therefore cannot acquire different
+  // boot behavior as the tree evolves.
+  // @ref LLP 0248#semantic-boot [implements]: boot follows the full semantic command, not argv[0]
+  const matched = registry.match(argv)
+  const profile = matched?.command.bootProfile
+  // Compatibility for injected registries and third-party wrappers built
+  // before command metadata existed. Core's own registrations set these
+  // explicitly; this fallback preserves the previous public boot contract.
+  const semanticName = matched?.command.name
+  if (semanticName === 'setup' || semanticName === 'init') return 'all-available'
+  if (semanticName === 'status' || semanticName === 'version' || semanticName === 'smoke' || semanticName === 'dev smoke' || semanticName?.startsWith('daemon ')) {
+    return { activate: [] }
+  }
+  if (profile === 'all-available') return 'all-available'
+  if (profile === 'none') return { activate: [] }
   return 'config'
 }
 
@@ -740,45 +781,56 @@ async function runHelp({ stdout, registry, devRunId, argvCount, discovery }) {
  * @param {{
  *   stdout: { write(chunk: string): unknown },
  *   registry: ReturnType<typeof createCommandRegistry>,
- *   pluginCommands?: { name: string, summary: string }[],
+ *   pluginCommands?: { name: string, summary: string, category?: string, audience?: string }[],
  * }} args
  */
 function renderHelp({ stdout, registry, pluginCommands = [] }) {
   const core = registry
     .list()
     .filter((c) => !c.hidden)
-    .map((c) => ({ name: c.name, summary: c.summary }))
+    .map((c) => ({ name: c.name, summary: c.summary, category: c.category, audience: c.audience }))
   const coreNames = new Set(core.map((c) => c.name))
   const merged = [...core, ...pluginCommands.filter((c) => !coreNames.has(c.name))]
 
-  /** @type {Map<string, string>} */
+  /** @type {Map<string, { summary: string, category: string | undefined }>} */
   const rows = new Map()
   /** @type {Map<string, Set<string>>} */
   const groupChildren = new Map()
   for (const cmd of merged) {
     const [head, ...restTokens] = cmd.name.split(' ')
     if (restTokens.length === 0) {
-      rows.set(head, cmd.summary)
+      rows.set(head, { summary: cmd.summary, category: cmd.category })
     } else {
       let children = groupChildren.get(head)
       if (!children) groupChildren.set(head, (children = new Set()))
       children.add(restTokens[0])
+      if (!rows.has(head)) rows.set(head, { summary: '', category: cmd.category })
     }
   }
   for (const [head, children] of groupChildren) {
-    if (!rows.has(head)) rows.set(head, synthesizeGroupSummary([...children].sort()))
+    const row = rows.get(head)
+    if (row && row.summary.length === 0) row.summary = synthesizeGroupSummary([...children].sort())
   }
-  const names = [...rows.keys()].sort()
 
   stdout.write("hyp - HypAware: your AI agents' sessions, logs, and telemetry in one queryable history\n")
   stdout.write('      (also installed as `hypaware`; same binary)\n')
   stdout.write('\n')
   stdout.write('usage: hyp <command> [args...]\n')
   stdout.write('\n')
-  stdout.write('Commands:\n')
-  const nameWidth = Math.max(...names.map((n) => n.length), 8)
-  for (const name of names) {
-    stdout.write(`  ${name.padEnd(nameWidth)}  ${rows.get(name)}\n`)
+  // @ref LLP 0248#decision [implements]: everyday journeys get descriptions; operations stay direct in one compact list
+  renderJourneyHelpSection(stdout, 'Getting started:', rows, 'getting-started', ['setup', 'status'])
+  renderJourneyHelpSection(stdout, 'Explore and share:', rows, 'explore-share', ['ask', 'query', 'report'])
+  renderJourneyHelpSection(stdout, 'Control capture and movement:', rows, 'capture-movement', [
+    'client', 'privacy', 'session', 'join', 'leave', 'sync',
+  ])
+  const preferredAdditional = [
+    'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'graph',
+    'vector', 'enrichment', 'source', 'version', 'update', 'dev',
+  ]
+  const additional = orderedHelpNames(rows, 'additional', preferredAdditional)
+  if (additional.length > 0) {
+    stdout.write('Additional commands:\n')
+    stdout.write(`  ${additional.join(', ')}\n`)
   }
   stdout.write('\n')
   stdout.write(`Run 'hyp <command> --help' for subcommands and details.\n`)
@@ -789,6 +841,63 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
   stdout.write('expect is missing, run it anyway: hyp names the plugin that provides it\n')
   stdout.write('and prints how to enable it.\n')
   stdout.write(`Start with 'hyp status' for whether this install is working.\n`)
+}
+
+/**
+ * @param {{ write(chunk: string): unknown }} stdout
+ * @param {string} title
+ * @param {Map<string, { summary: string, category: string | undefined }>} rows
+ * @param {string} category
+ * @param {string[]} preferred
+ */
+function renderJourneyHelpSection(stdout, title, rows, category, preferred) {
+  const names = orderedHelpNames(rows, category, preferred)
+  if (names.length === 0) return
+  stdout.write(`${title}\n`)
+  const width = Math.max(8, ...names.map((name) => name.length))
+  for (const name of names) {
+    stdout.write(`  ${name.padEnd(width)}  ${rows.get(name)?.summary ?? ''}\n`)
+  }
+  stdout.write('\n')
+}
+
+/**
+ * The four sections `renderHelp` prints, in the order it prints them. Every
+ * row has to land in one of them.
+ */
+const HELP_SECTIONS = ['getting-started', 'explore-share', 'capture-movement', 'additional']
+
+/**
+ * Which section a row belongs to. A category outside `HELP_SECTIONS` falls
+ * back to `additional` rather than matching nothing: the registry invents a
+ * category for any registration that omits one (`command.name.split(' ')[0]`,
+ * so `foo bar` becomes `foo`), and a third-party command may declare whatever
+ * it likes in its manifest. Matching on the raw value dropped such a command
+ * from `hyp --help` silently, with no error and nothing in the output to say
+ * it existed, which is the one outcome help must not produce.
+ *
+ * @param {string | undefined} category
+ * @returns {string}
+ */
+function helpSectionFor(category) {
+  return category !== undefined && HELP_SECTIONS.includes(category) ? category : 'additional'
+}
+
+/**
+ * @param {Map<string, { summary: string, category: string | undefined }>} rows
+ * @param {string} category
+ * @param {string[]} preferred
+ */
+function orderedHelpNames(rows, category, preferred) {
+  const available = [...rows.entries()]
+    .filter(([, row]) => helpSectionFor(row.category) === category)
+    .map(([name]) => name)
+  const rank = new Map(preferred.map((name, index) => [name, index]))
+  return available.sort((a, b) => {
+    const ar = rank.get(a) ?? Number.MAX_SAFE_INTEGER
+    const br = rank.get(b) ?? Number.MAX_SAFE_INTEGER
+    return ar - br || a.localeCompare(b)
+  })
 }
 
 /**
@@ -812,7 +921,7 @@ function renderHelp({ stdout, registry, pluginCommands = [] }) {
  * `--help`.
  *
  * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} discovery
- * @returns {Promise<{ name: string, summary: string }[]>}
+ * @returns {Promise<{ name: string, summary: string, category?: string, audience?: string }[]>}
  * @ref LLP 0005#declarative [implements]: manifest lists commands before any plugin code is loaded
  */
 async function collectPluginHelpCommands(discovery) {
@@ -822,14 +931,21 @@ async function collectPluginHelpCommands(discovery) {
     // dispatches; advertise no plugin commands rather than ones boot rejects.
     if (!selection || selection.shadowing.length > 0) return []
 
-    /** @type {Map<string, { name: string, summary: string }>} */
+    /** @type {Map<string, { name: string, summary: string, category?: string, audience?: string }>} */
     const out = new Map()
     for (const entry of selection.selectedManifests) {
       for (const cmd of entry.manifest.contributes?.commands ?? []) {
         if (!cmd || typeof cmd.name !== 'string' || out.has(cmd.name)) continue
+        // An internal mechanism keeps its manifest entry (the miss path
+        // still names its plugin) but is not CLI surface, so it never
+        // reaches a help row. Mirrors the registry's `hidden` filter above.
+        // @ref LLP 0268#field [implements]: hidden is a help filter over a declaration that stays
+        if (cmd.hidden === true) continue
         out.set(cmd.name, {
           name: cmd.name,
           summary: typeof cmd.summary === 'string' ? cmd.summary : '',
+          ...(typeof cmd.category === 'string' ? { category: cmd.category } : {}),
+          ...(typeof cmd.audience === 'string' ? { audience: cmd.audience } : {}),
         })
       }
     }
@@ -920,8 +1036,6 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
   try {
     if (typeof name !== 'string' || name.length === 0 || name.startsWith('-')) return
     if (registry.match([name])) return
-    const head = name.split(' ')[0]
-
     const selection = await computeBootSelection(discovery)
     // A shadow collision makes real boot throw; there is no coherent
     // plugin set to activate from, so leave the miss path to report.
@@ -932,7 +1046,7 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
     )
     const owner = inactive.find((entry) =>
       (entry.manifest.contributes?.commands ?? []).some(
-        (cmd) => cmd && typeof cmd.name === 'string' && cmd.name.split(' ')[0] === head
+        (cmd) => cmd && typeof cmd.name === 'string' && commandManifestNames(cmd).includes(name)
       )
     )
     if (!owner) return
@@ -1118,32 +1232,69 @@ export async function activatePluginDependencyClosure({
 }
 
 /**
- * On a top-level dispatch miss, resolve whether `token` exactly names the
- * leading command word declared by a plugin that is bundled or installed but
- * NOT active in the effective config. Returns the owning plugin so the caller
- * can say "unavailable, here's how to enable it" instead of "unknown".
+ * On a dispatch miss, resolve whether the argv prefix names a command or
+ * compatibility alias declared by a plugin that is bundled or installed but
+ * whose commands are not in the registry. Returns the owning plugin so the
+ * caller can say "unavailable, here's how to fix it" instead of "unknown".
  *
- * Exact match ONLY: `token` must equal the first word of a declared command
- * name (`graph` for `graph project`). A typo matches nothing and falls
- * through to the generic unknown-command message. Active plugins never reach
- * here for their own commands: those matched `registry.match`/group help
- * above, so at the miss path `token` is unowned by any active or core command.
+ * Two ways a declared command can be missing, and they need different repairs:
+ *
+ * - the config does not select the plugin at all (LLP 0153's case): add or
+ *   enable it, per {@link classifyInactiveState};
+ * - the config *does* select it, but this boot did not get it. Its `activate()`
+ *   threw, the dep graph eliminated it for an unsatisfied `requires`, or the
+ *   boot profile withheld it. Editing the config fixes none of those, and
+ *   before this case existed the command fell through to "unknown command" -
+ *   telling a user their own configured feature does not exist. Checked first,
+ *   because a selected plugin is never also in the not-selected pool.
+ *
+ * The fourth route into `unavailablePlugins`, a manifest that would not load,
+ * is deliberately not matched here and still falls through to the generic
+ * message: boot names such a plugin by the directory it failed in rather than
+ * by a plugin name (`src/core/runtime/boot.js`, `unloadable`), and an
+ * unreadable manifest declares no commands to match `argv` against in the
+ * first place.
+ *
+ * Canonical names and compatibility aliases are matched by argv prefix. A typo
+ * matches nothing and falls through to the generic unknown-command message.
+ * Active plugins never reach here for their own commands: those matched
+ * `registry.match` or group help above.
  *
  * Best-effort and cheap: the same manifest discovery `--help` already runs,
  * wrapped so any failure (missing workspace, unreadable config) degrades to
  * "no suggestion" rather than corrupting the error path.
  *
  * @param {{ workspaceDir?: string, stateRoot: string, configPath: string }} discovery
- * @param {string} token
- * @returns {Promise<{ token: string, plugin: PluginName, state: 'absent' | 'disabled-local' | 'disabled-central' } | undefined>}
+ * @param {string[]} argv
+ * @param {string[]} unavailablePlugins `bootKernel`'s `unavailablePlugins`: the
+ *   plugins this boot did not get, by any of the routes above.
+ * @returns {Promise<{ token: string, plugin: PluginName, state: 'absent' | 'disabled-local' | 'disabled-central' | 'selected-unavailable' } | undefined>}
  */
-async function findInactivePluginForCommand(discovery, token) {
-  if (typeof token !== 'string' || token.length === 0 || token.startsWith('-')) return undefined
+async function findInactivePluginForCommand(discovery, argv, unavailablePlugins = []) {
+  if (!Array.isArray(argv) || argv.length === 0 || argv[0].startsWith('-')) return undefined
   try {
     const selection = await computeBootSelection(discovery)
     // A shadow collision makes real boot throw; there is no dispatchable
     // command set to reason about, so offer no suggestion.
     if (selection.shadowing.length > 0) return undefined
+    // Selected but not running: the config is already right, so the repair is
+    // to find out why the plugin did not come up, not to edit plugins[]. Boot
+    // already reports that set, so read it rather than re-derive it by
+    // subtracting the active plugins: the subtraction also fires when a caller
+    // injected its own kernel (`opts.kernel`, the integration API's escape
+    // hatch), where dispatch never booted and an absent plugin proves nothing.
+    // @ref LLP 0219#incomplete-activation-prunes-nothing [constrained-by]: one list holds every way a boot came up short of its plugin set
+    // @ref LLP 0267#d5 [implements]: a fourth miss state for a plugin the config selects and the boot did not get
+    const unavailable = new Set(unavailablePlugins)
+    for (const entry of selection.selectedManifests) {
+      const name = /** @type {PluginName} */ (entry.manifest.name)
+      if (!unavailable.has(name)) continue
+      for (const cmd of entry.manifest.contributes?.commands ?? []) {
+        if (!cmd || typeof cmd.name !== 'string') continue
+        const invoked = longestCommandPrefix(argv, commandManifestNames(cmd))
+        if (invoked) return { token: invoked, plugin: name, state: 'selected-unavailable' }
+      }
+    }
     // Inactive = in the boot pool but not selected for a `config` boot. Walk
     // in pool order (bundled, then excluded, then installed) so the first
     // declaring plugin wins a head-token collision, matching boot's own
@@ -1153,8 +1304,9 @@ async function findInactivePluginForCommand(discovery, token) {
       if (selection.selected.has(name)) continue
       for (const cmd of entry.manifest.contributes?.commands ?? []) {
         if (!cmd || typeof cmd.name !== 'string') continue
-        if (cmd.name.split(' ')[0] === token) {
-          return { token, plugin: name, state: classifyInactiveState(selection.layered, name) }
+        const invoked = longestCommandPrefix(argv, commandManifestNames(cmd))
+        if (invoked) {
+          return { token: invoked, plugin: name, state: classifyInactiveState(selection.layered, name) }
         }
       }
     }
@@ -1162,6 +1314,73 @@ async function findInactivePluginForCommand(discovery, token) {
   } catch {
     return undefined
   }
+}
+
+/** @param {{ name: string, aliases?: string[] }} command */
+function commandManifestNames(command) {
+  return [command.name, ...(command.aliases ?? [])]
+}
+
+/**
+ * @param {string[]} argv
+ * @param {string[]} names
+ */
+function longestCommandPrefix(argv, names) {
+  const exact = names
+    .filter((name) => argv.slice(0, name.split(' ').length).join(' ') === name)
+    .sort((a, b) => b.split(' ').length - a.split(' ').length)[0]
+  if (exact) return exact
+  const invoked = argv.filter((token) => !token.startsWith('-')).join(' ')
+  if (invoked.length === 0) return undefined
+  return names.some((name) => name.startsWith(`${invoked} `)) ? invoked : undefined
+}
+
+/**
+ * @param {{
+ *   stderr: { write(chunk: string): unknown },
+ *   inactive: { token: string, plugin: PluginName, state: 'absent'|'disabled-local'|'disabled-central'|'selected-unavailable' },
+ *   discovery: { configPath: string },
+ *   env: NodeJS.ProcessEnv,
+ * }} args
+ */
+function renderInactivePluginError({ stderr, inactive, discovery, env }) {
+  stderr.write(
+    inactive.state === 'selected-unavailable'
+      ? `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which your config selects but this run could not activate\n`
+      : `hyp: '${inactive.token}' is provided by ${inactive.plugin}, which is not in the active config\n`
+  )
+  if (inactive.state === 'selected-unavailable') {
+    stderr.write(
+      `  repair: the plugin is configured but unavailable this run; run 'hyp status' for why, then re-run this command\n`
+    )
+  } else if (inactive.state === 'disabled-central') {
+    stderr.write(
+      `  repair: ${inactive.plugin} is disabled by the organization (central) config and cannot be enabled locally; ask your administrator to enable it\n`
+    )
+  } else if (inactive.state === 'disabled-local') {
+    stderr.write(
+      `  repair: set "enabled": true on the {"name": "${inactive.plugin}"} entry in plugins[] in ${displayConfigPath(discovery.configPath, env)}\n`
+    )
+  } else {
+    stderr.write(
+      `  repair: add {"name": "${inactive.plugin}"} to plugins[] in ${displayConfigPath(discovery.configPath, env)}\n`
+    )
+  }
+}
+
+/**
+ * Does `manifest` declare a command whose first word is `token`?
+ *
+ * @param {PluginManifest} manifest
+ * @param {string} token
+ * @returns {boolean}
+ */
+function declaresCommandHead(manifest, token) {
+  for (const cmd of manifest.contributes?.commands ?? []) {
+    if (!cmd || typeof cmd.name !== 'string') continue
+    if (cmd.name.split(' ')[0] === token) return true
+  }
+  return false
 }
 
 /**

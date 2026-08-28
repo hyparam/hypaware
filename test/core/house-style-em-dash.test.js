@@ -56,6 +56,13 @@ function trackedFiles() {
  * covered the day it lands, and a binary (which cannot carry prose) is skipped
  * by looking for a NUL rather than by maintaining a list of suffixes.
  *
+ * That NUL test only means "binary" because `house-style-nul-byte.test.js`
+ * holds the tree to it: tracked text may not carry a NUL, so the only files
+ * this skips are declared binaries. It was not always true. `config/merge.js`
+ * was plain source carrying a raw NUL for the whole life of the file, and this
+ * scan skipped it in silence the entire time. Weaken that gate and this one
+ * quietly loses coverage again, so the two move together.
+ *
  * @returns {string[]}
  */
 function offenders() {

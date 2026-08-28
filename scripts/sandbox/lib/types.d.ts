@@ -52,6 +52,8 @@ export interface SandboxKeychainState {
 export interface SandboxUnit {
   enabled: boolean
   active: boolean
+  /** The supervisor's pid, or null when the mock recorded the start without spawning. */
+  pid: number | null
   changedAt: string
 }
 

@@ -66,6 +66,70 @@ export interface SinkSnapshot {
   nextScheduledAt?: string
 }
 
+/**
+ * Why a maintenance tick deliberately left a partition fragmented instead
+ * of rewriting it (LLP 0228#reason-ids-are-span-attribute-names). The ids
+ * are the `maintenance.partition` span's attribute names verbatim, which
+ * are themselves named after the `MaintenancePartitionReport` fields, so
+ * one spelling covers the trace, the status file, `hyp status`, and the
+ * daemon log.
+ *
+ * - `compaction_ineffective`: this writer already rewrote the partition and
+ *   reproduced the same file count (LLP 0217#record-effectiveness).
+ * - `compaction_attempt_failed`: the one retry the writer generation owed it
+ *   was spent by a rewrite that threw (LLP 0218#report-the-spent-attempt).
+ *
+ * Convergence (LLP 0199#baseline-gate) is not on this list: it is the
+ * healthy majority of a cache, not a partition left fragmented.
+ */
+export type MaintenanceSkipReason = 'compaction_ineffective' | 'compaction_attempt_failed'
+
+/** One partition the last maintenance tick left fragmented, and why. */
+export interface MaintenanceSkippedPartition {
+  dataset: string
+  /** Partition tuple as `k=v/k=v`, or `all` for an unpartitioned dataset. */
+  partition: string
+  reason: MaintenanceSkipReason
+  /**
+   * The data-file count the recorded rewrite ran over, not the live one
+   * (LLP 0217). Set for `compaction_ineffective` when the cursor records it.
+   */
+  dataFiles?: number
+  /**
+   * ISO time the spent attempt failed, as the cursor records it. Set for
+   * `compaction_attempt_failed`.
+   */
+  failedAt?: string
+}
+
+/**
+ * What the daemon's last completed maintenance tick left alone, summarized
+ * for a standing surface (LLP 0228). Overwritten whole by every tick,
+ * including one that skipped nothing: a skip reason is a state the tick
+ * re-derives from the partition cursor, so only the newest tick's answer is
+ * current, and a partition that thaws drops off by itself
+ * (LLP 0228#last-tick-only).
+ *
+ * Absent means no tick has reported (a daemon that has not reached one, or
+ * maintenance disabled), which is not the same as "nothing is frozen".
+ */
+export interface MaintenanceSkipSnapshot {
+  /** ISO time of the tick this snapshot describes. */
+  tickAt: string
+  /** Partitions the tick actually visited (a budget can cut the walk short). */
+  partitionsVisited: number
+  /** Partitions skipped for a stated reason, all reasons summed. */
+  skippedTotal: number
+  /** How many partitions each reason accounts for. Zero keys are kept. */
+  reasons: Record<MaintenanceSkipReason, number>
+  /**
+   * The worst of them by name, in walk order (LLP 0199#neediest-first, so
+   * descending live data-file count), capped at
+   * `MAX_SKIPPED_PARTITIONS_REPORTED`. `skippedTotal` is the true count.
+   */
+  partitions: MaintenanceSkippedPartition[]
+}
+
 export interface DaemonStatus {
   state: DaemonState
   pid: number
@@ -85,6 +149,11 @@ export interface DaemonStatus {
   configPath?: string
   sources: SourceSnapshot[]
   sinks: SinkSnapshot[]
+  /**
+   * What the last completed cache-maintenance tick left fragmented, and why
+   * (LLP 0228#status-file-is-the-surface). Absent until a tick has run.
+   */
+  maintenance?: MaintenanceSkipSnapshot
   warnings?: string[]
 }
 
@@ -98,6 +167,8 @@ export type StatusDiagnosticKind =
   | 'daemon_loaded_no_pid'
   | 'client_attach_missing'
   | 'client_attach_stale'
+  | 'client_telemetry_stale'
+  | 'client_telemetry_env_override'
   | 'client_attached_not_configured'
   | 'gateway_port_fallback'
   | 'gateway_idle_no_upstreams'
@@ -106,6 +177,8 @@ export type StatusDiagnosticKind =
   | 'remote_config_rolled_back'
   | 'local_only_list_unreadable'
   | 'client_sync_list_unreadable'
+  | 'maintenance_partitions_skipped'
+  | 'capture_gap'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -223,8 +296,55 @@ export interface ClientAttachReport {
   version?: string
   /** Local gateway port the adapter routes through, when recorded. */
   port?: string
+  /** Attach mode recorded in the marker (`base_url` / `proxy` / `otel`), when present. */
+  mode?: string
+  /** ISO timestamp the marker records the attach at, when present. */
+  attachedAt?: string
+  /**
+   * Port the marker's managed `OTEL_EXPORTER_OTLP_ENDPOINT` sends telemetry
+   * to, when the marker carries one. Distinct from `port` above (the
+   * gateway's): in `otel` mode this is the only address capture depends on,
+   * and it is what `client_telemetry_stale` compares against the listener's
+   * live bind.
+   */
+  telemetryPort?: number
   /** Probe error string, when the file was unreadable. */
   error?: string
+}
+
+/**
+ * One otel-attached client's capture health: what its own file trail says it
+ * did (`lastTranscriptActivityAt`, the newest activity-probe mtime) held
+ * against what the telemetry path actually captured (`lastEventAt`, from the
+ * listener source's status.json details). `state` is `gap` when activity ran
+ * past the capture baseline by more than the threshold; the paired
+ * `capture_gap` diagnostic carries the severity and repair
+ * (LLP 0257#status-and-health).
+ */
+export interface CaptureHealthReport {
+  /** Client name (`claude`). */
+  client: string
+  /** The plugin that owns the client and its listener source. */
+  plugin: string
+  /** The listener source's snapshot name in status.json, or null when no daemon recorded one. */
+  source: string | null
+  /** Last telemetry event the listener saw, or null when none is recorded. */
+  lastEventAt: string | null
+  /** Newest activity-probe file mtime, or null when the trail is empty or unprobed. */
+  lastTranscriptActivityAt: string | null
+  /** The attach timestamp the marker records, or null when unreadable. */
+  attachedAt: string | null
+  /**
+   * When the live listener started, or null when no daemon is running. The
+   * third baseline the gap is measured from: `lastEventAt` is in-process
+   * state, so a restart republishes it as null however long capture has been
+   * healthy, and without this the gap would be measured from an attach that
+   * can be weeks old.
+   */
+  listenerStartedAt: string | null
+  /** Milliseconds of activity past the capture baseline (0 when none). */
+  gapMs: number
+  state: 'ok' | 'gap'
 }
 
 /** Service-level daemon state surfaced by `hyp status`. */
@@ -261,16 +381,49 @@ export interface ServiceState {
 export interface ProxyTrustReport {
   /** SHA-256 fingerprint of the CA on disk, colon-separated uppercase hex. */
   caFingerprint: string
+  /**
+   * The CA's permitted `dNSName` subtrees: every host this grant lets the CA
+   * vouch for, which is the full provider set and not the subset this install
+   * captures (LLP 0238#full-provider-constraints). Empty only for a
+   * certificate carrying no dNSName constraints at all. Passed through
+   * `displayableCaHosts`, because the bytes come from the certificate on disk
+   * rather than from us (LLP 0225): entries are sanitized, and a list longer
+   * than any real CA's ends in a `(+N more ...)` entry rather than being
+   * silently shortened.
+   */
+  hosts: string[]
   /** `security verify-cert -p ssl` against the CA, or null when it could not run. */
   trusted: boolean | null
   /** `launchctl getenv NODE_USE_SYSTEM_CA` is `1`, or null when it could not run. */
   launchdEnvSet: boolean | null
+  /**
+   * Whether an enabled gateway entry in the effective config still carries
+   * `proxy_mode: true`, or null when the config could not be read at all.
+   * The two probes above cannot tell a CA in live use from residue an old
+   * proxy attach left behind, and the advice differs completely: a
+   * proxy-mode gateway re-mints this CA on every start and terminates TLS
+   * with it, so purging it breaks capture rather than tidying it up. Null is
+   * "cannot tell", which a consumer must not read as "proxy_mode is off".
+   */
+  proxyModeConfigured: boolean | null
 }
 
 export interface HypAwareStatusReport {
   configPath: string
   configExists: boolean
   configValid: boolean
+  /**
+   * Whether anything on this machine records an answer to onboarding's pick
+   * question (LLP 0277 #answer-less), as opposed to a config existing only
+   * because a writer that never asked one created it. True when the local
+   * layer records a pick answer, or when the central layer carries capture of
+   * its own (the fleet having answered on the machine's behalf); the bare
+   * `@hypaware/central` enrollment seed is not such an answer.
+   * `hyp remote add` and the enrolling `hyp remote login` before the first
+   * `hyp init` leave `configExists` true and this false; that pair is what the
+   * returning gate reads (LLP 0281 #returning-gate).
+   */
+  configRecordsAnswer: boolean
   activePlugins: string[]
   /**
    * Two-layer provenance (LLP 0031). Null on a host that never joined (a
@@ -356,6 +509,25 @@ export interface HypAwareStatusReport {
    */
   recentEntrypoints: RecentEntrypoint[]
   /**
+   * What the daemon's last cache-maintenance tick deliberately left
+   * fragmented (LLP 0228). Read from `status.json`, like
+   * `recentEntrypoints`: the daemon runs the hourly walk, and `hyp status`
+   * activates no plugins and reads no cache, so re-deriving this would mean
+   * running a second walk from a status command. Null when no daemon has
+   * reported a tick for this state root.
+   */
+  maintenance: MaintenanceSkipSnapshot | null
+  /**
+   * Capture health for every otel-attached client (LLP 0257#status-and-health,
+   * the RFC 0262 open-question-1 duty): last event seen on the telemetry path
+   * vs the client's own last activity. Empty when no configured client is
+   * otel-attached, so the pre-otel surface is unchanged. Like
+   * `recentEntrypoints` this reads status.json without a liveness gate: a
+   * dead daemon's stale `lastEventAt` is exactly the evidence a capture gap
+   * is made of.
+   */
+  captureHealth: CaptureHealthReport[]
+  /**
    * Proxy-mode trust state (LLP 0237, LLP 0239). Null whenever the question
    * does not apply: a non-darwin host (both mechanisms are macOS-only, LLP
    * 0237#darwin-only), or no local CA on disk (proxy mode was never on). An
@@ -363,6 +535,12 @@ export interface HypAwareStatusReport {
    * "unknown" a user could not act on.
    */
   proxyTrust: ProxyTrustReport | null
+  /**
+   * Kernel self-update health (LLP 0309). `line` is null when there is
+   * nothing worth surfacing on the text renderer; `json` always carries
+   * version, cached auto_update flag, provenance, and the last probe.
+   */
+  selfUpdate: { line: string | null, json: Record<string, unknown> }
 }
 
 export interface CollectStatusOptions {
@@ -566,6 +744,8 @@ export interface DaemonInstallOptions {
   systemctl?: SystemctlAdapter
   /** macOS: override the launchctl user domain (e.g. gui/501). */
   userDomain?: string
+  /** Override the poll delay the installers use while waiting (tests only). */
+  sleep?: (ms: number) => Promise<void>
 }
 
 export interface DaemonUninstallOptions {
@@ -705,4 +885,17 @@ export interface BackfillSweepTickReport {
 
 export interface BackfillSweepDriver {
   tick(opts?: BackfillSweepTickOptions): Promise<BackfillSweepTickReport>
+}
+
+/**
+ * One control request the boot-time clear could not remove
+ * (`clearControlRequests`), handed to `watchControlRequests` as
+ * `staleRequests` so the watcher consumes a matching leftover without
+ * dispatching it.
+ */
+export interface UnclearedRequest {
+  /** The file's bytes when readable, else null (matched conservatively). */
+  content: string | null
+  /** The error that kept the clear from removing the file. */
+  message: string
 }

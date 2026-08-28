@@ -16,6 +16,7 @@ import { checkWriteFormat, newSnapshotId, resolveParquetCodec, stageSnapshotForA
 import { computeColumnStats } from 'icebird/src/write/stats.js'
 
 import { Attr, getLogger } from '../../observability/index.js'
+import { snappyPageCompressors } from '../../util/parquet_snappy.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, tableExists } from './store.js'
 import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
 import { rowsToIcebergRecords } from './schema.js'
@@ -236,6 +237,14 @@ export async function openStreamingAppend({ tableDir, columns, targetFileBytes, 
         writer,
         schema: parquetSchema,
         codec,
+        // Without this the writer falls back to its own JS snappy. A
+        // compaction rewrites every live row of a table, so this is the
+        // largest single producer of parquet bytes in the process, and its
+        // pages are the same shape the sink encoder already compresses
+        // through hysnappy: raw snappy blocks, same shared instance. Not
+        // supplying it here was the gap that left the fast codec on the
+        // export path only.
+        compressors: snappyPageCompressors(),
         kvMetadata: [{ key: 'iceberg.schema', value: JSON.stringify(schema) }],
       }),
       partition,

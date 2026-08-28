@@ -279,6 +279,7 @@ async function claudeProjectorViaActivate(env) {
     skills: { register() {} },
     agents: { register() {} },
     initPresets: { register() {} },
+    query: { registerDataset() {} },
   })
   await activateClaude(ctx)
   assert.ok(projector, 'claude activate() registered an exchange projector')

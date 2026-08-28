@@ -4,9 +4,13 @@ import http from 'node:http'
 import https from 'node:https'
 import tls from 'node:tls'
 
+import { isControlPath } from '../../../../src/core/control/session_ignore.js'
+import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
 import { parseListen } from './config.js'
 import { attachConnectFrontDoor, connectHostOf, connectPortOf, isLoopbackAddress, openUpstream } from './connect.js'
 import { createNullExchange } from './recorder.js'
+
+export { isControlPath }
 
 /**
  * @import { AiGatewayRouteInput } from '../../../../hypaware-plugin-kernel-types.js'
@@ -164,7 +168,34 @@ export function interceptsHost(upstreams, host, port = 443) {
   // The hostname is lower-cased because a client may send any case and
   // `baseUrl.hostname` is already normalised.
   const wanted = host.toLowerCase()
-  return upstreams.some((u) => u.baseUrl.hostname === wanted && upstreamPortOf(u) === port)
+  // An IP-literal authority is never intercepted, however the routing table
+  // reads. The local CA can only mint `dNSName` leaves, which a client that
+  // connected to an IP does not match against, so terminating such a tunnel
+  // ends in a leaf mint that refuses the host - after the `200 Connection
+  // Established` has already gone out, which kills the client's egress rather
+  // than only its capture. `prepareInterception` drops an IP-literal upstream
+  // from the CA host list, but the compiled routing table still carries it (it
+  // is a real upstream in reverse-proxy mode), so the decision has to be made
+  // here as well. This is what makes that skip's promise true: such an upstream
+  // is tunnelled blind and unrecorded, exactly as an unconfigured host is. It
+  // also covers an install upgraded from a build that did mint the IP into its
+  // CA, where the host set alone would still say yes.
+  // @ref LLP 0275#ip-literals-are-refused [implements]: an IP-literal CONNECT is tunnelled, never terminated
+  if (isIpLiteralHost(wanted)) return false
+  // A rewriting upstream is skipped on the same terms `matchUpstreamByHost`
+  // skips it, and the two must agree or the pair inverts. Terminating a
+  // tunnel on an entry routing cannot then resolve answers
+  // `502 no upstream matches connect host` AFTER the
+  // `200 Connection Established` has gone out, which kills that client's
+  // egress to the host rather than only its capture - the precise outcome
+  // the blind-tunnel degrade contract exists to prevent. Where a
+  // non-rewriting entry also names the host (the ordinary case: `openai`
+  // beside `openai-codex`) this changes nothing, because that entry still
+  // matches here.
+  // @ref LLP 0313#the-rewrite-is-declarative-data [constrained-by]: a rewrite claims no host, so it authorises no interception either
+  // @ref LLP 0233#degrade-to-blind-tunnels [constrained-by]: a host we cannot route is tunnelled blind, never terminated and refused
+  return upstreams.some((u) =>
+    !u.rewrite && u.baseUrl.hostname === wanted && upstreamPortOf(u) === port)
 }
 
 /**
@@ -188,8 +219,8 @@ function upstreamPortOf(upstream) {
  * both more accurate and the only way to forward a request whose path no
  * preset claims.
  *
- * Host AND port, matching {@link interceptsHost} exactly. The two have to agree
- * or the port check there is defeated: `interceptsHost` decides *whether* to
+ * Host AND port, on the same key {@link interceptsHost} uses. The two have to
+ * agree on the key or the port check there is defeated: `interceptsHost` decides *whether* to
  * decrypt on the full authority, and this decides *where the decrypted request
  * then goes*. With two upstreams naming the same host on different ports (an
  * ordinary `upstreams` config, even though no shipping preset does it), a
@@ -201,6 +232,28 @@ function upstreamPortOf(upstream) {
  * absolute-form caller has no such guarantee: there a miss is expected, and it
  * means the named host is refused (LLP 0247 #refuse-hosts-nobody-registered).
  *
+ * `interceptsHost` is strictly the narrower predicate, not the identical one:
+ * it additionally refuses an IP-literal authority, which cannot be terminated
+ * (LLP 0275#ip-literals-are-refused). That direction is the one the argument
+ * above needs, and that particular difference must not be copied here - an
+ * IP-literal upstream is still routable and still recorded on the
+ * absolute-form door, where no certificate is involved. Every OTHER filter
+ * this function grows has to be added to `interceptsHost` as well, or the
+ * pair inverts and a terminated tunnel ends in a 502 the client cannot
+ * recover from.
+ *
+ * An upstream declaring a `rewrite` is skipped here, however it sorts, and
+ * `interceptsHost` skips it in step for exactly that reason. Such an entry
+ * exists to translate a foreign inbound prefix into the host's own path
+ * shape, which is a reverse-proxy concern: on these two doors the client
+ * addressed the real host itself and is already speaking its native paths, so
+ * there is nothing to translate. Routing to it would apply a swap nobody asked
+ * for and, worse, hand `shouldRecordProxyExchange` the wrong record anchor,
+ * silently dropping capture for every path the host really serves. The
+ * non-rewriting entry for the same host is the one that owns it; where there
+ * is none, the host is not intercepted at all and its tunnel stays blind.
+ *
+ * @ref LLP 0313#the-rewrite-is-declarative-data [constrained-by]: a rewrite is a reverse-proxy door's rule, not a claim on the host
  * @ref LLP 0234#intercept-set-is-the-routing-table [implements]: the entry that authorised the interception is the entry the request is routed to
  * @param {CompiledUpstream[]} upstreams
  * @param {string} host
@@ -209,7 +262,8 @@ function upstreamPortOf(upstream) {
  */
 export function matchUpstreamByHost(upstreams, host, port = 443) {
   const wanted = host.toLowerCase()
-  return upstreams.find((u) => u.baseUrl.hostname === wanted && upstreamPortOf(u) === port)
+  return upstreams.find((u) =>
+    !u.rewrite && u.baseUrl.hostname === wanted && upstreamPortOf(u) === port)
 }
 
 /**
@@ -414,6 +468,23 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     : isHttps ? 443 : 80
 
   const forwardedHeaders = forwardHeaders(req.headers, upstreamHost)
+  // The door the request arrived at and the wire it leaves on are two
+  // different facts once an upstream declares a rewrite. Only the outbound
+  // path moves; the recorded `path` below stays the inbound one, because a
+  // projector reads it to decide the body shape the CLIENT built, which the
+  // gateway's choice of destination does not change.
+  // @ref LLP 0313#the-row-records-where-the-request-was-sent [implements]: the outbound path is a separate recorded fact, not a replacement for the inbound one
+  const outboundPathname = applyPathRewrite(parsedUrl.pathname, upstream.rewrite)
+  const rewritten = outboundPathname !== parsedUrl.pathname
+  if (rewritten) {
+    // Pathnames only, never `search` and never a header: the credential is
+    // what selected this route and must not be what the log line carries.
+    opts.log?.info?.('aigw.path_rewritten', {
+      upstream: upstream.name,
+      from: parsedUrl.pathname,
+      to: outboundPathname,
+    })
+  }
   const exchange = recording
     ? opts.startExchange({
       upstream: upstream.name,
@@ -423,6 +494,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
       // path shape from all three front doors.
       path: absoluteForm ? parsedUrl.pathname + parsedUrl.search : requestUrl,
       requestHeaders: req.headers,
+      ...(rewritten ? { upstreamPath: outboundPathname + parsedUrl.search } : {}),
     })
     : createNullExchange()
 
@@ -451,7 +523,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     protocol: upstream.baseUrl.protocol,
     hostname: upstream.baseUrl.hostname,
     port: upstreamPort,
-    path: parsedUrl.pathname + parsedUrl.search,
+    path: outboundPathname + parsedUrl.search,
     headers: forwardedHeaders,
     family: 4,
     ...(isHttps && opts.chainedAgent ? { agent: opts.chainedAgent } : {}),
@@ -558,16 +630,80 @@ function buildRouteInput(method, pathname, headers) {
 }
 
 /**
- * Recognize the reserved `/_hypaware/` local control prefix. Uses the same
- * segment-boundary discipline as `pathMatchesPrefix`: `/_hypaware` itself
- * and any `/_hypaware/...` sub-path match, but `/_hypawarefoo` does not, so
- * a look-alike upstream path is never mistaken for a control request.
+ * Apply an upstream's declarative path rewrite to one inbound pathname.
  *
- * @ref LLP 0066#control-path [implements]
+ * A single path-segment prefix swap: a pathname under `from` gets `from`
+ * replaced by `to` and keeps the rest verbatim; anything else is returned
+ * unchanged. The rule is data the gateway applies, not a plugin callback it
+ * forwards the result of, so the whole routing decision stays printable and
+ * is validated once at compile rather than per request.
+ *
+ * @ref LLP 0313#the-rewrite-is-declarative-data [implements]: core owns and applies the swap
  * @param {string} pathname
+ * @param {{ from: string, to: string } | undefined} rewrite
+ * @returns {string}
  */
-export function isControlPath(pathname) {
-  return pathname === '/_hypaware' || pathname.startsWith('/_hypaware/')
+export function applyPathRewrite(pathname, rewrite) {
+  if (!rewrite) return pathname
+  if (!pathMatchesPrefix(pathname, rewrite.from)) return pathname
+  // `rest` is either empty or starts with '/', because `pathMatchesPrefix`
+  // matches on segment boundaries. A `to` of '/' therefore carries the
+  // separator the rest already has, and concatenating would double it.
+  const rest = pathname.slice(rewrite.from.length)
+  if (rewrite.to === '/') return rest.length > 0 ? rest : '/'
+  return rewrite.to + rest
+}
+
+/**
+ * Validate one preset-declared rewrite at compile time. A callback could
+ * return anything (an absolute URL, a `..` escape, a glued-on query
+ * string) and the gateway would forward it verbatim; a data rule can be
+ * checked once, here, and then trusted on the hot path.
+ *
+ * @ref LLP 0313#the-rewrite-is-declarative-data [implements]: the rule is validated at registration
+ * @param {string} name
+ * @param {unknown} rewrite
+ * @param {string | undefined} pathPrefix
+ * @returns {{ from: string, to: string }}
+ */
+function compileRewrite(name, rewrite, pathPrefix) {
+  if (!rewrite || typeof rewrite !== 'object' || Array.isArray(rewrite)) {
+    throw new Error(`ai-gateway: upstream "${name}" has a non-object rewrite`)
+  }
+  const from = /** @type {{ from?: unknown }} */ (rewrite).from
+  const to = /** @type {{ to?: unknown }} */ (rewrite).to
+  for (const [field, value] of [['from', from], ['to', to]]) {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`ai-gateway: upstream "${name}" rewrite.${field} must be a non-empty string`)
+    }
+    if (!value.startsWith('/')) {
+      throw new Error(`ai-gateway: upstream "${name}" rewrite.${field} must start with '/': ${value}`)
+    }
+    if (/[?#]/.test(value) || value.split('/').includes('..')) {
+      throw new Error(`ai-gateway: upstream "${name}" rewrite.${field} is not a plain path prefix: ${value}`)
+    }
+    if (value.length > 1 && value.endsWith('/')) {
+      throw new Error(`ai-gateway: upstream "${name}" rewrite.${field} must not end with '/': ${value}`)
+    }
+  }
+  const fromPath = /** @type {string} */ (from)
+  const toPath = /** @type {string} */ (to)
+  // '/' passes every check above (leading slash, non-empty, no query, and
+  // the trailing-slash rule skips a single character) and then matches every
+  // path while slicing away the leading separator: '/responses' under
+  // { from: '/', to: '/v1' } would leave as '/v1responses'. A `from` is a
+  // prefix to strip, and the whole path is not one.
+  if (fromPath === '/') {
+    throw new Error(`ai-gateway: upstream "${name}" rewrite.from must name a prefix, not '/'`)
+  }
+  // `from` has to be a prefix this upstream actually owns, or the rule
+  // would move paths the upstream was never routed for.
+  if (pathPrefix && !pathMatchesPrefix(fromPath, pathPrefix)) {
+    throw new Error(
+      `ai-gateway: upstream "${name}" rewrite.from '${fromPath}' is outside its path_prefix '${pathPrefix}'`
+    )
+  }
+  return { from: fromPath, to: toPath }
 }
 
 /**
@@ -616,6 +752,7 @@ export function compileUpstreams(upstreams) {
       match: typeof u.match === 'function' ? u.match : undefined,
     }
     if (u.provider) compiled.provider = u.provider
+    if (u.rewrite) compiled.rewrite = compileRewrite(u.name, u.rewrite, u.path_prefix)
     if (u.record_prefix) compiled.recordPrefix = u.record_prefix
     out.push(compiled)
   }

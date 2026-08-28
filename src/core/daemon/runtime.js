@@ -24,6 +24,11 @@ import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
 import {
+  clearControlRequests,
+  watchControlRequests,
+  writeControlRequest,
+} from './control.js'
+import {
   clearPidFile,
   pidFilePath,
   processIsAlive,
@@ -31,10 +36,11 @@ import {
   writePidFile,
 } from './pid.js'
 import { openDaemonLog } from './logs.js'
-import { statusFilePath, writeStatusFile } from './status.js'
+import { statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
+import { runSelfUpdatePass, writeSelfUpdateState } from '../update/self_update.js'
 
 /**
- * @import { AiGatewayCapability, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, ClientRegistry, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
@@ -99,13 +105,16 @@ export const DAEMON_RESTART_EXIT_CODE = 75
  *  5. A 60s (or `tickIntervalMs`) loop drives the sink driver. Each
  *     tick is a `sink.tick` child span; the bundled sink driver opens
  *     its own `sink.export_batch` spans inside.
- *  6. SIGTERM / SIGINT / `handle.stop()` flip the daemon into
- *     `stopping`, stop every source (each one inside a `source.stop`
- *     span), close the daemon log, write `stopped`, and remove the
- *     PID file. `daemon.shutdown` is the explicit child span the
- *     smoke greps for.
- *  7. SIGHUP / `handle.reload()` re-runs config diff: removed sources
- *     stop, new sources start, unchanged sources `reload()`.
+ *  6. SIGTERM / SIGINT / a `stop.request` control file /
+ *     `handle.stop()` flip the daemon into `stopping`, stop every
+ *     source (each one inside a `source.stop` span), close the daemon
+ *     log, write `stopped`, and remove the PID file. `daemon.shutdown`
+ *     is the explicit child span the smoke greps for.
+ *  7. SIGHUP / a `reload.request` control file / `handle.reload()`
+ *     re-runs config diff: removed sources stop, new sources start,
+ *     unchanged sources `reload()`. The control files (LLP 0300) are
+ *     the win32 transport for both verbs; on POSIX signals remain
+ *     primary and the file channel is a second door.
  *
  * The smoke harness opts out of signal handlers via
  * `installSignalHandlers: false` so multiple smoke runs can share
@@ -146,7 +155,7 @@ export async function runDaemon(opts = {}) {
   const sinkSnapshots = new Map()
   /** @type {NodeJS.Timeout | null} */
   let tickHandle = null
-  /** @type {((reason: 'signal'|'manual'|'restart') => Promise<number>) | null} */
+  /** @type {((reason: 'signal'|'manual'|'restart'|'control') => Promise<number>) | null} */
   let triggerShutdown = null
   let shutdownInFlight = false
   /** @type {((value: number) => void) | null} */
@@ -155,6 +164,8 @@ export async function runDaemon(opts = {}) {
   const done = new Promise((resolve) => { resolveDone = resolve })
   /** @type {(() => Promise<void>) | null} */
   let triggerReload = null
+  /** @type {{ close(): void } | null} */
+  let controlWatcher = null
   // Forward reference to the client-action reconcile scheduler. It can only
   // be built after `boot` resolves (it needs the effective config + the
   // kernel backfill registry), but the confirmation-edge hook below is wired
@@ -164,6 +175,21 @@ export async function runDaemon(opts = {}) {
   /** @type {((reason: string) => void) | null} */
   let scheduleReconcile = null
   let healthyAtMs = 0
+
+  // Stale control requests are consumed before the PID file goes down: a
+  // `stop.request` that survived a crash or a hard kill is an instruction to
+  // a daemon that no longer exists, and must not stop this boot on sight.
+  // Best-effort per file, and it cannot block the boot. A leftover the clear
+  // could not remove (win32 EPERM/EBUSY from a dying writer, a directory
+  // squatting on the name) is handed to the watcher below as stale: if the
+  // failure was transient the watcher will be able to consume the file
+  // later, and without the handoff it would mistake that leftover for a
+  // live request and stop the freshly booted daemon.
+  // @ref LLP 0300#boot-clears-stale [implements]: leftovers are cleared, or recorded so they can never dispatch
+  const staleControlRequests = clearControlRequests(stateRoot)
+  for (const [request, info] of Object.entries(staleControlRequests)) {
+    fileLog.warn('daemon.control_clear_failed', { request, message: info.message })
+  }
 
   // PID file is written before any plugin activation: that way a
   // crash during `bootKernel` still leaves something `daemon stop`
@@ -301,6 +327,32 @@ export async function runDaemon(opts = {}) {
     buildConfigApplyDeps({ stateRoot, configRegistry: boot.runtime.configRegistry })
   )
   configControl.armProbationWatchdog()
+
+  // ----- Kernel self-update (LLP 0309) -----
+  // Cache the effective auto_update flag so the import-light pre-boot
+  // lane (bin/hypaware.js) can honor the off switch without parsing
+  // config layers.
+  // @ref LLP 0309#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
+  let autoUpdateEnabled = true
+  /**
+   * Re-derive the effective flag and re-cache it. Called at boot and
+   * again after every reload: SIGHUP re-merges both config layers, and a
+   * flag captured once at boot would leave the daily lane running (and
+   * the cache advertising `true` to the pre-boot lane) after an operator
+   * turned auto-update off and reloaded.
+   */
+  function refreshAutoUpdateFlag() {
+    autoUpdateEnabled = boot.config?.auto_update !== false
+    try {
+      writeSelfUpdateState(stateRoot, { auto_update: autoUpdateEnabled })
+    } catch (err) {
+      fileLog.warn('self_update.flag_cache_failed', {
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+  refreshAutoUpdateFlag()
+  let selfUpdateInFlight = false
 
   // ----- Client-action reconciler (LLP 0036 / LLP 0037 / LLP 0041 / LLP 0045) -----
   // The daemon is the only host with `configControl`, so a reconciler
@@ -653,6 +705,34 @@ export async function runDaemon(opts = {}) {
     status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
     await refreshSourceDetails()
     persist()
+
+    // The daily self-update check rides this tick rather than owning a
+    // timer (same shape as the backfill sweep above). The pass itself
+    // is TTL-gated and provenance-guarded, so this is a cheap state
+    // read on almost every tick. An applied update exits through the
+    // staged-restart path: the service manager relaunches onto the new
+    // code.
+    // @ref LLP 0309#cadence [implements]: boot + daily with jitter, applied via the staged restart
+    if (autoUpdateEnabled && !selfUpdateInFlight) {
+      selfUpdateInFlight = true
+      void runSelfUpdatePass({
+        stateRoot,
+        env,
+        autoUpdate: autoUpdateEnabled,
+        log: (event, fields) => fileLog.info(event, fields ?? {}),
+      }).then((result) => {
+        if (result.action === 'updated' && triggerShutdown) {
+          void triggerShutdown('restart')
+        }
+      }).catch((err) => {
+        // `runSelfUpdatePass` never throws, but the restart handler above
+        // can, and an unhandled rejection is a dead daemon under Node's
+        // default `--unhandled-rejections=throw`.
+        fileLog.error('self_update.tick_failed', {
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }).finally(() => { selfUpdateInFlight = false })
+    }
   }
 
   if (tickIntervalMs > 0) {
@@ -702,7 +782,63 @@ export async function runDaemon(opts = {}) {
             // their uuid twin.
             storage: boot.runtime.storage,
             getSettleHook: (dataset) => boot.runtime.query.getDataset(dataset)?.resettleBatch,
+            // @ref LLP 0311#migration: let the tick detect and run the
+            // one-time re-partition when a dataset's declaration demoted
+            // partition columns to sortOnly.
+            getDeclaration: (dataset) => boot.runtime.query.getDataset(dataset)?.cachePartitioning,
           })
+          // @ref LLP 0228#status-file-is-the-surface [implements]: the tick
+          // stops discarding the report. A partition this walk deliberately
+          // left fragmented was, until now, a span attribute and nothing
+          // else, so an operator who did not have tracing on when the tick
+          // ran had no way to find it at all.
+          // @ref LLP 0311#migration [implements]: the swap rewrites the
+          // user's live cache under a layout it has never held before, and
+          // it happens once per partition, ever. `repartitioned` is set on
+          // the span, but a tracer nobody was running when the tick fired
+          // records nothing, so the migration also gets a durable line: it
+          // is the only evidence afterwards that the layout moved, and when.
+          for (const p of report.partitions) {
+            if (!p.repartitioned) continue
+            fileLog.info('daemon.cache_repartitioned', {
+              [Attr.DATASET]: p.dataset,
+              partition: JSON.stringify(p.partition),
+              data_files_before: p.dataFilesBefore,
+              data_files_after: p.dataFilesAfter,
+              row_count: p.rowCount,
+            })
+          }
+          // The same argument, for the case where the layout did NOT move.
+          // A deferred migration is the state that most needs durable
+          // evidence: the mismatch stands, and without a line here the only
+          // record is a span attribute nobody was collecting.
+          for (const p of report.partitions) {
+            if (!p.repartitionDeferred) continue
+            fileLog.warn('daemon.cache_repartition_deferred', {
+              [Attr.DATASET]: p.dataset,
+              partition: JSON.stringify(p.partition),
+              data_files: p.dataFilesAfter,
+            })
+          }
+          const skips = summarizeMaintenanceSkips(report)
+          persist({ maintenance: skips })
+          span.setAttribute('partitions_visited', skips.partitionsVisited)
+          span.setAttribute('partitions_skipped', skips.skippedTotal)
+          if (skips.skippedTotal > 0) {
+            // The log line is the record and the status file is the
+            // discovery (LLP 0228#status-file-is-the-surface). One line per
+            // tick, not one per partition: the counts are the fact, and the
+            // status file already names the worst of them.
+            fileLog.warn('daemon.maintenance_skipped', {
+              partitions_visited: skips.partitionsVisited,
+              partitions_skipped: skips.skippedTotal,
+              compaction_ineffective: skips.reasons.compaction_ineffective,
+              compaction_attempt_failed: skips.reasons.compaction_attempt_failed,
+              worst: skips.partitions[0]
+                ? `${skips.partitions[0].dataset}/${skips.partitions[0].partition}`
+                : null,
+            })
+          }
           // @ref LLP 0220#tick-reports-degraded [implements]: the walk now
           // survives a partition that throws, so the rejected promise has
           // stopped being how the daemon hears about one. Read the failures
@@ -757,10 +893,18 @@ export async function runDaemon(opts = {}) {
   }
 
   // ----- Shutdown -----
-  /** @param {'signal'|'manual'|'restart'} reason */
+  /** @param {'signal'|'manual'|'restart'|'control'} reason */
   async function shutdown(reason) {
     if (shutdownInFlight) return done
     shutdownInFlight = true
+    // Close the control watcher first: reconcile settle below can hold
+    // shutdown open for minutes, and a reload.request landing in that window
+    // must not dispatch reload() into sources that are being stopped (or log
+    // through a fileLog that is closed further down). The request that
+    // triggered this shutdown was already consumed before dispatch, and any
+    // file written from here on is cleared by the next boot.
+    controlWatcher?.close()
+    controlWatcher = null
     configControl.disarmProbationWatchdog()
     if (tickHandle) {
       clearInterval(tickHandle)
@@ -866,6 +1010,7 @@ export async function runDaemon(opts = {}) {
         }
         const freshConfig = resolved.effective ?? boot.config ?? null
         boot.config = freshConfig
+        refreshAutoUpdateFlag()
         for (const drop of resolved.drops) {
           fileLog.warn('config.local_entry_dropped', {
             [Attr.COMPONENT]: 'config',
@@ -904,10 +1049,22 @@ export async function runDaemon(opts = {}) {
   }
   triggerReload = reload
 
+  // reload() rethrows through withSpan and has no top-level catch, so a bare
+  // `void reload()` from a signal handler or the control watcher would turn
+  // a failed reload (an unreadable config layer, a throwing source) into an
+  // uncaught rejection that kills the daemon.
+  const reloadSafely = () => {
+    reload().catch((err) => {
+      fileLog.error('daemon.reload_failed', {
+        message: err instanceof Error ? err.message : String(err),
+      })
+    })
+  }
+
   // ----- Signal wiring -----
   const sigTermHandler = () => { void shutdown('signal') }
   const sigIntHandler = () => { void shutdown('signal') }
-  const sigHupHandler = () => { void reload() }
+  const sigHupHandler = () => { reloadSafely() }
 
   function removeSignalHandlers() {
     if (!installSignals) return
@@ -920,6 +1077,36 @@ export async function runDaemon(opts = {}) {
     process.on('SIGTERM', sigTermHandler)
     process.on('SIGINT', sigIntHandler)
     process.on('SIGHUP', sigHupHandler)
+  }
+
+  // ----- Control-file channel (LLP 0300) -----
+  // Installed on every platform: it is the only stop/reload transport on
+  // win32 (a cross-process SIGTERM there is TerminateProcess, skipping this
+  // whole shutdown path) and a harmless second door on POSIX. Dispatches
+  // into the same shutdown/reload the signal handlers call.
+  // @ref LLP 0300#file-channel [implements]: the watcher is the signal handlers' transport-agnostic twin
+  // Best-effort like the boot-time clear above: a squatting file or a
+  // foreign-owned directory at run/control must not take down a daemon whose
+  // sources are already running and whose PID file is on disk. Signals still
+  // stop it everywhere but win32.
+  try {
+    // TODO(win32): the watcher installs at the tail of runDaemon, after
+    // bootKernel and every source start, so a stop request written during
+    // that window times out even though it is honored moments later, and a
+    // boot that hangs has no win32 stop path at all. When the Windows
+    // service installer lands, arm the handlers next to writePidFile with
+    // the same forward-reference/park pattern triggerShutdown already uses.
+    controlWatcher = watchControlRequests(stateRoot, {
+      onStop: () => { void shutdown('control') },
+      onReload: () => { reloadSafely() },
+      log: fileLog,
+      staleRequests: staleControlRequests,
+      bootedAtMs: startedAtMs,
+    })
+  } catch (err) {
+    fileLog.warn('daemon.control_watch_install_failed', {
+      message: err instanceof Error ? err.message : String(err),
+    })
   }
 
   if (pendingRestart) {
@@ -1024,28 +1211,29 @@ export function createReconcilePassScheduler({ run, log }) {
  * listen failed), the daemon must **not** fall back to the configured-`listen`
  * URL: auto-attach is involuntary, and recording a base URL for a port nothing
  * bound would point clients at a dead endpoint. Instead `endpoint` stays
- * undefined and the attach handler's `perform()` guard keeps it inert this pass
- * (attaching once the gateway is proven-bound on a later boot). Manual
+ * undefined and the attach handler's `perform()` guard keeps gateway-backed
+ * clients inert this pass (attaching once the gateway is proven-bound on a
+ * later boot). Endpoint-free clients can still attach. Manual
  * `hyp attach`/`init` keep the configured-`listen` fallback: there the user
  * asked explicitly (`core_commands.js`).
  *
  * @param {{ boot: BootKernelResult, fileLog: ReturnType<typeof openDaemonLog> }} args
- * @returns {{ clientDescriptors: Map<string, ClientDescriptor>, clients: AiGatewayCapability | undefined, endpoint: string | undefined }}
- * @ref LLP 0045#part-1-the-client-seam-in-the-reconcile-context [implements]: clientDescriptors from the catalog; clients/endpoint from boot.runtime.capabilities, guarded on the gateway capability; daemon endpoint requires a proven-bound localEndpoint() (no configured-listen fallback; that's the manual path's)
+ * @returns {{ clientDescriptors: Map<string, ClientDescriptor>, clients: ClientRegistry | undefined, endpoint: string | undefined }}
+ * @ref LLP 0045#part-1-the-client-seam-in-the-reconcile-context [implements]: clientDescriptors and the intrinsic client registry always reach reconciliation; only gateway-backed attaches require the separately proven live endpoint
  */
 function resolveClientActionSeam({ boot, fileLog }) {
   const clientDescriptors = boot.clientDescriptors
-  /** @type {AiGatewayCapability | undefined} */
-  let clients
+  let clients = boot.runtime.clients
   /** @type {string | undefined} */
   let endpoint
 
   if (boot.runtime.capabilities.has('hypaware.ai-gateway', '^2.0.0')) {
-    clients = /** @type {AiGatewayCapability} */ (
+    const gateway = /** @type {AiGatewayCapability} */ (
       boot.runtime.capabilities.require('hyp-core', 'hypaware.ai-gateway', '^2.0.0')
     )
+    clients ??= gateway
     try {
-      endpoint = clients.localEndpoint()
+      endpoint = gateway.localEndpoint()
     } catch {
       // The gateway never bound (e.g. its listen failed). Unlike manual
       // `hyp attach`, the daemon does NOT fall back to the configured-`listen`
@@ -1247,29 +1435,45 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
 }
 
 /**
- * `hyp daemon stop` helper. Reads the PID file, signals the running
- * daemon with SIGTERM, and waits (up to `timeoutMs`) for the
- * process to clear the PID file. Returns the resulting state for
- * the command body to render.
+ * `hyp daemon stop` helper. Reads the PID file, requests an orderly stop,
+ * and waits (up to `timeoutMs`) for the process to clear the PID file.
+ * Returns the resulting state for the command body to render.
  *
- * @param {{ stateRoot: string, timeoutMs?: number, pollIntervalMs?: number }} args
+ * The request transport is per-platform: POSIX sends SIGTERM (the proven
+ * path, and what the service managers speak regardless); win32 writes a
+ * `stop.request` control file instead, because a cross-process SIGTERM
+ * there is `TerminateProcess` - a hard kill that skips the shutdown path,
+ * leaves the PID file stale, and drops unflushed log lines.
+ *
+ * @ref LLP 0300#posix-keeps-signals [implements]: only win32 routes through the file channel
+ * @param {{ stateRoot: string, timeoutMs?: number, pollIntervalMs?: number, platform?: NodeJS.Platform, log?: { warn(event: string, fields?: Record<string, unknown>): void } }} args
  * @returns {Promise<'stopped'|'not_running'|'timed_out'>}
  */
-export async function requestDaemonStop({ stateRoot, timeoutMs = 5_000, pollIntervalMs = 50 }) {
+export async function requestDaemonStop({
+  stateRoot,
+  timeoutMs = 5_000,
+  pollIntervalMs = 50,
+  platform = process.platform,
+  log,
+}) {
   const entry = readPidFile(stateRoot)
   if (!entry || !processIsAlive(entry.pid)) {
     if (entry) clearPidFile(stateRoot)
     return 'not_running'
   }
-  try {
-    process.kill(entry.pid, 'SIGTERM')
-  } catch (err) {
-    const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
-    if (code === 'ESRCH') {
-      clearPidFile(stateRoot)
-      return 'not_running'
+  if (platform === 'win32') {
+    writeControlRequest(stateRoot, 'stop', log)
+  } else {
+    try {
+      process.kill(entry.pid, 'SIGTERM')
+    } catch (err) {
+      const code = err && /** @type {NodeJS.ErrnoException} */ (err).code
+      if (code === 'ESRCH') {
+        clearPidFile(stateRoot)
+        return 'not_running'
+      }
+      throw err
     }
-    throw err
   }
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {

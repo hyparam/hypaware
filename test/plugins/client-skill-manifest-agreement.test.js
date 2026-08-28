@@ -55,6 +55,8 @@ async function registeredSkills(client) {
     agents: { register: noop },
     commands: { register: noop },
     backfills: { register: noop },
+    sources: { register: noop },
+    query: { registerDataset: noop },
     configRegistry: { registerSection: noop },
     initPresets: { register: noop },
     paths: { stateDir: '/tmp/hyp-test-state' },
@@ -66,7 +68,7 @@ async function registeredSkills(client) {
     requireCapability: () => anything,
     provideCapability: noop,
   })
-  const { activate } = await import(path.join(workspace, client, 'src/index.js'))
+  const { activate } = await import(url.pathToFileURL(path.join(workspace, client, 'src/index.js')).href)
   await activate(ctx)
   return skills
 }

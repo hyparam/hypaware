@@ -513,6 +513,56 @@ test('retention uses dataset primaryTimestampColumn for source tables', async ()
   }
 })
 
+test('retention expires rows in a data file written before the timestamp column existed', async () => {
+  // Regression for the hyparquet 1.29 projection rule. The candidate list
+  // (`primaryTimestampColumn` then the fallbacks) is narrowed to the TABLE
+  // schema, which is the union of every generation, so a file written before
+  // `event_time` was added is narrower still. hyparquet used to drop the
+  // absent name and let `extractTimestampMs` fall through to `created_at`;
+  // 1.29 throws, and `scanFileForExpiredRows`'s catch reads that as an
+  // unreadable file, so retention silently stopped expiring the older file
+  // and its rows stayed cached forever.
+  const cacheRoot = await makeTmpDir('retention-drifted-ts')
+  try {
+    /** @type {CachePartitioningDeclaration} */
+    const declaration = {
+      source: { columns: ['source'], fallback: 'unknown' },
+      iceberg: { fields: [{ column: 'day', transform: 'identity', required: true }] },
+    }
+    /** @type {ColumnSpec[]} */
+    const v1 = [
+      { name: 'id', type: 'INT32', nullable: false },
+      { name: 'day', type: 'STRING', nullable: false },
+      { name: 'created_at', type: 'STRING', nullable: true },
+    ]
+    /** @type {ColumnSpec[]} */
+    const v2 = [...v1, { name: 'event_time', type: 'STRING', nullable: true }]
+
+    await appendRowsToSourceTable(cacheRoot, 'event_ds', ['source=test'], v1, [
+      { id: 1, day: '2026-04-01', created_at: '2026-04-01T00:00:00.000Z' },
+    ], { declaration })
+    await appendRowsToSourceTable(cacheRoot, 'event_ds', ['source=test'], v2, [
+      { id: 2, day: '2026-04-01', created_at: '2026-04-01T00:00:00.000Z', event_time: '2026-04-01T00:00:00.000Z' },
+    ], { declaration })
+
+    const enforcer = createRetentionEnforcer({
+      cacheRoot,
+      config: { default_days: 30 },
+      getDataset: (dataset) => dataset === 'event_ds'
+        ? { primaryTimestampColumn: 'event_time', fallbackTimestampColumns: ['created_at'] }
+        : undefined,
+    })
+
+    const result = await enforcer.tick({ now: new Date('2026-05-28T00:00:00.000Z') })
+    assert.equal(result.sourceTableResults[0].rowsDeleted, 2, 'the narrow file expires too')
+
+    const sourceDir = path.join(cacheRoot, 'datasets', 'event_ds', 'source=test')
+    assert.deepEqual(await readRowsFromTable(path.join(sourceDir, 'table')), [])
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
 test('retention evicts source table by mtime when no timestamp column is resolvable', async () => {
   const cacheRoot = await makeTmpDir('retention-mtime-fallback')
   try {
@@ -864,6 +914,59 @@ async function commitForeignReplace(tableDir) {
   const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
   await icebergRewrite({ catalog, tableUrl: tableUrlForDir(tableDir), targetFileRows: 100_000 })
 }
+
+/**
+ * The id of a table's current snapshot.
+ *
+ * @param {string} tableDir
+ * @returns {Promise<string>}
+ */
+async function currentSnapshotId(tableDir) {
+  const { resolver, lister } = await createLocalIcebergIO()
+  const { metadata } = await loadLatestFileCatalogMetadata({
+    tableUrl: tableUrlForDir(tableDir), resolver, lister,
+  })
+  return String(metadata['current-snapshot-id'])
+}
+
+// A `replace` the kernel's own in-place compactor committed is not foreign.
+// Before LLP 0311 no cache table declared a sort order, so "replace +
+// declared sort order" could only be the server's compactor; the cache table
+// declares one now, and LLP 0310's in-place merge commits `replace` on it.
+// The cursor's recorded snapshot id is what still tells them apart.
+test('a replace this kernel committed in place is not recognized as foreign', async () => {
+  const cacheRoot = await makeTmpDir('maint-own-replace')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ds1', 'date=2026-08-08')
+    const epoch0 = path.join(partDir, 'epoch=0')
+    for (let i = 0; i < 3; i++) {
+      await appendRowsToTable(epoch0, COLUMNS, [
+        { id: i, value: `v${i}`, timestamp: new Date().toISOString() },
+      ], { sortOrder: [{ column: 'id', direction: 'asc' }] })
+    }
+    await commitForeignReplace(epoch0)
+    // Same on-disk shape as the foreign case above; the only difference is
+    // that the cursor claims this snapshot as ours.
+    await writeCursor(partDir, {
+      epoch: 0,
+      rowCount: 3,
+      layout: 'epoch',
+      compaction: {
+        compactedAt: '2026-08-08T00:00:00.000Z',
+        resettleBaselineFiles: 99,
+        inPlaceSnapshotId: await currentSnapshotId(epoch0),
+      },
+    })
+
+    const report = await maintainCache({ cacheRoot, compactOnly: true })
+    assert.equal(report.totalRebaselined, 0, 'our own replace must not be blessed as a foreign layout')
+    assert.equal(report.totalCompacted, 1, 'the partition gets the rewrite it is due')
+    assert.equal(readCursorSync(partDir).epoch, 1)
+    assert.equal((await readRowsFromTable(path.join(partDir, 'epoch=1'))).length, 3, 'lossless')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
 
 test('a foreign sorted replace re-baselines the cursor instead of being rewritten', async () => {
   const cacheRoot = await makeTmpDir('maint-foreign-replace')

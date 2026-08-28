@@ -26,7 +26,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 /**
- * @import { SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ScannableDataSource, SinkContinuation } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration, ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
  * @import { AsyncDataSource } from 'squirreling'
@@ -232,6 +232,17 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       }
     },
 
+    // Exact lookup sibling for plugin hot paths. Keeping this separate from
+    // the incremental read options prevents a pruning hint from being
+    // confused with a predicate whose result callers rely on.
+    async *readRowsWhere(tablePath, columns, whereIn) {
+      const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, { whereIn })) {
+        for (const f of INTERNAL_FIELDS) delete row[f]
+        yield row
+      }
+    },
+
     // @ref LLP 0040#storage-api-extension [implements]: cursor-aware sibling
     // for sinks that advance a per-(sink, partition) watermark. `_hyp_ingest_seq`
     // is an INTERNAL_FIELD stripped from the row, so a sink reading `readRows`
@@ -370,7 +381,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const source = await dataSourceForTable(resolveIcebergDir(tablePath))
       if (!source) return null
       const publicColumns = source.columns.filter((c) => !INTERNAL_FIELDS.includes(c))
-      /** @type {AsyncDataSource} */
+      /** @type {ScannableDataSource} */
       const wrapped = {
         numRows: source.numRows,
         columns: publicColumns,
@@ -401,6 +412,18 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // request one here.
       if (typeof source.scanColumn === 'function') {
         wrapped.scanColumn = (options) => /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)(options)
+      }
+      // Icebird's prepared scan is safe to expose after applying the same
+      // internal-field projection to its logical schema. Squirreling plans
+      // requests from this schema, so no prepared demand can name an internal
+      // field and the inner source returns only the requested public fields.
+      // @ref LLP 0294#transparent-wrappers [implements]: storage preserves native batches without advertising internal cache fields
+      if (source.schema && source.prepareScan) {
+        const prepareScan = source.prepareScan
+        wrapped.schema = {
+          fields: source.schema.fields.filter((field) => !INTERNAL_FIELDS.includes(field.name)),
+        }
+        wrapped.prepareScan = (request) => prepareScan.call(source, request)
       }
       return wrapped
     },

@@ -46,7 +46,7 @@ export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId,
   if (!stateRoot) throw new Error('createPluginPaths: stateRoot is required')
   if (!runId) throw new Error('createPluginPaths: runId is required')
 
-  const stateDir = path.join(stateRoot, 'plugins', pluginName)
+  const stateDir = pluginStateDir(stateRoot, pluginName)
   const cacheDir = path.join(stateRoot, 'cache', 'plugins', pluginName)
   const tempBase = tmpRoot ?? os.tmpdir()
   const tempDir = path.join(tempBase, `${sanitizeTempSegment(pluginName)}-${runId}`)
@@ -58,6 +58,28 @@ export async function createPluginPaths({ pluginName, rootDir, stateRoot, runId,
   ])
 
   return { rootDir, stateDir, cacheDir, tempDir }
+}
+
+/**
+ * The durable per-plugin state directory, `<stateRoot>/plugins/<name>`, without
+ * creating it.
+ *
+ * `createPluginPaths` is the activation-time path: it mkdirs all four dirs and
+ * hands the bag to the plugin. The kernel sometimes needs to *read* a plugin's
+ * durable state outside activation (the `hyp sync` consent preview reads a sink
+ * instance's watermarks to say how much is queued), and creating directories as
+ * a side effect of a read is the wrong shape for a `--dry-run`. Same join, one
+ * source of truth, no mkdir.
+ *
+ * @ref LLP 0004#state-directories [constrained-by]: the kernel owns the layout, so a kernel-side reader derives the path here instead of re-guessing it
+ * @param {string} stateRoot Kernel state root (e.g. `<HYP_HOME>/hypaware`).
+ * @param {string} pluginName Manifest `name`.
+ * @returns {string}
+ */
+export function pluginStateDir(stateRoot, pluginName) {
+  if (!stateRoot) throw new Error('pluginStateDir: stateRoot is required')
+  if (!pluginName) throw new Error('pluginStateDir: pluginName is required')
+  return path.join(stateRoot, 'plugins', pluginName)
 }
 
 /**

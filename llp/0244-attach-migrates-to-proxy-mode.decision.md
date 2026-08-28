@@ -6,7 +6,11 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-17
 **Related:** LLP 0031, LLP 0174, LLP 0181, LLP 0232, LLP 0233, LLP 0242,
-LLP 0243
+LLP 0243, LLP 0251
+**Extended-by:** LLP 0262 (accepted 2026-08-17; the migration machinery
+here is retargeted, not reverted: `hyp attach claude` migrates a proxy-mode
+install to the OTEL mode, unwinding the launchd environment and offering
+`detach --purge` for the CA trust)
 
 > When `hyp attach claude` runs against an effective config whose gateway
 > block lacks `proxy_mode: true`, and the client's row declares proxy attach,

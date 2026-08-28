@@ -165,6 +165,7 @@ function makeForwardSink({ storage, watermarks, responder, query }) {
     query: query ?? /** @type {any} */ ({ getDataset: () => ({ sourceSignal: SIGNAL }) }),
     storage,
     watermarks,
+    rollouts: /** @type {any} */ ({ async read() { return null }, async write() { throw new Error('unused') } }),
     log: /** @type {any} */ (noopLog()),
     fetchFn,
     sleepFn: async () => {},

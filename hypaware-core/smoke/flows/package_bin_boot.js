@@ -16,7 +16,7 @@ import {
  * finish-v1.md §Phase 1:
  *
  * - `node ./bin/hypaware.js --help` exits 0 (no-arg help via flag).
- * - `node ./bin/hypaware.js smoke core_boot_noop` still passes (the
+ * - `node ./bin/hypaware.js dev smoke core_boot_noop` still passes (the
  *   internal developer path is preserved through the dispatcher).
  * - `npm pack --dry-run --json` ships the bundled assets the package
  *   needs at install time: `bin/hypaware.js`, `src/core/**`, plugin
@@ -72,37 +72,40 @@ export async function run({ harness, expect }) {
         helpResult.stdout,
         (v) => typeof v === 'string' && v.includes('usage: hyp <command> [args...]')
       )
-      // Match the rendered command rows, not the whole blob: `daemon` and
-      // `status` both also appear in incidental prose (the epilogue and the
-      // `query`/`join` row summaries), so a plain substring check would stay
-      // green even if the command table itself lost every daemon*/status
-      // row. `renderHelp` writes each row as a two-space indent, the name,
-      // then two-or-more spaces (src/core/cli/dispatch.js), so that shape
-      // uniquely identifies a row.
+      // Journey commands render as rows; direct operations render in one
+      // compact Additional commands list. Assert both shapes so either half
+      // disappearing fails the packaged-binary gate.
       const helpRows = String(helpResult.stdout ?? '')
         .split('\n')
         .flatMap((line) => {
           const m = /^ {2}(\S+) {2,}\S/.exec(line)
           return m ? [m[1]] : []
         })
+      const additional = String(helpResult.stdout ?? '')
+        .split('Additional commands:\n')[1]
+        ?.split('\n')[0]
+        ?.trim()
+        .split(',')
+        .map((name) => name.trim()) ?? []
       expect.that(
-        `hypaware --help lists the core command rows (got rows=${helpRows.join(',') || '<none>'})`,
-        helpRows,
-        (v) => v.includes('daemon') && v.includes('status') && v.length >= 10
+        `hypaware --help lists journey rows and compact operations (rows=${helpRows.join(',') || '<none>'}; additional=${additional.join(',') || '<none>'})`,
+        { helpRows, additional },
+        (v) => v.helpRows.includes('status') && v.helpRows.includes('setup') &&
+          v.additional.includes('daemon') && v.additional.includes('dev')
       )
 
       const smokeResult = spawnSync(
         process.execPath,
-        [binPath, 'smoke', 'core_boot_noop'],
+        [binPath, 'dev', 'smoke', 'core_boot_noop'],
         { cwd: repoRoot, encoding: 'utf8', env: { ...process.env } }
       )
       expect.that(
-        `hypaware smoke core_boot_noop exits 0 (got status=${smokeResult.status}, stderr=${truncate(smokeResult.stderr)})`,
+        `hypaware dev smoke core_boot_noop exits 0 (got status=${smokeResult.status}, stderr=${truncate(smokeResult.stderr)})`,
         smokeResult.status,
         (v) => v === 0
       )
       expect.that(
-        'hypaware smoke core_boot_noop reports ok',
+        'hypaware dev smoke core_boot_noop reports ok',
         smokeResult.stdout,
         (v) => typeof v === 'string' && v.includes('smoke core_boot_noop: ok')
       )

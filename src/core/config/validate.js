@@ -641,7 +641,6 @@ function firstPartyClientDescriptors() {
         settings_file: '.claude/settings.json',
         marker_key: '_hypaware',
       },
-      requiredUpstreams: ['anthropic'],
     }],
     ['codex', {
       plugin: /** @type {PluginName} */ ('@hypaware/codex'),
@@ -713,8 +712,8 @@ export function diagnoseV1Config(config, ctx = {}) {
           `client plugin '${pluginName}' is enabled but '${AI_GATEWAY_PLUGIN}' is not - ` +
           `attach commands will fail until the gateway is enabled.`,
         repair: [
-          `hyp init --from-file <config.json>  # re-run picker to add the gateway`,
-          `hyp attach --client ${clientName}`,
+          `hyp setup --from-file <config.json>  # re-run picker to add the gateway`,
+          `hyp client attach ${clientName}`,
         ],
       })
     }
@@ -734,8 +733,8 @@ export function diagnoseV1Config(config, ctx = {}) {
             `'${pluginName}' is enabled but the gateway has no ${upstreamList} upstream - ` +
             `${clientName} requests will have nowhere to forward.`,
           repair: [
-            `hyp init --from-file <config.json>  # re-run picker to add the upstream`,
-            `hyp attach --client ${clientName}`,
+            `hyp setup --from-file <config.json>  # re-run picker to add the upstream`,
+            `hyp client attach ${clientName}`,
           ],
         })
       }
@@ -759,7 +758,7 @@ export function diagnoseV1Config(config, ctx = {}) {
           `sink '${name}' targets '${destination}' but no encoder plugin ` +
           `(${[...encoderPlugins].join(' or ')}) is enabled - local export will produce no files.`,
         repair: [
-          `hyp init --from-file <config.json>  # re-run picker and pick "local Parquet export"`,
+          `hyp setup --from-file <config.json>  # re-run picker and pick "local Parquet export"`,
         ],
       })
     }

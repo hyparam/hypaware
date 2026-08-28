@@ -1,10 +1,13 @@
 // @ts-check
 
+import os from 'node:os'
 import path from 'node:path'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv } from '../cli/verb_codec.js'
 import process from 'node:process'
 
 import { readObservabilityEnv } from '../observability/env.js'
+import { sanitizeLabel } from '../util/json_util.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -36,7 +39,8 @@ export async function runDaemonRun(argv, ctx) {
     return 2
   }
   const { runDaemon } = await import('../daemon/runtime.js')
-  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || '', '.hyp')
+  // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would put the daemon's state root at ./.hyp)
+  const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   try {
     const handle = await runDaemon({
       hypHome,
@@ -57,16 +61,93 @@ export async function runDaemonRun(argv, ctx) {
 }
 
 /**
+ * How much of an `error=` line a hostile status file may spend. Wider than a
+ * label's 120, because unlike a name this carries a real error message -
+ * typically an fs error naming a full path - and the clamp exists to stop the
+ * line being bloated, not to bound an identifier.
+ */
+const MAX_ERROR_CHARS = 400
+
+/**
+ * A value out of `status.json` on its way to the terminal, made safe to print.
+ *
+ * `hyp status` cleans what it reads back out of this same file at the last
+ * point before render, for a reason that is a property of the file and not of
+ * that command: `status.json` is a *file*, and core cannot assume the daemon
+ * that wrote it was this version, this build, or well behaved
+ * (LLP 0164#status-reads-it-from-the-status-file). Nothing validates a field
+ * on read, so a raw value can carry an escape sequence that repaints the
+ * operator's screen or a newline that forges a plausible extra status line.
+ *
+ * Cleaning happens here rather than in `readStatusFile` because the reader
+ * also feeds `--json`, which is the machine copy and must stay byte-exact:
+ * escaping is a render's job, never a read's (LLP 0225).
+ *
+ * @param {unknown} value
+ * @param {number} [max]
+ * @returns {string}
+ * @ref LLP 0164#status-reads-it-from-the-status-file [constrained-by]: what core reads back out of status.json is cleaned at the last point before render, on every surface that prints it
+ */
+function printable(value, max) {
+  return sanitizeLabel(value, max) ?? ''
+}
+
+/**
+ * A field `DaemonStatus` types as a number, printed as itself when the file
+ * really holds one and cleaned as a label when it does not. `String` is safe
+ * over anything `JSON.parse` produced, so a wrong-typed field still shows
+ * *something* rather than vanishing into an empty column.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function printableNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return printable(String(value))
+}
+
+/**
+ * A `sources` / `sinks` entry list out of the status file. Anything that is
+ * not an array is no list at all: the walk below would throw straight out
+ * through the CLI, which is the same raw-stack failure the read is guarded
+ * against.
+ *
+ * @param {unknown} value
+ * @returns {Record<string, unknown>[]}
+ */
+function entryList(value) {
+  if (!Array.isArray(value)) return []
+  return value.filter((entry) => !!entry && typeof entry === 'object')
+}
+
+/**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
 export async function runDaemonStatus(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('daemon status', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
   const { readStatusFile } = await import('../daemon/status.js')
   const { readPidFile, processIsAlive } = await import('../daemon/pid.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const status = readStatusFile(stateDir)
-  const pidEntry = readPidFile(stateDir)
+  /** @type {ReturnType<typeof readStatusFile>} */
+  let status
+  /** @type {ReturnType<typeof readPidFile>} */
+  let pidEntry
+  try {
+    status = readStatusFile(stateDir)
+    pidEntry = readPidFile(stateDir)
+  } catch (err) {
+    // Both readers throw on a file they cannot make sense of, and
+    // `JSON.parse`'s message quotes an excerpt of the input verbatim. Left
+    // uncaught that reached the operator as a raw stack trace carrying the
+    // file's own bytes: useless as a diagnosis, and the one path on which the
+    // file reached the terminal entirely unfiltered.
+    const message = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp daemon status: ${printable(message, MAX_ERROR_CHARS)}\n`)
+    return 1
+  }
   const running = !!(pidEntry && processIsAlive(pidEntry.pid))
   if (!status) {
     if (json) {
@@ -84,39 +165,56 @@ export async function runDaemonStatus(argv, ctx) {
     ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
     return 0
   }
-  ctx.stdout.write(`daemon: ${status.state}${running ? '' : ' (no live process)'}\n`)
-  ctx.stdout.write(`  pid:        ${status.pid}\n`)
-  ctx.stdout.write(`  startedAt:  ${status.startedAt}\n`)
-  if (status.healthyAt) ctx.stdout.write(`  healthyAt:  ${status.healthyAt}\n`)
-  if (status.stoppedAt) ctx.stdout.write(`  stoppedAt:  ${status.stoppedAt}\n`)
-  ctx.stdout.write(`  uptime_ms:  ${liveUptimeMs}\n`)
+  // Everything below this line came out of the file and is going to a
+  // terminal, so everything below this line is cleaned on the way.
+  ctx.stdout.write(`daemon: ${printable(status.state)}${running ? '' : ' (no live process)'}\n`)
+  ctx.stdout.write(`  pid:        ${printableNumber(status.pid)}\n`)
+  ctx.stdout.write(`  startedAt:  ${printable(status.startedAt)}\n`)
+  if (status.healthyAt) ctx.stdout.write(`  healthyAt:  ${printable(status.healthyAt)}\n`)
+  if (status.stoppedAt) ctx.stdout.write(`  stoppedAt:  ${printable(status.stoppedAt)}\n`)
+  ctx.stdout.write(`  uptime_ms:  ${printableNumber(liveUptimeMs)}\n`)
+  const sources = entryList(status.sources)
+  const sinks = entryList(status.sinks)
   ctx.stdout.write('  sources:\n')
-  if (status.sources.length === 0) {
+  if (sources.length === 0) {
     ctx.stdout.write('    (none)\n')
   } else {
-    for (const source of status.sources) {
-      ctx.stdout.write(`    - ${source.name} (${source.plugin}): ${source.state}${source.error ? ' - ' + source.error : ''}\n`)
+    for (const source of sources) {
+      const error = printable(source.error, MAX_ERROR_CHARS)
+      ctx.stdout.write(`    - ${printable(source.name)} (${printable(source.plugin)}): ${printable(source.state)}${error ? ' - ' + error : ''}\n`)
     }
   }
   ctx.stdout.write('  sinks:\n')
-  if (status.sinks.length === 0) {
+  if (sinks.length === 0) {
     ctx.stdout.write('    (none)\n')
   } else {
-    for (const sink of status.sinks) {
-      ctx.stdout.write(`    - ${sink.instance} (${sink.plugin}, ${sink.kind})\n`)
+    for (const sink of sinks) {
+      ctx.stdout.write(`    - ${printable(sink.instance)} (${printable(sink.plugin)}, ${printable(sink.kind)})\n`)
     }
   }
   return 0
 }
 
 /**
- * @param {string[]} _argv
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-export async function runDaemonStop(_argv, ctx) {
+export async function runDaemonStop(argv, ctx) {
+  const parsed = parseCoreCommandArgv('daemon stop', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { requestDaemonStop } = await import('../daemon/runtime.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const outcome = await requestDaemonStop({ stateRoot: stateDir })
+  // The requester-side control-dir warnings (a chmod it could not apply)
+  // land on stderr; they do not change the exit code.
+  const outcome = await requestDaemonStop({
+    stateRoot: stateDir,
+    log: {
+      warn: (event, fields) => {
+        const message = fields && typeof fields.message === 'string' ? `: ${fields.message}` : ''
+        ctx.stderr.write(`hyp daemon stop: warning: ${event}${message}\n`)
+      },
+    },
+  })
   if (outcome === 'not_running') {
     ctx.stdout.write('daemon: not running\n')
     return 0
@@ -125,7 +223,13 @@ export async function runDaemonStop(_argv, ctx) {
     // `hyp daemon stop:`, not the bare `daemon:` the success lines use: this
     // is a failure (exit 1), and the `hyp <cmd>:` shape is what every other
     // daemon subcommand's errors already use - and what marks it as one.
-    ctx.stderr.write('hyp daemon stop: stop signal sent but the daemon did not exit within 5s\n')
+    // The transport differs per platform (win32 writes a stop.request file
+    // and deliberately leaves it for the daemon to consume), so the message
+    // names the one actually used.
+    const detail = process.platform === 'win32'
+      ? 'stop request written but the daemon did not exit within 5s; the request file is left for it to consume'
+      : 'stop signal sent but the daemon did not exit within 5s'
+    ctx.stderr.write(`hyp daemon stop: ${detail}\n`)
     return 1
   }
   ctx.stdout.write('daemon: stopped\n')
@@ -137,10 +241,12 @@ export async function runDaemonStop(_argv, ctx) {
  * otherwise fall back to a stop + operator-relaunch hint for the
  * foreground path.
  *
- * @param {string[]} _argv
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-export async function runDaemonRestart(_argv, ctx) {
+export async function runDaemonRestart(argv, ctx) {
+  const parsed = parseCoreCommandArgv('daemon restart', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { restartServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
   const homeDir = ctx.env.HOME
   const status = await serviceDaemonStatus({ homeDir })
@@ -252,14 +358,8 @@ export async function runDaemonInstall(argv, ctx) {
  * @ref LLP 0206#d1 [implements]: uninstall reaches down to level 1 so it cannot leave clients pointed at a dead port
  */
 export async function runDaemonUninstall(argv, ctx, deps = {}) {
-  for (const token of argv) {
-    if (token === '--help' || token === '-h') {
-      ctx.stdout.write('usage: hyp daemon uninstall\n')
-      return 0
-    }
-    ctx.stderr.write(`hyp daemon uninstall: unexpected argument '${token}'\n`)
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('daemon uninstall', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { uninstallDaemon, daemonKindLabel } = await import('../daemon/install.js')
   const { detachAllClientsFromDisk } = await import('./clients.js')
   const homeDir = ctx.env.HOME
@@ -281,7 +381,7 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`hyp daemon uninstall: could not detach clients: ${message}\n`)
-    ctx.stderr.write("  the service is gone; run 'hyp detach <client>' for each attached client by hand\n")
+    ctx.stderr.write("  the service is gone; run 'hyp client detach <client>' for each attached client by hand\n")
     return 1
   }
   for (const client of sweep.detached) {
@@ -303,7 +403,7 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
   }
   for (const failure of sweep.failed) {
     ctx.stderr.write(`hyp daemon uninstall: detach '${failure.name}' failed: ${failure.message}\n`)
-    ctx.stderr.write(`  run 'hyp detach ${failure.name}' to finish reversing it\n`)
+    ctx.stderr.write(`  run 'hyp client detach ${failure.name}' to finish reversing it\n`)
   }
   if (sweep.failed.length > 0) {
     // Exit 1 here means the sweep, not the teardown: without this line a
@@ -321,14 +421,8 @@ export async function runDaemonUninstall(argv, ctx, deps = {}) {
  * @param {CommandRunContext} ctx
  */
 export async function runDaemonStart(argv, ctx) {
-  for (const token of argv) {
-    if (token === '--help' || token === '-h') {
-      ctx.stdout.write('usage: hyp daemon start\n')
-      return 0
-    }
-    ctx.stderr.write(`hyp daemon start: unexpected argument '${token}'\n`)
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('daemon start', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { startServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
   const homeDir = ctx.env.HOME
   const status = await serviceDaemonStatus({ ...(homeDir !== undefined ? { homeDir } : {}) })

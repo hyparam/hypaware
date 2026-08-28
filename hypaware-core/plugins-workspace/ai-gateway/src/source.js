@@ -15,11 +15,13 @@ import {
   readLocalCaInfo,
 } from '../../../../src/core/tls/ca.js'
 
+import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
+
 import { compileConfig, compileUpstreams, FALLBACK_LISTEN } from './config.js'
-import { createControlHandler } from './control.js'
+import { createControlHandler } from '../../../../src/core/control/session_ignore.js'
 import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './dataset.js'
 import { createEntrypointActivity } from './entrypoint_activity.js'
-import { createAiGatewayMessageProjector } from './message_projector.js'
+import { createAiGatewayMessageProjector, rollbackAiGatewayStateJournal } from './message_projector.js'
 import { createChainedAgent, startProxy } from './proxy.js'
 import { createRecorder } from './recorder.js'
 
@@ -299,10 +301,37 @@ async function launchListener(ctx, state, liveState) {
     /** @type {FinishedRow} */
     const row = exchange.finalize()
     const totalBytes = (row.request_bytes ?? 0) + (row.response_bytes ?? 0)
+    // Projection marks its messages seen in the listener-lifetime dedup
+    // state while it builds the rows, and the append below can still fail.
+    // A conversation replays its earlier messages on every later exchange,
+    // so leaving those marks in place after a failed write would make this
+    // batch unrecoverable for the life of the listener rather than merely
+    // late. Issue #879.
+    /** @type {(() => void)[]} */
+    const journal = []
+    // Set the moment the append resolves. The catch below covers the
+    // bookkeeping after the write too (entrypoint activity, counters,
+    // logging), and rolling back there would un-mark messages that DID
+    // land: unlike the OTEL writer this path has no `part_id` dedupe in
+    // front of it, and the flush-time `dedupeByPartId` only runs for
+    // fallback-identity batches, so the replay of a native-identity
+    // conversation would commit a second copy of every one of them.
+    //
+    // A rejected append is therefore treated as "nothing landed", which is
+    // true of every failure the spool can report EXCEPT one: `spool.append`
+    // writes the line before it `sync()`s and `close()`s the handle, so an
+    // `EIO`/`ENOSPC` from those last two rejects a record that is already
+    // durable and will still flush. That narrow window is the one case where
+    // this rollback duplicates instead of recovering. It stays a rollback on
+    // purpose: the common failure loses the batch until transcript backfill
+    // finds it, the rare one costs a duplicate part the query layer can be
+    // told about.
+    let appended = false
     try {
-      const messageRows = await projector.projectExchange(row)
+      const messageRows = await projector.projectExchange(row, { journal })
       if (messageRows.length > 0) {
         await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
+        appended = true
         liveState.rowsWritten += messageRows.length
         // Recorded only after the append resolves: "recent clients" in
         // `hyp status` must mean rows that landed, not rows that were
@@ -330,6 +359,7 @@ async function launchListener(ctx, state, liveState) {
         ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
       })
     } catch (err) {
+      if (!appended) rollbackAiGatewayStateJournal(journal)
       const message = err instanceof Error ? err.message : String(err)
       liveState.lastError = message
       sourcesLog.error('aigw.exchange_write_failed', {
@@ -432,9 +462,14 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
   if (!config.proxyMode) {
     // Proxy mode is off, but a CA on disk means a client was attached in proxy
     // mode at some point and may still have `HTTPS_PROXY` pointing here. Serve
-    // blind tunnels so its egress keeps working, and say so loudly: the repair
-    // is a re-attach (or a detach), and nothing else on the machine will
-    // volunteer that.
+    // blind tunnels so its egress keeps working, and say so loudly: nothing
+    // else on the machine will volunteer that this install is in the degraded
+    // state. A plain re-attach is NOT the remedy: attach leaves the CA where
+    // it is on purpose (the trust is offered back, never taken), so the file
+    // that puts the install in this state survives the re-attach. The
+    // remedies that land are removing the CA (`hyp client detach claude --purge`,
+    // then re-attach) or turning `proxy_mode` back on.
+    // @ref LLP 0262#migration [constrained-by]: attach offers the CA back rather than removing it, so it cannot clear this state on its own
     const stale = await readLocalCaInfo({ stateRoot: defaultStateRoot(ctx.env) })
     if (stale) {
       liveState.interceptionError = 'proxy_mode is off but a local CA is installed'
@@ -442,7 +477,8 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
         [Attr.PLUGIN]: PLUGIN_NAME,
         ca_cert_path: stale.certPath,
         reason: 'serving blind tunnels so an already-attached client keeps working; ' +
-          'run `hyp attach claude` to move it back to base-URL mode, or `hyp detach claude`',
+          're-attaching leaves this CA on disk, so run `hyp client detach claude --purge` ' +
+          'and re-attach to clear the proxy residue, or turn proxy_mode back on',
       })
       return { tunnelOnly: true }
     }
@@ -457,12 +493,47 @@ async function prepareInterception(ctx, config, upstreams, liveState) {
   // @ref LLP 0238#full-provider-constraints [implements]
   /** @type {string[]} */
   const hostList = []
+  /** @type {string[]} */
+  const ipLiteralHosts = []
   for (const u of upstreams) {
     const host = hostOfBaseUrl(u.base_url)
-    if (host) hostList.push(host)
+    if (!host) continue
+    // An IP-literal `base_url` names a host this CA can never vouch for: every
+    // name it can mint is a `dNSName`, and a client that connected to an IP
+    // matches `iPAddress` SANs alone (RFC 6125), so it would never look. Nor
+    // could the leaf simply carry an `iPAddress` instead: LLP 0235's name
+    // constraints exclude the whole IP space on purpose. Skipping it here
+    // rather than letting the mint refuse it keeps one such upstream from
+    // taking the install's other interception down with it.
+    // @ref LLP 0275#ip-literals-are-refused [implements]
+    if (isIpLiteralHost(host)) {
+      ipLiteralHosts.push(host)
+      continue
+    }
+    hostList.push(host)
+  }
+  if (ipLiteralHosts.length > 0) {
+    ctx.log.warn('aigw.interception_host_unsupported', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      hosts: [...new Set(ipLiteralHosts)],
+      reason: 'an IP-literal upstream base_url cannot be intercepted: the local CA ' +
+        'mints dNSName certificates, which a client connected to an IP never matches, ' +
+        'so its traffic is tunnelled blind and unrecorded; give the upstream a DNS ' +
+        'name to capture it',
+    })
   }
   const hosts = [...new Set(hostList)]
-  if (hosts.length === 0) {
+  // `ipLiteralHosts.length === 0` too, or the skip above turns "one upstream we
+  // cannot decrypt" into "no CA on this machine at all". The CA is minted
+  // against the static provider list rather than the configured subset
+  // (LLP 0238#full-provider-constraints), and its file is what a proxy-mode
+  // attach preflights on: with an IP-only upstream set, taking the idle path
+  // here leaves `hyp client attach claude` failing `no local CA at ...; start the
+  // daemon with proxy mode enabled before attaching` while proxy mode is
+  // enabled, which is a dead end. An install that names *nothing* is genuinely
+  // idle and still returns here.
+  // @ref LLP 0275#ip-literals-are-refused [constrained-by]: an unusable upstream loses its own capture, never the machine's CA
+  if (hosts.length === 0 && ipLiteralHosts.length === 0) {
     liveState.interceptionError = 'no upstream host to intercept'
     ctx.log.warn('aigw.interception_idle', {
       [Attr.PLUGIN]: PLUGIN_NAME,
@@ -586,6 +657,12 @@ export function mergeUpstreams(configUpstreams, state) {
     if (hasPathPrefix) entry.path_prefix = preset.path_prefix
     if (typeof preset.priority === 'number') entry.priority = preset.priority
     if (hasMatch) entry.match = preset.match
+    // The outbound path swap travels with the preset that declared it, but
+    // NOT onto an operator's same-named config entry below: unlike
+    // `record_prefix` (a persistence anchor) a rewrite decides where the
+    // bytes go, which is the routing question config owns outright.
+    // @ref LLP 0313#the-rewrite-is-declarative-data [implements]
+    if (preset.rewrite) entry.rewrite = preset.rewrite
     const existing = merged.get(preset.name)
     if (!existing) {
       merged.set(preset.name, entry)

@@ -78,3 +78,22 @@ export interface CentralSinkConfig {
   poll_interval_seconds?: number
 }
 
+/** Durable rollout boundary for one open dataset on one sink instance. */
+export interface DatasetRolloutRecord {
+  v: 1
+  /** Stable logical partition keys already initialized for forwarding. */
+  partitions: string[]
+  initializedAt: string
+  updatedAt: string
+}
+
+export interface DatasetRolloutStore {
+  filePath(dataset: string): string
+  /** Missing means never initialized; malformed state rejects. */
+  read(dataset: string): Promise<DatasetRolloutRecord | null>
+  write(
+    dataset: string,
+    partitionKeys: string[],
+    previous?: DatasetRolloutRecord | null,
+  ): Promise<DatasetRolloutRecord>
+}

@@ -34,8 +34,8 @@ import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/forma
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
+ * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
  * @import { AsyncDataSource, ExprNode, ScanColumnResults, SelectStatement, SqlPrimitive } from 'squirreling/src/types.js'
- * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
  */
 
 // The same fixture `test/core/parquet-source.test.js` uses, so the two
@@ -171,7 +171,7 @@ function asyncBufferFromBytes(bytes) {
  * The parquet-file backend over the fixture, at the small row-group size the
  * differential harness uses so multi-row-group iteration is exercised.
  *
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function makeParquetSource() {
   const columnData = rowsToColumnSources(NULLABLE_COLUMNS, NULLABLE_ROWS)
@@ -185,7 +185,7 @@ async function makeParquetSource() {
  * `dataSourceForTable` seam `hyp query sql` reaches.
  *
  * @param {string} tablePath
- * @returns {Promise<AsyncDataSource>}
+ * @returns {Promise<ScannableDataSource>}
  */
 async function makeIcebergSource(tablePath) {
   await appendRowsToTable(tablePath, NULLABLE_COLUMNS, NULLABLE_ROWS)
@@ -195,7 +195,7 @@ async function makeIcebergSource(tablePath) {
 }
 
 /**
- * @param {AsyncDataSource} source
+ * @param {ScannableDataSource} source
  * @param {string} predicate
  * @returns {Promise<number[]>}
  */
@@ -510,7 +510,7 @@ function whereOf(sql) {
 }
 
 /**
- * @param {AsyncDataSource} source
+ * @param {ScannableDataSource} source
  * @param {string} query
  * @returns {Promise<number[]>}
  */

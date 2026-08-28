@@ -1,8 +1,7 @@
-import type { ColumnSpec, QueryScope, QueryStorageService } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { ColumnSpec, QueryScope, QueryStorageService, ScannableDataSource } from '../../../hypaware-plugin-kernel-types.d.ts'
 import type { ParquetWriter } from 'hyparquet-writer'
 import type { Writer } from 'hyparquet-writer/src/types.js'
 import type { PartitionSpec } from 'icebird/src/types.js'
-import type { AsyncDataSource } from 'squirreling'
 import type { UsagePolicyResolver } from '../usage-policy/types.d.ts'
 // Partitioning declaration promoted to a neutral core home
 // (LLP 0003 / LLP 0022#shared-core-helpers). Re-exported here so existing
@@ -16,6 +15,15 @@ export interface PartitionCursor {
   compaction: unknown | null
   layout?: 'epoch' | 'source-table'
   tableDir?: string
+  // Committed rows still carrying the gateway provisional-identity marker
+  // (`attributes.gateway.identity_source === 'gateway_fallback'`, LLP 0027).
+  // Incremented by the flush path as marker rows land and reset to the exact
+  // remainder by each generation rewrite, so maintenance gates the re-settle
+  // sweep on this field instead of scanning the table's attributes column
+  // every tick. Absent means unknown (a cursor written before the field
+  // existed): maintenance answers with one legacy scan and writes the
+  // verdict back, so the scan runs at most once per partition.
+  pendingFallbacks?: number
   retention?: {
     lastCutoffDate?: string
     lastCutoffMs?: number
@@ -120,6 +128,21 @@ export interface PendingInfo {
 }
 
 export interface CacheSpool {
+  /**
+   * Write one batch into the table's spool, to be committed by a later
+   * `flushTable`. All-or-nothing as far as the caller is concerned: it
+   * resolves once the record is in the spool, and rejects when the record
+   * is not there and no flush will find it. That is what lets a caller
+   * treat a rejection as "nothing landed" and replay the rows without
+   * writing them twice.
+   *
+   * The rollback behind that is best effort, so the guarantee is not
+   * absolute: a torn write whose tail cannot be read back, and a spool
+   * file another process appended to between this append's size probe and
+   * its rollback, can both reject with bytes still in the file. A caller
+   * that must not double-write under a failing device or a shared spool
+   * still needs its own identity check.
+   */
   append(
     tablePath: string,
     columns: readonly ColumnSpec[],
@@ -257,12 +280,28 @@ export interface MaintenanceOptions {
    * (LLP 0027 "Re-settle sweep").
    */
   getSettleHook?: (dataset: string) => DatasetSettleHook | undefined
+  /**
+   * Resolve a dataset's current `cachePartitioning` declaration, so the
+   * tick can detect a table whose recorded partition spec still carries a
+   * column the declaration has demoted to sortOnly, and run the one-time
+   * generation-swap re-partition (LLP 0311). Absent when the caller has no
+   * registry (tests, bare CLI paths); no migration runs without it.
+   */
+  getDeclaration?: (dataset: string) => CachePartitioningDeclaration | undefined
 }
 
 /**
  * The dataset's flush-time settlement pass, re-used by the maintenance
  * re-settle sweep. Upgrades provisional fallback rows to native identity
  * and drops any whose `part_id` already exists in a committed partition.
+ *
+ * Maintenance resolves this from the dataset's `resettleBatch`, and calls it
+ * both for real (inside a rewrite) and speculatively (`victimFallbacksSettleable`,
+ * which discards the rows it gets back). The hook must therefore be pure and
+ * idempotent, per the contract stated on `resettleBatch` in
+ * `hypaware-plugin-kernel-types.d.ts`.
+ *
+ * @ref LLP 0312#settle-purity [constrained-by]: the probe calls this and throws the answer away.
  */
 export type DatasetSettleHook = (
   rows: Record<string, unknown>[],
@@ -289,12 +328,40 @@ export interface MaintenancePartitionReport {
   // cursor baseline was moved to the live file count instead of rewriting
   // (LLP 0207). Mutually exclusive with `compacted`.
   rebaselined?: boolean
+  // The compaction was the one-time re-partition migration: the generation
+  // swap wrote the new generation under the declaration's partition spec
+  // and sort order instead of carrying the recorded ones (LLP 0311).
+  repartitioned?: boolean
+  // The re-partition was due but its target layout could not be derived
+  // from the table's metadata, so this tick deferred it. The partition
+  // still compacts in place under its recorded spec; the layout has not
+  // moved and the mismatch stands until a tick can read the metadata.
+  repartitionDeferred?: boolean
   newEpoch?: number
   rowCount: number
   dataFilesBefore: number
   dataFilesAfter: number
   /** Bytes the compaction rewrite actually wrote; absent when it did not run. */
   compactedBytesWritten?: number
+  /** Grep sidecars built for the live generation; absent when the build pass did not run. */
+  sidecarsBuilt?: number
+  /** Files whose sidecar build failed on THIS pass; the scan tier serves them. */
+  sidecarsFailed?: number
+  /**
+   * Files skipped without a build because the per-file attempt budget is
+   * spent. Separate from `sidecarsFailed`, which counts work this pass
+   * actually attempted: a quarantined file costs nothing and would
+   * otherwise report a fresh failure on every later tick.
+   */
+  sidecarsQuarantined?: number
+  /**
+   * Files still missing a sidecar when the tick's budget ran out. They are
+   * built by a later tick: the pass is resumable because sidecar existence
+   * is its only completion marker.
+   */
+  sidecarsDeferred?: number
+  /** The build pass's own error, when the pass itself threw (never fails the partition). */
+  sidecarError?: string
   // Compaction of this partition is known not to reduce its data-file
   // count under the writer running now: either this run's rewrite
   // reproduced the count it started from, or a previous one did and the
@@ -315,6 +382,11 @@ export interface MaintenancePartitionReport {
   // When that attempt failed, as the cursor records it. Set whenever
   // `compactionAttemptFailed` is.
   compactionAttemptFailedAt?: string
+  // Files of the live generation released by the unreferenced-file sweep
+  // (LLP 0310): superseded by an in-place compaction or by snapshot
+  // expiry, and no longer named by any retained snapshot. Absent when the
+  // sweep removed nothing or did not run.
+  unreferencedFilesRemoved?: number
   // THIS tick's work on the partition ended in an error and the walk moved
   // on (LLP 0220). Distinct from `compactionAttemptFailed`, which is read
   // off the cursor and says an EARLIER tick's attempt failed and nothing
@@ -354,6 +426,15 @@ export interface CacheStatusPartition {
   deleteFileCount?: number
   lastRetentionCutoffDate?: string
   layout?: 'epoch' | 'source-table'
+  /** Data files with a grep sidecar beside them; present only on the grep dataset's partitions. */
+  indexedFileCount?: number
+  /**
+   * Data files a sidecar could be built beside, the honest denominator for
+   * `indexedFileCount`. Not `dataFileCount`: position-delete files live in
+   * the same `data/` directory and that counter includes them, while no
+   * sidecar is ever built for one.
+   */
+  indexableFileCount?: number
 }
 
 export interface CacheStatusReport {
@@ -433,7 +514,7 @@ export interface SourceWithholdResolver {
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {
-  dataSourceForTable(tablePath: string): Promise<AsyncDataSource | null>
+  dataSourceForTable(tablePath: string): Promise<ScannableDataSource | null>
   flushTable(tablePath: string, opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   flushAll(opts?: { reason?: string; force?: boolean }): Promise<FlushResult>
   pendingInfo(tablePath: string): Promise<PendingInfo>

@@ -6,6 +6,7 @@ import { ByteWriter, ParquetWriter, schemaFromColumnData } from 'hyparquet-write
 
 import { rowsToColumnSources } from './columns.js'
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
+import { snappyPageCompressors } from '../../../../src/core/util/parquet_snappy.js'
 
 /**
  * @import { JsonObject, PluginActivationContext, PluginLogger, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../../hypaware-plugin-kernel-types.js'
@@ -17,6 +18,10 @@ const FORMAT = 'parquet'
 const EXTENSION = 'parquet'
 const DEFAULT_CODEC = 'SNAPPY'
 const DEFAULT_ZSTD_LEVEL = 3
+// The shared hysnappy page compressor. It lives in core rather than here
+// because the cache's streaming compaction writer wires the same instance,
+// and two instances would be two WASM memory floors; see
+// `src/core/util/parquet_snappy.js` for why it is one and what that costs.
 
 // Row-group clustering. Originally this existed because hyparquet-writer
 // (< 0.16.6) kept a column dictionary-encoded only while a row group's
@@ -41,8 +46,8 @@ const DEFAULT_MAX_GROUP_BYTES = 32 * 1024 * 1024
 // Mirrors hyparquet-writer's own default page size (1 MiB).
 const DEFAULT_PAGE_SIZE = 1024 * 1024
 
-// Codecs this encoder can emit. SNAPPY is supplied by hyparquet-writer's
-// own default compressors; ZSTD is wired here via Node's built-in zlib
+// Codecs this encoder can emit. SNAPPY is wired through hysnappy's reusable
+// WASM compressor; ZSTD is wired here via Node's built-in zlib
 // (Node >= 22.15 / 23.8). Reads are covered by `hyparquet-compressors`,
 // which the query path already wires (see query/parquet-source.js).
 const ZSTD_AVAILABLE = typeof zlib.zstdCompressSync === 'function'
@@ -58,7 +63,7 @@ const ZSTD_AVAILABLE = typeof zlib.zstdCompressSync === 'function'
  *
  * @param {JsonObject | undefined} config
  * @param {PluginLogger} log
- * @returns {{ codec: 'SNAPPY' | 'ZSTD', compressors: Record<string, (bytes: Uint8Array) => Uint8Array> | undefined, pageSize: number | undefined }}
+ * @returns {{ codec: 'SNAPPY' | 'ZSTD', compressors: Record<string, (bytes: Uint8Array) => Uint8Array>, pageSize: number | undefined }}
  */
 export function resolveEncodeSettings(config, log) {
   const requested = String(config?.codec ?? DEFAULT_CODEC).toUpperCase()
@@ -76,7 +81,7 @@ export function resolveEncodeSettings(config, log) {
         fallback_codec: DEFAULT_CODEC,
         message: 'zlib.zstdCompressSync not available on this Node runtime; falling back to SNAPPY',
       })
-      return { codec: DEFAULT_CODEC, compressors: undefined, pageSize }
+      return { codec: DEFAULT_CODEC, compressors: snappyPageCompressors(), pageSize }
     }
     const levelRaw = config?.zstd_level
     const level =
@@ -92,8 +97,7 @@ export function resolveEncodeSettings(config, log) {
       message: `unknown codec '${requested}'; falling back to SNAPPY`,
     })
   }
-  // SNAPPY: hyparquet-writer provides its own snappy compressor by default.
-  return { codec: DEFAULT_CODEC, compressors: undefined, pageSize }
+  return { codec: DEFAULT_CODEC, compressors: snappyPageCompressors(), pageSize }
 }
 
 /**
@@ -147,7 +151,7 @@ export async function activate(ctx) {
  *
  * @param {QueryPartition} partition
  * @param {SinkEncodeContext} ctx
- * @param {{ codec: 'SNAPPY' | 'ZSTD', compressors: Record<string, (bytes: Uint8Array) => Uint8Array> | undefined, pageSize: number | undefined }} settings
+ * @param {{ codec: 'SNAPPY' | 'ZSTD', compressors: Record<string, (bytes: Uint8Array) => Uint8Array>, pageSize: number | undefined }} settings
  * @returns {Promise<SinkEncodedBlob>}
  */
 async function encodePartition(partition, ctx, settings) {

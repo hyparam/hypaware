@@ -40,16 +40,14 @@ test('claude picker summary discloses the attach and the skill install', async (
   assert.match(summary, /skills/i)
 })
 
-// `claude`'s row sets `requires_gateway` *with* a `gateway_upstream`
-// (`claude/hypaware.plugin.json` compose), so picked alone it binds a real
-// listener, unlike `hermes`'s row, which sets `requires_gateway` with no
-// upstream and starts no listener on its own (`test/core/
-// compose-picker-config.test.js` "hermes alone composes the gateway (no
-// upstreams)"). Same side-effect class as `otel` and
-// `raw-anthropic`/`raw-openai` above.
-test('claude picker summary discloses that a local gateway listener is started', async () => {
+// Claude capture is now its own OTEL listener. The gateway plugin remains in
+// composition because the adapter uses its projected-exchange writer, but no
+// Claude traffic is routed through it and no Anthropic upstream is composed.
+// @ref LLP 0262#capture [tests]: the picker teaches the recorder that actually receives Claude content
+test('claude picker summary discloses that its local telemetry listener is started', async () => {
   const summary = await pickerSummary('claude', 'claude')
-  assert.match(summary, /starts a local gateway listener/i)
+  assert.match(summary, /starts its local telemetry listener/i)
+  assert.doesNotMatch(summary, /gateway|proxy/i)
 })
 
 test('codex picker summary discloses the gateway config write and the skill install', async () => {

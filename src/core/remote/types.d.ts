@@ -137,12 +137,15 @@ export type RemoteCredentialRecord = RemoteStaticRecord | RemoteOidcRecord
  * server-surfaced LLP 0058 D7 refusals, definitive in the sense that the same
  * bare login cannot fix them. `denied` is a provider denial and `login_failed`
  * a transient or local failure (timeout, network, an abandoned browser flow);
- * both are worth retrying. The rest name a step that failed after the sign-in
- * itself succeeded, which is why they are not folded into one `failed`.
+ * both are worth retrying. `help` is the one non-failure that is also not a
+ * sign-in: argv asked for the usage line and got it. The rest name a step that
+ * failed after the sign-in itself succeeded, which is why they are not folded
+ * into one `failed`.
  */
 export type LoginOutcomeReason =
   | 'ok'
   | 'usage'
+  | 'help'
   | 'connected_elsewhere'
   | 'no_membership'
   | 'org_not_permitted'
@@ -156,9 +159,10 @@ export type LoginOutcomeReason =
 
 /**
  * What the login lane returns: the exit code `hyp remote login` reports, and
- * the reason behind it. `exitCode === 0` iff `reason === 'ok'`, except for
- * `daemon_incomplete`, which carries the daemon installer's own non-zero code
- * (LLP 0179#outcome).
+ * the reason behind it. `exitCode === 0` iff the sign-in path completed
+ * (`reason === 'ok'`) or argv only asked for usage (`reason === 'help'`, which
+ * signs nobody in). `daemon_incomplete` is the other exception the other way:
+ * it carries the daemon installer's own non-zero code (LLP 0179#outcome).
  */
 export interface LoginOutcome {
   exitCode: number

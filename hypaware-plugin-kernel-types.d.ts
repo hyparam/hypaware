@@ -17,6 +17,16 @@ import type { UsagePolicyDrop } from './src/core/usage-policy/types.d.ts'
 
 export type { AsyncDataSource, ScanOptions, ScanResults }
 
+/**
+ * A data source that retains Squirreling's row interface. Hypaware's storage,
+ * union, visibility, and legacy parquet adapters all guarantee this stronger
+ * shape even when they also expose prepared native batches.
+ */
+export type ScannableDataSource = AsyncDataSource & {
+  columns: string[]
+  scan(options: ScanOptions): ScanResults
+}
+
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
 
@@ -202,6 +212,29 @@ export interface PluginClientManifest {
    * attachable but never launchable.
    */
   launch?: PluginClientLaunchManifest
+  /**
+   * Where this client's own activity leaves a file trail, for the
+   * `hyp status` capture-health comparison (LLP 0257#status-and-health):
+   * the newest matching mtime under `dir` is the client's last activity,
+   * which status holds against the telemetry the daemon actually
+   * captured. Declared here rather than in a core table for the same
+   * reason as `attach_probe`: the path is the client's business, and
+   * core must be able to read it without importing plugin code.
+   */
+  activity_probe?: PluginActivityProbeManifest
+}
+
+/**
+ * A client-written directory core may stat (never parse) to answer
+ * "when was this client last active?". Same home-relative contract as
+ * `attach_probe.settings_file`: relative to `$HOME`, first segment
+ * relocatable by `$<CLIENT>_HOME`, absolute paths rejected.
+ */
+export interface PluginActivityProbeManifest {
+  /** Directory of activity files, RELATIVE to the user's home (e.g. `.claude/projects`). */
+  dir: string
+  /** Only files ending in this suffix count (e.g. `.jsonl`); absent means every file. */
+  file_suffix?: string
 }
 
 /**
@@ -242,7 +275,7 @@ export interface PluginAttachProbeManifest {
    * (client_detach_disk.js) and read (daemon/status.js) sides, which close
    * the #212 gap this format's prior removal warned about.
    */
-  format: 'json' | 'toml' | 'json_path'
+  format: 'json' | 'toml' | 'json_path' | 'managed_file'
   /**
    * The client's settings file, RELATIVE to the user's home (e.g.
    * `.codex/config.toml`). Its first path segment is the client's config
@@ -255,6 +288,8 @@ export interface PluginAttachProbeManifest {
   settings_file: string
   marker_key?: string
   marker_header?: string
+  /** `managed_file` only: exact ownership marker required for probe and removal. */
+  marker_text?: string
   /**
    * `json_path` only: dotted path, relative to the parsed settings file,
    * to the container object the probe/undo navigate (e.g.
@@ -408,8 +443,31 @@ export type PickerDetectProbe =
 
 export interface PluginCommandManifest {
   name: string
+  /** Help presentation category, mirrored onto the runtime registration. */
+  category?: string
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
+  /** Compatibility spellings used for inactive-plugin ownership checks. */
+  aliases?: string[]
   summary?: string
   usage?: string
+  /**
+   * True when the command is an internal mechanism rather than CLI
+   * surface: it keeps dispatching, and it keeps its manifest entry, but
+   * it is absent from `hyp --help` and from its group's help. For a
+   * command whose caller is a program (a credential-helper wrapper, an
+   * in-process orchestration step), not a person (LLP 0268).
+   *
+   * Declaring it hidden rather than deleting the entry is deliberate,
+   * the same display-filter-not-catalog-deletion rule LLP 0202 set for
+   * hidden picker rows: the declaration is what lets the dispatch-miss
+   * path name the owning plugin ("unavailable", not "unknown",
+   * LLP 0153) and what the manifest/registration parity tests compare.
+   *
+   * The runtime registration must set `CommandRegistration.hidden` to
+   * match; the manifest field governs pre-boot help, the registration
+   * field governs post-boot group help.
+   */
+  hidden?: boolean
 }
 
 export interface PluginConfigSectionManifest {
@@ -589,6 +647,8 @@ export interface PluginActivationContext {
    * before appending to the cache.
    */
   backfillMaterializers: BackfillMaterializerRegistry
+  /** Kernel-owned client lifecycle registry. */
+  clients: ClientRegistry
   /**
    * Narrow facade over the kernel config apply engine (LLP 0023). Only
    * present when the host process runs an apply engine (the daemon);
@@ -712,6 +772,12 @@ export interface HypAwareV2Config {
    * listed must be unambiguously provided.
    */
   disambiguate?: Record<CapabilityName, PluginName>
+  /**
+   * Kernel self-update switch. Default true when absent; the daemon
+   * applies new HypAware releases automatically. Central wins over
+   * local when both layers set it.
+   */
+  auto_update?: boolean
 }
 
 /** Legacy alias retained only while the project rename completes. */
@@ -870,6 +936,19 @@ export interface ValidationError {
 // =============================================================================
 
 export interface CommandRegistry {
+  /**
+   * Claim a command name. `command` is an input, not the registry's
+   * storage: the registry keeps a shallow copy and fills the semantic
+   * defaults (`category`, `audience`, `bootProfile`) on that copy, so a
+   * frozen module-level registration is accepted, a registration this
+   * call rejects comes back exactly as it was passed, and editing the
+   * object afterwards does not reach what `get`/`list` return. Function
+   * members (`run`) are shared with the copy, not cloned.
+   *
+   * The copy is own enumerable properties only, and the shape checks run
+   * on it, so a registration whose members live on a prototype (a class
+   * instance) is rejected here rather than stored half-formed.
+   */
   register(command: CommandRegistration): void
   /**
    * Describe a command *group* (`graph`, `query`) so its `--help` can
@@ -881,6 +960,21 @@ export interface CommandRegistry {
    * cannot shadow a command or show up as its own subcommand.
    */
   registerGroup(group: CommandGroupRegistration): void
+  /**
+   * Release a registered command name, along with every alias pointing at
+   * it. Accepts whatever `get` accepts (primary name or alias), is
+   * idempotent, and is a no-op on an unknown name. Exists so a retracted
+   * verb can give back the CLI surface its registration claimed.
+   *
+   * Optional on purpose. The kernel accepts an injected command registry,
+   * and `VerbRegistry.unregister` feature-detects this member before
+   * calling it, so a registry that predates the affordance is tolerated
+   * rather than fatal. Typing it required would narrow that check to
+   * always-true for anyone compiling against these declarations and
+   * invite its removal, which is what turns an older kernel into a boot
+   * failure. `createCommandRegistry` always provides it.
+   */
+  unregister?(name: string): void
   get(name: string): CommandRegistration | undefined
   getGroup(name: string): CommandGroupRegistration | undefined
   list(): CommandRegistration[]
@@ -899,6 +993,14 @@ export interface CommandGroupRegistration {
 export interface CommandRegistration {
   name: string
   plugin?: PluginName
+  /** Help presentation category used to organize the command surface. */
+  category?: string
+  /** Intended help audience. Machine commands are hidden contracts. */
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
+  /** Plugin activation policy selected after semantic command resolution. */
+  bootProfile?: 'config' | 'all-available' | 'none'
+  /** True for a help-only namespace command created by core. */
+  group?: boolean
   summary: string
   usage: string
   /**
@@ -907,7 +1009,15 @@ export interface CommandRegistration {
    * summary stays one line for command listings.
    */
   help?: string
+  /** Compatibility spellings. Indexed for dispatch and omitted from help. */
   aliases?: string[]
+  /**
+   * True when the command is an internal mechanism, not CLI surface:
+   * it still dispatches, but core drops it from top-level help and
+   * from its group table. A plugin command that sets this must also
+   * set `hidden` on its manifest entry, which is what governs the
+   * pre-boot help rendered before any plugin is loaded (LLP 0268).
+   */
   hidden?: boolean
   run(argv: string[], ctx: CommandRunContext): Promise<number>
 }
@@ -932,6 +1042,8 @@ export interface CommandRunContext {
    */
   failedPlugins?: string[]
   capabilities: CapabilityRegistry
+  /** Kernel-owned client lifecycle registry. Present on current hosts. */
+  clients?: ClientRegistry
   /** Dataset registry (kernel-owned). Populated by the dispatcher. */
   query: QueryRegistry
   /**
@@ -1330,7 +1442,7 @@ export interface ExportResult {
  */
 export interface SinkQueryReader {
   discoverPartitions(scope: QueryScope): Promise<QueryPartition[]> | QueryPartition[]
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<ScannableDataSource> | ScannableDataSource
 }
 
 // =============================================================================
@@ -1363,7 +1475,7 @@ export interface DatasetRegistration {
   localOnlyContentColumns?: string[]
   discoverPartitions(ctx: DatasetDiscoveryContext): Promise<QueryPartition[]> | QueryPartition[]
   refreshPartition?(partition: QueryPartition, ctx: DatasetRefreshContext): Promise<DatasetRefreshResult>
-  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<AsyncDataSource> | AsyncDataSource
+  createDataSource(partitions: QueryPartition[], ctx: DatasetDataSourceContext): Promise<ScannableDataSource> | ScannableDataSource
   /**
    * Optional flush-time settlement pass. The kernel calls this once per
    * flush batch (before partition write) with the batch's rows; the
@@ -1382,6 +1494,19 @@ export interface DatasetRegistration {
    * non-upgraded fallback against its own copy). Compaction owns the
    * within-rewrite de-twin instead. Distinct from `settleBatch`, whose
    * dedupe assumes the rows are not yet committed.
+   *
+   * MUST be free of observable side effects and MUST be idempotent. This is
+   * the hook cache maintenance calls SPECULATIVELY, before it has picked a
+   * compaction path: it asks whether re-settlement would change a candidate
+   * file's rows, discards the rows it gets back, and may ask again on the
+   * next tick about rows it never commits. An implementation that marked a
+   * transcript line consumed, advanced a cursor, or wrote anything a later
+   * run or another process can observe would fire that effect for work which
+   * never happened. Reading logs and memoising in memory is fine. Whatever
+   * this hook fans out to inherits the requirement; for the gateway dataset
+   * that is `AiGatewaySettlementEnricher`.
+   *
+   * @ref LLP 0312#settle-purity [implements]: maintenance probes this hook and discards the answer, so the hook must not notice being called.
    */
   resettleBatch?(rows: Record<string, unknown>[], ctx: DatasetSettleContext): Promise<Record<string, unknown>[]>
 }
@@ -1502,6 +1627,16 @@ export interface QueryStorageService {
   tableExists(tablePath: string): boolean
   tableUrl(tablePath: string): string
   readRows(tablePath: string, columns?: string[], opts?: ReadRowsOptions): AsyncIterable<Record<string, unknown>>
+  /**
+   * Exact equality-list read for lookup paths. The predicate is applied by
+   * the cache data source, allowing Iceberg file and row-group bounds to prune
+   * sorted lookup columns before rows are materialized.
+   */
+  readRowsWhere?(
+    tablePath: string,
+    columns: string[] | undefined,
+    whereIn: Record<string, string[]>,
+  ): AsyncIterable<Record<string, unknown>>
   /**
    * Cursor-aware sibling of `readRows` for sinks that must advance a
    * per-(sink instance, partition) watermark. Pairs each internal-stripped row
@@ -1650,6 +1785,11 @@ export interface VerbRenderResult {
 export interface VerbRegistration {
   /** CLI command name, e.g. `'graph neighbors'`. */
   name: string
+  /** CLI-only compatibility spellings. The MCP tool name is unchanged. */
+  aliases?: string[]
+  /** CLI help metadata. Does not affect MCP exposure or auth. */
+  category?: string
+  audience?: 'everyday' | 'operator' | 'developer' | 'machine'
   /** MCP tool name, e.g. `'graph_neighbors'`. */
   tool: string
   plugin?: PluginName
@@ -1679,6 +1819,25 @@ export interface VerbRegistration {
 
 export interface VerbRegistry {
   register(verb: VerbRegistration): void
+  /**
+   * Release a claimed verb name: the name map, the tool map, and the CLI
+   * command projected from a verb under that name (and only that one; a
+   * plugin's own same-named command survives). By-name, idempotent, and a
+   * no-op on an unknown name.
+   *
+   * This is what lets a host displace a kernel-shipped verb with its own
+   * implementation of the same tool: it takes the name back, then
+   * registers. Callers should re-check `getByTool` afterwards rather than
+   * trust the removal, since registering into a still-held tool slot
+   * throws (LLP 0264 §verb).
+   *
+   * Optional on purpose: plugins declare a kernel semver *range*, so a
+   * plugin built against these declarations can be loaded by a kernel
+   * that predates this member. Feature-detect it (`typeof
+   * verbs.unregister === 'function'`) rather than assume it. The kernel's
+   * own `createVerbRegistry` always provides it.
+   */
+  unregister?(name: string): void
   get(name: string): VerbRegistration | undefined
   getByTool(tool: string): VerbRegistration | undefined
   list(): VerbRegistration[]
@@ -1729,6 +1888,22 @@ export interface AiGatewayCapability {
    * LLP 0024.
    */
   registerSettlementEnricher(enricher: AiGatewaySettlementEnricher): void
+  /**
+   * Record one already-projected exchange into `ai_gateway_messages`.
+   *
+   * For a LIVE producer that does not sit on the wire: it holds a
+   * finished `AiGatewayProjectedExchange` and hands it to the dataset's
+   * owner rather than learning the table path, the column list, and the
+   * `part_id` dedupe rules. The proxy recorder does not use this (it
+   * already owns the projector chain); the Claude OTEL telemetry
+   * listener does. Rows whose `part_id` another producer already stored
+   * are skipped, which is what makes producer overlap harmless. See
+   * LLP 0252 #projection-unchanged.
+   */
+  recordProjectedExchange(
+    exchange: AiGatewayProjectedExchange,
+    opts?: AiGatewayRecordOptions,
+  ): Promise<AiGatewayRecordResult>
   localEndpoint(opts?: AiGatewayEndpointOptions): string
   /**
    * Look up a registered client by name. Returns `undefined` when no
@@ -1742,6 +1917,24 @@ export interface AiGatewayCapability {
    * and the walkthrough to list available adapters.
    */
   listClients(): AiGatewayClientRegistration[]
+}
+
+/** Options for `AiGatewayCapability.recordProjectedExchange`. */
+export interface AiGatewayRecordOptions {
+  /**
+   * Producer provenance merged under every emitted row's `attributes`,
+   * the same slot the backfill materializer fills with
+   * `{ gateway: { source: 'backfill' } }`.
+   */
+  gatewayAttributes?: JsonObject
+}
+
+/** Outcome of one `recordProjectedExchange` call. */
+export interface AiGatewayRecordResult {
+  /** Rows appended to the dataset. */
+  rowsWritten: number
+  /** Rows dropped because another producer already stored that `part_id`. */
+  rowsSkipped: number
 }
 
 /**
@@ -1759,6 +1952,17 @@ export interface AiGatewayCapability {
  * honored only by the flush-time `settleBatch`, before partition write; the
  * maintenance `resettleBatch` ignores it, so an already-committed row is never
  * purged.
+ *
+ * `settle` MUST be free of observable side effects and MUST be idempotent.
+ * Cache maintenance calls it SPECULATIVELY, on rows it may never commit and
+ * possibly on the same rows again next tick, purely to answer "would
+ * settlement change anything" before choosing a compaction path
+ * (`victimFallbacksSettleable`); it then discards the returned rows. So
+ * calling `settle` twice, or calling it and throwing the answer away, must be
+ * indistinguishable from not calling it at all. Reading logs and memoising in
+ * memory is fine; marking a transcript line consumed, advancing a cursor, or
+ * writing anything a later run or another process can observe is not. See
+ * LLP 0312#settle-purity.
  */
 export interface AiGatewaySettlementEnricher {
   name: string
@@ -1787,6 +1991,26 @@ export interface AiGatewayUpstreamPreset {
   path_prefix?: string
   priority?: number
   match?(input: AiGatewayRouteInput): boolean
+  /**
+   * Rewrite the inbound path prefix before the request is forwarded, for
+   * an upstream whose own path shape differs from the door the request
+   * arrived on. Declarative data rather than a callback so core can print
+   * the whole routing rule, validate it at registration, and fix it at
+   * startup (LLP 0313).
+   */
+  rewrite?: AiGatewayUpstreamPathRewrite
+}
+
+/**
+ * A single path-prefix swap. `from` must be a path-segment prefix the
+ * upstream owns (equal to, or under, its `path_prefix` when it declares
+ * one); `to` replaces it and the rest of the path is carried verbatim,
+ * query string included. A request whose path is not under `from` is
+ * forwarded unchanged.
+ */
+export interface AiGatewayUpstreamPathRewrite {
+  from: string
+  to: string
 }
 
 /**
@@ -1816,15 +2040,27 @@ export interface AiGatewayEndpointOptions {
  *
  * @ref LLP 0045#part-3-reverse-runs-from-disk-the-marker-is-a-self-describing-undo-record [constrained-by]: AiGatewayClientRegistration.detach is retired; the sole undo lives in core
  */
-export interface AiGatewayClientRegistration {
+export interface ClientRegistration {
   name: string
-  defaultUpstream: string
-  attach(ctx: AiGatewayClientAttachContext): Promise<void>
+  /** False when attach installs a local integration and needs no gateway URL. */
+  requiresEndpoint?: boolean
+  attach(ctx: ClientAttachContext): Promise<void>
   status?(ctx: AiGatewayClientStatusContext): Promise<JsonObject>
 }
 
-export interface AiGatewayClientAttachContext {
-  endpoint: string
+export interface ClientRegistry {
+  registerClient(client: ClientRegistration): void
+  getClient(name: string): ClientRegistration | undefined
+  listClients(): ClientRegistration[]
+}
+
+export interface AiGatewayClientRegistration extends ClientRegistration {
+  defaultUpstream: string
+  attach(ctx: AiGatewayClientAttachContext): Promise<void>
+}
+
+export interface ClientAttachContext {
+  endpoint?: string
   config: JsonObject
   stdout: WriteStream
   stderr: WriteStream
@@ -1841,6 +2077,10 @@ export interface AiGatewayClientAttachContext {
    * `changed`, `prev_value`).
    */
   json?: boolean
+}
+
+export interface AiGatewayClientAttachContext extends ClientAttachContext {
+  endpoint: string
 }
 
 export interface AiGatewayClientStatusContext {
@@ -2601,4 +2841,3 @@ export interface BackfillMaterializeContext {
   /** Stable run id propagated from the CLI runner. */
   devRunId?: string
 }
-

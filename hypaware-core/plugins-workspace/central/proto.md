@@ -121,16 +121,77 @@ backs off linearly (30s → 60s → 120s → 300s).
 
 ## Ingest
 
+### PUT `/v1/datasets/{dataset}`
+
+Bearer-authenticated. Announces one dataset's schema so the server's
+catalog can resolve rows POSTed under that name. Body is JSON:
+
+```json
+{ "schema": { "columns": [ { "name": "…", "type": "STRING", "nullable": true } ] },
+  "sourceSignal": "claude_telemetry",
+  "primaryTimestampColumn": "event_timestamp" }
+```
+
+`sourceSignal` and `primaryTimestampColumn` are sent only when the
+dataset declares them. `{dataset}` is URL-escaped, and the ingest POST
+below escapes it identically, so the two calls always name one resource.
+
+Datasets declaring `localOnlyContentColumns` are not eligible for this raw-row
+protocol: those columns may contain local-only content without per-row `cwd`
+provenance, and registration cannot make the server enforce the machine's
+local usage policy. The client withholds such a dataset before either request.
+The withhold is permanent, not an error: the partition is skipped (and named
+once per sink instance in `central.forward.dataset_withheld`) rather than
+retried, so it never fills the driver's outbox. A dataset whose name collides
+with a reserved legacy signal is withheld the same way, at warn.
+
+Registration is expected to be idempotent: the client announces an eligible
+dataset once per sink instance, before that dataset's first ingest chunk, and
+a daemon restart (or a second concurrent tick) may announce it again.
+
+When the sink instance starts, the client initializes a durable rollout
+manifest for every eligible open dataset. It flushes and rediscovers pending
+spools, records every existing partition's current sequence high-water without
+sending its rows, then commits the manifest. Establishing that boundary locally
+first means a registration outage cannot absorb later rows into a delayed
+baseline. An empty dataset still commits an empty manifest, so a partition
+created later starts at sequence zero and forwards its first rows.
+
+Once the manifest names a partition, missing or invalid progress fails closed:
+it never falls through to either a full-history read or a new baseline. Legacy
+signals keep their existing full first-export behavior. See LLP 0307.
+
+Response 2xx: registered. A `404` or `405` means the server predates this
+additive route: the client holds the dataset locally, logs once, and re-probes
+after five minutes instead of creating an outbox entry every tick. Any other
+status throws, which fails that partition for the driver's outbox retry; the
+dataset is not marked registered until a call succeeds. A `401` refreshes the
+JWT once and retries, exactly as ingest does.
+
+> **Server status:** this route is the fleet server's accepted catalog
+> protocol (server LLP 0001 / 0004) and was exercised against the deployed
+> Hyperparam server on 2026-08-24 with `claude_telemetry_events`. An older
+> server that does not serve it holds the partition locally and emits
+> `central.forward.dataset_unsupported`; no rows are POSTed.
+
 ### POST `/v1/ingest/{signal}`
 
 Bearer-authenticated. Body is NDJSON (one row per line, terminated by
 `\n`). One request carries one signal. The kernel forwards each cache
-partition independently, resolving its signal from the dataset's
-`sourceSignal` (defaulting to the dataset name) and streaming the
-partition's rows as one or more bounded chunks: one POST per chunk (see
-"Batch boundaries").
+partition independently and streams the partition's rows as one or more
+bounded chunks: one POST per chunk (see "Batch boundaries").
 
-`{signal}` is one of:
+`{signal}` is resolved from the dataset in two ways:
+
+- the four **legacy signals** keep their fixed paths, chosen by the
+  dataset's declared `sourceSignal`;
+- every **other eligible** dataset ingests under its own dataset name, after
+  its schema is registered by the `PUT` above. Its `sourceSignal`, if it
+  declares one, travels in the registration body and does **not** select the
+  path. Datasets declaring `localOnlyContentColumns` are ineligible as
+  described above. The names `logs`, `traces`, `metrics`, and `proxy` are
+  reserved by the server's legacy path mapping and cannot be used by an open
+  dataset.
 
 | Signal    | Source                                            |
 |-----------|---------------------------------------------------|

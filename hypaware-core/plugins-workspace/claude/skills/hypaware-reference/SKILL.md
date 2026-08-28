@@ -1,6 +1,6 @@
 ---
 name: hypaware-reference
-description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a fleet, and what is local-only versus opt-in, including how to stop recording the current session. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go" - and to opt this conversation out of recording: "don't record this", "ignore this session", "pause logging", "resume recording" (these map to `hyp session ignore` / `unignore`). For querying recorded data, including graph and co-occurrence questions, use hypaware-query.
+description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a central server, and what is local-only versus opt-in, including how to stop recording the current session. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go" - and to opt this conversation out of recording: "don't record this", "ignore this session", "pause logging", "resume recording" (these map to `hyp session ignore` / `unignore`). For querying recorded data, including graph and co-occurrence questions, use hypaware-query.
 user-invocable: false
 ---
 
@@ -19,11 +19,11 @@ What stays on the machine and what can leave is drawn under "What is opt-in".
 
 ## What it captures (sources)
 
-`hyp init` picks any subset of `claude`, `codex`, `raw-anthropic`, `raw-openai`,
+`hyp setup` picks any subset of `claude`, `codex`, `raw-anthropic`, `raw-openai`,
 and `otel`. For what is actually recording here, read it rather than infer it:
-`hyp status` marks each client configured/attached, and on a fleet-managed
-host also splits them into what the fleet forwards and what stays local, so a
-local addition is never invisible. `hyp policy list` enumerates folder
+`hyp status` marks each client configured/attached, and on a centrally managed
+host also splits them into what the org forwards and what stays local, so a
+local addition is never invisible. `hyp privacy list` enumerates folder
 markings.
 
 The rule neither command states: folder scoping works only for `claude` and
@@ -48,7 +48,7 @@ markings are a no-op for the raw proxies and OTEL.
 `HYP_HOME` defaults to `~/.hyp`; override by exporting it before invoking the
 CLI or daemon.
 
-- `<HYP_HOME>/hypaware-config.json` - active config, rewritten by `hyp init`
+- `<HYP_HOME>/hypaware-config.json` - active config, rewritten by `hyp setup`
 - `<HYP_HOME>/hypaware/cache/` - local query cache (Iceberg-backed)
 - `<HYP_HOME>/hypaware/sinks/<name>/outbox/` - failed export rows awaiting retry
 - `<HYP_HOME>/hypaware/dev-telemetry/` - daemon self-telemetry
@@ -81,19 +81,20 @@ curated HypAware registry.
 - See what was captured here, and mark or purge it - use the
   **hypaware-privacy** skill (also the review before an enrolled machine's
   first sync).
-- Opt a folder out of recording - `hyp ignore <path>` writes a committable
-  `.hypignore`; `hyp policy set <path> ignore` marks it machine-local instead,
+- Opt a folder out of recording - `hyp privacy ignore <path>` writes a committable
+  `.hypignore`; `hyp privacy set <path> ignore` marks it machine-local instead,
   with no repo breadcrumb.
 <!-- @ref LLP 0212#routing-moves-to-reference [implements]: the retired hypaware-ignore skill's job, minus the second implementation of the control call -->
 - Stop recording *this conversation* - `hyp session ignore` drops this session's
-  exchanges at the gateway; `hyp session unignore` resumes, and `hyp session
-  status` reports which it is right now. Each resolves the session id itself
-  (Claude and Codex) and fails closed rather than guessing. The opt-out is
-  in-memory: a gateway restart drops it, and a fork (`claude --fork-session`,
-  `codex fork`) mints a new id it no longer covers.
+  exchanges at every local recorder (the gateway, and the Claude telemetry
+  listener when one is running); `hyp session unignore` resumes, and
+  `hyp session status` reports which it is right now. Each resolves the
+  session id itself (Claude and Codex) and fails closed rather than guessing.
+  The opt-out is in-memory: a daemon restart drops it, and a fork
+  (`claude --fork-session`, `codex fork`) mints a new id it no longer covers.
 - Decide what happens in new folders - by default they sync with no
-  question; `hyp policy folders ask` asks once per new folder instead, and
-  `hyp policy folders sync` returns to the default. It gates the question
+  question; `hyp privacy folders ask` asks once per new folder instead, and
+  `hyp privacy folders sync` returns to the default. It gates the question
   only, never an existing class.
 - "Is it working?" or diagnose a problem - `hyp status` (add `--json` for the
   stable shape).

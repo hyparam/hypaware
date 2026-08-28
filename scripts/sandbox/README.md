@@ -122,7 +122,7 @@ $NODE_USE_SYSTEM_CA` in the real one.
 | Flag | Effect |
 |---|---|
 | `--root <dir>` | Sandbox root (default `~/.hyp-sandbox`) |
-| `--spawn` | Mock `launchctl bootstrap` really starts the plist's program, so you get a live sandboxed daemon with a real pid, status file, and bound port |
+| `--spawn` | Mock `launchctl` or `systemctl` really starts the service, so you get a live sandboxed daemon with a real pid, status file, and bound port |
 | `--refuse-trust` | `security add-trusted-cert` behaves like the user cancelling the macOS password dialog, for testing the degraded attach path |
 | `--trust-from-daemon <grant\|refuse>` | Whether a *daemon-issued* trust succeeds. Default `refuse` - see "What the sandbox assumes" |
 | `--verbose` | Echo every intercepted call to stderr as it happens |
@@ -216,28 +216,25 @@ re-seeds its identity and stops. `hyp daemon install` is the idempotent step
 that covers both.
 
 The `security add-trusted-cert` in this flow is issued by the **daemon**, not
-by a command the user ran. The sandbox mock accepts it silently; a real Mac
-raises its password dialog. That step is the one thing this sandbox cannot
-prove - verify it in a second macOS user account before telling anyone the
-flow is unattended.
+by a command the user ran. The sandbox refuses it by default because nobody is
+watching the background service to answer a password dialog. That is the
+pessimistic assumption described above, not proof of what a real Mac does; use
+`--trust-from-daemon grant` to exercise the other branch, and verify either
+claim in a second macOS user account before calling the flow unattended.
 
-## Known snag: `npm config get prefix`
+## Why the npm prefix lives in `.npmrc`
 
-npm 11 refuses to *read* `prefix` whenever it is set explicitly, in an
-`.npmrc` or in the environment:
+npm 11 refuses to *read* `prefix` when the sandbox supplies it through the
+`npm_config_prefix` environment variable:
 
 ```
 npm error The prefix option is protected, and can not be retrieved in this way
 ```
 
-The sandbox has to set it, so `ensureDurableBinForNpx`
-(`src/core/cli/global_install.js`), which shells out to `npm config get
-prefix`, fails inside the sandbox on the `npx hypaware` → `hyp init` path.
-
-This is not only a sandbox artifact: **any** user with `prefix=` in their
-`~/.npmrc` (the usual way to avoid `sudo` for global installs) hits the same
-error on that path. `npm prefix -g` returns the same value and is not
-protected.
+`ensureDurableBinForNpx` (`src/core/cli/global_install.js`) calls `npm config
+get prefix`, so the sandbox instead writes `prefix` and `cache` into the
+sandbox HOME's `.npmrc`. npm still reports that value normally, and both the
+global install and the npx download stay under the sandbox root.
 
 ## Adding a mock
 

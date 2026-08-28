@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-03
 **Related:** LLP 0044 (attach-on-join, the consent framing this extends), LLP 0011 (init finale), LLP 0031 (local config layer writers), LLP 0037 (backfill on join), LLP 0045 (client attach/detach seam), LLP 0169 (OpenClaw attach surface), LLP 0170 (OpenClaw scheduled sweep)
+**Extended-by:** LLP 0299 (prompt polarity: the quoted `[y/N]` copy is now `[Y/n]`, default yes)
 
 > Proposal: when `hyp attach <client>` fails because the client's adapter
 > plugin is not enabled, stop dead-ending. Interactively, turn the failure

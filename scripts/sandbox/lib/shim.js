@@ -67,6 +67,8 @@ const args = process.argv.slice(3)
 // never returns, and it must not be recorded as an intercepted call.
 if (tool === '__supervise') {
   supervise(args[0], args[1])
+} else if (tool === '__supervise_systemd') {
+  superviseSystemd(args[0], args[1])
 } else {
   main()
 }
@@ -373,7 +375,6 @@ function startSupervisor(label, plist) {
 function supervise(label, plist) {
   const xml = fs.readFileSync(plist, 'utf8')
   const argv = parsePlistArray(xml, 'ProgramArguments')
-  if (argv.length === 0) process.exit(0)
   const keepAlive = /<key>KeepAlive<\/key>\s*<true\/>/.test(xml)
   // `HYP_SANDBOX_SERVICE` marks everything launchd starts, and is inherited by
   // whatever the daemon spawns, so the shim can tell "the background agent did
@@ -385,11 +386,71 @@ function supervise(label, plist) {
   }
   const outPath = parsePlistString(xml, 'StandardOutPath')
   const errPath = parsePlistString(xml, 'StandardErrorPath')
+
+  superviseProgram({
+    label,
+    argv,
+    keepAlive,
+    env,
+    outPath,
+    errPath,
+    throttleMs: 1000,
+  })
+}
+
+/**
+ * Run a systemd unit's ExecStart under the same detached supervisor used for
+ * launchd. The generated HypAware units use only the directives read here.
+ *
+ * @param {string} unit
+ * @param {string} unitPath
+ */
+function superviseSystemd(unit, unitPath) {
+  const body = fs.readFileSync(unitPath, 'utf8')
+  const argv = parseSystemdWords(unitValues(body, 'ExecStart')[0] ?? '')
+  const restart = unitValues(body, 'Restart')[0] === 'always'
+  const restartSec = Number(unitValues(body, 'RestartSec')[0] ?? '1')
+  const env = { ...process.env }
+  for (const declaration of unitValues(body, 'Environment')) {
+    for (const assignment of parseSystemdWords(declaration)) {
+      const equals = assignment.indexOf('=')
+      if (equals > 0) env[assignment.slice(0, equals)] = assignment.slice(equals + 1)
+    }
+  }
+  const stdout = unitValues(body, 'StandardOutput')[0] ?? ''
+  const stderr = unitValues(body, 'StandardError')[0] ?? ''
+
+  superviseProgram({
+    label: unit,
+    argv,
+    keepAlive: restart,
+    env,
+    outPath: stdout.startsWith('append:') ? stdout.slice('append:'.length) : null,
+    errPath: stderr.startsWith('append:') ? stderr.slice('append:'.length) : null,
+    throttleMs: Number.isFinite(restartSec) && restartSec >= 0 ? restartSec * 1000 : 1000,
+  })
+}
+
+/**
+ * Supervise one service command until it stops or exceeds the crash-loop cap.
+ *
+ * @param {{
+ *   label: string,
+ *   argv: string[],
+ *   keepAlive: boolean,
+ *   env: NodeJS.ProcessEnv,
+ *   outPath: string | null,
+ *   errPath: string | null,
+ *   throttleMs: number,
+ * }} options
+ */
+function superviseProgram(options) {
+  const { label, argv, keepAlive, env, outPath, errPath, throttleMs } = options
+  if (argv.length === 0) process.exit(0)
   const pidFile = path.join(stateDir, `service-${label}.json`)
 
   const RESTART_CEILING = 20
   const RESTART_WINDOW_MS = 60_000
-  const THROTTLE_MS = 1000
   /** @type {number[]} */
   const recentStarts = []
   /** @type {import('node:child_process').ChildProcess | null} */
@@ -439,7 +500,7 @@ function supervise(label, plist) {
         try { fs.rmSync(pidFile) } catch { /* nothing to clear */ }
         process.exit(0)
       }
-      setTimeout(runOnce, THROTTLE_MS)
+      setTimeout(runOnce, throttleMs)
     })
   }
 
@@ -517,6 +578,65 @@ function unescapeXml(value) {
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&amp;/g, '&')
+}
+
+/**
+ * Read every value assigned to a systemd unit directive.
+ *
+ * @param {string} body
+ * @param {string} name
+ * @returns {string[]}
+ */
+function unitValues(body, name) {
+  const prefix = `${name}=`
+  return body.split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(prefix))
+    .map((line) => line.slice(prefix.length))
+}
+
+/**
+ * Split the quoting and escaping emitted by `buildUnit` into argv words.
+ *
+ * @param {string} value
+ * @returns {string[]}
+ */
+function parseSystemdWords(value) {
+  /** @type {string[]} */
+  const words = []
+  let word = ''
+  let quote = ''
+  let escaped = false
+  let started = false
+  for (const char of value) {
+    if (escaped) {
+      word += char
+      escaped = false
+      started = true
+    } else if (char === '\\') {
+      escaped = true
+      started = true
+    } else if (quote) {
+      if (char === quote) quote = ''
+      else word += char
+      started = true
+    } else if (char === '"' || char === "'") {
+      quote = char
+      started = true
+    } else if (/\s/.test(char)) {
+      if (started) {
+        words.push(word)
+        word = ''
+        started = false
+      }
+    } else {
+      word += char
+      started = true
+    }
+  }
+  if (escaped) word += '\\'
+  if (started) words.push(word)
+  return words
 }
 
 // ------------------------------------------------------------------ security
@@ -675,23 +795,57 @@ function systemctl(argv) {
 
   if (sub === 'daemon-reload' || sub === 'reset-failed') return { code: 0 }
 
-  if (sub === 'enable' || sub === 'start' || sub === 'restart') {
-    state.units[unit] = { enabled: true, active: true, changedAt: new Date().toISOString() }
+  if (sub === 'enable') {
+    const entry = state.units[unit] ?? { enabled: false, active: false, pid: null, changedAt: '' }
+    entry.enabled = true
+    entry.changedAt = new Date().toISOString()
+    state.units[unit] = entry
     writeState(systemdPath, state)
     return { code: 0, note: `${sub} ${unit}` }
   }
 
-  if (sub === 'stop' || sub === 'disable') {
-    if (state.units[unit]) {
-      state.units[unit].active = false
-      if (sub === 'disable') state.units[unit].enabled = false
+  if (sub === 'start' || sub === 'restart') {
+    const entry = state.units[unit] ?? { enabled: false, active: false, pid: null, changedAt: '' }
+    if (sub === 'restart' && entry.pid) killService(unit, entry)
+    if (process.env.HYP_SANDBOX_SPAWN === '1' && !childPid(unit)) {
+      const unitPath = path.join(process.env.HOME ?? '', '.config', 'systemd', 'user', unit)
+      if (!fs.existsSync(unitPath)) return { code: 5, err: `Unit ${unit} not found.\n` }
+      entry.pid = startSystemdSupervisor(unit, unitPath)
+    }
+    entry.active = true
+    entry.changedAt = new Date().toISOString()
+    state.units[unit] = entry
+    writeState(systemdPath, state)
+    return { code: 0, note: `${sub} ${unit}` }
+  }
+
+  if (sub === 'stop') {
+    const entry = state.units[unit]
+    if (entry) {
+      killService(unit, entry)
+      entry.active = false
+      entry.pid = null
+      entry.changedAt = new Date().toISOString()
+      writeState(systemdPath, state)
+    }
+    return { code: 0, note: `${sub} ${unit}` }
+  }
+
+  if (sub === 'disable') {
+    const entry = state.units[unit]
+    if (entry) {
+      entry.enabled = false
+      entry.changedAt = new Date().toISOString()
       writeState(systemdPath, state)
     }
     return { code: 0, note: `${sub} ${unit}` }
   }
 
   if (sub === 'is-active') {
-    const active = Boolean(state.units[unit] && state.units[unit].active)
+    const entry = state.units[unit]
+    const active = process.env.HYP_SANDBOX_SPAWN === '1'
+      ? Boolean(entry && childPid(unit))
+      : Boolean(entry && entry.active)
     return { code: active ? 0 : 3, out: `${active ? 'active' : 'inactive'}\n` }
   }
 
@@ -702,11 +856,30 @@ function systemctl(argv) {
 
   if (sub === 'show') {
     const entry = state.units[unit]
+    const pid = entry ? childPid(unit) : null
+    const active = process.env.HYP_SANDBOX_SPAWN === '1' ? Boolean(pid) : Boolean(entry && entry.active)
     return {
       code: 0,
-      out: `MainPID=0\nActiveState=${entry && entry.active ? 'active' : 'inactive'}\n`,
+      out: `LoadState=${entry ? 'loaded' : 'not-found'}\nMainPID=${pid ?? 0}\nActiveState=${active ? 'active' : 'inactive'}\n`,
     }
   }
 
   return { code: 0, note: `unhandled systemctl subcommand ${sub}` }
+}
+
+/**
+ * Start a detached supervisor for a systemd unit.
+ *
+ * @param {string} unit
+ * @param {string} unitPath
+ * @returns {number | null}
+ */
+function startSystemdSupervisor(unit, unitPath) {
+  const child = spawn(process.execPath, [import.meta.filename, '__supervise_systemd', unit, unitPath], {
+    detached: true,
+    stdio: 'ignore',
+    env: process.env,
+  })
+  child.unref()
+  return child.pid ?? null
 }

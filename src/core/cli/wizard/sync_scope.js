@@ -9,6 +9,7 @@ import { LOCKED_LABEL_SUFFIX } from './pick.js'
 import {
   ClientSyncListUnreadableError,
   clientSyncListPath,
+  optedOutClientSourceIds,
   readClientSyncEntries,
   writeClientSyncEntries,
 } from '../../usage-policy/index.js'
@@ -34,10 +35,19 @@ const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this
  * Locked (org-configured) sources are shown but never editable: they
  * always sync (LLP 0188 #locked), so the gate lists them - fleet-suffixed
  * - and the menu renders them checked and disabled, keeping "these will
- * sync" the whole picture rather than the editable slice. `candidates` is
- * the pick result's locked-filtered descriptor list; when it is empty the
- * step prints its position plus the always-sync fact instead of
- * prompting, so the counter never skips a number.
+ * sync" the whole picture rather than the editable slice. `opts.locked`
+ * arrives already display-filtered (LLP 0276 #sync-gate): a hidden row is
+ * locked on every enrolled machine and was never offered, so naming it
+ * here would label a screen the user cannot connect to anything they did.
+ * `candidates` is the pick result's locked-filtered descriptor list, put
+ * through that same display filter; when it is empty the step prints its
+ * position plus the always-sync fact - or, with no org row to name
+ * either, the nothing-picked fact, which only reads "nothing syncs" when
+ * `lockedHidden` and `candidatesHiddenIds` both say no filtered-out row is
+ * standing - instead of prompting, so the counter never skips a number. A
+ * hidden pick the store already withholds is not standing, which is why
+ * the picks arrive as ids and the locked rows as a count (LLP 0289
+ * #ask-the-store).
  *
  * The write has editor semantics over the shown candidates only: entries
  * for sources not shown (a previously opted-out source the user unpicked
@@ -73,18 +83,90 @@ export async function runWizardSyncScope(opts) {
 
   const candidateIds = new Set(opts.candidates.map((d) => d.id))
   const optedOutBefore = new Set(existing.filter((e) => candidateIds.has(e.source)).map((e) => e.source))
+  // The one question the lane may ask about a row it may not show: does a
+  // hidden pick still ship? `optedOutBefore` cannot answer it - it is
+  // computed over `candidateIds`, the *visible* candidates - and a hidden
+  // row is addressable in the store all the same
+  // (`hyp policy client raw-anthropic local-only`), so the ids go to the
+  // store and never to the screen.
+  // The store's answer, not the seam's: the seam also drops opt-out
+  // entries for central-classified sources, which this cannot see. That
+  // costs nothing while a hidden pick is non-central by construction, and
+  // the run where it is not is recorded as accepted in LLP 0289 #not-done.
+  // @ref LLP 0289#ask-the-store [implements]: the hidden picks reach the lane as ids so their sentence can be checked against the store the export seam reads
+  const optedOutAll = new Set(optedOutClientSourceIds(existing))
+  const hiddenCandidates = opts.candidatesHiddenIds ?? []
+  const hiddenCandidateSyncs = hiddenCandidates.some((id) => !optedOutAll.has(id))
 
   if (opts.candidates.length === 0) {
     // Led by a blank line like every other block this lane prints, so the
     // no-question path is not the one that runs into its neighbour.
     opts.stdout.write('\n')
     if (opts.progress) opts.stdout.write(`${opts.progress}\n`)
+    // Five ways to reach this line, and they are not the same fact. With
+    // org rows to name and nothing else standing, everything picked is the
+    // fleet's and always syncs; with a hidden pick standing beside them the
+    // fleet sentence narrows to the rows it owns (below).
+    // With none nameable but locked rows still standing - the enrolled
+    // machine whose locked set is entirely hidden (LLP 0276 #sync-gate) -
+    // the fleet's own capture still ships, so the line may not claim
+    // nothing syncs; it just has no row to attribute it to. With no locked
+    // row but a hidden row among the picks that the store does not already
+    // withhold - a carried raw source (LLP 0202 #carry-through) on a run
+    // whose org config has not converged - capture still ships and the
+    // fleet does not own it, so the line names neither the row nor an
+    // owner. Only with nothing standing at all is nothing picked and
+    // nothing synced. The locked branch needs no such check: an org row
+    // always syncs (LLP 0188 #locked) and the export seam drops opt-out
+    // entries for central-classified sources, so a store entry for one is
+    // inert.
+    // @ref LLP 0276#no-candidates [implements]: the no-candidates line states the fleet only when there is a visible org row to name, and never claims nothing syncs while a filtered-out row stands
+    // @ref LLP 0289#ask-the-store [implements]: a hidden pick the store withholds is not standing, so this branch reads "nothing syncs" instead of promising an export that will not happen
+    if ((opts.locked ?? []).length === 0) {
+      if ((opts.lockedHidden ?? 0) > 0) {
+        opts.stdout.write(
+          'You picked nothing to record, but capture your fleet manages directly still syncs to your server.\n'
+        )
+      } else if (hiddenCandidateSyncs) {
+        opts.stdout.write(
+          'You picked nothing to record, but capture already set up on this machine still syncs to your server.\n'
+        )
+      } else {
+        opts.stdout.write('You picked nothing to record, so nothing syncs to your server.\n')
+      }
+      return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
+    }
+    // A hidden pick standing beside the org rows breaks the exhaustive
+    // reading of the fleet sentence: the carried row (LLP 0202
+    // #carry-through) is in `sources`, composes into the *local* layer, and
+    // syncs, so "everything you picked is managed by your fleet" hands the
+    // fleet an owner's claim over capture it does not own. The org rows get
+    // a sentence scoped to themselves, and the machine's own capture gets
+    // the line the no-locked branch already uses - a fact, never a name.
+    // Two claims, two questions. *Ownership* is not the store's to answer:
+    // a hidden pick the store withholds is still not the fleet's, so the
+    // fleet sentence narrows whenever such a row exists, which is the count
+    // LLP 0281 settled on. *Shipping* is the store's, so the second line -
+    // the one that promises an export - prints only when a hidden pick is
+    // not already withheld. That is the same question the no-locked branch
+    // asks, so the two agree about what leaves the machine without this one
+    // re-acquiring an owner's claim it gave up.
+    // @ref LLP 0281#visible-org-row [implements]: a visible org row stops standing in for a hidden pick beside it, withheld or not
+    // @ref LLP 0289#ask-the-store [implements]: the store answers whether the machine's own capture ships, not whether the fleet owns it
+    if (hiddenCandidates.length > 0) {
+      opts.stdout.write('Your fleet manages these and they always sync:\n')
+      for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
+      if (hiddenCandidateSyncs) {
+        opts.stdout.write('Capture already set up on this machine also syncs to your server.\n')
+      }
+      return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
+    }
     opts.stdout.write('Everything you picked is managed by your fleet and always syncs.\n')
     for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
     // A statement, not a screen: `noQuestion` is what tells the lane after
     // this one that there is nothing here to step back *to* (LLP 0191
     // #back-edges).
-    return await finishSpan({ noQuestion: true, optedOut: [] }, opts)
+    return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
   }
 
   const ask = opts.prompt ?? defaultPromptFactory(opts)
@@ -96,7 +178,7 @@ export async function runWizardSyncScope(opts) {
   } catch (err) {
     if (!isPromptCancelledError(err)) throw err
     try {
-      opts.stderr.write('hyp init: cancelled\n')
+      opts.stderr.write('hyp setup: cancelled\n')
     } catch {
       // best-effort: stderr might be closed during cleanup
     }
@@ -118,7 +200,7 @@ export async function runWizardSyncScope(opts) {
   })
   if (optedOut.length > 0) {
     opts.stdout.write(
-      `Keeping local-only: ${optedOut.join(' · ')}. Change later with 'hyp policy client <name> sync|local-only'.\n`
+      `Keeping local-only: ${optedOut.join(' · ')}. Change later with 'hyp privacy client <name> sync|local-only'.\n`
     )
   }
   return await finishSpan({ optedOut }, opts)
@@ -236,17 +318,29 @@ async function promptSyncScopeSelection({ opts, ask, confirm, optedOutBefore }) 
 }
 
 /**
+ * The lane's one span. `hidden_picks` and `hidden_picks_syncing` carry the
+ * store answer the no-candidates sentence turns on (LLP 0289
+ * #ask-the-store) so a later "it said nothing syncs but rows shipped" is
+ * triageable from the signal: the count separates "no hidden pick" from
+ * "hidden picks, all withheld", which print the same line. Counts and a
+ * boolean, never the ids - the lane holds them to ask the store, not to
+ * record them (LLP 0202).
+ *
  * @param {WizardSyncScopeResult} result
  * @param {RunWizardSyncScopeOptions} opts
+ * @param {{ hidden_picks_syncing?: boolean }} [extra] attributes only the
+ *   caller knows, folded in when present
  * @returns {Promise<WizardSyncScopeResult>}
  */
-async function finishSpan(result, opts) {
+async function finishSpan(result, opts, extra) {
   await withSpan(
     'wizard.sync_scope.finish',
     {
       [Attr.COMPONENT]: 'wizard',
       [Attr.OPERATION]: 'wizard.sync_scope.finish',
       candidates: opts.candidates.length,
+      hidden_picks: (opts.candidatesHiddenIds ?? []).length,
+      ...(extra ?? {}),
       sources_opted_out: result.optedOut.length,
       status: result.cancelled ? 'cancelled' : result.back ? 'backed' : result.skipped ? 'skipped' : 'ok',
     },

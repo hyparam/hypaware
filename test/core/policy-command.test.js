@@ -654,7 +654,7 @@ test('hyp policy on a corrupt store tags the command span with the local_only_li
 
     await obs.shutdown()
     const traces = readJsonl(path.join(devTelemetryDir(obsEnv.stateDir), `traces-${process.pid}.jsonl`))
-    for (const name of ['policy list', 'policy show']) {
+    for (const name of ['privacy list', 'privacy show']) {
       const span = traces.find((record) => (
         record.name === 'command.run' && record.attributes?.hyp_command === name
       ))
@@ -929,7 +929,7 @@ test('hyp policy folders fails loudly on a corrupt preference and names the repa
     const res = await run('policy folders', [], { cwd: root, hypHome })
     assert.equal(res.code, 1)
     assert.match(res.stderr, /unreadable or malformed/)
-    assert.match(res.stderr, /hyp policy folders ask/)
+    assert.match(res.stderr, /hyp privacy folders ask/)
     assert.equal(readFileSync(prefPath, 'utf8'), '{ nope', 'never overwritten by the read path')
 
     // The write path is the documented repair and must work over the corrupt file.

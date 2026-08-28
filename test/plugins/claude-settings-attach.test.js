@@ -452,6 +452,7 @@ test('activate() attach() rethrows the JSONC refusal with the refusal mark intac
       skills: { register() {} },
       agents: { register() {} },
       initPresets: { register() {} },
+      query: { registerDataset() {} },
     })
     await activateClaude(ctx)
 

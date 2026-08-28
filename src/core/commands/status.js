@@ -1,7 +1,8 @@
 // @ts-check
 
 import { Attr, withSpan } from '../observability/index.js'
-import { collectHypAwareStatus } from '../daemon/status.js'
+import { collectHypAwareStatus, describeMaintenanceSkipReasons } from '../daemon/status.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
@@ -31,12 +32,14 @@ import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
  * @returns {Promise<number>}
  */
 export async function runStatus(argv, ctx) {
-  const json = argv.includes('--json')
+  const parsed = parseCoreCommandArgv('status', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
 
   const sources = /** @type {ExtendedSourceRegistry} */ (ctx.sources)
   const sinks = /** @type {ExtendedSinkRegistry} */ (ctx.sinks)
 
-  const runtimeClientNames = listClientNames(ctx.capabilities)
+  const runtimeClientNames = listClientNames(ctx)
 
   const report = await collectHypAwareStatus({
     env: ctx.env,
@@ -110,6 +113,178 @@ export async function runStatus(argv, ctx) {
 }
 
 /**
+ * Narrow client projection of the same snapshot `hyp status` uses. This is
+ * intentionally not a second attach probe or config reader: adding another
+ * client surface must not create two answers to whether a client is attached.
+ *
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ * @ref LLP 0248#client-status [implements]: client status projects the overall status collector
+ */
+export async function runClientStatus(argv, ctx) {
+  const parsed = parseCoreCommandArgv('client status', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const json = parsed.params.json === true
+
+  const report = await collectHypAwareStatus({
+    env: ctx.env,
+    runtime: {
+      sources: /** @type {ExtendedSourceRegistry} */ (ctx.sources),
+      sinks: /** @type {ExtendedSinkRegistry} */ (ctx.sinks),
+      capabilities: ctx.capabilities,
+      query: ctx.query,
+      storage: ctx.storage,
+    },
+  })
+  const requested = typeof parsed.params.client === 'string' ? parsed.params.client : undefined
+  const clients = requested
+    ? report.clients.filter((client) => client.name === requested)
+    : report.clients
+  if (requested && clients.length === 0) {
+    ctx.stderr.write(`hyp client status: unknown client '${requested}'\n`)
+    return 1
+  }
+
+  const rows = projectClientStatus(report, clients)
+
+  if (json) {
+    ctx.stdout.write(JSON.stringify({ clients: rows }, null, 2) + '\n')
+    return 0
+  }
+  if (rows.length === 0) {
+    ctx.stdout.write('No clients are configured or detected.\n')
+    return 0
+  }
+  renderClientStatusText(rows, ctx.stdout)
+  return 0
+}
+
+/**
+ * Project client-focused facts out of the same status report used by
+ * `hyp status`. The projection reads listener details already persisted in the
+ * report's source snapshot and never probes settings, transcripts, or a live
+ * endpoint itself.
+ *
+ * @param {HypAwareStatusReport} report
+ * @param {HypAwareStatusReport['clients']} clients
+ * @ref LLP 0248#client-status [implements]: one overall snapshot supplies attach, endpoint, activity, and recorder-health facts
+ */
+export function projectClientStatus(report, clients) {
+  return clients.map((client) => {
+    const health = report.captureHealth.find((entry) => entry.client === client.name)
+    const listener = listenerEndpointFromReport(report, health?.source ?? null)
+    const clientTelemetryEndpoint = client.telemetryPort !== undefined
+      ? `http://127.0.0.1:${client.telemetryPort}`
+      : null
+    const endpointDrift = client.telemetryPort !== undefined && listener.port !== null
+      ? client.telemetryPort !== listener.port
+      : null
+
+    return {
+      name: client.name,
+      configured: client.configured,
+      attachable: client.attachable !== false,
+      attached: client.attached,
+      mode: client.mode ?? null,
+      provenance: report.layered
+        ? (report.layered.centralPlugins.includes(client.plugin) ? 'central' : 'local')
+        : 'local',
+      settings_path: client.settingsPath ?? null,
+      version: client.version ?? null,
+      port: client.port ?? null,
+      telemetry_endpoint: clientTelemetryEndpoint,
+      listener_endpoint: listener.endpoint,
+      endpoint_drift: endpointDrift,
+      capture_health: health
+        ? {
+          source: health.source,
+          last_event_at: health.lastEventAt,
+          last_transcript_activity_at: health.lastTranscriptActivityAt,
+          attached_at: health.attachedAt,
+          listener_started_at: health.listenerStartedAt,
+          gap_seconds: Math.round(health.gapMs / 1000),
+          state: health.state,
+        }
+        : null,
+      error: client.error ?? null,
+      recent_entrypoints: report.recentEntrypoints
+        .filter((entry) => entry.clientName === client.name)
+        .map((entry) => ({
+          entrypoint: entry.entrypoint,
+          last_seen: entry.lastSeen,
+          rows: entry.rows,
+        })),
+    }
+  })
+}
+
+/**
+ * @param {ReturnType<typeof projectClientStatus>} rows
+ * @param {{ write(chunk: string): unknown }} stdout
+ */
+export function renderClientStatusText(rows, stdout) {
+  stdout.write('Clients:\n')
+  for (const row of rows) {
+    const attach = row.attachable
+      ? row.attached
+        ? (row.mode ? `attached (${row.mode})` : 'attached')
+        : 'not attached'
+      : 'attach n/a'
+    stdout.write(`  ${row.name}: ${row.configured ? 'configured' : 'not configured'}, ${attach}, ${row.provenance}\n`)
+    if (row.telemetry_endpoint || row.listener_endpoint) {
+      const clientEndpoint = row.telemetry_endpoint ?? 'unknown client endpoint'
+      const listenerEndpoint = row.listener_endpoint ?? 'listener not running'
+      const drift = row.endpoint_drift === true ? ' [endpoint drift]' : ''
+      stdout.write(`    telemetry: ${clientEndpoint} -> ${listenerEndpoint}${drift}\n`)
+    }
+    if (row.capture_health) {
+      const events = row.capture_health.last_event_at ?? 'none'
+      const transcripts = row.capture_health.last_transcript_activity_at ?? 'none'
+      const gap = row.capture_health.state === 'gap' ? ' [capture gap]' : ''
+      stdout.write(`    capture: ${row.capture_health.state}; last event ${events}; last transcript activity ${transcripts}${gap}\n`)
+    }
+    if (row.error) stdout.write(`    error: ${row.error}\n`)
+    for (const entry of row.recent_entrypoints) {
+      stdout.write(`    recent: ${entry.entrypoint}, ${entry.rows} row${entry.rows === 1 ? '' : 's'}, ${entry.last_seen}\n`)
+    }
+  }
+}
+
+/**
+ * Where the recorder's listener is bound, read from the report's source
+ * snapshot.
+ *
+ * Liveness-gated, exactly like the `client_telemetry_stale` diagnostic in
+ * `hyp status` (src/core/daemon/status.js): "the listener is bound to X" is
+ * not a claim a dead daemon's persisted snapshot can support, and a restart
+ * is what moves an ephemeral port back. Without the gate, `hyp client status`
+ * boots with no plugins, falls back to the last `status.json`, and reports
+ * `[endpoint drift]` for a stopped daemon while `hyp status` correctly stays
+ * silent, so the two surfaces this projection exists to reconcile disagree.
+ *
+ * @param {HypAwareStatusReport} report
+ * @param {string | null} sourceName
+ * @returns {{ endpoint: string | null, port: number | null }}
+ * @ref LLP 0248#client-status [implements]: the projection reports what the overall status collector would report, drift gate included
+ */
+function listenerEndpointFromReport(report, sourceName) {
+  if (!sourceName) return { endpoint: null, port: null }
+  if (!report.daemon?.running) return { endpoint: null, port: null }
+  const source = report.sources.find((entry) => entry.name === sourceName)
+  if (!source?.details || typeof source.details !== 'object') return { endpoint: null, port: null }
+  const details = /** @type {Record<string, unknown>} */ (source.details)
+  const host = typeof details.listen_host === 'string' ? details.listen_host : null
+  const port = typeof details.listen_port === 'number' && Number.isInteger(details.listen_port)
+    ? details.listen_port
+    : null
+  return {
+    endpoint: host !== null && port !== null ? `http://${host}:${port}` : null,
+    port,
+  }
+}
+
+/**
  * Render the V1 status report as a stable JSON shape. Consumers may
  * pin keys without dispatching on platform; missing values surface as
  * `null` rather than being omitted, so smoke assertions can probe
@@ -157,6 +332,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       platform: report.daemon.platform,
       ...(report.daemon.error ? { error: report.daemon.error } : {}),
     },
+    ...(report.selfUpdate ? { self_update: report.selfUpdate.json } : {}),
     sources: report.sources.map((s) => ({
       name: s.name,
       plugin: s.plugin,
@@ -193,6 +369,10 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       ...(c.settingsPath ? { settings_path: c.settingsPath } : {}),
       ...(c.version ? { version: c.version } : {}),
       ...(c.port ? { port: c.port } : {}),
+      // The attach mode the marker records (`base_url` / `proxy` / `otel`),
+      // so a machine can be seen to be on the third mode without opening
+      // the settings file (LLP 0258's consequence).
+      ...(c.mode ? { mode: c.mode } : {}),
       ...(c.error ? { error: c.error } : {}),
     })),
     // Picked clients grouped by provenance (LLP 0132 #never-silent). Null on
@@ -210,6 +390,41 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       client_name: e.clientName,
       last_seen: e.lastSeen,
       rows: e.rows,
+    })),
+    // What the daemon's last maintenance tick deliberately left fragmented
+    // (LLP 0228). Null until a daemon has reported a tick: absent is "no tick
+    // has said", which is not "nothing is frozen".
+    maintenance: report.maintenance
+      ? {
+        tick_at: report.maintenance.tickAt,
+        partitions_visited: report.maintenance.partitionsVisited,
+        skipped_total: report.maintenance.skippedTotal,
+        reasons: report.maintenance.reasons,
+        skipped: report.maintenance.partitions.map((p) => ({
+          dataset: p.dataset,
+          partition: p.partition,
+          reason: p.reason,
+          ...(p.dataFiles !== undefined ? { data_files: p.dataFiles } : {}),
+          ...(p.failedAt ? { failed_at: p.failedAt } : {}),
+        })),
+      }
+      : null,
+    // Capture health per otel-attached client (LLP 0257 S17). Always an
+    // array so a consumer can pin the key; empty means no configured client
+    // is otel-attached, which keeps the pre-otel payload shape unchanged.
+    // Timestamps follow the null-not-omitted contract: `last_event_at:
+    // null` is the actionable answer ("attached, nothing ever arrived"),
+    // not a missing field.
+    // @ref LLP 0257#status-and-health [implements]: --json carries the machine-readable comparison the text line renders
+    capture_health: report.captureHealth.map((c) => ({
+      client: c.client,
+      source: c.source,
+      last_event_at: c.lastEventAt,
+      last_transcript_activity_at: c.lastTranscriptActivityAt,
+      attached_at: c.attachedAt,
+      listener_started_at: c.listenerStartedAt,
+      gap_seconds: Math.round(c.gapMs / 1000),
+      state: c.state,
     })),
     datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
     cache: {
@@ -292,11 +507,18 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     // `ca_trusted` / `launchd_env_set` are tri-state: `null` means the probe
     // could not run, which a consumer must not read as "not trusted".
     // @ref LLP 0237#consequences [implements]: --json carries the trust state next to the CA fingerprint
+    // @ref LLP 0238#consequences [implements]: and the full permitted host set the grant covers
     proxy_trust: report.proxyTrust
       ? {
         ca_fingerprint: report.proxyTrust.caFingerprint,
+        permitted_hosts: report.proxyTrust.hosts,
         ca_trusted: report.proxyTrust.trusted,
         launchd_env_set: report.proxyTrust.launchdEnvSet,
+        // Whether the CA is live or residue, which neither probe above can
+        // answer and which decides whether purging it is safe. Tri-state like
+        // its siblings: `null` means the config could not be read, which a
+        // consumer must not read as "proxy_mode is off".
+        proxy_mode_configured: report.proxyTrust.proxyModeConfigured,
       }
       : null,
     diagnostics: report.diagnostics.map((d) => ({
@@ -310,35 +532,43 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
 }
 
 /**
- * How much of the daemon line's `error=` a hostile status file may spend.
- * Wider than a label's 120, because unlike a name this carries a real error
- * message - typically an fs error naming a full path - and the clamp exists
- * to stop the line being bloated, not to bound an identifier. Cutting a path
- * short is the one way this cleaning could cost a reader an answer.
+ * How much of an `error` line a hostile file may spend. Wider than a label's
+ * 120, because unlike a name this carries a real error message - typically an
+ * fs or parser error naming a full path - and the clamp exists to stop the
+ * line being bloated, not to bound an identifier. Cutting a path short is the
+ * one way this cleaning could cost a reader an answer.
  */
-const MAX_DAEMON_ERROR_CHARS = 400
+const MAX_ERROR_CHARS = 400
 
 /**
  * A string on its way into the text surface, made safe to print.
  *
- * `renderStatusText` is the last point before a terminal, and several of the
- * strings it interpolates were read back out of `status.json`
- * (`daemon.state`, `daemon.mode`, and - with no runtime attached - every
- * `sources[]` / `sinks[]` entry). That file is a *file*: core cannot assume
- * the daemon that wrote it was this version, this build, or well behaved, so
- * a raw value from it can carry an escape sequence that repaints the
- * operator's screen or a newline that forges a plausible extra status line.
+ * `renderStatusText` is the last point before a terminal, and not everything
+ * it interpolates was written by this build. Several of these strings were
+ * read back out of `status.json` (`daemon.state`, `daemon.mode`, and - with
+ * no runtime attached - every `sources[]` / `sinks[]` entry), and that file
+ * is a *file*: core cannot assume the daemon that wrote it was this version,
+ * this build, or well behaved. The remote-config block prints etags authored
+ * by whatever server the install joined, read back through a local state file
+ * that nothing validates; the client block prints an attach probe's error,
+ * which for a settings file that is not valid JSON is `JSON.parse`'s message
+ * and therefore quotes an excerpt of that file verbatim. Any of them can
+ * carry an escape sequence that repaints the operator's screen or a newline
+ * that forges a plausible extra status line.
  *
- * Cleaning happens *here* rather than in the collector because these values
- * are not display-only: `sources[].name` and `sinks[].instance` are identity
- * keys and part of the `--json` contract, which a consumer escapes for
- * itself. Cleaning at the interpolation closes the terminal path and leaves
- * both intact - including the raw values the provenance lookups below match
- * on.
+ * Cleaning happens *here* rather than in the collector because `--json`
+ * renders the same values for a program, which escapes for itself and must
+ * receive what was actually recorded (LLP 0225): escaping is a render's job,
+ * and only of the render a person reads. That is not merely a display
+ * nicety, either - `sources[].name` and `sinks[].instance` are identity keys
+ * as well as `--json` contract, and cleaning at the interpolation closes the
+ * terminal path while leaving both intact, including the raw values the
+ * provenance lookups below match on.
  *
- * @param {string | undefined} value
+ * @param {unknown} value
  * @param {number} [max]
  * @returns {string}
+ * @ref LLP 0225#decision [implements]: the text surface escapes what a person reads; --json stays byte-exact
  * @ref LLP 0164#status-reads-it-from-the-status-file [constrained-by]: what core reads back out of status.json is cleaned at the last point before render, whichever field it came from
  */
 function printable(value, max) {
@@ -368,6 +598,12 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
 
   const daemonLine = describeDaemon(report.daemon)
   stdout.write(`  daemon:   ${daemonLine}\n`)
+
+  // Quiet when healthy: the line appears only when self-update is off,
+  // skipped, degraded, or a newer release is waiting.
+  if (report.selfUpdate?.line) {
+    stdout.write(`  ${report.selfUpdate.line}\n`)
+  }
 
   stdout.write('  active plugins:\n')
   if (report.activePlugins.length === 0) {
@@ -416,12 +652,33 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       const state = []
       state.push(c.configured ? 'configured' : 'not in config')
       // A client with no attach probe has no attach state to report: printing
-      // `not attached` for it invites a `hyp attach` that is a documented
-      // no-op and can never change the line (#544).
+      // `not attached` for it invites a `hyp client attach` that is a documented
+      // no-op and can never change the line (#544). Where there is an attach,
+      // the marker's mode rides the attached state (`attached (otel)`), so a
+      // machine that just migrated modes is visibly on the new one from the
+      // surface a human reads, not only under --json (LLP 0258's consequence,
+      // completed by the LLP 0262 migration). Markers that predate modes carry
+      // none and keep the bare word. The mode goes through `printable` because
+      // it is read back off the client's own settings file, which a hand edit
+      // can fill with anything: an unsanitized value here would let a settings
+      // file drive the operator's terminal, which is what LLP 0225 exists to
+      // stop. A value that sanitizes away entirely leaves the bare word.
       // @ref LLP 0229#status-derives-by-the-same-gate [implements]: the clients row says attach n/a, not "not attached", for a probe-less client
-      state.push(c.attachable === false ? 'attach n/a' : c.attached ? 'attached' : 'not attached')
+      // @ref LLP 0225#one-vocabulary [implements]: a label lifted off disk is stripped before it reaches the terminal
+      const mode = printable(c.mode)
+      state.push(
+        c.attachable === false
+          ? 'attach n/a'
+          : c.attached
+            ? (mode ? `attached (${mode})` : 'attached')
+            : 'not attached'
+      )
       stdout.write(`    - ${c.name}  [${state.join(', ')}]${provenanceTag(report.layered, isCentralPlugin(report.layered, c.plugin))}\n`)
-      if (c.error) stdout.write(`        error: ${c.error}\n`)
+      // The probe's error is not this build's prose: a settings file that is
+      // not valid JSON surfaces here as `JSON.parse`'s message, which echoes
+      // an excerpt of the file back. The client wrote that file, so it is
+      // cleaned on the way into the line.
+      if (c.error) stdout.write(`        error: ${printable(c.error, MAX_ERROR_CHARS)}\n`)
     }
     for (const name of clientNames) {
       if (seen.has(name)) continue
@@ -459,6 +716,29 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     }
   }
 
+  // Capture health for otel-attached clients (LLP 0257 S17): the line that
+  // answers "is the telemetry path keeping up with what the client itself is
+  // doing?", which no other line can be read for - `recent clients` above
+  // only knows what WAS captured, and a silent capture gap is precisely rows
+  // that never arrived. Rendered only when a configured client is
+  // otel-attached, so every other install's text surface is unchanged; the
+  // `[capture gap]` tag points at the diagnostics block, which carries the
+  // repair.
+  // @ref LLP 0257#status-and-health [implements]: hyp status renders last event seen vs last transcript activity
+  if (report.captureHealth.length > 0) {
+    stdout.write('  capture health:\n')
+    for (const c of report.captureHealth) {
+      const events = c.lastEventAt !== null
+        ? `last event ${formatEntrypointAge(c.lastEventAt)}`
+        : 'no events yet'
+      const transcripts = c.lastTranscriptActivityAt !== null
+        ? `last transcript activity ${formatEntrypointAge(c.lastTranscriptActivityAt)}`
+        : 'no transcript activity'
+      const tag = c.state === 'gap' ? '  [capture gap]' : ''
+      stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
+    }
+  }
+
   // Proxy mode's two invisible preconditions (LLP 0237, LLP 0239). Rendered
   // only where the question applies - macOS with a CA on disk - so an ordinary
   // install's text output is unchanged and a Linux host is never told about a
@@ -466,13 +746,62 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // dialog was cancelled last month" and "the CA was re-minted and the
   // keychain still trusts the old one", neither of which any other line here
   // can be read for.
+  //
+  // The permitted hosts are named here and not only in the attach dialog: the
+  // grant covers every provider host the product can intercept, so on an
+  // install that captures Claude alone it is wider than anything the config
+  // shows, and after attach this is the only place it can be re-read.
   // @ref LLP 0237#consequences [implements]: the trust state is reported next to the CA fingerprint, so a cancelled dialog is diagnosable without re-running attach
+  // @ref LLP 0238#consequences [implements]: hyp status names all permitted hosts, so the standing grant stays informed and not just the moment it was asked for
   // @ref LLP 0239#terminals-predating-attach [implements]: and next to it, whether the launchd environment carries the variable
   if (report.proxyTrust) {
     stdout.write('  proxy trust:\n')
     stdout.write(`    ca fingerprint: ${report.proxyTrust.caFingerprint}\n`)
+    stdout.write(`    permitted:      ${describePermittedHosts(report.proxyTrust.hosts)}\n`)
     stdout.write(`    login keychain: ${describeCaTrust(report.proxyTrust.trusted)}\n`)
     stdout.write(`    launchd env:    ${describeLaunchdEnv(report.proxyTrust.launchdEnvSet)}\n`)
+    // Three facts with no verb is what this block used to be, and since
+    // LLP 0262 the claude attach neither installs nor reads either mechanism,
+    // so nothing else on the machine names what acts on them. What the note
+    // may say depends on whether the CA is live: `proxy_mode: true` has the
+    // gateway re-mint and present it on every start, so a purge there is not
+    // tidying up, it is deleting the key the running interception terminates
+    // TLS with. Residue gets the purge; live proxy capture gets told what
+    // still depends on the CA and nothing to run; a config we could not read
+    // gets neither, because "cannot tell" is not "safe to delete".
+    //
+    // The live branch names no client: `proxy_mode` is retained for codex,
+    // claude-desktop, openclaw, hermes, and raw SDK traffic, so the client
+    // this CA is actually serving here is not knowable from the trust state.
+    // The residue branch has to name one, because `hyp client detach` takes a
+    // client; that command detaches it as well as purging, which the note
+    // states rather than leaving the user to discover it.
+    // @ref LLP 0262#migration [implements]: the CA and any trust it was granted outlive the migration and end at `detach --purge`, never at another attach
+    if (report.proxyTrust.proxyModeConfigured === null) {
+      stdout.write(
+        '    note:           the config could not be read, so whether this CA is live or residue is unknown\n'
+      )
+      stdout.write(
+        '                    fix the config first: purging a CA a proxy_mode gateway presents breaks capture\n'
+      )
+    } else if (report.proxyTrust.proxyModeConfigured) {
+      stdout.write(
+        '    note:           proxy_mode is on, so the gateway still terminates TLS with this CA\n'
+      )
+      stdout.write(
+        '                    the clients captured through the proxy need it; turn proxy_mode off before purging\n'
+      )
+    } else {
+      stdout.write(
+        '    note:           only proxy_mode capture uses this CA, and no plugin here is configured for it\n'
+      )
+      stdout.write(
+        "                    'hyp client detach claude --purge' removes the CA, its keychain trust, and the launchd env\n"
+      )
+      stdout.write(
+        '                    it detaches claude on the way, so re-attach it afterwards to keep capturing\n'
+      )
+    }
   }
 
   stdout.write(`  cache:           ${cacheRoot}\n`)
@@ -502,8 +831,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.layered?.hasCentral && report.usagePolicy) {
     stdout.write(
       report.usagePolicy.folderAsk === 'sync'
-        ? '  new folders:     sync without asking (`hyp policy folders ask` to be asked instead)\n'
-        : '  new folders:     asked about once each (`hyp policy folders sync` to stop asking)\n'
+        ? '  new folders:     sync without asking (`hyp privacy folders ask` to be asked instead)\n'
+        : '  new folders:     asked about once each (`hyp privacy folders sync` to stop asking)\n'
     )
   }
 
@@ -514,6 +843,36 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     stdout.write(
       `  first sync:      held until ${formatFirstSyncDeadline(report.firstSyncHoldDeadline)} (review with the hypaware-privacy skill; \`hyp sync\` sends it now)\n`
     )
+  }
+
+  // Partitions the daemon's last maintenance tick deliberately left
+  // fragmented (LLP 0228). Rendered only when there are some, like every
+  // other conditional block here, so an ordinary install's text surface is
+  // unchanged. `formatEntrypointAge` is the file's coarse-age formatter (it
+  // is named for its first caller): the question is "is this tick's answer
+  // hours or weeks old?", not the exact instant.
+  // @ref LLP 0228#status-file-is-the-surface [implements]: hyp status is where an operator who never runs `hyp query maintain` finds a frozen partition
+  if (report.maintenance && report.maintenance.skippedTotal > 0) {
+    const m = report.maintenance
+    const breakdown = describeMaintenanceSkipReasons(m.reasons)
+    stdout.write('  maintenance:\n')
+    stdout.write(
+      `    ${m.skippedTotal} of ${m.partitionsVisited} partitions left fragmented, as of the tick ${formatEntrypointAge(m.tickAt)} (${breakdown})\n`
+    )
+    for (const p of m.partitions) {
+      // The count is the one the recorded rewrite ran over, not the live one:
+      // the sentence is about that rewrite, and `hyp query maintain` draws the
+      // same distinction.
+      const detail =
+        p.reason === 'compaction_attempt_failed'
+          ? (p.failedAt ? `  the retry failed at ${p.failedAt}` : '')
+          : (p.dataFiles !== undefined ? `  the last rewrite of ${p.dataFiles} files reduced nothing` : '')
+      stdout.write(`    - ${p.dataset}/${p.partition}  [${p.reason}]${detail}\n`)
+    }
+    const unnamed = m.skippedTotal - m.partitions.length
+    if (unnamed > 0) {
+      stdout.write(`    ... and ${unnamed} more (hyp query maintain --dry-run lists them all)\n`)
+    }
   }
 
   // Local entries the central layer overrides (LLP 0031): dropped at
@@ -536,16 +895,21 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // show. A never-joined install keeps the V1 status surface.
   const rc = report.remoteConfig
   if (rc && (rc.runningEtag || rc.probation || rc.lastRollback || rc.badEtag)) {
+    // Every value in this block is remote-authored or read back out of a
+    // local state file that nothing validates, and all of it is display-only
+    // here, so all of it is cleaned at the interpolation. An etag is whatever
+    // the joined server put in the header; a `reason` and a timestamp are
+    // this build's own vocabulary only if this build wrote the file.
     stdout.write('  remote config:\n')
-    if (rc.runningEtag) stdout.write(`    running etag:  ${rc.runningEtag}\n`)
+    if (rc.runningEtag) stdout.write(`    running etag:  ${printable(rc.runningEtag)}\n`)
     if (rc.probation) {
-      stdout.write(`    probation:     ${rc.probation.etag} until ${rc.probation.until}\n`)
+      stdout.write(`    probation:     ${printable(rc.probation.etag)} until ${printable(rc.probation.until)}\n`)
     }
     if (rc.lastRollback) {
-      stdout.write(`    last rollback: ${rc.lastRollback.etag} at ${rc.lastRollback.at} (${rc.lastRollback.reason})\n`)
+      stdout.write(`    last rollback: ${printable(rc.lastRollback.etag)} at ${printable(rc.lastRollback.at)} (${printable(rc.lastRollback.reason)})\n`)
     }
     if (rc.badEtag) {
-      stdout.write(`    bad etag:      ${rc.badEtag.etag} (${rc.badEtag.reason})\n`)
+      stdout.write(`    bad etag:      ${printable(rc.badEtag.etag)} (${printable(rc.badEtag.reason)})\n`)
     }
   }
 
@@ -576,7 +940,7 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         // @ref LLP 0186#hyp-status-attention-needed-surface [implements]: distinct bracketed state plus a concrete next step, not a repeated generic retry line
         const bits = []
         if (a.reason) bits.push(a.reason)
-        const repair = `run 'hyp attach ${a.requestKey}' after fixing the cause`
+        const repair = `run 'hyp client attach ${a.requestKey}' after fixing the cause`
         detail = bits.length > 0 ? `  (${bits.join(', ')})  ${repair}` : `  ${repair}`
       }
       stdout.write(`    - ${a.kind} ${a.requestKey}  [${a.state}]${detail}\n`)
@@ -596,32 +960,58 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
 }
 
 /**
- * The keychain half of the `proxy trust` block. An untrusted CA carries the
- * repair with it because the repair is one command and the state is otherwise
- * silent: capture keeps working, so nothing else in the report will ever
- * mention it (LLP 0237#attach-anyway-on-refusal). `null` is a probe that could
- * not run, which is a different answer from "not trusted" and says so.
+ * The keychain half of the `proxy trust` block. A bare state, with no repair
+ * attached: the repair used to be `hyp client attach claude`, and since LLP 0262 that
+ * attach writes an OTEL settings block and touches neither the keychain nor
+ * the launchd environment, so naming it would point the user at a command that
+ * cannot change this line. Nor does an untrusted CA break Remote Control any
+ * more: the OTEL attach repoints no base URL, so the inbound channel the trust
+ * grant existed for never meets the proxy. What does act on the CA is named
+ * once, by the block itself. `null` is a probe that could not run, which is a
+ * different answer from "not trusted" and says so.
  *
+ * @ref LLP 0262#requirements [constrained-by]: R6 - the base URL is never repointed, so Remote Control no longer rests on this trust
  * @param {boolean | null} trusted
  * @returns {string}
  */
 function describeCaTrust(trusted) {
   if (trusted === true) return 'trusted'
-  if (trusted === false) {
-    return 'not trusted - Remote Control inbound will not work, run `hyp attach claude` to retry'
-  }
+  if (trusted === false) return 'not trusted'
   return 'unknown - the keychain probe could not run'
 }
 
 /**
- * The launchd half of the `proxy trust` block. Same tri-state, same reason.
+ * The host set the trust grant covers. Printed as the certificate's own
+ * permitted subtrees, in the order the DER carries them, so the line is the
+ * grant rather than a restatement of the configured providers.
+ *
+ * An empty set is not "no hosts": a CA carrying no `dNSName` constraint at
+ * all can vouch for anything, which is the one reading the user most needs,
+ * so it is named rather than rendered as a blank line. HypAware's own mint
+ * never produces one (LLP 0238#full-provider-constraints), so this arm only
+ * fires for a foreign or damaged certificate at the CA path. That same
+ * certificate is why `collectProxyTrust` sanitizes the entries before they
+ * reach here: they are bytes off disk, not strings we wrote.
+ *
+ * @param {string[]} hosts
+ * @returns {string}
+ */
+function describePermittedHosts(hosts) {
+  if (hosts.length === 0) return 'no dNSName constraints found - this CA is not host-limited'
+  return hosts.join(', ')
+}
+
+/**
+ * The launchd half of the `proxy trust` block. Same tri-state, and the same
+ * reason for stating rather than prescribing: nothing sets `NODE_USE_SYSTEM_CA`
+ * on this machine any more, so an unset variable has no repair to carry.
  *
  * @param {boolean | null} set
  * @returns {string}
  */
 function describeLaunchdEnv(set) {
   if (set === true) return `${ENV_VAR_NAME}=1 set`
-  if (set === false) return `${ENV_VAR_NAME} not set - run \`hyp attach claude\` to set it`
+  if (set === false) return `${ENV_VAR_NAME} not set`
   return 'unknown - the launchctl probe could not run'
 }
 
@@ -705,18 +1095,26 @@ function describeDaemon(daemon) {
   if (daemon.state) parts.push(`state=${printable(daemon.state)}`)
   if (daemon.pid) parts.push(`pid=${daemon.pid}`)
   if (daemon.mode) parts.push(`mode=${printable(daemon.mode)}`)
-  if (daemon.error) parts.push(`error=${printable(daemon.error, MAX_DAEMON_ERROR_CHARS)}`)
+  if (daemon.error) parts.push(`error=${printable(daemon.error, MAX_ERROR_CHARS)}`)
   return parts.join(', ')
 }
 
 /**
- * @param {CommandRunContext['capabilities']} capabilities
+ * The intrinsic registry is the superset: gateway adapters delegate their
+ * registration into it, and an endpoint-free adapter registers only there,
+ * where the gateway capability's `listClients` filters it out. Reading the
+ * capability first would drop every endpoint-free client from the line. The
+ * capability stays as the fallback for a host that predates `ctx.clients`.
+ *
+ * @param {CommandRunContext} ctx
  * @returns {string[]}
+ * @ref LLP 0306#endpoint-free-clients [implements]: status lists clients from the intrinsic registry, not the gateway capability
  */
-function listClientNames(capabilities) {
-  if (!capabilities.has('hypaware.ai-gateway')) return []
+export function listClientNames(ctx) {
+  if (ctx.clients) return ctx.clients.listClients().map((c) => c.name).sort()
+  if (!ctx.capabilities.has('hypaware.ai-gateway')) return []
   /** @type {AiGatewayCapability} */
-  const gateway = capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^2.0.0')
+  const gateway = ctx.capabilities.require('hyp-core/status', 'hypaware.ai-gateway', '^2.0.0')
   return gateway.listClients().map((c) => c.name).sort()
 }
 

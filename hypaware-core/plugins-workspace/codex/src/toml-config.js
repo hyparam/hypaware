@@ -69,8 +69,8 @@ export function prepareAttach(content, port, version, opts = {}) {
   const providerBlock = [
     PROVIDER_BEGIN,
     `[model_providers.${PROVIDER_ID}]`,
-    `name = ${tomlString(opts.providerName ?? 'HypAware OpenAI Gateway')}`,
-    `base_url = ${tomlString(opts.baseUrl ?? `http://127.0.0.1:${port}/v1`)}`,
+    `name = ${tomlString(opts.providerName ?? 'HypAware Codex Gateway')}`,
+    `base_url = ${tomlString(opts.baseUrl ?? `http://127.0.0.1:${port}/backend-api/codex`)}`,
     'requires_openai_auth = true',
     'wire_api = "responses"',
     'supports_websockets = false',

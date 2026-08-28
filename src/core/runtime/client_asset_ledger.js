@@ -25,14 +25,22 @@ import { errCode } from '../util/json_util.js'
  * It stores a content digest per destination as well as the path, because the
  * two questions a destructive upgrade has to answer are different: *did we
  * write this* (the path) and *is what is there still ours* (the digest). Only a
- * recorded digest that still matches answers the second one. A mismatch is
- * positive evidence the user took the file over; a record with no digest is no
- * evidence at all. Both stop the removal, which is why a record whose digest
- * cannot be read is dropped rather than kept digest-less.
+ * recorded digest that still matches answers the second one, and the match is
+ * asked of every digest the ledger holds for that path, not of one record's:
+ * the key is `(client, dest)`, so a shared destination that a client-scoped run
+ * rewrote leaves the other client's record naming bytes that are no longer
+ * there, and reading that one record would call HypAware's own rewrite a user
+ * edit. Matching no digest recorded for the path is positive evidence the user
+ * took the file over; a path no digest was ever recorded for is no evidence at
+ * all. Both stop the removal, which is why a record whose digest cannot be read
+ * is dropped rather than kept digest-less.
  *
  * @ref LLP 0219#ledger [implements]: the per-home record of what HypAware
  *   installed, which is the only evidence that a no-longer-contributed path is
  *   ours to delete.
+ * @ref LLP 0284#digests-are-per-path [constrained-by]: a digest is evidence
+ *   about the path, so the gate reads every record naming it rather than the
+ *   one record whose client the prune is walking.
  */
 
 /**

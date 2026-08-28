@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import http from 'node:http'
 import readline from 'node:readline/promises'
 
+import { askLineOnce } from '../../../../src/core/cli/line_asker.js'
 import { CLAUDE_ACCOUNT_CONFIG_SECTION, resolveMode, validateClaudeAccountConfig } from './config.js'
 import { resolveCredential } from './credential.js'
 import {
@@ -22,6 +23,7 @@ import {
 } from './store.js'
 
 /**
+ * @import { Interface } from 'node:readline/promises'
  * @import { PluginActivationContext, CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AnthropicCredentialCapability } from './types.js'
  */
@@ -73,9 +75,15 @@ export async function activate(ctx) {
   }
   ctx.provideCapability(CREDENTIAL_CAPABILITY, '1.0.0', capability)
 
+  // Internal mechanism, not CLI surface: the caller is the no-arg wrapper
+  // Desktop execs, and the whole stdout is a live credential. Advertising it
+  // in help invites a person to run it and paste the result somewhere.
+  // @ref LLP 0268#internal [implements]: the helper contract is hidden in the registry and in the manifest, and stays dispatchable
   ctx.commands.register({
     name: 'claude-account credential',
     plugin: PLUGIN_NAME,
+    audience: 'machine',
+    hidden: true,
     summary: 'Print the resolved Anthropic credential (Desktop helper contract)',
     usage: 'hyp claude-account credential',
     help: 'Prints a single JSON object { token, headers, ttlSec } to stdout and nothing else. '
@@ -84,26 +92,41 @@ export async function activate(ctx) {
   })
 
   ctx.commands.register({
-    name: 'claude-account login',
+    name: 'client claude-account login',
+    aliases: ['claude-account login'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Sign in with your Claude account (subscription mode)',
-    usage: 'hyp claude-account login',
+    usage: 'hyp client claude-account login',
     run: async (argv, cmdCtx) => runLogin(cmdCtx, mode, stateDir),
   })
 
   ctx.commands.register({
-    name: 'claude-account logout',
+    name: 'client claude-account logout',
+    aliases: ['claude-account logout'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Forget the stored subscription credential',
-    usage: 'hyp claude-account logout',
+    usage: 'hyp client claude-account logout',
     run: async (argv, cmdCtx) => runLogout(cmdCtx, stateDir),
   })
 
   ctx.commands.register({
-    name: 'claude-account status',
+    name: 'client claude-account status',
+    aliases: ['claude-account status'],
     plugin: PLUGIN_NAME,
+    category: 'capture-movement',
+    audience: 'everyday',
     summary: 'Show credential mode and sign-in state',
-    usage: 'hyp claude-account status',
+    usage: 'hyp client claude-account status',
+    help: 'Reports which credential this fleet uses (org_key or subscription) and whether this '
+      + 'machine can present one: for org_key, whether the key resolves from config or the named '
+      + "env var; for subscription, whether a token is stored and when it expires. It prints the "
+      + 'token fingerprint only, never the token, so the output is safe to paste into a bug report. '
+      + "Exits nonzero when no credential resolves, so it doubles as a check before 'hyp "
+      + "client claude-desktop install'.",
     run: async (argv, cmdCtx) => runStatus(cmdCtx, config, mode, stateDir),
   })
 
@@ -129,6 +152,43 @@ async function runCredential(cmdCtx, config, stateDir) {
     cmdCtx.stderr.write(`claude-account credential: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1
   }
+}
+
+/**
+ * The `Code: ` paste fallback as its own lane, so the rule it encodes for
+ * a stdin that can no longer answer is readable and testable without a
+ * browser.
+ *
+ * `rl.question` leaves its promise permanently unsettled at EOF, so with
+ * no loopback listener to race - the port could not be bound, or the
+ * consumer flow fell back to the hosted callback - a login on a stdin
+ * that dried up waited forever on a paste that could never arrive.
+ * `askLineOnce` settles that as `null`, and the two cases part here:
+ *
+ * - No listener: nothing else can finish the login, so EOF is a real
+ *   failure and says so, and `runLogin` prints it and exits 1.
+ * - A listener is up: the browser can still land on it, so the paste lane
+ *   deliberately stays pending rather than losing the race for it. An EOF
+ *   on the fallback input is not evidence about the primary flow, and a
+ *   rejection here would settle `Promise.race` and abort a sign-in that
+ *   was still on its way.
+ *
+ * `null` is not folded into the empty line the way the wizard's prompts
+ * fold it: `parsePastedAuthorization('')` throws `empty authorization
+ * code`, so an unanswerable prompt would report itself as a malformed
+ * paste the user never made.
+ *
+ * @ref LLP 0190#eof-everywhere [implements]: a spent stdin settles the prompt instead of waiting on an answer that can never come; this prompt has no default, so it settles as a failure rather than an answer
+ *
+ * @param {{ rl: Interface, stdin: NodeJS.ReadableStream, hasCallback: boolean }} args
+ * @returns {Promise<{ code: string, state: string }>}
+ */
+export function pasteAuthorizationLane({ rl, stdin, hasCallback }) {
+  return askLineOnce(rl, stdin, 'Code: ').then((pasted) => {
+    if (pasted !== null) return parsePastedAuthorization(pasted)
+    if (hasCallback) return new Promise(() => {})
+    throw new Error('stdin ended before an authorization code was pasted')
+  })
 }
 
 /**
@@ -164,9 +224,15 @@ async function runLogin(cmdCtx, mode, stateDir) {
     output: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (cmdCtx.stdout)),
   })
   try {
-    const pastePromise = rl.question('Code: ').then((pasted) => parsePastedAuthorization(pasted))
-    // A settled race leaves the loser pending; readline close (finally)
-    // rejects a pending question, so keep that rejection handled.
+    const pastePromise = pasteAuthorizationLane({
+      rl,
+      stdin: /** @type {NodeJS.ReadableStream} */ (cmdCtx.stdin),
+      hasCallback: callback !== null && callback !== undefined,
+    })
+    // A settled race leaves the loser pending. Closing the interface does
+    // not settle it either way (that is the defect `askLineOnce` works
+    // around), so what is guarded here is a malformed paste landing after
+    // the callback already won: keep that rejection handled.
     pastePromise.catch(() => {})
     const { code, state } = await (callback
       ? Promise.race([callback.result, pastePromise])

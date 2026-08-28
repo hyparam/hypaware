@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
+import { MAINTENANCE_DEFAULTS } from '../cache/maintenance_defaults.js'
 import { BUILTIN_REMOTES } from '../remote/builtin_remotes.js'
 import { isPlainObject } from '../util/json_util.js'
 
@@ -35,6 +36,30 @@ export const CONFIG_BASENAME = 'hypaware-config.json'
  */
 export function defaultConfigPath(hypHome) {
   return path.join(hypHome, CONFIG_BASENAME)
+}
+
+/**
+ * Whether a config records a pick answer at all, as opposed to having been
+ * created by a config writer that never asked one. The discriminator is the
+ * `plugins` key: the picker's composer always writes a `plugins` array (a
+ * record-nothing pick still composes the export pair), while the
+ * side-channel writers (`hyp remote add` / `remove`) create-or-augment the
+ * file without ever touching `plugins`.
+ *
+ * `plugins: []` counts as an answer: it cannot be told apart from a
+ * deliberately emptied install, and re-seeding that from detection would
+ * re-consent to capture on the user's behalf.
+ *
+ * It lives here, beside the loader, rather than in the wizard: the pick lane
+ * and `collectHypAwareStatus` both read it, and the daemon must not import
+ * the CLI walkthrough to ask one question about a config document.
+ *
+ * @ref LLP 0277#answer-less [implements]: a config without a plugins array holds no pick answer, so it seeds like no config at all
+ * @param {HypAwareV2Config} config
+ * @returns {boolean}
+ */
+export function configRecordsPickAnswer(config) {
+  return Array.isArray(config.plugins)
 }
 
 /**
@@ -269,6 +294,16 @@ export function parseConfigShape(value) {
     }
   }
 
+  /** @type {boolean|undefined} */
+  let autoUpdate
+  if (root.auto_update !== undefined) {
+    if (typeof root.auto_update !== 'boolean') {
+      errors.push({ pointer: '/auto_update', message: 'auto_update must be a boolean' })
+    } else {
+      autoUpdate = root.auto_update
+    }
+  }
+
   for (const key of Object.keys(root)) {
     if (!RECOGNIZED_TOP_KEYS.has(key)) {
       errors.push({ pointer: `/${key}`, message: `unrecognized top-level key '${key}'` })
@@ -283,10 +318,11 @@ export function parseConfigShape(value) {
   if (sinks) config.sinks = sinks
   if (query) config.query = query
   if (disambiguate) config.disambiguate = disambiguate
+  if (autoUpdate !== undefined) config.auto_update = autoUpdate
   return { ok: true, config }
 }
 
-const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate'])
+const RECOGNIZED_TOP_KEYS = new Set(['version', 'plugins', 'sinks', 'query', 'disambiguate', 'auto_update'])
 
 /**
  * Build the kernel `ConfigRegistry`. Plugins call `registerSection`
@@ -623,6 +659,14 @@ function parseQueryCacheConfig(cache, pointer, errors) {
       const m = /** @type {Record<string, unknown>} */ (cache.maintenance)
       /** @type {QueryCacheMaintenanceConfig} */
       const maint = {}
+      /**
+       * Keys the user wrote that failed their own check. Their value is
+       * gone, so no cross-field rule below can say anything true about
+       * them.
+       *
+       * @type {Set<string>}
+       */
+      const rejected = new Set()
       if (m.enabled !== undefined) {
         if (typeof m.enabled !== 'boolean') {
           errors.push({ pointer: `${pointer}/maintenance/enabled`, message: 'must be a boolean' })
@@ -638,9 +682,34 @@ function parseQueryCacheConfig(cache, pointer, errors) {
         if (m[key] !== undefined) {
           if (typeof m[key] !== 'number' || !Number.isFinite(/** @type {number} */ (m[key])) || /** @type {number} */ (m[key]) < 0) {
             errors.push({ pointer: `${pointer}/maintenance/${key}`, message: `must be a non-negative number` })
+            rejected.add(key)
           } else {
             maint[key] = /** @type {number} */ (m[key])
           }
+        }
+      }
+      // @ref LLP 0312#avg-below-batch [implements]: routine compaction merges
+      // victims in memory, so a merged file never exceeds
+      // `compact_batch_bytes` and its size can never reach an average-size
+      // threshold set above that bound. A partition would converge and still
+      // read as due on every growth tick, forever, with no error anywhere.
+      // Compared on EFFECTIVE values: a config that raises only the average
+      // is paired with the default batch bound, which is the likelier way to
+      // write this mistake.
+      //
+      // Silent when either key already failed its own check: the written
+      // value is gone, so the pairing this rule would report is with a
+      // DEFAULT the user never wrote, and the message would name a bound
+      // absent from their file and blame the wrong key. Fixing the key
+      // that really failed re-runs this rule against the real pair.
+      if (!rejected.has('compact_avg_file_bytes') && !rejected.has('compact_batch_bytes')) {
+        const avg = maint.compact_avg_file_bytes ?? MAINTENANCE_DEFAULTS.compact_avg_file_bytes
+        const batch = maint.compact_batch_bytes ?? MAINTENANCE_DEFAULTS.compact_batch_bytes
+        if (avg > batch) {
+          errors.push({
+            pointer: `${pointer}/maintenance/compact_avg_file_bytes`,
+            message: `must be at or below compact_batch_bytes (${batch}); routine compaction merges in memory, so a merged file never reaches a larger average and the partition would read as permanently due`,
+          })
         }
       }
       out.maintenance = maint

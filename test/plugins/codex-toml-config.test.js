@@ -20,7 +20,7 @@ test('prepareAttach inserts managed Codex provider blocks and preserves previous
 
   const result = prepareAttach(initial, 4388, '0.2.0', {
     baseUrl: 'http://127.0.0.1:4388/backend-api/codex',
-    providerName: 'HypAware ChatGPT Gateway',
+    providerName: 'HypAware Codex Gateway',
   })
 
   assert.equal(result.prevValue, 'openai')
@@ -77,7 +77,7 @@ test('prepareDetach removes managed Codex blocks and restores previous provider'
 
   assert.equal(detached.changed, true)
   assert.equal(detached.restoredValue, 'openai')
-  assert.equal(detached.removed, 'http://127.0.0.1:4388/v1')
+  assert.equal(detached.removed, 'http://127.0.0.1:4388/backend-api/codex')
   assert.equal(isManagedAttached(detached.content), false)
   assert.equal(detached.content, 'model_provider = "openai"\n')
 })

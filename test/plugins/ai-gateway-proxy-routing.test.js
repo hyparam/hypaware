@@ -4,11 +4,14 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import test from 'node:test'
 
-import { createControlHandler } from '../../hypaware-core/plugins-workspace/ai-gateway/src/control.js'
+import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import {
+  applyPathRewrite,
   compileUpstreams,
   forwardHeaders,
+  interceptsHost,
   matchUpstream,
+  matchUpstreamByHost,
   pathMatchesPrefix,
   startProxy,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/proxy.js'
@@ -50,6 +53,124 @@ test('compileUpstreams rejects non-http(s) base_url', () => {
   assert.throws(
     () => compileUpstreams([{ name: 'bad', base_url: 'ftp://x/', path_prefix: '/' }]),
     /must use http:\/\/ or https:\/\//,
+  )
+})
+
+// @ref LLP 0313#the-rewrite-is-declarative-data [tests]: a single path-segment
+// prefix swap, applied by core, validated once at compile
+test('applyPathRewrite swaps the prefix and carries the rest verbatim', () => {
+  const rule = { from: '/backend-api/codex', to: '/v1' }
+  assert.equal(applyPathRewrite('/backend-api/codex/responses', rule), '/v1/responses')
+  assert.equal(applyPathRewrite('/backend-api/codex', rule), '/v1')
+  assert.equal(applyPathRewrite('/backend-api/codex/a/b', rule), '/v1/a/b')
+  // Segment boundary: a look-alike is not under the prefix and is untouched.
+  assert.equal(applyPathRewrite('/backend-api/codexx/responses', rule), '/backend-api/codexx/responses')
+  assert.equal(applyPathRewrite('/v1/responses', rule), '/v1/responses')
+  assert.equal(applyPathRewrite('/v1/responses', undefined), '/v1/responses')
+})
+
+// A `to` of '/' is the "strip the prefix entirely" rule. The rest of the
+// path already carries the separator (`pathMatchesPrefix` matches on segment
+// boundaries), so concatenating would forward '//responses'.
+test('applyPathRewrite does not double the separator when rewriting to the root', () => {
+  const rule = { from: '/backend-api/codex', to: '/' }
+  assert.equal(applyPathRewrite('/backend-api/codex/responses', rule), '/responses')
+  assert.equal(applyPathRewrite('/backend-api/codex/a/b', rule), '/a/b')
+  // The prefix on its own leaves nothing behind, so the root is the path.
+  assert.equal(applyPathRewrite('/backend-api/codex', rule), '/')
+})
+
+test('compileUpstreams carries a valid rewrite onto the compiled upstream', () => {
+  const [compiled] = compileUpstreams([{
+    name: 'openai-codex',
+    base_url: 'https://api.openai.com',
+    path_prefix: '/backend-api/codex',
+    rewrite: { from: '/backend-api/codex', to: '/v1' },
+  }])
+  assert.deepEqual(compiled.rewrite, { from: '/backend-api/codex', to: '/v1' })
+})
+
+for (const bad of [
+  { label: 'a relative prefix', rewrite: { from: 'backend-api/codex', to: '/v1' } },
+  { label: 'a path escape', rewrite: { from: '/backend-api/codex', to: '/v1/../../etc' } },
+  { label: 'a glued-on query string', rewrite: { from: '/backend-api/codex', to: '/v1?key=leaked' } },
+  { label: 'a trailing slash', rewrite: { from: '/backend-api/codex', to: '/v1/' } },
+  { label: 'a missing field', rewrite: { from: '/backend-api/codex' } },
+  { label: 'a non-object rule', rewrite: 'from /backend-api/codex to /v1' },
+  // '/' clears every other check (leading slash, non-empty, no query, and the
+  // trailing-slash rule skips a single character) and then matches every path
+  // while slicing away its leading separator, so '/responses' would leave as
+  // '/v1responses'. A `from` is a prefix to strip; the whole path is not one.
+  { label: 'a from of the bare root', rewrite: { from: '/', to: '/v1' } },
+]) {
+  test(`compileUpstreams rejects ${bad.label} in a rewrite`, () => {
+    assert.throws(
+      () => compileUpstreams([{
+        name: 'bad',
+        base_url: 'https://api.openai.com',
+        path_prefix: '/backend-api/codex',
+        rewrite: /** @type {any} */ (bad.rewrite),
+      }]),
+      /upstream "bad"/,
+    )
+  })
+}
+
+// @ref LLP 0313#the-rewrite-is-declarative-data [tests]: a rewriting entry is
+// a reverse-proxy door's rule and claims no host, so the two host-keyed
+// predicates have to skip it in step.
+//
+// The pair is directional and the direction matters: `interceptsHost` decides
+// whether to terminate a CONNECT, `matchUpstreamByHost` decides where the
+// terminated request then goes. If the first can say yes where the second
+// says no, the tunnel is decrypted after `200 Connection Established` and
+// then 502s, which kills that client's egress to the host rather than only
+// its capture.
+test('interceptsHost never outruns matchUpstreamByHost on a rewriting upstream', () => {
+  // The shipping shape: a non-rewriting entry owns the host, so nothing moves.
+  const shipping = compileUpstreams([
+    { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1' },
+    {
+      name: 'openai-codex',
+      base_url: 'https://api.openai.com',
+      path_prefix: '/backend-api/codex',
+      priority: 10,
+      rewrite: { from: '/backend-api/codex', to: '/v1' },
+    },
+  ])
+  assert.equal(interceptsHost(shipping, 'api.openai.com', 443), true)
+  assert.equal(matchUpstreamByHost(shipping, 'api.openai.com', 443)?.name, 'openai')
+
+  // The shape that inverted the pair: operator config repointed `openai`
+  // elsewhere by name, leaving the rewriting entry as the only one naming
+  // api.openai.com. The host must fall out of the intercept set with it.
+  const onlyRewriting = compileUpstreams([
+    { name: 'openai', base_url: 'https://codex-proxy.corp.internal', path_prefix: '/v1' },
+    {
+      name: 'openai-codex',
+      base_url: 'https://api.openai.com',
+      path_prefix: '/backend-api/codex',
+      priority: 10,
+      rewrite: { from: '/backend-api/codex', to: '/v1' },
+    },
+  ])
+  assert.equal(matchUpstreamByHost(onlyRewriting, 'api.openai.com', 443), undefined)
+  assert.equal(
+    interceptsHost(onlyRewriting, 'api.openai.com', 443),
+    false,
+    'the tunnel would be terminated and then 502, killing egress the blind tunnel used to carry'
+  )
+})
+
+test('compileUpstreams rejects a rewrite.from outside the upstream path_prefix', () => {
+  assert.throws(
+    () => compileUpstreams([{
+      name: 'bad',
+      base_url: 'https://api.openai.com',
+      path_prefix: '/backend-api/codex',
+      rewrite: { from: '/v1', to: '/v2' },
+    }]),
+    /is outside its path_prefix/,
   )
 })
 

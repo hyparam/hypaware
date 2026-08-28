@@ -151,7 +151,10 @@ export function createAttachHandler(opts = {}) {
         return { status: 'failed', reason: `no registered client '${client}' to attach` }
       }
       const endpoint = ctx.endpoint
-      if (typeof endpoint !== 'string' || endpoint.length === 0) {
+      if (
+        registration.requiresEndpoint !== false &&
+        (typeof endpoint !== 'string' || endpoint.length === 0)
+      ) {
         return { status: 'failed', reason: 'attach action missing gateway endpoint' }
       }
 
@@ -163,12 +166,12 @@ export function createAttachHandler(opts = {}) {
         [Attr.OPERATION]: 'client_action.perform',
         [Attr.PLUGIN]: typeof action.params?.plugin === 'string' ? action.params.plugin : client,
         client,
-        endpoint,
+        ...(endpoint ? { endpoint } : {}),
         [Attr.STATUS]: 'ok',
       })
 
       try {
-        await registration.attach({ endpoint, config: {}, stdout, stderr, json: true })
+        await registration.attach({ ...(endpoint ? { endpoint } : {}), config: {}, stdout, stderr, json: true })
       } catch (err) {
         // A marked refusal (LLP 0186) is a permanent precondition failure only
         // the user can fix; anything else is the transient `failed` the
@@ -203,10 +206,16 @@ export function createAttachHandler(opts = {}) {
       // prev_value / port are best-effort detail from the adapter's payload.
       // @ref LLP 0086#endpoint-aware-markers [implements]: perform() records the endpoint on the done marker so drift is representable
       /** @type {JsonObject} */
-      const detail = { endpoint }
+      const detail = endpoint ? { endpoint } : {}
+      // Claude's adapter has exactly one successful attach mode. Record that
+      // invariant from the requested client, not from best-effort stdout, so a
+      // parse miss cannot leave the new marker stale and re-run attach forever.
+      // @ref LLP 0262#migration [implements]: a successful Claude attach settles the proxy-to-OTEL migration even when its report payload is unavailable
+      if (client === 'claude') detail.mode = 'otel'
       if (parsed) {
         if (typeof parsed.settings_path === 'string') detail.settings_path = parsed.settings_path
         if (typeof parsed.prev_value === 'string') detail.prev_value = parsed.prev_value
+        if (client !== 'claude' && typeof parsed.mode === 'string') detail.mode = parsed.mode
       }
       // The undo record for the copies: reverse() removes exactly these paths,
       // so a user's own `hyp skills install` (which records no marker) survives
@@ -226,8 +235,8 @@ export function createAttachHandler(opts = {}) {
     },
 
     /**
-     * Freshness predicate for a `done` attach marker (LLP 0086). Two things can
-     * go stale, and each is checked against what the marker recorded.
+     * Freshness predicate for a `done` attach marker (LLP 0086). Three things
+     * can go stale, and each is checked against what the marker recorded.
      *
      * **The endpoint.** Returns `false` when the recorded endpoint no longer
      * matches the live gateway endpoint: the daemon rebound to a new ephemeral
@@ -259,6 +268,29 @@ export function createAttachHandler(opts = {}) {
      * A pre-LLP-0138 marker recorded no key: stale exactly once, which records
      * one and self-heals.
      *
+     * **The attach mode**, for `claude` only. The adapter has exactly one
+     * desired mode (`otel`), and a proxy-era attach sits at the same gateway
+     * endpoint with the same asset set, so neither key above can see it. A
+     * marker recording anything other than `otel` (including a pre-LLP-0262
+     * marker recording no mode at all) is stale, and re-performing it is the
+     * migration itself: `attach()` releases the proxy keys and writes the OTEL
+     * block. It self-heals the same way the other two do, because `perform()`
+     * records `mode: 'otel'` on every successful claude attach, from the
+     * requested client rather than from the adapter's best-effort payload, so a
+     * report that fails to parse cannot leave the fresh marker stale.
+     *
+     * One population this does NOT settle: a machine whose Claude Code is below
+     * the LLP 0258 version floor. Its marker is stale on every pass, `perform()`
+     * refuses (`VERSION_FLOOR`), and a `refused` marker short-circuits
+     * unconditionally (LLP 0186), so it stays refused until an explicit
+     * `hyp attach claude` even after the user upgrades. That is LLP 0186's named
+     * auto-re-arm gap, now reachable by more machines than before.
+     *
+     * **A client that declares `requiresEndpoint: false`** attaches by writing
+     * a managed file rather than by pointing at a bound port, so the endpoint
+     * key above does not apply and is skipped for it: its marker stays current
+     * across a gateway rebind, and the asset set is the only key left.
+     *
      * @param {ActionMarker} marker
      * @param {DesiredAction} action
      * @param {ActionContext} ctx
@@ -266,12 +298,21 @@ export function createAttachHandler(opts = {}) {
      * @ref LLP 0086#re-attach-on-drift [implements]: a done attach at a stale endpoint is not current; an unresolved endpoint leaves it alone
      * @ref LLP 0107#currency [implements]: a done attach whose asset set has changed is not current, so an org adding a plugin later re-materializes without a re-login
      * @ref LLP 0138#currency [implements]: the recorded digest is the freshness key, compared against what the live registries would produce
+     * @ref LLP 0306#endpoint-free-clients [implements]: an endpoint-free client's marker is not staled by a port that moved
      */
     isCurrent(marker, action, ctx) {
-      const live = ctx.endpoint
-      if (typeof live !== 'string' || live.length === 0) return true
-      if (marker.endpoint !== live) return false
       const client = attachActionClient(action)
+      const registration = ctx.clients?.getClient(client)
+      const live = ctx.endpoint
+      if (registration?.requiresEndpoint !== false) {
+        if (typeof live !== 'string' || live.length === 0) return true
+        if (marker.endpoint !== live) return false
+      }
+      // A proxy-era marker at an unchanged gateway endpoint is still stale:
+      // Claude's adapter now has one desired mode, and re-performing it is the
+      // migration that releases the proxy settings and writes the OTEL block.
+      // @ref LLP 0262#migration [implements]: attachment mode drift is a forward gap even when the gateway port did not move
+      if (client === 'claude' && marker.mode !== 'otel') return false
       const assetsKey = attachedAssetsKey(client, ctx)
       if (assetsKey === undefined) return true
       return marker.assets_key === assetsKey
@@ -476,6 +517,10 @@ function attachActionClient(action) {
  */
 function attachedAssetOptions(client, ctx) {
   const descriptors = ctx.clientDescriptors
+  // `?? ''`, not os.homedir(): the install side stays deliberately inert
+  // without an env-provided HOME (see the removal-side comment above); the
+  // empty string is what arms the guard below. LLP 0300's homedir fallback
+  // is for read-side path resolution, not this write-side seam.
   const homeDir = ctx.env.HOME ?? ''
   if (!descriptors || homeDir.length === 0) return undefined
   if (!ctx.skills && !ctx.agents) return undefined
@@ -577,8 +622,8 @@ function captureStream() {
  * (`{ status, action, client, dry_run, settings_path?, port?, changed?,
  * prev_value? }`). Tolerant: trims, and on a parse miss falls back to the last
  * non-empty line (in case prose leaked onto stdout). Returns `undefined` when
- * nothing parses to an object so the caller records `done` without detail
- * rather than re-running a successful attach.
+ * nothing parses to an object. The caller still records every freshness key it
+ * owns independently of the payload, so a successful attach settles.
  *
  * @param {string} stdout
  * @returns {Record<string, unknown> | undefined}

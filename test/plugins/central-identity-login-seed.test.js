@@ -77,7 +77,7 @@ test('writeLoginSeed writes a 0600 login-origin identity stamped with the centra
   assert.equal(persisted.gateway_id, 'gw-login')
   assert.equal(persisted.expires_at, NOW_SEC + 30 * DAY)
   assert.equal(persisted.bootstrap_token_fp, undefined)
-  assert.equal(fs.statSync(persistedPath).mode & 0o777, 0o600)
+  if (process.platform !== 'win32') assert.equal(fs.statSync(persistedPath).mode & 0o777, 0o600)
 })
 
 test('writeLoginSeed returns the identity it displaced', () => {

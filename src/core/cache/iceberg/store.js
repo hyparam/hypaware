@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { parquetReadObjects } from 'hyparquet'
+import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
 import {
   fileCatalog,
   icebergAppend,
@@ -35,15 +35,17 @@ import {
 } from './schema.js'
 import {
   partitionSpecForDeclaration,
+  sortColumnsForDeclaration,
   validatePartitionSpecStability,
 } from '../../iceberg/partition-spec.js'
 import { INGEST_SEQ_COLUMN } from '../streaming-reader.js'
 
 /**
- * @import { ColumnSpec } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { ColumnSpec, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { AppendOptions } from '../../../../src/core/cache/types.js'
  * @import { Catalog, Lister, Manifest, ManifestEntry, PartitionSpec, Resolver, Schema, TableMetadata } from 'icebird/src/types.js'
- * @import { AsyncDataSource, AsyncRow } from 'squirreling'
+ * @import { AsyncDataSource, AsyncRow, ExprNode } from 'squirreling'
+ * @import { AsyncBuffer, FileMetaData } from 'hyparquet'
  */
 
 /**
@@ -114,20 +116,41 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
   // then throws, leaving the table's schema ahead of its data.
   const records = rows.length > 0 ? rowsToIcebergRecords(columns, rows) : []
 
-  if (!tableExists(tablePath)) {
+  // `tableExists` is a probe, not a claim: another committer can create the
+  // table between the probe and the create below. The local resolver enforces
+  // the create-only precondition with `link`, so that race now raises a real
+  // 412 instead of one creator silently overwriting the other's `v1`, and
+  // `icebergCreate` deliberately has no retry: its contract hands 412 back to
+  // the caller to read as "the table already exists". Read it that way. The
+  // create existed to make the table exist, it does, and the existing-table
+  // path is the one that should run.
+  let tablePresent = tableExists(tablePath)
+  if (!tablePresent) {
     /** @type {PartitionSpec | undefined} */
     const partitionSpec = declaration
       ? partitionSpecForDeclaration(declaration, schema)
       : options?.partitionSpec
-    await icebergCreateTable({
-      catalog,
-      tableUrl: url,
-      schema,
-      formatVersion: 3,
-      partitionSpec,
-      sortOrder: options?.sortOrder ? sortOrderForColumns(options.sortOrder, schema) : undefined,
-    })
-  } else if (declaration) {
+    // A declaration's lookup columns double as the table's sort order, so a
+    // column demoted from partitioning to sortOnly keeps its rows clustered
+    // and file/row-group bounds on it stay tight for pruning (LLP 0311).
+    const schemaNames = new Set(schema.fields.map((f) => f.name))
+    const sortColumns = options?.sortOrder ??
+      (declaration ? sortColumnsForDeclaration(declaration).filter((c) => schemaNames.has(c.column)) : undefined)
+    try {
+      await icebergCreateTable({
+        catalog,
+        tableUrl: url,
+        schema,
+        formatVersion: 3,
+        partitionSpec,
+        sortOrder: sortColumns?.length ? sortOrderForColumns(sortColumns, schema) : undefined,
+      })
+    } catch (err) {
+      if (!isCommitCollision(err)) throw err
+      tablePresent = true
+    }
+  }
+  if (tablePresent && declaration) {
     const { metadata: existing } = await loadLatestFileCatalogMetadata({
       tableUrl: url, resolver, lister,
     })
@@ -169,6 +192,21 @@ export async function appendRowsToTable(tablePath, columns, rows, options) {
   }
   const bytesWritten = metadata ? addedFilesSize(metadata) : 0
   return { tableUrl: url, appended: rows.length > 0, bytesWritten }
+}
+
+/**
+ * True for the conditional-commit collision a create or a metadata commit
+ * raises when another committer got the same version first. Mirrors icebird's
+ * own `isCommitConflict`, which reads `status`; `statusCode` is accepted too
+ * because the resolvers set both and only the local one is ours.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isCommitCollision(err) {
+  if (!err || typeof err !== 'object') return false
+  const { status, statusCode } = /** @type {{ status?: number, statusCode?: number }} */ (err)
+  return status === 412 || status === 409 || statusCode === 412 || statusCode === 409
 }
 
 /**
@@ -335,7 +373,9 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
 
   // Only project columns that exist in the current schema; a predicate column
   // absent from an older partition reads as `undefined`, which the caller's
-  // predicate must tolerate (the additive-schema contract, LLP 0032).
+  // predicate must tolerate (the additive-schema contract, LLP 0029). The
+  // table schema is the OUTER bound only: an older data file can be narrower
+  // still, so the per-file read below narrows this list again.
   const schema = currentSchema(metadata)
   const schemaColumns = new Set(schema?.fields.map((f) => f.name) ?? [])
   const projected = opts.columns.filter((c) => schemaColumns.has(c))
@@ -373,6 +413,44 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
 }
 
 /**
+ * Narrow a projection to the columns one data file PHYSICALLY carries, and
+ * hand back the footer that proved it so the caller reads it once.
+ *
+ * A table's current schema is the union of every generation written under it,
+ * so a file written before an additive evolution is narrower than the schema
+ * that describes it. hyparquet used to drop a projected name the file lacked;
+ * since 1.29 it throws `parquet column not found`. Both callers (the purge
+ * scan below and retention's expiry scan) read inside a `catch` that treats a
+ * failed read as "this file has nothing to contribute", so an unnarrowed
+ * projection never surfaces as an error: a purge silently spares the older
+ * file's rows and retention silently stops expiring them. Narrowing here
+ * keeps the pre-1.29 reading, where an absent column simply resolves to
+ * `undefined` on the row.
+ *
+ * The narrowing can reach EMPTY, and that case is load-bearing rather than
+ * degenerate: a data file predating every projected column is exactly the file
+ * `hyp purge --all` must still empty, and its unconditional predicate only
+ * fires if the read still yields a row per row. It does, because hyparquet
+ * reads `columns: []` as "no COLUMNS", handing back one bare `{}` per physical
+ * row, not as "no rows" or "every column". That is the one library behaviour
+ * this helper cannot re-derive from the footer, and icebird's own reader routes
+ * around the same shape rather than relying on it (`icebird/src/read.js`), so a
+ * hyparquet that reinterpreted it would silently restore the under-delete this
+ * helper exists to close. `cache-iceberg-schema-evolution.test.js` pins it at
+ * this seam so the bump that changed it names itself.
+ *
+ * @ref LLP 0029#in-place-evolution [constrained-by]: evolution leaves older data files narrower than the table schema
+ * @param {AsyncBuffer} file
+ * @param {string[]} columns the projection the caller wants
+ * @returns {Promise<{ metadata: FileMetaData, columns: string[] }>}
+ */
+export async function physicalProjection(file, columns) {
+  const metadata = await parquetMetadataAsync(file)
+  const physical = new Set(parquetSchema(metadata).children.map((child) => child.element.name))
+  return { metadata, columns: columns.filter((column) => physical.has(column)) }
+}
+
+/**
  * Scan one Iceberg data file and return the row positions of live rows that
  * satisfy `predicate`. Rows already covered by a committed position-delete are
  * skipped so re-purges never re-plan the same delete.
@@ -389,7 +467,9 @@ async function scanFileForMatchingRows(filePath, resolver, predicate, columns, d
   const positions = []
   try {
     const file = await Promise.resolve(resolver.reader(filePath))
-    const readOpts = columns.length > 0 ? { file, columns } : { file }
+    const readOpts = columns.length > 0
+      ? { file, ...await physicalProjection(file, columns) }
+      : { file }
     const rows = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects(readOpts))
     for (let i = 0; i < rows.length; i++) {
       if (deletedPositions?.has(BigInt(i))) continue
@@ -449,6 +529,53 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
 }
 
 /**
+ * List the table's live data files with their identity-partition values and
+ * committed position-delete positions, for readers that walk files directly
+ * rather than scanning the table as one stream. The grep service is the
+ * consumer: its two tiers are per FILE (a sidecar-indexed file is searched
+ * through `parquetFind`, an unindexed one is brute-scanned), so it needs the
+ * file list, each file's partition `date` for the newest-first walk, and the
+ * deleted positions, because a raw file read does not apply position deletes
+ * and would otherwise resurrect purged rows (LLP 0104).
+ *
+ * Files whose manifest entry is deleted (status 2) or not parquet are
+ * excluded. A missing or snapshot-less table returns `[]`, matching the
+ * "empty table" degradation of `dataSourceForTable`. A metadata load that
+ * FAILS propagates, for the same reason: unreadable table metadata means an
+ * unknown row set, and a reader that swallows it reports "no matches" over a
+ * partition it never read. `dataSourceForTable` lets that error out, so
+ * `hyp query sql` fails loudly; grep search must not answer zero where SQL
+ * raises.
+ *
+ * @param {string} tablePath
+ * @returns {Promise<{ filePath: string, partition: Record<string, unknown>, sizeBytes: number, deletedPositions: Set<bigint> | undefined }[]>}
+ * @ref LLP 0302#purge-by-position [implements]: the file walk needs the committed delete positions, because a raw parquet read applies none
+ */
+export async function listLiveDataFiles(tablePath) {
+  if (!tableExists(tablePath)) return []
+  const { resolver, lister } = await getLocalIO()
+  const url = tableUrlForDir(tablePath)
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+  if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return []
+  const dataFileMap = await findDataFileEntries(metadata, resolver)
+  if (dataFileMap.size === 0) return []
+  const deleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
+  /** @type {{ filePath: string, partition: Record<string, unknown>, sizeBytes: number, deletedPositions: Set<bigint> | undefined }[]} */
+  const out = []
+  for (const [filePath, { partition, entry }] of dataFileMap) {
+    const file = entry.data_file
+    if (String(file.file_format).toLowerCase() !== 'parquet') continue
+    out.push({
+      filePath,
+      partition,
+      sizeBytes: Number(file.file_size_in_bytes ?? 0),
+      deletedPositions: deleted.get(filePath),
+    })
+  }
+  return out
+}
+
+/**
  * Streaming counterpart to `readRowsFromTable`. Yields rows one at a
  * time so callers (in particular `QueryStorageService.readRows`) never
  * materialize the full table in memory.
@@ -484,7 +611,7 @@ async function loadDeletedPositions(metadata, resolver, dataFileMap) {
  * @ref LLP 0040#storage-api-extension [implements]: since-filtered incremental scan; null-seq new on first export, then excluded
  * @param {string} tablePath
  * @param {string[]} [columns]
- * @param {{ since?: bigint, includeLegacy?: boolean }} [opts]
+ * @param {{ since?: bigint, includeLegacy?: boolean, metadata?: TableMetadata, whereIn?: Record<string, string[]> }} [opts]
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
 export async function* scanRowsFromTable(tablePath, columns, opts) {
@@ -494,7 +621,7 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   const includeLegacy = opts?.includeLegacy !== false
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
-  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
+  const metadata = opts?.metadata ?? (await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })).metadata
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return
   const source = await icebergDataSource({ tableUrl: url, metadata, resolver, lister })
   // A table that has never been flushed under the seq-column schema carries no
@@ -505,7 +632,7 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   if (filtering && hasSeqColumn && !projected.includes(INGEST_SEQ_COLUMN.name)) {
     projected = [...projected, INGEST_SEQ_COLUMN.name]
   }
-  const scan = source.scan({ columns: projected })
+  const scan = source.scan({ columns: projected, where: whereInExpr(source, opts?.whereIn) })
   for await (const row of scan.rows()) {
     const resolved = await resolveAsyncRow(row, projected)
     if (filtering) {
@@ -520,6 +647,40 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
     }
     yield resolved
   }
+}
+
+/**
+ * Build the exact `column IN (...) AND ...` predicate used by targeted cache
+ * reads. This is a row filter, not a hint: callers may rely on the returned
+ * rows matching it. Iceberg also uses the same expression to prune files and
+ * row groups from bounds on sorted lookup columns.
+ *
+ * @ref LLP 0311#context [implements]: session lookups prune through bounds on
+ * the leading `session_id` sort key after date becomes the only partition key
+ * @param {ScannableDataSource} source
+ * @param {Record<string, string[]> | undefined} whereIn
+ * @returns {ExprNode | undefined}
+ */
+function whereInExpr(source, whereIn) {
+  if (!whereIn) return undefined
+  const at = { positionStart: 0, positionEnd: 0 }
+  /** @type {ExprNode | undefined} */
+  let expr
+  for (const [name, values] of Object.entries(whereIn)) {
+    if (!source.columns.includes(name)) throw new Error(`cache lookup column not found: ${name}`)
+    if (!Array.isArray(values) || values.length === 0) {
+      throw new Error(`cache lookup values must be non-empty: ${name}`)
+    }
+    /** @type {ExprNode} */
+    const node = {
+      ...at,
+      type: 'in valuelist',
+      expr: { ...at, type: 'identifier', name },
+      values: values.map((value) => ({ ...at, type: 'literal', value })),
+    }
+    expr = expr ? { ...at, type: 'binary', op: 'AND', left: expr, right: node } : node
+  }
+  return expr
 }
 
 /**
@@ -546,7 +707,7 @@ export function seqValue(raw) {
  * an empty table.
  *
  * @param {string} tablePath
- * @returns {Promise<AsyncDataSource | null>}
+ * @returns {Promise<ScannableDataSource | null>}
  */
 export async function dataSourceForTable(tablePath) {
   if (!tableExists(tablePath)) return null

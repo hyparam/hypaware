@@ -3,7 +3,8 @@
 import { Attr, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCoreCommandArgv } from '../cli/command_args.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
 
 /**
@@ -21,11 +22,9 @@ import { useColor } from '../cli/stdio.js'
  * @param {CommandRunContext} ctx
  */
 export async function runQuerySchema(argv, ctx) {
-  const dataset = argv[0]
-  if (!dataset) {
-    ctx.stderr.write('usage: hyp query schema <dataset>\n')
-    return 2
-  }
+  const parsed = parseCoreCommandArgv('query schema', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const dataset = String(parsed.params.dataset)
   return withSpan(
     'query.resolve_tables',
     {
@@ -49,15 +48,66 @@ export async function runQuerySchema(argv, ctx) {
 }
 
 /**
- * @param {string[]} _argv
+ * Report this machine's local cache. There is no remote form: the server
+ * owns its own registration state and never exposes it through this
+ * command, so `--remote` is refused rather than ignored.
+ *
+ * The refusal matters more here than it does for `--refresh`. A rejected
+ * refresh is obvious (nothing happened), but a silently-ignored `--remote`
+ * on `status` prints a plausible, server-shaped inventory of the *wrong*
+ * host, with nothing on stderr and a zero exit. Callers asking "what does
+ * the server have" have been observed to read the local answer as the
+ * server's and carry on.
+ *
+ * @ref LLP 0273#decision [implements]: status rejects --remote before any cache work, so no local inventory reaches stdout
+ * @ref LLP 0273#asymmetry: the silent ignore is self-consistent here, unlike a dropped --refresh, so nothing later contradicts it
+ * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
-export async function runQueryStatus(_argv, ctx) {
+export async function runQueryStatus(argv, ctx) {
+  if (argv.some((arg) => arg === '--remote' || arg.startsWith('--remote='))) {
+    ctx.stderr.write(
+      "hyp cache status: --remote is not supported - status reports this machine's local cache (the server owns its own)\n"
+    )
+    ctx.stderr.write(
+      "  to see what a remote host holds, probe it: hyp query sql 'select 1 from <dataset> limit 1' --remote <target>\n"
+    )
+    return 2
+  }
+  // Everything else goes through the shared codec, for the same reason the
+  // spelled-out `--remote` is refused above: `status` takes no arguments, so
+  // anything else here is a near miss (`--remot prod`, `-r prod`,
+  // `--format json`, a bare `prod`) that a silent ignore would answer with
+  // the same well-formed local inventory the refusal exists to withhold.
+  // @ref LLP 0273#asymmetry [implements]: a wrong-host answer is self-consistent, so a mistyped flag has to fail loudly too
+  const parsed = parseCoreCommandArgv('cache status', argv, ctx)
+  if (!parsed.ok) return parsed.code
   const { cacheStatus } = await import('../cache/maintenance.js')
   const datasets = ctx.query.listDatasets()
   const report = await cacheStatus({ cacheRoot: ctx.storage.cacheRoot })
   ctx.stdout.write(`cache:    ${report.cacheRoot}\n`)
   ctx.stdout.write(`pending:  ${report.pendingSpoolBytes} bytes\n`)
+  // Grep-index coverage over the searchable dataset: how much of a `hyp
+  // query grep` is served by sidecar indexes versus the brute scan. A gap
+  // is expected on a cache that has taken writes since the last
+  // maintenance tick, so the line names the mechanism that closes it. It
+  // says "maintenance", not "compaction": the build pass runs on any
+  // generation with missing coverage, so a partition already at the
+  // compaction floor closes its gap too, and advice naming a rewrite that
+  // will never run is advice the reader cannot act on.
+  // @ref LLP 0302#build-site [constrained-by]: the remedy the line names is the one the build pass actually runs
+  // @ref LLP 0264#lifecycle [implements]: index coverage is observable where the operator already looks
+  const searchable = report.partitions.filter((p) => p.indexedFileCount !== undefined)
+  if (searchable.length > 0) {
+    // `indexableFileCount`, never `dataFileCount`: the latter counts the
+    // position-delete files that share the data directory, and no sidecar is
+    // ever built beside one, so a partition purged since its last compaction
+    // would report coverage it can never reach.
+    const files = searchable.reduce((n, p) => n + (p.indexableFileCount ?? p.dataFileCount), 0)
+    const indexed = searchable.reduce((n, p) => n + (p.indexedFileCount ?? 0), 0)
+    ctx.stdout.write(`grep index: ${indexed} of ${files} data files indexed` +
+      (indexed < files ? ' (searches brute-scan the rest; maintenance indexes them)\n' : '\n'))
+  }
   ctx.stdout.write(`datasets: ${datasets.length} registered\n`)
   for (const dataset of datasets) {
     ctx.stdout.write(`  ${dataset.name}  (${dataset.plugin})\n`)
@@ -69,6 +119,16 @@ export async function runQueryStatus(_argv, ctx) {
       const label = `${p.dataset}/${partKey || 'all'}`
       if (p.layout === 'source-table') {
         const extras = []
+        // Carries its own denominator, because `files=` on this same line is
+        // `dataFileCount`, which counts the position-delete files sharing the
+        // data directory. No sidecar is ever built beside one, so a bare
+        // `indexed=N` invites the reader to compare it against `files=M` and
+        // read a purged partition as permanently under-indexed - the exact
+        // misreading the aggregate coverage line above avoids by using
+        // `indexableFileCount`.
+        if (p.indexedFileCount !== undefined) {
+          extras.push(`indexed=${p.indexedFileCount}/${p.indexableFileCount ?? p.dataFileCount}`)
+        }
         if (p.deleteFileCount) extras.push(`deletes=${p.deleteFileCount}`)
         if (p.lastRetentionCutoffDate) extras.push(`retention_cutoff=${p.lastRetentionCutoffDate}`)
         ctx.stdout.write(`  ${label}  source-table  rows=${p.rowCount}  files=${p.dataFileCount}  snapshots=${p.snapshotCount}  metadata=${p.metadataBytes}B${extras.length ? '  ' + extras.join('  ') : ''}\n`)
@@ -175,7 +235,7 @@ export async function runQueryOverview(argv, ctx) {
     // "no AI client is set up yet".
     ctx.stderr.write(
       'hyp query overview: nothing has been recorded yet - no AI client is connected.\n' +
-      '  Run `hyp init` to start capturing Claude or Codex sessions.\n'
+      '  Run `hyp setup` to start capturing Claude or Codex sessions.\n'
     )
     return 1
   }
@@ -238,7 +298,9 @@ export async function runQueryOverview(argv, ctx) {
  * @param {CommandRunContext} ctx
  */
 export async function runQueryRefresh(argv, ctx) {
-  const target = argv[0]
+  const parsed = parseCoreCommandArgv('cache refresh', argv, ctx)
+  if (!parsed.ok) return parsed.code
+  const target = /** @type {string | undefined} */ (parsed.params.dataset)
   const datasets = ctx.query.listDatasets()
   const filtered = target ? datasets.filter((d) => d.name === target) : datasets
   if (target && filtered.length === 0) {
@@ -310,6 +372,9 @@ export async function runQueryMaintain(argv, ctx) {
     // committed fallback rows too, so a manual sweep also closes the race.
     storage: ctx.storage,
     getSettleHook: (dataset) => ctx.query.getDataset(dataset)?.resettleBatch,
+    // @ref LLP 0311#migration: the manual path runs the same one-time
+    // re-partition the daemon tick would.
+    getDeclaration: (dataset) => ctx.query.getDataset(dataset)?.cachePartitioning,
   })
   if (report.dryRun) {
     ctx.stdout.write('[dry-run]\n')
@@ -320,6 +385,10 @@ export async function runQueryMaintain(argv, ctx) {
     const actions = []
     if (p.snapshotsExpired > 0) actions.push(`expired ${p.snapshotsExpired} snapshots`)
     if (p.compacted) actions.push(`compacted epoch=${p.newEpoch ?? '?'} (${p.dataFilesBefore} -> ${p.dataFilesAfter} files)`)
+    if (p.repartitioned) actions.push('re-partitioned to the declared layout')
+    // @ref LLP 0311#migration: a deferred migration leaves the partition on
+    // its recorded layout, so the run must not read as "nothing to migrate".
+    if (p.repartitionDeferred) actions.push('re-partition deferred (target layout not derivable)')
     // @ref LLP 0207#re-baseline: a rebaseline writes the cursor without a
     // rewrite; without this line the run reads as "nothing due".
     if (p.rebaselined) actions.push(`rebaselined to ${p.dataFilesBefore} files (foreign sorted replace)`)
@@ -391,7 +460,7 @@ const QUERY_MAINTAIN_SCHEMA = {
  * @returns {{ error: string } | { dataset?: string, dryRun: boolean, force: boolean, compactOnly: boolean, expireOnly: boolean }}
  */
 function parseQueryMaintainArgv(argv) {
-  const parsed = parseCommandArgv(argv, QUERY_MAINTAIN_SCHEMA)
+  const parsed = parseCommandArgv(argv, QUERY_MAINTAIN_SCHEMA, STRICT_SHORT_FLAGS)
   if ('help' in parsed) return { error: QUERY_MAINTAIN_USAGE }
   if (!parsed.ok) return { error: parsed.error }
   const p = /** @type {{ dataset?: string, 'dry-run': boolean, force: boolean, 'compact-only': boolean, 'expire-only': boolean }} */ (parsed.params)

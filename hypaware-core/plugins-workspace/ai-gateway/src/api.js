@@ -1,7 +1,9 @@
 // @ts-check
 
+import { createProjectedExchangeWriter } from './exchange_writer.js'
+
 /**
- * @import { AiGatewayCapability, AiGatewayEndpointOptions } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, AiGatewayClientRegistration, AiGatewayEndpointOptions, AiGatewayProjectedExchange, AiGatewayRecordOptions, ClientRegistration, ClientRegistry, QueryStorageService } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { GatewayState } from './types.js'
  */
 
@@ -32,11 +34,20 @@ export function createGatewayState() {
  * adapter should hand to the client tool so its traffic flows through
  * this gateway.
  *
+ * `storage` is the activation context's storage service. It is what
+ * lets `recordProjectedExchange` exist: a producer plugin holding a
+ * finished projection can hand it back to the dataset's owner instead
+ * of learning the table path, the column list, and the dedupe rules.
+ *
  * @param {GatewayState} state
+ * @param {{ storage?: QueryStorageService, clients?: ClientRegistry }} [deps]
  * @returns {AiGatewayCapability}
  */
-export function createAiGatewayApi(state) {
+export function createAiGatewayApi(state, deps = {}) {
+  const clients = deps.clients ?? legacyClientRegistry(state)
   let projectorSeq = 0
+  /** @type {ReturnType<typeof createProjectedExchangeWriter> | undefined} */
+  let writer
   return {
     registerUpstreamPreset(preset) {
       if (!preset || typeof preset.name !== 'string' || preset.name.length === 0) {
@@ -67,7 +78,7 @@ export function createAiGatewayApi(state) {
       if (typeof client.attach !== 'function') {
         throw new TypeError(`registerClient '${client.name}': attach() is required`)
       }
-      state.clients.set(client.name, client)
+      clients.registerClient(client)
     },
 
     registerExchangeProjector(projector) {
@@ -97,6 +108,28 @@ export function createAiGatewayApi(state) {
     },
 
     /**
+     * Record one already-projected exchange into `ai_gateway_messages`.
+     *
+     * The caller supplies the projection; everything downstream of it
+     * (row expansion, `part_id` identity, the `part_id` dedupe against
+     * committed and spooled rows, the table path, the column list) stays
+     * here, so a second live producer cannot drift from the proxy's rows
+     * for the same content.
+     *
+     * @ref LLP 0252#projection-unchanged [implements]: the OTEL listener is a
+     *   third producer of this dataset, not the owner of a new one
+     * @param {AiGatewayProjectedExchange} projection
+     * @param {AiGatewayRecordOptions} [opts]
+     */
+    async recordProjectedExchange(projection, opts) {
+      if (!deps.storage) {
+        throw new Error('ai-gateway: recordProjectedExchange() needs a storage service')
+      }
+      if (!writer) writer = createProjectedExchangeWriter({ storage: deps.storage })
+      return writer.record(projection, opts ?? {})
+    },
+
+    /**
      * Resolve the local endpoint URL the gateway is listening on. The
      * source must be started (`state.listen` set) before this returns
      * a usable URL; calling before start throws so callers fail loudly
@@ -119,12 +152,35 @@ export function createAiGatewayApi(state) {
 
     /** @param {string} name */
     getClient(name) {
-      return state.clients.get(name)
+      const client = clients.getClient(name)
+      return isGatewayClient(client) ? client : undefined
     },
 
     listClients() {
-      return Array.from(state.clients.values())
+      return clients.listClients().filter(isGatewayClient)
     },
+  }
+}
+
+/**
+ * The intrinsic registry also carries endpoint-free adapters. Keep the
+ * gateway capability's established contract limited to registrations with a
+ * gateway upstream.
+ *
+ * @param {ClientRegistration | undefined} client
+ * @returns {client is AiGatewayClientRegistration}
+ */
+function isGatewayClient(client) {
+  return client !== undefined &&
+    typeof /** @type {{ defaultUpstream?: unknown }} */ (client).defaultUpstream === 'string'
+}
+
+/** @param {GatewayState} state @returns {ClientRegistry} */
+function legacyClientRegistry(state) {
+  return {
+    registerClient(client) { state.clients.set(client.name, /** @type {any} */ (client)) },
+    getClient(name) { return state.clients.get(name) },
+    listClients() { return Array.from(state.clients.values()) },
   }
 }
 

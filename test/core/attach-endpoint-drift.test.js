@@ -67,7 +67,7 @@ function clientsWith({ attachCalls }) {
       ctx.stdout.write(
         JSON.stringify({
           status: 'attached', action: 'attach', client: 'claude', dry_run: false,
-          changed: true, settings_path: '/home/u/.claude/settings.json', port,
+          changed: true, settings_path: '/home/u/.claude/settings.json', port, mode: 'otel',
         }) + '\n'
       )
     },
@@ -156,6 +156,44 @@ test('a legacy done attach marker with no recorded endpoint re-attaches once (ba
     assert.deepEqual(r.results.map((x) => x.outcome), ['done'])
     assert.deepEqual(attachCalls, ['http://127.0.0.1:55555'], 'a legacy endpoint-less marker re-attaches once')
     assert.equal(readMarkerFile(stateRoot).attach.claude.endpoint, 'http://127.0.0.1:55555')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('a proxy-mode marker at the current endpoint re-attaches into otel mode', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    const endpoint = 'http://127.0.0.1:55555'
+    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.writeFileSync(
+      markerPath(stateRoot),
+      JSON.stringify({
+        attach: {
+          claude: {
+            status: 'done',
+            request_key: 'claude',
+            at: '2026-08-17T00:00:00.000Z',
+            endpoint,
+            mode: 'proxy',
+          },
+        },
+      }, null, 2) + '\n'
+    )
+
+    /** @type {string[]} */
+    const attachCalls = []
+    const clients = clientsWith({ attachCalls })
+    const reconciler = createActionReconciler({ stateRoot, handlers: [createAttachHandler()], log: NOOP_LOG })
+
+    const first = await reconciler.reconcile(reconcileInput({ endpoint, clients }))
+    assert.deepEqual(first.results.map((x) => x.outcome), ['done'])
+    assert.deepEqual(attachCalls, [endpoint])
+    assert.equal(readMarkerFile(stateRoot).attach.claude.mode, 'otel')
+
+    const second = await reconciler.reconcile(reconcileInput({ endpoint, clients }))
+    assert.deepEqual(second.results.map((x) => x.outcome), ['skipped'])
+    assert.equal(attachCalls.length, 1, 'the otel marker settles after the migration')
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }
