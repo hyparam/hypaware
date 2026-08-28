@@ -60,6 +60,12 @@ const launchdPath = path.join(stateDir, 'launchd.json')
 const keychainPath = path.join(stateDir, 'keychain.json')
 const systemdPath = path.join(stateDir, 'systemd.json')
 
+// How long a stop waits for the processes it signalled to actually exit, and
+// how often it re-checks. Real launchd holds the label until the job is gone,
+// which is what `waitUntilUnloaded` (`src/core/daemon/macos.js`) polls for.
+const STOP_WAIT_MS = 5000
+const STOP_POLL_MS = 25
+
 const tool = process.argv[2]
 const args = process.argv.slice(3)
 
@@ -133,12 +139,28 @@ function readState(file, fallback) {
 }
 
 /**
+ * Replace a state file atomically: write a sibling temp file, then rename it
+ * over the target. A plain `writeFileSync` leaves a window in which a second
+ * shim (the daemon's reconciler running `launchctl setenv` while the user
+ * runs `hyp daemon install`) reads a half-written file. `readState` swallows
+ * the parse error and hands back the empty fallback, so that reader would go
+ * on to write a domain with no services and no setenv values, erasing the
+ * whole mock domain. A rename is atomic, so every reader sees one complete
+ * version or the other.
+ *
  * @param {string} file
  * @param {any} value
  */
 function writeState(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`)
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`)
+    fs.renameSync(tmp, file)
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }) } catch { /* nothing to clear */ }
+    throw err
+  }
 }
 
 // ---------------------------------------------------------------- launchctl
@@ -211,11 +233,19 @@ function launchctl(argv) {
       return { code: 3, err: `Could not find service "${label}" in domain for\n` }
     }
     if (process.env.HYP_SANDBOX_SPAWN === '1') {
-      // `-k` kills the running instance; the supervisor restarts it, which is
-      // what launchd's KeepAlive does.
+      // Only `-k` kills the running instance (the supervisor then restarts
+      // it, which is what launchd's KeepAlive does). Plain `kickstart` starts
+      // an idle job and leaves a running one alone, and the difference is
+      // load-bearing: `installLaunchAgent` and `startLaunchAgent`
+      // (`src/core/daemon/macos.js`) kickstart *without* `-k` and then poll
+      // for a pid, so a mock that always killed would report a successful
+      // start while leaving the daemon down.
+      const forceRestart = argv.includes('-k')
       const child = childPid(label)
       if (child) {
-        try { process.kill(child, 'SIGTERM') } catch { /* already gone */ }
+        if (forceRestart) {
+          try { process.kill(child, 'SIGTERM') } catch { /* already gone */ }
+        }
       } else if (!alivePid(service.pid)) {
         service.pid = startSupervisor(label, service.plist)
         writeState(launchdPath, state)
@@ -297,14 +327,45 @@ function alivePid(pid) {
   if (!pid) return false
   try {
     process.kill(pid, 0)
-    return true
   } catch {
     return false
   }
+  return !isZombie(pid)
 }
 
 /**
- * Stop a service: kill its supervisor, which kills the daemon it is watching.
+ * A pid that has exited but not yet been reaped still answers signal 0, so a
+ * stop that waits on `process.kill(pid, 0)` alone can hang on a zombie. The
+ * supervisors are detached and orphaned by design, so whether they are reaped
+ * promptly is up to whatever PID 1 the sandbox happens to run under. macOS
+ * has no `/proc` and its launchd always reaps, so the read simply fails there
+ * and the answer falls back to the signal probe.
+ *
+ * @param {number} pid
+ */
+function isZombie(pid) {
+  let stat = ''
+  try {
+    stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+  } catch {
+    return false
+  }
+  // `comm` is parenthesised and may itself contain spaces, so the state field
+  // is the character two positions past the final `)`.
+  const close = stat.lastIndexOf(')')
+  return close !== -1 && stat[close + 2] === 'Z'
+}
+
+/**
+ * Stop a service: kill its supervisor, which kills the daemon it is watching,
+ * and do not return until both are actually gone.
+ *
+ * Waiting is the point. `bootout` deletes the domain entry, so `print` starts
+ * answering 113 the moment this returns and `waitUntilUnloaded` is satisfied.
+ * If the daemon were still winding down at that instant, the `bootstrap` that
+ * follows a stop/restart/reinstall would race it for the gateway's listen
+ * port, and an explicitly configured `listen` fails loudly on EADDRINUSE. The
+ * sandbox would be manufacturing a HypAware bug that is not there.
  *
  * @param {string} label
  * @param {{ pid: number | null }} service
@@ -319,7 +380,52 @@ function killService(label, service) {
   if (child) {
     try { process.kill(child, 'SIGTERM') } catch { /* gone */ }
   }
+  waitForExit([service.pid, child])
   try { fs.rmSync(servicePidPath(label)) } catch { /* nothing to clear */ }
+}
+
+/**
+ * Block until none of `pids` is alive, escalating to SIGKILL once the grace
+ * period is spent. The child is escalated alongside the supervisor so a
+ * SIGKILL cannot orphan the daemon onto the port.
+ *
+ * @param {(number | null | undefined)[]} pids
+ */
+function waitForExit(pids) {
+  const targets = pids.filter((pid) => typeof pid === 'number' && pid > 0)
+  if (targets.length === 0) return
+  if (waitWhileAlive(targets, STOP_WAIT_MS)) return
+  for (const pid of targets) {
+    if (alivePid(pid)) {
+      try { process.kill(/** @type {number} */ (pid), 'SIGKILL') } catch { /* gone */ }
+    }
+  }
+  waitWhileAlive(targets, STOP_WAIT_MS)
+}
+
+/**
+ * @param {(number | null | undefined)[]} pids
+ * @param {number} budgetMs
+ * @returns {boolean} true when every pid is gone within the budget
+ */
+function waitWhileAlive(pids, budgetMs) {
+  const deadline = Date.now() + budgetMs
+  for (;;) {
+    if (!pids.some(alivePid)) return true
+    if (Date.now() >= deadline) return false
+    sleepSync(STOP_POLL_MS)
+  }
+}
+
+/**
+ * Sleep without yielding to the event loop. The shim is a one-shot process
+ * whose exit code and stdout are the whole contract, so `killService` has to
+ * stay synchronous all the way up to `launchctl(argv)`'s return.
+ *
+ * @param {number} ms
+ */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
 /**
@@ -381,6 +487,7 @@ function supervise(label, plist) {
   const xml = fs.readFileSync(plist, 'utf8')
   const argv = parsePlistArray(xml, 'ProgramArguments')
   const keepAlive = /<key>KeepAlive<\/key>\s*<true\/>/.test(xml)
+  const jobEnv = parsePlistDict(xml, 'EnvironmentVariables')
   // Real launchd injects whatever `launchctl setenv` put in the domain into
   // every job it starts afterwards. That delivery is the point of the
   // `NODE_USE_SYSTEM_CA` setenv the attach path makes, so a mock that only
@@ -389,16 +496,24 @@ function supervise(label, plist) {
   // the invoking shell happened to export. The plist's own
   // `EnvironmentVariables` still win, the way a job-level setting outranks
   // the domain.
-  /** @type {SandboxLaunchdState} */
-  const domain = readState(launchdPath, { services: {}, env: {} })
+  //
+  // Read the domain per launch rather than once here: `hyp attach claude`
+  // setenvs and *then* lets the daemon restart to pick the value up, so a
+  // snapshot taken at bootstrap would miss every setenv the run makes and
+  // give a confident false negative on the one path this models.
+  //
   // `HYP_SANDBOX_SERVICE` marks everything launchd starts, and is inherited by
   // whatever the daemon spawns, so the shim can tell "the background agent did
   // this" from "the user typed this" without walking the process tree.
-  const env = {
-    ...process.env,
-    ...domain.env,
-    ...parsePlistDict(xml, 'EnvironmentVariables'),
-    HYP_SANDBOX_SERVICE: '1',
+  const env = () => {
+    /** @type {SandboxLaunchdState} */
+    const domain = readState(launchdPath, { services: {}, env: {} })
+    return {
+      ...process.env,
+      ...domain.env,
+      ...jobEnv,
+      HYP_SANDBOX_SERVICE: '1',
+    }
   }
   const outPath = parsePlistString(xml, 'StandardOutPath')
   const errPath = parsePlistString(xml, 'StandardErrorPath')
@@ -429,13 +544,17 @@ function superviseSystemd(unit, unitPath) {
   // The same marker the launchd lane sets. Without it a daemon started
   // through systemd looks user-issued to the `security` mock, and the
   // default-refuse assumption silently does not apply on this lane.
-  const env = { ...process.env, HYP_SANDBOX_SERVICE: '1' }
+  /** @type {NodeJS.ProcessEnv} */
+  const unitEnv = { ...process.env, HYP_SANDBOX_SERVICE: '1' }
   for (const declaration of unitValues(body, 'Environment')) {
     for (const assignment of parseSystemdWords(declaration)) {
       const equals = assignment.indexOf('=')
-      if (equals > 0) env[assignment.slice(0, equals)] = assignment.slice(equals + 1)
+      if (equals > 0) unitEnv[assignment.slice(0, equals)] = assignment.slice(equals + 1)
     }
   }
+  // systemd has no `launchctl setenv` equivalent in this mock, so the unit's
+  // environment is fixed at load time; the getter keeps one supervisor shape.
+  const env = () => unitEnv
   const stdout = unitValues(body, 'StandardOutput')[0] ?? ''
   const stderr = unitValues(body, 'StandardError')[0] ?? ''
 
@@ -457,7 +576,7 @@ function superviseSystemd(unit, unitPath) {
  *   label: string,
  *   argv: string[],
  *   keepAlive: boolean,
- *   env: NodeJS.ProcessEnv,
+ *   env: () => NodeJS.ProcessEnv,
  *   outPath: string | null,
  *   errPath: string | null,
  *   throttleMs: number,
@@ -493,13 +612,7 @@ function superviseProgram(options) {
     recentStarts.push(now)
     while (recentStarts.length > 0 && now - recentStarts[0] > RESTART_WINDOW_MS) recentStarts.shift()
     if (recentStarts.length > RESTART_CEILING) {
-      fs.appendFileSync(callsPath, `${JSON.stringify({
-        ts: new Date().toISOString(),
-        tool: 'launchctl',
-        args: ['(supervisor)', label],
-        exit: -1,
-        note: `crash loop: ${recentStarts.length} starts in ${RESTART_WINDOW_MS / 1000}s, giving up`,
-      })}\n`)
+      supervisorNote(label, `crash loop: ${recentStarts.length} starts in ${RESTART_WINDOW_MS / 1000}s, giving up`)
       stop()
       return
     }
@@ -515,26 +628,64 @@ function superviseProgram(options) {
         }
       }
     }
-    current = spawn(argv[0], argv.slice(1), { stdio: ['ignore', out, err], env })
+    const child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', out, err], env: env() })
+    current = child
     writeState(pidFile, {
       label,
-      pid: current.pid ?? null,
+      pid: child.pid ?? null,
       startedAt: new Date().toISOString(),
       starts: recentStarts.length,
     })
-    current.on('exit', () => {
-      current = null
+    // `spawn` reports a program it could not launch at all (a stale node path
+    // after an in-sandbox `npm install -g`, say) as an `error` event and no
+    // `exit`. With stdio ignored and no listener, that unhandled event kills
+    // the supervisor itself: KeepAlive silently stops keeping anything alive
+    // and `hyp-sandbox calls` shows only the bootstrap that appeared to work.
+    // Treat it as an immediate exit, and leave a line saying which program.
+    let settled = false
+    const settle = (/** @type {string | null} */ note) => {
+      if (settled) return
+      settled = true
+      if (current === child) current = null
       closeLogFds()
+      if (note) supervisorNote(label, note)
       if (stopping) return
       if (!keepAlive) {
         try { fs.rmSync(pidFile) } catch { /* nothing to clear */ }
         process.exit(0)
       }
       setTimeout(runOnce, throttleMs)
+    }
+    child.on('error', (spawnErr) => {
+      try { fs.rmSync(pidFile) } catch { /* nothing to clear */ }
+      settle(`could not start ${argv[0]}: ${spawnErr.message}`)
     })
+    child.on('exit', () => settle(null))
   }
 
   runOnce()
+}
+
+/**
+ * Append a supervisor observation to `calls.jsonl`. The supervisor runs
+ * detached with stdio ignored, so this log is the only channel it has, and a
+ * failure it does not write here is a failure the run cannot explain.
+ *
+ * @param {string} label
+ * @param {string} note
+ */
+function supervisorNote(label, note) {
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    tool: 'launchctl',
+    args: ['(supervisor)', label],
+    exit: -1,
+    note,
+  })
+  try {
+    fs.mkdirSync(stateDir, { recursive: true })
+    fs.appendFileSync(callsPath, `${line}\n`)
+  } catch { /* the sandbox root is gone; nothing left to tell */ }
 }
 
 /**

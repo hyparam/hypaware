@@ -355,3 +355,161 @@ test('shim refuses to run without a sandbox root', () => {
   assert.equal(result.status, 64)
   assert.match(result.stderr, /HYP_SANDBOX_ROOT is not set/)
 })
+
+/**
+ * Write a plist over `sandboxRoot`'s default one, running `argv` under the
+ * `KeepAlive` the installed HypAware LaunchAgent uses.
+ *
+ * @param {string} root
+ * @param {string} label
+ * @param {string[]} argv
+ * @param {{ keepAlive?: boolean }} [options]
+ */
+function writePlist(root, label, argv, options = {}) {
+  const keepAlive = options.keepAlive !== false
+  const plist = path.join(root, `${label}.plist`)
+  const escape = (/** @type {string} */ value) => value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+  fs.writeFileSync(plist, [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<plist version="1.0">',
+    '<dict>',
+    '  <key>Label</key>',
+    `  <string>${label}</string>`,
+    '  <key>ProgramArguments</key>',
+    '  <array>',
+    ...argv.map((arg) => `    <string>${escape(arg)}</string>`),
+    '  </array>',
+    ...(keepAlive ? ['  <key>KeepAlive</key>', '  <true/>'] : []),
+    '</dict>',
+    '</plist>',
+    '',
+  ].join('\n'))
+  return plist
+}
+
+/**
+ * Poll `launchctl print` until it reports a running pid other than `not`.
+ *
+ * @param {string} root
+ * @param {string} target
+ * @param {Record<string, string>} env
+ * @param {number | null} [not]
+ * @returns {Promise<number | null>}
+ */
+async function waitForPid(root, target, env, not = null) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const printed = shim(root, 'launchctl', ['print', target], env)
+    const match = /\bpid = (\d+)/.exec(printed.stdout)
+    if (match && Number(match[1]) !== not) return Number(match[1])
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  return null
+}
+
+test('launchctl mock: kickstart bounces the job only when -k asks it to', async (t) => {
+  const { root, label, target } = sandboxRoot(t)
+  const env = { HYP_SANDBOX_SPAWN: '1' }
+  const plist = writePlist(root, label, ['/bin/sh', '-c', 'exec sleep 30'])
+  t.after(() => shim(root, 'launchctl', ['bootout', target], env))
+
+  assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
+  const first = await waitForPid(root, target, env)
+  assert.ok(first, 'the supervisor started the program')
+
+  // `installLaunchAgent` and `startLaunchAgent` (`src/core/daemon/macos.js`)
+  // kickstart without `-k` and then poll for a pid. Real launchctl starts an
+  // idle job and leaves a running one alone, so a mock that always killed
+  // would report a successful start having just taken the daemon down.
+  assert.equal(shim(root, 'launchctl', ['kickstart', target], env).code, 0)
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  const printed = shim(root, 'launchctl', ['print', target], env)
+  assert.match(printed.stdout, /\bstate = running/)
+  assert.match(printed.stdout, new RegExp(`\\bpid = ${first}\\b`), 'a plain kickstart is a no-op on a running job')
+
+  // `restartLaunchAgent` passes `-k`, and that one does bounce it.
+  assert.equal(shim(root, 'launchctl', ['kickstart', '-k', target], env).code, 0)
+  const second = await waitForPid(root, target, env, first)
+  assert.ok(second, 'kickstart -k restarts the job')
+  assert.notEqual(second, first)
+})
+
+test('launchctl mock: bootout does not return until the job has exited', async (t) => {
+  const { root, label, target } = sandboxRoot(t)
+  const env = { HYP_SANDBOX_SPAWN: '1' }
+  // A real HypAware daemon drains before it exits, so the program here does
+  // not die the instant it is signalled either. Against a program that dies
+  // on the spot this test would pass without the wait and prove nothing.
+  const plist = writePlist(root, label, [
+    '/bin/sh', '-c', 'trap "sleep 1; exit 0" TERM; while :; do sleep 0.1; done',
+  ])
+
+  assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
+  const pid = await waitForPid(root, target, env)
+  assert.ok(pid, 'the supervisor started the program')
+
+  assert.equal(shim(root, 'launchctl', ['bootout', target], env).code, 0)
+  // The instant bootout returns, the domain entry is gone and `print` answers
+  // 113, which is all `waitUntilUnloaded` waits for. Anything still alive here
+  // would still hold the gateway's listen port when the bootstrap that
+  // follows a restart or reinstall tries to bind it.
+  assert.equal(shim(root, 'launchctl', ['print', target], env).code, 113)
+  assert.throws(() => process.kill(/** @type {number} */ (pid), 0), 'the job is gone, not merely signalled')
+})
+
+test('launchctl mock: a setenv after bootstrap reaches the next launch', async (t) => {
+  const { root, label, target } = sandboxRoot(t)
+  const env = { HYP_SANDBOX_SPAWN: '1', SANDBOX_PROBE: '' }
+  const seen = path.join(root, 'probe.txt')
+  // KeepAlive plus a program that exits is the restart cycle `hyp attach`
+  // relies on: it setenvs and *then* lets the daemon come back to pick the
+  // value up, so a domain snapshotted at bootstrap would never deliver it.
+  const plist = writePlist(root, label, ['/bin/sh', '-c', `printf '[%s]\\n' "$SANDBOX_PROBE" >> ${seen}`])
+  t.after(() => shim(root, 'launchctl', ['bootout', target], env))
+
+  assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (fs.existsSync(seen)) break
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.equal(fs.readFileSync(seen, 'utf8'), '[]\n', 'the first launch saw an unset variable')
+
+  assert.equal(shim(root, 'launchctl', ['setenv', 'SANDBOX_PROBE', 'on'], env).code, 0)
+  let body = ''
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    body = fs.readFileSync(seen, 'utf8')
+    if (body.includes('[on]')) break
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.match(body, /\[on\]/, 'a restart after the setenv carries the domain value')
+})
+
+test('launchctl mock: a program that cannot be started is recorded, not swallowed', async (t) => {
+  const { root, label, target } = sandboxRoot(t)
+  const env = { HYP_SANDBOX_SPAWN: '1' }
+  // `spawn` reports an unlaunchable program as an `error` event and no
+  // `exit`; unhandled, that takes the supervisor down with it and the run has
+  // nothing to say about why the daemon never appeared.
+  const plist = writePlist(root, label, [path.join(root, 'no-such-program')], { keepAlive: false })
+  t.after(() => shim(root, 'launchctl', ['bootout', target], env))
+
+  assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
+
+  const callsPath = path.join(root, 'state', 'calls.jsonl')
+  let notes = []
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    notes = fs.readFileSync(callsPath, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((entry) => entry.args[0] === '(supervisor)')
+      .map((entry) => entry.note)
+    if (notes.length > 0) break
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.equal(notes.length, 1)
+  assert.match(notes[0], /could not start .*no-such-program/)
+  assert.equal(shim(root, 'launchctl', ['print', target], env).stdout.includes('state = running'), false)
+})

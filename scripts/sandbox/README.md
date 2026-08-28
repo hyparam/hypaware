@@ -122,7 +122,7 @@ $NODE_USE_SYSTEM_CA` in the real one.
 | `port <n>` | Rewrite every `listen` port in the sandbox config |
 | `calls [n]` | Show the last n intercepted `launchctl`/`security` calls |
 | `state` | Dump the mock launchd, keychain, and systemd state |
-| `reset` | Stop anything `--spawn` started (and the fake central), then delete the sandbox root (asks first) |
+| `reset` | Stop anything `--spawn` started (and the fake central), wait for it to actually exit, then delete the sandbox root (asks first) |
 
 | Flag | Effect |
 |---|---|

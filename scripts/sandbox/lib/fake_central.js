@@ -254,9 +254,14 @@ function json(res, status, payload, note) {
  */
 function readBody(req) {
   return new Promise((resolve) => {
-    let body = ''
-    req.on('data', (chunk) => { body += chunk.toString('utf8') })
-    req.on('end', () => resolve(body))
+    // Buffer the chunks and decode once. Decoding per chunk turns any
+    // multi-byte character that straddles a chunk boundary into replacement
+    // characters, and ingest bodies are NDJSON of captured prompts and model
+    // output, so that is reachable on any non-ASCII body over a chunk.
+    /** @type {Buffer[]} */
+    const chunks = []
+    req.on('data', (chunk) => { chunks.push(Buffer.from(chunk)) })
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
   })
 }
 

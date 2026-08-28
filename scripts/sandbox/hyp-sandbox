@@ -158,10 +158,12 @@ sandbox_env() {
 # mock-launchd / mock-systemd supervisor, and the daemon each supervisor is
 # watching. Best effort - a pid that is already gone is not an error.
 stop_everything() {
-  local central_pid="$ROOT/state/central.pid"
-  if [[ -f "$central_pid" ]]; then
-    kill "$(cat "$central_pid")" 2>/dev/null || true
-    rm -f "$central_pid"
+  local central_pid=""
+  local central_pid_file="$ROOT/state/central.pid"
+  if [[ -f "$central_pid_file" ]]; then
+    central_pid="$(cat "$central_pid_file")"
+    kill "$central_pid" 2>/dev/null || true
+    rm -f "$central_pid_file"
   fi
   node -e '
     const fs = require("node:fs")
@@ -182,12 +184,35 @@ stop_everything() {
       const entry = read(name)
       if (entry?.pid) pids.add(entry.pid)
     }
+    const central = Number(process.argv[2])
+    if (Number.isInteger(central) && central > 0) pids.add(central)
     let stopped = 0
     for (const pid of pids) {
       try { process.kill(pid, "SIGTERM"); stopped += 1 } catch { /* already gone */ }
     }
+    // SIGTERM only asks. A real HypAware daemon drains before it exits, so
+    // returning here would let the caller start deleting $ROOT while the
+    // daemon was still writing into HYP_HOME. Wait for the pids to actually
+    // go, then escalate, so "stopped" is a fact and not a request.
+    const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+    const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+    const waitAll = (budgetMs) => {
+      const deadline = Date.now() + budgetMs
+      for (;;) {
+        const left = [...pids].filter(alive)
+        if (left.length === 0) return []
+        if (Date.now() >= deadline) return left
+        sleep(50)
+      }
+    }
+    let left = waitAll(5000)
+    for (const pid of left) {
+      try { process.kill(pid, "SIGKILL") } catch { /* already gone */ }
+    }
+    left = waitAll(2000)
     if (stopped > 0) console.log(`stopped ${stopped} sandbox process(es)`)
-  ' "$ROOT"
+    if (left.length > 0) console.log(`warning: still running after SIGKILL: ${left.join(", ")}`)
+  ' "$ROOT" "$central_pid"
 }
 
 case "$CMD" in
@@ -201,11 +226,14 @@ case "$CMD" in
     du -sh "$ROOT" 2>/dev/null || true
     read -r -p "delete it? [y/N] " reply
     if [[ "$reply" == "y" || "$reply" == "Y" ]]; then
-      # Everything --spawn started must go first: the plists are KeepAlive, so
-      # a surviving supervisor restarts the daemon against a wiped HYP_HOME
-      # and recreates part of the tree, and the fake central's pid file lives
-      # under $ROOT too, so deleting it first would strand :18700 held by a
-      # process 'central stop' then reports as not running.
+      # Everything --spawn started must go first, and must be gone before the
+      # delete starts: the plists are KeepAlive, so a surviving supervisor
+      # restarts the daemon against a wiped HYP_HOME and recreates part of the
+      # tree, and a daemon still draining its SIGTERM keeps writing into
+      # HYP_HOME underneath the rm. `stop_everything` waits for the pids it
+      # signalled rather than only signalling them. The fake central's pid
+      # file lives under $ROOT too, so deleting first would strand :18700 held
+      # by a process 'central stop' then reports as not running.
       stop_everything
       rm -rf "$ROOT"
       echo "deleted $ROOT"
