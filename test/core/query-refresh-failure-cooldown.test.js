@@ -162,7 +162,9 @@ test('a failed automatic refresh holds the gate closed instead of retrying on ev
     assert.equal(/** @type {any} */ (result).degraded, true, 'a cooled query is still degraded')
   }
 
-  // Forced refresh is unaffected: it never consults the stamp.
+  // Forced refresh is unaffected: this gate never consults the stamp. The
+  // spool's coalescing rule does read it, for forced callers too, which is a
+  // separate rule pinned by its own tests below.
   await assert.rejects(
     () => settlePendingCacheForQuery({
       partitions: [{ tablePath }],

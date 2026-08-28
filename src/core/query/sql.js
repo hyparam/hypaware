@@ -686,8 +686,12 @@ export async function settlePendingCacheForQuery(args) {
       const info = await args.storage.pendingInfo(partition.tablePath)
       if (!info.pending) continue
       if (args.refresh === 'always') {
-        // Forced refresh never consults the stamp: freshness is the caller's
-        // stated requirement, so it gets the attempt and the original error.
+        // This gate never consults the stamp under `always`: freshness is the
+        // caller's stated requirement, so it gets the attempt and the original
+        // error. The gate only. The spool's coalescing rule reads the stamp for
+        // forced callers too, and still returns them the newest rows, because a
+        // coalesced pass that completes drains the active file in the same call.
+        // @ref LLP 0322#coalesce-the-retry [constrained-by]: the stamp paces this gate, not the flush the gate calls
         await args.storage.flushTable(partition.tablePath, { force: true, reason: 'query_always' })
         continue
       }

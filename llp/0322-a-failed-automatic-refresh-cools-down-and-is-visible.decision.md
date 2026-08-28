@@ -86,7 +86,10 @@ query, and the attempt that follows a repair still arrives promptly.
 
 The window is a constant, not config, for LLP 0319's reason: it is a retry
 cadence for a broken-cache corner, and a caller who needs the newest rows sooner
-has `--refresh always`, which never consults the stamp.
+has `--refresh always`, whose gate never consults the stamp. The gate only:
+the coalescing rule below reads the stamp for every caller, forced included,
+and still hands `--refresh always` the newest rows, because a coalesced pass
+that completes drains `active.jsonl` in the same call.
 
 <a id="what-the-stamp-is-not"></a>**The stamp is a pacing record, not a verdict
 about the data.** It says when a flush attempt last failed. It says nothing
