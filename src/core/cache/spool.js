@@ -90,6 +90,38 @@ export function createCacheSpool(args) {
   }
 
   /**
+   * Move one set of already-rotated flush files into the cache, accumulating
+   * into `totals`. Throws on the first append the cache rejects, leaving the
+   * remaining files where they are for a later attempt.
+   *
+   * @param {string} tablePath
+   * @param {string[]} files
+   * @param {{ rowCount: number, chunkCount: number, bytesWritten: number, malformedCount: number, droppedCount: number }} totals
+   */
+  async function drainFlushFiles(tablePath, files, totals) {
+    for (const filePath of files) {
+      const progress = await readProgress(filePath)
+      const startOffset = progress?.byteOffset ?? 0
+      const batchId = `flush-${Date.now()}-${process.pid}`
+      let fileMalformed = 0
+
+      for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: seqAllocator.next })) {
+        const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
+        totals.rowCount += batch.chunk.rows.length
+        totals.chunkCount += 1
+        totals.bytesWritten += written.bytesWritten
+        totals.droppedCount += written.droppedCount ?? 0
+        fileMalformed += batch.malformedCount
+        await writeProgress(filePath, batch.resumeOffset)
+      }
+
+      totals.malformedCount += fileMalformed
+      await removeProgress(filePath)
+      await fs.rm(filePath, { force: true })
+    }
+  }
+
+  /**
    * The flush body. Lifted out of `flushTable` so the failure stamp write
    * and the stamp clear wrap every exit from it, the early return included.
    *
@@ -99,67 +131,53 @@ export function createCacheSpool(args) {
    */
   async function runFlush(tablePath, opts) {
     const reason = opts.reason ?? 'manual'
-    // A rotation while a failure stands only adds a file to a set nothing
-    // is draining: the waiting files cannot be read past the append that
-    // rejected them, so the retry has the same work either way. Skipping
-    // it keeps the stranded set fixed instead of growing it once per
-    // attempt, and lets new rows coalesce in the active file.
+    const totals = { rowCount: 0, chunkCount: 0, bytesWritten: 0, malformedCount: 0, droppedCount: 0 }
+
+    // A rotation while a failure stands only adds a file to a set nothing is
+    // draining: the waiting files cannot be read past the append that
+    // rejected them, so the retry has the same work either way. Skipping it
+    // keeps the stranded set fixed instead of growing it once per attempt,
+    // and lets new rows coalesce in the active file.
     //
-    // Never on a forced flush. `force` is the word every caller who needs
-    // "everything captured so far is committed once this resolves" passes:
-    // `--refresh always`, `hyp query refresh`, the post-backfill commit, and
-    // the sink export paths that read the table straight afterwards. Skipping
-    // the rotation for them would let a flush that succeeds against a
-    // repaired cache return `flushed: true` while the newest rows still sat
-    // in `active.jsonl` - the "reports success while silently dropping data"
-    // case those callers flush to avoid, and the strictness LLP 0321 settled
-    // for `always`. The unforced paths are the ones that repeat (the query
-    // gate, the size-threshold flush, the sink driver's discovery settle), so
-    // bounding those is what bounds the growth.
-    // @ref LLP 0322#coalesce-the-retry [implements]: an unforced retry under a standing stamp reuses the files already rotated
-    // @ref LLP 0321#decision [constrained-by]: forced refresh stays strict, so a forced flush always rotates
+    // This has to cover forced calls too, or it does not bound anything: the
+    // sink adapters flush with `force: true` once per partition per export
+    // tick and the driver's default schedule is every minute, so exempting
+    // `force` would move the growth off query traffic and onto a cron that
+    // strands ~1440 files a day per partition.
+    // @ref LLP 0322#coalesce-the-retry [implements]: a retry under a standing stamp reuses the files already rotated
     const stranded = listFlushFiles(tablePath)
-    const coalescing = opts.force !== true && stranded.length > 0 && (await readFlushFailedAt(tablePath)) !== null
+    const coalescing = stranded.length > 0 && (await readFlushFailedAt(tablePath)) !== null
     if (!coalescing) {
       await withWriteLock(tablePath, async () => {
         await rotateActiveFile(tablePath)
       })
     }
 
-    const files = coalescing ? stranded : listFlushFiles(tablePath)
-    if (files.length === 0) {
-      return { flushed: false, rowCount: 0, chunkCount: 0, bytesWritten: 0, pendingBytes: pendingBytesSync(tablePath), malformedCount: 0, droppedCount: 0, reason }
+    await drainFlushFiles(tablePath, coalescing ? stranded : listFlushFiles(tablePath), totals)
+
+    // Reaching here from a coalesced pass means the cache accepted the very
+    // rows it was rejecting, so the condition that suppressed the rotation is
+    // over and the skipped rows are drained in the same call. Without this a
+    // completed flush would return `flushed: true` having knowingly left
+    // `active.jsonl` behind, which breaks both halves of the contract: a
+    // forced caller ("everything captured so far is committed once this
+    // resolves" - `--refresh always`, `hyp query refresh`, the post-backfill
+    // commit, the sink export paths) would silently export without those
+    // rows, and `writeLastFlush` below would re-arm the query debounce over
+    // rows it had just decided to skip, hiding them for another window.
+    // @ref LLP 0322#coalesce-the-retry [implements]: a coalesced flush that completes rotates and drains before it returns
+    // @ref LLP 0321#decision [constrained-by]: forced refresh stays strict, so a flush that resolves has moved everything
+    if (coalescing) {
+      await withWriteLock(tablePath, async () => {
+        await rotateActiveFile(tablePath)
+      })
+      await drainFlushFiles(tablePath, listFlushFiles(tablePath), totals)
     }
 
-    let rowCount = 0
-    let chunkCount = 0
-    let bytesWritten = 0
-    let malformedCount = 0
-    let droppedCount = 0
-    for (const filePath of files) {
-      const progress = await readProgress(filePath)
-      const startOffset = progress?.byteOffset ?? 0
-      const batchId = `flush-${Date.now()}-${process.pid}`
-      let fileMalformed = 0
-
-      for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: seqAllocator.next })) {
-        const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
-        rowCount += batch.chunk.rows.length
-        chunkCount += 1
-        bytesWritten += written.bytesWritten
-        droppedCount += written.droppedCount ?? 0
-        fileMalformed += batch.malformedCount
-        await writeProgress(filePath, batch.resumeOffset)
-      }
-
-      malformedCount += fileMalformed
-      await removeProgress(filePath)
-      await fs.rm(filePath, { force: true })
+    if (totals.chunkCount > 0) {
+      await writeLastFlush(tablePath, { rowCount: totals.rowCount, bytesWritten: totals.bytesWritten })
     }
-    if (chunkCount > 0) {
-      await writeLastFlush(tablePath, { rowCount, bytesWritten })
-    }
-    return { flushed: chunkCount > 0, rowCount, chunkCount, bytesWritten, pendingBytes: pendingBytesSync(tablePath), malformedCount, droppedCount, reason }
+    return { flushed: totals.chunkCount > 0, rowCount: totals.rowCount, chunkCount: totals.chunkCount, bytesWritten: totals.bytesWritten, pendingBytes: pendingBytesSync(tablePath), malformedCount: totals.malformedCount, droppedCount: totals.droppedCount, reason }
   }
 
   return {

@@ -9,10 +9,12 @@
  * only an attribute nobody alerts on.
  *
  * These tests pin all four, plus the two edges the bound must not cross:
- * a forced flush still rotates, so it never resolves having quietly left
- * the newest rows in the spool (LLP 0321's strict `always`), and a
- * declared status reaches the code on `runRoot` spans as well as
- * `withSpan` ones.
+ * the suppression covers forced flushes too (or the sink cron simply
+ * inherits the growth), and the flush that gets past the stranded set
+ * drains `active.jsonl` in the same call, so it never resolves having
+ * quietly left the newest rows behind (LLP 0321's strict `always`) nor
+ * re-arms the debounce over them. Plus: a declared status reaches the
+ * status code on `runRoot` spans as well as `withSpan` ones.
  */
 
 import test from 'node:test'
@@ -265,18 +267,18 @@ test('a retry under a standing failure stops minting one more flush file each ti
     'ten more failing flushes under live capture leave the stranded set fixed'
   )
 
-  // Nothing was lost by not rotating: the repair commits every row.
+  // Nothing was lost by not rotating: one repaired flush commits every row,
+  // the stranded set and the rows that coalesced in `active.jsonl` alike.
   state.rejecting = false
   await spool.flushTable(tablePath, { reason: 'daemon' })
-  await spool.flushTable(tablePath, { reason: 'daemon' })
   const committed = await spool.pendingInfo(tablePath)
-  assert.equal(committed.pending, false, 'the repaired flush drains the whole spool')
+  assert.equal(committed.pending, false, 'one repaired flush drains the whole spool')
   assert.equal(committed.flushFailedAtMs ?? null, null)
 
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
 
-test('a forced flush still rotates, so it never reports success having left rows behind', async () => {
+test('a flush that gets past the stranded set drains the active file in the same call', async () => {
   const cacheRoot = await makeCacheRoot()
   const tablePath = path.join(cacheRoot, 'ai_gateway_messages')
   const state = { rejecting: true }
@@ -300,20 +302,51 @@ test('a forced flush still rotates, so it never reports success having left rows
   await spool.append(tablePath, COLUMNS, [{ id: 2 }])
   state.rejecting = false
 
-  // `force` is what `--refresh always`, `hyp query refresh`, the post-backfill
-  // commit, and the sink export paths pass. Coalescing must not apply to them:
-  // returning `flushed: true` with row 2 still in the spool is the silent drop
-  // those callers flush to prevent, and breaks LLP 0321's strict `always`.
+  // One call, and the spool is empty. A flush that completes has proved the
+  // cache accepts these rows, so the condition that suppressed the rotation
+  // is over and the skipped rows go in the same call. Returning `flushed:
+  // true` with row 2 still waiting would break `force`'s promise to
+  // `--refresh always`, `hyp query refresh`, the post-backfill commit and the
+  // sink export paths, and would re-arm the query debounce over a row the
+  // same call chose to skip.
   const forced = await spool.flushTable(tablePath, { force: true, reason: 'query_always' })
   assert.equal(forced.flushed, true)
   assert.deepEqual(
-    committed.sort((a, b) => a - b),
+    [...committed].sort((a, b) => a - b),
     [1, 2],
-    'a forced flush commits the rows captured while the failure stood, not only the stranded ones'
+    'the call commits the rows captured while the failure stood, not only the stranded ones'
   )
+  assert.equal(forced.rowCount, 2, 'the result counts both passes, so `lastFlushAtMs` covers both')
   const after = await spool.pendingInfo(tablePath)
-  assert.equal(after.pending, false, 'a forced flush that resolves leaves nothing waiting')
+  assert.equal(after.pending, false, 'a flush that resolves leaves nothing waiting')
   assert.equal(after.flushFailedAtMs ?? null, null)
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
+test('a forced flush under a standing failure does not mint one more file either', async () => {
+  const cacheRoot = await makeCacheRoot()
+  const tablePath = path.join(cacheRoot, 'ai_gateway_messages')
+  const { spool } = spoolWithSwitchableCommit(cacheRoot)
+
+  // The sink adapters flush with `force: true` once per partition per export
+  // tick, and the sink driver's default schedule is every minute. Exempting
+  // `force` from the coalescing rule would not remove the growth this
+  // document exists to stop, only move it off query traffic and onto a cron.
+  await spool.append(tablePath, COLUMNS, [{ id: 0 }])
+  await assert.rejects(() => spool.flushTable(tablePath, { reason: 'sink_discover' }))
+  assert.equal(flushFileCount(tablePath), 1)
+
+  for (let i = 1; i <= 10; i++) {
+    await spool.append(tablePath, COLUMNS, [{ id: i }])
+    await assert.rejects(() => spool.flushTable(tablePath, { reason: 'sink_discover' }))
+    await assert.rejects(() => spool.flushTable(tablePath, { force: true, reason: 'sink_export' }))
+  }
+  assert.equal(
+    flushFileCount(tablePath),
+    1,
+    'ten sink ticks under a standing failure leave the stranded set fixed, forced flush included'
+  )
 
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
