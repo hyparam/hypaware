@@ -186,16 +186,17 @@ function writeState(file, value) {
  * Anything that blocks - killing a job and waiting for it to go - stays
  * outside the lock. Only the read-change-write is held.
  *
+ * @template S
  * @template T
  * @param {string} file
- * @param {any} fallback
- * @param {(state: any) => T} change
+ * @param {S} fallback
+ * @param {(state: S) => T} change
  * @returns {T}
  */
 function updateState(file, fallback, change) {
   const release = acquireStateLock(file)
   try {
-    const state = readState(file, fallback)
+    const state = /** @type {S} */ (readState(file, fallback))
     const result = change(state)
     writeState(file, state)
     return result
@@ -242,9 +243,19 @@ function tryStateLock(lockPath) {
     if (/** @type {NodeJS.ErrnoException} */ (err).code === 'EEXIST') return null
     throw err
   }
-  try { fs.writeSync(fd, `${process.pid}\n`) } catch { /* the pid is a courtesy */ }
+  // The token is what makes the release safe, not a courtesy: a waiter whose
+  // budget ran out breaks this lock and takes it for itself, so releasing by
+  // name alone would delete a lock another shim is still holding and hand a
+  // third one the read-change-write underneath it.
+  const token = `${process.pid}.${crypto.randomBytes(4).toString('hex')}\n`
+  try { fs.writeSync(fd, token) } catch { /* the release below then leaves it to the stale sweep */ }
   try { fs.closeSync(fd) } catch { /* already closed */ }
   return () => {
+    try {
+      if (fs.readFileSync(lockPath, 'utf8') !== token) return
+    } catch {
+      return // already broken or released; not ours to remove
+    }
     try { fs.rmSync(lockPath, { force: true }) } catch { /* already released */ }
   }
 }
@@ -337,8 +348,22 @@ function launchctl(argv) {
     if (!label || !service) return { code: 3, err: 'Boot-out failed: 3: No such process\n' }
     killService(label, service)
     // Re-read under the lock rather than writing back the pre-wait copy, which
-    // would erase every setenv and bootstrap that landed during the wait.
-    updateState(launchdPath, emptyLaunchd(), (state) => { delete state.services[label] })
+    // would erase every setenv and bootstrap that landed during the wait, and
+    // delete only the instance this call actually killed. The supervisor dies
+    // on the first SIGTERM while its child is still draining, so a `kickstart`
+    // landing in that window sees a dead pid and installs a fresh supervisor
+    // under the same label. Deleting that one strands it outside the domain:
+    // `print` answers 113 while it is live, the next `bootstrap` succeeds and
+    // puts a second daemon on the port, and `stop_everything` cannot find it
+    // to kill because it enumerates the domain.
+    updateState(launchdPath, emptyLaunchd(), (state) => {
+      const entry = state.services[label]
+      // `kickstart` replaces the supervisor in place and leaves `loadedAt`
+      // alone, so the pid is the part that identifies the instance; `loadedAt`
+      // catches a bootout-then-bootstrap in the same window.
+      if (!entry || entry.pid !== service.pid || entry.loadedAt !== service.loadedAt) return
+      delete state.services[label]
+    })
     return { code: 0, note: `bootout ${label}` }
   }
 
@@ -996,7 +1021,7 @@ function security(argv) {
     const commonName = certCommonName(certPath)
     const keychain = flagValue(argv, '-k') ?? ''
     updateState(keychainPath, emptyKeychain(), (state) => {
-      const without = state.certs.filter((/** @type {{ sha256: string }} */ c) => c.sha256 !== digest)
+      const without = state.certs.filter((c) => c.sha256 !== digest)
       without.push({
         cn: commonName,
         path: certPath,
@@ -1013,7 +1038,7 @@ function security(argv) {
   if (sub === 'delete-certificate') {
     const commonName = flagValue(argv, '-c')
     return updateState(keychainPath, emptyKeychain(), (state) => {
-      const remaining = state.certs.filter((/** @type {{ cn: string | null }} */ c) => c.cn !== commonName)
+      const remaining = state.certs.filter((c) => c.cn !== commonName)
       if (remaining.length === state.certs.length) {
         return {
           code: 1,
@@ -1123,7 +1148,13 @@ function systemctl(argv) {
     }
     return updateState(systemdPath, emptySystemd(), (state) => {
       const entry = state.units[unit] ?? newUnit()
-      if (process.env.HYP_SANDBOX_SPAWN === '1' && !childPid(unit)) {
+      // `childPid` alone is not enough to say a unit is already running: a
+      // supervisor between restarts has removed its child's pid file and is
+      // still very much alive, so a second `start` would install a second
+      // supervisor for the one unit. Only the newer pid reaches `systemd.json`,
+      // and `stop` and `stop_everything` kill only what it records, so the
+      // older one survives both. Same re-check `kickstart` makes above.
+      if (process.env.HYP_SANDBOX_SPAWN === '1' && !childPid(unit) && !alivePid(entry.pid)) {
         const unitPath = path.join(process.env.HOME ?? '', '.config', 'systemd', 'user', unit)
         if (!fs.existsSync(unitPath)) return { code: 5, err: `Unit ${unit} not found.\n` }
         entry.pid = startSystemdSupervisor(unit, unitPath)
@@ -1141,7 +1172,11 @@ function systemctl(argv) {
       killService(unit, previous)
       updateState(systemdPath, emptySystemd(), (state) => {
         const entry = state.units[unit]
-        if (!entry) return
+        // Only clear the instance this call killed. A `start` that landed while
+        // the unit was draining recorded a live supervisor here, and nulling
+        // its pid would strand it: nothing else records it, so neither `stop`
+        // nor `stop_everything` could reach it again.
+        if (!entry || entry.pid !== previous.pid) return
         entry.active = false
         entry.pid = null
         entry.changedAt = new Date().toISOString()
