@@ -284,14 +284,18 @@ export async function installSystemdUnit(options) {
       // the message, so a reason carried on the error alone never reaches
       // the person this failure exists to tell (`ensureOk` folds it in too).
       const why = (startRes.stderr || '').trim()
-      // The log is the second place to look, not the first: a unit systemd
-      // never spawned wrote nothing to it, so its newest lines belong to a
-      // previous run. `systemctl --user status` always has an answer.
+      // The log is the second place to look, not the first. The unit writes
+      // stderr with `StandardError=append:`, never truncating, so a unit
+      // systemd never spawned leaves whatever the previous run wrote sitting
+      // there looking current. Say that out loud, and end on `systemctl --user
+      // status`, which always has an answer and is copy-pasteable because
+      // nothing follows it.
       throw new SystemdUnitError(
         `started ${plan.unitName} but systemd never reported a running process`
           + `${why ? `: ${why}` : ''}`
-          + ` (see ${path.posix.join(plan.logDir, 'daemon.err.log')},`
-          + ` which stays empty when the unit never ran, then: systemctl --user status ${plan.unitName})`,
+          + `. ${path.posix.join(plan.logDir, 'daemon.err.log')} is appended to across runs,`
+          + ` so when the unit never ran it holds only older output`
+          + `; ask systemd itself: systemctl --user status ${plan.unitName}`,
         // No exit code when the start itself exited 0: a thrown error tagged
         // `exitCode: 0` reads as success to any caller that forwards the
         // field as a process exit status.
