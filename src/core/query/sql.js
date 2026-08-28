@@ -37,7 +37,15 @@ const DEFAULT_MAX_HEAP_GROWTH_BYTES = 1024 * 1024 * 1024
 /** How often the watchdog samples heap growth while a query runs. */
 const HEAP_WATCH_INTERVAL_MS = 100
 
-const AUTO_REFRESH_FAILURE_MESSAGE =
+/**
+ * Exported so a caller that routes freshness lines by meaning can tell this
+ * one apart from the ordinary debounce staleness line. They arrive in the
+ * same `freshnessMessages` array and read alike, but only this one means
+ * rows are missing rather than merely a couple of minutes old.
+ *
+ * @ref LLP 0321#decision [implements]: the degrade emits one warning that newer waiting rows may be missing
+ */
+export const AUTO_REFRESH_FAILURE_MESSAGE =
   'cache: refresh failed; using previously saved data; newer waiting rows may be missing'
 
 /**

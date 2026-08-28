@@ -24,6 +24,7 @@ import {
   renderRepoMix,
 } from '../../src/core/query/overview.js'
 import { runQueryOverview } from '../../src/core/commands/query.js'
+import { AUTO_REFRESH_FAILURE_MESSAGE } from '../../src/core/query/sql.js'
 
 /** @import { OverviewWindow } from '../../src/core/query/types.js' */
 
@@ -762,6 +763,32 @@ test('overviewRunnerFromCtx: nothing to withhold says nothing', async () => {
   assert.ok(runner)
   await collectOverview(runner)
   assert.deepEqual(notices, [])
+})
+
+test('overviewRunnerFromCtx: a failed refresh routes apart from the debounce line', async () => {
+  // Both lines arrive in `freshnessMessages`, so a caller that routes on the
+  // array alone cannot tell "a couple of minutes stale" from "rows are
+  // missing". The wizard's first look drops the first by design; tagging
+  // them the same kind would drop the second with it.
+  // @ref LLP 0321#consequences [tests]: a degraded result never claims to be current, on every surface
+  const { ctx } = ctxWithRows()
+  const dataset = ctx.query.getDataset(OVERVIEW_DATASET)
+  dataset.discoverPartitions = async () => [{ tablePath: '/cache/ai_gateway_messages' }]
+  ctx.storage = {
+    cacheRoot: '/cache',
+    pendingInfo: async () => ({ pending: true, pendingBytes: 1, lastFlushAtMs: null }),
+    flushTable: async () => {
+      throw new Error('cache-iceberg: partition field "session_id" is new - adding a partition field is spec evolution and requires an explicit migration')
+    },
+  }
+  /** @type {{ kind: string, line: string }[]} */
+  const notices = []
+  const runner = overviewRunnerFromCtx(ctx, (notice) => notices.push(notice))
+  assert.ok(runner)
+  await collectOverview(runner)
+
+  assert.deepEqual(notices.map((n) => n.kind), ['refresh-failed'])
+  assert.equal(notices[0].line, `${AUTO_REFRESH_FAILURE_MESSAGE}\n`)
 })
 
 test('overviewRunnerFromCtx: no query registry yields no runner', () => {

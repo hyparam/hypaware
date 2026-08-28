@@ -16,7 +16,7 @@
  */
 
 import { escapeForDisplay } from '../util/json_util.js'
-import { executeQuerySql } from './sql.js'
+import { AUTO_REFRESH_FAILURE_MESSAGE, executeQuerySql } from './sql.js'
 import { renderLocalOnlyNotice } from './verb.js'
 // @ref LLP 0189#palette [implements]: one ANSI table for the whole CLI
 import { ANSI, paint } from '../cli/style.js'
@@ -349,7 +349,12 @@ export function overviewRunnerFromCtx(ctx, onNotice, opts = {}) {
         includeLocalOnly: opts.includeLocalOnly === true,
       })
       for (const line of result.freshnessMessages ?? []) {
-        say({ kind: 'freshness', line: `${line}\n` })
+        // Split by meaning, not by source array. The debounce line is
+        // advisory and a caller may drop it; the degrade warning says rows
+        // are missing, so it routes with the disclosures instead.
+        // @ref LLP 0321#consequences [implements]: a degraded result never claims to be current, on every surface that renders it
+        const kind = line === AUTO_REFRESH_FAILURE_MESSAGE ? 'refresh-failed' : 'freshness'
+        say({ kind, line: `${line}\n` })
       }
       const withheld = renderLocalOnlyNotice(result.localOnly)
       if (withheld) say({ kind: 'local-only', line: withheld })

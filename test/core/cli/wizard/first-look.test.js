@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 
 import { firstLookNoticeSink, runWizardFirstLook } from '../../../../src/core/cli/wizard/first_look.js'
 import { OVERVIEW_PROBE_SQL, buildOverviewSql } from '../../../../src/core/query/overview.js'
+import { AUTO_REFRESH_FAILURE_MESSAGE } from '../../../../src/core/query/sql.js'
 
 // The wizard's half of the first look (LLP 0135 #first-look): when the step
 // runs, and that it can never fail a finished install. The block's layout
@@ -241,6 +242,19 @@ test('firstLookNoticeSink: discloses withheld rows, drops the freshness line', a
   // finishing an install can act on. `hyp query overview` prints it.
   sink({ kind: 'freshness', line: 'note: capture may lag by up to 2 minutes\n' })
   assert.equal(stderr.text(), 'local-only: withheld 3 row(s) not visible from this full caller\n')
+})
+
+test('firstLookNoticeSink: a failed refresh is disclosed, not dropped with the freshness line', async () => {
+  // Both arrive on the same freshness channel and read alike, but only one
+  // of them means rows are missing. Before LLP 0321 this failure threw and
+  // setup printed no block; serving confirmed rows under "First look at what
+  // HypAware has recorded" while swallowing the one signal that they are
+  // incomplete would trade a visible failure for a silent one.
+  const stderr = makeBuf()
+  const sink = firstLookNoticeSink(stderr)
+  sink({ kind: 'freshness', line: 'cache: last write to query cache was 4 minutes ago\n' })
+  sink({ kind: 'refresh-failed', line: `${AUTO_REFRESH_FAILURE_MESSAGE}\n` })
+  assert.equal(stderr.text(), `${AUTO_REFRESH_FAILURE_MESSAGE}\n`)
 })
 
 test('firstLookNoticeSink: a closed sink drops a late disclosure', async () => {

@@ -43,11 +43,21 @@ export { overviewRunnerFromCtx as firstLookRunnerFromCtx } from '../../query/ove
  * cannot act on, attached to a block whose backfilled rows were
  * force-flushed anyway. `hyp query overview` prints both.
  *
+ * A failed refresh is NOT that line and is not dropped, even though it
+ * arrives on the same freshness channel. It says the spool could not enter
+ * the cache, so rows the user can see are recorded are absent from the table
+ * being drawn. Before LLP 0321 that failure threw and setup printed no block
+ * at all; serving the confirmed rows is the improvement, and printing them
+ * under "First look at what HypAware has recorded" with the one signal that
+ * they are incomplete suppressed would trade a visible failure for a silent
+ * one - the omission this block's own rules forbid.
+ *
  * The sink closes. An expired deadline abandons queries that keep running,
  * and one of them resolving late must not print a disclosure after the
  * privacy narration that setup documents as its last words.
  *
  * @ref LLP 0105 [implements]: withholding is disclosed on every surface, setup included
+ * @ref LLP 0321#consequences [implements]: a degraded result never claims to be current, setup included
  * @param {{ write(chunk: string): unknown }} stderr
  * @returns {((notice: OverviewNotice) => void) & { close(): void }}
  */
@@ -56,7 +66,7 @@ export function firstLookNoticeSink(stderr) {
   const sink = /** @type {((notice: OverviewNotice) => void) & { close(): void }} */ (
     /** @param {OverviewNotice} notice */
     (notice) => {
-      if (open && notice.kind === 'local-only') stderr.write(notice.line)
+      if (open && notice.kind !== 'freshness') stderr.write(notice.line)
     }
   )
   sink.close = () => { open = false }
