@@ -624,7 +624,7 @@ test('a metadata load that fails after the staging pass still reports what the p
 })
 
 // @ref LLP 0316#staged-writes-are-reclaimed [tests]: `tableExists` matches a
-// published `v<N>.metadata.json`, which a staging name is not, so a metadata
+// published `*.metadata.json`, which a staging name is not, so a metadata
 // directory whose only entry is a staged file answers no. That is exactly
 // what a table's FIRST publish crashing between staging and `link` leaves
 // behind, and before hyparam/hypaware#1040 the sweep never entered the
@@ -654,6 +654,87 @@ test('a staged metadata write is reclaimed when it is the only metadata entry th
       swept.partitions[0].unreferencedFilesRemoved, 1,
       'and reports the reclamation like any other'
     )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0316#consequences [tests]: the staging pass reads only
+// `metadata/`, and reusing its grace window for `data/` reintroduces a
+// defect that document names - a parked streaming writer (LLP 0209
+// #descriptor-parking) holds a staged `data/` file with a stale mtime while
+// the write is live, and unlinking it makes `openTmp` recreate it empty in
+// append mode and commit a truncated file with no error. Entering a
+// metadata directory that holds nothing but a staging name is a new door
+// into the sweep, so pin that it did not become a door into `data/` too.
+test('the staged-only metadata door reclaims nothing under data/', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-staged-only-data-'))
+  try {
+    await seedFragmented(cacheRoot, 2, 2)
+    const dir = partitionDir(cacheRoot)
+    const tableDir = liveTableDir(dir)
+    const metadataDir = path.join(tableDir, 'metadata')
+    const dataDir = path.join(tableDir, 'data')
+    const stale = new Date(Date.now() - 5 * 60 * 60 * 1000)
+
+    // Every data file well past the grace window, so nothing here is spared
+    // by its mtime: only the pass's refusal to read `data/` can spare it.
+    const seeded = await fs.readdir(dataDir)
+    for (const name of seeded) await fs.utimes(path.join(dataDir, name), stale, stale)
+
+    const parked = path.join(dataDir, '00000000-0000-0000-0000-000000000000.parquet.tmp.4242.1756200000000.k3f9zq')
+    await fs.writeFile(parked, 'a parked streaming writer still owns this name')
+    await fs.utimes(parked, stale, stale)
+    const parkedSidecar = path.join(dataDir, '11111111-1111-1111-1111-111111111111.index.parquet.tmp.7.8.zz')
+    await fs.writeFile(parkedSidecar, 'staged sidecar')
+    await fs.utimes(parkedSidecar, stale, stale)
+
+    for (const name of await fs.readdir(metadataDir)) {
+      await fs.rm(path.join(metadataDir, name), { force: true })
+    }
+    const leak = path.join(metadataDir, 'v1.metadata.json.tmp.4242.1756200000000.k3f9zq')
+    await fs.writeFile(leak, 'staged bytes that never published')
+    await fs.utimes(leak, stale, stale)
+
+    const swept = await maintainCache({ cacheRoot })
+
+    assert.equal(await pathExists(leak), false, 'the metadata leak is reclaimed through the new door')
+    assert.equal(await pathExists(parked), true, 'a staged data file is not this pass to reclaim')
+    assert.equal(await pathExists(parkedSidecar), true, 'nor a staged sidecar')
+    for (const name of seeded) {
+      assert.equal(await pathExists(path.join(dataDir, name)), true, `data file ${name} outlives an unreadable table`)
+    }
+    assert.equal(swept.partitions[0].unreferencedFilesRemoved, 1, 'and the metadata leak is all that was counted')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// @ref LLP 0316#staged-writes-are-reclaimed [tests]: the grace window is the
+// whole of an in-flight publish's safety, and entering a metadata directory
+// with no published version means entering it while a table's FIRST publish
+// may still be running. Widening which directories the pass reads must not
+// widen which files it takes.
+test('a staged metadata write still inside the grace window survives the staged-only door', async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-staged-only-fresh-'))
+  try {
+    await seedFragmented(cacheRoot, 1, 1)
+    const dir = partitionDir(cacheRoot)
+    const metadataDir = path.join(liveTableDir(dir), 'metadata')
+    for (const name of await fs.readdir(metadataDir)) {
+      await fs.rm(path.join(metadataDir, name), { force: true })
+    }
+
+    // Mtime left alone: this is a create that is publishing right now, and
+    // unlinking the name it is about to `link` would fail the create.
+    const inFlight = path.join(metadataDir, 'v1.metadata.json.tmp.4242.1756200000000.k3f9zq')
+    await fs.writeFile(inFlight, 'staged bytes on their way to link')
+
+    const swept = await maintainCache({ cacheRoot })
+
+    assert.equal(await pathExists(inFlight), true, 'a publish still in flight keeps its staging name')
+    assert.equal(swept.partitions[0].unreferencedFilesRemoved, undefined, 'and nothing is reported reclaimed')
+    assert.equal(swept.partitions[0].failed, undefined, 'a table with nothing published is not a failed partition')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }

@@ -555,8 +555,9 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
   const layout = generationLayout(cursor)
   const liveDir = path.join(r.path, layout.liveDir)
   // Not a bare return: a table whose metadata directory holds nothing but a
-  // staged name is the one shape where `tableExists` answers no AND there is
-  // still something to reclaim. Everything else this function does needs a
+  // staged name is the one shape where `tableExists` answers no (a staging
+  // name is not the `*.metadata.json` it looks for) AND there is still
+  // something to reclaim. Everything else this function does needs a
   // table that reads; the sweep's staging pass does not.
   // @ref LLP 0316#staged-writes-are-reclaimed [implements]: the leak's only reclaimer must not be gated on a published metadata version.
   if (!tableExists(liveDir)) return await sweepLiveGeneration(r, cursor, opts)
@@ -918,7 +919,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
  * the count, which belongs to the tick that did it. The only tick that can
  * reach here is one whose metadata is already too broken to load, which is
  * exactly when a reader of the report needs to see the reclaimer still ran.
- * @ref LLP 0316#staged-writes-are-reclaimed [implements]: the staging pass is independent of the walk, so a walk failure must not swallow its count.
+ * @ref LLP 0316#staged-writes-are-reclaimed [implements]: what the staging pass released is this tick's to report, whatever the walk behind it did.
  *
  * @param {MaintenancePartitionReport} r
  * @param {PartitionCursor} cursor
@@ -935,8 +936,16 @@ async function sweepLiveGeneration(r, cursor, opts) {
   try {
     removed = await sweepUnreferencedTableFiles(path.join(r.path, sweptLayout.liveDir))
   } catch (err) {
-    // Swept again next tick; counted for this one.
+    // Swept again next tick; counted for this one. Said out loud on the
+    // span as well as counted: restoring the count alone would make an
+    // aborted walk report exactly what a completed one reports, and the
+    // difference is the whole reason the count is worth having. The tick
+    // is not failed by this - the walk is best-effort by construction -
+    // so the signal is an attribute, not an error.
+    // @ref LLP 0220#walk-survives-a-partition [constrained-by]: a sweep failure stays a note on the span, never the partition's verdict.
     removed = filesRemovedBeforeFailure(err)
+    getActiveSpan()?.setAttribute('unreferenced_sweep_failed', true)
+    getActiveSpan()?.setAttribute('unreferenced_sweep_error', err instanceof Error ? err.message : String(err))
   }
   if (removed > 0) {
     r.unreferencedFilesRemoved = removed
@@ -1913,17 +1922,20 @@ async function sweepUnreferencedTableFiles(tableDir) {
     if (isStagedWriteName(name)) removeStale(path.join(metadataDir, name))
   }
 
-  // Only NOW may the sweep ask whether the table reads. `tableExists` looks
-  // for a published `v<N>.metadata.json`, which a staging name is not, so a
-  // metadata directory holding only a leak answers no - and that is the
-  // very state a first publish that crashed between staging and `link`
-  // leaves behind. Asking ahead of the pass above hands that leak no
-  // reclaimer at all, which is the same defect as gating it on the
-  // referenced set, reached by a different door.
-  // @ref LLP 0316#staged-writes-are-reclaimed [implements]: a metadata directory whose only entry is a staging name is still a directory to sweep.
-  if (!tableExists(tableDir)) return removed
-
+  // Everything past the staging pass runs inside the wrap, gate included:
+  // the count above is earned and a throw from here on must carry it, so
+  // the guarantee is the block's shape rather than a property of whichever
+  // statements happen to sit here today.
   try {
+    // Only NOW may the sweep ask whether the table reads. `tableExists`
+    // answers yes to any published `*.metadata.json`, and a staging name
+    // is not one, so a metadata directory holding only a leak answers no -
+    // and that is the very state a first publish that crashed between
+    // staging and `link` leaves behind. Asking ahead of the pass above
+    // hands that leak no reclaimer at all, which is the same defect as
+    // gating it on the referenced set, reached by a different door.
+    // @ref LLP 0316#staged-writes-are-reclaimed [implements]: a metadata directory whose only entry is a staging name is still a directory to sweep.
+    if (!tableExists(tableDir)) return removed
     await sweepReferencedSetFiles(tableDir, metaNames, removeStale)
   } catch (err) {
     throw new SweepFailure(err, removed)
