@@ -407,7 +407,11 @@ function renderPlan({ destinations, volumes, exclusions }) {
  *   would overstate the egress; dropping them entirely is how a machine that
  *   withholds *everything* looks identical to one that withholds nothing (#958
  *   was invisible at exactly this prompt).
- * - **A floor says so.** A truncated count renders "at least N", never N.
+ * - **A floor says so, on every line the scan produced.** A truncated count
+ *   renders "at least N", never N, and the withheld tally carries the same
+ *   mark: it came off the same short scan, so an exact-looking number beside
+ *   an "at least" claims a precision the count never had and understates what
+ *   policy held back, on the one line that says policy is working at all.
  * - **An unknown count says unknown.** Rendering it as "nothing pending" would
  *   be a false all-clear on a consent surface, which is worse than a gap.
  *
@@ -419,6 +423,9 @@ function renderVolume(volume) {
   if (volume.status === 'unknown') {
     return [`pending volume unknown${volume.reason ? ` (${volume.reason})` : ''}`]
   }
+  // One scan produced the payload tally and the withheld tally together, so
+  // one truncation marks both.
+  const floor = volume.status === 'partial' ? 'at least ' : ''
   const lines = []
   if (volume.rows === 0 && volume.status === 'counted') {
     lines.push('nothing pending')
@@ -427,14 +434,13 @@ function renderVolume(volume) {
     // on the one line somebody is deciding from, and it is reachable: a
     // destination whose whole pending range is withheld, counted short. Say the
     // payload count is incomplete and let the withheld line below carry the
-    // magnitude that is actually known.
+    // magnitude, marked as the floor it is.
     lines.push(`pending volume not fully counted${volume.reason ? ` (${volume.reason})` : ''}`)
   } else {
-    const floor = volume.status === 'partial' ? 'at least ' : ''
     lines.push(`${floor}${plural(volume.rows, 'row')} pending${renderResume(volume.resume)}`)
   }
   if (volume.withheldRows > 0) {
-    lines.push(`${plural(volume.withheldRows, 'row')} withheld by policy (not sent)`)
+    lines.push(`${floor}${plural(volume.withheldRows, 'row')} withheld by policy (not sent)`)
   }
   return lines
 }

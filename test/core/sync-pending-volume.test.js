@@ -554,3 +554,42 @@ test('a cursor whose timestamp will not parse never lets another partition stand
   assert.equal(volume.resume.kind, 'unknown')
   assert.notEqual(volume.resume.kind, 'since')
 })
+
+test('a truncated scan marks the withheld line as a floor too, and an exact count does not', async () => {
+  // Both tallies come off one scan, so one truncation applies to both. A
+  // withheld line that renders an exact-looking number beside "at least N rows
+  // pending" understates what policy held back, on the one line that tells the
+  // person at the prompt policy is working at all.
+  const short = await makeHome('withheld-floor')
+  const shortStorage = fakeStorage({ hypHome: short, entries: TWELVE_ROWS })
+  // Buffered rows the preview will not flush to count: the same short scan
+  // produced both numbers.
+  shortStorage.hasPendingSync = () => true
+  const shortRun = makeCtx({
+    hypHome: short,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')],
+    storage: shortStorage,
+  })
+
+  assert.equal(await runSync(['--dry-run'], shortRun.ctx), 0)
+  assert.match(shortRun.stdout.text, /at least 10 rows pending/)
+  assert.match(shortRun.stdout.text, /at least 2 rows withheld by policy \(not sent\)/)
+  assert.doesNotMatch(
+    shortRun.stdout.text,
+    /^ +2 rows withheld by policy/m,
+    'an unqualified withheld count next to a floor claims a precision the scan never had'
+  )
+
+  // The mark is earned, not decorative: a complete count still states an exact
+  // withheld total.
+  const whole = await makeHome('withheld-exact')
+  const wholeRun = makeCtx({
+    hypHome: whole,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')],
+    storage: fakeStorage({ hypHome: whole, entries: TWELVE_ROWS }),
+  })
+
+  assert.equal(await runSync(['--dry-run'], wholeRun.ctx), 0)
+  assert.match(wholeRun.stdout.text, /^ +2 rows withheld by policy \(not sent\)/m)
+  assert.doesNotMatch(wholeRun.stdout.text, /at least 2 rows withheld/)
+})
