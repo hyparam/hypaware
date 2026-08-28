@@ -36,7 +36,7 @@ const CLEAN_ROOT = '/work/clean-repo'
 // Live projector
 // ---------------------------------------------------------------------------
 
-test('live projector returns no rows when the exchange cwd is governed by .hypignore', async () => {
+test('live projector emits no GitHub repo evidence when the exchange cwd is governed by .hypignore', async () => {
   const env = await stageEnv()
   try {
     await writeTranscript(env, 'sess-ign', transcriptPair('sess-ign'))
@@ -45,6 +45,7 @@ test('live projector returns no rows when the exchange cwd is governed by .hypig
       session_id: 'sess-ign',
       transcript_path: undefined,
       git_branch: undefined,
+      git_remote: 'https://github.com/acme/ignored.git',
       cwd: path.join(IGNORED_ROOT, 'src'),
       ts: '2026-05-22T09:59:00.000Z',
     })
@@ -54,7 +55,7 @@ test('live projector returns no rows when the exchange cwd is governed by .hypig
       resolver: resolverIgnoring(IGNORED_ROOT),
     })
 
-    assert.equal(rows.length, 0, 'an ignored cwd must drop every row at the capture seam')
+    assert.equal(rows.length, 0, 'an ignored cwd must drop every row and its GitHub repo evidence at the capture seam')
   } finally {
     await env.cleanup()
   }
