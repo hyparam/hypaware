@@ -150,6 +150,15 @@ try {
   output.target = assessTarget(output.scenarios)
   output.process_peak_rss_mib = round(process.resourceUsage().maxRSS / 1024, 1)
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`)
+  // Surface the notes a failing check attached, so a run that fails for a
+  // configuration reason says so at the top level instead of leaving the
+  // reader to correlate a check name with a field buried in the scenario.
+  // Printed whether or not assertions were requested: a plain run reports the
+  // same `pass: false`, it just does not exit on it.
+  for (const check of output.target.checks) {
+    if (check.pass || !check.note) continue
+    process.stderr.write(`target check ${check.name} failed: ${check.note}\n`)
+  }
   if (args.assertTarget && !output.target.pass) process.exitCode = 1
 } finally {
   if (!args.keep) await fs.rm(root, { recursive: true, force: true })
@@ -1020,11 +1029,16 @@ function assessTarget(measured) {
     const strategies = new Set(dedupe.fan_outs.map(
       (/** @type {number} */ width) => dedupe.fan_out[String(width)]?.read_strategy,
     ))
+    const spansCap = strategies.has('scoped') && strategies.has('unrestricted')
     checks.push({
       name: 'otel_dedupe_measures_both_sides_of_the_scoped_read_cap',
       actual: strategies.size,
       limit: 2,
-      pass: strategies.has('scoped') && strategies.has('unrestricted'),
+      pass: spansCap,
+      // Still a hard failure, and deliberately: the note explains the
+      // configuration, it does not excuse it. `undefined` is dropped by
+      // `JSON.stringify`, so a passing check reports exactly as before.
+      note: spansCap ? undefined : describeScopedCapShortfall(dedupe),
     })
     for (const width of dedupe.fan_outs) {
       const entry = dedupe.fan_out[String(width)]
@@ -1137,6 +1151,141 @@ function assessTarget(measured) {
     }
   }
   return { pass: checks.every((check) => check.pass), checks }
+}
+
+/**
+ * Why the fan-out sweep failed to span the scoped-read cap, in one actionable
+ * line.
+ *
+ * The check stays a hard failure. A sweep confined to one side of the cap
+ * cannot prove the property the scenario exists to prove, and skipping or
+ * degrading it silently is the pass-green-while-measuring-nothing blindness
+ * of issue #1056. What was missing is only the diagnosis: the two inputs that
+ * produce the failure sit in different corners of the report
+ * (`fixture_sessions` under the scenario, the widths under
+ * `fan_outs_skipped_above_fixture`), and the check name mentions neither.
+ *
+ * Two distinguishable causes, with different remedies, decided per missing
+ * side rather than for the message as a whole. Both can hold at once (one
+ * side skipped for size, the other never requested), and a note that picked
+ * only one of them would name a remedy that does not restore the sweep:
+ *
+ *  - the fixture is too small to build a width on the missing side, so that
+ *    width was skipped. `--cache-rows` is the fix, and the exact value is
+ *    computable: the narrowest skipped width that lands on the missing side,
+ *    times `FIXTURE_ROWS_PER_SESSION`.
+ *  - no skipped width lands on the missing side at all, so growing the
+ *    fixture cannot supply one and `--dedupe-fan-outs` has to change. That is
+ *    the whole remedy only when the fixture could already build a width on
+ *    that side (one session for `scoped`, more than the cap for
+ *    `unrestricted`); below that floor both flags have to move together, and
+ *    the note quotes the `--cache-rows` value that makes the advised widths
+ *    buildable rather than asserting a bigger fixture would not help.
+ *
+ * The cap used to sort widths into sides is `scoped_session_cap_assumed`, the
+ * local constant, so the message says "assumed": if the shipped cap has moved
+ * the widths may be honest and `observed_cap_between` is the field to read.
+ *
+ * @param {Record<string, any>} dedupe
+ */
+function describeScopedCapShortfall(dedupe) {
+  const cap = dedupe.scoped_session_cap_assumed
+  const rowsPerSession = dedupe.fixture_rows_per_session
+  /** @type {number[]} */
+  const skipped = dedupe.fan_outs_skipped_above_fixture
+  /** @type {number[]} */
+  const measured = dedupe.fan_outs
+  const strategies = new Set(measured
+    .map((/** @type {number} */ width) => dedupe.fan_out[String(width)]?.read_strategy)
+    .filter((/** @type {string | undefined} */ strategy) => strategy !== undefined))
+  /** @type {string[]} */
+  const missing = []
+  if (!strategies.has('scoped')) missing.push('scoped')
+  if (!strategies.has('unrestricted')) missing.push('unrestricted')
+  // Sort the missing sides by which remedy actually reaches them. A
+  // `--cache-rows` bump can only restore a side that some skipped width lands
+  // on; where no skipped width does, no fixture size conjures one and the
+  // width set itself has to change. Deciding this per side, not once for the
+  // whole message, is what keeps the note from telling a reader whose fixture
+  // is genuinely too small that a larger `--cache-rows` will not help.
+  /** @type {string[]} */
+  const growableSides = []
+  /** @type {number[]} */
+  const growableWidths = []
+  /** @type {string[]} */
+  const unaskedSides = []
+  for (const side of missing) {
+    // The narrowest skipped width on this side: `skipped` is ascending, so
+    // the first hit is the cheapest fixture that would restore the side.
+    const rescuer = skipped.find(
+      (/** @type {number} */ width) => side === 'scoped' ? width <= cap : width > cap,
+    )
+    if (rescuer === undefined) unaskedSides.push(side)
+    else {
+      growableSides.push(side)
+      growableWidths.push(rescuer)
+    }
+  }
+  const measuredSummary = strategies.size === 0
+    ? 'no widths were measured'
+    : `only ${[...strategies].join(' and ')} reads were measured (widths ${measured.join(', ')})`
+  let message = `the fan-out sweep did not span the assumed ${cap}-session scoped-read cap: ` +
+    `${measuredSummary}, and the sweep needs both sides to prove the cap bounds anything.`
+  if (growableWidths.length > 0) {
+    // The widest of the per-side rescuers: one `--cache-rows` bump has to
+    // reach the furthest side it is being asked to restore.
+    const needSessions = Math.max(...growableWidths)
+    // Narrowing the sweep is only an alternative when the fixture can still
+    // build a width past the cap. Below that it is no remedy at all, and
+    // saying otherwise would send the reader after a configuration that
+    // cannot exist. It is also not an "alternative" when another side already
+    // requires it, which the clause below states outright.
+    const narrowing = unaskedSides.length === 0 && dedupe.fixture_sessions > cap
+      ? ` Alternatively pass --dedupe-fan-outs widths this fixture can build on both sides of ${cap}.`
+      : ''
+    message += ` The fixture holds ${dedupe.fixture_sessions} addressable sessions ` +
+      `(${rowsPerSession} committed rows each), too few to build widths ${skipped.join(', ')}, ` +
+      `so the ${growableSides.join(' and ')} side${growableSides.length > 1 ? 's' : ''} could not be measured. ` +
+      `Re-run with --cache-rows ${needSessions * rowsPerSession} or more to reach width ${needSessions}.` +
+      narrowing
+  }
+  if (unaskedSides.length > 0) {
+    // A different `--dedupe-fan-outs` only restores a side this fixture can
+    // actually build a width for: the scoped side needs one addressable
+    // session, the unrestricted side needs one more than the cap. Below that
+    // floor the widths are not the only problem, and telling the reader a
+    // larger `--cache-rows` will not help walks them into the same failure by
+    // another route - they pass a width past the cap, it is skipped for size,
+    // and the run fails again for a reason the note said to rule out.
+    const unaskedFloor = Math.max(...unaskedSides.map(
+      (/** @type {string} */ side) => side === 'scoped' ? 1 : cap + 1,
+    ))
+    // One fixture has to serve every side being restored, so the floor quoted
+    // here covers the skipped widths named above as well as the widths advised
+    // here. This subsumes the vaguer "large enough to build both": a skipped
+    // width rescuing the other side exceeds `fixture_sessions` by definition,
+    // so that case always lands in this branch and gets a number, not a hint.
+    const needSessions = Math.max(unaskedFloor, ...growableWidths)
+    if (needSessions > dedupe.fixture_sessions) {
+      message += ` No width this fixture can build lands on the ${unaskedSides.join(' or ')} ` +
+        `side of ${cap}, so the widths and the fixture both have to change: pass ` +
+        `--dedupe-fan-outs with at least one width <= ${cap} and one > ${cap}, at ` +
+        `--cache-rows ${needSessions * rowsPerSession} or more so this fixture can build them.`
+    } else {
+      // Only claim every width was built when the fixture skipped none. Saying
+      // it while `fan_outs_skipped_above_fixture` is populated contradicts the
+      // report the note is attached to.
+      const cannotGrow = skipped.length === 0
+        ? 'Every requested width was built, so a larger --cache-rows will not help'
+        : `No skipped width lands on the ${unaskedSides.join(' or ')} side of ${cap}, ` +
+          'so a larger --cache-rows will not supply it'
+      message += ` ${cannotGrow}: pass --dedupe-fan-outs with at least one width <= ${cap} ` +
+        `and one > ${cap}.`
+    }
+    message += ` If the widths already straddle ${cap}, ` +
+      'read observed_cap_between - the shipped cap may have moved.'
+  }
+  return message
 }
 
 /** @param {string[]} argv */
