@@ -39,7 +39,7 @@
 // `hypvector`); each carries its own nested hyparquet today, neither runs
 // icebird's converter, and neither is this task's business.
 //
-// @ref LLP 0222#hyparquet-floor [tests]: a floor only holds if nothing below it resolves beside the pin
+// @ref LLP 0222#hyparquet-floor [tests]: a floor only holds if nothing below it resolves beside the pin, and the deduping the same section claims is a separate property that has to be held separately
 // @ref LLP 0264#dependency [tests]: hypgrep enters as a plain root dependency, held to the floor by an override
 
 import test from 'node:test'
@@ -116,6 +116,54 @@ test('hypgrep is a plain dependency, held at the floor by an override', () => {
     'hyparquet-writer is an optionalDependency; the overrides pin must not promote it')
   assert.ok(optionalDependencies['hyparquet-writer'],
     'hyparquet-writer stays in optionalDependencies')
+})
+
+// The floor above is correctness. This pair is hygiene, and it is here because
+// the corpus asserts it: LLP 0222 #hyparquet-floor records the 1.28.1 -> 1.28.2
+// bump as "resolving to a single deduped copy shared with icebird". That was
+// true when written and stopped being true without a sound: icebird 0.8.25
+// began declaring its own exact hyparquet, npm nested a second copy under it,
+// and nothing reddened because both copies sit above the floor and only a
+// below-floor copy changes an answer. Kept separate from the floor tests for
+// exactly that reason - this pair can go red while every query is still right,
+// and reading a dedupe failure as a correctness failure is how the floor tests
+// would start lying.
+//
+// The override that holds it is cheaper than it looks. icebird declares an
+// exact hyparquet, so the override moves it between two adjacent patch
+// releases and nothing else; hyparquet 1.29.1 -> 1.29.2 changed package.json
+// alone (it added `default` export conditions), with no `src/` delta. The
+// remedy when this goes red is therefore directional: if a dependency declares
+// a hyparquet ABOVE the root pin, move the ROOT pin up. Holding a dependency
+// down onto an older reader to win a dedupe would trade the property that
+// matters for the one that does not.
+test('icebird is held at the root hyparquet pin, not left to nest its own', () => {
+  assert.ok(dependencies.icebird, 'icebird is the read path; it belongs in `dependencies`')
+  assert.equal(overrides.icebird?.hyparquet, ROOT_PINS.hyparquet,
+    'LLP 0222 #hyparquet-floor: the icebird override holds hyparquet at the root pin, ' +
+    'which is what makes "a single deduped copy shared with icebird" true')
+  assert.equal(overrides.icebird?.['hyparquet-writer'], ROOT_PINS['hyparquet-writer'],
+    'the icebird override holds hyparquet-writer at the root pin')
+})
+
+test('no root dependency nests a hyparquet of its own', t => {
+  if (!INSTALLED) {
+    t.skip('no node_modules, so nothing has been resolved to inspect')
+    return
+  }
+  // Scoped to hyparquet, and to the root `dependencies`, for the same reason
+  // the floor checks are: the optionalDependencies are write-side and
+  // vector-side, `hypvector` carries its own nested pair today, and neither
+  // runs icebird's converter.
+  const nested = []
+  for (const name of Object.keys(dependencies)) {
+    for (const copy of nestedCopies(path.join(NODE_MODULES, name))) {
+      if (copy.dep !== 'hyparquet') continue
+      nested.push(`${copy.where} is hyparquet@${copy.version}, beside the root ${ROOT_PINS.hyparquet}`)
+    }
+  }
+  assert.deepEqual(nested, [], 'LLP 0222 #hyparquet-floor claims one deduped hyparquet ' +
+    `shared across the read path; these are second copies:\n  ${nested.join('\n  ')}`)
 })
 
 test('every read-path dependency that carries hyparquet is held at the floor', t => {

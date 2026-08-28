@@ -92,6 +92,7 @@
   },
   "overrides": {
     "icebird": {
+      "hyparquet": "1.29.2",
       "hyparquet-writer": "0.16.8"
     },
     "hypgrep": {
