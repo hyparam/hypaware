@@ -71,3 +71,21 @@ test('forced refresh preserves the spool-to-cache error', async () => {
     new RegExp(PARTITION_ERROR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
   )
 })
+
+test('a storage service missing the spool methods fails instead of degrading forever', async () => {
+  /** @type {string[]} */
+  const messages = []
+  await assert.rejects(
+    () => settlePendingCacheForQuery({
+      partitions: [{ tablePath: '/cache/a' }],
+      storage: /** @type {any} */ ({
+        cacheRoot: '/tmp/hypaware-query-refresh-test',
+        pendingInfo: async () => ({ pending: true, pendingBytes: 1, lastFlushAtMs: null }),
+      }),
+      refresh: 'auto',
+      messages,
+    }),
+    TypeError
+  )
+  assert.deepEqual(messages, [], 'a miswired storage service never reads as a stale cache')
+})

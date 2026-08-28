@@ -34,8 +34,10 @@ stop the spool-to-cache or cache-to-compaction path.
 
 **Requires:** the last released tag or package, the candidate checkout or
 package, separate dependency installs for both versions, and a unique test root
-under `/private/tmp`. The test root must contain the entire `HYP_HOME`. Never
-point either version at the operator's normal `~/.hyp`.
+under the platform temp directory (`${TMPDIR:-/tmp}`, which resolves to
+`/private/tmp` on macOS and `/tmp` on Linux). The test root must contain the
+entire `HYP_HOME`. Never point either version at the operator's normal
+`~/.hyp`.
 
 **Related:** [LLP 0013](../llp/0013-local-query-cache.decision.md),
 [LLP 0311](../llp/0311-cache-date-partition.decision.md),
@@ -59,15 +61,16 @@ point either version at the operator's normal `~/.hyp`.
    dependencies:
 
    ```sh
-   UPGRADE_ROOT=$(mktemp -d /private/tmp/hypaware-durable-upgrade.XXXXXX)
+   UPGRADE_TMP="${TMPDIR:-/tmp}"
+   UPGRADE_ROOT=$(mktemp -d "${UPGRADE_TMP%/}/hypaware-durable-upgrade.XXXXXX")
    mkdir -p "$UPGRADE_ROOT/previous" "$UPGRADE_ROOT/candidate" "$UPGRADE_ROOT/hyp-home"
    export HYP_HOME="$UPGRADE_ROOT/hyp-home"
    ```
 
    Before any writer starts, assert that `HYP_HOME` begins with
-   `/private/tmp/hypaware-durable-upgrade.`. Keep the previous release and
-   candidate in separate directories so one dependency tree cannot hide a
-   package change in the other.
+   `${UPGRADE_TMP%/}/hypaware-durable-upgrade.` and is not under `$HOME`. Keep
+   the previous release and candidate in separate directories so one dependency
+   tree cannot hide a package change in the other.
 
 3. Using the previous release's real storage writer, create:
 

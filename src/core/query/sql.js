@@ -665,6 +665,15 @@ export async function settlePendingCacheForQuery(args) {
       )
     } catch (err) {
       if (args.refresh !== 'auto') throw err
+      // A storage service that never had the spool methods is a wiring bug,
+      // not the blocked spool-to-cache write the auto degrade is for. Told
+      // apart here rather than up front because the callers that legitimately
+      // pass a bare storage only ever reach this loop with no flushable
+      // table, so an eager capability check would reject them too. Swallowed,
+      // it would read as "cache: refresh failed" on every query forever while
+      // newly captured rows silently never arrived.
+      // @ref LLP 0321#decision [constrained-by]: the degrade covers a failed spool-to-cache move, not a storage service missing the move
+      if (typeof args.storage.pendingInfo !== 'function' || typeof args.storage.flushTable !== 'function') throw err
       reportAutoRefreshFailure(err, args.messages)
     }
   }
