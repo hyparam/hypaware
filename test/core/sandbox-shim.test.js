@@ -464,7 +464,7 @@ test('launchctl mock: bootout does not return until the job has exited', async (
   // would still hold the gateway's listen port when the bootstrap that
   // follows a restart or reinstall tries to bind it.
   assert.equal(shim(root, 'launchctl', ['print', target], env).code, 113)
-  assert.throws(() => process.kill(/** @type {number} */ (pid), 0), 'the job is gone, not merely signalled')
+  assert.equal(isAlive(/** @type {number} */ (pid)), false, 'the job is gone, not merely signalled')
 })
 
 test('launchctl mock: a setenv after bootstrap reaches the next launch', async (t) => {
