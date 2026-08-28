@@ -190,3 +190,85 @@ test('a committed partition with no session_id column degrades to a full read', 
     await env.cleanup()
   }
 })
+
+/**
+ * The scoped read is only cheaper than the full read while the list stays
+ * narrow. Iceberg prunes on an `IN` list only when EVERY listed value falls
+ * outside a chunk bound, so pruning decays toward nothing as the list widens,
+ * and hyparquet then matches each surviving row by walking the whole list:
+ * the scoped read becomes O(rows x sessions) against the full read O(rows).
+ * Measured on a 200k-row committed partition it crosses over near 220
+ * sessions and reaches 13.8x the full read at 4,000, so an uncapped list is
+ * not a weaker optimization, it is slower than the scan it replaced without
+ * bound.
+ *
+ * Timing cannot be asserted, so this pins the decision instead: past the cap
+ * the scan issues the unrestricted read. It also pins the half that makes the
+ * fallback safe rather than merely cheap, and the half a `[]`-vs-`[]` check
+ * cannot see: both shapes must DROP the committed twins and KEEP the fresh
+ * rows. A fallback that read the wrong thing and dropped everything is data
+ * loss, not a slow dedupe, so the batch carries survivors on purpose.
+ */
+test('a batch too wide to prune reverts to the unrestricted read', async () => {
+  const env = await stageStorage()
+  const sess = (/** @type {number} */ i) => `sess-${String(i).padStart(4, '0')}`
+  const WIDEST = 201
+  try {
+    // One committed row per session, on a date no batch row carries, so the
+    // twin is only reachable by a read that spans dates (either shape).
+    await env.storage.appendRows(env.tablePath, COLUMNS,
+      Array.from({ length: WIDEST }, (_, i) => row(sess(i), '2026-05-01', `m-old-${i}`)))
+    await env.storage.flushTable(env.tablePath, { force: true })
+
+    /** @param {number} count */
+    const batchOf = (count) => {
+      /** @type {Record<string, unknown>[]} */
+      const rows = []
+      for (let i = 0; i < count; i++) {
+        rows.push(row(sess(i), '2026-08-27', `m-old-${i}`)) // committed: must drop
+        rows.push(row(sess(i), '2026-08-27', `m-new-${i}`)) // never written: must survive
+      }
+      return rows
+    }
+    /** @param {number} count */
+    const expectedSurvivors = (count) => Array.from({ length: count }, (_, i) => `m-new-${i}#0`)
+
+    /** @param {Record<string, unknown>[]} batch */
+    const dedupeWithSpy = async (batch) => {
+      /** @type {(Record<string, string[]> | undefined)[]} */
+      const wheres = []
+      let unscopedReads = 0
+      const spy = /** @type {QueryStorageService} */ (/** @type {unknown} */ ({
+        ...env.storage,
+        discoverCachePartitions: (scope) => env.storage.discoverCachePartitions(scope),
+        async *readRows(tablePath, columns, readOpts) {
+          unscopedReads++
+          yield* env.storage.readRows(tablePath, columns, readOpts)
+        },
+        async *readRowsWhere(tablePath, columns, whereIn) {
+          wheres.push(whereIn)
+          yield* /** @type {NonNullable<typeof env.storage.readRowsWhere>} */ (env.storage.readRowsWhere)(tablePath, columns, whereIn)
+        },
+      }))
+      const fresh = await dedupeStoredPartIds(batch, spy)
+      return { fresh, wheres, unscopedReads }
+    }
+
+    const narrow = await dedupeWithSpy(batchOf(200))
+    assert.equal(narrow.unscopedReads, 0, 'a list the cache can prune on still takes the scoped read')
+    assert.equal(narrow.wheres.length, 1)
+    assert.equal(narrow.wheres[0]?.session_id?.length, 200, 'the whole batch is pushed down, not a prefix of it')
+
+    const wide = await dedupeWithSpy(batchOf(WIDEST))
+    assert.equal(wide.wheres.length, 0, 'a list too wide to prune on is never pushed down')
+    assert.ok(wide.unscopedReads > 0, 'it reads the partition unrestricted instead')
+
+    // The equivalence the fallback rests on: the full read answers the same
+    // membership question over a superset of the rows, so neither shape may
+    // miss a committed twin (a silent duplicate) or drop a fresh row.
+    assert.deepEqual(narrow.fresh.map((r) => r.part_id), expectedSurvivors(200))
+    assert.deepEqual(wide.fresh.map((r) => r.part_id), expectedSurvivors(WIDEST))
+  } finally {
+    await env.cleanup()
+  }
+})

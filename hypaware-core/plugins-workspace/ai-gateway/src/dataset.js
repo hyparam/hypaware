@@ -724,6 +724,42 @@ function canScanExistingRows(storage) {
 }
 
 /**
+ * Widest session list the scoped committed read is allowed to carry. Past it
+ * the scan reverts to the unrestricted full read.
+ *
+ * A scoped read is not an index probe. Iceberg prunes a file or row group on
+ * an `IN` list only when EVERY listed value falls outside the chunk
+ * `session_id` bounds, so each value added is another chance to keep the
+ * chunk and pruning decays toward nothing as the list widens. Every row that
+ * survives is then matched by hyparquet walking the whole value list. So the
+ * scoped read costs O(rows scanned x sessions) where the full read costs
+ * O(rows scanned), and past a crossover it is slower than the scan it exists
+ * to avoid, by an unbounded factor rather than a bounded one. Measured against
+ * a 200k-row committed partition: 0.93x the full read at 200 sessions, 1.9x
+ * at 500, 5.4x at 1,000, 13.8x at 4,000, crossing over near 220.
+ *
+ * The cap sits under that measured crossover, but the number it caps is the
+ * linear term, not the crossover: the shape is O(sessions) on every layout,
+ * while where it crosses 1x moves with file count, row width, and how tight
+ * the per-file `session_id` bounds are. So the guarantee the cap buys is
+ * bounded cost, not a specific multiple. On a layout whose crossover sits
+ * below the cap, a batch at the cap costs a small multiple of the full read
+ * instead of slightly less than it, and above the cap it IS the full read.
+ * Read the numbers as calibration, not as a portable constant.
+ *
+ * Choosing the full read is always safe: it answers the same membership
+ * question over a superset of the rows, so its seen-set is a superset of the
+ * scoped one and it can only find MORE committed twins, never fewer. It
+ * cannot miss a duplicate the scoped read would have caught, and it is the
+ * shape this scan already takes for a batch with no usable session ids.
+ *
+ * @ref LLP 0311#context [constrained-by]: bounds on the leading `session_id`
+ * sort key prune a session lookup, which is a claim about ONE narrow lookup;
+ * a batch-wide list of them is not one.
+ */
+const MAX_SCOPED_SESSION_IDS = 200
+
+/**
  * Scan committed `ai_gateway_messages` partitions and collect the set of
  * `part_id`s already present. Reads are projected to the three identity
  * columns so the scan stays cheap, and every failure mode (unreadable
@@ -742,7 +778,9 @@ function canScanExistingRows(storage) {
  * lookup still searches every date that may contain that session. A partition
  * that cannot answer the scoped read (a schema with no `session_id` column)
  * degrades to the full read rather than being skipped: skipping it would
- * report a committed row as fresh and write a duplicate.
+ * report a committed row as fresh and write a duplicate. A list wider than
+ * `MAX_SCOPED_SESSION_IDS` degrades the same way, for cost rather than
+ * capability.
  *
  * @param {QueryStorageService} storage
  * @param {ReadonlySet<string>} [restrictTo]
@@ -760,7 +798,8 @@ async function scanExistingPartIds(storage, restrictTo, sessionIds) {
   } catch {
     return seen
   }
-  const targeted = !!sessionIds && typeof storage.readRowsWhere === 'function'
+  const targeted = !!sessionIds && sessionIds.length <= MAX_SCOPED_SESSION_IDS &&
+    typeof storage.readRowsWhere === 'function'
   for (const part of partitions ?? []) {
     const tablePath = part?.path
     if (!tablePath || (typeof part.rowCount === 'number' && part.rowCount === 0)) continue
