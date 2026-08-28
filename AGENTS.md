@@ -116,16 +116,22 @@ Keep three tiers distinct:
 1. Traditional tests: fast, deterministic, and broad over edge cases.
 2. Hermetic smokes: narrow complete workflows in a temp install, good for PR
    confidence and plugin/kernel wiring checks.
-3. Acceptance smokes: heavier release or manual gates that use the packaged CLI,
-   real daemon install/start/stop, real user-home style config, production-ish
-   telemetry defaults, client attach behavior, and bounded disk-growth
-   assertions. Written procedures live in
+3. Acceptance smokes: heavier release or manual gates that cross boundaries
+   the hermetic harness cannot, such as consecutive package versions, real
+   daemon install/start/stop, real client behavior, and production-ish
+   telemetry defaults. Written procedures live in
    [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md); a human runs them before a
-   release that touched the relevant adapter, and they are never simulated
-   with fixtures.
+   release that touched the relevant boundary, and they are never replaced by
+   fixtures that only agree with the current code.
 
 Written acceptance procedures:
 
+- `durable_cache_upgrade`: required when a release changes a spool envelope or
+  label, cache schema or partition declaration, generation/cursor format, or
+  maintenance/compaction output. Runs the previous release and candidate in a
+  disposable `HYP_HOME`, one affected stream at a time, and proves confirmed
+  rows, waiting rows, migration, post-migration writes, and refresh-failure
+  behavior. See `docs/ACCEPTANCE.md`.
 - `codex_desktop_capture`: opt-in/manual, needs Codex Desktop on a real Mac.
   Proves Desktop traffic reaches `ai_gateway_messages` by both the live
   gateway route and the `~/.codex/sessions` backfill route, and is
@@ -293,6 +299,12 @@ hypaware daemon uninstall
 If the release touched a client adapter, run the matching procedure in
 [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) and record the result in the
 release notes.
+
+If the release changed a spool envelope or label, cache schema or partition
+declaration, generation/cursor format, or maintenance/compaction output, run
+[`durable_cache_upgrade`](docs/ACCEPTANCE.md#durable_cache_upgrade) against the
+last released version for every affected stream. Record the versions and the
+row, file, layout, and waiting-spool results in the release notes.
 
 If the release touched the **claude** adapter (`@hypaware/claude`, the
 telemetry listener, the body spool, or the attach settings writer), the
