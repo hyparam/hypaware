@@ -3,9 +3,20 @@
 import { snappyCompressor } from 'hysnappy'
 
 /**
- * The process's one hysnappy page compressor, shared by every parquet
- * WRITE path in this repo (the sink export encoder and the cache's
- * streaming compaction writer).
+ * The process's one hysnappy page compressor, shared by the two parquet
+ * write paths in this repo that can be handed a `compressors` map: the
+ * sink export encoder and the cache's streaming compaction writer.
+ *
+ * The other parquet writes in the process deliberately do NOT reach it,
+ * and none of them can without an upstream change. Everything that routes
+ * through icebird's `writeParquet` takes a `codec` but no
+ * `compressors` at all: cache ingest FLUSH (`partition.js` ->
+ * `appendRowsToTable`), and `stream_append.js`'s own `legacyAppend`
+ * fallback for a table it cannot stream into. The grep sidecar build
+ * (`search/index_worker_thread.js`) is hypgrep's `createIndex`, which
+ * constructs its own `ParquetWriter` inside the library. So the fast
+ * codec reaching "the cache" is the streamed compaction REWRITE, not
+ * every byte the cache writes.
  *
  * There are two reasons it is a singleton and not a per-writer value.
  *
