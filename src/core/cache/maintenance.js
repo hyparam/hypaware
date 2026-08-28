@@ -108,6 +108,29 @@ const ORPHAN_GRACE_MS = 60 * 60 * 1000
 const COMPACTION_WRITER_GENERATION = 3
 
 /**
+ * How long a seeding scan that could not read its table waits before
+ * another tick may attempt it again.
+ *
+ * The legacy scan is paid at most once per partition because its verdict
+ * is cached, and a scan that could not look caches nothing (LLP 0027): the
+ * partition is classified again next tick. That is right per tick and
+ * unbounded in time - a partition whose data files are permanently
+ * unreadable has no re-settle baseline to converge onto either, so the
+ * growth gate never closes and the whole-table `attributes` decode is
+ * re-paid on every tick, forever, which is the cost the cursor count
+ * exists to retire.
+ *
+ * Six default maintenance intervals: enough to cut that retry rate by
+ * most of an order of magnitude at any plausible tick cadence, short
+ * enough that a partition whose files become readable again is swept the
+ * same day. Nothing is lost by waiting - while the table is unreadable
+ * the rewrite the scan would force cannot run either.
+ *
+ * @ref LLP 0319#cool-the-retry-down [implements]: the retry is delayed, never cancelled.
+ */
+const RESETTLE_SCAN_COOLDOWN_MS = 6 * 60 * 60 * 1000
+
+/**
  * The most in-place merge rounds one maintenance tick may run on one
  * partition. Each round is bounded by `compact_batch_bytes` of victim
  * data (the rewrite materializes the victims' rows in memory), so the
@@ -2111,10 +2134,14 @@ function rowPartId(row) {
  * every tick and OOMed the daemon hourly on a large gateway cache.
  *
  * Only a scan that completed is a verdict. One that could not read the
- * table answers "no sweep this tick" and caches nothing, so the next tick
- * classifies the partition again.
+ * table answers "no sweep this tick" and caches nothing, so a later tick
+ * classifies the partition again - after the cooldown its failure stamped
+ * on the cursor, because a permanently unreadable partition's growth gate
+ * never closes and the unknown answer would otherwise re-pay the whole
+ * decode every tick, forever.
  *
  * @ref LLP 0027#re-settle-sweep: gate the sweep on the flush-maintained count.
+ * @ref LLP 0319#cool-the-retry-down [implements]: the unknown answer costs one scan per window, not one per tick.
  * @param {string} partitionDir
  * @param {PartitionCursor} cursor
  * @param {string} tableDir
@@ -2123,6 +2150,14 @@ function rowPartId(row) {
  */
 async function hasPendingFallbacks(partitionDir, cursor, tableDir, dryRun) {
   if (typeof cursor.pendingFallbacks === 'number') return cursor.pendingFallbacks > 0
+  // A scan this partition already failed, recently. Skip it: it caches
+  // nothing either way, and the sweep it might have forced could not run
+  // on a table the scan cannot read.
+  // @ref LLP 0319#cool-the-retry-down [implements]: the skip is a delay on the retry, never a verdict about the partition.
+  if (resettleScanCoolingDown(cursor)) {
+    getActiveSpan()?.setAttribute('resettle_scan_cooling_down', true)
+    return false
+  }
   const found = await hasResettleCandidate(tableDir)
   // The scan could not read the table (an EACCES on a live data file, a
   // half-written parquet). Unknown, not zero: the seed is permanent, so
@@ -2130,10 +2165,12 @@ async function hasPendingFallbacks(partitionDir, cursor, tableDir, dryRun) {
   // partition's marker rows until an append happened to flip the count off
   // zero, or a human ran `hyp query maintain --force`. Unknown keeps the
   // conservative direction the rest of this gate takes - it costs another
-  // scan next tick, which is the cost the whole field exists to bound,
-  // paid only while the table stays unreadable.
+  // scan, which is the cost the whole field exists to bound, and the stamp
+  // below is what keeps that cost from recurring every tick for as long as
+  // the table stays unreadable.
   if (found === undefined) {
     getActiveSpan()?.setAttribute('resettle_scan_unreadable', true)
+    if (!dryRun) await stampResettleScanFailure(partitionDir)
     return false
   }
   // A dry run reports what a real run WOULD do and writes nothing - the
@@ -2141,6 +2178,8 @@ async function hasPendingFallbacks(partitionDir, cursor, tableDir, dryRun) {
   // that persisted the seed would also make itself unrepeatable: the next
   // run, dry or not, would read the cached verdict instead of classifying
   // the partition, so the preview would have changed what it previewed.
+  // The failure stamp above is withheld for the same reason: a preview must
+  // not decide when the daemon next looks.
   if (dryRun) return found
   // Seed under the mutation lock, and only if a flush has not concretized
   // the count while the scan ran: a concurrent append's tally must win over
@@ -2148,9 +2187,78 @@ async function hasPendingFallbacks(partitionDir, cursor, tableDir, dryRun) {
   await withPartitionMutationLock(partitionDir, async () => {
     const current = tryReadCursorSync(partitionDir)
     if (!current || typeof current.pendingFallbacks === 'number') return
-    await writeCursor(partitionDir, { ...current, pendingFallbacks: found ? 1 : 0 })
+    await writeCursor(partitionDir, { ...withoutResettleScanStamp(current), pendingFallbacks: found ? 1 : 0 })
   })
   return found
+}
+
+/**
+ * Is this partition's last failed seeding scan recent enough that the tick
+ * should not attempt another?
+ *
+ * Read off the cursor and nothing else, like every other maintenance skip.
+ * Anything the stamp cannot be read as a failure that happened within the
+ * window - absent, unparseable, or dated in the future by a clock that
+ * moved - answers false and the scan runs: suppressing a scan on state
+ * this function cannot interpret is the direction that hides marker rows,
+ * and re-scanning is only ever a cost.
+ *
+ * @ref LLP 0319#cool-the-retry-down [implements]: the window is measured from the recorded failure.
+ * @param {PartitionCursor} cursor
+ * @returns {boolean}
+ */
+function resettleScanCoolingDown(cursor) {
+  const c = cursor.compaction
+  if (!isPlainObject(c) || typeof c.resettleScanFailedAt !== 'string') return false
+  const failedMs = Date.parse(c.resettleScanFailedAt)
+  if (!Number.isFinite(failedMs)) return false
+  const sinceMs = Date.now() - failedMs
+  return sinceMs >= 0 && sinceMs < RESETTLE_SCAN_COOLDOWN_MS
+}
+
+/**
+ * Record that this tick's seeding scan could not read the table.
+ *
+ * Written into the cursor's `compaction` block beside the re-settle
+ * baseline, which is where the sweep's other cursor state lives: an append
+ * carries that block through untouched, so ordinary write traffic does not
+ * reopen the retry, while every rewrite, recognition, and in-place verdict
+ * replaces the block wholesale and so drops the stamp with the record that
+ * supersedes it. All three of those prove the table was readable.
+ *
+ * Skipped when a flush concretized the count while the scan ran, for the
+ * same reason the seed below it is: a real tally outranks anything this
+ * path knows, and a stamp written over it would be dead state.
+ *
+ * @ref LLP 0319#cool-the-retry-down [implements]: the failure is stamped where a later success clears it.
+ * @param {string} partitionDir
+ * @returns {Promise<void>}
+ */
+async function stampResettleScanFailure(partitionDir) {
+  await withPartitionMutationLock(partitionDir, async () => {
+    const current = tryReadCursorSync(partitionDir)
+    if (!current || typeof current.pendingFallbacks === 'number') return
+    const compaction = isPlainObject(current.compaction) ? current.compaction : {}
+    await writeCursor(partitionDir, {
+      ...current,
+      compaction: { ...compaction, resettleScanFailedAt: new Date().toISOString() },
+    })
+  })
+}
+
+/**
+ * The same cursor with any scan-failure stamp dropped. A completed scan
+ * has said everything there is to say about this partition, so the record
+ * of the one that could not is spent.
+ *
+ * @param {PartitionCursor} cursor
+ * @returns {PartitionCursor}
+ */
+function withoutResettleScanStamp(cursor) {
+  if (!isPlainObject(cursor.compaction)) return cursor
+  const compaction = { ...cursor.compaction }
+  delete compaction.resettleScanFailedAt
+  return { ...cursor, compaction }
 }
 
 /**
@@ -2175,7 +2283,7 @@ async function hasResettleCandidate(tableDir) {
   } catch (err) {
     // Not rethrown: an unreadable table must not fail the partition's whole
     // tick, and the caller's `undefined` already keeps the verdict uncached.
-    // But unknown re-scans on every growth tick until the read succeeds, so
+    // But unknown re-scans, on a cooldown, until the read succeeds, so
     // record WHAT failed - the caller's boolean cannot separate a transient
     // EACCES from a permanently torn data file or a bug in this scan, and
     // only the first of those clears itself. Without this the recurring

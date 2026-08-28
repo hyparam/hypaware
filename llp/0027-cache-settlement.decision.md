@@ -8,7 +8,10 @@
 **Related:** LLP 0013, LLP 0016, LLP 0026
 **Extended-by:** LLP 0312 (#settle-purity: compaction probes the settle hook
 speculatively and discards the answer, so an enricher's `settle` must be free
-of observable side effects and idempotent)
+of observable side effects and idempotent); [LLP 0319](./0319-resettle-scan-failure-cooldown.decision.md)
+(#re-settle-sweep: the seeding scan that could not read its table is stamped on
+the cursor and retried on a cooldown, so the unknown answer costs one scan per
+window instead of one per tick)
 
 ## Summary
 
@@ -167,9 +170,12 @@ once per partition. Only a scan that *completed* is a verdict: one that could
 not read the table (an EACCES on a live data file, a half-written parquet)
 leaves the field unknown, because a cached zero is permanent and a false one
 strands that partition's marker rows until an append happens to flip the count
-off zero. Unknown costs another scan next tick, which is the direction every
-other unknown in this gate takes. What point 4 decided is unchanged: the same
-two conditions still gate the same forced rewrite.
+off zero. Unknown costs another scan, which is the direction every other
+unknown in this gate takes - stamped on the cursor and retried on a cooldown
+rather than on the very next tick, so a permanently unreadable partition pays
+one scan per window instead of one per tick ([LLP
+0319](./0319-resettle-scan-failure-cooldown.decision.md)). What point 4 decided
+is unchanged: the same two conditions still gate the same forced rewrite.
 
 Conservative and bounded: an enricher miss/failure leaves the fallback row
 untouched for a later sweep; a matchable second sweep collapses the twin and the
