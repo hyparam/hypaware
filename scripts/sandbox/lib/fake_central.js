@@ -143,7 +143,17 @@ function route(req, res, url, body) {
     }
     const code = `code_${codeSeq += 1}`
     codes.set(code, { challenge: url.searchParams.get('code_challenge') ?? '' })
-    const location = `${redirectUri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`
+    // Built through `URL` rather than string concatenation: a loopback
+    // receiver that already carries a query would otherwise get two `?`.
+    let location
+    try {
+      const target = new URL(redirectUri)
+      target.searchParams.set('code', code)
+      target.searchParams.set('state', state)
+      location = target.toString()
+    } catch {
+      return json(res, 400, { error: 'invalid_request' }, `unparseable redirect_uri ${redirectUri}`)
+    }
     res.writeHead(302, { location })
     res.end()
     return `302 → ${redirectUri}`

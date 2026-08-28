@@ -97,7 +97,12 @@ A mock that always succeeds is worse than no mock: it turns an open question
 into a false answer. If you add mocks here, prefer failing the uncertain case
 and naming the assumption in the `note` the call log records.
 
-Related, and *not* modellable here: Remote Control also needs
+The mock does model the half of `launchctl setenv` that matters to the
+daemon: a value set in the domain is injected into every job the mock launchd
+starts afterwards, so under `--spawn` you can check the daemon's own
+environment rather than only that `getenv` reads the value back.
+
+What is *not* modellable here: Remote Control also needs
 `NODE_USE_SYSTEM_CA=1` in the environment when Claude Code boots.
 `launchctl setenv` only reaches processes launched afterwards, so the terminal
 app must be fully quit (Cmd-Q) and reopened. Nothing inside a sandbox can
@@ -117,7 +122,7 @@ $NODE_USE_SYSTEM_CA` in the real one.
 | `port <n>` | Rewrite every `listen` port in the sandbox config |
 | `calls [n]` | Show the last n intercepted `launchctl`/`security` calls |
 | `state` | Dump the mock launchd, keychain, and systemd state |
-| `reset` | Delete the sandbox root (asks first) |
+| `reset` | Stop anything `--spawn` started (and the fake central), then delete the sandbox root (asks first) |
 
 | Flag | Effect |
 |---|---|

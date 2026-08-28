@@ -56,13 +56,23 @@ examples:
 EOF
 }
 
+# `set -u` would turn a missing option value into an "unbound variable" line
+# from inside the parser instead of the usage block.
+need_value() {
+  if [[ $# -lt 2 ]]; then
+    echo "hyp-sandbox: $1 needs a value" >&2
+    usage >&2
+    exit 64
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --root) ROOT="$2"; shift 2 ;;
+    --root) need_value "$@"; ROOT="$2"; shift 2 ;;
     --root=*) ROOT="${1#*=}"; shift ;;
     --spawn) SPAWN=1; shift ;;
     --refuse-trust) TRUST_REFUSE=1; shift ;;
-    --trust-from-daemon) TRUST_FROM_DAEMON="$2"; shift 2 ;;
+    --trust-from-daemon) need_value "$@"; TRUST_FROM_DAEMON="$2"; shift 2 ;;
     --trust-from-daemon=*) TRUST_FROM_DAEMON="${1#*=}"; shift ;;
     --verbose) VERBOSE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -70,13 +80,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# The shim tests this for the exact string `grant`, so a typo would silently
+# select the pessimistic branch and the run would look like it proved a
+# refusal it never tested.
+if [[ "$TRUST_FROM_DAEMON" != "grant" && "$TRUST_FROM_DAEMON" != "refuse" ]]; then
+  echo "hyp-sandbox: --trust-from-daemon takes 'grant' or 'refuse', got '$TRUST_FROM_DAEMON'" >&2
+  exit 64
+fi
+
 if [[ $# -eq 0 ]]; then usage; exit 64; fi
 
 CMD="$1"; shift
 
 # Absolute, so a relative --root cannot follow the sandboxed HOME around.
-mkdir -p "$ROOT"
-ROOT="$(cd "$ROOT" && pwd)"
+# Resolved without creating anything: the read-only commands (path, calls,
+# state) and `reset` must not conjure the root they are asked about, and an
+# unconditional mkdir here made `reset`'s "nothing to reset" guard dead code.
+if [[ -d "$ROOT" ]]; then
+  ROOT="$(cd "$ROOT" && pwd)"
+elif [[ "$ROOT" != /* ]]; then
+  ROOT="$PWD/$ROOT"
+fi
 
 SANDBOX_HOME="$ROOT/home"
 SANDBOX_HYP_HOME="$SANDBOX_HOME/.hyp"
@@ -130,6 +154,42 @@ sandbox_env() {
     "$@"
 }
 
+# Terminate every process the sandbox started: the fake central server, each
+# mock-launchd / mock-systemd supervisor, and the daemon each supervisor is
+# watching. Best effort - a pid that is already gone is not an error.
+stop_everything() {
+  local central_pid="$ROOT/state/central.pid"
+  if [[ -f "$central_pid" ]]; then
+    kill "$(cat "$central_pid")" 2>/dev/null || true
+    rm -f "$central_pid"
+  fi
+  node -e '
+    const fs = require("node:fs")
+    const path = require("node:path")
+    const stateDir = path.join(process.argv[1], "state")
+    const read = (file) => {
+      try { return JSON.parse(fs.readFileSync(path.join(stateDir, file), "utf8")) } catch { return null }
+    }
+    const pids = new Set()
+    const launchd = read("launchd.json")
+    for (const service of Object.values(launchd?.services ?? {})) if (service?.pid) pids.add(service.pid)
+    const systemd = read("systemd.json")
+    for (const unit of Object.values(systemd?.units ?? {})) if (unit?.pid) pids.add(unit.pid)
+    let entries = []
+    try { entries = fs.readdirSync(stateDir) } catch { /* no state yet */ }
+    for (const name of entries) {
+      if (!name.startsWith("service-") || !name.endsWith(".json")) continue
+      const entry = read(name)
+      if (entry?.pid) pids.add(entry.pid)
+    }
+    let stopped = 0
+    for (const pid of pids) {
+      try { process.kill(pid, "SIGTERM"); stopped += 1 } catch { /* already gone */ }
+    }
+    if (stopped > 0) console.log(`stopped ${stopped} sandbox process(es)`)
+  ' "$ROOT"
+}
+
 case "$CMD" in
   path)
     echo "$ROOT"
@@ -141,6 +201,12 @@ case "$CMD" in
     du -sh "$ROOT" 2>/dev/null || true
     read -r -p "delete it? [y/N] " reply
     if [[ "$reply" == "y" || "$reply" == "Y" ]]; then
+      # Everything --spawn started must go first: the plists are KeepAlive, so
+      # a surviving supervisor restarts the daemon against a wiped HYP_HOME
+      # and recreates part of the tree, and the fake central's pid file lives
+      # under $ROOT too, so deleting it first would strand :18700 held by a
+      # process 'central stop' then reports as not running.
+      stop_everything
       rm -rf "$ROOT"
       echo "deleted $ROOT"
     else

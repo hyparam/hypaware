@@ -90,9 +90,14 @@ function main() {
  */
 function finish(result) {
   record(result)
+  // `process.exitCode` rather than `process.exit()`: stdout is asynchronous
+  // for a pipe on macOS, and every call arrives through the PATH wrapper on a
+  // pipe. Exiting outright can truncate the payloads the kernel parses
+  // (`launchctl print`'s pid line, `launchctl getenv`'s value), and the
+  // failure is silent - the daemon reads as loaded with no pid.
+  process.exitCode = result.code
   if (result.out) process.stdout.write(result.out)
   if (result.err) process.stderr.write(result.err)
-  process.exit(result.code)
 }
 
 /**
@@ -376,11 +381,22 @@ function supervise(label, plist) {
   const xml = fs.readFileSync(plist, 'utf8')
   const argv = parsePlistArray(xml, 'ProgramArguments')
   const keepAlive = /<key>KeepAlive<\/key>\s*<true\/>/.test(xml)
+  // Real launchd injects whatever `launchctl setenv` put in the domain into
+  // every job it starts afterwards. That delivery is the point of the
+  // `NODE_USE_SYSTEM_CA` setenv the attach path makes, so a mock that only
+  // stored the value would let `getenv` report it set while the daemon it
+  // started never saw it - a false green whose outcome depends on whatever
+  // the invoking shell happened to export. The plist's own
+  // `EnvironmentVariables` still win, the way a job-level setting outranks
+  // the domain.
+  /** @type {SandboxLaunchdState} */
+  const domain = readState(launchdPath, { services: {}, env: {} })
   // `HYP_SANDBOX_SERVICE` marks everything launchd starts, and is inherited by
   // whatever the daemon spawns, so the shim can tell "the background agent did
   // this" from "the user typed this" without walking the process tree.
   const env = {
     ...process.env,
+    ...domain.env,
     ...parsePlistDict(xml, 'EnvironmentVariables'),
     HYP_SANDBOX_SERVICE: '1',
   }
@@ -410,7 +426,10 @@ function superviseSystemd(unit, unitPath) {
   const argv = parseSystemdWords(unitValues(body, 'ExecStart')[0] ?? '')
   const restart = unitValues(body, 'Restart')[0] === 'always'
   const restartSec = Number(unitValues(body, 'RestartSec')[0] ?? '1')
-  const env = { ...process.env }
+  // The same marker the launchd lane sets. Without it a daemon started
+  // through systemd looks user-issued to the `security` mock, and the
+  // default-refuse assumption silently does not apply on this lane.
+  const env = { ...process.env, HYP_SANDBOX_SERVICE: '1' }
   for (const declaration of unitValues(body, 'Environment')) {
     for (const assignment of parseSystemdWords(declaration)) {
       const equals = assignment.indexOf('=')
@@ -486,6 +505,16 @@ function superviseProgram(options) {
     }
     const out = outPath ? openAppend(outPath) : 'ignore'
     const err = errPath ? openAppend(errPath) : 'ignore'
+    // `spawn` does not take ownership of fds handed to it, and the restart
+    // cycle this supervisor exists to reproduce would otherwise leak two per
+    // restart and walk a long session toward EMFILE.
+    const closeLogFds = () => {
+      for (const fd of [out, err]) {
+        if (typeof fd === 'number') {
+          try { fs.closeSync(fd) } catch { /* already closed */ }
+        }
+      }
+    }
     current = spawn(argv[0], argv.slice(1), { stdio: ['ignore', out, err], env })
     writeState(pidFile, {
       label,
@@ -495,6 +524,7 @@ function superviseProgram(options) {
     })
     current.on('exit', () => {
       current = null
+      closeLogFds()
       if (stopping) return
       if (!keepAlive) {
         try { fs.rmSync(pidFile) } catch { /* nothing to clear */ }
@@ -764,19 +794,28 @@ function fileDigest(file) {
 }
 
 /**
- * Best-effort CN extraction. Real `openssl` is on every macOS box; when it is
- * missing the sandbox falls back to the file path as the identity, which only
- * costs a `delete-certificate -c <CN>` match.
+ * The certificate's CN, which is the only handle `delete-certificate -c <CN>`
+ * and `find-certificate -c <CN>` have on a stored cert. Parsed in process
+ * rather than by shelling out: a null CN makes removal a silent no-op,
+ * `removeCaTrust` reads the resulting "could not be found" as already-absent,
+ * and `hyp daemon uninstall` then reports it removed trust it did not.
+ * `openssl` stays as a fallback for anything this Node cannot parse.
  *
  * @param {string} certPath
  * @returns {string | null}
  */
 function certCommonName(certPath) {
-  const res = spawnSync('openssl', ['x509', '-noout', '-subject', '-in', certPath], {
-    encoding: 'utf8',
-  })
-  if (res.status !== 0 || !res.stdout) return null
-  const match = /CN\s*=\s*([^,/\n]+)/.exec(res.stdout)
+  let subject = ''
+  try {
+    subject = new crypto.X509Certificate(fs.readFileSync(certPath)).subject
+  } catch {
+    const res = spawnSync('openssl', ['x509', '-noout', '-subject', '-in', certPath], {
+      encoding: 'utf8',
+    })
+    if (res.status !== 0 || !res.stdout) return null
+    subject = res.stdout
+  }
+  const match = /CN\s*=\s*([^,/\n]+)/.exec(subject)
   return match ? match[1].trim() : null
 }
 

@@ -73,8 +73,16 @@ function sandboxRoot(t, label = 'com.hyperparam.hypaware.test') {
  */
 function systemdRoot(t, unit = 'hypaware.service') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-shim-systemd-test-'))
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const home = path.join(root, 'home')
+  // Stop before delete, in one hook: node:test runs `after` hooks in
+  // registration order, so a separate stop hook registered by the test body
+  // would run after this root was already removed, the mock would read empty
+  // state, find no unit, and leave the detached supervisor and its child
+  // orphaned past the end of `npm test`.
+  t.after(() => {
+    shim(root, 'systemctl', ['--user', 'stop', unit], { HOME: home })
+    fs.rmSync(root, { recursive: true, force: true })
+  })
   const unitDir = path.join(home, '.config', 'systemd', 'user')
   const unitPath = path.join(unitDir, unit)
   fs.mkdirSync(unitDir, { recursive: true })
@@ -141,10 +149,80 @@ test('launchctl mock: setenv / getenv / unsetenv', (t) => {
   assert.equal(shim(root, 'launchctl', ['getenv', 'NODE_USE_SYSTEM_CA']).stdout, '')
 })
 
+test('launchctl mock: setenv reaches the job launchd starts', async (t) => {
+  const { root, label } = sandboxRoot(t)
+  // Storing a setenv value is not the behaviour attach depends on; delivering
+  // it into the daemon launchd starts afterwards is. A mock that only stored
+  // it would let `getenv` report NODE_USE_SYSTEM_CA set while the daemon
+  // never saw it, and whether the run looked green would come down to what
+  // the developer's own shell happened to export.
+  const seen = path.join(root, 'job-env.txt')
+  const plist = path.join(root, 'env-job.plist')
+  fs.writeFileSync(plist, [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<plist version="1.0">',
+    '<dict>',
+    '  <key>Label</key>',
+    `  <string>${label}</string>`,
+    '  <key>ProgramArguments</key>',
+    '  <array>',
+    '    <string>/bin/sh</string>',
+    '    <string>-c</string>',
+    `    <string>printf '%s' "\$NODE_USE_SYSTEM_CA" &gt; ${seen}</string>`,
+    '  </array>',
+    '</dict>',
+    '</plist>',
+    '',
+  ].join('\n'))
+  const env = { HYP_SANDBOX_SPAWN: '1', NODE_USE_SYSTEM_CA: '' }
+  t.after(() => shim(root, 'launchctl', ['bootout', `gui/501/${label}`], env))
+
+  assert.equal(shim(root, 'launchctl', ['setenv', 'NODE_USE_SYSTEM_CA', '1'], env).code, 0)
+  assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (fs.existsSync(seen)) break
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.equal(fs.readFileSync(seen, 'utf8'), '1', 'the domain variable is in the job env')
+})
+
+test('security mock: the CN is read from the certificate without shelling out', (t) => {
+  const { root } = sandboxRoot(t)
+  const certPath = path.join(root, 'ca-cert.pem')
+  const openssl = spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-keyout', path.join(root, 'ca-key.pem'),
+    '-out', certPath, '-days', '1', '-nodes', '-subj', '/CN=HypAware Local CA',
+  ], { encoding: 'utf8' })
+  if (openssl.status !== 0) {
+    t.skip('openssl is unavailable, so no certificate to trust')
+    return
+  }
+  const keychain = path.join(root, 'login.keychain-db')
+  // A null CN would store a cert that `delete-certificate -c <CN>` can never
+  // match; `removeCaTrust` reads the resulting "could not be found" as
+  // already-absent, so `hyp daemon uninstall` would report it removed trust
+  // that is still there.
+  const withoutOpenssl = { PATH: path.join(root, 'empty-path') }
+
+  assert.equal(
+    shim(root, 'security', ['add-trusted-cert', '-r', 'trustRoot', '-k', keychain, certPath], withoutOpenssl).code,
+    0
+  )
+  const stored = JSON.parse(fs.readFileSync(path.join(root, 'state', 'keychain.json'), 'utf8'))
+  assert.equal(stored.certs[0].cn, 'HypAware Local CA')
+
+  assert.equal(
+    shim(root, 'security', ['delete-certificate', '-c', 'HypAware Local CA', '-t', keychain], withoutOpenssl).code,
+    0,
+    'removal matches the stored CN'
+  )
+  assert.equal(shim(root, 'security', ['verify-cert', '-c', certPath, '-p', 'ssl']).code, 1)
+})
+
 test('systemctl mock: --spawn starts the unit and reports its MainPID', async (t) => {
   const { root, home, unit } = systemdRoot(t)
   const env = { HOME: home, HYP_SANDBOX_SPAWN: '1' }
-  t.after(() => shim(root, 'systemctl', ['--user', 'stop', unit], env))
 
   assert.equal(shim(root, 'systemctl', ['--user', 'restart', unit], env).code, 0)
 
