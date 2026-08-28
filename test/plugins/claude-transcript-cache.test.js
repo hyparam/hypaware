@@ -109,6 +109,43 @@ test('truncation discards the cached state and re-reads from byte zero', async (
   }
 })
 
+test('rotation to a different inode discards the cached state, even when the new file is larger', async () => {
+  const env = await stage()
+  try {
+    const loader = createTranscriptLoader()
+    const opts = { projectsDir: env.dir, sessionId: SESSION, transcriptPath: env.file }
+    await fsp.writeFile(env.file, line('u-1', 'one', 1) + '\n' + line('u-2', 'two', 2) + '\n')
+    const first = await loader.load(opts)
+    assert.deepEqual(first.map((e) => e.provider_uuid), ['u-1', 'u-2'])
+    const before = await fsp.stat(env.file)
+
+    // Rotate: move the transcript aside (keeping it, so its inode stays
+    // allocated and cannot be handed back) and write a fresh file at the
+    // same path. The replacement is deliberately LARGER than what we
+    // consumed, so size alone reads as an append: only the inode change
+    // distinguishes rotation from growth here, and dropping that check
+    // would leave the old entries in place and resume parsing partway
+    // into the new file.
+    await fsp.rename(env.file, path.join(env.dir, 'rotated-away.bak'))
+    await fsp.writeFile(
+      env.file,
+      line('u-9', 'nine', 9) + '\n' + line('u-10', 'ten', 10) + '\n' + line('u-11', 'eleven', 11) + '\n'
+    )
+    const after = await fsp.stat(env.file)
+    assert.notEqual(after.ino, before.ino, 'precondition: the replacement is a different inode')
+    assert.ok(after.size > before.size, 'precondition: the replacement is larger, so size reads as an append')
+
+    const rotated = await loader.load(opts)
+    assert.deepEqual(
+      rotated.map((e) => e.provider_uuid),
+      ['u-9', 'u-10', 'u-11'],
+      'the rotated-away file contributes nothing and the new file is read from byte zero'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('a half-written tail line is left for the next load, then consumed once complete', async () => {
   const env = await stage()
   try {
