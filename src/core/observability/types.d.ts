@@ -9,6 +9,7 @@ export interface ObservabilityHandle {
   tracer: { provider: unknown }
   logger: { provider: unknown }
   meter: { provider: unknown; readers: object[] }
+  runtimeMetrics: { active: true; intervalMs: number; stop: () => void } | null
   shutdown: () => Promise<void>
 }
 
@@ -20,6 +21,8 @@ export interface ObservabilityEnv {
   stateDir: string
   devRunId: string | undefined
   resourceAttributes: string
+  runtimeMetrics: boolean
+  runtimeMetricsIntervalMs: number
 }
 
 // A metric instrument as its callers use it. `add` and `record` are the same

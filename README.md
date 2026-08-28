@@ -193,6 +193,30 @@ installing or restarting the daemon.
 `HYP_HOME` defaults to `~/.hyp`. Override it by exporting `HYP_HOME=...`
 before invoking the CLI or the daemon.
 
+### Runtime diagnostics
+
+HypAware can emit opt-in OTEL runtime metrics for diagnosing memory pressure,
+out-of-memory failures, CPU spikes, garbage collection, and event-loop stalls:
+
+```sh
+HYP_OTEL_RUNTIME_METRICS=1 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4319 \
+hyp daemon run --foreground
+```
+
+Point the endpoint at your own collector, not back at HypAware. The bundled
+OpenTelemetry source listens on `127.0.0.1:4318` when you enable it, and it
+drops requests carrying HypAware's own `hypaware.self` resource marker, so
+exporting the diagnostics into it discards them rather than storing them.
+
+`HYP_OTEL_RUNTIME_METRICS_INTERVAL_MS` changes the 30-second sampling interval.
+Values below 5000 are clamped to five seconds. Sampling starts only when a
+metrics exporter exists, through `OTEL_EXPORTER_OTLP_ENDPOINT` or
+`HYP_DEV_TELEMETRY=1`, and every sample is sent as one batch. The sampler
+records process and host memory, V8 heap spaces, CPU core use, event-loop
+utilization and delay, GC activity, load average, active Node resources, and
+its own collection duration. It does not inspect captured payloads.
+
 ## Querying captured data
 
 Start with the overview: input, cached and output tokens per provider and

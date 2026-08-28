@@ -159,8 +159,14 @@ export class MeterProvider {
 
   /** @param {MetricRecord} record */
   exportRecord(record) {
+    this.exportRecords([record])
+  }
+
+  /** @param {MetricRecord[]} records */
+  exportRecords(records) {
+    if (records.length === 0) return
     if (this.exporters.length === 0) return
-    for (const exporter of this.exporters) exporter.exportBatch([record])
+    for (const exporter of this.exporters) exporter.exportBatch(records)
   }
 
   async forceFlush() {
