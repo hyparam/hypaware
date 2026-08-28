@@ -230,6 +230,12 @@ async function stageCache(root, rowCount) {
  * grew and the scan stayed flat at ~2ms. Widening fan-out alone would still
  * have measured nothing.
  *
+ * Both properties are checked, not merely arranged: `assessTarget` requires
+ * the sweep to span both read strategies, and requires each scoped width to
+ * read EXACTLY `batches x width x FIXTURE_ROWS_PER_SESSION` committed rows.
+ * A batch that named uncommitted sessions would read far fewer and fail, so
+ * the fixture cannot quietly drift back to measuring nothing.
+ *
  * Nothing here asserts a duration: read `median_to_full_read_ratio` per width.
  * With the cap in place no width exceeds ~1x the full read. If the cap were
  * removed or widened, the ratio at the wide end climbs roughly linearly with
@@ -239,7 +245,12 @@ async function stageCache(root, rowCount) {
  * @param {typeof PROFILES.normal} profile
  */
 async function measureOtelDedupe(storage, profile) {
-  const fixtureSessions = Math.max(1, Math.ceil(profile.cacheRows / FIXTURE_ROWS_PER_SESSION))
+  // Whole sessions only. Every session a batch names must hold exactly
+  // FIXTURE_ROWS_PER_SESSION committed rows, or the scoped row-count check
+  // below cannot be the equality that proves the batch named committed
+  // sessions. A cache too small for one full session addresses none, and the
+  // report says so rather than measuring a short one.
+  const fixtureSessions = Math.floor(profile.cacheRows / FIXTURE_ROWS_PER_SESSION)
   const requested = profile.dedupeFanOuts
   // A width wider than the fixture has sessions cannot be built without
   // repeating one, which would report a fan-out the batch does not have.
@@ -262,9 +273,20 @@ async function measureOtelDedupe(storage, profile) {
       ? null
       : ratio(/** @type {{ median: number }} */ (entry.timing_ms).median, fullReadMedian)
   }
+  const scopedWidths = fanOuts.filter((width) => byFanOut[String(width)].read_strategy === 'scoped')
+  const unrestrictedWidths = fanOuts.filter(
+    (width) => byFanOut[String(width)].read_strategy === 'unrestricted',
+  )
   return {
     batches: profile.ingestBatches,
-    scoped_session_cap: SCOPED_SESSION_CAP,
+    cache_rows: profile.cacheRows,
+    // The local constant that picked the widths, NOT a reading of the shipped
+    // cap. `observed_cap_between` is the measured one: the shipped cap sits at
+    // or above the widest width still scoped and below the narrowest that
+    // reverted, so a cap that moved shows up here instead of hiding behind a
+    // stale number this file restated.
+    scoped_session_cap_assumed: SCOPED_SESSION_CAP,
+    observed_cap_between: [scopedWidths.at(-1) ?? null, unrestrictedWidths[0] ?? null],
     fixture_sessions: fixtureSessions,
     fixture_rows_per_session: FIXTURE_ROWS_PER_SESSION,
     fan_outs: fanOuts,
@@ -1012,12 +1034,19 @@ function assessTarget(measured) {
           limit: dedupe.batches,
           pass: entry.targeted_reads === dedupe.batches,
         })
-        const scopedRowLimit = dedupe.batches * width * dedupe.fixture_rows_per_session
+        // Equality, not an upper bound. An upper bound passes when the batch
+        // names sessions that are NOT committed: the scoped read returns
+        // almost nothing, the sweep stays flat, and every other check is still
+        // green - issue #1056 wearing a different hat. Each addressable
+        // fixture session holds exactly `fixture_rows_per_session` committed
+        // rows, so an honest batch hits this number on the nose and a batch
+        // that only overlaps the fixture falls short of it.
+        const scopedRows = dedupe.batches * width * dedupe.fixture_rows_per_session
         checks.push({
-          name: `otel_dedupe_fan_out_${width}_reads_only_the_named_fixture_sessions`,
+          name: `otel_dedupe_fan_out_${width}_reads_exactly_the_named_fixture_sessions`,
           actual: entry.committed_rows_read,
-          limit: scopedRowLimit,
-          pass: entry.committed_rows_read <= scopedRowLimit,
+          limit: scopedRows,
+          pass: entry.committed_rows_read === scopedRows,
         })
       } else {
         checks.push({
@@ -1025,6 +1054,16 @@ function assessTarget(measured) {
           actual: entry.targeted_reads,
           limit: 0,
           pass: entry.targeted_reads === 0,
+        })
+        // The narrowest such width is the denominator of every
+        // `median_to_full_read_ratio`, so the ratios only mean anything if it
+        // really scanned the whole committed table once per batch.
+        const fullReadRows = dedupe.batches * dedupe.cache_rows
+        checks.push({
+          name: `otel_dedupe_fan_out_${width}_full_read_scans_the_whole_committed_table`,
+          actual: entry.committed_rows_read,
+          limit: fullReadRows,
+          pass: entry.committed_rows_read === fullReadRows,
         })
       }
       checks.push({
