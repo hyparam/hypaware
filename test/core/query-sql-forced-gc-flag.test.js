@@ -138,14 +138,25 @@ const CHILD_PROBE = `
 `
 
 /**
+ * The child's gc exposure has to come from `nodeArgs` alone, so the ambient
+ * NODE_OPTIONS is stripped of `--expose-gc` on the way in. Someone chasing a
+ * heap problem in this very guard is exactly the person likely to have that
+ * set, and it would otherwise push the unexposed probe onto the guard's
+ * already-exposed early return: the run would then fail on an opaque
+ * flag-call diff instead of exercising the path the test is named for.
+ *
  * @param {string[]} nodeArgs
  * @returns {any}
  */
 function runChildProbe(nodeArgs) {
+  /** @type {Record<string, string | undefined>} */
+  const env = { ...process.env, HYP_TEST_SQL_MODULE: SQL_MODULE }
+  const inherited = env.NODE_OPTIONS
+  if (inherited) env.NODE_OPTIONS = inherited.split(/\s+/).filter((opt) => opt !== '--expose-gc').join(' ')
   const out = execFileSync(
     process.execPath,
     [...nodeArgs, '--input-type=module', '-e', CHILD_PROBE],
-    { cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, HYP_TEST_SQL_MODULE: SQL_MODULE } }
+    { cwd: REPO_ROOT, encoding: 'utf8', env }
   )
   const line = out.split('\n').find((candidate) => candidate.startsWith('HYP_PROBE '))
   assert.ok(line, `child probe printed no report: ${out}`)
