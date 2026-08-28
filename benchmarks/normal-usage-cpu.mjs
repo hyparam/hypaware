@@ -1175,7 +1175,12 @@ function assessTarget(measured) {
  *    computable: the narrowest skipped width that lands on the missing side,
  *    times `FIXTURE_ROWS_PER_SESSION`.
  *  - no skipped width lands on the missing side at all, so growing the
- *    fixture cannot supply one. `--dedupe-fan-outs` is the fix for that side.
+ *    fixture cannot supply one and `--dedupe-fan-outs` has to change. That is
+ *    the whole remedy only when the fixture could already build a width on
+ *    that side (one session for `scoped`, more than the cap for
+ *    `unrestricted`); below that floor both flags have to move together, and
+ *    the note quotes the `--cache-rows` value that makes the advised widths
+ *    buildable rather than asserting a bigger fixture would not help.
  *
  * The cap used to sort widths into sides is `scoped_session_cap_assumed`, the
  * local constant, so the message says "assumed": if the shipped cap has moved
@@ -1245,23 +1250,40 @@ function describeScopedCapShortfall(dedupe) {
       narrowing
   }
   if (unaskedSides.length > 0) {
-    // Only claim every width was built when the fixture skipped none. Saying
-    // it while `fan_outs_skipped_above_fixture` is populated contradicts the
-    // report the note is attached to, and when a skipped width would restore
-    // the OTHER missing side it is wrong about the remedy too: a larger
-    // fixture is still required there, it is just not sufficient alone.
-    const cannotGrow = skipped.length === 0
-      ? 'Every requested width was built, so a larger --cache-rows will not help'
-      : `No skipped width lands on the ${unaskedSides.join(' or ')} side of ${cap}, ` +
-        'so a larger --cache-rows will not supply it'
-    message += ` ${cannotGrow}: pass --dedupe-fan-outs with at least one width <= ${cap} ` +
-      `and one > ${cap}` +
-      // When the other side also needs a bigger fixture, the --cache-rows
-      // figure above is a floor for THAT width, not for whichever width the
-      // reader picks here. Say so, or the two remedies read as independent
-      // and a reader can satisfy both literally and still fail.
-      (growableWidths.length > 0 ? ', at a --cache-rows large enough to build both' : '') +
-      `. If the widths already straddle ${cap}, read observed_cap_between - the shipped cap may have moved.`
+    // A different `--dedupe-fan-outs` only restores a side this fixture can
+    // actually build a width for: the scoped side needs one addressable
+    // session, the unrestricted side needs one more than the cap. Below that
+    // floor the widths are not the only problem, and telling the reader a
+    // larger `--cache-rows` will not help walks them into the same failure by
+    // another route - they pass a width past the cap, it is skipped for size,
+    // and the run fails again for a reason the note said to rule out.
+    const unaskedFloor = Math.max(...unaskedSides.map(
+      (/** @type {string} */ side) => side === 'scoped' ? 1 : cap + 1,
+    ))
+    // One fixture has to serve every side being restored, so the floor quoted
+    // here covers the skipped widths named above as well as the widths advised
+    // here. This subsumes the vaguer "large enough to build both": a skipped
+    // width rescuing the other side exceeds `fixture_sessions` by definition,
+    // so that case always lands in this branch and gets a number, not a hint.
+    const needSessions = Math.max(unaskedFloor, ...growableWidths)
+    if (needSessions > dedupe.fixture_sessions) {
+      message += ` No width this fixture can build lands on the ${unaskedSides.join(' or ')} ` +
+        `side of ${cap}, so the widths and the fixture both have to change: pass ` +
+        `--dedupe-fan-outs with at least one width <= ${cap} and one > ${cap}, at ` +
+        `--cache-rows ${needSessions * rowsPerSession} or more so this fixture can build them.`
+    } else {
+      // Only claim every width was built when the fixture skipped none. Saying
+      // it while `fan_outs_skipped_above_fixture` is populated contradicts the
+      // report the note is attached to.
+      const cannotGrow = skipped.length === 0
+        ? 'Every requested width was built, so a larger --cache-rows will not help'
+        : `No skipped width lands on the ${unaskedSides.join(' or ')} side of ${cap}, ` +
+          'so a larger --cache-rows will not supply it'
+      message += ` ${cannotGrow}: pass --dedupe-fan-outs with at least one width <= ${cap} ` +
+        `and one > ${cap}.`
+    }
+    message += ` If the widths already straddle ${cap}, ` +
+      'read observed_cap_between - the shipped cap may have moved.'
   }
   return message
 }
