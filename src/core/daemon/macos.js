@@ -347,11 +347,19 @@ export async function installLaunchAgent(options) {
       // the message, so a reason left on the error alone never reaches the
       // person this failure exists to tell (`ensureOk` folds it in too).
       const why = (kickRes.stderr || '').trim()
+      // The log is the second place to look, not the first: a job launchd
+      // never spawned wrote nothing to it, so its newest lines belong to a
+      // previous run. `launchctl print` is the probe that always has an
+      // answer (`state = not running`, `pended nondemand spawn = speculative`).
       throw new LaunchAgentError(
         `bootstrapped LaunchAgent ${plan.label} but launchd never started it`
           + `${why ? `: ${why}` : ''}`
-          + ` (see ${path.posix.join(plan.logDir, 'daemon.err.log')})`,
-        { exitCode: kickRes.exitCode, stderr: kickRes.stderr },
+          + ` (see ${path.posix.join(plan.logDir, 'daemon.err.log')},`
+          + ` which stays empty when the job never ran, then: launchctl print ${target})`,
+        // No exit code when the kickstart itself exited 0: a thrown error
+        // tagged `exitCode: 0` reads as success to any caller that forwards
+        // the field as a process exit status.
+        { exitCode: kickRes.exitCode === 0 ? undefined : kickRes.exitCode, stderr: kickRes.stderr },
       )
     }
   }

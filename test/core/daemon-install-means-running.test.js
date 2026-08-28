@@ -280,3 +280,65 @@ test('systemd install issues no extra start when restart already brought it up',
   assert.equal(count(sc.calls, 'restart'), 1, 'restarted once')
   assert.equal(count(sc.calls, 'start'), 0, 'no redundant start on a healthy unit')
 })
+
+// Deferred findings from the review of #1039 (issue #1041, items 3 and 4):
+// the "install never came up" failure has to point somewhere that actually
+// has an answer, and must not label itself with a success exit code.
+
+test('a launchd install that never spawned names launchctl print as the second place to look', async () => {
+  const home = tmpHome('la-where')
+  // The pended-spawn shape: every command exits 0, nothing ever runs, and
+  // daemon.err.log has no fresh line in it because the process never started.
+  // The log pointer alone can only show stale output from a previous run.
+  const lc = fakeLaunchd({ spawnOnBootstrap: false, spawnOnKickstart: false })
+
+  await assert.rejects(
+    () => installLaunchAgent(darwinOpts(home, lc)),
+    (err) => err instanceof Error
+      && /daemon\.err\.log/.test(err.message)
+      && /launchctl print gui\/501\/\S+/.test(err.message),
+  )
+})
+
+test('a launchd install that never spawned carries no exit code when launchctl exited 0', async () => {
+  const home = tmpHome('la-exit0')
+  const lc = fakeLaunchd({ spawnOnBootstrap: false, spawnOnKickstart: false })
+
+  await assert.rejects(
+    () => installLaunchAgent(darwinOpts(home, lc)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      // A thrown install error tagged `exitCode: 0` reads as success to any
+      // caller that forwards the field as a process exit status. The kickstart
+      // really did exit 0, which is why there is no exit code to report here.
+      assert.equal(/** @type {{ exitCode?: number }} */ (err).exitCode, undefined)
+      return true
+    },
+  )
+})
+
+test('a systemd install that never spawned names systemctl status as the second place to look', async () => {
+  const home = tmpHome('sd-where')
+  const sc = fakeSystemd({ spawnOnRestart: false, spawnOnStart: false })
+
+  await assert.rejects(
+    () => installSystemdUnit(linuxOpts(home, sc)),
+    (err) => err instanceof Error
+      && /daemon\.err\.log/.test(err.message)
+      && /systemctl --user status \S+\.service/.test(err.message),
+  )
+})
+
+test('a systemd install that never spawned carries no exit code when systemctl exited 0', async () => {
+  const home = tmpHome('sd-exit0')
+  const sc = fakeSystemd({ spawnOnRestart: false, spawnOnStart: false })
+
+  await assert.rejects(
+    () => installSystemdUnit(linuxOpts(home, sc)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.equal(/** @type {{ exitCode?: number }} */ (err).exitCode, undefined)
+      return true
+    },
+  )
+})
