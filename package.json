@@ -84,7 +84,7 @@
     "hysnappy": "1.1.1",
     "icebird": "0.8.26",
     "marked": "18.0.11",
-    "squirreling": "0.16.2"
+    "squirreling": "0.16.3"
   },
   "optionalDependencies": {
     "hyparquet-writer": "0.16.8",
