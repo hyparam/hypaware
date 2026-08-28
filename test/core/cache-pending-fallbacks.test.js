@@ -25,6 +25,7 @@ import { matchKey } from '../../hypaware-core/plugins-workspace/claude/src/trans
  * that uncached scan OOMed the daemon every tick on a large gateway cache.
  *
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
+ * @import { PartitionCursor } from '../../src/core/cache/types.js'
  */
 
 /** @type {ColumnSpec[]} */
@@ -415,12 +416,61 @@ test('a scan that could not read the table is retried on a cooldown, never on ev
   }
 })
 
+test('a failure stamp that cannot be written costs a re-scan, not the partition\'s tick', async () => {
+  const env = await stageEnv()
+  try {
+    const { storage, getSettleHook } = buildGateway(env)
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+    await writeTranscript(env, SESSION, [nativeAssistantLine()])
+    const part = await partitionDir(storage)
+    const legacy = readCursorSync(part.path)
+    delete legacy.pendingFallbacks
+    await writeCursor(part.path, legacy)
+
+    const dataFiles = await parquetFiles(part.path)
+    const saved = new Map(dataFiles.map((file) => [file, fsSync.readFileSync(file)]))
+    for (const file of dataFiles) await fs.writeFile(file, 'not a parquet file')
+
+    // The scan cannot read the table AND the cursor cannot be written: a
+    // read-only partition directory, which is what an ENOSPC or a lost
+    // write permission looks like from here - and one of the ways the torn
+    // parquet got torn in the first place. The scan already swallows its
+    // own error so an unreadable table cannot fail the partition's tick;
+    // the stamp is bookkeeping on top of that and must not undo it.
+    let report
+    try {
+      await fs.chmod(part.path, 0o555)
+      report = await maintainCache({
+        cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+        config: NO_NATURAL_COMPACTION,
+      })
+    } finally {
+      await fs.chmod(part.path, 0o755)
+      for (const [file, bytes] of saved) await fs.writeFile(file, bytes)
+    }
+
+    assert.equal(report.totalFailed, 0, 'a stamp that could not be written is not a failed partition')
+    assert.equal(report.partitions[0]?.failed, undefined, 'and the partition report says so too')
+    assert.equal(report.totalCompacted, 0, 'an unreadable table is still not rewritten')
+    // Unstamped, so the next tick simply re-scans: the pre-cooldown
+    // behaviour, and still no verdict cached either way.
+    assert.equal(resettleScanStamp(readCursorSync(part.path)), undefined, 'nothing was stamped')
+    assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
+      'and the failed scan cached no verdict')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // --- helpers ---------------------------------------------------------
 
 /**
  * The failure stamp a scan that could not read the table leaves on the
  * cursor, or undefined when there is none.
- * @param {import('../../src/core/cache/types.js').PartitionCursor} cursor
+ * @param {PartitionCursor} cursor
  * @returns {string | undefined}
  */
 function resettleScanStamp(cursor) {

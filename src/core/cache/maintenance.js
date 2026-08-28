@@ -1805,8 +1805,11 @@ function inPlaceVerdictCursor(cursor, liveDataFiles) {
     ...compactionOutcomeRecord({ dataFilesBefore: liveDataFiles, dataFilesAfter: liveDataFiles }),
   }
   // The verdict settles whatever a failed attempt left hanging, exactly as
-  // a foreign-replace recognition does (LLP 0218#report-the-spent-attempt).
+  // a foreign-replace recognition does (LLP 0218#report-the-spent-attempt),
+  // and the re-settle scan's failure stamp with it.
+  // @ref LLP 0319#clearing [implements]: the record that supersedes the stamp drops it.
   delete next.attemptFailedAt
+  delete next.resettleScanFailedAt
   return { ...cursor, compaction: next }
 }
 
@@ -2223,27 +2226,39 @@ function resettleScanCoolingDown(cursor) {
  * baseline, which is where the sweep's other cursor state lives: an append
  * carries that block through untouched, so ordinary write traffic does not
  * reopen the retry, while every rewrite, recognition, and in-place verdict
- * replaces the block wholesale and so drops the stamp with the record that
- * supersedes it. All three of those prove the table was readable.
+ * rewrites that record and drops the stamp along with it. All of those ran
+ * against a table they could read.
  *
  * Skipped when a flush concretized the count while the scan ran, for the
  * same reason the seed below it is: a real tally outranks anything this
  * path knows, and a stamp written over it would be dead state.
  *
+ * Best-effort, like the writer-generation stamp on the rewrite-failure
+ * path. The scan this records deliberately swallows its own error so an
+ * unreadable table cannot fail the partition's whole tick, and a cursor
+ * write that throws here (an ENOSPC, which is one of the ways the torn
+ * parquet got torn) would undo exactly that: a clean no-op tick would
+ * become a `failed` partition, counted against the walk's failure budget
+ * and skipped by the sidecar build. Unstamped only costs the next tick a
+ * re-scan, which is the pre-cooldown behaviour rather than a regression.
+ *
+ * @ref LLP 0220#walk-survives-a-partition [constrained-by]: a bookkeeping write must not turn a survivable tick into a failed partition.
  * @ref LLP 0319#cool-the-retry-down [implements]: the failure is stamped where a later success clears it.
  * @param {string} partitionDir
  * @returns {Promise<void>}
  */
 async function stampResettleScanFailure(partitionDir) {
-  await withPartitionMutationLock(partitionDir, async () => {
-    const current = tryReadCursorSync(partitionDir)
-    if (!current || typeof current.pendingFallbacks === 'number') return
-    const compaction = isPlainObject(current.compaction) ? current.compaction : {}
-    await writeCursor(partitionDir, {
-      ...current,
-      compaction: { ...compaction, resettleScanFailedAt: new Date().toISOString() },
+  try {
+    await withPartitionMutationLock(partitionDir, async () => {
+      const current = tryReadCursorSync(partitionDir)
+      if (!current || typeof current.pendingFallbacks === 'number') return
+      const compaction = isPlainObject(current.compaction) ? current.compaction : {}
+      await writeCursor(partitionDir, {
+        ...current,
+        compaction: { ...compaction, resettleScanFailedAt: new Date().toISOString() },
+      })
     })
-  })
+  } catch { /* see above */ }
 }
 
 /**
@@ -2532,6 +2547,12 @@ function rebaselineCursor(cursor, liveDataFiles) {
   // rewrite it, so "the last retry failed" has stopped being the reason this
   // partition is skipped (LLP 0218#report-the-spent-attempt).
   delete next.attemptFailedAt
+  // The re-settle scan's failure stamp goes with it. This write moves the
+  // baseline the cooled retry rides on, so it is one of the records that
+  // supersede the stamp; spreading the old block would carry a stamp past
+  // its own supersession and cool down a scan the new baseline re-arms.
+  // @ref LLP 0319#clearing [implements]: the record that supersedes the stamp drops it.
+  delete next.resettleScanFailedAt
   return { ...cursor, compaction: next }
 }
 
