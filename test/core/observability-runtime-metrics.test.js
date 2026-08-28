@@ -181,11 +181,13 @@ test('a sample after a collection carries the bounded gc kind dimension', async 
     }
     // Bounded by construction, so bounded in the emitted stream too: the whole
     // point of the dimension is that it cannot mint a series per collection.
+    // Membership is the entire bound. A companion `kinds.size <= GC_KINDS.size`
+    // is entailed by it and so could never fail on its own - the same reason
+    // the matching count bound is not asserted for `space` either.
     const kinds = new Set(gcPoints.map((metric) => String(metric.attributes.kind)))
     for (const kind of kinds) {
       assert.ok(GC_KINDS.has(kind), `kind=${kind} is not a known v8 collection kind`)
     }
-    assert.ok(kinds.size <= GC_KINDS.size, `gc emitted ${kinds.size} distinct kinds`)
 
     // And the generic rules that catch a pid or a path smuggled into any
     // dimension now run over batches that actually contain `kind`.
@@ -269,10 +271,15 @@ function loadForcedGc() {
   try {
     v8.setFlagsFromString('--expose-gc')
     const candidate = vm.runInNewContext('gc')
-    v8.setFlagsFromString('--no-expose-gc')
     forcedGc = typeof candidate === 'function' ? /** @type {() => void} */ (candidate) : null
   } catch {
     forcedGc = null
+  } finally {
+    // The reset has to run on the throwing path too. A build that refuses to
+    // expose `gc` throws a ReferenceError out of runInNewContext, and that is
+    // exactly the run that would otherwise leave --expose-gc set for the rest
+    // of the process. A captured `gc` keeps working after the reset.
+    v8.setFlagsFromString('--no-expose-gc')
   }
   return forcedGc
 }
