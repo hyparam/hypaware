@@ -126,10 +126,27 @@ function resolveForcedGc() {
     try {
       v8.setFlagsFromString('--expose-gc')
       const gc = vm.runInNewContext('gc')
-      v8.setFlagsFromString('--no-expose-gc')
       if (typeof gc === 'function') resolved = gc
     } catch {
       resolved = null
+    } finally {
+      // The reset has to run on the throwing path too. A build or host that
+      // refuses to expose `gc` throws a ReferenceError out of
+      // runInNewContext, and that is exactly the run that would otherwise
+      // leave --expose-gc set process-wide for the rest of the daemon or CLI
+      // invocation: the `catch` degrades the guard quietly, so nothing fails
+      // loudly and the leak is invisible on the hosts where the handle does
+      // resolve. A captured `gc` keeps working after the reset.
+      //
+      // Swallowed on its own, because a `finally` is outside the reach of
+      // the sibling `catch`: on a runtime whose setFlagsFromString throws
+      // (a hardened embedding, a `node:v8` shim), the reset would otherwise
+      // escape resolveForcedGc and abort an otherwise valid query from
+      // inside guard.check. Failing to resolve a GC handle must degrade to
+      // gcMode=unavailable, never refuse the query outright.
+      try {
+        v8.setFlagsFromString('--no-expose-gc')
+      } catch {}
     }
   }
   cachedForcedGc = resolved
