@@ -3,10 +3,10 @@
 import zlib from 'node:zlib'
 
 import { ByteWriter, ParquetWriter, schemaFromColumnData } from 'hyparquet-writer'
-import { snappyCompressor } from 'hysnappy'
 
 import { rowsToColumnSources } from './columns.js'
 import { getTracer, SpanStatusCode } from '../../../../src/core/observability/index.js'
+import { snappyPageCompressors } from '../../../../src/core/util/parquet_snappy.js'
 
 /**
  * @import { JsonObject, PluginActivationContext, PluginLogger, QueryPartition, SinkEncodeContext, SinkEncodedBlob, SinkEncoder } from '../../../../hypaware-plugin-kernel-types.js'
@@ -18,24 +18,10 @@ const FORMAT = 'parquet'
 const EXTENSION = 'parquet'
 const DEFAULT_CODEC = 'SNAPPY'
 const DEFAULT_ZSTD_LEVEL = 3
-// One compressor for the process. `snappyCompressor()` instantiates a WASM
-// module and returns a closure over its instance, so building one per encode
-// (or per page) would recompile the module every time and give the speedup
-// back. The instance is safe to share: compression is synchronous with no
-// await inside, so two encodes can never interleave in it, and the hash table
-// it carries between calls is re-validated against the current input rather
-// than trusted.
-//
-// The cost of sharing it is a memory FLOOR, and it is worth stating because
-// nothing else in this file leaks: a WASM memory only ever grows, so the
-// instance ends up sized to the largest page it has ever seen (roughly twice
-// that page, input copy plus output room) and holds it for the life of the
-// daemon. Pages are usually `pageSize`, but a page is cut AFTER the value that
-// overflowed it, so one fat cell (a big `tools` or `content_text` blob) sets
-// the floor for every later sync. That is bounded by the same fat-row limit
-// `DEFAULT_MAX_GROUP_BYTES` bounds the encoder's peak heap with, not unbounded,
-// and it is one instance per process (nothing here runs on a worker thread).
-const SNAPPY_COMPRESSOR = snappyCompressor()
+// The shared hysnappy page compressor. It lives in core rather than here
+// because the cache's streaming compaction writer wires the same instance,
+// and two instances would be two WASM memory floors; see
+// `src/core/util/parquet_snappy.js` for why it is one and what that costs.
 
 // Row-group clustering. Originally this existed because hyparquet-writer
 // (< 0.16.6) kept a column dictionary-encoded only while a row group's
@@ -95,7 +81,7 @@ export function resolveEncodeSettings(config, log) {
         fallback_codec: DEFAULT_CODEC,
         message: 'zlib.zstdCompressSync not available on this Node runtime; falling back to SNAPPY',
       })
-      return { codec: DEFAULT_CODEC, compressors: { SNAPPY: SNAPPY_COMPRESSOR }, pageSize }
+      return { codec: DEFAULT_CODEC, compressors: snappyPageCompressors(), pageSize }
     }
     const levelRaw = config?.zstd_level
     const level =
@@ -111,7 +97,7 @@ export function resolveEncodeSettings(config, log) {
       message: `unknown codec '${requested}'; falling back to SNAPPY`,
     })
   }
-  return { codec: DEFAULT_CODEC, compressors: { SNAPPY: SNAPPY_COMPRESSOR }, pageSize }
+  return { codec: DEFAULT_CODEC, compressors: snappyPageCompressors(), pageSize }
 }
 
 /**

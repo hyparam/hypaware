@@ -1,7 +1,7 @@
 // @ts-check
 
 import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
-import { parquetFind } from 'hypgrep'
+import { parquetFind, queryIndex } from 'hypgrep'
 
 import { createLocalIcebergIO, urlToPath } from '../cache/iceberg/resolver.js'
 import { listLiveDataFiles } from '../cache/iceberg/store.js'
@@ -301,6 +301,40 @@ export async function executeGrepSearch(args) {
       }
 
       /**
+       * Ask the sidecar whether this file can hold a match at all, before
+       * anything opens the source. Returns the sidecar footer alongside, so
+       * the answer costs one index-footer parse rather than two.
+       *
+       * `parquetFind` runs the same `queryIndex` internally and takes no way
+       * to be handed the result, so a file that DOES have candidate blocks
+       * decodes its posting bitsets twice. That is CPU over a buffer
+       * `io.reader` already made resident, no second read, and it is what
+       * buys a PRUNED file a source it never opens.
+       *
+       * Only a definite "no blocks" shortcuts. Every other outcome, a
+       * failure included, falls through to the path below, so an unreadable
+       * or poisoned sidecar still degrades exactly where it did before, with
+       * the same warning naming both files. This function therefore cannot
+       * change an answer; it can only decline to read.
+       *
+       * @param {Awaited<ReturnType<typeof io.reader>>} indexFile
+       * @returns {Promise<{ empty: boolean, indexMetadata: FileMetaData | undefined }>}
+       */
+      const pruneWithIndex = async (indexFile) => {
+        try {
+          signal?.throwIfAborted()
+          const indexMetadata = await parquetMetadataAsync(indexFile)
+          const pruned = await queryIndex({ query: matcher.hypQuery, indexFile, indexMetadata })
+          // `undefined` is an empty query, not an empty result: it means the
+          // index was never consulted, so it is not a prune.
+          return { empty: pruned?.blocks.length === 0, indexMetadata }
+        } catch (err) {
+          if (isAbort(err, signal)) throw err
+          return { empty: false, indexMetadata: undefined }
+        }
+      }
+
+      /**
        * Search one file through its sidecar. Returns false when the index
        * proved unusable, which hands that one file to the scan tier below.
        *
@@ -330,13 +364,16 @@ export async function executeGrepSearch(args) {
        *
        * @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file
        * @param {Awaited<ReturnType<typeof io.reader>>} indexFile
+       * @param {FileMetaData | undefined} indexMetadata the sidecar footer
+       *   `pruneWithIndex` already parsed, so `parquetFind` does not parse it
+       *   a second time
        * @param {string} sidecarUrl
        * @param {AsyncBuffer} sourceFile
        * @param {FileMetaData} sourceMetadata
        * @param {string[]} scanColumns
        * @returns {Promise<boolean>}
        */
-      const searchIndexed = async (file, indexFile, sidecarUrl, sourceFile, sourceMetadata, scanColumns) => {
+      const searchIndexed = async (file, indexFile, indexMetadata, sidecarUrl, sourceFile, sourceMetadata, scanColumns) => {
         /** @type {GrepSearchHit[]} */
         const found = []
         let withheldHere = 0
@@ -368,6 +405,7 @@ export async function executeGrepSearch(args) {
             query: matcher.hypQuery,
             url: file.filePath,
             indexFile,
+            indexMetadata,
             // The SOURCE data file is handle-backed, so a candidate range
             // fetches the byte ranges its row group needs rather than coming
             // out of a whole-file resident buffer. hypgrep then wraps it in
@@ -477,6 +515,34 @@ export async function executeGrepSearch(args) {
           if (isAbort(err, signal)) throw err
           indexFile = null
         }
+        // The sidecar decides before the source is touched. hyparquet >= 1.29
+        // rejects a projected column a file does not carry, so `scanColumns`
+        // below has to be intersected with THIS file's physical schema, and
+        // that needs its footer: which is how opening the source ended up
+        // ahead of the index in the first place. For a file the index prunes
+        // to nothing that footer read is pure waste, and it is not a cheap
+        // waste - `parquetMetadataAsync` slices the last 512 KiB of a file
+        // that turned out to have no candidate rows at all. Pruning to
+        // nothing is the COMMON case for the selective query this tier exists
+        // to make fast, so the projection is computed only once a candidate
+        // block has survived.
+        //
+        // It also keeps those files out of the ENOENT window: a compaction or
+        // a purge that unlinks a data file mid-walk cannot fail a query that
+        // never needed to read it.
+        /** @type {FileMetaData | undefined} */
+        let indexMetadata
+        if (indexFile) {
+          const pruned = await pruneWithIndex(indexFile)
+          if (pruned.empty) {
+            // Counted for the same reason `searchIndexed` counts: the index
+            // served this file WHOLE, and answering "no rows here" out of the
+            // sidecar alone is the tier working, not degrading.
+            indexedFiles += 1
+            return
+          }
+          indexMetadata = pruned.indexMetadata
+        }
         const sourceFile = await asyncBufferFromFile(urlToPath(file.filePath))
         // One ROW GROUP at a time, not the whole file. A compacted data
         // file runs to `target_file_bytes` (128 MiB by default) and the
@@ -511,6 +577,7 @@ export async function executeGrepSearch(args) {
         if (indexFile && await searchIndexed(
           file,
           indexFile,
+          indexMetadata,
           sidecarUrl,
           sourceFile,
           metadata,

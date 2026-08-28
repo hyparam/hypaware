@@ -395,6 +395,25 @@ test('indexed tier: a stale sidecar cannot resurrect a purged row', async () => 
   assert.deepEqual(res.hits.map((h) => h.sessionId), ['s1'], 'the purged row is filtered by position')
 })
 
+// The sidecar is the whole answer for a file it prunes to zero blocks, so
+// nothing should open the source: not to read it, and not to read its footer
+// for the physical projection. Deleting the data files and keeping the
+// sidecars is how that is observable from outside - it is also the real
+// failure it prevents, since a concurrent compaction or purge unlinks data
+// files under a running walk. On a tree that opens the source first this
+// fails the whole query with ENOENT before the index is ever consulted.
+test('indexed tier: a file the index prunes to nothing is answered without opening it', async () => {
+  const { storage, tableDir } = await makeCache([[OLD], [NEW]])
+  await buildSidecars(tableDir())
+  const files = await listLiveDataFiles(tableDir())
+  for (const file of files) await fs.rm(urlToPath(file.filePath))
+  // Long enough to yield n-grams, and present in no block of either file.
+  const res = await grep(storage, { query: 'quixotic-haberdashery' })
+  assert.deepEqual(res.hits, [])
+  assert.equal(res.indexedFiles, files.length, 'the sidecar served every file whole')
+  assert.equal(res.scannedFiles, 0, 'nothing fell through to the scan tier')
+})
+
 test('indexed tier: a poisoned sidecar degrades that file, it does not fail the search', async () => {
   const { storage, tableDir } = await makeCache([[OLD], [NEW]])
   const before = await grep(storage)
