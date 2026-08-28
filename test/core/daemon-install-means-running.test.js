@@ -369,3 +369,47 @@ test('a systemd install that never spawned carries no exit code when systemctl e
     },
   )
 })
+
+// The reason clause is now followed by a sentence, not by ` (see ...)`, so a
+// service manager that ends its stderr with a period used to leave `..` in the
+// middle of the one message the operator has to read carefully.
+
+test('a systemd reason that ends in a period does not double up the sentence break', async () => {
+  const home = tmpHome('sd-dot')
+  // Verbatim shape of a real `systemctl --user start` failure: it ends in a period.
+  const sc = fakeSystemd({
+    spawnOnRestart: false,
+    spawnOnStart: false,
+    startStderr: 'Failed to start hypaware.service: Unit hypaware.service not found.',
+  })
+
+  await assert.rejects(
+    () => installSystemdUnit(linuxOpts(home, sc)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      // The reason still arrives whole apart from the punctuation.
+      assert.match(err.message, /Unit hypaware\.service not found/)
+      assert.doesNotMatch(err.message, /\.\./)
+      return true
+    },
+  )
+})
+
+test('a launchd reason that ends in a period does not double up the sentence break', async () => {
+  const home = tmpHome('la-dot')
+  const lc = fakeLaunchd({
+    spawnOnBootstrap: false,
+    spawnOnKickstart: false,
+    kickstartStderr: 'Could not find service "com.hyperparam.hypaware" in domain for user.',
+  })
+
+  await assert.rejects(
+    () => installLaunchAgent(darwinOpts(home, lc)),
+    (err) => {
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /in domain for user/)
+      assert.doesNotMatch(err.message, /\.\./)
+      return true
+    },
+  )
+})

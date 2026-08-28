@@ -283,7 +283,11 @@ export async function installSystemdUnit(options) {
       // Say why, and where to look next: `hyp daemon install` prints only
       // the message, so a reason carried on the error alone never reaches
       // the person this failure exists to tell (`ensureOk` folds it in too).
-      const why = (startRes.stderr || '').trim()
+      // Trailing period stripped because the clause after it opens with the
+      // log path: real systemctl stderr ends in one ("Unit hypaware.service
+      // not found."), and "not found.. /path" reads as a typo in the one
+      // message whose job is to be read carefully.
+      const why = (startRes.stderr || '').trim().replace(/\.+$/, '')
       // The log is the second place to look, not the first. The unit writes
       // stderr with `StandardError=append:`, never truncating, so a unit
       // systemd never spawned leaves whatever the previous run wrote sitting

@@ -346,7 +346,11 @@ export async function installLaunchAgent(options) {
       // Say why, and where to look next. `hyp daemon install` prints only
       // the message, so a reason left on the error alone never reaches the
       // person this failure exists to tell (`ensureOk` folds it in too).
-      const why = (kickRes.stderr || '').trim()
+      // Trailing period stripped because the clause after it opens with the
+      // log path: launchctl stderr sometimes ends in one, and "in domain for
+      // user.. /path" reads as a typo in the one message whose job is to be
+      // read carefully.
+      const why = (kickRes.stderr || '').trim().replace(/\.+$/, '')
       // The log is the second place to look, not the first. `StandardErrorPath`
       // is appended to, never truncated, so a job launchd never spawned leaves
       // whatever the previous run wrote sitting there looking current. Say that
