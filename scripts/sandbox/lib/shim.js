@@ -356,15 +356,21 @@ function launchctl(argv) {
     // `print` answers 113 while it is live, the next `bootstrap` succeeds and
     // puts a second daemon on the port, and `stop_everything` cannot find it
     // to kill because it enumerates the domain.
-    updateState(launchdPath, emptyLaunchd(), (state) => {
+    const kept = updateState(launchdPath, emptyLaunchd(), (state) => {
       const entry = state.services[label]
       // `kickstart` replaces the supervisor in place and leaves `loadedAt`
       // alone, so the pid is the part that identifies the instance; `loadedAt`
       // catches a bootout-then-bootstrap in the same window.
-      if (!entry || entry.pid !== service.pid || entry.loadedAt !== service.loadedAt) return
+      if (!entry || entry.pid !== service.pid || entry.loadedAt !== service.loadedAt) return true
       delete state.services[label]
+      return false
     })
-    return { code: 0, note: `bootout ${label}` }
+    // Say which of the two things happened. `calls.jsonl` is the only account
+    // the sandbox can give of itself, and "the label is gone" and "the label
+    // now holds a supervisor this call did not start" are different worlds for
+    // anyone reading back why a `hyp daemon restart` behaved as it did.
+    const note = kept ? `bootout ${label} (kept the instance that replaced it)` : `bootout ${label}`
+    return { code: 0, note }
   }
 
   if (sub === 'kickstart') {
@@ -528,7 +534,18 @@ function killService(label, service) {
     try { process.kill(child, 'SIGTERM') } catch { /* gone */ }
   }
   waitForExit([service.pid, child])
-  try { fs.rmSync(servicePidPath(label)) } catch { /* nothing to clear */ }
+  // Clear the pid file only when it does not name a live child some other
+  // supervisor is running. A supervisor installed while this one was draining
+  // (a `kickstart` or a `systemctl start` landing inside the wait) has already
+  // written its own child here, and the callers this mock serves read exactly
+  // this: `launchctl print`'s `pid = N` line and `systemctl show`'s `MainPID`.
+  // Removing it makes the sandbox report a running daemon as `not running`,
+  // which is the same confident wrong answer that leaving the domain entry in
+  // place is there to avoid.
+  const recorded = readState(servicePidPath(label), null)?.pid ?? null
+  if (!recorded || recorded === child || !alivePid(recorded)) {
+    try { fs.rmSync(servicePidPath(label)) } catch { /* nothing to clear */ }
+  }
 }
 
 /**

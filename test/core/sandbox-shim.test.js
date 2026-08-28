@@ -661,6 +661,35 @@ test('hyp-sandbox: stopping does not wait on, or warn about, an unreaped pid', a
 })
 
 /**
+ * Whether `pid` is a live process rather than an unreaped corpse.
+ *
+ * `process.kill(pid, 0)` alone is not enough, and this file is the wrong place
+ * to forget it: the shim's supervisors are detached and orphaned on purpose,
+ * so under a PID 1 that does not reap, a supervisor a `stop` has already
+ * killed keeps answering the signal probe. Same rule as `alivePid`/`isZombie`
+ * in `scripts/sandbox/lib/shim.js`.
+ *
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0)
+  } catch {
+    return false
+  }
+  let stat = ''
+  try {
+    stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+  } catch {
+    // No `/proc` (macOS), where launchd always reaps, so the probe stands.
+    return true
+  }
+  const close = stat.lastIndexOf(')')
+  return !(close !== -1 && stat[close + 2] === 'Z')
+}
+
+/**
  * The supervisor pid the mock has recorded for `label`, or null.
  *
  * `launchctl print` reports the *program's* pid, not the supervisor's, and it
@@ -717,9 +746,18 @@ test('launchctl mock: a bootout leaves alone a supervisor started while it waite
     second,
     'the bootout deleted the instance it killed, not the one that replaced it'
   )
-  assert.doesNotThrow(
-    () => process.kill(/** @type {number} */ (second), 0),
+  assert.ok(
+    isAlive(/** @type {number} */ (second)),
     'the replacement is still running, so leaving it in the domain is what keeps it reachable'
+  )
+  // The domain entry is only half of staying reachable. `killService` also
+  // clears the child pid file, and that file is where `print` reads the
+  // `pid = N` line `waitUntilRunning` and `hyp status` branch on, so clearing
+  // the replacement's entry would report a live daemon as `not running`.
+  assert.match(
+    shim(root, 'launchctl', ['print', target], env).stdout,
+    /\bpid = \d+/,
+    'print still reports the daemon the replacement is running'
   )
 })
 
@@ -755,8 +793,9 @@ test('systemctl mock: a start while the unit is between restarts does not add a 
   )
 
   assert.equal(shim(root, 'systemctl', ['--user', 'stop', unit], env).code, 0)
-  assert.throws(
-    () => process.kill(/** @type {number} */ (first), 0),
+  assert.equal(
+    isAlive(/** @type {number} */ (first)),
+    false,
     'stop reached every supervisor the unit had'
   )
 })
