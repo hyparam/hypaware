@@ -25,6 +25,7 @@ import { matchKey } from '../../hypaware-core/plugins-workspace/claude/src/trans
  * that uncached scan OOMed the daemon every tick on a large gateway cache.
  *
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
+ * @import { PartitionCursor } from '../../src/core/cache/types.js'
  */
 
 /** @type {ColumnSpec[]} */
@@ -317,8 +318,12 @@ test('a seeding scan that could not read the table caches no verdict; a later ti
     assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
       'a scan that failed must not be cached at all, as a zero or as anything else')
 
-    // Nothing about the partition changed, so the next tick still owes it
-    // that scan - which now succeeds and routes to the sweep.
+    // Nothing was cached, so the partition is still owed that scan. The
+    // failed attempt is on a cooldown (LLP 0319) and an on-disk repair
+    // changes nothing a cheap check could read, so the retry comes when
+    // the window is up rather than on the very next tick; what matters
+    // here is that it comes at all, and then routes to the sweep.
+    await ageResettleScanStamp(part.path)
     const after = await maintainCache({
       cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
       config: NO_NATURAL_COMPACTION,
@@ -331,7 +336,164 @@ test('a seeding scan that could not read the table caches no verdict; a later ti
   }
 })
 
+test('a scan that could not read the table is retried on a cooldown, never on every tick', async () => {
+  const env = await stageEnv()
+  try {
+    const { storage, getSettleHook } = buildGateway(env)
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+
+    // As above: a committed marker row and its transcript under a cursor
+    // from before the count existed, so every tick owes this partition the
+    // seeding scan.
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+    await writeTranscript(env, SESSION, [nativeAssistantLine()])
+    const part = await partitionDir(storage)
+    const legacy = readCursorSync(part.path)
+    delete legacy.pendingFallbacks
+    await writeCursor(part.path, legacy)
+
+    // Permanently unreadable, not transiently: the bytes stay torn for the
+    // whole run. A never-compacted partition has no re-settle baseline, so
+    // the growth gate is permanently open and nothing else throttles the
+    // retry.
+    const dataFiles = await parquetFiles(part.path)
+    assert.ok(dataFiles.length > 0, 'the flush committed at least one data file')
+    const saved = new Map(dataFiles.map((file) => [file, fsSync.readFileSync(file)]))
+    for (const file of dataFiles) await fs.writeFile(file, 'not a parquet file')
+
+    // Count decode attempts at the only place they can happen: the local
+    // Iceberg resolver reads a data file whole before hyparquet can throw
+    // on it, so one read of a torn file is one attempted scan.
+    const torn = new Set(dataFiles)
+    const realReadFileSync = fsSync.readFileSync
+    let scans = 0
+    // @ts-ignore - test double over the resolver's one read seam
+    fsSync.readFileSync = (target, ...rest) => {
+      if (typeof target === 'string' && torn.has(target)) scans++
+      // @ts-ignore
+      return realReadFileSync(target, ...rest)
+    }
+    const tick = () => maintainCache({
+      cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+      config: NO_NATURAL_COMPACTION,
+    })
+    try {
+      for (let i = 0; i < 4; i++) {
+        await tick()
+        assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
+          'a scan that could not look caches no verdict, on any tick')
+      }
+      assert.equal(scans, 1, 'four ticks, one attempted scan: the failure is on cooldown, not re-decoded hourly')
+
+      // The cooldown delays the retry; it does not end it. Age the stamp
+      // past the window and the next tick looks again - still unreadable,
+      // still cached as nothing, and the window restarts.
+      await ageResettleScanStamp(part.path)
+      await tick()
+      assert.equal(scans, 2, 'an aged-out stamp buys another look')
+      assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
+        'the second failure caches no verdict either')
+      await tick()
+      assert.equal(scans, 2, 'and the fresh stamp cools the retry down again')
+    } finally {
+      fsSync.readFileSync = realReadFileSync
+      for (const [file, bytes] of saved) await fs.writeFile(file, bytes)
+    }
+
+    // Readable again: the partition resumes normal behaviour once its
+    // window is up - the scan finds the marker and the sweep it forces
+    // settles the row.
+    await ageResettleScanStamp(part.path)
+    const after = await tick()
+    assert.ok(after.totalCompacted > 0, 'the retried scan finds the marker and forces the sweep')
+    assert.equal(readCursorSync(part.path).pendingFallbacks, 0,
+      'the rewrite settles the row and records the exact remainder')
+    assert.equal(resettleScanStamp(readCursorSync(part.path)), undefined,
+      'and the failure stamp is gone with the record that superseded it')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a failure stamp that cannot be written costs a re-scan, not the partition\'s tick', async () => {
+  const env = await stageEnv()
+  try {
+    const { storage, getSettleHook } = buildGateway(env)
+    const tablePath = storage.cacheTablePath(DATASET_NAME, ['proxy_messages_v4'])
+
+    await storage.appendRows(tablePath, COLUMNS, [fallbackRow()])
+    await storage.flushTable(tablePath, { force: true })
+    await writeTranscript(env, SESSION, [nativeAssistantLine()])
+    const part = await partitionDir(storage)
+    const legacy = readCursorSync(part.path)
+    delete legacy.pendingFallbacks
+    await writeCursor(part.path, legacy)
+
+    const dataFiles = await parquetFiles(part.path)
+    const saved = new Map(dataFiles.map((file) => [file, fsSync.readFileSync(file)]))
+    for (const file of dataFiles) await fs.writeFile(file, 'not a parquet file')
+
+    // The scan cannot read the table AND the cursor cannot be written: a
+    // read-only partition directory, which is what an ENOSPC or a lost
+    // write permission looks like from here - and one of the ways the torn
+    // parquet got torn in the first place. The scan already swallows its
+    // own error so an unreadable table cannot fail the partition's tick;
+    // the stamp is bookkeeping on top of that and must not undo it.
+    let report
+    try {
+      await fs.chmod(part.path, 0o555)
+      report = await maintainCache({
+        cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
+        config: NO_NATURAL_COMPACTION,
+      })
+    } finally {
+      await fs.chmod(part.path, 0o755)
+      for (const [file, bytes] of saved) await fs.writeFile(file, bytes)
+    }
+
+    assert.equal(report.totalFailed, 0, 'a stamp that could not be written is not a failed partition')
+    assert.equal(report.partitions[0]?.failed, undefined, 'and the partition report says so too')
+    assert.equal(report.totalCompacted, 0, 'an unreadable table is still not rewritten')
+    // Unstamped, so the next tick simply re-scans: the pre-cooldown
+    // behaviour, and still no verdict cached either way.
+    assert.equal(resettleScanStamp(readCursorSync(part.path)), undefined, 'nothing was stamped')
+    assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
+      'and the failed scan cached no verdict')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // --- helpers ---------------------------------------------------------
+
+/**
+ * The failure stamp a scan that could not read the table leaves on the
+ * cursor, or undefined when there is none.
+ * @param {PartitionCursor} cursor
+ * @returns {string | undefined}
+ */
+function resettleScanStamp(cursor) {
+  const c = cursor.compaction
+  if (!c || typeof c !== 'object') return undefined
+  const at = /** @type {Record<string, unknown>} */ (c).resettleScanFailedAt
+  return typeof at === 'string' ? at : undefined
+}
+
+/**
+ * Backdate that stamp past any plausible cooldown window, which is how a
+ * test reaches "the window is up" without waiting for wall-clock hours.
+ * @param {string} partitionPath
+ */
+async function ageResettleScanStamp(partitionPath) {
+  const cursor = readCursorSync(partitionPath)
+  assert.ok(resettleScanStamp(cursor), 'the failed scan stamped the cursor')
+  const compaction = /** @type {Record<string, unknown>} */ (cursor.compaction)
+  await writeCursor(partitionPath, {
+    ...cursor,
+    compaction: { ...compaction, resettleScanFailedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() },
+  })
+}
 
 /**
  * Every committed parquet data file under a partition directory.
