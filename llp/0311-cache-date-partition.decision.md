@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-25
 **Related:** LLP 0022, LLP 0030, LLP 0209, LLP 0217, LLP 0310
+**Extended-by:** LLP 0321
 
 > The cache's `ai_gateway_messages` table drops `session_id`,
 > `conversation_id`, and `cwd` from its partition spec and partitions on

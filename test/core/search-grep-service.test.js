@@ -459,6 +459,32 @@ test('rows captured into the spool are found after the freshness flush', async (
   )
 })
 
+test('automatic refresh searches confirmed rows when the spool cannot enter the hot cache', async () => {
+  const { storage } = await makeCache([[OLD]])
+  const spooled = mkRow({
+    date: '2026-08-13',
+    session_id: 'waiting',
+    content_text: 'waiting needle blocked by the old cache layout',
+  })
+  const labelTable = storage.cacheTablePath(DATASET, ['proxy_messages_v5'])
+  await storage.appendRows(labelTable, COLUMNS, [spooled])
+  const partitionError =
+    'cache-iceberg: partition field "session_id" is new - adding a partition field is spec evolution and requires an explicit migration'
+  storage.flushTable = async () => { throw new Error(partitionError) }
+
+  const automatic = await grep(storage, { refresh: 'auto' })
+  assert.deepEqual(automatic.hits.map((hit) => hit.sessionId), ['s1'])
+  assert.deepEqual(automatic.freshnessMessages, [
+    'cache: refresh failed; using previously saved data; newer waiting rows may be missing',
+  ])
+  assert.equal((await storage.pendingInfo(labelTable)).pending, true, 'the failed flush leaves its rows in the spool')
+
+  await assert.rejects(
+    () => grep(storage, { refresh: 'always' }),
+    /partition field "session_id" is new/
+  )
+})
+
 test('an empty cache answers empty and exhausted', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-grep-empty-'))
   const storage = createQueryStorageService({ cacheRoot })
