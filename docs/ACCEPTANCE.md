@@ -34,10 +34,10 @@ stop the spool-to-cache or cache-to-compaction path.
 
 **Requires:** the last released tag or package, the candidate checkout or
 package, separate dependency installs for both versions, and a unique test root
-under the platform temp directory (`${TMPDIR:-/tmp}`, which resolves to
-`/private/tmp` on macOS and `/tmp` on Linux). The test root must contain the
-entire `HYP_HOME`. Never point either version at the operator's normal
-`~/.hyp`.
+under the platform temp directory (`${TMPDIR:-/tmp}`: the per-user
+`/var/folders/.../T` directory macOS sets, `/tmp` on Linux). The test root
+must contain the entire `HYP_HOME`. Never point either version at the
+operator's normal `~/.hyp`.
 
 **Related:** [LLP 0013](../llp/0013-local-query-cache.decision.md),
 [LLP 0311](../llp/0311-cache-date-partition.decision.md),
