@@ -237,7 +237,9 @@ async function stageCache(root, rowCount) {
  * the fixture cannot quietly drift back to measuring nothing.
  *
  * Nothing here asserts a duration: read `median_to_full_read_ratio` per width.
- * With the cap in place no width exceeds ~1x the full read. If the cap were
+ * With the cap in place the widest scoped width stays in the neighbourhood of
+ * the full read (0.78x at `normal`, ~1.2x at `quick`, where a 200-session
+ * scope already covers two thirds of a 300-session fixture). If the cap were
  * removed or widened, the ratio at the wide end climbs roughly linearly with
  * fan-out, which is the regression this scenario exists to make visible.
  *
@@ -315,7 +317,13 @@ async function measureOtelDedupe(storage, profile) {
  */
 async function measureOtelDedupeFanOut(storage, profile, width, fixtureSessions) {
   const observed = instrumentStorage(storage)
-  const rowsPerBatch = Math.max(profile.incomingRows, width)
+  // At least two rows, whatever `--incoming-rows` says. The dedupe's
+  // committed scan stops early once every key in the batch has been accounted
+  // for, so a batch consisting solely of the committed twin ends the read one
+  // row in and the row-count equality in `assessTarget` cannot hold. One fresh
+  // key alongside the twin keeps the scan draining the sessions the batch
+  // named, which is also the shape a real flush batch has.
+  const rowsPerBatch = Math.max(profile.incomingRows, width, 2)
   const samples = []
   let rowsReturned = 0
   /** @type {Set<string>} */
