@@ -150,6 +150,15 @@ try {
   output.target = assessTarget(output.scenarios)
   output.process_peak_rss_mib = round(process.resourceUsage().maxRSS / 1024, 1)
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`)
+  // Surface the notes a failing check attached, so a run that fails for a
+  // configuration reason says so at the top level instead of leaving the
+  // reader to correlate a check name with a field buried in the scenario.
+  // Printed whether or not assertions were requested: a plain run reports the
+  // same `pass: false`, it just does not exit on it.
+  for (const check of output.target.checks) {
+    if (check.pass || !check.note) continue
+    process.stderr.write(`target check ${check.name} failed: ${check.note}\n`)
+  }
   if (args.assertTarget && !output.target.pass) process.exitCode = 1
 } finally {
   if (!args.keep) await fs.rm(root, { recursive: true, force: true })
@@ -1020,11 +1029,16 @@ function assessTarget(measured) {
     const strategies = new Set(dedupe.fan_outs.map(
       (/** @type {number} */ width) => dedupe.fan_out[String(width)]?.read_strategy,
     ))
+    const spansCap = strategies.has('scoped') && strategies.has('unrestricted')
     checks.push({
       name: 'otel_dedupe_measures_both_sides_of_the_scoped_read_cap',
       actual: strategies.size,
       limit: 2,
-      pass: strategies.has('scoped') && strategies.has('unrestricted'),
+      pass: spansCap,
+      // Still a hard failure, and deliberately: the note explains the
+      // configuration, it does not excuse it. `undefined` is dropped by
+      // `JSON.stringify`, so a passing check reports exactly as before.
+      note: spansCap ? undefined : describeScopedCapShortfall(dedupe),
     })
     for (const width of dedupe.fan_outs) {
       const entry = dedupe.fan_out[String(width)]
@@ -1137,6 +1151,76 @@ function assessTarget(measured) {
     }
   }
   return { pass: checks.every((check) => check.pass), checks }
+}
+
+/**
+ * Why the fan-out sweep failed to span the scoped-read cap, in one actionable
+ * line.
+ *
+ * The check stays a hard failure. A sweep confined to one side of the cap
+ * cannot prove the property the scenario exists to prove, and skipping or
+ * degrading it silently is the pass-green-while-measuring-nothing blindness
+ * of issue #1056. What was missing is only the diagnosis: the two inputs that
+ * produce the failure sit in different corners of the report
+ * (`fixture_sessions` under the scenario, the widths under
+ * `fan_outs_skipped_above_fixture`), and the check name mentions neither.
+ *
+ * Two distinguishable causes, with different remedies:
+ *
+ *  - the fixture is too small to build a width on the missing side, so that
+ *    width was skipped. `--cache-rows` is the fix, and the exact value is
+ *    computable: the narrowest skipped width that lands on the missing side,
+ *    times `FIXTURE_ROWS_PER_SESSION`.
+ *  - every requested width was built, but they all sit on one side of the
+ *    cap. `--dedupe-fan-outs` is the fix, and no `--cache-rows` value helps.
+ *
+ * The cap used to sort widths into sides is `scoped_session_cap_assumed`, the
+ * local constant, so the message says "assumed": if the shipped cap has moved
+ * the widths may be honest and `observed_cap_between` is the field to read.
+ *
+ * @param {Record<string, any>} dedupe
+ */
+function describeScopedCapShortfall(dedupe) {
+  const cap = dedupe.scoped_session_cap_assumed
+  const rowsPerSession = dedupe.fixture_rows_per_session
+  /** @type {number[]} */
+  const skipped = dedupe.fan_outs_skipped_above_fixture
+  /** @type {number[]} */
+  const measured = dedupe.fan_outs
+  const strategies = new Set(measured
+    .map((/** @type {number} */ width) => dedupe.fan_out[String(width)]?.read_strategy)
+    .filter((/** @type {string | undefined} */ strategy) => strategy !== undefined))
+  /** @type {string[]} */
+  const missing = []
+  if (!strategies.has('scoped')) missing.push('scoped')
+  if (!strategies.has('unrestricted')) missing.push('unrestricted')
+  // The narrowest skipped width on each missing side. The widest of those is
+  // what one `--cache-rows` bump has to reach to cover every missing side.
+  const rescuers = missing.map((side) => skipped.find(
+    (width) => side === 'scoped' ? width <= cap : width > cap,
+  ))
+  const measuredSummary = strategies.size === 0
+    ? 'no widths were measured'
+    : `only ${[...strategies].join(' and ')} reads were measured (widths ${measured.join(', ')})`
+  const context = `the fan-out sweep did not span the assumed ${cap}-session scoped-read cap: ` +
+    `${measuredSummary}, and the sweep needs both sides to prove the cap bounds anything.`
+  if (rescuers.some((width) => width === undefined)) {
+    return `${context} Every requested width was built, so a larger --cache-rows will not help: ` +
+      `pass --dedupe-fan-outs with at least one width <= ${cap} and one > ${cap}. ` +
+      `If the widths already straddle ${cap}, read observed_cap_between - the shipped cap may have moved.`
+  }
+  const needSessions = Math.max(.../** @type {number[]} */ (rescuers))
+  // Narrowing the sweep is only an alternative when the fixture can still
+  // build a width past the cap. Below that it is no remedy at all, and saying
+  // otherwise would send the reader after a configuration that cannot exist.
+  const narrowing = dedupe.fixture_sessions > cap
+    ? ` Alternatively pass --dedupe-fan-outs widths this fixture can build on both sides of ${cap}.`
+    : ''
+  return `${context} The fixture holds ${dedupe.fixture_sessions} addressable sessions ` +
+    `(${rowsPerSession} committed rows each), too few to build widths ${skipped.join(', ')}, ` +
+    `so the ${missing.join(' and ')} side${missing.length > 1 ? 's' : ''} could not be measured. ` +
+    `Re-run with --cache-rows ${needSessions * rowsPerSession} or more to reach width ${needSessions}.` +
+    narrowing
 }
 
 /** @param {string[]} argv */
