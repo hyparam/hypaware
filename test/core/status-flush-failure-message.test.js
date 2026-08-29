@@ -29,6 +29,15 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 const ESC = '\u001b'
 
+// The three groups LLP 0225 decomposes the unsafe class into, so this file
+// pins the strip policy at *this* call site rather than trusting that
+// whatever the renderer happens to call still covers all three. An ESC-only
+// assertion would pass against a hand-rolled `replace(/\u001b/g, '')`, and a
+// lone carriage return or a bidi override would still reach the terminal.
+// @ref LLP 0225#one-vocabulary [tests]: one class, three groups, and the label plane strips every one of them
+const TERMINAL_DRIVING = new RegExp('[\\u0000-\\u001F\\u007F-\\u009F\\u2028-\\u2029]')
+const BIDI_OR_INVISIBLE = new RegExp('[\\u061C\\u200E-\\u200F\\u202A-\\u202E\\u2066-\\u2069\\u00AD\\u200B-\\u200D\\u2060-\\u2064\\uFEFF]')
+
 const PARTITION_ERROR =
   'cache-iceberg: partition field "session_id" is new - adding a partition field is spec evolution and requires an explicit migration'
 
@@ -268,7 +277,24 @@ test('a healthy cache adds no line, and a hostile stamp cannot repaint the termi
 
     // The stamp is a file some other process wrote, so its message reaches a
     // TTY with no guarantee of being short, printable, or single-line.
-    const hostile = `${ESC}[2Jforged\n  daemon:         running\n${'x'.repeat(600)}`
+    // One payload per way a captured string drives a terminal: an erase-screen
+    // CSI, an OSC 8 hyperlink, a carriage return that overwrites the line, a
+    // backspace run that rewrites what was already printed, a forged status
+    // line, a raw C1 CSI and a DEL, a Unicode line separator, a right-to-left
+    // override that reorders everything after it, a zero-width run, and more
+    // characters than the line may spend.
+    const hostile = [
+      `${ESC}[2J${ESC}[Hforged`,
+      `${ESC}]8;;http://evil${ESC}\u0007click${ESC}]8;;${ESC}\u0007`,
+      'benign\rEVIL',
+      'realmsg\b\b\b\b\b\b\bFAKE',
+      '\n  daemon:         running',
+      '\u009b2J\u007f\u0085',
+      '\u2028  daemon: running\u2029',
+      'gnitsurt\u202e evil \u202c\u2066x\u2069',
+      'a\u200bb\u200dc\ufeffd\u00ade',
+      'x'.repeat(600),
+    ].join('')
     await writeStamp(cacheRoot, 'ai_gateway_messages', {
       failedAt: new Date().toISOString(),
       errorMessage: hostile,
@@ -280,6 +306,18 @@ test('a healthy cache adds no line, and a hostile stamp cannot repaint the termi
     const line = text.split('\n').find((l) => l.includes('cache flush ('))
     assert.ok(line, 'the failure is still reported')
     assert.equal(line.includes(ESC), false, 'no escape byte survives to the terminal')
+    const driving = line.match(TERMINAL_DRIVING)
+    assert.equal(
+      driving,
+      null,
+      `no character that drives a terminal survives, got U+${driving?.[0].codePointAt(0)?.toString(16)}`
+    )
+    const reordering = line.match(BIDI_OR_INVISIBLE)
+    assert.equal(
+      reordering,
+      null,
+      `no character that reorders or hides survives, got U+${reordering?.[0].codePointAt(0)?.toString(16)}`
+    )
     assert.equal(
       text.split('\n').filter((l) => l === '  daemon:         running').length,
       0,
@@ -291,6 +329,55 @@ test('a healthy cache adds no line, and a hostile stamp cannot repaint the termi
     // stamped, clamped only by the 512 the writer applies.
     const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot })
     assert.equal(json.cache_flush_failures[0].error_message, hostile.slice(0, 512))
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('the capped list still reports how many tables it is not naming', async () => {
+  const { hypHome, cacheRoot } = await makeHome()
+  try {
+    // Twelve tables, all refusing writes. Eight is a screenful and the cap is
+    // right; showing eight and implying that is the whole incident is not.
+    // The same rule `MAX_SKIPPED_PARTITIONS_REPORTED` settled for the
+    // maintenance block: cap the list, never the size of the problem.
+    for (let i = 0; i < 12; i++) {
+      await writeStamp(cacheRoot, `t${String(i).padStart(2, '0')}`, {
+        failedAt: new Date(Date.now() - (i + 1) * 60_000).toISOString(),
+        errorMessage: 'ENOSPC: no space left on device',
+      })
+    }
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.cacheFlushFailures.length, 8, 'the list is capped')
+    assert.equal(report.cacheFlushFailuresTotal, 12, 'the count is not')
+
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot, stdout })
+    const text = stdout.text()
+    assert.equal(text.split('\n').filter((l) => l.includes('cache flush (')).length, 8)
+    assert.match(text, /\.\.\. and 4 more tables whose last flush failed/)
+
+    const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot })
+    assert.equal(json.cache_flush_failures.length, 8)
+    assert.equal(json.cache_flush_failures_total, 12)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('an uncapped list says nothing about tables it is not hiding', async () => {
+  const { hypHome, cacheRoot } = await makeHome()
+  try {
+    await writeStamp(cacheRoot, 'only_one', {
+      failedAt: new Date().toISOString(),
+      errorMessage: 'ENOSPC: no space left on device',
+    })
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.equal(report.cacheFlushFailuresTotal, 1)
+    const stdout = buffer()
+    renderStatusText({ report, clientNames: [], datasets: [], cacheRoot, stdout })
+    assert.doesNotMatch(stdout.text(), /\.\.\. and \d+ more table/)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

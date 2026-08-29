@@ -436,6 +436,9 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       error_message: f.errorMessage,
       still_cooling_down: f.stillCoolingDown,
     })),
+    // The count before the cap, beside the capped list, so a program reading
+    // the array is not left believing eight is the whole incident.
+    cache_flush_failures_total: report.cacheFlushFailuresTotal,
     datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
     cache: {
       dir: cacheRoot,
@@ -774,6 +777,14 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       const why = printable(f.errorMessage, MAX_FLUSH_FAILURE_CHARS) || 'no error message was recorded'
       const tag = f.stillCoolingDown ? '  [refresh cooling down]' : ''
       stdout.write(`    - cache flush (${printable(f.table, 80)})  last attempt failed ${formatEntrypointAge(f.failedAt)}: ${why}${tag}\n`)
+    }
+    // The same shape the maintenance block uses for its cap: the list is
+    // bounded, the size of the incident is not. Nine failing tables and forty
+    // failing tables are different incidents, and this section exists to
+    // answer which one is happening.
+    const unnamed = report.cacheFlushFailuresTotal - report.cacheFlushFailures.length
+    if (unnamed > 0) {
+      stdout.write(`    ... and ${unnamed} more table${unnamed === 1 ? '' : 's'} whose last flush failed\n`)
     }
   }
 

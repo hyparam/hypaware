@@ -564,6 +564,13 @@ export interface HypAwareStatusReport {
    */
   cacheFlushFailures: CacheFlushFailureReport[]
   /**
+   * How many tables carried a readable failure stamp before the cap above,
+   * so a render can say how much of the problem it is not showing. The same
+   * relationship `MaintenanceSkipSnapshot.skippedTotal` has to its capped
+   * `partitions`: the list is bounded, the size of the incident is not.
+   */
+  cacheFlushFailuresTotal: number
+  /**
    * Proxy-mode trust state (LLP 0237, LLP 0239). Null whenever the question
    * does not apply: a non-darwin host (both mechanisms are macOS-only, LLP
    * 0237#darwin-only), or no local CA on disk (proxy mode was never on). An

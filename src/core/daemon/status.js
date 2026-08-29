@@ -1786,8 +1786,11 @@ export async function collectHypAwareStatus(opts = {}) {
   // @ref LLP 0322#what-the-stamp-is-not [constrained-by]: reported as the reason a retry is paced, never folded into the freshness or size lines above
   /** @type {CacheFlushFailureReport[]} */
   let cacheFlushFailures = []
+  let cacheFlushFailuresTotal = 0
   try {
-    cacheFlushFailures = await collectCacheFlushFailures(cacheRoot)
+    const collected = await collectCacheFlushFailures(cacheRoot)
+    cacheFlushFailures = collected.failures
+    cacheFlushFailuresTotal = collected.total
   } catch { /* best-effort spool probe */ }
 
   // ----- remote config apply state (LLP 0025) -----
@@ -1953,6 +1956,7 @@ export async function collectHypAwareStatus(opts = {}) {
     maintenance,
     captureHealth,
     cacheFlushFailures,
+    cacheFlushFailuresTotal,
     proxyTrust,
     selfUpdate: describeSelfUpdate({ stateRoot, env }),
   }
@@ -2293,9 +2297,17 @@ function inferConfiguredSources(activePlugins) {
  * "an old failure that nothing has cleared", which reads the same on disk
  * and very differently to an operator.
  *
+ * `total` is the count before the cap, and it is the reason the cap is
+ * allowed to exist. `MAX_SKIPPED_PARTITIONS_REPORTED` above settled the same
+ * argument for the same number: cap the list, never the size of the problem.
+ * Nine tables failing and forty tables failing are different incidents, and a
+ * section whose whole job is "is what was captured reaching the query cache?"
+ * would be answering it wrong if it showed eight and said nothing about the
+ * rest.
+ *
  * @param {string} cacheRoot
  * @param {number} [nowMs]
- * @returns {Promise<CacheFlushFailureReport[]>}
+ * @returns {Promise<{ total: number, failures: CacheFlushFailureReport[] }>}
  */
 async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
   /** @type {CacheFlushFailureReport[]} */
@@ -2315,7 +2327,7 @@ async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
     })
   }
   failures.sort((a, b) => (a.failedAt < b.failedAt ? 1 : a.failedAt > b.failedAt ? -1 : a.table.localeCompare(b.table)))
-  return failures.slice(0, MAX_CACHE_FLUSH_FAILURES)
+  return { total: failures.length, failures: failures.slice(0, MAX_CACHE_FLUSH_FAILURES) }
 }
 
 const MAX_CACHE_FLUSH_FAILURES = 8
