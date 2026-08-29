@@ -155,6 +155,59 @@ test('rejecting the cursor does not hand the orphan sweep the real generation', 
   }
 })
 
+// The load-bearing case for rejecting the WHOLE cursor rather than the
+// escaping field (LLP 0323#whole-cursor). The test above it cannot see the
+// difference: its live generation is `table`, which is exactly what a
+// field-only guard would default to, so both designs keep it. Only a
+// partition that has been through a generation swap tells them apart.
+test('rejecting the whole cursor keeps a swapped generation the default would orphan', async () => {
+  const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
+  try {
+    const dir = partitionDir(cacheRoot)
+    const generation = 'table-1756200000000'
+    // The shape a generation swap leaves: the live generation is a
+    // `table-<ms>`, and `table` is not it.
+    await fs.rename(path.join(dir, 'table'), path.join(dir, generation))
+    await aimCursorAt(dir, generation)
+    await fs.utimes(path.join(dir, generation), STALE, STALE)
+
+    await aimCursorAt(dir, path.relative(dir, outside))
+    await maintainCache({ cacheRoot })
+
+    // Under a guard that dropped only `tableDir`, the cursor would still
+    // read as a source-table cursor, `liveGenerationDir` would answer
+    // `table`, and this directory would be swept as an orphan.
+    assert.equal(
+      await pathExists(path.join(dir, generation)), true,
+      'a cursor that names no generation must not nominate the default one'
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// A tableDir that resolves to the live generation but is not spelled as its
+// name is the same data loss by a shorter route: the orphan sweep compares
+// `cursor.tableDir` to a `readdir` entry name, and `./table` matches no
+// entry, so the live generation reads as an orphan.
+test('a tableDir that aliases the live generation does not cost the live generation', async () => {
+  for (const alias of ['./table', 'table/', 'table/nested']) {
+    const { root, cacheRoot } = await makeCacheBesideOutsider()
+    try {
+      const dir = partitionDir(cacheRoot)
+      const live = path.join(dir, 'table')
+      await fs.utimes(live, STALE, STALE)
+      await aimCursorAt(dir, alias)
+
+      await maintainCache({ cacheRoot })
+
+      assert.equal(await pathExists(live), true, `${alias} must not orphan the generation it resolves to`)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  }
+})
+
 test('the next append heals a rejected cursor into a contained one', async () => {
   const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
   try {
@@ -178,19 +231,29 @@ test('the next append heals a rejected cursor into a contained one', async () =>
 test('tryReadCursorSync accepts every generation name hyp actually mints', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cursor-contained-'))
   try {
-    for (const tableDir of ['table', 'table-1756200000000', './table', 'table/nested']) {
+    // The complete set of shapes any writer produces: a first append's
+    // `table`, a generation swap's `table-<ms>`, and the legacy layout's
+    // `epoch=<n>`. Nothing in the tree spells a generation any other way.
+    for (const tableDir of ['table', 'table-1756200000000', 'epoch=3']) {
       await writeCursor(dir, { epoch: 0, rowCount: 1, compaction: null, layout: 'source-table', tableDir })
-      assert.equal(tryReadCursorSync(dir)?.tableDir, tableDir, `${tableDir} is inside the partition`)
+      assert.equal(tryReadCursorSync(dir)?.tableDir, tableDir, `${tableDir} is a generation this partition owns`)
     }
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
 
-test('tryReadCursorSync rejects a tableDir that does not resolve inside the partition', async () => {
+test('tryReadCursorSync rejects a tableDir that is not a bare name inside the partition', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cursor-escaping-'))
   try {
-    for (const tableDir of ['..', '../sibling', 'table/../../escape', path.join(dir, '..', 'absolute'), '', '.']) {
+    // `./table` and `table/` resolve to the live generation and are still
+    // rejected: the orphan sweep matches this string against a `readdir`
+    // entry name, so a spelling that resolves right and compares wrong is
+    // the shape that reclaims the live generation. See the behaviour test
+    // above it.
+    const notAName = ['./table', 'table/', 'table/nested', './/table', 'a/../b']
+    const notInside = ['..', '../sibling', 'table/../../escape', path.join(dir, '..', 'absolute'), '', '.']
+    for (const tableDir of [...notAName, ...notInside]) {
       await writeCursor(dir, { epoch: 0, rowCount: 1, compaction: null, layout: 'source-table', tableDir })
       assert.equal(tryReadCursorSync(dir), null, `${JSON.stringify(tableDir)} is not a generation this partition owns`)
       // The lenient reader answers what it answers for any other corrupt

@@ -122,17 +122,26 @@ export function tryReadCursorSync(partitionDir) {
  * it finds there. One `..` segment therefore aims destructive cache
  * maintenance at a directory the cache does not own.
  *
- * Absolute is rejected separately because `path.resolve` discards the
- * partition entirely rather than escaping it by degrees. `partitionDir`
- * itself is rejected too: it holds the cursor, not a generation.
+ * One segment, because the consumers do not all resolve the value: the
+ * orphan sweep compares it to a `readdir` entry name (`entry.name ===
+ * liveDirName`), so `./table` and `table/` resolve to the live
+ * generation while matching no entry, and the sweep reclaims the very
+ * directory the cursor meant to protect. A spelling that resolves inside
+ * the partition is therefore not enough; the string itself has to be the
+ * name. That is also what every writer mints, so nothing legitimate is
+ * spelled any other way.
  *
- * @ref LLP 0323#contained [implements]: a cursor may name a generation only inside its own partition.
+ * Resolution is still checked after that, because `.` and `..` are both
+ * single segments: one names the partition, which holds the cursor rather
+ * than a generation, and the other leaves it.
+ *
+ * @ref LLP 0323#contained [implements]: a cursor may name a generation only inside its own partition, by its own name.
  * @param {string} partitionDir
  * @param {string} tableDir
  * @returns {boolean}
  */
 function generationDirIsContained(partitionDir, tableDir) {
-  if (tableDir === '' || path.isAbsolute(tableDir)) return false
+  if (tableDir === '' || tableDir !== path.basename(tableDir)) return false
   const root = path.resolve(partitionDir)
   return path.resolve(root, tableDir).startsWith(root + path.sep)
 }

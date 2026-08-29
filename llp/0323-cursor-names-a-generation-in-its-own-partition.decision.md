@@ -10,9 +10,11 @@
 
 > `cursor.json`'s `tableDir` is a directory NAME, not a path: the readers
 > downstream of it join it onto the partition directory and then sweep,
-> unlink, and rewrite what they find. A value that resolves outside its own
-> partition therefore aims destructive cache maintenance at a directory the
-> cache does not own. `tryReadCursorSync` rejects it, which makes the WHOLE
+> unlink, and rewrite what they find, and one of them compares it to a
+> directory entry instead. A value that is not the bare name of a directory
+> inside its own partition therefore aims destructive cache maintenance
+> either at a directory the cache does not own or at the live generation
+> itself. `tryReadCursorSync` rejects it, which makes the WHOLE
 > cursor unreadable rather than dropping one field, and every reader gets
 > the degradation it already had for a corrupt cursor. The rejection is the
 > one corrupt-cursor case that knows its own cause, so it is logged.
@@ -54,15 +56,37 @@ being a `PartitionCursor`. Downstream code keeps its existing invariant -
 "a cursor I was handed names a generation in my partition" - without
 restating it.
 
-## Contained means resolves strictly inside {#contained}
+## Contained means one bare name, resolving strictly inside {#contained}
 
-`path.resolve(partitionDir, tableDir)` must be a strict descendant of
-`path.resolve(partitionDir)`. Absolute values are rejected before that
-because `path.resolve` discards the partition rather than escaping it by
-degrees: today's consumers all use `path.join`, which swallows a leading
-separator and lands back inside by accident, and an accident is not a
-guarantee. `partitionDir` itself is rejected: it holds the cursor, not a
-generation. So is the empty string.
+`tableDir` must be a single path segment (`tableDir === path.basename(tableDir)`),
+and `path.resolve(partitionDir, tableDir)` must then be a strict descendant
+of `path.resolve(partitionDir)`.
+
+Resolving inside is not sufficient on its own, because not every consumer
+resolves. The orphan sweep compares the value against a directory entry
+name (`entry.name === liveDirName` in `walkForRetired`), so `./table` and
+`table/` resolve to the live generation and match no entry: the sweep then
+reads the live generation as a directory the cursor does not reference and
+reclaims it past `ORPHAN_GRACE_MS`. A spelling that resolves right and
+compares wrong destroys the partition it was pointing at, which is the same
+local data loss this document rejects the field-level guard for. The
+segment rule closes it by making the string the name, which is the only
+thing any writer mints anyway.
+
+The segment rule also settles absolute values, which `path.resolve` would
+otherwise handle by discarding the partition rather than escaping it by
+degrees. Resolution is still checked after it, because `.` and `..` are
+each one segment: `.` names `partitionDir`, which holds the cursor rather
+than a generation, and `..` leaves it. The empty string is rejected
+outright.
+
+What the gate does not decide is whether the cursor names the RIGHT
+generation. A well-formed name for a directory that is not the live one
+(`table-999`, or any other directory in the partition) still passes, and
+the sweep then reclaims the real generation as an orphan. That is the
+cursor's authority working as designed: the cursor is what says which
+generation is live. This gate bounds where a cursor may point, not whether
+it points at the right thing.
 
 ## Rejecting the whole cursor, not the field {#whole-cursor}
 
@@ -116,6 +140,13 @@ anything `hyp` writes, so it cannot become routine noise.
 - Its rows are invisible to queries until the cursor is healed, because
   `resolveIcebergDir` falls back to the partition directory, which is not a
   table. The next append heals it: it writes a fresh cursor at `table`.
+- Healing restores maintenance, not rows. On a partition whose live
+  generation was a `table-<ms>`, the append writes a fresh `table` and the
+  previous generation is left named by nothing, so the orphan sweep
+  reclaims it once it ages past `ORPHAN_GRACE_MS`; the rows it held are
+  gone. This is a cache and the rows are re-derivable, and the pre-fix
+  behaviour was a destructive sweep OUTSIDE the cache, so it is the better
+  end of a bad trade. It is not a restore.
 - Retention routes such a partition to the legacy-epoch branch, which
   returns without evicting because neither `epoch=0` nor the partition
   directory is an Iceberg table. A legacy epoch-layout partition whose
