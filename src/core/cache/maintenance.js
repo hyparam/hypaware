@@ -554,7 +554,13 @@ function generationLayout(cursor) {
 async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter) {
   const layout = generationLayout(cursor)
   const liveDir = path.join(r.path, layout.liveDir)
-  if (!tableExists(liveDir)) return r
+  // Not a bare return: a table whose metadata directory holds nothing but a
+  // staged name is the one shape where `tableExists` answers no (a staging
+  // name is not the `*.metadata.json` it looks for) AND there is still
+  // something to reclaim. Everything else this function does needs a
+  // table that reads; the sweep's staging pass does not.
+  // @ref LLP 0316#staged-writes-are-reclaimed [implements]: the leak's only reclaimer must not be gated on a published metadata version.
+  if (!tableExists(liveDir)) return await sweepLiveGeneration(r, cursor, opts)
 
   // Live counts from the current snapshot's summary where the table keeps
   // one, not from the directory. In-place compaction (LLP 0310) leaves
@@ -883,36 +889,78 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     }
   }
 
-  // Release what nothing references any more. In-place compaction and
-  // snapshot expiry both stop short of deleting files (a retained snapshot
-  // may still read them), so the live generation accumulates superseded
-  // data files and metadata until this sweep finds them unreferenced by
-  // every retained snapshot. Best-effort by construction: a file missed
-  // this tick is caught on a later one, and a sweep failure must not fail
-  // the partition's report.
-  // @ref LLP 0310#unreferenced-sweep [implements]: snapshot retention is the reader-safety window; the sweep only reclaims what fell out of it.
-  //
-  // Read the generation off the cursor AGAIN rather than reuse `layout`:
-  // when the tick took the generation-swap rewrite (--force, the settle
-  // escape, the legacy layout) the directory `liveDir` names is the RETIRED
-  // one. Sweeping that is both wrong and expensive - a full metadata and
-  // manifest walk, every tick for the whole 24 h retirement grace, of a
-  // directory the retirement sweep deletes wholesale - and it would report
-  // the retired generation's releases as the live generation's.
-  if (!opts.dryRun) {
-    const sweptCursor = tryReadCursorSync(r.path) ?? cursor
-    const sweptLayout = generationLayout(sweptCursor)
-    if (sweptLayout.kind === 'source-table') {
-      try {
-        const removed = await sweepUnreferencedTableFiles(path.join(r.path, sweptLayout.liveDir))
-        if (removed > 0) {
-          r.unreferencedFilesRemoved = removed
-          getActiveSpan()?.setAttribute('unreferenced_files_removed', removed)
-        }
-      } catch { /* swept again next tick */ }
-    }
-  }
+  return await sweepLiveGeneration(r, cursor, opts)
+}
 
+/**
+ * Release what nothing references any more, and report what was released.
+ *
+ * In-place compaction and snapshot expiry both stop short of deleting files
+ * (a retained snapshot may still read them), so the live generation
+ * accumulates superseded data files and metadata until this sweep finds
+ * them unreferenced by every retained snapshot. Best-effort by
+ * construction: a file missed this tick is caught on a later one, and a
+ * sweep failure must not fail the partition's report.
+ *
+ * @ref LLP 0310#unreferenced-sweep [implements]: snapshot retention is the reader-safety window; the sweep only reclaims what fell out of it.
+ *
+ * Reads the generation off the cursor AGAIN rather than trusting the
+ * caller's: when the tick took the generation-swap rewrite (--force, the
+ * settle escape, the legacy layout) the directory the caller's layout names
+ * is the RETIRED one. Sweeping that is both wrong and expensive - a full
+ * metadata and manifest walk, every tick for the whole 24 h retirement
+ * grace, of a directory the retirement sweep deletes wholesale - and it
+ * would report the retired generation's releases as the live generation's.
+ *
+ * A sweep that throws still reports what it had already released. Its
+ * staging pass runs ahead of the referenced-set walk and answers to no
+ * referenced set, so those files are unlinked before anything downstream
+ * can throw: "swept again next tick" is right for the work and wrong for
+ * the count, which belongs to the tick that did it. The only tick that can
+ * reach here is one whose metadata is already too broken to load, which is
+ * exactly when a reader of the report needs to see the reclaimer still ran.
+ * @ref LLP 0316#staged-writes-are-reclaimed [implements]: what the staging pass released is this tick's to report, whatever the walk behind it did.
+ *
+ * @param {MaintenancePartitionReport} r
+ * @param {PartitionCursor} cursor
+ * @param {MaintenanceOptions} opts
+ * @returns {Promise<MaintenancePartitionReport>}
+ */
+async function sweepLiveGeneration(r, cursor, opts) {
+  if (opts.dryRun) return r
+  const sweptCursor = tryReadCursorSync(r.path) ?? cursor
+  const sweptLayout = generationLayout(sweptCursor)
+  if (sweptLayout.kind !== 'source-table') return r
+
+  let removed = 0
+  try {
+    removed = await sweepUnreferencedTableFiles(path.join(r.path, sweptLayout.liveDir))
+  } catch (err) {
+    // Swept again next tick; counted for this one. Said out loud on the
+    // span as well as counted: restoring the count alone would make an
+    // aborted walk report exactly what a completed one reports, and the
+    // difference is the whole reason the count is worth having. The tick
+    // is not failed by this - the walk is best-effort by construction -
+    // so the signal is an attribute, not an error.
+    // @ref LLP 0220#walk-survives-a-partition [constrained-by]: a sweep failure stays a note on the span, never the partition's verdict.
+    removed = filesRemovedBeforeFailure(err)
+    // Bounded, like `resettle_scan_error` below and for the same reason:
+    // `setAttribute` skips `buildAttrs`, so the 512-char cap every other
+    // emission gets is not applied here. This message is authored by
+    // icebird, hyparquet, or the OS, and the throw path it names is a
+    // metadata or manifest decode - a decoder that quotes the bytes it
+    // choked on would put a manifest's column bounds, which are literal
+    // slices of recorded exchange content, on an exported span.
+    // @ref LLP 0021#the-attribute-contract [constrained-by]: bound the value the helper would have bounded.
+    const sweepError = err instanceof Error ? err.message : String(err)
+    const span = getActiveSpan()
+    span?.setAttribute('unreferenced_sweep_failed', true)
+    span?.setAttribute('unreferenced_sweep_error', sweepError.slice(0, 512))
+  }
+  if (removed > 0) {
+    r.unreferencedFilesRemoved = removed
+    getActiveSpan()?.setAttribute('unreferenced_files_removed', removed)
+  }
   return r
 }
 
@@ -1831,12 +1879,14 @@ function inPlaceVerdictCursor(cursor, liveDataFiles) {
  * returns must not take the one reclaimer they have with them. The grace
  * window is the whole of their safety.
  *
+ * Throws only what {@link sweepReferencedSetFiles} throws, wrapped so the
+ * count the staging pass already earned survives the throw.
+ *
  * @param {string} tableDir
  * @returns {Promise<number>} files removed
+ * @throws {SweepFailure}
  */
 async function sweepUnreferencedTableFiles(tableDir) {
-  if (!tableExists(tableDir)) return 0
-
   let removed = 0
   const now = Date.now()
   /** @param {string} filePath */
@@ -1861,10 +1911,10 @@ async function sweepUnreferencedTableFiles(tableDir) {
   // race to unlink its own staging name. On the source-table layout no
   // generation directory is ever retired out from under it, so this sweep is
   // the only reclaimer it has, and nothing else in the tree even looks at the
-  // name: it survives every clause of the metadata loop below by falling
-  // through all of them.
+  // name: it survives every clause of {@link sweepReferencedSetFiles}'s
+  // metadata loop by falling through all of them.
   //
-  // It runs HERE, ahead of the referenced-set walk, rather than in that loop.
+  // It runs HERE, ahead of that walk, rather than inside it.
   // Every other candidate the sweep weighs is a file some snapshot might
   // name, so the walk returns early rather than guess when it cannot build
   // the set. A staging name is unreferenced by construction, so the set has
@@ -1882,10 +1932,48 @@ async function sweepUnreferencedTableFiles(tableDir) {
     if (isStagedWriteName(name)) removeStale(path.join(metadataDir, name))
   }
 
+  // Everything past the staging pass runs inside the wrap, gate included:
+  // the count above is earned and a throw from here on must carry it, so
+  // the guarantee is the block's shape rather than a property of whichever
+  // statements happen to sit here today.
+  try {
+    // Only NOW may the sweep ask whether the table reads. `tableExists`
+    // answers yes to any published `*.metadata.json`, and a staging name
+    // is not one, so a metadata directory holding only a leak answers no -
+    // and that is the very state a first publish that crashed between
+    // staging and `link` leaves behind. Asking ahead of the pass above
+    // hands that leak no reclaimer at all, which is the same defect as
+    // gating it on the referenced set, reached by a different door.
+    // @ref LLP 0316#staged-writes-are-reclaimed [implements]: a metadata directory whose only entry is a staging name is still a directory to sweep.
+    if (!tableExists(tableDir)) return removed
+    await sweepReferencedSetFiles(tableDir, metaNames, removeStale)
+  } catch (err) {
+    throw new SweepFailure(err, removed)
+  }
+  return removed
+}
+
+/**
+ * The referenced-set pass: delete the live generation's files that no
+ * retained snapshot names.
+ *
+ * Every candidate weighed here is a file some snapshot might name, so every
+ * failure to build the referenced set returns without deleting rather than
+ * guess. `removeStale` belongs to the caller, so what this pass releases is
+ * counted through those early returns - and, because this pass can also
+ * throw outright, so is what the caller's staging pass released before it.
+ *
+ * @param {string} tableDir
+ * @param {string[]} metaNames  the `metadata/` listing the staging pass read
+ * @param {(filePath: string) => void} removeStale
+ * @returns {Promise<void>}
+ */
+async function sweepReferencedSetFiles(tableDir, metaNames, removeStale) {
+  const metadataDir = path.join(tableDir, 'metadata')
   const { resolver, lister } = await createLocalIcebergIO()
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(tableDir), resolver, lister })
   const snapshots = metadata.snapshots ?? []
-  if (snapshots.length === 0) return removed
+  if (snapshots.length === 0) return
 
   /** @type {Set<string>} */
   const referenced = new Set()
@@ -1902,9 +1990,10 @@ async function sweepUnreferencedTableFiles(tableDir) {
     } catch {
       // An unreadable manifest list means an unknown referenced set: keep
       // everything rather than delete a file a snapshot may still name.
-      // `removed`, not 0: the staging pass above answers to no referenced
-      // set and has already run.
-      return removed
+      // A bare return, not a throw: the caller's staging pass has already
+      // run and its count stands either way, and a referenced set this
+      // pass cannot build is the ordinary case it is written around.
+      return
     }
     for (const manifest of manifests) {
       referenced.add(path.basename(manifest.manifest_path))
@@ -1917,7 +2006,7 @@ async function sweepUnreferencedTableFiles(tableDir) {
           await fetchAvroRecords(manifest.manifest_path, resolver, Number(manifest.manifest_length))
         )
       } catch {
-        return removed
+        return
       }
       // Every status, including DELETED: an entry that still appears in a
       // retained snapshot's manifest names a file a time-travel read of
@@ -1971,8 +2060,44 @@ async function sweepUnreferencedTableFiles(tableDir) {
     if (referenced.has(name)) continue
     removeStale(path.join(metadataDir, name))
   }
+}
 
-  return removed
+/**
+ * A sweep failure that carries what the sweep had already released.
+ *
+ * The staging pass runs ahead of the referenced-set walk and answers to no
+ * referenced set, so by the time the walk fails its files are already
+ * unlinked. Its caller treats a throwing sweep as "swept again next tick",
+ * which is right for the work and wrong for the count: a tick that
+ * reclaimed files would report none, on the one kind of tick (metadata too
+ * broken to load) where a reader most needs to know the reclaimer ran.
+ * Deletion correctness never depended on the walk here - a staging name is
+ * unreferenced by construction - so only the observability was at stake,
+ * and only the observability is what this restores.
+ *
+ * @ref LLP 0316#staged-writes-are-reclaimed [implements]: the staging pass is independent of the walk, so a walk failure must not swallow its count.
+ */
+class SweepFailure extends Error {
+  /**
+   * @param {unknown} cause
+   * @param {number} filesRemoved
+   */
+  constructor(cause, filesRemoved) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
+    this.name = 'SweepFailure'
+    this.filesRemoved = filesRemoved
+  }
+}
+
+/**
+ * How many files a sweep had already released when it failed. Zero for
+ * anything else, including an error thrown before the sweep started.
+ *
+ * @param {unknown} err
+ * @returns {number}
+ */
+function filesRemovedBeforeFailure(err) {
+  return err instanceof SweepFailure ? err.filesRemoved : 0
 }
 
 /* ----- Re-settle sweep (LLP 0027 "Re-settle sweep") -----

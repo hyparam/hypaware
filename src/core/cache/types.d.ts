@@ -392,8 +392,14 @@ export interface MaintenancePartitionReport {
   compactionAttemptFailedAt?: string
   // Files of the live generation released by the unreferenced-file sweep
   // (LLP 0310): superseded by an in-place compaction or by snapshot
-  // expiry, and no longer named by any retained snapshot. Absent when the
-  // sweep removed nothing or did not run.
+  // expiry and no longer named by any retained snapshot, plus the staged
+  // metadata names a crashed publish stranded (LLP 0316), which the sweep
+  // reclaims in a pass that runs ahead of the referenced-set walk.
+  // Absent when the sweep removed nothing or did not run. Present does
+  // NOT mean the sweep finished: the staging pass answers to no
+  // referenced set, so a walk that failed after it still reports what the
+  // pass had already released, and what the walk did not reach is swept
+  // next tick.
   unreferencedFilesRemoved?: number
   // THIS tick's work on the partition ended in an error and the walk moved
   // on (LLP 0220). Distinct from `compactionAttemptFailed`, which is read
