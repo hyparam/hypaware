@@ -30,6 +30,9 @@ const FLUSH_PREFIX = 'flush-'
 const FLUSH_SUFFIX = '.jsonl'
 const LAST_FLUSH_FILE = 'last-flush.json'
 const FLUSH_FAILURE_FILE = 'last-flush-failure.json'
+// The writer's bound and the reader's. The stamp is a file on disk, so a build
+// that reads one it did not write cannot rely on the writer having clamped it.
+const FLUSH_FAILURE_MESSAGE_MAX = 512
 
 /**
  * @param {{
@@ -288,11 +291,19 @@ export function createCacheSpool(args) {
 
     async pendingInfo(tablePath) {
       knownTables.add(tablePath)
+      const failure = await readFlushFailure(tablePath)
       return {
         pending: hasPendingSync(tablePath),
         pendingBytes: pendingBytesSync(tablePath),
         lastFlushAtMs: await readLastFlushAt(tablePath),
-        flushFailedAtMs: await readFlushFailedAt(tablePath),
+        // Both halves of the stamp, not only its time. A caller that reports
+        // the cooldown can then say what the flush failed with, which is the
+        // one fact the cooldown itself withholds. Still pacing state and not a
+        // verdict: neither field is read as a claim about what the spool or
+        // the cache holds, and `pending`/`pendingBytes` above are untouched.
+        // @ref LLP 0322#what-the-stamp-is-not [implements]: the stamp reaches a reader as a reason, never as a freshness or durability claim
+        flushFailedAtMs: failure?.failedAtMs ?? null,
+        flushFailureMessage: failure?.errorMessage ?? null,
       }
     },
 
@@ -590,7 +601,7 @@ async function writeFlushFailure(tablePath, err) {
     await fs.mkdir(spoolDir(tablePath), { recursive: true })
     await atomicWriteJson(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), {
       failedAt: new Date().toISOString(),
-      errorMessage: message.slice(0, 512),
+      errorMessage: message.slice(0, FLUSH_FAILURE_MESSAGE_MAX),
     })
   } catch {
     // The stamp is a pacing hint. Failing to write it costs an unpaced
@@ -615,21 +626,40 @@ async function clearFlushFailure(tablePath) {
  * state this build cannot interpret is the direction that silently withholds
  * rows; attempting it is only ever a cost.
  *
+ * Returns the message the stamp carries alongside its time, so a reader that
+ * reports the cooldown can also say what the flush failed with. The message
+ * is advisory: a stamp whose `failedAt` reads but whose `errorMessage` does
+ * not still cools the gate down, with a null message, because the pacing
+ * decision has never depended on it. Re-clamped to the writer's 512 here as
+ * well, since the bound has to hold for a file this process did not write.
+ *
  * @ref LLP 0322#stamps-that-cannot-be-read [implements]: an uninterpretable stamp is no stamp
+ * @param {string} tablePath
+ * @returns {Promise<{ failedAtMs: number, errorMessage: string | null } | null>}
+ */
+export async function readFlushFailure(tablePath) {
+  try {
+    const raw = await fs.readFile(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), 'utf8')
+    const parsed = /** @type {{ failedAt?: unknown, errorMessage?: unknown }} */ (JSON.parse(raw))
+    if (typeof parsed.failedAt !== 'string') return null
+    const ms = Date.parse(parsed.failedAt)
+    if (!Number.isFinite(ms)) return null
+    if (ms > Date.now()) return null
+    const message = typeof parsed.errorMessage === 'string' && parsed.errorMessage.length > 0
+      ? parsed.errorMessage.slice(0, FLUSH_FAILURE_MESSAGE_MAX)
+      : null
+    return { failedAtMs: ms, errorMessage: message }
+  } catch {
+    return null
+  }
+}
+
+/**
  * @param {string} tablePath
  * @returns {Promise<number | null>}
  */
 async function readFlushFailedAt(tablePath) {
-  try {
-    const raw = await fs.readFile(path.join(spoolDir(tablePath), FLUSH_FAILURE_FILE), 'utf8')
-    const parsed = /** @type {{ failedAt?: unknown }} */ (JSON.parse(raw))
-    if (typeof parsed.failedAt !== 'string') return null
-    const ms = Date.parse(parsed.failedAt)
-    if (!Number.isFinite(ms)) return null
-    return ms > Date.now() ? null : ms
-  } catch {
-    return null
-  }
+  return (await readFlushFailure(tablePath))?.failedAtMs ?? null
 }
 
 /**

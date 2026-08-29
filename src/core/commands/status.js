@@ -426,6 +426,16 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       gap_seconds: Math.round(c.gapMs / 1000),
       state: c.state,
     })),
+    // The machine copy of the capture-health section's flush-failure lines
+    // (LLP 0322). Always an array, empty on a healthy install. `error_message`
+    // is byte-exact as stamped, unlike the rendered line, which escapes and
+    // clips it for a terminal.
+    cache_flush_failures: report.cacheFlushFailures.map((f) => ({
+      table: f.table,
+      failed_at: f.failedAt,
+      error_message: f.errorMessage,
+      still_cooling_down: f.stillCoolingDown,
+    })),
     datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
     cache: {
       dir: cacheRoot,
@@ -574,6 +584,13 @@ const MAX_ERROR_CHARS = 400
 function printable(value, max) {
   return sanitizeLabel(value, max) ?? ''
 }
+
+/**
+ * How much of a flush failure's message the capture-health line quotes. Wider
+ * than `sanitizeLabel`'s default because this value is a sentence rather than
+ * a name, and still bounded because it is one line among many.
+ */
+const MAX_FLUSH_FAILURE_CHARS = 200
 
 /**
  * Render the V1 status report as human-friendly text. Mirrors the
@@ -725,7 +742,19 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // `[capture gap]` tag points at the diagnostics block, which carries the
   // repair.
   // @ref LLP 0257#status-and-health [implements]: hyp status renders last event seen vs last transcript activity
-  if (report.captureHealth.length > 0) {
+  //
+  // The same section carries the other way capture stops reaching the query
+  // cache: rows that were captured fine and then failed the spool-to-cache
+  // flush. LLP 0322 gave that failure a stamp and a cooldown, and a query
+  // inside the window is told the cache may be stale with no way to learn
+  // why short of reading spool internals. This is the line that says why.
+  // It sits beside the otel lines rather than beside `cache size` because
+  // it is the same question those answer - is what was captured reaching the
+  // place queries read? - and deliberately nowhere near the freshness
+  // timestamp, which quotes the last write that actually happened and would
+  // become a lie if a failed attempt fed it.
+  // @ref LLP 0322#what-the-stamp-is-not [implements]: the stamp is rendered as the reason a retry is paced, and kept out of the freshness report
+  if (report.captureHealth.length > 0 || report.cacheFlushFailures.length > 0) {
     stdout.write('  capture health:\n')
     for (const c of report.captureHealth) {
       const events = c.lastEventAt !== null
@@ -736,6 +765,15 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         : 'no transcript activity'
       const tag = c.state === 'gap' ? '  [capture gap]' : ''
       stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
+    }
+    for (const f of report.cacheFlushFailures) {
+      // Through `printable` like every other collector-sourced string on this
+      // surface: the stamp is a file on disk written by some other process,
+      // so its message reaches a TTY with no guarantee of being short,
+      // printable, or single-line. `--json` still carries it byte-exact.
+      const why = printable(f.errorMessage, MAX_FLUSH_FAILURE_CHARS) || 'no error message was recorded'
+      const tag = f.stillCoolingDown ? '  [refresh cooling down]' : ''
+      stdout.write(`    - cache flush (${printable(f.table, 80)})  last attempt failed ${formatEntrypointAge(f.failedAt)}: ${why}${tag}\n`)
     }
   }
 

@@ -17,6 +17,7 @@ import {
   perSignalOtlpOverrides,
 } from '../config/otlp_precedence.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
+import { discoverSpoolTables, QUERY_FLUSH_FAILURE_COOLDOWN_MS, readFlushFailure } from '../cache/spool.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
@@ -58,7 +59,7 @@ import {
 /**
  * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
@@ -1768,6 +1769,27 @@ export async function collectHypAwareStatus(opts = {}) {
     cache = await measureCacheStats(cacheRoot)
   } catch { /* best-effort cache probe */ }
 
+  // ----- tables whose last spool-to-cache flush failed (LLP 0322) -----
+  // The cooldown is the visible half of a standing flush failure: a query
+  // inside the window is told the cache may be stale, and nothing anywhere
+  // told the user why. The stamp has carried the reason since the cooldown
+  // shipped, on disk and unread. This is where it becomes readable.
+  //
+  // Read off the spool directly rather than through status.json, unlike
+  // `recentEntrypoints` and `maintenance` above: those summarize a walk only
+  // the daemon runs, while a flush failure is stamped by whichever process
+  // attempted the flush - the daemon's scheduled one, a sink export, or the
+  // `hyp query` in another terminal that first hit it. No single process
+  // sees them all, so the file is the only place the whole answer exists.
+  // The cost is one tree walk that stops at each spool directory, next to
+  // the whole-tree stat sweep `measureCacheStats` already pays.
+  // @ref LLP 0322#what-the-stamp-is-not [constrained-by]: reported as the reason a retry is paced, never folded into the freshness or size lines above
+  /** @type {CacheFlushFailureReport[]} */
+  let cacheFlushFailures = []
+  try {
+    cacheFlushFailures = await collectCacheFlushFailures(cacheRoot)
+  } catch { /* best-effort spool probe */ }
+
   // ----- remote config apply state (LLP 0025) -----
   /** @type {ConfigControlStatus | null} */
   let remoteConfig = null
@@ -1930,6 +1952,7 @@ export async function collectHypAwareStatus(opts = {}) {
     recentEntrypoints,
     maintenance,
     captureHealth,
+    cacheFlushFailures,
     proxyTrust,
     selfUpdate: describeSelfUpdate({ stateRoot, env }),
   }
@@ -2259,6 +2282,43 @@ function inferConfiguredSources(activePlugins) {
   }
   return sources.sort((a, b) => a.name.localeCompare(b.name))
 }
+
+/**
+ * Every table carrying a readable flush-failure stamp, newest failure first.
+ *
+ * Bounded like the other list-valued status sections: a cache whose every
+ * table is refusing writes has one cause, and eight lines is enough to name
+ * it without burying the rest of the report. `stillCoolingDown` is the
+ * difference between "the automatic retry is being held off right now" and
+ * "an old failure that nothing has cleared", which reads the same on disk
+ * and very differently to an operator.
+ *
+ * @param {string} cacheRoot
+ * @param {number} [nowMs]
+ * @returns {Promise<CacheFlushFailureReport[]>}
+ */
+async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
+  /** @type {CacheFlushFailureReport[]} */
+  const failures = []
+  for (const tablePath of await discoverSpoolTables(cacheRoot)) {
+    const failure = await readFlushFailure(tablePath)
+    if (!failure) continue
+    // A path, so cleaned as a name: it is filesystem-sourced and reaches a
+    // TTY. The message is not - it is the payload the operator asked for,
+    // and it is cleaned where the prose is assembled (LLP 0225).
+    const relative = path.relative(cacheRoot, tablePath)
+    failures.push({
+      table: sanitizeLabel(relative === '' ? tablePath : relative) ?? 'unknown',
+      failedAt: new Date(failure.failedAtMs).toISOString(),
+      errorMessage: failure.errorMessage,
+      stillCoolingDown: nowMs - failure.failedAtMs < QUERY_FLUSH_FAILURE_COOLDOWN_MS,
+    })
+  }
+  failures.sort((a, b) => (a.failedAt < b.failedAt ? 1 : a.failedAt > b.failedAt ? -1 : a.table.localeCompare(b.table)))
+  return failures.slice(0, MAX_CACHE_FLUSH_FAILURES)
+}
+
+const MAX_CACHE_FLUSH_FAILURES = 8
 
 /**
  * @param {string} cacheRoot
