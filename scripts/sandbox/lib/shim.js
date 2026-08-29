@@ -33,6 +33,17 @@
  *                             one the user typed. Inherited by its children.
  * - `HYP_SANDBOX_VERBOSE=1`   echo each intercepted call to stderr
  *
+ * Test-only hooks. The sandbox is developer tooling excluded from the
+ * published package (`package.json#files` has no `scripts/`), and the lock's
+ * break-glass paths are unreachable from a test in any bounded time without
+ * them: the wait budget is 15s and the critical section is microseconds long.
+ * - `HYP_SANDBOX_TEST_HOLD_MS`  `updateState` parks this long inside the lock,
+ *                             between the read and the write, so a test can
+ *                             hold a second shim in the wait.
+ * - `HYP_SANDBOX_TEST_LOCK_WAIT_MS`
+ *                             override `LOCK_WAIT_MS`, so a test can reach the
+ *                             budget-exhausted break without waiting 15s.
+ *
  * @import {
  *   SandboxKeychainState,
  *   SandboxLaunchdState,
@@ -131,13 +142,44 @@ function record(result) {
   }
 }
 
+// Read errors worth another go: a fanned-out install can exhaust descriptors,
+// and a retry costs a poll interval. Anything else (EACCES, EISDIR) will not
+// improve by waiting.
+const TRANSIENT_READ_CODES = new Set(['EMFILE', 'ENFILE', 'EAGAIN', 'EBUSY', 'EINTR'])
+const READ_RETRIES = 3
+
 /**
+ * Read a state file, or hand back `fallback` when there is nothing to read.
+ *
+ * "Nothing to read" means ENOENT, and only ENOENT. Any other read failure is
+ * thrown: `updateState` would otherwise take the empty fallback for the real
+ * state and commit it under the lock, so one EMFILE erases the whole mock
+ * domain and the shim reports success while doing it. A mock that says the
+ * daemon was never installed is the confident wrong answer this sandbox
+ * exists to avoid; an exit 70 naming the errno is not.
+ *
+ * A parse failure still falls back. `writeState` renames into place, so no
+ * reader can see a torn file, and a body that will not parse is damage from
+ * outside the shim that only a fresh file can clear.
+ *
  * @param {string} file
  * @param {any} fallback
  */
 function readState(file, fallback) {
+  let raw = ''
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      raw = fs.readFileSync(file, 'utf8')
+      break
+    } catch (err) {
+      const code = /** @type {NodeJS.ErrnoException} */ (err).code
+      if (code === 'ENOENT') return fallback
+      if (attempt >= READ_RETRIES || !TRANSIENT_READ_CODES.has(code ?? '')) throw err
+      sleepSync(STOP_POLL_MS)
+    }
+  }
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'))
+    return JSON.parse(raw)
   } catch {
     return fallback
   }
@@ -197,12 +239,44 @@ function updateState(file, fallback, change) {
   const release = acquireStateLock(file)
   try {
     const state = /** @type {S} */ (readState(file, fallback))
+    testHold()
+    // Write only what actually changed. The error and no-op paths (a second
+    // `bootstrap`, a `systemctl start` of a unit that is not installed, a
+    // `delete-certificate` that matches nothing) return without touching the
+    // state, and writing anyway materialises a file that was never there:
+    // `hyp-sandbox state` then prints an empty domain where it used to print
+    // `(empty)`, which reads as "installed, and holding nothing".
+    const before = JSON.stringify(state)
     const result = change(state)
-    writeState(file, state)
+    if (JSON.stringify(state) !== before) writeState(file, state)
     return result
   } finally {
     release()
   }
+}
+
+/**
+ * How long to wait for another shim's lock. Overridable so a test can reach
+ * the budget-exhausted break; see `HYP_SANDBOX_TEST_LOCK_WAIT_MS` above.
+ *
+ * @returns {number}
+ */
+function lockWaitMs() {
+  const raw = process.env.HYP_SANDBOX_TEST_LOCK_WAIT_MS
+  if (raw === undefined || raw === '') return LOCK_WAIT_MS
+  const ms = Number(raw)
+  return Number.isFinite(ms) && ms >= 0 ? ms : LOCK_WAIT_MS
+}
+
+/**
+ * Park inside the critical section when a test asks for it; see
+ * `HYP_SANDBOX_TEST_HOLD_MS` above. A no-op otherwise.
+ */
+function testHold() {
+  const raw = process.env.HYP_SANDBOX_TEST_HOLD_MS
+  if (!raw) return
+  const ms = Number(raw)
+  if (Number.isFinite(ms) && ms > 0) sleepSync(ms)
 }
 
 /**
@@ -219,16 +293,57 @@ function updateState(file, fallback, change) {
 function acquireStateLock(file) {
   const lockPath = `${file}.lock`
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  const deadline = Date.now() + LOCK_WAIT_MS
+  const started = Date.now()
+  const deadline = started + lockWaitMs()
   for (;;) {
     const held = tryStateLock(lockPath)
     if (held) return held
-    if (lockAgeMs(lockPath) > LOCK_STALE_MS || Date.now() >= deadline) {
+    const ageMs = lockAgeMs(lockPath)
+    const stale = ageMs > LOCK_STALE_MS
+    if (stale || Date.now() >= deadline) {
+      // Every path out of here is a degraded one, and a degraded run that
+      // leaves no line is indistinguishable from a clean one afterwards. The
+      // lost update it may have caused shows up as a state file quietly
+      // missing a setenv, hours later, in a run nobody can replay.
+      recordLockEvent(file, stale ? 'broke-stale' : 'broke-budget', started, ageMs)
       try { fs.rmSync(lockPath, { force: true }) } catch { /* another shim broke it first */ }
-      return tryStateLock(lockPath) ?? (() => {})
+      const retaken = tryStateLock(lockPath)
+      if (retaken) return retaken
+      recordLockEvent(file, 'degraded-unlocked', started, ageMs)
+      return () => {}
     }
     sleepSync(STOP_POLL_MS)
   }
+}
+
+/**
+ * Append a line saying the lock guarding `file` was broken, or given up on.
+ *
+ * Shaped like `record`'s lines so `hyp-sandbox calls` renders it in place,
+ * with a `lock` object a reader can filter on. `exit: -1` marks it as an
+ * observation rather than an intercepted call, the way `supervisorNote` does.
+ *
+ * @param {string} file
+ * @param {'broke-stale' | 'broke-budget' | 'degraded-unlocked'} event
+ * @param {number} started
+ * @param {number} ageMs
+ */
+function recordLockEvent(file, event, started, ageMs) {
+  const name = path.basename(file)
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    tool,
+    args,
+    exit: -1,
+    note: `state lock ${event}: ${name}`,
+    lock: { file: name, event, ageMs, waitedMs: Date.now() - started },
+    pid: process.pid,
+    ppid: process.ppid,
+  })
+  try {
+    fs.mkdirSync(stateDir, { recursive: true })
+    fs.appendFileSync(callsPath, `${line}\n`)
+  } catch { /* the sandbox root is gone; nothing left to tell */ }
 }
 
 /**
@@ -671,7 +786,17 @@ function supervise(label, plist) {
   // this" from "the user typed this" without walking the process tree.
   const env = () => {
     /** @type {SandboxLaunchdState} */
-    const domain = readState(launchdPath, { services: {}, env: {} })
+    let domain = { services: {}, env: {} }
+    // `readState` now throws on a read that failed for a reason other than the
+    // file being absent, and this getter runs on every relaunch inside a
+    // detached process with stdio ignored, where an uncaught throw would take
+    // KeepAlive down without a word. Launch with what the plist carries and
+    // leave a line naming the errno instead.
+    try {
+      domain = readState(launchdPath, domain)
+    } catch (err) {
+      supervisorNote(label, `could not read the launchd domain: ${err instanceof Error ? err.message : String(err)}`)
+    }
     return {
       ...process.env,
       ...domain.env,
@@ -1185,21 +1310,27 @@ function systemctl(argv) {
 
   if (sub === 'stop') {
     const previous = readState(systemdPath, emptySystemd()).units[unit]
-    if (previous) {
-      killService(unit, previous)
-      updateState(systemdPath, emptySystemd(), (state) => {
-        const entry = state.units[unit]
-        // Only clear the instance this call killed. A `start` that landed while
-        // the unit was draining recorded a live supervisor here, and nulling
-        // its pid would strand it: nothing else records it, so neither `stop`
-        // nor `stop_everything` could reach it again.
-        if (!entry || entry.pid !== previous.pid) return
-        entry.active = false
-        entry.pid = null
-        entry.changedAt = new Date().toISOString()
-      })
-    }
-    return { code: 0, note: `${sub} ${unit}` }
+    if (!previous) return { code: 0, note: `${sub} ${unit}` }
+    killService(unit, previous)
+    const kept = updateState(systemdPath, emptySystemd(), (state) => {
+      const entry = state.units[unit]
+      // Only clear the instance this call killed. A `start` that landed while
+      // the unit was draining recorded a live supervisor here, and nulling
+      // its pid would strand it: nothing else records it, so neither `stop`
+      // nor `stop_everything` could reach it again.
+      if (!entry) return false
+      if (entry.pid !== previous.pid) return true
+      entry.active = false
+      entry.pid = null
+      entry.changedAt = new Date().toISOString()
+      return false
+    })
+    // Leaving the replacement alone is the right trade, but this call still
+    // exits 0 with the unit live, and that is the whole of what the caller
+    // sees. Say it here, the way `bootout` does, so a run that hit the race
+    // can be told from one where the stop really did stop everything.
+    const note = kept ? `${sub} ${unit} (kept the instance that replaced it)` : `${sub} ${unit}`
+    return { code: 0, note }
   }
 
   if (sub === 'disable') {

@@ -47,6 +47,19 @@ the shims intercept.
 | `npm install -g`, `npx` downloads | `<root>/npm-global`, `<root>/npm-cache` |
 | Every intercepted call | `<root>/state/calls.jsonl` |
 
+Two shims updating the same state file take a lock over the read-change-write,
+because a rename stops torn reads but not lost updates. A mock that deadlocks
+would be worse than one that races, so a lock left behind by a shim that was
+killed is broken after 60s and a wait that outlives its 15s budget gives up
+and proceeds unlocked. Every one of those degraded exits appends a line to
+`calls.jsonl` carrying a `lock` object (`broke-stale`, `broke-budget`, or
+`degraded-unlocked`, with the age it broke and how long it waited), so a run
+that lost an update can be told from one that never contended:
+
+```sh
+grep '"lock"' "$(scripts/sandbox/hyp-sandbox path)/state/calls.jsonl"
+```
+
 ## What is **not** isolated
 
 - **Network.** Real requests go to real upstreams.
