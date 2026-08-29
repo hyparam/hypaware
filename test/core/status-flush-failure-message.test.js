@@ -9,9 +9,9 @@
 // stamp must never cross: it is a pacing record, so it may say why a retry is
 // being held off and may not be read as a write that happened.
 //
-// Be honest about which is which. Tests 1, 4 and 5 fail against the pre-change
-// source, so they pin the new plumbing. Tests 2 and 3 pass either way by
-// design: they are guards on behaviour #1077 already shipped (an unreadable
+// Be honest about which is which. Tests 1, 4, 5, 6 and 7 fail against the
+// pre-change source, so they pin the new plumbing. Tests 2 and 3 pass either
+// way by design: they are guards on behaviour #1077 already shipped (an unreadable
 // message still paces the retry; a cooled query never claims a write), held
 // here because this is the change that gives someone a reason to reach for
 // that state, and a guard that only starts failing later has done its job.
@@ -41,9 +41,17 @@ const ESC = '\u001b'
 // whatever the renderer happens to call still covers all three. An ESC-only
 // assertion would pass against a hand-rolled `replace(/\u001b/g, '')`, and a
 // lone carriage return or a bidi override would still reach the terminal.
+//
+// One assertion per group, and every range inside one copied whole from the
+// constant of the same name in `src/core/util/json_util.js` rather than from
+// the characters that read as obviously dangerous. A call-site strip that
+// covered ZWSP and the BOM but dropped U+180E and the variation selectors
+// would leave zero-width code points on the line and still satisfy a shorter
+// list, which is the substitution these assertions exist to catch.
 // @ref LLP 0225#one-vocabulary [tests]: one class, three groups, and the label plane strips every one of them
 const TERMINAL_DRIVING = new RegExp('[\\u0000-\\u001F\\u007F-\\u009F\\u2028-\\u2029]')
-const BIDI_OR_INVISIBLE = new RegExp('[\\u061C\\u200E-\\u200F\\u202A-\\u202E\\u2066-\\u2069\\u00AD\\u200B-\\u200D\\u2060-\\u2064\\uFEFF]')
+const BIDI_FORMATTING = new RegExp('[\\u061C\\u200E-\\u200F\\u202A-\\u202E\\u2066-\\u2069]')
+const INVISIBLE_FORMATTING = new RegExp('[\\u00AD\\u180E\\u200B-\\u200D\\u2060-\\u2064\\uFE00-\\uFE0F\\uFEFF]')
 
 const PARTITION_ERROR =
   'cache-iceberg: partition field "session_id" is new - adding a partition field is spec evolution and requires an explicit migration'
@@ -288,7 +296,8 @@ test('a healthy cache adds no line, and a hostile stamp cannot repaint the termi
     // CSI, an OSC 8 hyperlink, a carriage return that overwrites the line, a
     // backspace run that rewrites what was already printed, a forged status
     // line, a raw C1 CSI and a DEL, a Unicode line separator, a right-to-left
-    // override that reorders everything after it, a zero-width run, and more
+    // override that reorders everything after it, a zero-width run, one
+    // Mongolian vowel separator and two variation selectors, and more
     // characters than the line may spend.
     const hostile = [
       `${ESC}[2J${ESC}[Hforged`,
@@ -300,6 +309,7 @@ test('a healthy cache adds no line, and a hostile stamp cannot repaint the termi
       '\u2028  daemon: running\u2029',
       'gnitsurt\u202e evil \u202c\u2066x\u2069',
       'a\u200bb\u200dc\ufeffd\u00ade',
+      'f\u180Eg\ufe0fh\ufe01i',
       'x'.repeat(600),
     ].join('')
     await writeStamp(cacheRoot, 'ai_gateway_messages', {
@@ -319,11 +329,17 @@ test('a healthy cache adds no line, and a hostile stamp cannot repaint the termi
       null,
       `no character that drives a terminal survives, got U+${driving?.[0].codePointAt(0)?.toString(16)}`
     )
-    const reordering = line.match(BIDI_OR_INVISIBLE)
+    const reordering = line.match(BIDI_FORMATTING)
     assert.equal(
       reordering,
       null,
-      `no character that reorders or hides survives, got U+${reordering?.[0].codePointAt(0)?.toString(16)}`
+      `no character that reorders survives, got U+${reordering?.[0].codePointAt(0)?.toString(16)}`
+    )
+    const hiding = line.match(INVISIBLE_FORMATTING)
+    assert.equal(
+      hiding,
+      null,
+      `no character that occupies no width survives, got U+${hiding?.[0].codePointAt(0)?.toString(16)}`
     )
     assert.equal(
       text.split('\n').filter((l) => l === '  daemon:         running').length,

@@ -791,10 +791,17 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       const tag = f.stillCoolingDown ? '  [refresh cooling down]' : ''
       stdout.write(`    - cache flush (${printable(f.table, 80)})  last attempt failed ${formatEntrypointAge(f.failedAt)}: ${why}${tag}\n`)
     }
-    // The same shape the maintenance block uses for its cap: the list is
-    // bounded, the size of the incident is not. Nine failing tables and forty
-    // failing tables are different incidents, and this section exists to
-    // answer which one is happening.
+    // The count beside the capped list, as the maintenance block does below:
+    // the list is bounded, the size of the incident is not. Nine failing
+    // tables and forty failing tables are different incidents, and this
+    // section exists to answer which one is happening.
+    //
+    // Only half of that block's shape, and the half it is missing is worth
+    // stating rather than implying. LLP 0228#last-tick-only pairs the count
+    // with a pointer to where the rest are listed, and the maintenance line
+    // spends it on `hyp query maintain --dry-run`. Nothing lists these:
+    // `--json` carries the same eight. So an operator learns the scale of the
+    // incident here and cannot learn which tables are past the cap.
     const unnamed = report.cacheFlushFailuresTotal - report.cacheFlushFailures.length
     if (unnamed > 0) {
       stdout.write(`    ... and ${unnamed} more table${unnamed === 1 ? '' : 's'} whose last flush failed\n`)
