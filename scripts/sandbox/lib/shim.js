@@ -299,17 +299,23 @@ function acquireStateLock(file) {
     const held = tryStateLock(lockPath)
     if (held) return held
     const ageMs = lockAgeMs(lockPath)
-    const stale = ageMs > LOCK_STALE_MS
+    const stale = ageMs !== null && ageMs > LOCK_STALE_MS
     if (stale || Date.now() >= deadline) {
       // Every path out of here is a degraded one, and a degraded run that
       // leaves no line is indistinguishable from a clean one afterwards. The
       // lost update it may have caused shows up as a state file quietly
       // missing a setenv, hours later, in a run nobody can replay.
-      recordLockEvent(file, stale ? 'broke-stale' : 'broke-budget', started, ageMs)
+      //
+      // Only when there is still a lock here to break, though. The holder can
+      // release between the take that failed and this check, and a line
+      // claiming an eviction that never happened is the same false record
+      // this event exists to prevent: it sends a reader hunting a lost update
+      // through a run that in the end never contended past its wait.
+      if (ageMs !== null) recordLockEvent(file, stale ? 'broke-stale' : 'broke-budget', started, ageMs)
       try { fs.rmSync(lockPath, { force: true }) } catch { /* another shim broke it first */ }
       const retaken = tryStateLock(lockPath)
       if (retaken) return retaken
-      recordLockEvent(file, 'degraded-unlocked', started, ageMs)
+      recordLockEvent(file, 'degraded-unlocked', started, ageMs ?? 0)
       return () => {}
     }
     sleepSync(STOP_POLL_MS)
@@ -376,14 +382,19 @@ function tryStateLock(lockPath) {
 }
 
 /**
+ * How long ago the lock at `lockPath` was taken, or null when there is no
+ * lock there. Null rather than 0: a lock taken this same millisecond is also
+ * 0ms old, and the caller has to tell "nothing to break" from "just taken".
+ *
  * @param {string} lockPath
+ * @returns {number | null}
  */
 function lockAgeMs(lockPath) {
   try {
     return Date.now() - fs.statSync(lockPath).mtimeMs
   } catch {
     // It was released while we looked at it, so it is not stale, it is gone.
-    return 0
+    return null
   }
 }
 

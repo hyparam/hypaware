@@ -50,8 +50,9 @@ the shims intercept.
 Two shims updating the same state file take a lock over the read-change-write,
 because a rename stops torn reads but not lost updates. A mock that deadlocks
 would be worse than one that races, so a lock left behind by a shim that was
-killed is broken after 60s and a wait that outlives its 15s budget gives up
-and proceeds unlocked. Every one of those degraded exits appends a line to
+killed is broken after 60s, and a wait that outlives its 15s budget breaks
+the holder's lock and takes it for itself; it proceeds unlocked only when
+that retake is lost too. Every one of those degraded exits appends a line to
 `calls.jsonl` carrying a `lock` object (`broke-stale`, `broke-budget`, or
 `degraded-unlocked`, with the age it broke and how long it waited), so a run
 that lost an update can be told from one that never contended:
