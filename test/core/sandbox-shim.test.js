@@ -2,7 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -39,14 +39,24 @@ function shim(root, tool, args, env = {}) {
 }
 
 /**
- * A sandbox root with a LaunchAgent plist in it, removed when the test ends.
+ * A sandbox root with a LaunchAgent plist in it, booted out and removed when
+ * the test ends.
  *
  * @param {import('node:test').TestContext} t
  * @param {string} [label]
  */
 function sandboxRoot(t, label = 'com.hyperparam.hypaware.test') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-shim-test-'))
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  // Stop before delete, in one hook, for the same reason `systemdRoot` gives
+  // below: node:test runs `after` hooks in registration order, so a bootout a
+  // test body registers later runs after this root has already been removed.
+  // The mock reads empty state, answers 3, and kills nothing, which leaves the
+  // KeepAlive supervisor and the program it keeps restarting alive past the
+  // end of `npm test` for as long as the machine stays up.
+  t.after(() => {
+    shim(root, 'launchctl', ['bootout', `gui/501/${label}`])
+    fs.rmSync(root, { recursive: true, force: true })
+  })
   const plist = path.join(root, `${label}.plist`)
   fs.writeFileSync(plist, [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -175,7 +185,6 @@ test('launchctl mock: setenv reaches the job launchd starts', async (t) => {
     '',
   ].join('\n'))
   const env = { HYP_SANDBOX_SPAWN: '1', NODE_USE_SYSTEM_CA: '' }
-  t.after(() => shim(root, 'launchctl', ['bootout', `gui/501/${label}`], env))
 
   assert.equal(shim(root, 'launchctl', ['setenv', 'NODE_USE_SYSTEM_CA', '1'], env).code, 0)
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
@@ -413,7 +422,6 @@ test('launchctl mock: kickstart bounces the job only when -k asks it to', async 
   const { root, label, target } = sandboxRoot(t)
   const env = { HYP_SANDBOX_SPAWN: '1' }
   const plist = writePlist(root, label, ['/bin/sh', '-c', 'exec sleep 30'])
-  t.after(() => shim(root, 'launchctl', ['bootout', target], env))
 
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
   const first = await waitForPid(root, target, env)
@@ -456,18 +464,17 @@ test('launchctl mock: bootout does not return until the job has exited', async (
   // would still hold the gateway's listen port when the bootstrap that
   // follows a restart or reinstall tries to bind it.
   assert.equal(shim(root, 'launchctl', ['print', target], env).code, 113)
-  assert.throws(() => process.kill(/** @type {number} */ (pid), 0), 'the job is gone, not merely signalled')
+  assert.equal(isAlive(/** @type {number} */ (pid)), false, 'the job is gone, not merely signalled')
 })
 
 test('launchctl mock: a setenv after bootstrap reaches the next launch', async (t) => {
-  const { root, label, target } = sandboxRoot(t)
+  const { root, label } = sandboxRoot(t)
   const env = { HYP_SANDBOX_SPAWN: '1', SANDBOX_PROBE: '' }
   const seen = path.join(root, 'probe.txt')
   // KeepAlive plus a program that exits is the restart cycle `hyp attach`
   // relies on: it setenvs and *then* lets the daemon come back to pick the
   // value up, so a domain snapshotted at bootstrap would never deliver it.
   const plist = writePlist(root, label, ['/bin/sh', '-c', `printf '[%s]\\n' "$SANDBOX_PROBE" >> ${seen}`])
-  t.after(() => shim(root, 'launchctl', ['bootout', target], env))
 
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
   for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -493,7 +500,6 @@ test('launchctl mock: a program that cannot be started is recorded, not swallowe
   // `exit`; unhandled, that takes the supervisor down with it and the run has
   // nothing to say about why the daemon never appeared.
   const plist = writePlist(root, label, [path.join(root, 'no-such-program')], { keepAlive: false })
-  t.after(() => shim(root, 'launchctl', ['bootout', target], env))
 
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
 
@@ -512,4 +518,284 @@ test('launchctl mock: a program that cannot be started is recorded, not swallowe
   assert.equal(notes.length, 1)
   assert.match(notes[0], /could not start .*no-such-program/)
   assert.equal(shim(root, 'launchctl', ['print', target], env).stdout.includes('state = running'), false)
+})
+
+test('launchctl mock: a setenv during a bootout survives the bootout', async (t) => {
+  const { root, label, target } = sandboxRoot(t)
+  const env = { HYP_SANDBOX_SPAWN: '1' }
+  // `bootout` blocks until the job it signalled has actually drained. The
+  // domain it writes back when it returns has to be re-read after that wait,
+  // not the copy it read before: `hyp attach` setenvs NODE_USE_SYSTEM_CA and
+  // the daemon's reconciler runs on its own clock, so a setenv landing inside
+  // the wait is exactly the traffic this mock is here to model. Writing back
+  // the stale copy erases it, `getenv` then reports it unset, and the run
+  // blames HypAware for a value the mock threw away. `writeState`'s rename
+  // does not cover this: it stops torn reads, not lost updates.
+  const plist = writePlist(root, label, [
+    '/bin/sh', '-c', 'trap "sleep 1; exit 0" TERM; while :; do sleep 0.1; done',
+  ])
+
+  assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
+  assert.ok(await waitForPid(root, target, env), 'the supervisor started the program')
+
+  const bootout = spawn(process.execPath, [SHIM, 'launchctl', 'bootout', target], {
+    env: { ...process.env, HYP_SANDBOX_ROOT: root, ...env },
+    stdio: 'ignore',
+  })
+  const booted = new Promise((resolve) => bootout.on('exit', resolve))
+  // Well inside the ~1s the trapped program spends draining.
+  await new Promise((resolve) => setTimeout(resolve, 300))
+
+  assert.equal(shim(root, 'launchctl', ['setenv', 'NODE_USE_SYSTEM_CA', '1'], env).code, 0)
+  // Without this the test passes vacuously whenever the setenv lands after the
+  // bootout has already written back: the pre-fix shim is green at that end of
+  // the window, so a timing shift on a slow host would quietly stop testing
+  // anything. `exitCode` is null only while the child is still running.
+  assert.equal(bootout.exitCode, null, 'the bootout was still waiting when the setenv committed')
+  assert.equal(
+    shim(root, 'launchctl', ['getenv', 'NODE_USE_SYSTEM_CA'], env).stdout,
+    '1\n',
+    'the setenv committed'
+  )
+
+  assert.equal(await booted, 0, 'the bootout succeeded')
+  assert.equal(
+    shim(root, 'launchctl', ['getenv', 'NODE_USE_SYSTEM_CA'], env).stdout,
+    '1\n',
+    'the bootout did not write back the domain it read before it waited'
+  )
+  assert.equal(shim(root, 'launchctl', ['print', target], env).code, 113, 'the bootout still unloaded')
+})
+
+/**
+ * A pid that has exited but has not been reaped. It still answers signal 0 and
+ * shrugs off SIGKILL, which is exactly the state the sandbox's detached,
+ * orphaned supervisors end up in under a PID 1 that does not reap. Resolves to
+ * null when this host cannot produce one.
+ *
+ * @param {import('node:test').TestContext} t
+ * @returns {Promise<number | null>}
+ */
+async function unreapedPid(t) {
+  // `$| = 1` so the pid reaches us before the parent parks; perl does not reap
+  // on its own, so the child stays unreaped for as long as the parent lives.
+  const maker = spawn('perl', ['-e', '$| = 1; my $p = fork(); if ($p == 0) { exit 0 } print "$p\\n"; sleep 30;'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  t.after(() => { try { maker.kill('SIGKILL') } catch { /* already gone */ } })
+
+  const pid = await new Promise((resolve) => {
+    let seen = ''
+    const done = setTimeout(() => resolve(null), 5000)
+    maker.on('error', () => { clearTimeout(done); resolve(null) })
+    maker.stdout.on('data', (chunk) => {
+      seen += chunk.toString('utf8')
+      if (!seen.includes('\n')) return
+      clearTimeout(done)
+      resolve(Number(seen.trim()))
+    })
+  })
+  if (!Number.isInteger(pid) || Number(pid) <= 0) return null
+
+  // Only useful if it really is unreaped, and the fork reports its pid before
+  // the child has finished exiting, so poll rather than read once: under the
+  // full suite's load a single read catches it still running and the test
+  // silently skips the thing it exists to cover. A host whose perl or /proc
+  // behaves differently still skips rather than asserting something it never
+  // managed to set up.
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    let stat = ''
+    try { stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8') } catch { return null }
+    const close = stat.lastIndexOf(')')
+    if (close !== -1 && stat[close + 2] === 'Z') return Number(pid)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  return null
+}
+
+test('hyp-sandbox: stopping does not wait on, or warn about, an unreaped pid', async (t) => {
+  const sandboxCli = fileURLToPath(new URL('../../scripts/sandbox/hyp-sandbox', import.meta.url))
+  const zombiePid = await unreapedPid(t)
+  if (zombiePid === null) {
+    t.skip('this host cannot produce an unreaped pid to stop')
+    return
+  }
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-sandbox-stop-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(root, 'state'), { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'state', 'launchd.json'),
+    `${JSON.stringify({ services: { 'com.example.gone': { pid: zombiePid } }, env: {} }, null, 2)}\n`
+  )
+
+  const started = Date.now()
+  const reset = spawnSync('bash', [sandboxCli, '--root', root, 'reset'], {
+    encoding: 'utf8',
+    input: 'y\n',
+    timeout: 60_000,
+  })
+  const elapsed = Date.now() - started
+
+  assert.equal(reset.status, 0, reset.stderr)
+  // Positive control: without it, a `stop_everything` that stopped reading
+  // `launchd.json` at all would satisfy every assertion below by doing nothing.
+  assert.match(
+    reset.stdout,
+    /stopped 1 sandbox process/,
+    'the pid in the domain was actually read and signalled'
+  )
+  // `stop_everything` probes with signal 0 alone unless it also checks for an
+  // unreaped pid, and a corpse answers that probe forever. The visible cost is
+  // a reset that spends its whole 5s SIGTERM budget plus its 2s SIGKILL budget
+  // on a process that had already exited, then warns about survivors that are
+  // not there - the sandbox reporting a confident wrong answer about its own
+  // teardown, which is the one thing it must not do.
+  assert.doesNotMatch(
+    reset.stdout,
+    /still running after SIGKILL/,
+    'a pid that has already exited is gone, not a survivor to warn about'
+  )
+  assert.ok(elapsed < 5000, `reset spent ${elapsed}ms waiting on a pid that had already exited`)
+  assert.equal(fs.existsSync(root), false, 'the root is deleted once nothing is running')
+})
+
+/**
+ * Whether `pid` is a live process rather than an unreaped corpse.
+ *
+ * `process.kill(pid, 0)` alone is not enough, and this file is the wrong place
+ * to forget it: the shim's supervisors are detached and orphaned on purpose,
+ * so under a PID 1 that does not reap, a supervisor a `stop` has already
+ * killed keeps answering the signal probe. Same rule as `alivePid`/`isZombie`
+ * in `scripts/sandbox/lib/shim.js`.
+ *
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0)
+  } catch {
+    return false
+  }
+  let stat = ''
+  try {
+    stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+  } catch {
+    // No `/proc` (macOS), where launchd always reaps, so the probe stands.
+    return true
+  }
+  const close = stat.lastIndexOf(')')
+  return !(close !== -1 && stat[close + 2] === 'Z')
+}
+
+/**
+ * The supervisor pid the mock has recorded for `label`, or null.
+ *
+ * `launchctl print` reports the *program's* pid, not the supervisor's, and it
+ * is the supervisor that teardown has to be able to find.
+ *
+ * @param {string} root
+ * @param {string} file
+ * @param {string} collection
+ * @param {string} key
+ * @returns {number | null}
+ */
+function recordedPid(root, file, collection, key) {
+  try {
+    const state = JSON.parse(fs.readFileSync(path.join(root, 'state', file), 'utf8'))
+    return state[collection][key]?.pid ?? null
+  } catch {
+    return null
+  }
+}
+
+test('launchctl mock: a bootout leaves alone a supervisor started while it waited', async (t) => {
+  const { root, label, target } = sandboxRoot(t)
+  const env = { HYP_SANDBOX_SPAWN: '1' }
+  // The supervisor dies on the first SIGTERM while its program is still
+  // draining, so for the whole of that wait the domain holds a dead pid and a
+  // `kickstart` (which is what `startLaunchAgent` and `hyp daemon restart`
+  // issue) installs a replacement. A bootout that deletes by label alone then
+  // removes the replacement it never killed: `print` answers 113 while that
+  // supervisor is live, the next `bootstrap` puts a second daemon on the port,
+  // and `stop_everything` cannot reach it because it enumerates the domain.
+  const plist = writePlist(root, label, [
+    '/bin/sh', '-c', 'trap "sleep 2; exit 0" TERM; while :; do sleep 0.1; done',
+  ])
+
+  assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
+  assert.ok(await waitForPid(root, target, env), 'the supervisor started the program')
+  const first = recordedPid(root, 'launchd.json', 'services', label)
+
+  const bootout = spawn(process.execPath, [SHIM, 'launchctl', 'bootout', target], {
+    env: { ...process.env, HYP_SANDBOX_ROOT: root, ...env },
+    stdio: 'ignore',
+  })
+  const booted = new Promise((resolve) => bootout.on('exit', resolve))
+  // Well inside the ~2s the trapped program spends draining.
+  await new Promise((resolve) => setTimeout(resolve, 400))
+
+  assert.equal(shim(root, 'launchctl', ['kickstart', target], env).code, 0)
+  const second = recordedPid(root, 'launchd.json', 'services', label)
+  assert.ok(second && second !== first, 'the kickstart installed a replacement supervisor')
+
+  await booted
+  assert.equal(
+    recordedPid(root, 'launchd.json', 'services', label),
+    second,
+    'the bootout deleted the instance it killed, not the one that replaced it'
+  )
+  assert.ok(
+    isAlive(/** @type {number} */ (second)),
+    'the replacement is still running, so leaving it in the domain is what keeps it reachable'
+  )
+  // The domain entry is only half of staying reachable. `killService` also
+  // clears the child pid file, and that file is where `print` reads the
+  // `pid = N` line `waitUntilRunning` and `hyp status` branch on, so clearing
+  // the replacement's entry would report a live daemon as `not running`.
+  assert.match(
+    shim(root, 'launchctl', ['print', target], env).stdout,
+    /\bpid = \d+/,
+    'print still reports the daemon the replacement is running'
+  )
+})
+
+test('systemctl mock: a start while the unit is between restarts does not add a second supervisor', async (t) => {
+  const { root, home, unit } = systemdRoot(t)
+  const env = { HOME: home, HYP_SANDBOX_SPAWN: '1' }
+  // A supervisor waiting out `RestartSec` has already removed its child's pid
+  // file, so a liveness check that only asks `childPid` calls the unit stopped
+  // and starts a second supervisor for it. Only the newer pid reaches
+  // `systemd.json`, and both `stop` and `hyp-sandbox`'s `stop_everything` kill
+  // only what it records, so the older one survives teardown.
+  fs.writeFileSync(path.join(home, '.config', 'systemd', 'user', unit), [
+    '[Service]',
+    'Type=simple',
+    'ExecStart=/bin/sh -c "sleep 0.2"',
+    'Restart=always',
+    'RestartSec=2',
+    '',
+  ].join('\n'))
+
+  assert.equal(shim(root, 'systemctl', ['--user', 'start', unit], env).code, 0)
+  const first = recordedPid(root, 'systemd.json', 'units', unit)
+  assert.ok(first, 'the unit got a supervisor')
+
+  // Long enough for the program to exit and the supervisor to be sitting in
+  // its restart delay with no child pid file on disk.
+  await new Promise((resolve) => setTimeout(resolve, 700))
+  assert.equal(shim(root, 'systemctl', ['--user', 'start', unit], env).code, 0)
+  assert.equal(
+    recordedPid(root, 'systemd.json', 'units', unit),
+    first,
+    'the second start reused the running supervisor rather than adding one'
+  )
+
+  assert.equal(shim(root, 'systemctl', ['--user', 'stop', unit], env).code, 0)
+  assert.equal(
+    isAlive(/** @type {number} */ (first)),
+    false,
+    'stop reached every supervisor the unit had'
+  )
 })

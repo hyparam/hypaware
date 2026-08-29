@@ -194,7 +194,25 @@ stop_everything() {
     // returning here would let the caller start deleting $ROOT while the
     // daemon was still writing into HYP_HOME. Wait for the pids to actually
     // go, then escalate, so "stopped" is a fact and not a request.
-    const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+    // A pid that has exited but has not been reaped still answers signal 0 and
+    // shrugs off SIGKILL, so a naive probe treats a corpse as a live process.
+    // These supervisors are detached and orphaned by design, so whether they
+    // get reaped is up to whatever PID 1 the sandbox happens to run under -
+    // under a container init that does not reap, every reset would burn the
+    // whole budget waiting and then warn about processes that are already
+    // gone. macOS has no /proc and its launchd always reaps, so the read
+    // simply fails there and the signal probe stands. Same rule as the shims
+    // `alivePid`/`isZombie` in lib/shim.js.
+    const zombie = (pid) => {
+      let stat = ""
+      try { stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8") } catch { return false }
+      const close = stat.lastIndexOf(")")
+      return close !== -1 && stat[close + 2] === "Z"
+    }
+    const alive = (pid) => {
+      try { process.kill(pid, 0) } catch { return false }
+      return !zombie(pid)
+    }
     const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
     const waitAll = (budgetMs) => {
       const deadline = Date.now() + budgetMs
