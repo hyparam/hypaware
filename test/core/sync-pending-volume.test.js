@@ -373,6 +373,70 @@ test('a slow scan degrades every destination to a floor, not the first to precis
   }
 })
 
+test('partition discovery is charged to no slice, so the first destination is not the one left unknown', async () => {
+  const hypHome = await makeHome('discovery-cost')
+  const handles = /** @type {any[]} */ ([
+    fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central'),
+    fakeSink('local', { dir: '/home/u/exports' }, '@hypaware/local-fs'),
+    fakeSink('archive', { dir: '/home/u/archive' }, '@hypaware/local-fs'),
+    fakeSink('bucket', { url: 'https://s3.example.com/b' }, '@hypaware/s3'),
+  ])
+
+  // Discovery is one shared cost paid before any destination counts, and it is
+  // plugin-backed: `discoverPartitions` over a cold cache is exactly the call
+  // that takes a large fraction of the budget. Anchoring the slices at the
+  // preview's start rather than after discovery charges all of it to slice 0,
+  // whose deadline then falls before its first row is read - the first
+  // destination reports `unknown` while every later one reports a floor, which
+  // is the failure the slices exist to remove, moved rather than removed.
+  // 900ms of a 3000ms budget across four destinations ends slice 0 150ms early.
+  // @ref LLP 0325#slices [tests]: the shared discovery cost comes off the top, so no destination inherits an already-spent deadline
+  let t = 0
+  const now = () => t
+  const query = {
+    listDatasets: () => [
+      {
+        name: 'ai_gateway_messages',
+        discoverPartitions: async () => {
+          t += 900
+          return [{ dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath: tablePathFor(hypHome) }]
+        },
+      },
+    ],
+  }
+  const entries = function* () {
+    for (let seq = 1; seq <= 4000; seq++) {
+      t += 1
+      yield { seq }
+    }
+  }
+
+  const volumes = await previewPendingRows({
+    handles,
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries })),
+    stateRoot: stateDir(hypHome),
+    budgetMs: 3000,
+    now,
+  })
+
+  for (const instance of ['central', 'local', 'archive', 'bucket']) {
+    const volume = /** @type {any} */ (volumes.get(instance))
+    assert.equal(volume.status, 'partial', `${instance} must report a labelled floor, not '${volume.status}'`)
+    assert.ok(volume.rows > 0, `${instance} must have counted something before its deadline`)
+  }
+  // The bound the budget exists to enforce: discovery plus every slice still
+  // fits inside it, so paying discovery off the top buys fairness and not time.
+  assert.ok(t <= 3000 + CLOCK_CHECK_SLACK, `the preview overran its budget: ${t}ms`)
+})
+
+/**
+ * One in-flight `readRowsSince` block may overshoot a deadline, because the row
+ * loop checks the clock every 512 rows rather than every row. Four destinations
+ * can therefore each overshoot by up to one block.
+ */
+const CLOCK_CHECK_SLACK = 4 * 512
+
 test('rows still buffered in the spool make the count a floor rather than a silent undercount', async () => {
   const hypHome = await makeHome('spool')
   const storage = fakeStorage({ hypHome, entries: TWELVE_ROWS })

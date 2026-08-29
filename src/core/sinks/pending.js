@@ -22,8 +22,8 @@ const DEFAULT_ROW_LIMIT = 200000
  * Wall-clock budget for the whole preview. The row limit bounds work, this
  * bounds *waiting*: a cold page cache makes a small backlog slow, and a
  * consent prompt that looks hung is its own bug (#976). Spent as cumulative
- * per-destination deadlines, never as one shared clock a first destination
- * can exhaust (see `previewPendingRows`).
+ * per-destination deadlines anchored after discovery, never as one shared clock
+ * a first destination can exhaust (see `previewPendingRows`).
  */
 const DEFAULT_BUDGET_MS = 3000
 
@@ -100,18 +100,38 @@ export async function previewPendingRows(args) {
     }
 
     // The budget is spent as cumulative per-destination deadlines: destination
-    // i of n counts until start + budget * (i + 1) / n. Absolute deadlines
-    // make rollover free (a destination that finishes early donates its
-    // remainder to every later one), one destination collapses to a single
-    // shared deadline, and the last deadline is start + budget, so the total
-    // wait is unchanged. What this buys is fairness on a slow machine: the
-    // release the plan feeds is all-or-nothing, so its worth is bounded by the
-    // worst-informed line, and letting the first destination spend the whole
-    // clock left `unknown` on destinations the confirmation forwards anyway.
+    // i of n counts until `scanStart + remaining * (i + 1) / n`. What this buys
+    // on a slow machine is fairness: the release the plan feeds is
+    // all-or-nothing, so the plan's worth is bounded by its worst-informed
+    // line, and letting the first destination spend the whole clock left
+    // `unknown` on destinations the confirmation forwards anyway.
+    //
+    // The slices are anchored *after* discovery, not at `start`. Discovery is
+    // one shared cost every destination benefits from, paid before any of them
+    // counts, so charging it to the first slice is how the first destination
+    // inherits an already-spent deadline and reports `unknown` while every
+    // later one reports a floor - the failure this exists to remove, relocated
+    // rather than removed. Measured: 4 destinations, a 3000ms budget and a
+    // 900ms discovery ends slice 0 a full 150ms before its first row is read.
+    //
+    // Absolute deadlines make rollover free (a destination that finishes early
+    // donates its remainder to every later one), and the last deadline is
+    // `scanStart + remaining`, which is `start + budget` exactly, so the
+    // preview's total wall-clock bound is unchanged and a single destination
+    // collapses to today's lone `start + budget`.
+    const scanStart = now()
+    // Signed on purpose. Discovery alone can outlast the budget, and then every
+    // deadline is already in the past and every destination reports `unknown`,
+    // exactly as one shared spent deadline does today. Clamping to zero would
+    // instead hand every destination a fresh partition read and a first
+    // 512-row block on a budget that is already gone, in front of the prompt
+    // whose whole reason for having a budget is not looking hung.
+    const remaining = start + budgetMs - scanStart
     // @ref LLP 0325#slices [implements]: labelled floors on every line beat an exact first count beside an absent answer
+    // @ref LLP 0325#discovery-off-the-top [implements]: the shared discovery cost is charged to no slice, so slice 0 is not the one that starts already spent
     for (let i = 0; i < handles.length; i++) {
       const handle = handles[i]
-      const deadline = start + budgetMs * (i + 1) / handles.length
+      const deadline = scanStart + remaining * (i + 1) / handles.length
       out.set(
         handle.instanceName,
         await countForHandle({ handle, discovered, storage, stateRoot, rowLimit, deadline, now })

@@ -11,8 +11,10 @@
 > `hyp sync`'s pending preview spends one wall-clock budget in destination
 > order, so on a slow machine the first destination gets an exact count and a
 > later one inherits a spent budget and reports `unknown`. The budget stays a
-> single number, but it is now spent as cumulative per-destination deadlines:
-> destination *i* of *n* may run until `start + budget * (i + 1) / n`. A fast
+> single number, but it is now spent as cumulative per-destination deadlines
+> over whatever partition discovery leaves: destination *i* of *n* may run
+> until `scanStart + remaining * (i + 1) / n`, where `scanStart` is the clock
+> after discovery and `remaining` is the budget it did not consume. A fast
 > destination's unused time rolls forward automatically, a single-destination
 > machine is unchanged, and a slow machine degrades to labelled floors on
 > every line instead of precision on the first and absence on the rest.
@@ -44,18 +46,33 @@ Two other degradations were examined and left standing, see
 
 ### Cumulative slices with automatic rollover {#slices}
 
-`previewPendingRows` reads the clock once at the start. Destination *i*
-(zero-based) of *n* counts until the absolute deadline
-`start + budget * (i + 1) / n`. Everything downstream of the deadline is
-unchanged: the same per-partition and per-512-rows clock checks, the same
-floor and `unknown` semantics, the same false-zero guard.
+Partition discovery comes off the top {#discovery-off-the-top}. It is one
+shared cost every destination benefits from, paid before any of them counts,
+so it is charged to no slice: the preview notes `start` before discovery and
+anchors the slices at `scanStart`, the clock reading after it, dividing only
+`remaining = start + budget - scanStart`. Destination *i* (zero-based) of *n*
+then counts until the absolute deadline `scanStart + remaining * (i + 1) / n`.
+Everything downstream of the deadline is unchanged: the same per-partition and
+per-512-rows clock checks, the same floor and `unknown` semantics, the same
+false-zero guard.
+
+Anchoring at `start` instead would charge the whole shared cost to slice 0 and
+so relocate this decision's own failure onto the first destination rather than
+removing it: with four destinations, a 3000ms budget and a 900ms discovery,
+slice 0 ends 150ms before its first row is read, and the plan prints `unknown`
+on line one beside three floors. Discovery is plugin-backed
+(`discoverPartitions` over a cold cache), so its share is not small.
 
 Because the deadlines are cumulative absolute times, not per-destination
 stopwatches, a destination that finishes early donates its remainder to every
 later one with no bookkeeping {#rollover}. The last destination's deadline is
-`start + budget`, so the preview's total wall-clock bound is exactly what it
-was. With one destination the formula collapses to today's single deadline,
-so the common single-destination machine is byte-identical {#single}.
+`scanStart + remaining`, which is `start + budget` exactly, so the preview's
+total wall-clock bound is exactly what it was. With one destination the
+formula collapses to today's single deadline, so the common
+single-destination machine is byte-identical {#single}. `remaining` is
+deliberately signed: a discovery that alone outlasts the budget leaves every
+deadline already in the past and every destination reporting `unknown`, which
+is precisely what one shared spent deadline does today.
 
 The cost is the one the trade names: on a machine slow enough that the first
 destination used to consume the whole budget for an exact count, that
@@ -64,6 +81,18 @@ that every later destination reports a floor too, instead of `unknown`. Two
 labelled floors inform the all-or-nothing confirmation better than one exact
 count beside an absent answer, because the confirmation forwards both
 destinations either way.
+
+The cost has a second, sharper form, and naming it is part of accepting the
+trade {#floor-to-unknown}. A destination whose *watermark survey* outruns its
+deadline has no cursor to count any row from, so it reports `unknown` rather
+than a floor. A slice is by construction shorter than the old shared budget,
+so on a survey-bound machine (many partitions, cold filesystem) the first
+destination can fall from a floor to `unknown`, not merely from exact to a
+floor. This is accepted rather than mitigated: the plan's worth is bounded by
+its worst line, that line is `unknown` under either scheme on such a machine,
+and the slices at least stop one destination's survey from spending every
+other destination's. Charging discovery to no slice removes the common cause;
+what remains is inherent to giving any destination less than the whole clock.
 
 A destination can still meet an already-spent deadline: the clock checks are
 periodic, so one slow `readRowsSince` pull can overshoot a slice into the
@@ -105,10 +134,13 @@ a floor.
 ## Consequences
 
 - Implemented in the same change as this document, in
-  `src/core/sinks/pending.js`, with the multi-destination case added to
+  `src/core/sinks/pending.js`, with two cases added to
   `test/core/sync-pending-volume.test.js`: a scan that exhausts the first
   destination's slice must leave the second destination with a floor, not
-  `unknown`.
+  `unknown`; and a preview whose discovery eats a large share of the budget
+  must still leave every destination a floor, which pins
+  [#discovery-off-the-top](#discovery-off-the-top) against a regression that
+  would put `unknown` back on the first line.
 - The `sync.pending_preview` log line still sums `hyp_pending_rows` across
   every status and so reads low on a degraded machine; `hyp_exact_counts` on
   the same line remains the disambiguator. Unchanged by this decision.
