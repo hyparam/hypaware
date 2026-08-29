@@ -944,8 +944,18 @@ async function sweepLiveGeneration(r, cursor, opts) {
     // so the signal is an attribute, not an error.
     // @ref LLP 0220#walk-survives-a-partition [constrained-by]: a sweep failure stays a note on the span, never the partition's verdict.
     removed = filesRemovedBeforeFailure(err)
-    getActiveSpan()?.setAttribute('unreferenced_sweep_failed', true)
-    getActiveSpan()?.setAttribute('unreferenced_sweep_error', err instanceof Error ? err.message : String(err))
+    // Bounded, like `resettle_scan_error` below and for the same reason:
+    // `setAttribute` skips `buildAttrs`, so the 512-char cap every other
+    // emission gets is not applied here. This message is authored by
+    // icebird, hyparquet, or the OS, and the throw path it names is a
+    // metadata or manifest decode - a decoder that quotes the bytes it
+    // choked on would put a manifest's column bounds, which are literal
+    // slices of recorded exchange content, on an exported span.
+    // @ref LLP 0021#the-attribute-contract [constrained-by]: bound the value the helper would have bounded.
+    const sweepError = err instanceof Error ? err.message : String(err)
+    const span = getActiveSpan()
+    span?.setAttribute('unreferenced_sweep_failed', true)
+    span?.setAttribute('unreferenced_sweep_error', sweepError.slice(0, 512))
   }
   if (removed > 0) {
     r.unreferencedFilesRemoved = removed
