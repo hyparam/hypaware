@@ -121,7 +121,12 @@ export interface PendingVolume {
 export interface PendingPreviewOptions {
   /** Rows one destination may scan before reporting a floor. */
   rowLimit?: number
-  /** Wall-clock budget for the whole preview, shared across destinations. */
+  /**
+   * Wall-clock budget for the whole preview, spent as cumulative
+   * per-destination deadlines (LLP 0325): destination i of n counts until
+   * start + budget * (i + 1) / n, so a slow first destination cannot spend a
+   * later one down to `unknown`.
+   */
   budgetMs?: number
   /** Clock seam (tests). */
   now?: () => number

@@ -19,9 +19,11 @@ import { createSinkWatermarkStore } from './watermarks.js'
 const DEFAULT_ROW_LIMIT = 200000
 
 /**
- * Wall-clock budget for the whole preview, shared across destinations. The row
- * limit bounds work, this bounds *waiting*: a cold page cache makes a small
- * backlog slow, and a consent prompt that looks hung is its own bug (#976).
+ * Wall-clock budget for the whole preview. The row limit bounds work, this
+ * bounds *waiting*: a cold page cache makes a small backlog slow, and a
+ * consent prompt that looks hung is its own bug (#976). Spent as cumulative
+ * per-destination deadlines, never as one shared clock a first destination
+ * can exhaust (see `previewPendingRows`).
  */
 const DEFAULT_BUDGET_MS = 3000
 
@@ -75,7 +77,7 @@ export async function previewPendingRows(args) {
   const rowLimit = args.rowLimit ?? DEFAULT_ROW_LIMIT
   const budgetMs = args.budgetMs ?? DEFAULT_BUDGET_MS
   const now = args.now ?? (() => Date.now())
-  const deadline = now() + budgetMs
+  const start = now()
 
   /** @type {Map<string, PendingVolume>} */
   const out = new Map()
@@ -97,7 +99,19 @@ export async function previewPendingRows(args) {
       return out
     }
 
-    for (const handle of handles) {
+    // The budget is spent as cumulative per-destination deadlines: destination
+    // i of n counts until start + budget * (i + 1) / n. Absolute deadlines
+    // make rollover free (a destination that finishes early donates its
+    // remainder to every later one), one destination collapses to a single
+    // shared deadline, and the last deadline is start + budget, so the total
+    // wait is unchanged. What this buys is fairness on a slow machine: the
+    // release the plan feeds is all-or-nothing, so its worth is bounded by the
+    // worst-informed line, and letting the first destination spend the whole
+    // clock left `unknown` on destinations the confirmation forwards anyway.
+    // @ref LLP 0325#slices [implements]: labelled floors on every line beat an exact first count beside an absent answer
+    for (let i = 0; i < handles.length; i++) {
+      const handle = handles[i]
+      const deadline = start + budgetMs * (i + 1) / handles.length
       out.set(
         handle.instanceName,
         await countForHandle({ handle, discovered, storage, stateRoot, rowLimit, deadline, now })

@@ -333,6 +333,46 @@ test('a spent wall-clock budget yields unknown, not a floor built from one parti
   }
 })
 
+test('a slow scan degrades every destination to a floor, not the first to precision and the rest to unknown', async () => {
+  const hypHome = await makeHome('slices')
+  const handles = /** @type {any[]} */ ([
+    fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central'),
+    fakeSink('local', { dir: '/home/u/exports' }, '@hypaware/local-fs'),
+  ])
+
+  // A clock driven by the scan itself: each row pulled from storage costs one
+  // millisecond of fake time. Two thousand rows against a 600ms budget cannot
+  // be counted exactly for both destinations, so this is the machine where the
+  // budget's spending order decides who gets an answer. Releasing the
+  // first-sync hold is all-or-nothing, so a plan line reading `unknown` covers
+  // a destination the confirmation forwards anyway - each destination must land
+  // on a labelled floor instead.
+  // @ref LLP 0325#slices [tests]: destination i of n counts until start + budget * (i + 1) / n, so a spent first slice cannot spend the second destination down to unknown
+  let t = 0
+  const now = () => t
+  const entries = function* () {
+    for (let seq = 1; seq <= 2000; seq++) {
+      t += 1
+      yield { seq }
+    }
+  }
+
+  const volumes = await previewPendingRows({
+    handles,
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries })),
+    stateRoot: stateDir(hypHome),
+    budgetMs: 600,
+    now,
+  })
+
+  for (const instance of ['central', 'local']) {
+    const volume = /** @type {any} */ (volumes.get(instance))
+    assert.equal(volume.status, 'partial', `${instance} must report a labelled floor, not '${volume.status}'`)
+    assert.ok(volume.rows > 0, `${instance} must have counted something before its deadline`)
+  }
+})
+
 test('rows still buffered in the spool make the count a floor rather than a silent undercount', async () => {
   const hypHome = await makeHome('spool')
   const storage = fakeStorage({ hypHome, entries: TWELVE_ROWS })
