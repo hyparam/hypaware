@@ -427,9 +427,15 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       state: c.state,
     })),
     // The machine copy of the capture-health section's flush-failure lines
-    // (LLP 0322). Always an array, empty on a healthy install. `error_message`
-    // is byte-exact as stamped, unlike the rendered line, which escapes and
-    // clips it for a terminal.
+    // (LLP 0322). Always an array, empty on a healthy install.
+    //
+    // `error_message` is the value plane and the rendered line is the prose
+    // plane, the split LLP 0225 settled: no character is stripped or escaped
+    // out of this one, so a program reading it gets the bytes the stamp
+    // holds. Not unbounded, though, and the comment must not claim it is:
+    // `readFlushFailure` clamps at 512 on the way in, because the stamp is a
+    // file this process may not have written, and `table` is a display label
+    // that `sanitizeLabel` has already cleaned and clamped upstream.
     cache_flush_failures: report.cacheFlushFailures.map((f) => ({
       table: f.table,
       failed_at: f.failedAt,
@@ -756,7 +762,14 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // place queries read? - and deliberately nowhere near the freshness
   // timestamp, which quotes the last write that actually happened and would
   // become a lie if a failed attempt fed it.
-  // @ref LLP 0322#what-the-stamp-is-not [implements]: the stamp is rendered as the reason a retry is paced, and kept out of the freshness report
+  // `[constrained-by]`, not `[implements]`: LLP 0322 does not decide that the
+  // stamp is rendered here at all - `#degrade-reaches-the-signals` scopes the
+  // signal to the span status code and `queryRunsTotal`, and this surface is
+  // new. What the section does decide is the shape this line has to hold to:
+  // it may say why a retry is paced and it may not read as a write that
+  // happened, which is why the line quotes an attempt and sits nowhere near
+  // the freshness timestamp.
+  // @ref LLP 0322#what-the-stamp-is-not [constrained-by]: a rendered stamp stays a reason for a paced retry, never a freshness claim
   if (report.captureHealth.length > 0 || report.cacheFlushFailures.length > 0) {
     stdout.write('  capture health:\n')
     for (const c of report.captureHealth) {

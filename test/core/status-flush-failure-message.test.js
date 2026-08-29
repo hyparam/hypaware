@@ -8,6 +8,13 @@
 // `pendingInfo` to the `hyp status` capture-health line, and pin the line the
 // stamp must never cross: it is a pacing record, so it may say why a retry is
 // being held off and may not be read as a write that happened.
+//
+// Be honest about which is which. Tests 1, 4 and 5 fail against the pre-change
+// source, so they pin the new plumbing. Tests 2 and 3 pass either way by
+// design: they are guards on behaviour #1077 already shipped (an unreadable
+// message still paces the retry; a cooled query never claims a write), held
+// here because this is the change that gives someone a reason to reach for
+// that state, and a guard that only starts failing later has done its job.
 // @ref LLP 0322#what-the-stamp-is-not [tests]:
 
 import test from 'node:test'

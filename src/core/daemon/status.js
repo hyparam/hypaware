@@ -2288,6 +2288,14 @@ function inferConfiguredSources(activePlugins) {
 }
 
 /**
+ * How many failing tables the standing surface names. Declared beside its
+ * sibling cap's convention rather than below its only user: the count that
+ * rides with it is exact, so this bounds the terminal block and the `--json`
+ * array without bounding what the operator is told about the incident.
+ */
+const MAX_CACHE_FLUSH_FAILURES = 8
+
+/**
  * Every table carrying a readable flush-failure stamp, newest failure first.
  *
  * Bounded like the other list-valued status sections: a cache whose every
@@ -2316,11 +2324,20 @@ async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
     const failure = await readFlushFailure(tablePath)
     if (!failure) continue
     // A path, so cleaned as a name: it is filesystem-sourced and reaches a
-    // TTY. The message is not - it is the payload the operator asked for,
-    // and it is cleaned where the prose is assembled (LLP 0225).
+    // TTY. Cleaned on the write side and not only on read, the rule
+    // LLP 0228#last-tick-only settled for the sibling `dataset`/`partition`
+    // labels; a spool path carries partition segments that came off a
+    // captured row. The message is not a name - it is the payload the
+    // operator asked for, and it is cleaned where the prose is assembled
+    // (LLP 0225).
+    //
+    // Relative always, never `tablePath`: `discoverSpoolTables` only yields
+    // directories under `<cacheRoot>/datasets`, so the relative form is at
+    // minimum `datasets` and an absolute host path can never reach the
+    // label. `sanitizeLabel` returning nothing is the only fallback needed.
     const relative = path.relative(cacheRoot, tablePath)
     failures.push({
-      table: sanitizeLabel(relative === '' ? tablePath : relative) ?? 'unknown',
+      table: sanitizeLabel(relative) ?? 'unknown',
       failedAt: new Date(failure.failedAtMs).toISOString(),
       errorMessage: failure.errorMessage,
       stillCoolingDown: nowMs - failure.failedAtMs < QUERY_FLUSH_FAILURE_COOLDOWN_MS,
@@ -2329,8 +2346,6 @@ async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
   failures.sort((a, b) => (a.failedAt < b.failedAt ? 1 : a.failedAt > b.failedAt ? -1 : a.table.localeCompare(b.table)))
   return { total: failures.length, failures: failures.slice(0, MAX_CACHE_FLUSH_FAILURES) }
 }
-
-const MAX_CACHE_FLUSH_FAILURES = 8
 
 /**
  * @param {string} cacheRoot
