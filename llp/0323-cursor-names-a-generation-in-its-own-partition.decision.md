@@ -99,6 +99,15 @@ sweep would then see the real live generation as a directory the cursor does
 not reference and reclaim it once past `ORPHAN_GRACE_MS`. The field-level
 guard converts an escape into local data loss.
 
+That includes a `tableDir` that is PRESENT but not a string. The reader
+tested `typeof === 'string'` and dropped anything else, which is the
+field-level guard wearing a different spelling and costs the same
+generation. So a `tableDir` key that is present either names a generation
+this partition owns or the cursor is unreadable. A cursor carrying no
+`tableDir` key at all is a different thing and stays valid: it is the
+pre-`tableDir` spelling of `table`, and `liveGenerationDir` already reads
+it as one.
+
 Returning null keeps `liveGenerationDir` at null, which is precisely the
 signal the orphan sweep already refuses to act on. The unreadable-cursor
 path is load-bearing and already built.

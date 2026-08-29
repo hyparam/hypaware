@@ -267,3 +267,57 @@ test('tryReadCursorSync rejects a tableDir that is not a bare name inside the pa
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
+
+// A `tableDir` that is present but not a string reaches the same data loss
+// through the reader's other door: the old `typeof === 'string'` test
+// dropped it, which is the field-level guard LLP 0323#whole-cursor rejects.
+// Absent is a different thing and stays legitimate, because a cursor
+// written before `tableDir` existed means `table` by omission.
+test('a tableDir that is present but not a string is rejected, not dropped', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cursor-nonstring-'))
+  try {
+    for (const tableDir of [42, null, ['table'], { name: 'table' }, true]) {
+      await fs.writeFile(
+        path.join(dir, 'cursor.json'),
+        JSON.stringify({ epoch: 0, rowCount: 1, compaction: null, layout: 'source-table', tableDir })
+      )
+      assert.equal(
+        tryReadCursorSync(dir), null,
+        `${JSON.stringify(tableDir)} is not a generation name, so it cannot be read as the default one`
+      )
+    }
+    await fs.writeFile(
+      path.join(dir, 'cursor.json'),
+      JSON.stringify({ epoch: 0, rowCount: 1, compaction: null, layout: 'source-table' })
+    )
+    assert.deepEqual(
+      tryReadCursorSync(dir), { epoch: 0, rowCount: 1, compaction: null, layout: 'source-table' },
+      'a cursor that never carried a tableDir still means the default generation'
+    )
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a non-string tableDir does not cost a swapped generation either', async () => {
+  const { root, cacheRoot } = await makeCacheBesideOutsider()
+  try {
+    const dir = partitionDir(cacheRoot)
+    const generation = 'table-1756200000000'
+    await fs.rename(path.join(dir, 'table'), path.join(dir, generation))
+    await fs.utimes(path.join(dir, generation), STALE, STALE)
+    await fs.writeFile(
+      path.join(dir, 'cursor.json'),
+      JSON.stringify({ epoch: 0, rowCount: 1, compaction: null, layout: 'source-table', tableDir: 42 })
+    )
+
+    await maintainCache({ cacheRoot })
+
+    assert.equal(
+      await pathExists(path.join(dir, generation)), true,
+      'a cursor whose tableDir is not a name must not nominate the default one'
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})

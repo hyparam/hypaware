@@ -91,8 +91,14 @@ export function tryReadCursorSync(partitionDir) {
     if (parsed.layout === 'source-table' || parsed.layout === 'epoch') {
       cursor.layout = parsed.layout
     }
-    if (typeof parsed.tableDir === 'string') {
-      if (!generationDirIsContained(partitionDir, parsed.tableDir)) {
+    // Present but not a string is rejected too, not dropped. Dropping it
+    // is exactly the field-level guard LLP 0323#whole-cursor refuses: the
+    // cursor would still read as source-table, name the default `table`,
+    // and cost a `table-<ms>` partition its live generation to the orphan
+    // sweep. Absent stays legitimate - it is the pre-`tableDir` spelling
+    // of `table`, and `liveGenerationDir` reads it as one.
+    if (parsed.tableDir !== undefined) {
+      if (typeof parsed.tableDir !== 'string' || !generationDirIsContained(partitionDir, parsed.tableDir)) {
         reportEscapingTableDir(partitionDir, parsed.tableDir)
         return null
       }
@@ -161,17 +167,17 @@ function generationDirIsContained(partitionDir, tableDir) {
  *
  * @ref LLP 0323#say-it [implements]: this is the one corrupt-cursor case that knows its cause, so it does not degrade silently.
  * @param {string} partitionDir
- * @param {string} tableDir
+ * @param {unknown} tableDir  the rejected value, which need not be a string
  */
 function reportEscapingTableDir(partitionDir, tableDir) {
   try {
     getLogger('cache').warn(
-      'cursor.tableDir names a directory outside its partition; treating the cursor as unreadable',
+      'cursor.tableDir does not name a generation in its partition; treating the cursor as unreadable',
       {
         [Attr.OPERATION]: 'cache.cursor_read',
         [Attr.ERROR_KIND]: 'cursor_table_dir_escapes_partition',
         partition_dir: partitionDir,
-        table_dir: tableDir,
+        table_dir: typeof tableDir === 'string' ? tableDir : JSON.stringify(tableDir) ?? String(tableDir),
       }
     )
   } catch { /* a cursor read must not fail on a logger provider that is not installed */ }
