@@ -122,8 +122,8 @@ export async function previewPendingRows(args) {
     const scanStart = now()
     // Signed on purpose. Discovery alone can outlast the budget, and then every
     // deadline is already in the past and every destination reports `unknown`,
-    // exactly as one shared spent deadline does today. Clamping to zero would
-    // instead hand every destination a fresh partition read and a first
+    // exactly as one shared spent deadline does today. Clamping *this* to zero
+    // would instead hand every destination a fresh partition read and a first
     // 512-row block on a budget that is already gone, in front of the prompt
     // whose whole reason for having a budget is not looking hung.
     const remaining = start + budgetMs - scanStart
@@ -131,7 +131,18 @@ export async function previewPendingRows(args) {
     // @ref LLP 0325#discovery-off-the-top [implements]: the shared discovery cost is charged to no slice, so slice 0 is not the one that starts already spent
     for (let i = 0; i < handles.length; i++) {
       const handle = handles[i]
-      const deadline = scanStart + remaining * (i + 1) / handles.length
+      // The floor is what makes "already in the past" true at every `n`, and a
+      // no-op whenever `remaining >= 0`, since a share of a non-negative
+      // remainder never reaches past the last deadline. A share smaller than
+      // half a ULP of a `Date.now()` magnitude rounds away entirely, so a
+      // *negative* remainder divided across enough destinations hands the early
+      // ones a deadline of exactly `scanStart`, which is not in the past at
+      // all: measured at n = 20000 against a budget discovery had already
+      // overrun by 1ms, the first two destinations ran a complete exact count
+      // on a spent clock. `start + budgetMs` is the single spent deadline this
+      // is supposed to be indistinguishable from, so floor at it.
+      // @ref LLP 0325#spent-is-spent [implements]: a budget discovery already overran puts every deadline in the past at every n, not only where the share survives rounding
+      const deadline = Math.min(scanStart + remaining * (i + 1) / handles.length, start + budgetMs)
       out.set(
         handle.instanceName,
         await countForHandle({ handle, discovered, storage, stateRoot, rowLimit, deadline, now })
