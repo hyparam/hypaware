@@ -453,7 +453,12 @@ test('a destination whose whole pending range is withheld never renders "at leas
   assert.doesNotMatch(stdout.text, /at least 0 rows pending/)
   assert.doesNotMatch(stdout.text, /nothing pending/)
   assert.match(stdout.text, /pending volume not fully counted/)
-  assert.match(stdout.text, /6 rows withheld by policy \(not sent\)/)
+  // The floor mark belongs on this line too, and this is the branch where it
+  // carries the whole magnitude: the payload line has stood down to "not fully
+  // counted", so the withheld tally is the only number on screen. An
+  // unqualified `6` here would be the one exact-looking figure on an
+  // admittedly incomplete count.
+  assert.match(stdout.text, /at least 6 rows withheld by policy \(not sent\)/)
 })
 
 test('one partition whose cursor cannot be derived costs that partition, not the whole count', async () => {
@@ -553,4 +558,49 @@ test('a cursor whose timestamp will not parse never lets another partition stand
   assert.equal(volume.rows, 13)
   assert.equal(volume.resume.kind, 'unknown')
   assert.notEqual(volume.resume.kind, 'since')
+})
+
+test('an incomplete count marks the withheld line as a floor too, and an exact count does not', async () => {
+  // Both tallies come off one pass, so whatever shortened it shortened both. A
+  // withheld line that renders an exact-looking number beside "at least N rows
+  // pending" understates what policy held back, on the one line that tells the
+  // person at the prompt policy is working at all.
+  //
+  // The renderer keys off `status === 'partial'`, not off which shortfall
+  // produced it, so one shortfall proves the rendering for all of them. This
+  // case uses the cheapest one to stage, an unflushed spool: `runSync` does not
+  // plumb `rowLimit`/`budgetMs`, so reaching `partial` by scan budget through it
+  // costs a 250,000-row fixture, which is the price the floor case above pays.
+  const short = await makeHome('withheld-floor')
+  const shortStorage = fakeStorage({ hypHome: short, entries: TWELVE_ROWS })
+  // Buffered rows the preview will not flush to count: the same short pass
+  // produced both numbers.
+  shortStorage.hasPendingSync = () => true
+  const shortRun = makeCtx({
+    hypHome: short,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')],
+    storage: shortStorage,
+  })
+
+  assert.equal(await runSync(['--dry-run'], shortRun.ctx), 0)
+  assert.match(shortRun.stdout.text, /at least 10 rows pending/)
+  assert.match(shortRun.stdout.text, /at least 2 rows withheld by policy \(not sent\)/)
+  assert.doesNotMatch(
+    shortRun.stdout.text,
+    /^ +2 rows withheld by policy/m,
+    'an unqualified withheld count next to a floor claims a precision the scan never had'
+  )
+
+  // The mark is earned, not decorative: a complete count still states an exact
+  // withheld total.
+  const whole = await makeHome('withheld-exact')
+  const wholeRun = makeCtx({
+    hypHome: whole,
+    sinks: [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')],
+    storage: fakeStorage({ hypHome: whole, entries: TWELVE_ROWS }),
+  })
+
+  assert.equal(await runSync(['--dry-run'], wholeRun.ctx), 0)
+  assert.match(wholeRun.stdout.text, /^ +2 rows withheld by policy \(not sent\)/m)
+  assert.doesNotMatch(wholeRun.stdout.text, /at least 2 rows withheld/)
 })
