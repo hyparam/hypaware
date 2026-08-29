@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
+import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { countGatewayFallbackRows } from './gateway_fallback.js'
 import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
@@ -63,6 +64,11 @@ export function readCursorSync(partitionDir) {
  * cursor (e.g. the orphan-generation sweep) must use this so a corrupt
  * `cursor.json` is never mistaken for "the live generation is epoch 0".
  *
+ * A `tableDir` that names anything outside its own partition makes the
+ * whole cursor unreadable, and it is rejected here rather than at any call
+ * site: see {@link generationDirIsContained}.
+ *
+ * @ref LLP 0323#one-gate [implements]: the containment check belongs to the reader every destructive path already shares.
  * @param {string} partitionDir
  * @returns {PartitionCursor | null}
  */
@@ -86,6 +92,10 @@ export function tryReadCursorSync(partitionDir) {
       cursor.layout = parsed.layout
     }
     if (typeof parsed.tableDir === 'string') {
+      if (!generationDirIsContained(partitionDir, parsed.tableDir)) {
+        reportEscapingTableDir(partitionDir, parsed.tableDir)
+        return null
+      }
       cursor.tableDir = parsed.tableDir
     }
     if (parsed.retention && typeof parsed.retention === 'object') {
@@ -98,6 +108,64 @@ export function tryReadCursorSync(partitionDir) {
   } catch {
     return null
   }
+}
+
+/**
+ * Does `tableDir` name a generation directory inside `partitionDir`?
+ *
+ * Every writer in the tree mints a bare `table` or `table-<ms>` name
+ * (`generationLayout`'s `nextDirName`, the context-graph rewrite, and the
+ * first append below), so a value that resolves anywhere else did not come
+ * from `hyp`. It came from a corrupt or edited `cursor.json`, and the
+ * readers downstream are not all read-only: maintenance joins this name
+ * onto the partition path and then sweeps, unlinks, and rewrites whatever
+ * it finds there. One `..` segment therefore aims destructive cache
+ * maintenance at a directory the cache does not own.
+ *
+ * Absolute is rejected separately because `path.resolve` discards the
+ * partition entirely rather than escaping it by degrees. `partitionDir`
+ * itself is rejected too: it holds the cursor, not a generation.
+ *
+ * @ref LLP 0323#contained [implements]: a cursor may name a generation only inside its own partition.
+ * @param {string} partitionDir
+ * @param {string} tableDir
+ * @returns {boolean}
+ */
+function generationDirIsContained(partitionDir, tableDir) {
+  if (tableDir === '' || path.isAbsolute(tableDir)) return false
+  const root = path.resolve(partitionDir)
+  return path.resolve(root, tableDir).startsWith(root + path.sep)
+}
+
+/**
+ * Say that a cursor was rejected for naming a generation outside its
+ * partition, and say it out loud.
+ *
+ * The rejection is otherwise indistinguishable from every other unreadable
+ * cursor: the partition stops compacting, stops sweeping, and reads as
+ * empty until the next append rewrites the cursor. That is the safe
+ * behaviour and the useless diagnostic - "my rows vanished" and "a file I
+ * never wrote is in my cache" are two symptoms an operator would otherwise
+ * have to reconcile against silence.
+ *
+ * `warn`, not `error`: nothing failed, and the tick carries on.
+ *
+ * @ref LLP 0323#say-it [implements]: this is the one corrupt-cursor case that knows its cause, so it does not degrade silently.
+ * @param {string} partitionDir
+ * @param {string} tableDir
+ */
+function reportEscapingTableDir(partitionDir, tableDir) {
+  try {
+    getLogger('cache').warn(
+      'cursor.tableDir names a directory outside its partition; treating the cursor as unreadable',
+      {
+        [Attr.OPERATION]: 'cache.cursor_read',
+        [Attr.ERROR_KIND]: 'cursor_table_dir_escapes_partition',
+        partition_dir: partitionDir,
+        table_dir: tableDir,
+      }
+    )
+  } catch { /* a cursor read must not fail on a logger provider that is not installed */ }
 }
 
 /**
