@@ -96,6 +96,12 @@ export interface PendingVolume {
    * Rows the export seam withholds (a `local-only` directory, an opted-out
    * source). Reported apart from `rows` and never added to it: they advance the
    * cursor but never ship.
+   *
+   * A floor when `status` is `partial`, for the same reason `rows` is: one scan
+   * produces both tallies, so whatever cut it short cut both short. Render it
+   * as "at least N" wherever `rows` earns that mark. An exact-looking withheld
+   * number beside an "at least N rows pending" claims a precision the count
+   * never had, on the one line that says policy is working at all.
    */
   withheldRows: number
   /**
