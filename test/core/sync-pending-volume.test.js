@@ -568,9 +568,9 @@ test('an incomplete count marks the withheld line as a floor too, and an exact c
   //
   // The renderer keys off `status === 'partial'`, not off which shortfall
   // produced it, so one shortfall proves the rendering for all of them. This
-  // case uses the cheapest one to stage through `runSync`, an unflushed spool:
-  // `runSync` does not plumb `rowLimit`/`budgetMs`, and the scan-budget route to
-  // `partial` is pinned directly against `previewPendingRows` above.
+  // case uses the cheapest one to stage, an unflushed spool: `runSync` does not
+  // plumb `rowLimit`/`budgetMs`, so reaching `partial` by scan budget through it
+  // costs a 250,000-row fixture, which is the price the floor case above pays.
   const short = await makeHome('withheld-floor')
   const shortStorage = fakeStorage({ hypHome: short, entries: TWELVE_ROWS })
   // Buffered rows the preview will not flush to count: the same short pass

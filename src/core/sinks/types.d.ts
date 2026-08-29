@@ -99,9 +99,12 @@ export interface PendingVolume {
    *
    * A floor when `status` is `partial`, for the same reason `rows` is: one scan
    * produces both tallies, so whatever cut it short cut both short. Render it
-   * as "at least N" wherever `rows` earns that mark. An exact-looking withheld
-   * number beside an "at least N rows pending" claims a precision the count
-   * never had, on the one line that says policy is working at all.
+   * as "at least N" on every `partial` volume, including the one where `rows`
+   * is 0 and the payload line stands down to "not fully counted": there the
+   * withheld tally is the only number on screen, so it is the branch that most
+   * needs the mark. An exact-looking withheld number beside an admittedly
+   * incomplete payload count claims a precision the count never had, on the one
+   * line that says policy is working at all.
    */
   withheldRows: number
   /**
