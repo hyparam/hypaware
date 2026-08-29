@@ -306,16 +306,27 @@ function acquireStateLock(file) {
       // lost update it may have caused shows up as a state file quietly
       // missing a setenv, hours later, in a run nobody can replay.
       //
-      // Only when there is still a lock here to break, though. The holder can
-      // release between the take that failed and this check, and a line
-      // claiming an eviction that never happened is the same false record
-      // this event exists to prevent: it sends a reader hunting a lost update
-      // through a run that in the end never contended past its wait.
-      if (ageMs !== null) recordLockEvent(file, stale ? 'broke-stale' : 'broke-budget', started, ageMs)
-      try { fs.rmSync(lockPath, { force: true }) } catch { /* another shim broke it first */ }
+      // The removal is what says an eviction happened, so the record follows
+      // it rather than the age read above. Neither observation carries the
+      // other: the holder can release between the take that failed and the
+      // stat, so an age of null still sits in front of an `rmSync` that
+      // evicts a lock taken in the gap, and a lock path this shim cannot
+      // clear reads as an age while nothing is broken at all. A line for
+      // either one is the same false record this event exists to prevent -
+      // sending a reader hunting a lost update through a run that in the end
+      // never contended past its wait, or leaving an eviction that did happen
+      // off the only account the sandbox can give of itself. `force` stays
+      // off so the ENOENT meaning "already gone" stays distinguishable from a
+      // removal that took something.
+      let broke = false
+      try {
+        fs.rmSync(lockPath)
+        broke = true
+      } catch { /* released first, broken by another shim, or not a lock this shim can clear */ }
+      if (broke) recordLockEvent(file, stale ? 'broke-stale' : 'broke-budget', started, ageMs)
       const retaken = tryStateLock(lockPath)
       if (retaken) return retaken
-      recordLockEvent(file, 'degraded-unlocked', started, ageMs ?? 0)
+      recordLockEvent(file, 'degraded-unlocked', started, ageMs)
       return () => {}
     }
     sleepSync(STOP_POLL_MS)
@@ -329,10 +340,16 @@ function acquireStateLock(file) {
  * with a `lock` object a reader can filter on. `exit: -1` marks it as an
  * observation rather than an intercepted call, the way `supervisorNote` does.
  *
+ * `ageMs` is null when the age could not be read: the lock was gone by the
+ * time it was looked at, or the lock path was something `statSync` refused.
+ * Null rather than 0, because 0 is also what a lock taken this millisecond
+ * reports, and a reader has to be able to tell a measurement from its
+ * absence.
+ *
  * @param {string} file
  * @param {'broke-stale' | 'broke-budget' | 'degraded-unlocked'} event
  * @param {number} started
- * @param {number} ageMs
+ * @param {number | null} ageMs
  */
 function recordLockEvent(file, event, started, ageMs) {
   const name = path.basename(file)
@@ -774,7 +791,20 @@ function startSupervisor(label, plist) {
  * @param {string} plist
  */
 function supervise(label, plist) {
-  const xml = fs.readFileSync(plist, 'utf8')
+  // The bootstrap that spawned this supervisor read the same plist to find
+  // the label, but that was a different process ago, and `kickstart` respawns
+  // from the path the domain remembers without re-reading it at all. This one
+  // is detached with stdio ignored, so an unguarded throw here is a KeepAlive
+  // supervisor that dies without a word while the call that started it
+  // reports a pid and exit 0, which is the confidently wrong answer this mock
+  // exists to avoid. Leave the errno on the record instead.
+  let xml = ''
+  try {
+    xml = fs.readFileSync(plist, 'utf8')
+  } catch (err) {
+    supervisorNote(label, `could not read ${plist}: ${err instanceof Error ? err.message : String(err)}`)
+    return
+  }
   const argv = parsePlistArray(xml, 'ProgramArguments')
   const keepAlive = /<key>KeepAlive<\/key>\s*<true\/>/.test(xml)
   const jobEnv = parsePlistDict(xml, 'EnvironmentVariables')
@@ -837,7 +867,15 @@ function supervise(label, plist) {
  * @param {string} unitPath
  */
 function superviseSystemd(unit, unitPath) {
-  const body = fs.readFileSync(unitPath, 'utf8')
+  // The same silent death as the launchd lane above, out of the same
+  // detached, stdio-ignored process.
+  let body = ''
+  try {
+    body = fs.readFileSync(unitPath, 'utf8')
+  } catch (err) {
+    supervisorNote(unit, `could not read ${unitPath}: ${err instanceof Error ? err.message : String(err)}`)
+    return
+  }
   const argv = parseSystemdWords(unitValues(body, 'ExecStart')[0] ?? '')
   const restart = unitValues(body, 'Restart')[0] === 'always'
   const restartSec = Number(unitValues(body, 'RestartSec')[0] ?? '1')

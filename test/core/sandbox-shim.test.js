@@ -832,12 +832,25 @@ async function waitForLockToken(lockPath, not) {
  * The lock events `calls.jsonl` recorded, oldest first.
  *
  * @param {string} root
- * @returns {{ tool: string, exit: number, note: string, lock: { file: string, event: string, ageMs: number, waitedMs: number } }[]}
+ * @returns {{ tool: string, exit: number, note: string, lock: { file: string, event: string, ageMs: number | null, waitedMs: number } }[]}
  */
 function lockEvents(root) {
   let raw = ''
   try { raw = fs.readFileSync(path.join(root, 'state', 'calls.jsonl'), 'utf8') } catch { return [] }
   return raw.split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((entry) => entry.lock)
+}
+
+/**
+ * The observations a detached supervisor appended to `calls.jsonl`.
+ *
+ * @param {string} root
+ * @returns {{ note: string }[]}
+ */
+function supervisorNotes(root) {
+  let raw = ''
+  try { raw = fs.readFileSync(path.join(root, 'state', 'calls.jsonl'), 'utf8') } catch { return [] }
+  return raw.split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    .filter((entry) => entry.args && entry.args[0] === '(supervisor)')
 }
 
 test('state lock: a holder whose lock was broken does not delete its successor lock', async (t) => {
@@ -918,15 +931,20 @@ test('state lock: breaking a stale lock is recorded in calls.jsonl', (t) => {
   const events = lockEvents(root)
   assert.equal(events.length, 1, 'exactly one lock event')
   assert.equal(events[0].lock.event, 'broke-stale')
-  assert.ok(events[0].lock.ageMs >= 60_000, 'it records how old the lock it broke was')
+  // A null age here would mean the record was written without ever reading
+  // the lock it claims to have broken.
+  assert.notEqual(events[0].lock.ageMs, null, 'it measured the lock before breaking it')
+  assert.ok(Number(events[0].lock.ageMs) >= 60_000, 'it records how old the lock it broke was')
 })
 
 test('state lock: proceeding unlocked after losing the retake is recorded in calls.jsonl', (t) => {
   const { root } = sandboxRoot(t)
   const lockPath = lockPathFor(root, 'launchd.json')
-  // A lock path the shim can neither take nor remove, which is what losing the
-  // retake to a third shim looks like from inside `acquireStateLock`: it
-  // breaks the lock, fails to get it back, and does the update unlocked.
+  // A lock path the shim can neither take nor remove, which is what losing
+  // the retake to a third shim looks like from inside `acquireStateLock`: it
+  // fails to get the lock back and does the update unlocked. Nothing was
+  // evicted on the way there, because the removal failed too, so the only
+  // line is the one saying this run went unlocked.
   fs.mkdirSync(lockPath, { recursive: true })
 
   assert.equal(
@@ -938,9 +956,33 @@ test('state lock: proceeding unlocked after losing the retake is recorded in cal
 
   assert.deepEqual(
     lockEvents(root).map((entry) => entry.lock.event),
-    ['broke-budget', 'degraded-unlocked'],
-    'the unlocked update is on the record'
+    ['degraded-unlocked'],
+    'the unlocked update is on the record, and nothing claims a break that did not happen'
   )
+})
+
+test('state lock: an eviction is recorded from the removal, not from an age it could not read', (t) => {
+  const { root } = sandboxRoot(t)
+  const lockPath = lockPathFor(root, 'launchd.json')
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true })
+  // A lock path the take refuses and the age check cannot measure: `wx` fails
+  // EEXIST on the link itself, `statSync` follows it to nothing. It stands in
+  // for the race no age read can see - a holder releasing between the failed
+  // take and the stat, and a successor taking the lock again before the rm -
+  // where the removal evicts something the age said was not there. Deciding
+  // from the age alone drops that eviction off the record, and the record is
+  // the only account the sandbox can give of a lost update.
+  fs.symlinkSync(path.join(root, 'state', 'no-such-lock-target'), lockPath)
+
+  assert.equal(
+    shim(root, 'launchctl', ['setenv', 'FOO', '1'], { HYP_SANDBOX_TEST_LOCK_WAIT_MS: '0' }).code,
+    0
+  )
+  assert.equal(shim(root, 'launchctl', ['getenv', 'FOO']).stdout, '1\n', 'the update still landed')
+
+  const events = lockEvents(root)
+  assert.deepEqual(events.map((entry) => entry.lock.event), ['broke-budget'], 'the eviction is on the record')
+  assert.equal(events[0].lock.ageMs, null, 'and says the age of what it removed could not be read')
 })
 
 // Root reads through mode 000 (CAP_DAC_OVERRIDE), so the EACCES this case is
@@ -963,6 +1005,30 @@ test('state lock: an unreadable state file is not committed as an empty domain',
 
   fs.chmodSync(file, 0o600)
   assert.equal(shim(root, 'launchctl', ['print', target]).code, 0, 'the bootstrapped service survived')
+})
+
+test('supervisor: a definition file it cannot read leaves a note rather than dying silently', (t) => {
+  const { root, label } = sandboxRoot(t)
+  const { root: systemdRootDir, unit } = systemdRoot(t)
+  // Both supervisors run detached with stdio ignored, so a throw at the read
+  // that opens them is a KeepAlive supervisor gone without a word while the
+  // `bootstrap` or `start` that spawned it recorded a pid and exit 0. It is
+  // reachable without the file ever being corrupt: `kickstart` respawns from
+  // the path the domain remembers, and re-reads nothing before it does.
+  const missing = path.join(root, 'gone.plist')
+  const supervised = shim(root, '__supervise', [label, missing])
+  assert.equal(supervised.code, 0, 'the launchd supervisor exits rather than throwing')
+
+  const missingUnit = path.join(systemdRootDir, 'gone.service')
+  const supervisedUnit = shim(systemdRootDir, '__supervise_systemd', [unit, missingUnit])
+  assert.equal(supervisedUnit.code, 0, 'the systemd supervisor exits rather than throwing')
+
+  for (const [where, name] of [[root, missing], [systemdRootDir, missingUnit]]) {
+    const notes = supervisorNotes(where)
+    assert.equal(notes.length, 1, `one supervisor note for ${name}`)
+    assert.match(notes[0].note, /could not read/, 'the note says the read is what failed')
+    assert.match(notes[0].note, /ENOENT/, 'and names the errno, which is the whole of what it can say')
+  }
 })
 
 test('state lock: a no-op update does not materialise a state file', (t) => {

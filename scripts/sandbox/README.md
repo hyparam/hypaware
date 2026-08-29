@@ -51,11 +51,13 @@ Two shims updating the same state file take a lock over the read-change-write,
 because a rename stops torn reads but not lost updates. A mock that deadlocks
 would be worse than one that races, so a lock left behind by a shim that was
 killed is broken after 60s, and a wait that outlives its 15s budget breaks
-the holder's lock and takes it for itself; it proceeds unlocked only when
-that retake is lost too. Every one of those degraded exits appends a line to
-`calls.jsonl` carrying a `lock` object (`broke-stale`, `broke-budget`, or
-`degraded-unlocked`, with the age it broke and how long it waited), so a run
-that lost an update can be told from one that never contended:
+the holder's lock and takes it for itself. Either break proceeds unlocked
+instead when the retake that follows it is lost. Every one of those degraded
+exits appends a line to `calls.jsonl` carrying a `lock` object
+(`broke-stale`, `broke-budget`, or `degraded-unlocked`, with how long it
+waited and the age of the lock it broke, or a null age where there was
+nothing left to measure), so a run that lost an update can be told from one
+that never contended:
 
 ```sh
 grep '"lock"' "$(scripts/sandbox/hyp-sandbox path)/state/calls.jsonl"
