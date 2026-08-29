@@ -14,8 +14,24 @@
 // pre-upgrade null-seq backlog the destination has already shipped and
 // overstate; the reverse would hide a backlog the very next tick forwards,
 // which is the undercount class this preview exists to close. So pin the
-// property behaviourally: drive every seam against a recording storage stub
-// and require the read options they hand to `readRowsSince` to be identical.
+// property behaviourally: drive those three incremental seams against a
+// recording storage stub and require the read options they hand to
+// `readRowsSince` to be identical.
+//
+// Scope, stated so nobody reads a guarantee that is not here. Two further
+// `readRowsSince` call sites are deliberately *not* pinned, because they are
+// not the incremental export seam and are not supposed to agree with it:
+//
+// - `@hypaware/central`'s `writeHistoryBaseline` reads `{ includeLegacy: false }`
+//   with no `since` to skip a newly eligible open dataset's history *without
+//   sending it* (LLP 0305 #start-now). The preview does not model that, so it
+//   over-counts such a dataset on its first tick: the safe direction on a
+//   consent prompt, and the reason this file does not try to equalize them.
+// - `@hypaware/format-iceberg`'s table-format reader takes whole tables with
+//   `{ includeLegacy: true }`; it has no watermark and no notion of pending.
+//
+// A fourth incremental seam added later is therefore not covered until it is
+// added to the scenarios below by name.
 //
 // This is a parity test on purpose. Extracting one helper would remove today's
 // duplication but not the failure mode: a future site can call `readRowsSince`
@@ -285,6 +301,11 @@ test('the preview discovers partitions with exactly the scope the export driver 
   await driver.tick({ force: true, now: new Date('2026-08-20T09:00:00.000Z') })
 
   assert.equal(previewArgs.length, 1)
-  assert.equal(driverArgs.length, 1)
-  assert.deepEqual(previewArgs[0], driverArgs[0], 'the preview and the driver must ask for the same partitions')
+  // At least one, and every one: the driver re-discovers after a flush, so
+  // pinning the *count* would fail on an unrelated change to when it flushes.
+  // The property is the scope each call carries, not how many calls there are.
+  assert.ok(driverArgs.length >= 1, 'the driver discovered partitions at least once')
+  for (const args of driverArgs) {
+    assert.deepEqual(previewArgs[0], args, 'the preview and the driver must ask for the same partitions')
+  }
 })

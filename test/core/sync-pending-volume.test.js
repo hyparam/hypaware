@@ -453,7 +453,12 @@ test('a destination whose whole pending range is withheld never renders "at leas
   assert.doesNotMatch(stdout.text, /at least 0 rows pending/)
   assert.doesNotMatch(stdout.text, /nothing pending/)
   assert.match(stdout.text, /pending volume not fully counted/)
-  assert.match(stdout.text, /6 rows withheld by policy \(not sent\)/)
+  // The floor mark belongs on this line too, and this is the branch where it
+  // carries the whole magnitude: the payload line has stood down to "not fully
+  // counted", so the withheld tally is the only number on screen. An
+  // unqualified `6` here would be the one exact-looking figure on an
+  // admittedly incomplete count.
+  assert.match(stdout.text, /at least 6 rows withheld by policy \(not sent\)/)
 })
 
 test('one partition whose cursor cannot be derived costs that partition, not the whole count', async () => {
@@ -555,14 +560,20 @@ test('a cursor whose timestamp will not parse never lets another partition stand
   assert.notEqual(volume.resume.kind, 'since')
 })
 
-test('a truncated scan marks the withheld line as a floor too, and an exact count does not', async () => {
-  // Both tallies come off one scan, so one truncation applies to both. A
+test('an incomplete count marks the withheld line as a floor too, and an exact count does not', async () => {
+  // Both tallies come off one pass, so whatever shortened it shortened both. A
   // withheld line that renders an exact-looking number beside "at least N rows
   // pending" understates what policy held back, on the one line that tells the
   // person at the prompt policy is working at all.
+  //
+  // The renderer keys off `status === 'partial'`, not off which shortfall
+  // produced it, so one shortfall proves the rendering for all of them. This
+  // case uses the cheapest one to stage through `runSync`, an unflushed spool:
+  // `runSync` does not plumb `rowLimit`/`budgetMs`, and the scan-budget route to
+  // `partial` is pinned directly against `previewPendingRows` above.
   const short = await makeHome('withheld-floor')
   const shortStorage = fakeStorage({ hypHome: short, entries: TWELVE_ROWS })
-  // Buffered rows the preview will not flush to count: the same short scan
+  // Buffered rows the preview will not flush to count: the same short pass
   // produced both numbers.
   shortStorage.hasPendingSync = () => true
   const shortRun = makeCtx({
