@@ -1001,7 +1001,12 @@ test('state lock: an unreadable state file is not committed as an empty domain',
   t.after(() => { try { fs.chmodSync(file, 0o600) } catch { /* already restored */ } })
 
   const setenv = shim(root, 'launchctl', ['setenv', 'NODE_USE_SYSTEM_CA', '1'])
-  assert.notEqual(setenv.code, 0, 'a state file it cannot read is an error, not an empty domain')
+  // `code` is `spawnSync`'s `status`, which is `null` for a child that died on
+  // a signal, and `notEqual(code, 0)` counts that `null` as the error it went
+  // looking for. This read leaves through `main`'s catch, which is exit 70 and
+  // nothing else for a `launchctl` the shim recognises, so that is what the
+  // assertion names.
+  assert.equal(setenv.code, 70, 'a state file it cannot read is an error, not an empty domain')
   // The exit code alone cannot tell a read that failed from a shim that broke
   // on the way to reporting one. Naming the errno is the whole of what this
   // error is for, and asserting only `code !== 0` let a ReferenceError raised
