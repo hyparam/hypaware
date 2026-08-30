@@ -651,6 +651,13 @@ test('a partition created after rollout is quoted, not counted as a start-now ze
     volume.rows >= shipped,
     `the preview quoted ${volume.rows} rows while the export shipped ${shipped}, so the prompt promised less egress than occurred`
   )
+  // And exactly, not merely at least. `>=` above is the safety property and
+  // states why it matters; on its own it would also accept a preview that
+  // recounted the already-cursored `source=claude` partition and quoted eight,
+  // which is the over-count LLP 0324 exists to remove reappearing inside the
+  // fix for the undercount.
+  assert.equal(volume.rows, shipped, 'the preview quotes this state exactly, neither less nor more')
+  assert.equal(volume.status, 'counted')
   assert.equal(volume.resume.kind, 'beginning', 'a partition with no cursor reaches back as far as the table does')
 })
 
