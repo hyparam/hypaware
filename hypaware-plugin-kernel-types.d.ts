@@ -1414,7 +1414,11 @@ export interface SinkHandle {
  * uncursored partition. A sink that establishes its baselines up front, so an
  * uncursored partition is instead one that appeared afterwards and forwards in
  * full, must answer `forwards`, or the prompt reads "nothing pending" over rows
- * the next export sends.
+ * the next export sends. `@hypaware/central` is such a sink, and LLP 0327 is
+ * the decision of record for that rule; it supersedes the start-now clause of
+ * LLP 0324#disposition-seam's central mapping.
+ *
+ * @ref LLP 0327#uncursored-forwards: a sink that baselines at creation must answer forwards, because its uncursored partitions forward in full
  */
 export type DatasetDisposition = 'forwards' | 'skips' | 'starts-from-now'
 

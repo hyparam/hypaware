@@ -50,7 +50,9 @@
 // because the state `starts-from-now` speaks about - a partition with no
 // durable cursor - means the opposite for this sink once its rollout manifest
 // exists: a post-rollout partition that forwards in full
-// (LLP 0307 #future-partitions). The scenario that pins that is at the bottom
+// (LLP 0307 #future-partitions). LLP 0327 is the decision of record for that
+// divergence; it supersedes the start-now clause of LLP 0324
+// #disposition-seam's central mapping. The scenario that pins that is at the bottom
 // too, and it is the reason the `starts-from-now` arm of the kernel rule is
 // exercised by a synthetic sink in `test/core/sync-pending-volume.test.js`
 // rather than by this one.
@@ -612,7 +614,8 @@ test('a partition created after rollout is quoted, not counted as a start-now ze
   // and forwards in full. A `starts-from-now` answer would make LLP
   // 0324#starts-from-now count exactly those rows as zero, so the prompt would
   // read "nothing pending" while the next export shipped the whole backlog.
-  // @ref LLP 0324#drift-pinned [tests]: the preview may not quote less egress than the export performs, on the one state where central's two answers differ
+  // @ref LLP 0327#central-answers-forwards [tests]: the decision of record for the forwards answer, on the one state where central's two answers differ
+  // @ref LLP 0324#drift-pinned [tests]: the preview may not quote less egress than the export performs
   // @ref LLP 0307#future-partitions [tests]: an uncursored post-rollout partition forwards from seq 0, which is the opposite of a start-now zero
   const home = await makeHome('postrollout')
   const central = centralOverGrowingOpenDataset(home)
