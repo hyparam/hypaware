@@ -8,6 +8,9 @@
 **Date:** 2026-08-30
 **Extends:** [LLP 0323](./0323-cursor-names-a-generation-in-its-own-partition.decision.md) (#contained: containment is now checked against the filesystem as well as the string)
 **Related:** LLP 0304, LLP 0310, LLP 0316, LLP 0323
+**Extended-by:** [LLP 0328](./0328-a-spool-path-is-checked-where-it-is-walked.decision.md)
+(#one-level-down: the same check, on the capture-spool sweep, so the principle
+now spans subsystems rather than only the cache)
 
 > LLP 0323's containment check reads the string and never the disk, so a
 > `tableDir` naming a bare-name SYMLINK is contained by spelling and
@@ -170,6 +173,14 @@ That is the general statement the three guards are instances of: a pass
 that unlinks by path checks the path it will walk, at the point it walks
 it. The cursor gate decides whether a NAME is usable; it cannot decide what
 an unlink one lenient read (or no read at all) away is allowed to touch.
+
+**Extended-by:** [LLP 0328](./0328-a-spool-path-is-checked-where-it-is-walked.decision.md)
+(Accepted): that statement is not about the cache. The capture-spool sweep
+(LLP 0253#purge-and-detach-sweep) had the same gap between a string
+containment test and a `readdir` that follows, with a wider reach (no name
+predicate, no grace window) and a user-invoked trigger, and it takes the same
+check from this document. Nothing here is re-decided; the principle is applied
+in a fourth pass and a second subsystem.
 
 Each refusal logs its own `error_kind` rather than the cursor gate's:
 `sweep_path_is_symlink` for the two maintenance passes,

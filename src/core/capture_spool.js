@@ -3,6 +3,8 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 
+import { isConfirmedSymlink } from './cache/paths.js'
+import { Attr, getLogger } from './observability/index.js'
 import { errCode } from './util/json_util.js'
 
 /**
@@ -54,6 +56,35 @@ export function isCaptureSpoolDir(dir, hypHome) {
 }
 
 /**
+ * Say that the sweep refused a directory, and say it out loud.
+ *
+ * A guard on a deleting pass fails silently by construction: the symptom of a
+ * refusal nobody reports is a spool that quietly stops being emptied, with
+ * both verbs still returning success and a zero count that reads exactly like
+ * an empty spool. `ls -l` at the logged component answers in one line.
+ *
+ * The two paths are directories, not filenames. This file's privacy rule
+ * (counts, never names) bounds the spooled bodies, whose names are the
+ * client's and whose contents are raw prompts; a spool directory is one we or
+ * the attach marker named, and the component that refused is the only fact
+ * worth saying about it.
+ *
+ * @param {string} root the spool the sweep was asked to empty
+ * @param {string} planted the component on the way down that is a symlink
+ */
+function reportPlantedSpoolPath(root, planted) {
+  try {
+    getLogger('capture-spool').warn('a symlink stands on the spool sweep path; emptying nothing beneath it', {
+      [Attr.COMPONENT]: 'capture-spool',
+      [Attr.OPERATION]: 'capture_spool.sweep',
+      [Attr.ERROR_KIND]: 'capture_spool_path_is_symlink',
+      spool_dir: root,
+      planted_component: planted,
+    })
+  } catch { /* a sweep must not fail on a logger provider that is not installed */ }
+}
+
+/**
  * Empty a capture spool: remove every file under `dir`, keeping the
  * directories themselves.
  *
@@ -64,8 +95,26 @@ export function isCaptureSpoolDir(dir, hypHome) {
  * `failed` count the caller reports, not a reason to fail a purge or a detach
  * that already succeeded.
  *
+ * Every directory is asked one question before it is walked: `lstat`, is this
+ * a symlink. {@link isCaptureSpoolDir} is string work only, so it cannot see
+ * that `<hyp-home>/spool/claude-bodies` is a link, and `readdir` follows the
+ * path it is handed. This walk then removes every file it lists, with no name
+ * predicate and no grace window, recursing through real subdirectories, so a
+ * link at the entry path (or at `<hyp-home>/spool` itself, which `hyp purge`
+ * sweeps whatever its target) aims the whole deletion at a tree outside the
+ * HypAware home. Nothing we or a client write mints a symlink here, so a
+ * confirmed one means this is not a spool to empty.
+ *
+ * Only a symlink the filesystem confirms refuses. An unanswerable stat
+ * accepts, and the `readdir` behind it then reports the directory as
+ * `failed`, which is the line that tells a user to empty it by hand. Reading
+ * silence as an escape would replace that with the same zero-count success an
+ * empty spool returns.
+ *
  * @ref LLP 0253#purge-and-detach-sweep [implements]: purge and detach both
  *   remove the spool directory's contents
+ * @ref LLP 0328#sweep-path [implements]: the containment test is a string, so
+ *   the walk asks the filesystem about each directory at the point it walks it
  * @param {string} dir
  * @param {{ fs?: typeof fsp }} [opts]
  * @returns {Promise<{ filesRemoved: number, bytesRemoved: number, failed: number }>}
@@ -80,6 +129,15 @@ export async function sweepCaptureSpool(dir, opts = {}) {
   const pending = [dir]
   while (pending.length > 0) {
     const current = /** @type {string} */ (pending.pop())
+    // Asked of the entry path and of every subdirectory alike, because the
+    // question is about the path this iteration is about to walk rather than
+    // about who supplied it. In-walk dirents are already safe (a symlink is
+    // not `isDirectory()`, so it is removed as the link it is and never
+    // queued); this covers the one path no dirent ever described.
+    if (isConfirmedSymlink(current)) {
+      reportPlantedSpoolPath(dir, current)
+      continue
+    }
     /** @type {Dirent[]} */
     let entries
     try {
