@@ -10,7 +10,9 @@ decision realizes, accepted 2026-08-17), LLP 0252, LLP 0257, LLP 0258
 **Extended-by:** LLP 0263 (#byte-cap is also enforced by the client hook, so
 the bound holds while the daemon is down), LLP 0287 (#delete-on-drop is
 applied by the Claude OTEL listener to an `undetermined` verdict too, which is
-none of the three drops this names; open, nothing settled until that issue is)
+none of the three drops this names; open, nothing settled until that issue is),
+LLP 0328 (#purge-and-detach-sweep: the sweep asks the filesystem about each
+directory it walks, not only the string about the name)
 
 > Raw request and response bodies land in a spool directory under the HypAware
 > home with owner-only permissions. Its size is a config value with a 512 MB
@@ -75,6 +77,13 @@ unchanged until it is settled.
 contents.** The attach marker records the path (LLP 0258 #marker-and-spool) so
 neither verb has to recompute it, and so a detach after a config change still
 sweeps the directory that was actually used.
+
+**Extended-by:** [LLP 0328](./0328-a-spool-path-is-checked-where-it-is-walked.decision.md)
+(Accepted): the containment test that decides which directory a marker may aim
+this sweep at is string work, and `readdir` follows a symlinked spool path.
+The sweep now asks `lstat` about each directory at the moment it walks it. What
+this section settles (both verbs empty the spool, from the recorded path) is
+unchanged.
 
 ## Consequences
 
