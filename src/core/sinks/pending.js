@@ -273,6 +273,14 @@ function resolveDispositions(handle, discovered) {
     // A partition with no registration behind it is one nothing can be asked
     // about, so it counts in full, same as a sink that answers nothing.
     if (!dataset) { byTable.set(tablePath, 'forwards'); continue }
+    // The driver routes a partition by `partition.dataset`, while the seam can
+    // only be asked about the registration that produced it. Every dataset in
+    // this repo names its partitions after itself, so the two agree; where they
+    // do not, the answer describes a different dataset than the export would
+    // route, and a restrictive answer read off the wrong registration is the
+    // one error direction the prompt may not have.
+    // @ref LLP 0324#fail-open-loud [implements]: an answer the preview cannot line up with what the export would route is not an answer, so it counts as `forwards`
+    if (partition.dataset !== dataset.name) { byTable.set(tablePath, 'forwards'); continue }
     let answer = byDataset.get(dataset.name)
     if (answer === undefined) {
       answer = askDisposition(handle, dataset)

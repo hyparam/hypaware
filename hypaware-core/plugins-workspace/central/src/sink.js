@@ -221,22 +221,35 @@ export function createForwardSink(args) {
      * than restating the rule, because a second copy of a privacy verdict is a
      * copy that can drift toward promising less egress than occurs.
      *
-     * A legacy signal forwards its whole backlog. An eligible open dataset is
-     * baselined at rollout and ships nothing that predates it, which is
-     * `starts-from-now`. Everything withheld is `skips`: a local-only-content
-     * dataset and a name a legacy ingest path has reserved alike, because from
-     * the prompt's side both are rows that never leave.
+     * Everything withheld is `skips`: a local-only-content dataset and a name a
+     * legacy ingest path has reserved alike, because from the prompt's side
+     * both are rows that never leave. Everything else is `forwards`, legacy
+     * signal and eligible open dataset alike.
+     *
+     * An eligible open dataset answers `forwards` and not `starts-from-now`,
+     * even though its rollout does skip the history it finds. `starts-from-now`
+     * is not a claim about rollout, it is a claim about a partition with no
+     * durable cursor: LLP 0324#starts-from-now makes an uncursored partition
+     * count zero. For this sink an uncursored partition means the opposite.
+     * Rollout state is established at sink creation (LLP 0307#rollout-instant),
+     * so every partition that existed then already carries a baseline cursor,
+     * and a partition with no cursor is one that appeared *after* rollout,
+     * which LLP 0307#future-partitions admits at `seq 0` and forwards in full.
+     * Answering `starts-from-now` would quote that partition's whole backlog as
+     * zero at the consent prompt while the next export shipped it, the
+     * under-disclosure LLP 0324#drift-pinned exists to prevent.
+     * `starts-from-now` stays on the seam for the case LLP 0324 built it for: a
+     * sink whose baseline is not written at creation.
      *
      * @ref LLP 0324#disposition-seam [implements]: central answers from the predicate its forwarding path already enforces
+     * @ref LLP 0324#drift-pinned [constrained-by]: an answer more restrictive than this sink's export would make the prompt promise less egress than occurs
+     * @ref LLP 0307#future-partitions [constrained-by]: an uncursored partition is post-rollout and forwards from seq 0, so a missing cursor here is not a start-now zero
      * @ref LLP 0305#eligibility [constrained-by]: the eligibility rule stays declared on the dataset and enforced here, so the preview asks rather than reimplements
      * @param {DatasetRegistration} dataset
      * @returns {DatasetDisposition}
      */
     datasetDisposition(dataset) {
-      const verdict = datasetForwardingVerdict(dataset, dataset.name)
-      if ('withheld' in verdict) return 'skips'
-      // @ref LLP 0305#start-now [implements]: an eligible open dataset's history predating its rollout never ships, so the preview must not count it
-      return verdict.registration ? 'starts-from-now' : 'forwards'
+      return 'withheld' in datasetForwardingVerdict(dataset, dataset.name) ? 'skips' : 'forwards'
     },
 
     async close() {

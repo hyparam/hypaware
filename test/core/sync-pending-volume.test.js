@@ -880,3 +880,151 @@ test('a local-only dataset counts for a local-fs destination and not for a centr
   assert.match(stdout.text, /nothing pending/)
   assert.doesNotMatch(stdout.text, /withheld by policy/)
 })
+
+// ---------------------------------------------------------------------------
+// The disposition seam's degraded and non-central answers. Central answers only
+// `forwards` and `skips`, so nothing else in the suite reaches the kernel's
+// `starts-from-now` arm or its fail-open path, and an untested arm on a consent
+// surface is an arm that can rot into under-disclosure unnoticed.
+// ---------------------------------------------------------------------------
+
+/** Twelve plain rows, nothing withheld, so a count is either 12 or a decision. */
+const TWELVE_PLAIN_ROWS = Array.from({ length: 12 }, (_, i) => ({ seq: i + 1 }))
+
+/**
+ * One destination whose sink answers `datasetDisposition` however the caller
+ * says, over the twelve-row cache every other test in this file uses.
+ *
+ * @param {{ hypHome: string, disposition?: (dataset: any) => unknown }} args
+ */
+async function previewWithDisposition({ hypHome, disposition }) {
+  const sink = /** @type {any} */ ({
+    async exportBatch() { return { status: 'exported', partitionsExported: 0, bytesWritten: 0 } },
+  })
+  if (disposition) sink.datasetDisposition = disposition
+  const handle = /** @type {any} */ ({
+    instanceName: 'dest', plugin: '@hypaware/fake', kind: 'blob', config: {}, sink,
+  })
+  const volumes = await previewPendingRows({
+    handles: [handle],
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries: TWELVE_PLAIN_ROWS })),
+    stateRoot: stateDir(hypHome),
+  })
+  return /** @type {any} */ (volumes.get('dest'))
+}
+
+test('every answer the kernel cannot use is counted as `forwards`, not as a skip', async () => {
+  // The degraded direction is chosen. `forwards` is today's behaviour and the
+  // over-disclosing answer, so a sink that cannot be asked, throws when asked,
+  // or answers something outside the union is counted in full rather than
+  // quietly dropped off the prompt.
+  // @ref LLP 0324#fail-open-loud [tests]: absence, a throw, and an unrecognized answer all read as `forwards`
+  /** @type {[string, ((dataset: any) => unknown) | undefined][]} */
+  const answers = [
+    ['no method at all', undefined],
+    ['a method that throws', () => { throw new Error('plugin blew up') }],
+    ['undefined', () => undefined],
+    ['null', () => null],
+    ['a number', () => 3],
+    ['the near-miss string `skip`', () => 'skip'],
+    ['the wrong case `SKIPS`', () => 'SKIPS'],
+    ['an object that stringifies to `skips`', () => ({ toString: () => 'skips' })],
+    ['a promise of `skips`', async () => 'skips'],
+  ]
+  for (const [label, disposition] of answers) {
+    const hypHome = await makeHome('failopen')
+    const volume = await previewWithDisposition({ hypHome, disposition })
+    assert.equal(volume.rows, 12, `${label} must be counted in full, not silently removed from the prompt`)
+    assert.equal(volume.withheldRows, 0, label)
+    assert.equal(volume.resume.kind, 'beginning', `${label} must still claim the reach it would have`)
+  }
+})
+
+test('a `starts-from-now` destination counts zero without a cursor and incrementally with one', async () => {
+  // The kernel arm LLP 0324 built for a sink whose baseline is not written at
+  // creation. No central sink answers this today, so this synthetic one is the
+  // only thing holding the rule.
+  // @ref LLP 0324#starts-from-now [tests]: a missing watermark means zero, not the beginning, and a present one counts incrementally
+  const fresh = await makeHome('startnow-fresh')
+  const freshVolume = await previewWithDisposition({
+    hypHome: fresh,
+    disposition: () => 'starts-from-now',
+  })
+  assert.equal(freshVolume.rows, 0, 'this destination ships none of the history it has no cursor for')
+  assert.equal(freshVolume.status, 'counted', "zero here is the sink's own answer, not a count that failed")
+  assert.notEqual(freshVolume.resume.kind, 'beginning', 'a range it does not reach must not be announced')
+
+  const cursored = await makeHome('startnow-cursored')
+  await writeWatermark({
+    hypHome: cursored,
+    plugin: '@hypaware/fake',
+    instance: 'dest',
+    seq: '3',
+    updatedAt: '2026-08-12T00:50:31.004Z',
+  })
+  const cursoredVolume = await previewWithDisposition({
+    hypHome: cursored,
+    disposition: () => 'starts-from-now',
+  })
+  assert.equal(cursoredVolume.rows, 9, 'a partition with a cursor counts incrementally, unchanged')
+  assert.equal(cursoredVolume.resume.kind, 'since')
+})
+
+test('a `skips` destination stays out of the withheld tally and out of the resume range', async () => {
+  // A skipped dataset's cursor never advances, so folding it into the withheld
+  // line would report policy activity that did not happen, and letting it claim
+  // a resume range would describe a reach the destination does not have.
+  // @ref LLP 0324#skips [tests]: a skipped dataset contributes to neither tally and claims no range, with or without a cursor
+  const hypHome = await makeHome('skips-cursored')
+  await writeWatermark({
+    hypHome,
+    plugin: '@hypaware/fake',
+    instance: 'dest',
+    seq: '3',
+    updatedAt: '2026-08-12T00:50:31.004Z',
+  })
+  const volume = await previewWithDisposition({ hypHome, disposition: () => 'skips' })
+  assert.equal(volume.rows, 0)
+  assert.equal(volume.withheldRows, 0)
+  assert.equal(volume.status, 'counted')
+  assert.equal(volume.resume.kind, 'unknown')
+})
+
+test('a partition named after some other dataset is counted in full, not skipped on its behalf', async () => {
+  // The seam is asked about a `DatasetRegistration`, but the driver routes a
+  // partition by `partition.dataset`. When a registration emits a partition
+  // under a different name, a `skips` answer describes a dataset the export
+  // would not have routed under that name, so believing it could drop rows the
+  // export ships. Fail open, like every other answer the preview cannot use.
+  // @ref LLP 0324#fail-open-loud [tests]: a disposition that cannot be lined up with what the export routes counts as `forwards`
+  const hypHome = await makeHome('namemismatch')
+  const misnaming = {
+    listDatasets: () => [
+      {
+        name: 'some_other_dataset',
+        discoverPartitions: () => [
+          { dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath: tablePathFor(hypHome) },
+        ],
+      },
+    ],
+  }
+  const handle = /** @type {any} */ ({
+    instanceName: 'dest',
+    plugin: '@hypaware/fake',
+    kind: 'blob',
+    config: {},
+    sink: {
+      datasetDisposition: () => 'skips',
+      async exportBatch() { return { status: 'exported', partitionsExported: 0, bytesWritten: 0 } },
+    },
+  })
+  const volume = /** @type {any} */ ((await previewPendingRows({
+    handles: [handle],
+    query: /** @type {any} */ (misnaming),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries: TWELVE_PLAIN_ROWS })),
+    stateRoot: stateDir(hypHome),
+  })).get('dest'))
+  assert.equal(volume.rows, 12)
+  assert.equal(volume.resume.kind, 'beginning')
+})

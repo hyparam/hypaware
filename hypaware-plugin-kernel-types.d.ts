@@ -1406,6 +1406,15 @@ export interface SinkHandle {
  * it: the sink forwards the dataset, it skips the dataset entirely, or it
  * forwards the dataset but starts from now, so history predating the sink
  * ships nothing.
+ *
+ * `starts-from-now` is narrower than it reads, and the narrowing is what keeps
+ * the prompt honest. It is a claim about a partition with *no durable
+ * watermark*: the preview counts such a partition as zero and lets it bound no
+ * resume range. Answer it only if your export really would ship nothing from an
+ * uncursored partition. A sink that establishes its baselines up front, so an
+ * uncursored partition is instead one that appeared afterwards and forwards in
+ * full, must answer `forwards`, or the prompt reads "nothing pending" over rows
+ * the next export sends.
  */
 export type DatasetDisposition = 'forwards' | 'skips' | 'starts-from-now'
 

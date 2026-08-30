@@ -33,9 +33,9 @@
 // dataset's history *without sending it* (LLP 0305 #start-now), and the preview
 // had no way to model that, so it over-counted such a dataset on its first
 // tick - the safe direction on a consent prompt. LLP 0324 gave the preview a
-// way to ask, so this file now covers it, under a second and different parity
-// claim: not "two reads agree", but "what a destination says it would do agrees
-// with what its export actually does".
+// way to ask, so this file now covers that sink's answers, under a second and
+// different parity claim: not "two reads agree", but "what a destination says
+// it would do agrees with what its export actually does".
 //
 // That second claim carries the whole hazard of the disposition seam. The
 // preview now *believes* a sink that answers `skips` or `starts-from-now`, so a
@@ -45,6 +45,16 @@
 // inside the preview can detect it: only driving both sides of the same sink
 // can, which is what the scenarios at the bottom of this file do.
 //
+// The over-count above is where central still lands, on purpose. It answers
+// `forwards` for an eligible open dataset rather than `starts-from-now`,
+// because the state `starts-from-now` speaks about - a partition with no
+// durable cursor - means the opposite for this sink once its rollout manifest
+// exists: a post-rollout partition that forwards in full
+// (LLP 0307 #future-partitions). The scenario that pins that is at the bottom
+// too, and it is the reason the `starts-from-now` arm of the kernel rule is
+// exercised by a synthetic sink in `test/core/sync-pending-volume.test.js`
+// rather than by this one.
+//
 // This is a parity test on purpose. Extracting one helper would remove today's
 // duplication but not the failure mode: a future site can call `readRowsSince`
 // with its own options and bypass the helper silently, and it would drag the
@@ -53,7 +63,7 @@
 //
 // @ref LLP 0040#storage-api-extension [tests]: every seam derives `includeLegacy` from the presence of a durable watermark, identically
 // @ref LLP 0101#no-release [tests]: the preview's "prints what would leave" claim rests on reading the export's seam, not a second notion of pending
-// @ref LLP 0324#drift-pinned [tests]: every dataset central's export forwards is one its disposition admits, and a missing-watermark start-now dataset really does ship zero
+// @ref LLP 0324#drift-pinned [tests]: every dataset central's export forwards is one its disposition admits, including the post-rollout partition where a start-now answer would have under-disclosed
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -514,64 +524,134 @@ test('every dataset central forwards is one its disposition admits', async () =>
     { name: DATASET, rowsForwarded: 4, disposition: 'forwards' },
     { name: RESERVED_DATASET, rowsForwarded: 0, disposition: 'skips' },
     { name: LOCAL_ONLY_DATASET, rowsForwarded: 0, disposition: 'skips' },
-    { name: OPEN_DATASET, rowsForwarded: 0, disposition: 'starts-from-now' },
+    // `forwards`, not `starts-from-now`, even though this export shipped zero.
+    // The next test is why: for this sink a partition with no cursor is a
+    // post-rollout partition that forwards in full, so the one situation
+    // `starts-from-now` would change the count in is the situation where the
+    // count must not change.
+    { name: OPEN_DATASET, rowsForwarded: 0, disposition: 'forwards' },
   ])
 })
 
-test("a missing-watermark eligible open dataset's first export ships zero rows, and the preview says so", async () => {
-  const home = await makeHome('startnow')
-  const central = centralOverDatasets(home)
-  const open = central.datasets.find((d) => d.name === OPEN_DATASET)
-  assert.ok(open)
+/**
+ * One eligible open dataset whose partition list is mutable, so a partition can
+ * be made to appear *after* the rollout manifest was written. That is the state
+ * a real machine reaches whenever a new client starts writing (a new `source=`
+ * directory) between joining central and running `hyp sync`.
+ *
+ * @param {string} home
+ */
+function centralOverGrowingOpenDataset(home) {
+  /** @param {string} source */
+  const tableFor = (source) => path.join(cacheRoot(home), 'datasets', OPEN_DATASET, `source=${source}`)
+  let sources = ['claude']
+  const dataset = {
+    name: OPEN_DATASET,
+    plugin: '@hypaware/test',
+    schema: { fields: [{ name: 'id', type: 'string' }] },
+    discoverPartitions: () => sources.map((source) => ({
+      dataset: OPEN_DATASET, partition: { source }, tablePath: tableFor(source),
+    })),
+  }
+  const storage = {
+    cacheRoot: cacheRoot(home),
+    /** @param {string} p */
+    tableExists: (p) => sources.some((source) => tableFor(source) === p),
+    hasPendingSync: () => false,
+    async flushTable() {},
+    /** @param {string} p @param {{ since?: { v: number, seq: string } }} [opts] */
+    readRowsSince(p, opts) {
+      const since = opts?.since ? Number(opts.since.seq) : 0
+      return {
+        async *[Symbol.asyncIterator]() {
+          if (!sources.some((source) => tableFor(source) === p)) return
+          for (let seq = 1; seq <= 4; seq += 1) {
+            if (seq > since) yield { row: { id: String(seq) }, after: { v: 1, seq: String(seq) } }
+          }
+        },
+      }
+    },
+  }
+  const query = { listDatasets: () => [dataset], getDataset: (/** @type {string} */ n) => (n === OPEN_DATASET ? dataset : undefined) }
+  const instanceDir = path.join(stateDir(home), 'plugins', PLUGIN, 'sink-instances', INSTANCE)
+  /** @type {{ url: string, body: string }[]} */
+  const posts = []
+  const noop = () => {}
+  const sink = createForwardSink({
+    config: /** @type {any} */ ({ url: 'http://server:8740', identity: {} }),
+    identityClient: /** @type {any} */ ({ async getCurrentJwt() { return 'jwt' }, async refresh() {} }),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (storage),
+    watermarks: createSinkWatermarkStore({ stateDir: instanceDir }),
+    rollouts: createDatasetRolloutStore({
+      paths: /** @type {any} */ ({ stateDir: path.join(stateDir(home), 'plugins', PLUGIN) }),
+      instanceName: INSTANCE,
+    }),
+    log: /** @type {any} */ ({ debug: noop, info: noop, warn: noop, error: noop }),
+    fetchFn: /** @type {any} */ (async (/** @type {any} */ url, /** @type {any} */ init) => {
+      posts.push({ url: String(url), body: String(init?.body ?? '') })
+      return { status: 202, ok: true, headers: { get: () => null }, async text() { return '' }, body: { cancel: async () => {} } }
+    }),
+    sleepFn: async () => {},
+  })
+  /** @param {string} source */
+  const addSource = (source) => { sources = [...sources, source] }
+  /** @param {number} from */
+  const ingestRowsSince = (from) => posts.slice(from)
+    .filter((post) => post.url.includes('/v1/ingest/'))
+    .reduce((n, post) => n + post.body.split('\n').filter((line) => line.length > 0).length, 0)
+  return { sink, storage, query, dataset, posts, addSource, ingestRowsSince }
+}
 
-  assert.equal(central.sink.datasetDisposition?.(/** @type {any} */ (open)), 'starts-from-now')
+test('a partition created after rollout is quoted, not counted as a start-now zero', async () => {
+  // The reason central answers `forwards` rather than `starts-from-now`. Its
+  // rollout state is written at sink creation (LLP 0307#rollout-instant), so
+  // every partition that existed then carries a baseline cursor. A partition
+  // with *no* cursor is therefore not pre-rollout history the export will skip:
+  // it is a post-rollout partition LLP 0307#future-partitions admits at seq 0
+  // and forwards in full. A `starts-from-now` answer would make LLP
+  // 0324#starts-from-now count exactly those rows as zero, so the prompt would
+  // read "nothing pending" while the next export shipped the whole backlog.
+  // @ref LLP 0324#drift-pinned [tests]: the preview may not quote less egress than the export performs, on the one state where central's two answers differ
+  // @ref LLP 0307#future-partitions [tests]: an uncursored post-rollout partition forwards from seq 0, which is the opposite of a start-now zero
+  const home = await makeHome('postrollout')
+  const central = centralOverGrowingOpenDataset(home)
 
-  // The preview first, on an instance with no watermark anywhere: this is the
-  // state the export is about to resolve, so both sides answer the same
-  // question from the same disk.
-  const previewQuery = { listDatasets: () => [open], getDataset: () => open }
+  // Rollout, over the partitions that exist today. Their history is baselined
+  // rather than sent, so nothing is on the wire yet.
+  await central.sink.exportBatch(
+    /** @type {any} */ ({ batchId: 'b0', partitions: central.dataset.discoverPartitions() }),
+    /** @type {any} */ ({})
+  )
+  assert.equal(central.ingestRowsSince(0), 0, 'the rollout baseline skips the history without sending it')
+
+  // A new client starts writing. Its partition has four rows and no cursor.
+  central.addSource('codex')
+
   const handle = /** @type {any} */ ({
     instanceName: INSTANCE, plugin: PLUGIN, kind: 'request', config: {}, sink: central.sink,
   })
-  const volumes = await previewPendingRows({
+  const volume = /** @type {any} */ ((await previewPendingRows({
     handles: [handle],
-    query: /** @type {any} */ (previewQuery),
-    storage: /** @type {any} */ (central.storage),
-    stateRoot: stateDir(home),
-  })
-  const volume = /** @type {any} */ (volumes.get(INSTANCE))
-  assert.equal(volume.rows, 0, 'a start-now dataset with no cursor has no pending history')
-  assert.equal(volume.status, 'counted', "zero here is the sink's answer, not a count that failed")
-  assert.notEqual(volume.resume.kind, 'beginning', 'a start-now destination does not reach back at all')
-
-  // A sink that answers nothing over the identical state is the contrast that
-  // makes the zero above attributable to the disposition and not to an empty
-  // cache: it quotes the whole four-row history.
-  const silent = /** @type {any} */ ({
-    instanceName: INSTANCE, plugin: PLUGIN, kind: 'request', config: {},
-    sink: { async exportBatch() { return { status: 'exported', partitionsExported: 0, bytesWritten: 0 } } },
-  })
-  const silentVolume = /** @type {any} */ ((await previewPendingRows({
-    handles: [silent],
-    query: /** @type {any} */ (previewQuery),
+    query: /** @type {any} */ (central.query),
     storage: /** @type {any} */ (central.storage),
     stateRoot: stateDir(home),
   })).get(INSTANCE))
-  assert.equal(silentVolume.rows, 4)
-  assert.equal(silentVolume.resume.kind, 'beginning')
 
-  // Now the export, from that same empty state. It baselines the history
-  // instead of sending it, so the wire stays empty and the preview was right.
+  const before = central.posts.length
   const result = await central.sink.exportBatch(
-    /** @type {any} */ ({ batchId: 'b1', partitions: open.discoverPartitions() }),
+    /** @type {any} */ ({ batchId: 'b1', partitions: central.dataset.discoverPartitions() }),
     /** @type {any} */ ({})
   )
   assert.equal(result.status, 'exported')
-  assert.deepEqual(
-    central.posts.filter((post) => post.url.includes('/v1/ingest/')),
-    [],
-    'the rollout baseline skips the history without sending it'
+  const shipped = central.ingestRowsSince(before)
+
+  assert.equal(shipped, 4, 'the post-rollout partition really does forward its whole backlog')
+  assert.ok(
+    volume.rows >= shipped,
+    `the preview quoted ${volume.rows} rows while the export shipped ${shipped}, so the prompt promised less egress than occurred`
   )
+  assert.equal(volume.resume.kind, 'beginning', 'a partition with no cursor reaches back as far as the table does')
 })
 
 test('a disposition more restrictive than the export it describes is caught, not trusted', async () => {
@@ -593,5 +673,39 @@ test('a disposition more restrictive than the export it describes is caught, not
   assert.throws(
     () => assertNoUnderDisclosure(observed),
     /'ai_gateway_messages': the disposition answered 'skips' while the export forwarded 4 rows/
+  )
+})
+
+test("the guard catches a 'starts-from-now' lie too, and a partial one", async () => {
+  // `skips` is the loud lie. `starts-from-now` is the quiet one: it is a
+  // legitimate answer for a sink whose first export really does ship nothing,
+  // so a sink that answers it while shipping *some* history under-discloses by
+  // exactly the rows it shipped rather than by all of them. The guard is
+  // `rowsForwarded === 0` and not `rowsForwarded < forwarded`, precisely so a
+  // partial lie fails it as hard as a total one.
+  const home = await makeHome('driftnow')
+  const central = centralOverDatasets(home)
+
+  const lying = { ...central.sink, datasetDisposition: () => 'starts-from-now' }
+  const observed = await observeForwarding(lying, central.datasets, central.posts)
+  assert.equal(
+    observed.find((row) => row.name === DATASET)?.rowsForwarded,
+    4,
+    'the lying sink really did ship history it said it would not'
+  )
+  assert.throws(
+    () => assertNoUnderDisclosure(observed),
+    /'ai_gateway_messages': the disposition answered 'starts-from-now' while this instance's first export forwarded 4 rows of history/
+  )
+
+  // A partial lie: one row short of the truth is still a promise of less egress
+  // than occurs, so the guard must not have a tolerance.
+  assert.throws(
+    () => assertNoUnderDisclosure([{ name: 'partial', rowsForwarded: 1, disposition: 'starts-from-now' }]),
+    /'partial': the disposition answered 'starts-from-now' while this instance's first export forwarded 1 rows of history/
+  )
+  assert.throws(
+    () => assertNoUnderDisclosure([{ name: 'partial', rowsForwarded: 1, disposition: 'skips' }]),
+    /'partial': the disposition answered 'skips' while the export forwarded 1 rows/
   )
 })
