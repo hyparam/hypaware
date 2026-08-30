@@ -1,5 +1,9 @@
 {
   "automerge": true,
   "mergeQueue": true,
-  "maxActiveWork": 4
+  "maxActiveWork": 4,
+  "shipRisk": {
+    "mode": "observe",
+    "maxAutomerge": "low"
+  }
 }
