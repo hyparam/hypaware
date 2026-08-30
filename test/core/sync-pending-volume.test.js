@@ -272,23 +272,39 @@ test('rewinding a watermark changes what the dry-run plan discloses', async () =
 
 test('a count that hits its scan budget is disclosed as a floor, never as a total', async () => {
   const hypHome = await makeHome('floor')
-  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
-  const { ctx, stdout } = makeCtx({
-    hypHome,
-    sinks,
-    storage: fakeStorage({
+  const handles = /** @type {any[]} */ ([
+    fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central'),
+  ])
+
+  // The clock is frozen rather than real, so the only thing that can stop this
+  // count is `DEFAULT_ROW_LIMIT`. Read off the real clock, this case asserted
+  // that 200,000 rows are scanned inside the 3000ms budget, which is a claim
+  // about the machine and not about the code: under CPU contention the budget
+  // lands first and the plan reads "at least 198,144", a false failure in the
+  // direction load can only push it (#1105). Freezing the clock keeps every
+  // deadline unreachable and leaves the row limit as the sole stop, which is
+  // the shortfall this case exists to pin. Both defaults stay in play: nothing
+  // here passes `rowLimit` or `budgetMs`, so the 200,000 below is the shipped
+  // limit and not a fixture's.
+  const frozen = () => 1_000
+
+  const volumes = await previewPendingRows({
+    handles,
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({
       hypHome,
       entries: function* () {
         for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
       },
-    }),
+    })),
+    stateRoot: stateDir(hypHome),
+    now: frozen,
   })
 
-  const code = await runSync(['--dry-run'], ctx)
-
-  assert.equal(code, 0)
-  assert.match(stdout.text, /at least 200,000 rows pending, the full local history/)
-  assert.doesNotMatch(stdout.text, /nothing pending/)
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'partial', 'a count stopped at its limit is a floor, not a total')
+  assert.equal(volume.rows, 200000, 'the floor is the row limit reached, never the 250,000 rows behind it')
+  assert.notEqual(volume.rows, 250000)
 })
 
 test('a count that cannot be taken says unknown, never zero', async () => {
@@ -506,7 +522,15 @@ test('rows still buffered in the spool make the count a floor rather than a sile
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /at least 10 rows pending/)
+  // The whole rendered line, resume clause included. A shortened count reaches
+  // the renderer as `status: 'partial'` whatever shortened it, so the cheap
+  // shortfall to stage proves the rendering for the expensive one: the
+  // scan-limit case above is counted through `previewPendingRows` on a frozen
+  // clock precisely so it stops asserting how fast the machine is (#1105), and
+  // this is where the string it used to check is pinned instead.
+  assert.match(stdout.text, /at least 10 rows pending, the full local history/)
+  assert.doesNotMatch(stdout.text, /^ +10 rows pending/m, 'a floor rendered as a total overstates what the scan saw')
+  assert.doesNotMatch(stdout.text, /nothing pending/)
 })
 
 test('a plan still renders when the count itself throws: unknown, never a missing or zero line', async () => {
@@ -732,8 +756,9 @@ test('an incomplete count marks the withheld line as a floor too, and an exact c
   // The renderer keys off `status === 'partial'`, not off which shortfall
   // produced it, so one shortfall proves the rendering for all of them. This
   // case uses the cheapest one to stage, an unflushed spool: `runSync` does not
-  // plumb `rowLimit`/`budgetMs`, so reaching `partial` by scan budget through it
-  // costs a 250,000-row fixture, which is the price the floor case above pays.
+  // plumb `rowLimit`/`budgetMs`/`now`, so reaching `partial` by scan limit through
+  // it would cost a 250,000-row fixture counted against a real clock, which is the
+  // wall-clock dependence the scan-limit case above was rewritten to shed (#1105).
   const short = await makeHome('withheld-floor')
   const shortStorage = fakeStorage({ hypHome: short, entries: TWELVE_ROWS })
   // Buffered rows the preview will not flush to count: the same short pass
