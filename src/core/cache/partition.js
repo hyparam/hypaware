@@ -8,7 +8,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { countGatewayFallbackRows } from './gateway_fallback.js'
 import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
-import { cacheTablePath, datasetsRoot } from './paths.js'
+import { cacheTablePath, datasetsRoot, isConfirmedSymlink } from './paths.js'
 
 /**
  * @import { ColumnSpec, QueryScope } from '../../../hypaware-plugin-kernel-types.js'
@@ -19,6 +19,14 @@ import { cacheTablePath, datasetsRoot } from './paths.js'
 const CURSOR_FILE = 'cursor.json'
 const SPOOL_DIR = '_hypaware_spool'
 const RETIRED_DIR = '.retired'
+
+/**
+ * The one byte no directory entry on any supported filesystem can carry,
+ * and the one that would make a path stat throw on its argument rather
+ * than on the filesystem. Built rather than escaped, so this source file
+ * carries no control character of its own.
+ */
+const NUL_BYTE = String.fromCharCode(0)
 
 /** @type {Map<string, Promise<unknown>>} */
 const partitionMutationLocks = new Map()
@@ -103,6 +111,19 @@ export function tryReadCursorSync(partitionDir) {
         return null
       }
       cursor.tableDir = parsed.tableDir
+    } else {
+      // An absent `tableDir` still names a generation: every reader resolves
+      // it to the layout default and joins THAT onto the partition path, so
+      // the default is the name the sweep will walk and the name the gate has
+      // to ask about. Absent stays legitimate (LLP 0323#whole-cursor) - what
+      // is refused is the same planted symlink, wearing the name nobody had
+      // to write down.
+      const root = path.resolve(partitionDir)
+      const planted = defaultGenerationDirs(cursor).find((name) => generationDirIsSymlink(root, name))
+      if (planted !== undefined) {
+        reportEscapingTableDir(partitionDir, planted)
+        return null
+      }
     }
     if (parsed.retention && typeof parsed.retention === 'object') {
       cursor.retention = parsed.retention
@@ -141,15 +162,70 @@ export function tryReadCursorSync(partitionDir) {
  * single segments: one names the partition, which holds the cursor rather
  * than a generation, and the other leaves it.
  *
+ * All of which reads the string and none of which reads the disk, so a
+ * bare-name SYMLINK is contained by spelling and elsewhere in fact. The
+ * last check asks the filesystem: see {@link generationDirIsSymlink}. A NUL
+ * is rejected on the way past it, because it is the one byte that would
+ * make that stat throw on its argument rather than on the filesystem, and
+ * no directory entry can carry one anyway.
+ *
  * @ref LLP 0323#contained [implements]: a cursor may name a generation only inside its own partition, by its own name.
+ * @ref LLP 0326#not-a-symlink [implements]: and the name has to be the directory, not a pointer to one.
  * @param {string} partitionDir
  * @param {string} tableDir
  * @returns {boolean}
  */
 function generationDirIsContained(partitionDir, tableDir) {
-  if (tableDir === '' || tableDir !== path.basename(tableDir)) return false
+  if (tableDir === '' || tableDir.includes(NUL_BYTE) || tableDir !== path.basename(tableDir)) return false
   const root = path.resolve(partitionDir)
-  return path.resolve(root, tableDir).startsWith(root + path.sep)
+  if (!path.resolve(root, tableDir).startsWith(root + path.sep)) return false
+  return !generationDirIsSymlink(root, tableDir)
+}
+
+/**
+ * Is the thing at `<root>/<tableDir>` a symlink rather than a generation?
+ *
+ * `lstat`, so the link itself is measured rather than what it points at,
+ * and only the LAST component: every component above it is the partition's
+ * own path, which the cache did not choose and which is legitimately
+ * reached through a symlink (a `$HYP_HOME` on another volume, `/tmp` on
+ * macOS). Resolving those would reject a working cache for the shape of the
+ * path it lives at. `realpath` is the same check with that cost attached.
+ *
+ * Rejection needs positive evidence. A stat that cannot answer - the
+ * generation is not created yet, it was removed under us, the directory
+ * will not be traversed - says nothing about the name, and treating
+ * silence as an escape would invent a fresh way to lose a live generation
+ * to the orphan sweep, which is the trade LLP 0323#whole-cursor already
+ * refused once.
+ *
+ * @ref LLP 0326#positive-evidence [implements]: only a symlink the filesystem confirms rejects the cursor.
+ * @param {string} root  the resolved partition directory
+ * @param {string} tableDir  a bare generation name: an explicit one the
+ *   string rules above already passed, or a layout default
+ * @returns {boolean}
+ */
+function generationDirIsSymlink(root, tableDir) {
+  return isConfirmedSymlink(path.join(root, tableDir))
+}
+
+/**
+ * The generation names a reader may resolve for a cursor that carries no
+ * `tableDir`.
+ *
+ * Two of them, because the consumers do not agree and the gate has to cover
+ * every name one of them could walk: `liveGenerationDir` reads the layout
+ * and answers `epoch=<n>` for anything that is not source-table, while
+ * `appendRowsToSourceTable` answers `table` regardless. Only one of the two
+ * exists in any real partition, so the other costs a stat that finds
+ * nothing.
+ *
+ * @ref LLP 0326#not-a-symlink [implements]: the default generation name is a generation name.
+ * @param {PartitionCursor} cursor
+ * @returns {string[]}
+ */
+function defaultGenerationDirs(cursor) {
+  return ['table', `epoch=${cursor.epoch}`]
 }
 
 /**

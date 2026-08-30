@@ -4,7 +4,9 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 
+import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { isConfirmedSymlink } from './paths.js'
 import { createIngestSeqAllocator } from './ingest-seq.js'
 import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
 
@@ -493,6 +495,28 @@ function spoolDir(tablePath) {
 }
 
 /**
+ * Say that the flush refused a spool directory, and say it out loud.
+ *
+ * The symptom is otherwise a partition that silently stops committing: rows
+ * still append, the flush still returns, and nothing reports that the files
+ * it would have drained are somewhere the cache does not own. `ls -l` at the
+ * logged path answers in one line.
+ *
+ * @param {string} tablePath
+ * @param {string} dir
+ */
+function reportPlantedSpoolDir(tablePath, dir) {
+  try {
+    getLogger('cache').warn('the spool directory is a symlink; draining nothing for this table', {
+      [Attr.OPERATION]: 'cache.spool_flush',
+      [Attr.ERROR_KIND]: 'spool_dir_is_symlink',
+      table_path: tablePath,
+      spool_dir: dir,
+    })
+  } catch { /* a flush must not fail on a logger provider that is not installed */ }
+}
+
+/**
  * @param {string} tablePath
  */
 async function rotateActiveFile(tablePath) {
@@ -510,11 +534,34 @@ async function rotateActiveFile(tablePath) {
 }
 
 /**
+ * The rotated files a flush will read, drain into the cache, and then
+ * unlink.
+ *
+ * `_hypaware_spool` is a fixed name inside the partition, so it is the same
+ * door LLP 0326#one-level-down closed in the maintenance sweeps, reached
+ * without a cursor: `readdir` follows a symlinked directory, the entries it
+ * lists are real files, and `drainFlushFiles` removes each one by path once
+ * it has read it. Measured on this branch before this guard: a planted
+ * `<partition>/_hypaware_spool -> <outside>` with a `flush-*.jsonl` name in
+ * `<outside>` had that file read into the cache and then unlinked, while a
+ * differently named neighbour survived. Nothing in the tree mints a symlink
+ * here, so a confirmed one means this is not the spool to drain.
+ *
+ * This one function rather than `spoolDir`: it is the list every read and
+ * every unlink comes from, and returning nothing can only make a flush do
+ * less. Refusing inside `spoolDir` would instead fail `append`, which is
+ * the contract that decides whether a caller replays rows.
+ *
+ * @ref LLP 0326#one-level-down [implements]: a pass that unlinks by path checks the path it will walk.
  * @param {string} tablePath
  * @returns {string[]}
  */
 function listFlushFiles(tablePath) {
   const dir = spoolDir(tablePath)
+  if (isConfirmedSymlink(dir)) {
+    reportPlantedSpoolDir(tablePath, dir)
+    return []
+  }
   try {
     return fsSync
       .readdirSync(dir, { withFileTypes: true })
