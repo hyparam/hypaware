@@ -8,7 +8,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { countGatewayFallbackRows } from './gateway_fallback.js'
 import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
-import { cacheTablePath, datasetsRoot } from './paths.js'
+import { cacheTablePath, datasetsRoot, isConfirmedSymlink } from './paths.js'
 
 /**
  * @import { ColumnSpec, QueryScope } from '../../../hypaware-plugin-kernel-types.js'
@@ -206,11 +206,7 @@ function generationDirIsContained(partitionDir, tableDir) {
  * @returns {boolean}
  */
 function generationDirIsSymlink(root, tableDir) {
-  try {
-    return fs.lstatSync(path.join(root, tableDir), { throwIfNoEntry: false })?.isSymbolicLink() === true
-  } catch {
-    return false
-  }
+  return isConfirmedSymlink(path.join(root, tableDir))
 }
 
 /**

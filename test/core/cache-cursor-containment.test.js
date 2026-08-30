@@ -19,6 +19,7 @@ import path from 'node:path'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable, readCursorSync, tryReadCursorSync, writeCursor } from '../../src/core/cache/partition.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
+import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -692,6 +693,100 @@ test('the index-scratch sweep does not unlink through a symlinked generation eit
     await maintainCache({ cacheRoot })
 
     assert.equal(await pathExists(scratch), true, 'a scratch-shaped name outside the cache is not the cache to reclaim')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The same class of door reached without any cursor at all. `_hypaware_spool`
+// is a fixed name inside the partition, `readdir` follows a symlinked
+// directory, and the flush removes every file it drains by path. LLP 0326
+// #one-level-down.
+
+/**
+ * @param {string} cacheRoot
+ * @param {Record<string, unknown>[]} sink
+ */
+function spoolInto(cacheRoot, sink) {
+  return createCacheSpool({
+    cacheRoot,
+    appendChunk: async (_tablePath, _columns, rows) => {
+      sink.push(...rows)
+      return { bytesWritten: 1 }
+    },
+  })
+}
+
+/** @type {ColumnSpec[]} */
+const ID_COLUMN = [{ name: 'id', type: 'INT32', nullable: false }]
+
+test('the spool flush reads and unlinks nothing through a symlinked spool directory', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-spool-escape-'))
+  try {
+    const cacheRoot = path.join(root, 'cache')
+    const tablePath = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude')
+    const outside = path.join(root, 'outside')
+    await fs.mkdir(tablePath, { recursive: true })
+    await fs.mkdir(outside, { recursive: true })
+    await fs.symlink(outside, path.join(tablePath, SPOOL_DIR), 'dir')
+    // The one file shape the drain reads and then removes by path.
+    const planted = path.join(outside, 'flush-1700000000000-1-abcdef.jsonl')
+    await fs.writeFile(planted, 'bytes that belong to whoever owns this directory\n')
+
+    /** @type {Record<string, unknown>[]} */
+    const ingested = []
+    const spool = spoolInto(cacheRoot, ingested)
+    await spool.append(tablePath, ID_COLUMN, [{ id: 1 }])
+    await spool.flushTable(tablePath, { reason: 'test' })
+
+    assert.equal(await pathExists(planted), true, 'a flush-shaped name outside the cache is not the spool to drain')
+    assert.equal(ingested.length, 0, 'and nothing outside the cache was read into it either')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The over-tightening control, which is the whole risk of the guard above: a
+// flush that refuses drains nothing, and rows that never drain never commit.
+test('an ordinary spool still drains and still reclaims its own flush files', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-spool-ordinary-'))
+  try {
+    const cacheRoot = path.join(root, 'cache')
+    const tablePath = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude')
+    await fs.mkdir(tablePath, { recursive: true })
+
+    /** @type {Record<string, unknown>[]} */
+    const ingested = []
+    const spool = spoolInto(cacheRoot, ingested)
+    await spool.append(tablePath, ID_COLUMN, [{ id: 1 }, { id: 2 }])
+    const result = await spool.flushTable(tablePath, { reason: 'test' })
+
+    assert.equal(result.flushed, true, 'the flush still moves rows')
+    assert.equal(ingested.length, 2, 'and all of them')
+    const left = await fs.readdir(path.join(tablePath, SPOOL_DIR))
+    assert.equal(left.some((name) => name.startsWith('flush-')), false, 'and still removes the files it drained')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('and a spool reached through a symlinked ancestor drains like any other', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-spool-symlinked-home-'))
+  try {
+    await fs.mkdir(path.join(root, 'volume', 'hyp-home'), { recursive: true })
+    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), 'dir')
+    const cacheRoot = path.join(root, 'home', 'hyp-home', 'cache')
+    const tablePath = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude')
+    await fs.mkdir(tablePath, { recursive: true })
+
+    /** @type {Record<string, unknown>[]} */
+    const ingested = []
+    const spool = spoolInto(cacheRoot, ingested)
+    await spool.append(tablePath, ID_COLUMN, [{ id: 1 }])
+    const result = await spool.flushTable(tablePath, { reason: 'test' })
+
+    assert.equal(result.flushed, true, 'the shape of the path the cache lives at is not the flush\'s business')
+    assert.equal(ingested.length, 1, 'and the row still lands')
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

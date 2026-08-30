@@ -18,7 +18,7 @@ import { MAINTENANCE_DEFAULTS } from './maintenance_defaults.js'
 import { isGatewayFallbackRow } from './gateway_fallback.js'
 import { inferColumnType } from './migrate.js'
 import { discoverCachePartitions, readCursorSync, tryReadCursorSync, withPartitionMutationLock, writeCursor } from './partition.js'
-import { datasetsRoot } from './paths.js'
+import { datasetsRoot, isConfirmedSymlink } from './paths.js'
 import { createLocalIcebergIO, isStagedWriteName, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, listLiveDataFiles, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
@@ -379,7 +379,9 @@ export async function maintainCache(opts) {
         // yields a default generation name at this line, so the cursor gate
         // upstream is not standing in front of it.
         // @ref LLP 0326#one-level-down [implements]: every pass that unlinks by path checks the path it will walk.
-        if (!sweepPathComponents(liveDir).some(isConfirmedSymlink)) sweepIndexScratch(liveDir)
+        const plantedScratchPath = sweepPathComponents(liveDir).find(isConfirmedSymlink)
+        if (plantedScratchPath === undefined) sweepIndexScratch(liveDir)
+        else reportPlantedSweepPath(liveDir, 'maintenance.grep_index', plantedScratchPath)
         const coverage = countIndexCoverage(liveDir)
         if (coverage.indexed < coverage.indexable) {
           await withSpan(
@@ -1911,7 +1913,7 @@ async function sweepUnreferencedTableFiles(tableDir) {
   // @ref LLP 0326#one-level-down [implements]: the sweep only unlinks inside directories the cache owns.
   const planted = sweepPathComponents(tableDir).find(isConfirmedSymlink)
   if (planted !== undefined) {
-    reportPlantedSweepPath(tableDir, planted)
+    reportPlantedSweepPath(tableDir, 'cache.sweep_unreferenced', planted)
     return 0
   }
   let removed = 0
@@ -1993,38 +1995,23 @@ function sweepPathComponents(tableDir) {
 }
 
 /**
- * Is `p` a symlink the filesystem confirms?
- *
- * `lstat`, so the link is measured rather than what it points at, and
- * rejection needs positive evidence for the reason the cursor gate does
- * (LLP 0326#positive-evidence): a component that is simply absent is the
- * ordinary state of a table with nothing published yet, and refusing to
- * sweep on silence would strand the staged-write leak this pass is the only
- * reclaimer for.
- *
- * @param {string} p
- * @returns {boolean}
- */
-function isConfirmedSymlink(p) {
-  try {
-    return fs.lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink() === true
-  } catch {
-    return false
-  }
-}
-
-/**
- * Say that the sweep refused a path, and say it out loud. The symptom is
+ * Say that a sweep refused a path, and say it out loud. The symptom is
  * otherwise a partition that quietly never reclaims anything; `ls -l` at the
  * logged component answers why in one line.
  *
+ * Both refusing passes report through here, and the operation says which one
+ * stood down. They reclaim different leaks, so "nothing is being reclaimed"
+ * is two different reports, and a refusal that said nothing at all would be
+ * the silent half of exactly the symptom this line exists to name.
+ *
  * @param {string} tableDir
+ * @param {string} operation
  * @param {string} plantedComponent
  */
-function reportPlantedSweepPath(tableDir, plantedComponent) {
+function reportPlantedSweepPath(tableDir, operation, plantedComponent) {
   try {
     getLogger('cache').warn('a symlink stands on the sweep path; reclaiming nothing in this generation', {
-      [Attr.OPERATION]: 'cache.sweep_unreferenced',
+      [Attr.OPERATION]: operation,
       [Attr.ERROR_KIND]: 'sweep_path_is_symlink',
       table_dir: tableDir,
       planted_component: plantedComponent,

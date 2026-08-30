@@ -15,8 +15,10 @@
 > sweep was measured unlinking through one, in a directory outside the
 > cache. `generationDirIsContained` now asks the filesystem one question
 > about the last path component, layout defaults included: `lstat`, is this
-> a symlink. The sweep asks it again, at the moment of the delete, about
-> the two subdirectories it lists. Only a symlink the filesystem confirms
+> a symlink. Every pass that unlinks by path asks it again, at the moment
+> of the delete, about each component it will walk: the sweep's two
+> subdirectories, and the spool's own fixed directory name. Only a
+> symlink the filesystem confirms
 > rejects anything; a stat that cannot answer accepts, because inventing an
 > escape out of silence is how a gate starts losing live generations.
 
@@ -151,14 +153,38 @@ before the guard existed, a merely CORRUPT `cursor.json` beside a planted
 `<partition>/epoch=0 -> <outside>` was enough to make it unlink a
 scratch-shaped file in `<outside>`. No cursor had to be authored.
 
-That is the general statement the two guards are instances of: a pass that
-unlinks by path checks the path it will walk, at the point it walks it. The
-cursor gate decides whether a NAME is usable; it cannot decide what an
-unlink one lenient read away is allowed to touch.
+The third pass has no cursor in front of it at all. The spool's flush
+lists `<partition>/_hypaware_spool`, reads each rotated `flush-*.jsonl`
+into the cache, and then removes it by path (LLP 0322). That is a fixed
+name inside the partition, so the plant is the same one and nothing has to
+be written down anywhere: measured on this branch before the guard,
+`<partition>/_hypaware_spool -> <outside>` with a `flush-`-shaped name in
+`<outside>` had that file read and then unlinked, while a differently
+named neighbour in the same directory survived. The guard sits on
+`listFlushFiles`, the one list every read and every unlink in the flush
+comes from, so returning nothing can only make a flush do less. Deeper, in
+`spoolDir` itself, it would instead fail `append`, and `append`'s rejection
+is the signal that decides whether a caller replays rows.
 
-The refusal logs its own `error_kind`, `sweep_path_is_symlink`, rather than
-the cursor gate's: the state it names is a different one, where the cursor
-is fine and the directory under it is not.
+That is the general statement the three guards are instances of: a pass
+that unlinks by path checks the path it will walk, at the point it walks
+it. The cursor gate decides whether a NAME is usable; it cannot decide what
+an unlink one lenient read (or no read at all) away is allowed to touch.
+
+Each refusal logs its own `error_kind` rather than the cursor gate's:
+`sweep_path_is_symlink` for the two maintenance passes,
+`spool_dir_is_symlink` for the flush. The state they name is a different
+one, where the cursor is fine and the directory under it is not, and the
+two sweeps carry the operation that stood down alongside it, since they
+reclaim different leaks and "nothing is being reclaimed" is otherwise one
+message for two failures. A guard on a deleting pass fails silently by
+construction, so a refusal that said nothing would be the half of this
+design nobody can observe.
+
+The check itself lives in one place, `isConfirmedSymlink` in
+`src/core/cache/paths.js`, because the asymmetry in `#positive-evidence` is
+its entire content: a second copy that drifted toward `realpath`, or toward
+reading a throw as an escape, is a defect nothing beside it makes visible.
 
 ## Cost {#cost}
 
@@ -171,6 +197,12 @@ read already opens, reads, and closes a file and parses JSON; the tick
 around it walks directories and scans parquet. On a
 thousand-partition cache with a handful of reads each, the tick pays tens
 of milliseconds once every few minutes.
+
+The passes pay per traversal rather than per read: three `lstat`s for the
+unreferenced sweep, three for the grep-index scratch sweep on grep
+partitions, and one per spool flush. Measured on this branch, about 3.6
+microseconds for a stat that finds something and about 2.3 for one that
+does not, against about 7.3 for the cursor read alone.
 
 The check stays in `tryReadCursorSync` rather than moving to the
 destructive call sites, which is LLP 0323#one-gate unchanged: four guards
@@ -199,10 +231,20 @@ fifth consumer added later is the one that would inherit the defect.
   and descends only into entries that are directories, so a symlinked
   dataset or partition directory is already invisible to maintenance.
 - A generation whose `metadata/` or `data/` is a symlink keeps its cursor
-  and its rows: only the unreferenced-file sweep stands down, so the
-  partition still reads, still appends, and still compacts. The narrower
-  refusal is what the narrower door deserves - nothing about a planted
-  subdirectory says the generation is not the live one.
+  and its rows: the two file sweeps stand down, so the partition still
+  reads, still appends, and still compacts. The narrower refusal is what
+  the narrower door deserves - nothing about a planted subdirectory says
+  the generation is not the live one. The grep-index scratch sweep stands
+  down on a planted `metadata/` too, although it only lists `data/`: the
+  three components are asked about together because a pass that traverses
+  a generation has no cheaper way to be sure which of them it reaches.
+- A table whose `_hypaware_spool` is a symlink stops committing: nothing
+  is drained, and rows a running writer appends keep landing at the link's
+  target, because `append` still writes there. Refusing the drain does not
+  undo the plant and is not trying to; it stops the flush reading and
+  deleting files the cache did not put there. The state is loud
+  (`spool_dir_is_symlink` on every flush) and it is one an operator fixes
+  at the filesystem, like every other consequence here.
 - Items 3 and 4 of hyparam/hypaware#1091 stay open by decision, not by
   omission. A well-formed name for the *wrong* generation still costs the
   live one, which is the cursor's authority working as LLP 0323#contained
@@ -225,7 +267,12 @@ fifth consumer added later is the one that would inherit the defect.
 - [LLP 0304](./0304-grep-search-round-4-corrections.decision.md):
   `#scratch-sweep-site`, the second pass that unlinks by path inside the
   live generation, and the one that resolves it leniently.
-- Code: `src/core/cache/partition.js` (`generationDirIsContained`,
+- [LLP 0322](./0322-a-failed-automatic-refresh-cools-down-and-is-visible.decision.md):
+  the flush whose file list is the third pass, and whose `append` contract
+  is why the guard sits on the list rather than on the directory name.
+- Code: `src/core/cache/paths.js` (`isConfirmedSymlink`),
+  `src/core/cache/partition.js` (`generationDirIsContained`,
   `generationDirIsSymlink`, `defaultGenerationDirs`),
   `src/core/cache/maintenance.js` (`sweepPathComponents`,
-  `isConfirmedSymlink`), `test/core/cache-cursor-containment.test.js`.
+  `reportPlantedSweepPath`), `src/core/cache/spool.js` (`listFlushFiles`),
+  `test/core/cache-cursor-containment.test.js`.
