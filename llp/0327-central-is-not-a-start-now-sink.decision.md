@@ -76,7 +76,7 @@ LLP 0324 remains the design of record for the seam.
 
 ### An uncursored central partition forwards in full {#uncursored-forwards}
 
-For `@hypaware/central`, a partition with no durable watermark is a
+For `@hypaware/central`, a partition with no durable watermark is normally a
 post-rollout partition. Rollout state is established at sink creation
 ([LLP 0307 #rollout-instant](./0307-durable-open-dataset-rollout-manifest.decision.md#rollout-instant)),
 every partition present then is baselined before the manifest commits, and a
@@ -85,6 +85,19 @@ key the manifest does not name is admitted at sequence zero and forwarded
 The state `starts-from-now` speaks about therefore means the opposite for
 this sink: not "history that ships nothing" but "a backlog the next export
 sends in full".
+
+One uncursored state is not post-rollout and forwards nothing: a partition the
+manifest already names whose watermark is missing, unreadable, or malformed.
+The shared store returns `null` for all three, so it reads as uncursored here
+too, and
+[LLP 0307 #missing-progress](./0307-durable-open-dataset-rollout-manifest.decision.md#missing-progress)
+makes it an integrity failure the sink neither replays nor rebaselines: it
+ships nothing until an operator repairs the state. `forwards` over-quotes that
+partition rather than under-quoting it, which is the safe direction and the one
+[LLP 0324 #fail-open-loud](./0324-preview-asks-each-destination-which-datasets-it-forwards.decision.md#fail-open-loud)
+already takes for every degraded path. A partition wedged on an integrity error
+is a state the prompt should over-disclose, not report as a clean zero, so the
+answer is `forwards` in both states.
 
 ### Central answers `forwards` for every eligible open dataset {#central-answers-forwards}
 
@@ -95,11 +108,13 @@ other eligible open dataset answers `forwards`. The last clause supersedes
 [LLP 0324 #disposition-seam](./0324-preview-asks-each-destination-which-datasets-it-forwards.decision.md#disposition-seam)'s
 `starts-from-now` prescription.
 
-The cost is a bounded over-count in one state: a dataset eligible at sink
-materialization is quoted incrementally from its durable baseline anyway, so
-the answers only diverge on a partition created after rollout, where
-`forwards` quotes the real backlog the export will ship. Over-disclosure is
-the direction
+The cost is a bounded over-count. A dataset eligible at sink materialization is
+quoted incrementally from its durable baseline anyway, so the two answers
+diverge only on an uncursored partition: a post-rollout one, where `forwards`
+quotes the real backlog the export will ship, and one wedged on an integrity
+error, where `forwards` over-quotes a partition that ships nothing until it is
+repaired ([#uncursored-forwards](#uncursored-forwards)). Over-disclosure is the
+direction
 [LLP 0324 #fail-open-loud](./0324-preview-asks-each-destination-which-datasets-it-forwards.decision.md#fail-open-loud)
 already accepts for every degraded path; under-disclosure is the direction
 [#drift-pinned](./0324-preview-asks-each-destination-which-datasets-it-forwards.decision.md#drift-pinned)

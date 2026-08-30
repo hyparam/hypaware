@@ -98,7 +98,9 @@ writes its rollout baselines at sink creation
 ([LLP 0307 #rollout-instant](./0307-durable-open-dataset-rollout-manifest.decision.md#rollout-instant)),
 so a partition with no durable watermark is post-rollout and its backlog
 forwards in full
-([LLP 0307 #future-partitions](./0307-durable-open-dataset-rollout-manifest.decision.md#future-partitions));
+([LLP 0307 #future-partitions](./0307-durable-open-dataset-rollout-manifest.decision.md#future-partitions)),
+save for one integrity state LLP 0327 names where it forwards nothing and
+`forwards` merely over-quotes;
 `starts-from-now` would make the prompt quote that backlog as zero while the
 next export shipped it, the under-disclosure [#drift-pinned](#drift-pinned)
 forbids. The seam itself, the other three answers in this mapping, and the
