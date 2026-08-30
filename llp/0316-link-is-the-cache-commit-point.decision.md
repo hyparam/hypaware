@@ -7,6 +7,11 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-26
 **Related:** LLP 0022, LLP 0209, LLP 0310, LLP 0312
+**Extended-by:** [LLP 0323](./0323-cursor-names-a-generation-in-its-own-partition.decision.md)
+(#staged-writes-are-reclaimed: entering a metadata directory with nothing
+published makes WHICH directory the sweep was pointed at load-bearing, so a
+cursor whose `tableDir` resolves outside its partition is now rejected at the
+reader and names no live generation at all)
 
 > The intrinsic cache has no catalog service, no lock file, and no lease. A
 > conditional Iceberg commit (`ifNoneMatch: '*'`) publishes by staging the

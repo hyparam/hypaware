@@ -730,10 +730,20 @@ test('a staged metadata write still inside the grace window survives the staged-
     const inFlight = path.join(metadataDir, 'v1.metadata.json.tmp.4242.1756200000000.k3f9zq')
     await fs.writeFile(inFlight, 'staged bytes on their way to link')
 
+    // A stale sibling in the same directory, so the door is proved OPEN by
+    // the same run that proves the young name survives it. Without this the
+    // assertions below read identically against a build with no staged-only
+    // door at all, and the test would pass on the defect it exists to pin.
+    const abandoned = path.join(metadataDir, 'v1.metadata.json.tmp.99.1756200000001.aa11bb')
+    await fs.writeFile(abandoned, 'staged bytes from a publish that died an hour ago')
+    const stale = new Date(Date.now() - 5 * 60 * 60 * 1000)
+    await fs.utimes(abandoned, stale, stale)
+
     const swept = await maintainCache({ cacheRoot })
 
     assert.equal(await pathExists(inFlight), true, 'a publish still in flight keeps its staging name')
-    assert.equal(swept.partitions[0].unreferencedFilesRemoved, undefined, 'and nothing is reported reclaimed')
+    assert.equal(await pathExists(abandoned), false, 'while the door it came through is open on its stale sibling')
+    assert.equal(swept.partitions[0].unreferencedFilesRemoved, 1, 'and only the stale one is reported reclaimed')
     assert.equal(swept.partitions[0].failed, undefined, 'a table with nothing published is not a failed partition')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })

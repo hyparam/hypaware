@@ -15,6 +15,10 @@ trigger is left to the epoch layout, whose writer can clear it)
 `.tmp.*` staging name a crashed conditional publish strands, in a pass that
 runs before the referenced-set walk - nothing references it, so the walk's
 early returns must not take its only reclaimer with them)
+**Extended-by:** [LLP 0323](./0323-cursor-names-a-generation-in-its-own-partition.decision.md)
+(#unreferenced-sweep: the live generation the sweep runs on is now bounded to
+a directory inside the partition, because the cursor that names it is rejected
+as unreadable when it resolves anywhere else)
 
 > Routine compaction dueness on a source-table generation is served by an
 > in-place subset rewrite: icebird's files-scoped `icebergRewrite` merges only
