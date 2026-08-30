@@ -1028,7 +1028,16 @@ test('state lock: an unreadable state file is not committed as an empty domain',
 // ReferenceError naming a binding rather than retrying or naming the errno.
 // Counting the attempts is what keeps that from coming back: an assertion on
 // the exit code cannot tell a retried read from one that never happened.
-test('state read: a transient errno is retried, and giving up names the errno', (t) => {
+//
+// A count on its own still leaves unpinned the two halves the retry is shaped
+// around, and the hoist is what put both of them into service for the first
+// time. A retry that does not wait between tries spends its whole budget
+// inside the microsecond that raised EMFILE, before anything has had a chance
+// to close a descriptor, so the attempts are timed as well as counted. A
+// retry that does not consult `TRANSIENT_READ_CODES` sits three poll
+// intervals on an EACCES that waiting cannot clear, so a permanent errno is
+// injected too and asserted to be reported on the first read.
+test('state read: a transient errno is retried on a poll interval, a permanent one is not', (t) => {
   const { root, plist } = sandboxRoot(t)
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist]).code, 0)
   const target = path.join(root, 'state', 'launchd.json')
@@ -1040,6 +1049,7 @@ test('state read: a transient errno is retried, and giving up names the errno', 
     'const target = process.env.INJECT_TARGET',
     'const counter = process.env.INJECT_COUNTER',
     'const fails = Number(process.env.INJECT_FAILS)',
+    'const errno = process.env.INJECT_ERRNO',
     'const readFileSync = fs.readFileSync',
     'const appendFileSync = fs.appendFileSync',
     'let seen = 0',
@@ -1047,22 +1057,27 @@ test('state read: a transient errno is retried, and giving up names the errno', 
     'fs.readFileSync = (file, ...rest) => {',
     '  if (String(file) !== target) return readFileSync(file, ...rest)',
     '  seen += 1',
-    "  appendFileSync(counter, 'attempt\\n')",
+    '  appendFileSync(counter, `${Date.now()}\\n`)',
     '  if (seen > fails) return readFileSync(file, ...rest)',
-    '  const err = new Error(`EMFILE: too many open files, open \'${target}\'`)',
-    "  err.code = 'EMFILE'",
+    '  const err = new Error(`${errno}: injected read failure, open \'${target}\'`)',
+    '  err.code = errno',
     '  throw err',
     '}',
     '',
   ].join('\n'))
 
   /**
-   * Run one `setenv` whose first `fails` reads of the state file raise EMFILE.
+   * Run one `setenv` whose first `fails` reads of the state file raise `errno`.
+   *
+   * Every injected read stamps the counter with the wall clock, so the gap
+   * between the first attempt and the last says whether the shim waited
+   * between tries or spun straight through its budget.
    *
    * @param {number} fails
+   * @param {string} [errno]
    */
-  function setenvThrough(fails) {
-    const counter = path.join(root, `read-attempts-${fails}.log`)
+  function setenvThrough(fails, errno = 'EMFILE') {
+    const counter = path.join(root, `read-attempts-${errno}-${fails}.log`)
     const result = spawnSync(
       process.execPath,
       ['--import', pathToFileURL(injector).href, SHIM, 'launchctl', 'setenv', 'FOO', '1'],
@@ -1074,11 +1089,14 @@ test('state read: a transient errno is retried, and giving up names the errno', 
           INJECT_TARGET: target,
           INJECT_COUNTER: counter,
           INJECT_FAILS: String(fails),
+          INJECT_ERRNO: errno,
         },
       }
     )
     const log = fs.existsSync(counter) ? fs.readFileSync(counter, 'utf8') : ''
-    return { code: result.status, stderr: result.stderr, attempts: log.split('\n').filter(Boolean).length }
+    const stamps = log.split('\n').filter(Boolean).map(Number)
+    const spanMs = stamps.length > 1 ? stamps[stamps.length - 1] - stamps[0] : 0
+    return { code: result.status, stderr: result.stderr, attempts: stamps.length, spanMs }
   }
 
   const recovered = setenvThrough(2)
@@ -1090,6 +1108,18 @@ test('state read: a transient errno is retried, and giving up names the errno', 
   assert.notEqual(exhausted.code, 0, 'an errno that never clears is still an error')
   assert.equal(exhausted.attempts, 4, 'tried once and retried three times, then given up on')
   assert.match(exhausted.stderr, /EMFILE/, 'and the error names the errno it gave up on')
+  // Three waits of `STOP_POLL_MS` is 75ms. The floor sits well under that
+  // because what is being asserted is that there was a wait at all: four
+  // reads with no sleep between them land inside a single millisecond.
+  assert.ok(
+    exhausted.spanMs >= 50,
+    `four attempts spanned ${exhausted.spanMs}ms, so the shim waited a poll interval between them rather than spinning`
+  )
+
+  const refused = setenvThrough(99, 'EACCES')
+  assert.notEqual(refused.code, 0, 'an errno that waiting cannot clear is an error too')
+  assert.equal(refused.attempts, 1, 'but it is reported on the first read, not sat on for three poll intervals')
+  assert.match(refused.stderr, /EACCES/, 'and it is that errno the error names')
 })
 
 test('supervisor: a definition file it cannot read leaves a note rather than dying silently', (t) => {
