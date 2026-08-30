@@ -1109,17 +1109,31 @@ test('state read: a transient errno is retried on a poll interval, a permanent o
   assert.equal(exhausted.attempts, 4, 'tried once and retried three times, then given up on')
   assert.match(exhausted.stderr, /EMFILE/, 'and the error names the errno it gave up on')
   // Three waits of `STOP_POLL_MS` is 75ms. The floor sits well under that
-  // because what is being asserted is that there was a wait at all: four
-  // reads with no sleep between them land inside a single millisecond.
+  // because what is being asserted is that there was a wait at all, and the
+  // two outcomes are nowhere near it: with the sleep, twelve measured runs
+  // spanned 75 to 77ms; with the sleep deleted, ten runs under a 96-way load
+  // spanned 0 to 1ms, because `Atomics.wait` cannot return early and four
+  // reads with nothing between them land inside a millisecond.
   assert.ok(
     exhausted.spanMs >= 50,
-    `four attempts spanned ${exhausted.spanMs}ms, so the shim waited a poll interval between them rather than spinning`
+    `four attempts spanned ${exhausted.spanMs}ms, too little for a poll interval between tries`
   )
 
   const refused = setenvThrough(99, 'EACCES')
   assert.notEqual(refused.code, 0, 'an errno that waiting cannot clear is an error too')
   assert.equal(refused.attempts, 1, 'but it is reported on the first read, not sat on for three poll intervals')
   assert.match(refused.stderr, /EACCES/, 'and it is that errno the error names')
+
+  // The arms above pin one member of `TRANSIENT_READ_CODES` and one errno
+  // outside it, which leaves the other four members free to be dropped: the
+  // set narrows, the retry stops covering the case it was written for, and
+  // nothing says so. Each of them gets one read that fails and one that does
+  // not.
+  for (const code of ['ENFILE', 'EAGAIN', 'EBUSY', 'EINTR']) {
+    const waited = setenvThrough(1, code)
+    assert.equal(waited.code, 0, `a single ${code} is waited out rather than reported`)
+    assert.equal(waited.attempts, 2, `because ${code} is transient too, and the second try is the one that reads`)
+  }
 })
 
 test('supervisor: a definition file it cannot read leaves a note rather than dying silently', (t) => {
