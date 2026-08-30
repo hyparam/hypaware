@@ -17,6 +17,7 @@ import {
   perSignalOtlpOverrides,
 } from '../config/otlp_precedence.js'
 import { DEFAULT_RETENTION_DAYS } from '../cache/retention.js'
+import { discoverSpoolTables, QUERY_FLUSH_FAILURE_COOLDOWN_MS, readFlushFailure } from '../cache/spool.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
@@ -58,7 +59,7 @@ import {
 /**
  * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
@@ -1768,6 +1769,30 @@ export async function collectHypAwareStatus(opts = {}) {
     cache = await measureCacheStats(cacheRoot)
   } catch { /* best-effort cache probe */ }
 
+  // ----- tables whose last spool-to-cache flush failed (LLP 0322) -----
+  // The cooldown is the visible half of a standing flush failure: a query
+  // inside the window is told the cache may be stale, and nothing anywhere
+  // told the user why. The stamp has carried the reason since the cooldown
+  // shipped, on disk and unread. This is where it becomes readable.
+  //
+  // Read off the spool directly rather than through status.json, unlike
+  // `recentEntrypoints` and `maintenance` above: those summarize a walk only
+  // the daemon runs, while a flush failure is stamped by whichever process
+  // attempted the flush - the daemon's scheduled one, a sink export, or the
+  // `hyp query` in another terminal that first hit it. No single process
+  // sees them all, so the file is the only place the whole answer exists.
+  // The cost is one tree walk that stops at each spool directory, next to
+  // the whole-tree stat sweep `measureCacheStats` already pays.
+  // @ref LLP 0322#what-the-stamp-is-not [constrained-by]: reported as the reason a retry is paced, never folded into the freshness or size lines above
+  /** @type {CacheFlushFailureReport[]} */
+  let cacheFlushFailures = []
+  let cacheFlushFailuresTotal = 0
+  try {
+    const collected = await collectCacheFlushFailures(cacheRoot)
+    cacheFlushFailures = collected.failures
+    cacheFlushFailuresTotal = collected.total
+  } catch { /* best-effort spool probe */ }
+
   // ----- remote config apply state (LLP 0025) -----
   /** @type {ConfigControlStatus | null} */
   let remoteConfig = null
@@ -1930,6 +1955,8 @@ export async function collectHypAwareStatus(opts = {}) {
     recentEntrypoints,
     maintenance,
     captureHealth,
+    cacheFlushFailures,
+    cacheFlushFailuresTotal,
     proxyTrust,
     selfUpdate: describeSelfUpdate({ stateRoot, env }),
   }
@@ -2258,6 +2285,66 @@ function inferConfiguredSources(activePlugins) {
     })
   }
   return sources.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * How many failing tables the standing surface names. Declared beside its
+ * sibling cap's convention rather than below its only user: the count that
+ * rides with it is exact, so this bounds the terminal block and the `--json`
+ * array without bounding what the operator is told about the incident.
+ */
+const MAX_CACHE_FLUSH_FAILURES = 8
+
+/**
+ * Every table carrying a readable flush-failure stamp, newest failure first.
+ *
+ * Bounded like the other list-valued status sections: a cache whose every
+ * table is refusing writes has one cause, and eight lines is enough to name
+ * it without burying the rest of the report. `stillCoolingDown` is the
+ * difference between "the automatic retry is being held off right now" and
+ * "an old failure that nothing has cleared", which reads the same on disk
+ * and very differently to an operator.
+ *
+ * `total` is the count before the cap, and it is the reason the cap is
+ * allowed to exist. `MAX_SKIPPED_PARTITIONS_REPORTED` above settled the same
+ * argument for the same number: cap the list, never the size of the problem.
+ * Nine tables failing and forty tables failing are different incidents, and a
+ * section whose whole job is "is what was captured reaching the query cache?"
+ * would be answering it wrong if it showed eight and said nothing about the
+ * rest.
+ *
+ * @param {string} cacheRoot
+ * @param {number} [nowMs]
+ * @returns {Promise<{ total: number, failures: CacheFlushFailureReport[] }>}
+ */
+async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
+  /** @type {CacheFlushFailureReport[]} */
+  const failures = []
+  for (const tablePath of await discoverSpoolTables(cacheRoot)) {
+    const failure = await readFlushFailure(tablePath)
+    if (!failure) continue
+    // A path, so cleaned as a name: it is filesystem-sourced and reaches a
+    // TTY. Cleaned on the write side and not only on read, the rule
+    // LLP 0228#last-tick-only settled for the sibling `dataset`/`partition`
+    // labels; a spool path carries partition segments that came off a
+    // captured row. The message is not a name - it is the payload the
+    // operator asked for, and it is cleaned where the prose is assembled
+    // (LLP 0225).
+    //
+    // Relative always, never `tablePath`: `discoverSpoolTables` only yields
+    // directories under `<cacheRoot>/datasets`, so the relative form is at
+    // minimum `datasets` and an absolute host path can never reach the
+    // label. `sanitizeLabel` returning nothing is the only fallback needed.
+    const relative = path.relative(cacheRoot, tablePath)
+    failures.push({
+      table: sanitizeLabel(relative) ?? 'unknown',
+      failedAt: new Date(failure.failedAtMs).toISOString(),
+      errorMessage: failure.errorMessage,
+      stillCoolingDown: nowMs - failure.failedAtMs < QUERY_FLUSH_FAILURE_COOLDOWN_MS,
+    })
+  }
+  failures.sort((a, b) => (a.failedAt < b.failedAt ? 1 : a.failedAt > b.failedAt ? -1 : a.table.localeCompare(b.table)))
+  return { total: failures.length, failures: failures.slice(0, MAX_CACHE_FLUSH_FAILURES) }
 }
 
 /**

@@ -426,6 +426,25 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       gap_seconds: Math.round(c.gapMs / 1000),
       state: c.state,
     })),
+    // The machine copy of the capture-health section's flush-failure lines
+    // (LLP 0322). Always an array, empty on a healthy install.
+    //
+    // `error_message` is the value plane and the rendered line is the prose
+    // plane, the split LLP 0225 settled: no character is stripped or escaped
+    // out of this one, so a program reading it gets the bytes the stamp
+    // holds. Not unbounded, though, and the comment must not claim it is:
+    // `readFlushFailure` clamps at 512 on the way in, because the stamp is a
+    // file this process may not have written, and `table` is a display label
+    // that `sanitizeLabel` has already cleaned and clamped upstream.
+    cache_flush_failures: report.cacheFlushFailures.map((f) => ({
+      table: f.table,
+      failed_at: f.failedAt,
+      error_message: f.errorMessage,
+      still_cooling_down: f.stillCoolingDown,
+    })),
+    // The count before the cap, beside the capped list, so a program reading
+    // the array is not left believing eight is the whole incident.
+    cache_flush_failures_total: report.cacheFlushFailuresTotal,
     datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
     cache: {
       dir: cacheRoot,
@@ -574,6 +593,13 @@ const MAX_ERROR_CHARS = 400
 function printable(value, max) {
   return sanitizeLabel(value, max) ?? ''
 }
+
+/**
+ * How much of a flush failure's message the capture-health line quotes. Wider
+ * than `sanitizeLabel`'s default because this value is a sentence rather than
+ * a name, and still bounded because it is one line among many.
+ */
+const MAX_FLUSH_FAILURE_CHARS = 200
 
 /**
  * Render the V1 status report as human-friendly text. Mirrors the
@@ -725,7 +751,26 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // `[capture gap]` tag points at the diagnostics block, which carries the
   // repair.
   // @ref LLP 0257#status-and-health [implements]: hyp status renders last event seen vs last transcript activity
-  if (report.captureHealth.length > 0) {
+  //
+  // The same section carries the other way capture stops reaching the query
+  // cache: rows that were captured fine and then failed the spool-to-cache
+  // flush. LLP 0322 gave that failure a stamp and a cooldown, and a query
+  // inside the window is told the cache may be stale with no way to learn
+  // why short of reading spool internals. This is the line that says why.
+  // It sits beside the otel lines rather than beside `cache size` because
+  // it is the same question those answer - is what was captured reaching the
+  // place queries read? - and deliberately nowhere near the freshness
+  // timestamp, which quotes the last write that actually happened and would
+  // become a lie if a failed attempt fed it.
+  // `[constrained-by]`, not `[implements]`: LLP 0322 does not decide that the
+  // stamp is rendered here at all - `#degrade-reaches-the-signals` scopes the
+  // signal to the span status code and `queryRunsTotal`, and this surface is
+  // new. What the section does decide is the shape this line has to hold to:
+  // it may say why a retry is paced and it may not read as a write that
+  // happened, which is why the line quotes an attempt and sits nowhere near
+  // the freshness timestamp.
+  // @ref LLP 0322#what-the-stamp-is-not [constrained-by]: a rendered stamp stays a reason for a paced retry, never a freshness claim
+  if (report.captureHealth.length > 0 || report.cacheFlushFailures.length > 0) {
     stdout.write('  capture health:\n')
     for (const c of report.captureHealth) {
       const events = c.lastEventAt !== null
@@ -736,6 +781,30 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
         : 'no transcript activity'
       const tag = c.state === 'gap' ? '  [capture gap]' : ''
       stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
+    }
+    for (const f of report.cacheFlushFailures) {
+      // Through `printable` like every other collector-sourced string on this
+      // surface: the stamp is a file on disk written by some other process,
+      // so its message reaches a TTY with no guarantee of being short,
+      // printable, or single-line. `--json` still carries it byte-exact.
+      const why = printable(f.errorMessage, MAX_FLUSH_FAILURE_CHARS) || 'no error message was recorded'
+      const tag = f.stillCoolingDown ? '  [refresh cooling down]' : ''
+      stdout.write(`    - cache flush (${printable(f.table, 80)})  last attempt failed ${formatEntrypointAge(f.failedAt)}: ${why}${tag}\n`)
+    }
+    // The count beside the capped list, as the maintenance block does below:
+    // the list is bounded, the size of the incident is not. Nine failing
+    // tables and forty failing tables are different incidents, and this
+    // section exists to answer which one is happening.
+    //
+    // Only half of that block's shape, and the half it is missing is worth
+    // stating rather than implying. LLP 0228#last-tick-only pairs the count
+    // with a pointer to where the rest are listed, and the maintenance line
+    // spends it on `hyp query maintain --dry-run`. Nothing lists these:
+    // `--json` carries the same eight. So an operator learns the scale of the
+    // incident here and cannot learn which tables are past the cap.
+    const unnamed = report.cacheFlushFailuresTotal - report.cacheFlushFailures.length
+    if (unnamed > 0) {
+      stdout.write(`    ... and ${unnamed} more table${unnamed === 1 ? '' : 's'} whose last flush failed\n`)
     }
   }
 

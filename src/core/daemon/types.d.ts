@@ -347,6 +347,34 @@ export interface CaptureHealthReport {
   state: 'ok' | 'gap'
 }
 
+/**
+ * One table whose last spool-to-cache flush attempt failed, read from the
+ * failure stamp that paces the automatic retry (LLP 0322#stamp-the-failure).
+ *
+ * A pacing record surfaced as prose, and nothing more: it says an attempt
+ * failed, when, and with what. It makes no claim about what the spool or the
+ * cache holds, and it never feeds the freshness or cache-size lines
+ * (LLP 0322#what-the-stamp-is-not).
+ */
+export interface CacheFlushFailureReport {
+  /** Table directory, relative to the cache root. */
+  table: string
+  /** ISO timestamp the stamp records the failed attempt at. */
+  failedAt: string
+  /**
+   * The bounded message the failed flush threw, or null when the stamp
+   * carries none this build can read. Byte-exact as stamped: the renderer
+   * cleans it for a terminal where the prose is assembled (LLP 0225).
+   */
+  errorMessage: string | null
+  /**
+   * Whether the stamp is still young enough to hold the automatic query
+   * flush gate closed. False means the failure stands but the next `auto`
+   * query will attempt the flush again.
+   */
+  stillCoolingDown: boolean
+}
+
 /** Service-level daemon state surfaced by `hyp status`. */
 export interface ServiceState {
   /** Service file present at the platform path. */
@@ -527,6 +555,21 @@ export interface HypAwareStatusReport {
    * is made of.
    */
   captureHealth: CaptureHealthReport[]
+  /**
+   * Tables whose last spool-to-cache flush failed, newest first and capped
+   * at eight (LLP 0322). Empty on every healthy install, so the ordinary
+   * status surface is unchanged. Unlike `maintenance` this is read from the
+   * spool rather than status.json, because the stamp is written by whichever
+   * process attempted the flush and no single process sees them all.
+   */
+  cacheFlushFailures: CacheFlushFailureReport[]
+  /**
+   * How many tables carried a readable failure stamp before the cap above,
+   * so a render can say how much of the problem it is not showing. The same
+   * relationship `MaintenanceSkipSnapshot.skippedTotal` has to its capped
+   * `partitions`: the list is bounded, the size of the incident is not.
+   */
+  cacheFlushFailuresTotal: number
   /**
    * Proxy-mode trust state (LLP 0237, LLP 0239). Null whenever the question
    * does not apply: a non-darwin host (both mechanisms are macOS-only, LLP
