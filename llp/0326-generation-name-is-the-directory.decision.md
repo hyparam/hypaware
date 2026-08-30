@@ -7,17 +7,18 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-30
 **Extends:** [LLP 0323](./0323-cursor-names-a-generation-in-its-own-partition.decision.md) (#contained: containment is now checked against the filesystem as well as the string)
-**Related:** LLP 0310, LLP 0316, LLP 0323
+**Related:** LLP 0304, LLP 0310, LLP 0316, LLP 0323
 
 > LLP 0323's containment check reads the string and never the disk, so a
 > `tableDir` naming a bare-name SYMLINK is contained by spelling and
 > elsewhere in fact: `path.resolve` folds `..` and stops. The staged-only
 > sweep was measured unlinking through one, in a directory outside the
 > cache. `generationDirIsContained` now asks the filesystem one question
-> about the last path component: `lstat`, is this a symlink. Only a symlink
-> the filesystem confirms rejects the cursor; a stat that cannot answer
-> accepts, because inventing an escape out of silence is how a gate starts
-> losing live generations.
+> about the last path component, layout defaults included: `lstat`, is this
+> a symlink. The sweep asks it again, at the moment of the delete, about
+> the two subdirectories it lists. Only a symlink the filesystem confirms
+> rejects anything; a stat that cannot answer accepts, because inventing an
+> escape out of silence is how a gate starts losing live generations.
 
 ## What LLP 0323 left open, and what it costs {#the-door}
 
@@ -59,7 +60,7 @@ line as every other rejection LLP 0323 defined.
 The **last component only**, and this is the part that matters. Every
 component above it is the partition's own path, which the cache did not
 choose: a `$HYP_HOME` on another volume, a `/tmp` that is `/private/tmp`,
-a dataset root a user moved and linked back. Resolving those and demanding
+a cache root a user pointed at another disk. Resolving those and demanding
 the result look canonical rejects a working cache for the shape of the
 path it lives at, which is a bigger loss than the one being prevented. A
 `realpath` containment comparison happens to be equivalent to this check
@@ -74,6 +75,15 @@ filesystem, and no directory entry on a supported filesystem can carry one,
 so it names nothing anywhere. This closes item 2 of hyparam/hypaware#1091,
 which noted it was rejectable for free once the gate was revisited. It adds
 no protection class of its own.
+
+The name a cursor does not write down is a name too. An absent `tableDir`
+is the pre-`tableDir` spelling of the layout default, and the readers
+resolve it before they join: `liveGenerationDir` answers `epoch=<n>` off the
+layout, `appendRowsToSourceTable` answers `table` regardless. Both
+resolutions are generation names something will walk, so when the field is
+absent both get the same `lstat`. This does not reject an absent `tableDir`
+(see `#consequences`); it refuses the same planted symlink wearing the name
+nobody had to write down.
 
 A symlink pointing back *inside* the partition is refused too. Nothing
 mints one, and the gate's meaning is cleaner as "the name is the
@@ -105,12 +115,60 @@ which is a different design than the one LLP 0323 settled. This document
 claims that a symlink standing on disk when the cursor is read is refused,
 and no more.
 
+## One level down: the sweep's own path {#one-level-down}
+
+The gate above runs when the cursor is read. The unlink runs later and one
+component further down: `sweepUnreferencedTableFiles` joins `metadata/` and
+`data/` onto the generation path, lists each, and removes what it finds by
+path. A symlink at either component aims the identical deletion outside the
+cache, and unlike the cursor door it needs no `cursor.json` edit at all: a
+planted `<generation>/metadata -> <outside>` is the whole of it. Measured
+the same way as the door above, that plant made the staged-only pass unlink
+a staged-shaped file inside `<outside>` with a perfectly ordinary cursor
+sitting in the partition.
+
+So the pass asks the same question about every component it will traverse
+(the generation directory, `metadata/`, `data/`) and reclaims nothing in a
+generation where any of them is a confirmed symlink. Three `lstat`s against
+a pass that already lists two directories and reads avro.
+
+Re-asking about the generation directory is deliberate, not duplication
+left in by accident. It is the same question at the moment of the delete
+rather than at cursor-read time, which narrows (without closing) the window
+`#positive-evidence` records as open, and it keeps the property attached to
+the code that deletes rather than to a caller that has to remember. That is
+LLP 0323#one-gate's reasoning applied to a second gate guarding a different
+thing: the cursor gate decides whether a NAME is usable, this one decides
+whether a PATH may be deleted inside.
+
+The grep-index scratch sweep (LLP 0304#scratch-sweep-site) is the second
+pass with this shape, and it needs the guard more rather than less. It
+lists `<generation>/data` and unlinks by path exactly the same way, but it
+resolves its generation through `readCursorSync`, the LENIENT reader: a
+cursor the gate rejected still yields a default `epoch=0` there, so the
+cursor gate is not standing in front of it at all. Measured on this branch
+before the guard existed, a merely CORRUPT `cursor.json` beside a planted
+`<partition>/epoch=0 -> <outside>` was enough to make it unlink a
+scratch-shaped file in `<outside>`. No cursor had to be authored.
+
+That is the general statement the two guards are instances of: a pass that
+unlinks by path checks the path it will walk, at the point it walks it. The
+cursor gate decides whether a NAME is usable; it cannot decide what an
+unlink one lenient read away is allowed to touch.
+
+The refusal logs its own `error_kind`, `sweep_path_is_symlink`, rather than
+the cursor gate's: the state it names is a different one, where the cursor
+is fine and the directory under it is not.
+
 ## Cost {#cost}
 
 One `lstat` per cursor read that gets as far as a well-formed `tableDir`,
 measured at about 3 microseconds against about 7 for the read it is
-attached to. The read already opens, reads, and closes a file and parses
-JSON; the tick around it walks directories and scans parquet. On a
+attached to. A cursor carrying no `tableDir` pays two instead of one,
+because two defaults could be resolved and only one of them exists; a
+sweep pays three more, once per tick per partition that reaches it. The
+read already opens, reads, and closes a file and parses JSON; the tick
+around it walks directories and scans parquet. On a
 thousand-partition cache with a handful of reads each, the tick pays tens
 of milliseconds once every few minutes.
 
@@ -134,9 +192,17 @@ fifth consumer added later is the one that would inherit the defect.
   it. This is not a supported layout and it never worked: a compaction swap
   mints its replacement generation with `mkdir` beside the link, on the
   original volume, so the arrangement dissolves at the first compaction
-  anyway. Linking `$HYP_HOME`, the cache root, or a dataset directory is
-  the supported way to put the cache somewhere else, and none of those is
-  touched by this check.
+  anyway. Linking `$HYP_HOME` or the cache root is the supported way to put
+  the cache somewhere else, and neither is touched by this check. Linking a
+  directory *inside* the datasets tree was never a way to do it and is not
+  one this check took away: `discoverCachePartitions` walks with `readdir`
+  and descends only into entries that are directories, so a symlinked
+  dataset or partition directory is already invisible to maintenance.
+- A generation whose `metadata/` or `data/` is a symlink keeps its cursor
+  and its rows: only the unreferenced-file sweep stands down, so the
+  partition still reads, still appends, and still compacts. The narrower
+  refusal is what the narrower door deserves - nothing about a planted
+  subdirectory says the generation is not the live one.
 - Items 3 and 4 of hyparam/hypaware#1091 stay open by decision, not by
   omission. A well-formed name for the *wrong* generation still costs the
   live one, which is the cursor's authority working as LLP 0323#contained
@@ -156,5 +222,10 @@ fifth consumer added later is the one that would inherit the defect.
 - [LLP 0310](./0310-in-place-subset-compaction.decision.md):
   `#unreferenced-sweep`, the other destructive reader downstream of the
   cursor.
+- [LLP 0304](./0304-grep-search-round-4-corrections.decision.md):
+  `#scratch-sweep-site`, the second pass that unlinks by path inside the
+  live generation, and the one that resolves it leniently.
 - Code: `src/core/cache/partition.js` (`generationDirIsContained`,
-  `generationDirIsSymlink`), `test/core/cache-cursor-containment.test.js`.
+  `generationDirIsSymlink`, `defaultGenerationDirs`),
+  `src/core/cache/maintenance.js` (`sweepPathComponents`,
+  `isConfirmedSymlink`), `test/core/cache-cursor-containment.test.js`.

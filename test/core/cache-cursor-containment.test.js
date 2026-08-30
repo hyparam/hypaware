@@ -532,3 +532,167 @@ test('append, generation swap, and retention leave every cursor readable', async
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+// The same door, reached without editing `tableDir` at all. LLP 0326
+// #not-a-symlink covers the name the cursor writes down; these cover the two
+// names it does not, and the two path components below them.
+
+test('a cursor that names no generation is still not a pointer to one', async () => {
+  const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
+  try {
+    const dir = partitionDir(cacheRoot)
+    const leak = await plantStaleStagedName(outside)
+    await fs.rm(path.join(dir, 'table'), { recursive: true, force: true })
+    await fs.symlink(outside, path.join(dir, 'table'), 'dir')
+    // The pre-`tableDir` spelling: legitimate, and it still resolves to a
+    // generation name every reader joins onto the partition path.
+    const { epoch, rowCount } = readCursorSync(dir)
+    await fs.writeFile(
+      path.join(dir, 'cursor.json'),
+      JSON.stringify({ epoch, rowCount, compaction: null, layout: 'source-table' })
+    )
+
+    assert.equal(tryReadCursorSync(dir), null, 'the default generation gets the same question an explicit one does')
+
+    const report = await maintainCache({ cacheRoot })
+
+    assert.equal(await pathExists(leak), true, 'the sweep does not unlink through the default name either')
+    assert.equal(report.partitions[0]?.unreferencedFilesRemoved, undefined, 'and reclaimed nothing')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a legacy epoch cursor resolves a default name too, and it is asked the same question', async () => {
+  const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
+  try {
+    const dir = partitionDir(cacheRoot)
+    await plantStaleStagedName(outside)
+    await fs.rm(path.join(dir, 'table'), { recursive: true, force: true })
+    await fs.symlink(outside, path.join(dir, 'epoch=0'), 'dir')
+    await fs.writeFile(path.join(dir, 'cursor.json'), JSON.stringify({ epoch: 0, rowCount: 1, compaction: null }))
+
+    assert.equal(tryReadCursorSync(dir), null, '`epoch=<n>` is a generation name the readers resolve')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// LLP 0326#one-level-down: the generation is a real directory the cursor
+// legitimately names, and the symlink is one component further down, on the
+// path the sweep itself joins and lists.
+
+/**
+ * @param {string} cacheRoot
+ * @param {string} outside
+ * @param {'metadata' | 'data'} component
+ */
+async function plantSymlinkedComponent(cacheRoot, outside, component) {
+  const generation = path.join(partitionDir(cacheRoot), 'table')
+  await fs.rm(path.join(generation, component), { recursive: true, force: true })
+  await fs.mkdir(path.join(outside, component), { recursive: true })
+  await fs.symlink(path.join(outside, component), path.join(generation, component), 'dir')
+}
+
+test('the sweep reclaims nothing through a symlinked metadata directory', async () => {
+  const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
+  try {
+    const leak = await plantStaleStagedName(outside)
+    await plantSymlinkedComponent(cacheRoot, outside, 'metadata')
+
+    const dir = partitionDir(cacheRoot)
+    assert.notEqual(tryReadCursorSync(dir), null, 'the cursor itself is fine: it names a real directory')
+
+    const report = await maintainCache({ cacheRoot })
+
+    assert.equal(await pathExists(leak), true, 'a staged name reached through a planted link is not the cache to reclaim')
+    assert.equal(report.partitions[0]?.unreferencedFilesRemoved, undefined, 'and the sweep counted nothing')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the sweep reclaims nothing through a symlinked data directory either', async () => {
+  const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
+  try {
+    await plantSymlinkedComponent(cacheRoot, outside, 'data')
+    // The referenced-set pass, not the staged one: a stale parquet no
+    // snapshot names is what it reclaims out of `data/`.
+    const leak = path.join(outside, 'data', 'part-orphan.parquet')
+    await fs.writeFile(leak, 'bytes that belong to whoever owns this directory')
+    await fs.utimes(leak, STALE, STALE)
+
+    await maintainCache({ cacheRoot })
+
+    assert.equal(await pathExists(leak), true, 'the other component the sweep lists is refused on the same terms')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// And the over-tightening control for that guard, which is the whole risk of
+// adding it: a sweep that refuses everything reclaims nothing, and the staged
+// leak (LLP 0316#staged-writes-are-reclaimed) has no other reclaimer.
+test('the sweep still reclaims a stale staged name inside a generation it owns', async () => {
+  const { root, cacheRoot } = await makeCacheBesideOutsider()
+  try {
+    const dir = partitionDir(cacheRoot)
+    const leak = await plantStaleStagedName(path.join(dir, 'table'))
+
+    const report = await maintainCache({ cacheRoot })
+
+    assert.equal(await pathExists(leak), false, 'a real generation is still swept')
+    assert.equal(report.partitions[0]?.unreferencedFilesRemoved, 1, 'and the reclaim is still counted')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The same control through a symlinked ancestor, which is where a guard
+// spelled as a canonicalization (`realpath(p) === p`) stops sweeping and a
+// guard spelled as `lstat` does not.
+test('and still reclaims it in a cache reached through a symlinked ancestor', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-sweep-symlinked-home-'))
+  try {
+    await fs.mkdir(path.join(root, 'volume', 'hyp-home'), { recursive: true })
+    await fs.symlink(path.join(root, 'volume'), path.join(root, 'home'), 'dir')
+    const cacheRoot = path.join(root, 'home', 'hyp-home', 'cache')
+    await appendRowsToSourceTable(
+      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
+      [{ id: 1, session_id: 's-1' }]
+    )
+    const leak = await plantStaleStagedName(path.join(partitionDir(cacheRoot), 'table'))
+
+    const report = await maintainCache({ cacheRoot })
+
+    assert.equal(await pathExists(leak), false, 'the shape of the path the cache lives at is not the sweep\'s business')
+    assert.equal(report.partitions[0]?.unreferencedFilesRemoved, 1, 'and the reclaim is still counted')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The pass the cursor gate does NOT stand in front of. The grep-index scratch
+// sweep resolves its generation through `readCursorSync`, the lenient reader,
+// so a cursor the gate rejected still yields a default generation name there -
+// and this cursor does not even have to be edited, only corrupt.
+test('the index-scratch sweep does not unlink through a symlinked generation either', async () => {
+  const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
+  try {
+    const dir = partitionDir(cacheRoot)
+    await fs.mkdir(path.join(outside, 'data'), { recursive: true })
+    const scratch = path.join(outside, 'data', 'part-0.index.parquet.tmp')
+    await fs.writeFile(scratch, 'someone else\'s abandoned scratch')
+    await fs.utimes(scratch, STALE, STALE)
+    // Unreadable, so the lenient reader synthesizes epoch 0 and the epoch
+    // layout names `epoch=0` as the live generation.
+    await fs.writeFile(path.join(dir, 'cursor.json'), '{ not json')
+    await fs.symlink(outside, path.join(dir, 'epoch=0'), 'dir')
+
+    await maintainCache({ cacheRoot })
+
+    assert.equal(await pathExists(scratch), true, 'a scratch-shaped name outside the cache is not the cache to reclaim')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})

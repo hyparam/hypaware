@@ -111,6 +111,19 @@ export function tryReadCursorSync(partitionDir) {
         return null
       }
       cursor.tableDir = parsed.tableDir
+    } else {
+      // An absent `tableDir` still names a generation: every reader resolves
+      // it to the layout default and joins THAT onto the partition path, so
+      // the default is the name the sweep will walk and the name the gate has
+      // to ask about. Absent stays legitimate (LLP 0323#whole-cursor) - what
+      // is refused is the same planted symlink, wearing the name nobody had
+      // to write down.
+      const root = path.resolve(partitionDir)
+      const planted = defaultGenerationDirs(cursor).find((name) => generationDirIsSymlink(root, name))
+      if (planted !== undefined) {
+        reportEscapingTableDir(partitionDir, planted)
+        return null
+      }
     }
     if (parsed.retention && typeof parsed.retention === 'object') {
       cursor.retention = parsed.retention
@@ -188,7 +201,8 @@ function generationDirIsContained(partitionDir, tableDir) {
  *
  * @ref LLP 0326#positive-evidence [implements]: only a symlink the filesystem confirms rejects the cursor.
  * @param {string} root  the resolved partition directory
- * @param {string} tableDir  already known to be a bare, contained name
+ * @param {string} tableDir  a bare generation name: an explicit one the
+ *   string rules above already passed, or a layout default
  * @returns {boolean}
  */
 function generationDirIsSymlink(root, tableDir) {
@@ -197,6 +211,25 @@ function generationDirIsSymlink(root, tableDir) {
   } catch {
     return false
   }
+}
+
+/**
+ * The generation names a reader may resolve for a cursor that carries no
+ * `tableDir`.
+ *
+ * Two of them, because the consumers do not agree and the gate has to cover
+ * every name one of them could walk: `liveGenerationDir` reads the layout
+ * and answers `epoch=<n>` for anything that is not source-table, while
+ * `appendRowsToSourceTable` answers `table` regardless. Only one of the two
+ * exists in any real partition, so the other costs a stat that finds
+ * nothing.
+ *
+ * @ref LLP 0326#not-a-symlink [implements]: the default generation name is a generation name.
+ * @param {PartitionCursor} cursor
+ * @returns {string[]}
+ */
+function defaultGenerationDirs(cursor) {
+  return ['table', `epoch=${cursor.epoch}`]
 }
 
 /**
