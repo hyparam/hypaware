@@ -6,6 +6,7 @@
 **Generated-by:** neutral
 **Author:** Phil / Claude
 **Date:** 2026-08-29
+**Extended-by:** [LLP 0326](./0326-generation-name-is-the-directory.decision.md) (#contained is checked against the filesystem as well as the string: a bare-name symlink resolves inside the partition and points out of it, so the gate now also refuses a generation name that is a symlink, and a name carrying a NUL)
 **Related:** LLP 0013, LLP 0217, LLP 0310, LLP 0316, LLP 0023, LLP 0220
 
 > `cursor.json`'s `tableDir` is a directory NAME, not a path: the readers
@@ -79,6 +80,10 @@ degrees. Resolution is still checked after it, because `.` and `..` are
 each one segment: `.` names `partitionDir`, which holds the cursor rather
 than a generation, and `..` leaves it. The empty string is rejected
 outright.
+
+**Extended-by:** [LLP 0326 #not-a-symlink](./0326-generation-name-is-the-directory.decision.md#not-a-symlink).
+Both rules above read the string and neither reads the disk, so a bare-name
+symlink passes them and points anywhere.
 
 What the gate does not decide is whether the cursor names the RIGHT
 generation. A well-formed name for a directory that is not the live one
