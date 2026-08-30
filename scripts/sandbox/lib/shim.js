@@ -82,6 +82,12 @@ const STOP_POLL_MS = 25
 const LOCK_WAIT_MS = 15_000
 const LOCK_STALE_MS = 60_000
 
+// Read errors worth another go: a fanned-out install can exhaust descriptors,
+// and a retry costs a poll interval. Anything else (EACCES, EISDIR) will not
+// improve by waiting.
+const TRANSIENT_READ_CODES = new Set(['EMFILE', 'ENFILE', 'EAGAIN', 'EBUSY', 'EINTR'])
+const READ_RETRIES = 3
+
 const tool = process.argv[2]
 const args = process.argv.slice(3)
 
@@ -141,12 +147,6 @@ function record(result) {
     process.stderr.write(`[sandbox] ${tool} ${args.join(' ')} -> exit ${result.code}\n`)
   }
 }
-
-// Read errors worth another go: a fanned-out install can exhaust descriptors,
-// and a retry costs a poll interval. Anything else (EACCES, EISDIR) will not
-// improve by waiting.
-const TRANSIENT_READ_CODES = new Set(['EMFILE', 'ENFILE', 'EAGAIN', 'EBUSY', 'EINTR'])
-const READ_RETRIES = 3
 
 /**
  * Read a state file, or hand back `fallback` when there is nothing to read.

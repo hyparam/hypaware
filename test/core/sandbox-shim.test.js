@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const SHIM = fileURLToPath(new URL('../../scripts/sandbox/lib/shim.js', import.meta.url))
 
@@ -1002,9 +1002,94 @@ test('state lock: an unreadable state file is not committed as an empty domain',
 
   const setenv = shim(root, 'launchctl', ['setenv', 'NODE_USE_SYSTEM_CA', '1'])
   assert.notEqual(setenv.code, 0, 'a state file it cannot read is an error, not an empty domain')
+  // The exit code alone cannot tell a read that failed from a shim that broke
+  // on the way to reporting one. Naming the errno is the whole of what this
+  // error is for, and asserting only `code !== 0` let a ReferenceError raised
+  // inside the shim stand in for the EACCES it was supposed to describe.
+  assert.match(
+    setenv.stderr,
+    /EACCES/,
+    'and says which errno stopped the read, not which binding stopped the shim'
+  )
 
   fs.chmodSync(file, 0o600)
   assert.equal(shim(root, 'launchctl', ['print', target]).code, 0, 'the bootstrapped service survived')
+})
+
+// A read that fails a bounded number of times and then does not is something
+// no filesystem offers on demand, so the failure is injected from outside the
+// shim: a preloaded module patches `fs.readFileSync` for one path and counts
+// the calls. The shim itself is untouched and knows nothing about the
+// injection, which is the point.
+//
+// The retry had never run once before this case existed. Its two constants
+// were declared below the module's top-level dispatch, so every non-ENOENT
+// read evaluated them inside their temporal dead zone and threw a
+// ReferenceError naming a binding rather than retrying or naming the errno.
+// Counting the attempts is what keeps that from coming back: an assertion on
+// the exit code cannot tell a retried read from one that never happened.
+test('state read: a transient errno is retried, and giving up names the errno', (t) => {
+  const { root, plist } = sandboxRoot(t)
+  assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist]).code, 0)
+  const target = path.join(root, 'state', 'launchd.json')
+  const injector = path.join(root, 'inject-read-failure.mjs')
+  fs.writeFileSync(injector, [
+    "import fs from 'node:fs'",
+    "import process from 'node:process'",
+    '',
+    'const target = process.env.INJECT_TARGET',
+    'const counter = process.env.INJECT_COUNTER',
+    'const fails = Number(process.env.INJECT_FAILS)',
+    'const readFileSync = fs.readFileSync',
+    'const appendFileSync = fs.appendFileSync',
+    'let seen = 0',
+    '',
+    'fs.readFileSync = (file, ...rest) => {',
+    '  if (String(file) !== target) return readFileSync(file, ...rest)',
+    '  seen += 1',
+    "  appendFileSync(counter, 'attempt\\n')",
+    '  if (seen > fails) return readFileSync(file, ...rest)',
+    '  const err = new Error(`EMFILE: too many open files, open \'${target}\'`)',
+    "  err.code = 'EMFILE'",
+    '  throw err',
+    '}',
+    '',
+  ].join('\n'))
+
+  /**
+   * Run one `setenv` whose first `fails` reads of the state file raise EMFILE.
+   *
+   * @param {number} fails
+   */
+  function setenvThrough(fails) {
+    const counter = path.join(root, `read-attempts-${fails}.log`)
+    const result = spawnSync(
+      process.execPath,
+      ['--import', pathToFileURL(injector).href, SHIM, 'launchctl', 'setenv', 'FOO', '1'],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HYP_SANDBOX_ROOT: root,
+          INJECT_TARGET: target,
+          INJECT_COUNTER: counter,
+          INJECT_FAILS: String(fails),
+        },
+      }
+    )
+    const log = fs.existsSync(counter) ? fs.readFileSync(counter, 'utf8') : ''
+    return { code: result.status, stderr: result.stderr, attempts: log.split('\n').filter(Boolean).length }
+  }
+
+  const recovered = setenvThrough(2)
+  assert.equal(recovered.code, 0, 'two EMFILEs in a row are waited out rather than reported')
+  assert.equal(recovered.attempts, 3, 'because the read is tried again, and the third try is the one that reads')
+  assert.equal(shim(root, 'launchctl', ['getenv', 'FOO']).stdout, '1\n', 'and the update landed on the real state')
+
+  const exhausted = setenvThrough(99)
+  assert.notEqual(exhausted.code, 0, 'an errno that never clears is still an error')
+  assert.equal(exhausted.attempts, 4, 'tried once and retried three times, then given up on')
+  assert.match(exhausted.stderr, /EMFILE/, 'and the error names the errno it gave up on')
 })
 
 test('supervisor: a definition file it cannot read leaves a note rather than dying silently', (t) => {
