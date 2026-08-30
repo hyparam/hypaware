@@ -346,6 +346,16 @@ function acquireStateLock(file) {
  * reports, and a reader has to be able to tell a measurement from its
  * absence.
  *
+ * On a `broke-*` line the age is an observation, not a fact about the lock
+ * that was evicted: it is stat'd before the removal, and a holder that
+ * released and was replaced in that gap leaves the replacement evicted under
+ * the earlier lock's age and `stale`-versus-budget reason. Closing that would
+ * need the eviction and the read to be one operation. `renameSync` would give
+ * it, but only here: a `degraded-unlocked` line evicted nothing, so its age
+ * stays an observation either way, and one field meaning two things by event
+ * kind reads worse than one that always means the same. `waitedMs` is the
+ * field to trust. See README.md.
+ *
  * @param {string} file
  * @param {'broke-stale' | 'broke-budget' | 'degraded-unlocked'} event
  * @param {number} started
@@ -802,7 +812,7 @@ function supervise(label, plist) {
   try {
     xml = fs.readFileSync(plist, 'utf8')
   } catch (err) {
-    supervisorNote(label, `could not read ${plist}: ${err instanceof Error ? err.message : String(err)}`)
+    supervisorNote('launchctl', label, `could not read ${plist}: ${err instanceof Error ? err.message : String(err)}`)
     return
   }
   const argv = parsePlistArray(xml, 'ProgramArguments')
@@ -836,7 +846,7 @@ function supervise(label, plist) {
     try {
       domain = readState(launchdPath, domain)
     } catch (err) {
-      supervisorNote(label, `could not read the launchd domain: ${err instanceof Error ? err.message : String(err)}`)
+      supervisorNote('launchctl', label, `could not read the launchd domain: ${err instanceof Error ? err.message : String(err)}`)
     }
     return {
       ...process.env,
@@ -849,6 +859,7 @@ function supervise(label, plist) {
   const errPath = parsePlistString(xml, 'StandardErrorPath')
 
   superviseProgram({
+    toolName: 'launchctl',
     label,
     argv,
     keepAlive,
@@ -873,7 +884,7 @@ function superviseSystemd(unit, unitPath) {
   try {
     body = fs.readFileSync(unitPath, 'utf8')
   } catch (err) {
-    supervisorNote(unit, `could not read ${unitPath}: ${err instanceof Error ? err.message : String(err)}`)
+    supervisorNote('systemctl', unit, `could not read ${unitPath}: ${err instanceof Error ? err.message : String(err)}`)
     return
   }
   const argv = parseSystemdWords(unitValues(body, 'ExecStart')[0] ?? '')
@@ -897,6 +908,7 @@ function superviseSystemd(unit, unitPath) {
   const stderr = unitValues(body, 'StandardError')[0] ?? ''
 
   superviseProgram({
+    toolName: 'systemctl',
     label: unit,
     argv,
     keepAlive: restart,
@@ -911,6 +923,7 @@ function superviseSystemd(unit, unitPath) {
  * Supervise one service command until it stops or exceeds the crash-loop cap.
  *
  * @param {{
+ *   toolName: 'launchctl' | 'systemctl',
  *   label: string,
  *   argv: string[],
  *   keepAlive: boolean,
@@ -921,7 +934,7 @@ function superviseSystemd(unit, unitPath) {
  * }} options
  */
 function superviseProgram(options) {
-  const { label, argv, keepAlive, env, outPath, errPath, throttleMs } = options
+  const { toolName, label, argv, keepAlive, env, outPath, errPath, throttleMs } = options
   if (argv.length === 0) process.exit(0)
   const pidFile = path.join(stateDir, `service-${label}.json`)
 
@@ -950,7 +963,7 @@ function superviseProgram(options) {
     recentStarts.push(now)
     while (recentStarts.length > 0 && now - recentStarts[0] > RESTART_WINDOW_MS) recentStarts.shift()
     if (recentStarts.length > RESTART_CEILING) {
-      supervisorNote(label, `crash loop: ${recentStarts.length} starts in ${RESTART_WINDOW_MS / 1000}s, giving up`)
+      supervisorNote(toolName, label, `crash loop: ${recentStarts.length} starts in ${RESTART_WINDOW_MS / 1000}s, giving up`)
       stop()
       return
     }
@@ -986,7 +999,7 @@ function superviseProgram(options) {
       settled = true
       if (current === child) current = null
       closeLogFds()
-      if (note) supervisorNote(label, note)
+      if (note) supervisorNote(toolName, label, note)
       if (stopping) return
       if (!keepAlive) {
         try { fs.rmSync(pidFile) } catch { /* nothing to clear */ }
@@ -1009,13 +1022,20 @@ function superviseProgram(options) {
  * detached with stdio ignored, so this log is the only channel it has, and a
  * failure it does not write here is a failure the run cannot explain.
  *
+ * `toolName` is the lane's own mock, not this process's `tool` argv slot,
+ * which reads `__supervise` or `__supervise_systemd` here. `hyp-sandbox
+ * calls` renders every line as `<tool> <args>`, so a systemd note filed
+ * under `launchctl` sends a reader debugging a Linux install to a binary
+ * the run never invoked and the host may not even have.
+ *
+ * @param {'launchctl' | 'systemctl'} toolName
  * @param {string} label
  * @param {string} note
  */
-function supervisorNote(label, note) {
+function supervisorNote(toolName, label, note) {
   const line = JSON.stringify({
     ts: new Date().toISOString(),
-    tool: 'launchctl',
+    tool: toolName,
     args: ['(supervisor)', label],
     exit: -1,
     note,

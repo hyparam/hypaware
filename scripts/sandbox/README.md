@@ -55,13 +55,24 @@ the holder's lock and takes it for itself. Either break proceeds unlocked
 instead when the retake that follows it is lost. Every one of those degraded
 exits appends a line to `calls.jsonl` carrying a `lock` object
 (`broke-stale`, `broke-budget`, or `degraded-unlocked`, with how long it
-waited and the age of the lock it broke, or a null age where there was
-nothing left to measure), so a run that lost an update can be told from one
-that never contended:
+waited and the age of the lock, or a null age where there was nothing left to
+measure), so a run that lost an update can be told from one that never
+contended:
 
 ```sh
 grep '"lock"' "$(scripts/sandbox/hyp-sandbox path)/state/calls.jsonl"
 ```
+
+Read `ageMs` as an observation, not a fact about the lock that was evicted.
+The age is stat'd before the removal, and those are two syscalls: a lock
+released and retaken in that gap is the one actually evicted, while `ageMs`
+still describes the lock seen a moment earlier. The reason is picked from
+that same earlier read, so where it was a stale age that triggered the
+break, the line says `broke-stale` about a lock that was freshly taken. A
+`broke-budget` stays true whatever it evicted, being a fact about this
+shim's own wait rather than about the lock. That an eviction happened is
+never misreported, only how it is described. `waitedMs` is the field to
+trust, on every event.
 
 ## What is **not** isolated
 
@@ -136,7 +147,7 @@ $NODE_USE_SYSTEM_CA` in the real one.
 | `central start\|stop\|status\|log\|config` | Run a stand-in central server so `hyp join` / `leave` / rejoin can be tested without a real fleet |
 | `seed-config [port]` | Write a minimal v2 config with a non-clashing gateway port |
 | `port <n>` | Rewrite every `listen` port in the sandbox config |
-| `calls [n]` | Show the last n intercepted `launchctl`/`security` calls |
+| `calls [n]` | Show the last n intercepted `launchctl`/`security`/`systemctl` calls, and the observations the KeepAlive supervisors filed under their own lane's tool |
 | `state` | Dump the mock launchd, keychain, and systemd state |
 | `reset` | Stop anything `--spawn` started (and the fake central), wait for it to actually exit, then delete the sandbox root (asks first) |
 
