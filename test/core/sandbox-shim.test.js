@@ -844,7 +844,7 @@ function lockEvents(root) {
  * The observations a detached supervisor appended to `calls.jsonl`.
  *
  * @param {string} root
- * @returns {{ note: string }[]}
+ * @returns {{ tool: string, note: string }[]}
  */
 function supervisorNotes(root) {
   let raw = ''
@@ -1023,11 +1023,19 @@ test('supervisor: a definition file it cannot read leaves a note rather than dyi
   const supervisedUnit = shim(systemdRootDir, '__supervise_systemd', [unit, missingUnit])
   assert.equal(supervisedUnit.code, 0, 'the systemd supervisor exits rather than throwing')
 
-  for (const [where, name] of [[root, missing], [systemdRootDir, missingUnit]]) {
+  // `hyp-sandbox calls` renders each line as `<tool> <args>`, so the lane a
+  // supervisor note came from is only legible if the note carries the tool
+  // that lane mocks. A systemd note filed under `launchctl` reads as a call
+  // to a binary this run never invoked, on a host that may not have one.
+  for (const [where, name, expected] of [
+    [root, missing, 'launchctl'],
+    [systemdRootDir, missingUnit, 'systemctl'],
+  ]) {
     const notes = supervisorNotes(where)
     assert.equal(notes.length, 1, `one supervisor note for ${name}`)
     assert.match(notes[0].note, /could not read/, 'the note says the read is what failed')
     assert.match(notes[0].note, /ENOENT/, 'and names the errno, which is the whole of what it can say')
+    assert.equal(notes[0].tool, expected, `the note for ${name} is filed under the lane's own tool`)
   }
 })
 
