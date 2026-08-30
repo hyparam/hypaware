@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
 
 /**
- * @import { DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetDisposition, DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { IdentityClient } from './identity_client.js'
  * @import { CentralSinkConfig, DatasetRolloutRecord, DatasetRolloutStore } from './types.js'
@@ -214,6 +214,31 @@ export function createForwardSink(args) {
       }
     },
 
+    /**
+     * The same verdict `exportBatch` acts on, stated instead of acted on, so
+     * `hyp sync`'s consent prompt does not quote rows this sink will refuse to
+     * send. It shares `datasetForwardingVerdict` with the export path rather
+     * than restating the rule, because a second copy of a privacy verdict is a
+     * copy that can drift toward promising less egress than occurs.
+     *
+     * A legacy signal forwards its whole backlog. An eligible open dataset is
+     * baselined at rollout and ships nothing that predates it, which is
+     * `starts-from-now`. Everything withheld is `skips`: a local-only-content
+     * dataset and a name a legacy ingest path has reserved alike, because from
+     * the prompt's side both are rows that never leave.
+     *
+     * @ref LLP 0324#disposition-seam [implements]: central answers from the predicate its forwarding path already enforces
+     * @ref LLP 0305#eligibility [constrained-by]: the eligibility rule stays declared on the dataset and enforced here, so the preview asks rather than reimplements
+     * @param {DatasetRegistration} dataset
+     * @returns {DatasetDisposition}
+     */
+    datasetDisposition(dataset) {
+      const verdict = datasetForwardingVerdict(dataset, dataset.name)
+      if ('withheld' in verdict) return 'skips'
+      // @ref LLP 0305#start-now [implements]: an eligible open dataset's history predating its rollout never ships, so the preview must not count it
+      return verdict.registration ? 'starts-from-now' : 'forwards'
+    },
+
     async close() {
       // No background loops to stop here: the config pull loop wraps
       // this sink's close() in index.js, and identity refresh is lazy
@@ -246,15 +271,34 @@ function forwardingTarget(query, partition) {
   if (!dataset) {
     throw new Error(`central.forward: dataset '${partition.dataset}' is not registered locally`)
   }
+  return datasetForwardingVerdict(dataset, partition.dataset)
+}
+
+/**
+ * The forwarding rule itself, over a resolved registration. Split out from
+ * {@link forwardingTarget} so `datasetDisposition` can answer the `hyp sync`
+ * preview from this exact predicate: the preview's whole claim is that it
+ * quotes what the export would do, and two copies of this rule would let the
+ * prompt drift into promising less egress than the export performs.
+ *
+ * `name` is passed rather than read off `dataset`, because the export path
+ * resolves the registration by the partition's dataset name and must keep
+ * routing by that name.
+ *
+ * @param {DatasetRegistration} dataset
+ * @param {string} name
+ * @returns {{ ingestName: string, registration?: DatasetRegistration } | { withheld: string, level: 'info' | 'warn' }}
+ */
+function datasetForwardingVerdict(dataset, name) {
   // A built-in dataset claims its reserved route explicitly. Without this
   // ordering, an unrelated open dataset named `logs` with no sourceSignal
   // falls through the default and silently impersonates the legacy endpoint.
-  if (KNOWN_SIGNALS.has(partition.dataset) && dataset.sourceSignal !== partition.dataset) {
+  if (KNOWN_SIGNALS.has(name) && dataset.sourceSignal !== name) {
     // A plugin bug rather than a policy outcome, so it reports at warn: the
     // dataset silently forwards nothing until the name is changed.
     return { withheld: 'name is reserved by a legacy ingest path', level: 'warn' }
   }
-  const signal = dataset.sourceSignal ?? partition.dataset
+  const signal = dataset.sourceSignal ?? name
   if (KNOWN_SIGNALS.has(signal)) return { ingestName: signal }
   // @ref LLP 0305#eligibility [implements]: fail closed when a dataset declares unprovenanced local-only content that this raw-row protocol cannot suppress.
   // @ref LLP 0105#graph-provenance [constrained-by]: unprovenanced derived content cannot leave through a raw-row export path that has no column-suppression seam.
@@ -263,7 +307,7 @@ function forwardingTarget(query, partition) {
     // reports at info.
     return { withheld: 'declares local-only content columns', level: 'info' }
   }
-  return { ingestName: partition.dataset, registration: dataset }
+  return { ingestName: name, registration: dataset }
 }
 
 /**

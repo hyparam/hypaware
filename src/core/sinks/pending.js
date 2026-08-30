@@ -5,10 +5,10 @@ import { pluginStateDir } from '../runtime/paths.js'
 import { createSinkWatermarkStore } from './watermarks.js'
 
 /**
- * @import { HypAwareV2Config, QueryPartition, QueryRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetDisposition, DatasetRegistration, HypAwareV2Config, QueryPartition, QueryRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
- * @import { PendingPreviewOptions, PendingVolume, SinkWatermarkRecord } from '../../../src/core/sinks/types.js'
+ * @import { Discovered, PendingPreviewOptions, PendingVolume, SinkWatermarkRecord } from '../../../src/core/sinks/types.js'
  */
 
 /**
@@ -167,27 +167,34 @@ export async function previewPendingRows(args) {
  * in the spool are not in the table this reads - so `unflushed` records that the
  * total is a floor.
  *
+ * The registration each partition came from travels with it, because the count
+ * is per destination and a destination is entitled to refuse a dataset: the
+ * disposition seam needs the same `DatasetRegistration` the sink's own export
+ * rule reads, and discovery is the only place the kernel still has it.
+ *
  * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, config?: HypAwareV2Config }} args
- * @returns {Promise<{ partitions: QueryPartition[], unflushed: boolean, failures: number }>}
+ * @returns {Promise<Discovered>}
  */
 async function discoverCountablePartitions({ query, storage, config }) {
   /** @type {QueryPartition[]} */
   const partitions = []
+  /** @type {Map<string, DatasetRegistration>} */
+  const datasets = new Map()
   /** @type {Set<string>} */
   const seen = new Set()
   let unflushed = false
   let failures = 0
   /** @type {ReturnType<QueryRegistry['listDatasets']>} */
-  let datasets
+  let listed
   try {
     // Listing is plugin-backed too, so it is as capable of throwing as the
     // per-dataset discovery below. An unlistable catalog is a count that could
     // not be taken, not a count of zero.
-    datasets = query.listDatasets()
+    listed = query.listDatasets()
   } catch {
-    return { partitions: [], unflushed: false, failures: 1 }
+    return { partitions: [], datasets, unflushed: false, failures: 1 }
   }
-  for (const dataset of datasets) {
+  for (const dataset of listed) {
     try {
       const parts = await dataset.discoverPartitions({
         config: config ?? /** @type {HypAwareV2Config} */ ({ version: 2 }),
@@ -201,19 +208,85 @@ async function discoverCountablePartitions({ query, storage, config }) {
         if (!tablePath || seen.has(tablePath) || !storage.tableExists(tablePath)) continue
         seen.add(tablePath)
         partitions.push(part)
+        datasets.set(tablePath, dataset)
         if (storage.hasPendingSync?.(tablePath)) unflushed = true
       }
     } catch {
       failures += 1
     }
   }
-  return { partitions, unflushed, failures }
+  return { partitions, datasets, unflushed, failures }
+}
+
+/**
+ * What `handle` would do with `dataset`, asked of the sink itself.
+ *
+ * The kernel does not interpret the answer beyond its three names, and it does
+ * not learn why: the eligibility rule stays declared on the dataset and
+ * enforced in the sink, which is the coupling LLP 0305 refused to move into the
+ * kernel. All this adds is the ability to ask.
+ *
+ * Every degraded case lands on `forwards`, and that direction is chosen, not
+ * incidental. `forwards` is today's behaviour and the over-disclosing answer;
+ * the failure this whole seam must not have is a prompt promising less egress
+ * than the export performs, so a sink that cannot be asked, or whose answer
+ * cannot be understood, is counted in full.
+ *
+ * @ref LLP 0324#fail-open-loud [implements]: absence, a throw, and an unrecognized answer all read as `forwards`
+ * @param {ExtendedSinkHandle} handle
+ * @param {DatasetRegistration} dataset
+ * @returns {DatasetDisposition}
+ */
+function askDisposition(handle, dataset) {
+  const sink = handle.sink
+  if (typeof sink?.datasetDisposition !== 'function') return 'forwards'
+  /** @type {unknown} */
+  let answer
+  try {
+    answer = sink.datasetDisposition(dataset)
+  } catch {
+    return 'forwards'
+  }
+  return answer === 'skips' || answer === 'starts-from-now' ? answer : 'forwards'
+}
+
+/**
+ * One destination's disposition for every discovered partition, keyed the way
+ * discovery keys partitions. Asked once per dataset rather than once per
+ * partition: the answer is a property of the dataset contract, and a plugin
+ * call per partition on a machine with thousands of them is wall clock spent in
+ * front of the prompt for an answer that cannot differ.
+ *
+ * @ref LLP 0324#disposition-seam [implements]: the preview asks each destination what it would do with each dataset, instead of the kernel filtering generically
+ * @param {ExtendedSinkHandle} handle
+ * @param {Discovered} discovered
+ * @returns {Map<string, DatasetDisposition>}
+ */
+function resolveDispositions(handle, discovered) {
+  /** @type {Map<string, DatasetDisposition>} */
+  const byTable = new Map()
+  /** @type {Map<string, DatasetDisposition>} */
+  const byDataset = new Map()
+  for (const partition of discovered.partitions) {
+    const tablePath = /** @type {string} */ (partition.tablePath)
+    const dataset = discovered.datasets.get(tablePath)
+    // A partition with no registration behind it is one nothing can be asked
+    // about, so it counts in full, same as a sink that answers nothing.
+    if (!dataset) { byTable.set(tablePath, 'forwards'); continue }
+    let answer = byDataset.get(dataset.name)
+    if (answer === undefined) {
+      answer = askDisposition(handle, dataset)
+      byDataset.set(dataset.name, answer)
+    }
+    byTable.set(tablePath, answer)
+  }
+  return byTable
 }
 
 /**
  * @param {{
  *   handle: ExtendedSinkHandle,
- *   discovered: { partitions: QueryPartition[], unflushed: boolean, failures: number },
+ *   discovered: Discovered,
  *   storage: ExtendedQueryStorageService,
  *   stateRoot: string,
  *   rowLimit: number,
@@ -232,6 +305,12 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
   } catch (err) {
     return unknownVolume(describeError(err))
   }
+
+  // What this destination says it would do with each discovered dataset,
+  // resolved before either pass so both read one answer. Preview-only: nothing
+  // below writes, and no caller of this file is the export path.
+  // @ref LLP 0324#preview-only [implements]: only the preview consults the disposition; the driver, the hold, and the export path are untouched
+  const dispositions = resolveDispositions(handle, discovered)
 
   // ---- Pass 1: every partition's resume point, before a single row is read.
   //
@@ -260,13 +339,23 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
   for (const partition of discovered.partitions) {
     if (now() > deadline) { resumeComplete = false; budgetSpent = true; break }
     const tablePath = /** @type {string} */ (partition.tablePath)
+    // A dataset this destination refuses leaves its count entirely: no cursor
+    // read, no rows, no withheld tally, and no claim on the resume range. It is
+    // not a partition whose survey failed, so it must not mark the survey
+    // incomplete either.
+    // @ref LLP 0324#skips [implements]: a skipped dataset contributes to neither tally, and its cursor never advances, so it is not policy activity
+    if (dispositions.get(tablePath) === 'skips') continue
     try {
       const record = await watermarks.read(watermarks.keyFor(storage.cacheRoot, tablePath))
       records.set(tablePath, record)
       if (record === null) {
         // No durable cursor for this partition: the destination would export it
         // from the beginning, so no timestamp bounds this destination's range.
-        anyFromBeginning = true
+        // A start-now destination is the exception: it ships none of that
+        // history, so the missing cursor bounds nothing and announcing "the
+        // full local history" would overstate a range that does not exist.
+        // @ref LLP 0324#starts-from-now [implements]: a missing watermark means zero for a start-now dataset, not the beginning
+        if (dispositions.get(tablePath) !== 'starts-from-now') anyFromBeginning = true
       } else {
         const at = Date.parse(record.updatedAt)
         // A cursor whose timestamp will not parse bounds nothing. Passing over
@@ -301,9 +390,19 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
     // however many rows fit before the first in-loop clock check.
     if (truncated || now() > deadline) { truncated = true; break }
     const tablePath = /** @type {string} */ (partition.tablePath)
+    const disposition = dispositions.get(tablePath) ?? 'forwards'
+    if (disposition === 'skips') continue
     if (!records.has(tablePath)) { failed += 1; continue }
+    const record = records.get(tablePath) ?? null
+    // The start-now boundary, counted rather than assumed: with no durable
+    // cursor this destination's first export ships nothing from this partition,
+    // so it contributes zero. Charged to `read` and not to `failed`, because
+    // zero is the destination's real answer for a dataset it does forward, and
+    // a counted zero is not the false zero the preview guards against.
+    // @ref LLP 0324#starts-from-now [implements]: a missing-watermark start-now partition contributes zero pending rows
+    if (disposition === 'starts-from-now' && record === null) { read += 1; continue }
     try {
-      const since = records.get(tablePath)?.continuation
+      const since = record?.continuation
       // @ref LLP 0040#storage-api-extension [constrained-by]: `includeLegacy` is
       // derived exactly as every sink derives it, so a preview never counts a
       // pre-upgrade null-seq backlog the destination has already shipped.

@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
+import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { runSync } from '../../src/core/commands/sync.js'
 import { previewPendingRows } from '../../src/core/sinks/pending.js'
 
@@ -24,6 +25,8 @@ import { previewPendingRows } from '../../src/core/sinks/pending.js'
 //      and a rewound watermark changes what the plan says.
 //   4. A count that is a floor says "at least"; a count that could not be
 //      taken says "unknown". Neither is ever rendered as zero.
+//   5. The count is per destination, not per machine: a dataset one
+//      destination refuses to forward must not be quoted on its line.
 // @ref LLP 0101#no-release [tests]: the "prints what would leave" half, in rows
 // @ref LLP 0070#incremental [tests]: withheld rows are disclosed apart from the payload rows
 
@@ -763,4 +766,117 @@ test('an incomplete count marks the withheld line as a floor too, and an exact c
   assert.equal(await runSync(['--dry-run'], wholeRun.ctx), 0)
   assert.match(wholeRun.stdout.text, /^ +2 rows withheld by policy \(not sent\)/m)
   assert.doesNotMatch(wholeRun.stdout.text, /at least 2 rows withheld/)
+})
+
+// ---------------------------------------------------------------------------
+// Claim 5: the count belongs to the destination, not to the machine.
+// ---------------------------------------------------------------------------
+
+/**
+ * A real `@hypaware/central` forward sink, built only far enough to answer
+ * `datasetDisposition`. Its `fetchFn` throws on purpose: the preview asks this
+ * sink what it would forward and must never make it forward anything.
+ *
+ * @param {{ query: unknown, storage: unknown }} args
+ */
+function centralForwardSink({ query, storage }) {
+  const noop = () => {}
+  return createForwardSink({
+    config: /** @type {any} */ ({ url: 'http://server:8740', identity: {} }),
+    identityClient: /** @type {any} */ ({ async getCurrentJwt() { return 'jwt' }, async refresh() {} }),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (storage),
+    watermarks: /** @type {any} */ ({
+      keyFor: () => ({ dataset: 'unused', partitionKey: 'unused' }),
+      filePath: () => 'unused',
+      async read() { return null },
+      async write() { throw new Error('the preview must not move a watermark') },
+    }),
+    rollouts: /** @type {any} */ ({
+      filePath: () => 'unused',
+      async read() { return null },
+      async write() { throw new Error('the preview must not write a rollout manifest') },
+    }),
+    log: /** @type {any} */ ({ debug: noop, info: noop, warn: noop, error: noop }),
+    fetchFn: /** @type {any} */ (async () => { throw new Error('the preview must not reach the network') }),
+    sleepFn: async () => {},
+  })
+}
+
+test('a local-only dataset counts for a local-fs destination and not for a central one', async () => {
+  // The over-count LLP 0324 exists to remove. `@hypaware/central` refuses any
+  // dataset declaring `localOnlyContentColumns`, so quoting its rows on the
+  // central line tells the person at the prompt that data leaves the machine
+  // which never will. `@hypaware/local-fs` exports that same dataset, so the
+  // rows are real for it - which is exactly why the kernel cannot filter them
+  // generically and has to ask each destination.
+  //
+  // The load-bearing assertion is that the two lines differ. Two destinations
+  // over one machine's cache quoting one number is the defect.
+  // @ref LLP 0324#disposition-seam [tests]: one dataset, two destinations, two different pending counts
+  // @ref LLP 0324#skips [tests]: a skipped dataset leaves the destination's tally entirely rather than moving to the withheld line
+  const hypHome = await makeHome('localonly')
+  const table = path.join(cacheRoot(hypHome), 'datasets', 'context_graph_nodes', 'source=claude')
+  const dataset = {
+    name: 'context_graph_nodes',
+    plugin: '@hypaware/context-graph',
+    schema: { fields: [{ name: 'id', type: 'string' }] },
+    localOnlyContentColumns: ['content_text'],
+    discoverPartitions: () => [
+      { dataset: 'context_graph_nodes', partition: { source: 'claude' }, tablePath: table },
+    ],
+  }
+  const query = { listDatasets: () => [dataset], getDataset: () => dataset }
+  const storage = {
+    cacheRoot: cacheRoot(hypHome),
+    tableExists: (/** @type {string} */ p) => p === table,
+    hasPendingSync: () => false,
+    async flushTable() {},
+    async *readRowsSince(/** @type {string} */ p, /** @type {any} */ opts = {}) {
+      if (p !== table) return
+      const since = opts.since ? Number(opts.since.seq) : 0
+      for (let seq = 1; seq <= 12; seq += 1) {
+        if (seq > since) yield { row: { id: seq }, after: { v: 1, seq: String(seq) } }
+      }
+    },
+  }
+
+  const central = {
+    ...fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central'),
+    sink: centralForwardSink({ query, storage }),
+  }
+  const local = fakeSink('local', { dir: '/home/u/exports' }, '@hypaware/local-fs')
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([central, local]),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (storage),
+    stateRoot: stateDir(hypHome),
+  })
+  const centralVolume = /** @type {any} */ (volumes.get('central'))
+  const localVolume = /** @type {any} */ (volumes.get('local'))
+
+  assert.equal(localVolume.rows, 12, 'local-fs exports this dataset, so all twelve rows are real for it')
+  assert.equal(centralVolume.rows, 0, 'central refuses this dataset, so none of these rows leave through it')
+  assert.notEqual(
+    centralVolume.rows,
+    localVolume.rows,
+    'two destinations with different forwarding rules must not quote one number'
+  )
+  // A skipped dataset is not a policy drop: its cursor never advances, so
+  // folding it into the withheld line would overstate what policy did.
+  assert.equal(centralVolume.withheldRows, 0)
+  // Nor is it a range: central would forward nothing, so it reaches nowhere.
+  assert.equal(centralVolume.resume.kind, 'unknown')
+  assert.notEqual(centralVolume.resume.kind, 'beginning')
+  // Zero here is the destination's real answer, not a count that failed, so it
+  // is a counted zero and the plan may say so.
+  assert.equal(centralVolume.status, 'counted')
+
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [central, local], storage })
+  ctx.query = query
+  assert.equal(await runSync(['--dry-run'], ctx), 0)
+  assert.match(stdout.text, /12 rows pending, the full local history/)
+  assert.match(stdout.text, /nothing pending/)
+  assert.doesNotMatch(stdout.text, /withheld by policy/)
 })
