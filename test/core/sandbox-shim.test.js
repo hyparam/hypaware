@@ -1001,7 +1001,12 @@ test('state lock: an unreadable state file is not committed as an empty domain',
   t.after(() => { try { fs.chmodSync(file, 0o600) } catch { /* already restored */ } })
 
   const setenv = shim(root, 'launchctl', ['setenv', 'NODE_USE_SYSTEM_CA', '1'])
-  assert.notEqual(setenv.code, 0, 'a state file it cannot read is an error, not an empty domain')
+  // `code` is `spawnSync`'s `status`, which is `null` for a child that died on
+  // a signal, and `notEqual(code, 0)` counts that `null` as the error it went
+  // looking for. This read leaves through `main`'s catch, which is exit 70 and
+  // nothing else for a `launchctl` the shim recognises, so that is what the
+  // assertion names.
+  assert.equal(setenv.code, 70, 'a state file it cannot read is an error, not an empty domain')
   // The exit code alone cannot tell a read that failed from a shim that broke
   // on the way to reporting one. Naming the errno is the whole of what this
   // error is for, and asserting only `code !== 0` let a ReferenceError raised
@@ -1057,7 +1062,7 @@ test('state read: a transient errno is retried on a poll interval, a permanent o
     'fs.readFileSync = (file, ...rest) => {',
     '  if (String(file) !== target) return readFileSync(file, ...rest)',
     '  seen += 1',
-    '  appendFileSync(counter, `${Date.now()}\\n`)',
+    '  appendFileSync(counter, `${process.hrtime.bigint()}\\n`)',
     '  if (seen > fails) return readFileSync(file, ...rest)',
     '  const err = new Error(`${errno}: injected read failure, open \'${target}\'`)',
     '  err.code = errno',
@@ -1069,9 +1074,12 @@ test('state read: a transient errno is retried on a poll interval, a permanent o
   /**
    * Run one `setenv` whose first `fails` reads of the state file raise `errno`.
    *
-   * Every injected read stamps the counter with the wall clock, so the gap
-   * between the first attempt and the last says whether the shim waited
-   * between tries or spun straight through its budget.
+   * Every injected read stamps the counter with `process.hrtime.bigint()`, so
+   * the gap between the first attempt and the last says whether the shim
+   * waited between tries or spun straight through its budget. All four stamps
+   * come from the one child process, so a monotonic clock is comparable
+   * across them, and unlike `Date.now()` it cannot step backwards inside the
+   * measured window and report a wait that happened as a wait that did not.
    *
    * @param {number} fails
    * @param {string} [errno]
@@ -1094,8 +1102,9 @@ test('state read: a transient errno is retried on a poll interval, a permanent o
       }
     )
     const log = fs.existsSync(counter) ? fs.readFileSync(counter, 'utf8') : ''
-    const stamps = log.split('\n').filter(Boolean).map(Number)
-    const spanMs = stamps.length > 1 ? stamps[stamps.length - 1] - stamps[0] : 0
+    const stamps = log.split('\n').filter(Boolean).map(BigInt)
+    const spanNs = stamps.length > 1 ? stamps[stamps.length - 1] - stamps[0] : 0n
+    const spanMs = Number(spanNs) / 1e6
     return { code: result.status, stderr: result.stderr, attempts: stamps.length, spanMs }
   }
 
@@ -1105,22 +1114,37 @@ test('state read: a transient errno is retried on a poll interval, a permanent o
   assert.equal(shim(root, 'launchctl', ['getenv', 'FOO']).stdout, '1\n', 'and the update landed on the real state')
 
   const exhausted = setenvThrough(99)
-  assert.notEqual(exhausted.code, 0, 'an errno that never clears is still an error')
+  // `code` is `spawnSync`'s `status`, which is `null` when the child died on a
+  // signal, and `notEqual(code, 0)` is satisfied by that `null`. A read the
+  // shim gave up on leaves through `main`'s catch, which is exit 70 and
+  // nothing else, so that is what the assertion names.
+  assert.equal(exhausted.code, 70, 'an errno that never clears is reported as an error, not survived')
   assert.equal(exhausted.attempts, 4, 'tried once and retried three times, then given up on')
   assert.match(exhausted.stderr, /EMFILE/, 'and the error names the errno it gave up on')
   // Three waits of `STOP_POLL_MS` is 75ms. The floor sits well under that
   // because what is being asserted is that there was a wait at all, and the
-  // two outcomes are nowhere near it: with the sleep, twelve measured runs
-  // spanned 75 to 77ms; with the sleep deleted, ten runs under a 96-way load
-  // spanned 0 to 1ms, because `Atomics.wait` cannot return early and four
-  // reads with nothing between them land inside a millisecond.
+  // two outcomes are nowhere near it: with the sleep, ten idle runs spanned
+  // 75.6 to 76.7ms; with the sleep deleted, the span is under a millisecond,
+  // because `Atomics.wait` cannot return early and four reads with nothing
+  // between them land inside one.
+  //
+  // There is deliberately no ceiling to go with this floor. A ceiling is the
+  // assertion that would catch an inflated `STOP_POLL_MS` or a wait added to
+  // the retry, and measurement says it cannot do that and stay honest. Under
+  // a 48-core box oversubscribed 20-fold (load average 484 to 863) this same
+  // span was observed at 167ms, which is past what a doubled `STOP_POLL_MS`
+  // would produce. Any ceiling loose enough to survive that contention no
+  // longer separates a healthy run from the change it was added for, and one
+  // tight enough to separate them fails runs that waited exactly right. The
+  // floor survives the same load untouched, because scheduler delay only ever
+  // pushes the span the safe way.
   assert.ok(
     exhausted.spanMs >= 50,
-    `four attempts spanned ${exhausted.spanMs}ms, too little for a poll interval between tries`
+    `four attempts spanned ${exhausted.spanMs.toFixed(1)}ms, too little for a poll interval between tries`
   )
 
   const refused = setenvThrough(99, 'EACCES')
-  assert.notEqual(refused.code, 0, 'an errno that waiting cannot clear is an error too')
+  assert.equal(refused.code, 70, 'an errno that waiting cannot clear is that same reported error')
   assert.equal(refused.attempts, 1, 'but it is reported on the first read, not sat on for three poll intervals')
   assert.match(refused.stderr, /EACCES/, 'and it is that errno the error names')
 
