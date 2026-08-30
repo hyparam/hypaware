@@ -427,23 +427,28 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       state: c.state,
     })),
     // The machine copy of the capture-health section's flush-failure lines
-    // (LLP 0322). Always an array, empty on a healthy install.
+    // (LLP 0322). Always an array, empty on a healthy install, and uncapped:
+    // the text plane names at most eight and points its overflow line here,
+    // so this array must carry every failing table or the pointer is a lie.
     //
     // `error_message` is the value plane and the rendered line is the prose
     // plane, the split LLP 0225 settled: no character is stripped or escaped
     // out of this one, so a program reading it gets the bytes the stamp
-    // holds. Not unbounded, though, and the comment must not claim it is:
-    // `readFlushFailure` clamps at 512 on the way in, because the stamp is a
-    // file this process may not have written, and `table` is a display label
-    // that `sanitizeLabel` has already cleaned and clamped upstream.
+    // holds. Each entry is bounded even so, and the comment must not claim
+    // otherwise: `readFlushFailure` clamps at 512 on the way in, because the
+    // stamp is a file this process may not have written, and `table` is a
+    // display label that `sanitizeLabel` has already cleaned and clamped
+    // upstream.
+    // @ref LLP 0330#capture-health-line [implements]: the stamp rides --json as two stable keys
     cache_flush_failures: report.cacheFlushFailures.map((f) => ({
       table: f.table,
       failed_at: f.failedAt,
       error_message: f.errorMessage,
       still_cooling_down: f.stillCoolingDown,
     })),
-    // The count before the cap, beside the capped list, so a program reading
-    // the array is not left believing eight is the whole incident.
+    // The exact count beside the list. Equal to the array's length now that
+    // the array is uncapped, and kept as the stable key the text plane's
+    // overflow arithmetic reads; the equality is an invariant.
     cache_flush_failures_total: report.cacheFlushFailuresTotal,
     datasets: datasets.map((d) => ({ name: d.name, plugin: d.plugin })),
     cache: {
@@ -600,6 +605,15 @@ function printable(value, max) {
  * a name, and still bounded because it is one line among many.
  */
 const MAX_FLUSH_FAILURE_CHARS = 200
+
+/**
+ * How many failing tables the text plane names. A terminal legibility bound
+ * and only that, which is why it lives here beside the renderer rather than
+ * in the collector: the exact total rides beside the list, and `--json`
+ * carries every entry, because it is where this cap's overflow line points.
+ * @ref LLP 0330#count-beside-cap [implements]: the cap bounds the terminal block, never the incident or the machine plane
+ */
+const MAX_CACHE_FLUSH_FAILURES = 8
 
 /**
  * Render the V1 status report as human-friendly text. Mirrors the
@@ -762,13 +776,14 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   // place queries read? - and deliberately nowhere near the freshness
   // timestamp, which quotes the last write that actually happened and would
   // become a lie if a failed attempt fed it.
-  // `[constrained-by]`, not `[implements]`: LLP 0322 does not decide that the
-  // stamp is rendered here at all - `#degrade-reaches-the-signals` scopes the
-  // signal to the span status code and `queryRunsTotal`, and this surface is
-  // new. What the section does decide is the shape this line has to hold to:
-  // it may say why a retry is paced and it may not read as a write that
-  // happened, which is why the line quotes an attempt and sits nowhere near
-  // the freshness timestamp.
+  // Two refs because the two documents hold different ends. LLP 0330 decides
+  // that the stamp is rendered here, on this line and in `--json` (LLP 0322
+  // deliberately did not: `#degrade-reaches-the-signals` scopes its signal to
+  // the span status code and `queryRunsTotal`). LLP 0322 constrains the shape
+  // the line has to hold to: it may say why a retry is paced and it may not
+  // read as a write that happened, which is why the line quotes an attempt
+  // and sits nowhere near the freshness timestamp.
+  // @ref LLP 0330#capture-health-line [implements]: the stamp renders on the capture-health line
   // @ref LLP 0322#what-the-stamp-is-not [constrained-by]: a rendered stamp stays a reason for a paced retry, never a freshness claim
   if (report.captureHealth.length > 0 || report.cacheFlushFailures.length > 0) {
     stdout.write('  capture health:\n')
@@ -782,7 +797,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
       const tag = c.state === 'gap' ? '  [capture gap]' : ''
       stdout.write(`    - ${c.client}  ${events}, ${transcripts}${tag}\n`)
     }
-    for (const f of report.cacheFlushFailures) {
+    const namedFailures = report.cacheFlushFailures.slice(0, MAX_CACHE_FLUSH_FAILURES)
+    for (const f of namedFailures) {
       // Through `printable` like every other collector-sourced string on this
       // surface: the stamp is a file on disk written by some other process,
       // so its message reaches a TTY with no guarantee of being short,
@@ -796,15 +812,15 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     // tables and forty failing tables are different incidents, and this
     // section exists to answer which one is happening.
     //
-    // Only half of that block's shape, and the half it is missing is worth
-    // stating rather than implying. LLP 0228#last-tick-only pairs the count
-    // with a pointer to where the rest are listed, and the maintenance line
-    // spends it on `hyp query maintain --dry-run`. Nothing lists these:
-    // `--json` carries the same eight. So an operator learns the scale of the
-    // incident here and cannot learn which tables are past the cap.
-    const unnamed = report.cacheFlushFailuresTotal - report.cacheFlushFailures.length
+    // Both halves of that block's shape now. LLP 0228#last-tick-only pairs
+    // the count with a pointer to where the rest are listed, and the
+    // maintenance line spends it on `hyp query maintain --dry-run`. This one
+    // spends it on `hyp status --json`, which carries every failing table
+    // because the machine plane is uncapped.
+    // @ref LLP 0330#count-beside-cap [implements]: the overflow line's pointer goes to the uncapped machine plane
+    const unnamed = report.cacheFlushFailuresTotal - namedFailures.length
     if (unnamed > 0) {
-      stdout.write(`    ... and ${unnamed} more table${unnamed === 1 ? '' : 's'} whose last flush failed\n`)
+      stdout.write(`    ... and ${unnamed} more table${unnamed === 1 ? '' : 's'} whose last flush failed (hyp status --json lists them all)\n`)
     }
   }
 

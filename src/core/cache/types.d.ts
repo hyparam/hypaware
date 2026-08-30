@@ -135,10 +135,12 @@ export interface PendingInfo {
   flushFailedAtMs?: number | null
   /**
    * The bounded error message that same stamp recorded, or null when the
-   * stamp carries none this build can read. Rides with `flushFailedAtMs`
-   * so a surface reporting the cooldown can say what the flush failed with;
-   * it is display text about a past attempt, and no gate, freshness line, or
-   * durability decision reads it (LLP 0322#what-the-stamp-is-not).
+   * stamp carries none this build can read. Rides with `flushFailedAtMs` so
+   * the surface reporting the cooldown says what the flush failed with: the
+   * query gate hands it to the staleness warning's reason line (LLP
+   * 0330#query-quotes-the-reason). It is display text about a past attempt,
+   * and no gate, freshness line, or durability decision reads it (LLP
+   * 0322#what-the-stamp-is-not).
    */
   flushFailureMessage?: string | null
 }

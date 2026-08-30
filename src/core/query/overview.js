@@ -16,7 +16,7 @@
  */
 
 import { escapeForDisplay } from '../util/json_util.js'
-import { AUTO_REFRESH_FAILURE_MESSAGE, executeQuerySql } from './sql.js'
+import { AUTO_REFRESH_FAILURE_MESSAGE, REFRESH_FAILURE_REASON_PREFIX, executeQuerySql } from './sql.js'
 import { renderLocalOnlyNotice } from './verb.js'
 // @ref LLP 0189#palette [implements]: one ANSI table for the whole CLI
 import { ANSI, paint } from '../cli/style.js'
@@ -351,9 +351,15 @@ export function overviewRunnerFromCtx(ctx, onNotice, opts = {}) {
       for (const line of result.freshnessMessages ?? []) {
         // Split by meaning, not by source array. The debounce line is
         // advisory and a caller may drop it; the degrade warning says rows
-        // are missing, so it routes with the disclosures instead.
+        // are missing, so it routes with the disclosures instead, and the
+        // reason line routes beside the warning it explains: a caller
+        // allowed to drop the advisory line must not be able to keep "rows
+        // may be missing" while dropping the why.
         // @ref LLP 0321#consequences [implements]: a degraded result never claims to be current, on every surface that renders it
-        const kind = line === AUTO_REFRESH_FAILURE_MESSAGE ? 'refresh-failed' : 'freshness'
+        // @ref LLP 0330#query-quotes-the-reason [implements]: the reason is part of the disclosure, not a droppable advisory
+        const kind = line === AUTO_REFRESH_FAILURE_MESSAGE || line.startsWith(REFRESH_FAILURE_REASON_PREFIX)
+          ? 'refresh-failed'
+          : 'freshness'
         say({ kind, line: `${line}\n` })
       }
       const withheld = renderLocalOnlyNotice(result.localOnly)

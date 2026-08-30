@@ -1774,6 +1774,7 @@ export async function collectHypAwareStatus(opts = {}) {
   // inside the window is told the cache may be stale, and nothing anywhere
   // told the user why. The stamp has carried the reason since the cooldown
   // shipped, on disk and unread. This is where it becomes readable.
+  // @ref LLP 0330#capture-health-line [implements]: the stamp is collected for the capture-health line and both --json keys
   //
   // Read off the spool directly rather than through status.json, unlike
   // `recentEntrypoints` and `maintenance` above: those summarize a walk only
@@ -1792,6 +1793,28 @@ export async function collectHypAwareStatus(opts = {}) {
     cacheFlushFailures = collected.failures
     cacheFlushFailuresTotal = collected.total
   } catch { /* best-effort spool probe */ }
+  if (cacheFlushFailuresTotal > 0) {
+    const one = cacheFlushFailuresTotal === 1
+    // Warning, never an error, the `maintenance_partitions_skipped` parallel:
+    // the daemon is running, capture works, the rows are durable in the spool
+    // (LLP 0321), and queries answer from the confirmed cache. The
+    // paging-grade signal already lives where LLP 0322 put it - the span
+    // status code and `queryRunsTotal` - so this diagnostic is the local
+    // repair pointer, and a flush failure alone never flips `overall`.
+    // Enumerate first, retry second, the maintenance analog's repair shape:
+    // `hyp status --json` lists every failing table, and a `hyp query
+    // refresh` that completes clears the stamp (LLP 0322#clearing).
+    // @ref LLP 0330#warning-diagnostic [implements]: a standing flush failure is a warning with a repair, not a degraded install
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'cache_flush_failing',
+      message: `spool-to-cache flush is failing for ${cacheFlushFailuresTotal} table${one ? '' : 's'} (newest: ${cacheFlushFailures[0]?.table ?? 'unknown'})`,
+      repair: [
+        'hyp status --json',
+        'hyp query refresh',
+      ],
+    })
+  }
 
   // ----- remote config apply state (LLP 0025) -----
   /** @type {ConfigControlStatus | null} */
@@ -2288,30 +2311,24 @@ function inferConfiguredSources(activePlugins) {
 }
 
 /**
- * How many failing tables the standing surface names. Declared beside its
- * sibling cap's convention rather than below its only user: the count that
- * rides with it is exact, so this bounds the terminal block and the `--json`
- * array without bounding what the operator is told about the incident.
- */
-const MAX_CACHE_FLUSH_FAILURES = 8
-
-/**
- * Every table carrying a readable flush-failure stamp, newest failure first.
+ * Every table carrying a readable flush-failure stamp, newest failure first,
+ * all of them. The eight-line cap is the text renderer's, a terminal
+ * legibility bound, and `--json` is the pointer that cap's overflow line
+ * names, so the collector must hand over the whole list: each entry is
+ * individually bounded (an 80-character label, a 512-character message), the
+ * array was always built whole in memory before any cap, and this report is
+ * built per invocation and never persisted, so there is no status.json
+ * growth to bound and no read-back to re-clamp, which is what forced the
+ * maintenance snapshot's cap onto both planes.
+ * @ref LLP 0330#count-beside-cap [implements]: the machine plane is uncapped, because it is where the text cap's pointer points
  *
- * Bounded like the other list-valued status sections: a cache whose every
- * table is refusing writes has one cause, and eight lines is enough to name
- * it without burying the rest of the report. `stillCoolingDown` is the
- * difference between "the automatic retry is being held off right now" and
- * "an old failure that nothing has cleared", which reads the same on disk
- * and very differently to an operator.
+ * `stillCoolingDown` is the difference between "the automatic retry is being
+ * held off right now" and "an old failure that nothing has cleared", which
+ * reads the same on disk and very differently to an operator.
  *
- * `total` is the count before the cap, and it is the reason the cap is
- * allowed to exist. `MAX_SKIPPED_PARTITIONS_REPORTED` above settled the same
- * argument for the same number: cap the list, never the size of the problem.
- * Nine tables failing and forty tables failing are different incidents, and a
- * section whose whole job is "is what was captured reaching the query cache?"
- * would be answering it wrong if it showed eight and said nothing about the
- * rest.
+ * `total` rides beside the list even though it now always equals its length:
+ * it shipped as a stable `--json` key, the text plane's overflow arithmetic
+ * reads it, and the equality is an invariant a consumer may rely on.
  *
  * @param {string} cacheRoot
  * @param {number} [nowMs]
@@ -2344,7 +2361,7 @@ async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
     })
   }
   failures.sort((a, b) => (a.failedAt < b.failedAt ? 1 : a.failedAt > b.failedAt ? -1 : a.table.localeCompare(b.table)))
-  return { total: failures.length, failures: failures.slice(0, MAX_CACHE_FLUSH_FAILURES) }
+  return { total: failures.length, failures }
 }
 
 /**

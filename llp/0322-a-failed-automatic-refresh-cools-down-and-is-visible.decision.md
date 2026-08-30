@@ -7,6 +7,7 @@
 **Generated-by:** neutral
 **Date:** 2026-08-28
 **Related:** LLP 0319 (the cursor-stamped cooldown idiom this reuses on a hotter path), LLP 0321 (the degrade this bounds), LLP 0021 (the span helpers this widens), LLP 0027
+**Extended-by:** LLP 0330 (the stamp becomes an operator surface: the `hyp status` capture-health line and `--json`, a warning diagnostic, and the query warning's quoted reason)
 
 > Extends [LLP 0321](./0321-auto-refresh-serves-confirmed-cache.decision.md).
 > The automatic degrade it settled is right per query and unbounded in time: a

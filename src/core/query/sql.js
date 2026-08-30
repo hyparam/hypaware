@@ -7,6 +7,7 @@ import { collect, executeSql as squirrelExecuteSql, extractTables, parseSql } fr
 
 import { Attr, getActiveSpan, getKernelInstruments, getLogger, markSpanStatus, withSpan } from '../observability/index.js'
 import { QUERY_FLUSH_DEBOUNCE_MS, QUERY_FLUSH_FAILURE_COOLDOWN_MS } from '../cache/spool.js'
+import { sanitizeLabel } from '../util/json_util.js'
 import { normalizeScanColumn } from './scan-column.js'
 import { coerceTimestampLiterals } from './timestamp-literals.js'
 import {
@@ -47,6 +48,19 @@ const HEAP_WATCH_INTERVAL_MS = 100
  */
 export const AUTO_REFRESH_FAILURE_MESSAGE =
   'cache: refresh failed; using previously saved data; newer waiting rows may be missing'
+
+/**
+ * The line that says why, appended after the warning above by both branches
+ * of a standing failure: the live one from the error in hand, the cooled one
+ * from the stamped message the flush left behind. Exported as a prefix
+ * because the suffix varies with the failure, and a caller routing notices by
+ * meaning must classify it with the warning it explains rather than with the
+ * droppable debounce line, or "rows may be missing" survives a surface that
+ * dropped its why.
+ *
+ * @ref LLP 0330#query-quotes-the-reason [implements]: the staleness warning carries the stamped reason, not only that one exists
+ */
+export const REFRESH_FAILURE_REASON_PREFIX = 'cache: last refresh attempt failed: '
 
 /**
  * Typed refusal for a query whose execution outgrew its heap budget.
@@ -704,7 +718,7 @@ export async function settlePendingCacheForQuery(args) {
       // @ref LLP 0322#stamp-the-failure [implements]: a standing failure stamp holds the automatic gate closed
       const failedAtMs = info.flushFailedAtMs ?? null
       if (failedAtMs !== null && now - failedAtMs < QUERY_FLUSH_FAILURE_COOLDOWN_MS) {
-        reportRefreshCoolingDown(args.messages)
+        reportRefreshCoolingDown(args.messages, info.flushFailureMessage ?? null)
         degraded = true
         continue
       }
@@ -768,6 +782,7 @@ function reportAutoRefreshFailure(err, messages) {
   if (!messages.includes(AUTO_REFRESH_FAILURE_MESSAGE)) {
     messages.push(AUTO_REFRESH_FAILURE_MESSAGE)
   }
+  appendRefreshFailureReason(messages, errorMessage)
 }
 
 /**
@@ -776,10 +791,18 @@ function reportAutoRefreshFailure(err, messages) {
  * not flicker on and off with the cooldown window. Separable in telemetry by
  * `cache_refresh_cooling_down`.
  *
+ * The stamped reason rides along when the stamp carries one this build can
+ * read: on the log event as `error_message`, matching the live-failure event
+ * so the two branches are not asymmetric in telemetry, and on the stderr
+ * reason line, so the person told "the cache may be stale" is no longer left
+ * to open `_hypaware_spool` by hand to learn why.
+ *
  * @ref LLP 0322#stamp-the-failure [implements]: the cooled query still reports degraded, and is separable in telemetry
+ * @ref LLP 0330#query-quotes-the-reason [implements]: the cooled branch consumes the stamp's message, not only its time
  * @param {string[]} messages
+ * @param {string | null} [flushFailureMessage]
  */
-function reportRefreshCoolingDown(messages) {
+function reportRefreshCoolingDown(messages, flushFailureMessage = null) {
   getLogger('query').warn('query.cache_refresh_cooling_down', {
     [Attr.COMPONENT]: 'query',
     [Attr.OPERATION]: 'cache.refresh',
@@ -787,6 +810,7 @@ function reportRefreshCoolingDown(messages) {
     refresh_mode: 'auto',
     status: 'degraded',
     cooldown_ms: QUERY_FLUSH_FAILURE_COOLDOWN_MS,
+    ...(flushFailureMessage !== null ? { error_message: flushFailureMessage.slice(0, 512) } : {}),
   })
   const span = getActiveSpan()
   markSpanStatus(span, 'degraded')
@@ -799,6 +823,29 @@ function reportRefreshCoolingDown(messages) {
   if (!messages.includes(AUTO_REFRESH_FAILURE_MESSAGE)) {
     messages.push(AUTO_REFRESH_FAILURE_MESSAGE)
   }
+  appendRefreshFailureReason(messages, flushFailureMessage)
+}
+
+/**
+ * One reason line per query run, first failure wins, appended by both the
+ * live-failure and the cooled branch so the wording does not flicker with the
+ * cooldown window. The reason is prose a person reads on stderr, assembled
+ * from an error some other process may have stamped, so it goes through the
+ * label policy exactly as the `hyp status` line does (strip and clamp, LLP
+ * 0225 via `sanitizeLabel`); a reason the policy empties appends no line,
+ * which is also the shape when the stamp carries no readable message, and
+ * the LLP 0321 warning stands alone as before.
+ *
+ * @ref LLP 0330#query-quotes-the-reason [implements]: one bounded, terminal-safe reason line beside the warning it explains
+ * @param {string[]} messages
+ * @param {string | null} reason
+ */
+function appendRefreshFailureReason(messages, reason) {
+  if (typeof reason !== 'string' || reason.length === 0) return
+  const cleaned = sanitizeLabel(reason, 200)
+  if (!cleaned) return
+  if (messages.some((m) => m.startsWith(REFRESH_FAILURE_REASON_PREFIX))) return
+  messages.push(`${REFRESH_FAILURE_REASON_PREFIX}${cleaned}`)
 }
 
 /** @param {number} ageMs */
