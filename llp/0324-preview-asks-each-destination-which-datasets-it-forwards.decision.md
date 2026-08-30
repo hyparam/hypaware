@@ -91,6 +91,20 @@ implementation is the predicate it already has: the four legacy signals answer
 open dataset whose name a legacy path reserves answers `skips`, and every
 other eligible open dataset answers `starts-from-now`.
 
+**Superseded-by:** [LLP 0327](./0327-central-is-not-a-start-now-sink.decision.md).
+The mapping's final clause only, and it is the part that is replaced: an
+eligible open dataset answers `forwards`, not `starts-from-now`. Central
+writes its rollout baselines at sink creation
+([LLP 0307 #rollout-instant](./0307-durable-open-dataset-rollout-manifest.decision.md#rollout-instant)),
+so a partition with no durable watermark is post-rollout and its backlog
+forwards in full
+([LLP 0307 #future-partitions](./0307-durable-open-dataset-rollout-manifest.decision.md#future-partitions));
+`starts-from-now` would make the prompt quote that backlog as zero while the
+next export shipped it, the under-disclosure [#drift-pinned](#drift-pinned)
+forbids. The seam itself, the other three answers in this mapping, and the
+[#starts-from-now](#starts-from-now) semantics for a sink whose baseline is
+not written at creation all stand.
+
 ### The seam is preview-only and never gates an export {#preview-only}
 
 Only `previewPendingRows` consults the disposition. The driver keeps handing
