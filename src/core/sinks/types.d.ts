@@ -121,7 +121,14 @@ export interface PendingVolume {
 export interface PendingPreviewOptions {
   /** Rows one destination may scan before reporting a floor. */
   rowLimit?: number
-  /** Wall-clock budget for the whole preview, shared across destinations. */
+  /**
+   * Wall-clock budget for the whole preview, spent as cumulative
+   * per-destination deadlines (LLP 0325). Partition discovery is one shared
+   * cost charged to no slice; whatever is left when it returns is divided so
+   * destination i of n counts until `scanStart + remaining * (i + 1) / n`. A
+   * slow first destination therefore cannot spend a later one down to
+   * `unknown`, and the last deadline is still `start + budget`.
+   */
   budgetMs?: number
   /** Clock seam (tests). */
   now?: () => number

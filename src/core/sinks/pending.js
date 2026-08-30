@@ -19,9 +19,11 @@ import { createSinkWatermarkStore } from './watermarks.js'
 const DEFAULT_ROW_LIMIT = 200000
 
 /**
- * Wall-clock budget for the whole preview, shared across destinations. The row
- * limit bounds work, this bounds *waiting*: a cold page cache makes a small
- * backlog slow, and a consent prompt that looks hung is its own bug (#976).
+ * Wall-clock budget for the whole preview. The row limit bounds work, this
+ * bounds *waiting*: a cold page cache makes a small backlog slow, and a
+ * consent prompt that looks hung is its own bug (#976). Spent as cumulative
+ * per-destination deadlines anchored after discovery, never as one shared clock
+ * a first destination can exhaust (see `previewPendingRows`).
  */
 const DEFAULT_BUDGET_MS = 3000
 
@@ -75,7 +77,7 @@ export async function previewPendingRows(args) {
   const rowLimit = args.rowLimit ?? DEFAULT_ROW_LIMIT
   const budgetMs = args.budgetMs ?? DEFAULT_BUDGET_MS
   const now = args.now ?? (() => Date.now())
-  const deadline = now() + budgetMs
+  const start = now()
 
   /** @type {Map<string, PendingVolume>} */
   const out = new Map()
@@ -97,7 +99,50 @@ export async function previewPendingRows(args) {
       return out
     }
 
-    for (const handle of handles) {
+    // The budget is spent as cumulative per-destination deadlines: destination
+    // i of n counts until `scanStart + remaining * (i + 1) / n`. What this buys
+    // on a slow machine is fairness: the release the plan feeds is
+    // all-or-nothing, so the plan's worth is bounded by its worst-informed
+    // line, and letting the first destination spend the whole clock left
+    // `unknown` on destinations the confirmation forwards anyway.
+    //
+    // The slices are anchored *after* discovery, not at `start`. Discovery is
+    // one shared cost every destination benefits from, paid before any of them
+    // counts, so charging it to the first slice is how the first destination
+    // inherits an already-spent deadline and reports `unknown` while every
+    // later one reports a floor - the failure this exists to remove, relocated
+    // rather than removed. Measured: 4 destinations, a 3000ms budget and a
+    // 900ms discovery ends slice 0 a full 150ms before its first row is read.
+    //
+    // Absolute deadlines make rollover free (a destination that finishes early
+    // donates its remainder to every later one), and the last deadline is
+    // `scanStart + remaining`, which is `start + budget` exactly, so the
+    // preview's total wall-clock bound is unchanged and a single destination
+    // collapses to today's lone `start + budget`.
+    const scanStart = now()
+    // Signed on purpose. Discovery alone can outlast the budget, and then every
+    // deadline is already in the past and every destination reports `unknown`,
+    // exactly as one shared spent deadline does today. Clamping *this* to zero
+    // would instead hand every destination a fresh partition read and a first
+    // 512-row block on a budget that is already gone, in front of the prompt
+    // whose whole reason for having a budget is not looking hung.
+    const remaining = start + budgetMs - scanStart
+    // @ref LLP 0325#slices [implements]: labelled floors on every line beat an exact first count beside an absent answer
+    // @ref LLP 0325#discovery-off-the-top [implements]: the shared discovery cost is charged to no slice, so slice 0 is not the one that starts already spent
+    for (let i = 0; i < handles.length; i++) {
+      const handle = handles[i]
+      // The floor is what makes "already in the past" true at every `n`, and a
+      // no-op whenever `remaining >= 0`, since a share of a non-negative
+      // remainder never reaches past the last deadline. A share smaller than
+      // half a ULP of a `Date.now()` magnitude rounds away entirely, so a
+      // *negative* remainder divided across enough destinations hands the early
+      // ones a deadline of exactly `scanStart`, which is not in the past at
+      // all: measured at n = 20000 against a budget discovery had already
+      // overrun by 1ms, the first two destinations ran a complete exact count
+      // on a spent clock. `start + budgetMs` is the single spent deadline this
+      // is supposed to be indistinguishable from, so floor at it.
+      // @ref LLP 0325#spent-is-spent [implements]: a budget discovery already overran puts every deadline in the past at every n, not only where the share survives rounding
+      const deadline = Math.min(scanStart + remaining * (i + 1) / handles.length, start + budgetMs)
       out.set(
         handle.instanceName,
         await countForHandle({ handle, discovered, storage, stateRoot, rowLimit, deadline, now })

@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-13
 **Related:** LLP 0063, LLP 0069, LLP 0093, LLP 0100, LLP 0102
-**Extended-by:** LLP 0203 (#no-release: setup offers the release verb instead of only naming it)
+**Extended-by:** LLP 0203 (#no-release: setup offers the release verb instead of only naming it), LLP 0324 (#hold: a preview-only dataset-disposition seam counts per destination without teaching the driver which sinks leave the machine), LLP 0325 (#no-release: the plan's count spends its budget as per-destination deadlines because the release is all-or-nothing)
 
 > On an attended enrolling login, the sink driver exports nothing until a
 > **printed, absolute deadline**: the next local 11:59pm, rolled to the
