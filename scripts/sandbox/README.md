@@ -66,9 +66,10 @@ grep '"lock"' "$(scripts/sandbox/hyp-sandbox path)/state/calls.jsonl"
 Read `ageMs` as an observation, not a fact about the lock that was evicted.
 The age is stat'd before the removal, and those are two syscalls: a lock
 released and retaken in that gap is the one actually evicted, and it is
-recorded with the age (and possibly the `stale` rather than `budget`
-reason) of the lock seen a moment earlier. The eviction itself is never
-misreported, only its age. `waitedMs` is the field to trust, on every event.
+recorded with the age of the lock seen a moment earlier, under the
+`broke-stale` that earlier age argued for even though the lock evicted was
+freshly taken. That an eviction happened is never misreported, only how it
+is described. `waitedMs` is the field to trust, on every event.
 
 ## What is **not** isolated
 

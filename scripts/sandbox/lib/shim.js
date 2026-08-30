@@ -1023,10 +1023,10 @@ function superviseProgram(options) {
  * failure it does not write here is a failure the run cannot explain.
  *
  * `toolName` is the lane's own mock, not this process's `tool` argv slot,
- * which reads `__supervise` here. `hyp-sandbox calls` renders every line as
- * `<tool> <args>`, so a systemd note filed under `launchctl` sends a reader
- * debugging a Linux install to a binary the run never invoked and the host
- * may not even have.
+ * which reads `__supervise` or `__supervise_systemd` here. `hyp-sandbox
+ * calls` renders every line as `<tool> <args>`, so a systemd note filed
+ * under `launchctl` sends a reader debugging a Linux install to a binary
+ * the run never invoked and the host may not even have.
  *
  * @param {'launchctl' | 'systemctl'} toolName
  * @param {string} label
