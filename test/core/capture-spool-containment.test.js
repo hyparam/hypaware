@@ -327,3 +327,86 @@ test('a spool the process cannot stat is reported as unswept, not declared forei
   assert.equal(swept.failed, 1, 'the sweep reports the directory it could not empty')
   assert.equal(swept.filesRemoved, 0)
 })
+
+// ---------------------------------------------------------------------------
+// The seam and the check have to mean the same filesystem.
+//
+// `sweepCaptureSpool` takes an injectable `{ fs }` for `readdir`, `lstat`, and
+// `rm`. The guard in front of them used to be `node:fs` `lstatSync`, so an
+// injected filesystem was read by the walk and never by the check - and the
+// check then failed OPEN, because a path absent from the real filesystem is
+// not a confirmed symlink. Inert against the two production callers, which
+// both pass real `fsp`; a door for anything else that takes the seam.
+// ---------------------------------------------------------------------------
+
+/**
+ * A filesystem that exists only in this test. `root` is the one directory,
+ * holding `files`; `rootIsSymlink` is what the injected `lstat` says about the
+ * directory itself, and `lstatThrows` is it declining to say anything.
+ *
+ * @param {{ root: string, files?: string[], rootIsSymlink?: boolean, lstatThrows?: boolean }} spec
+ */
+function virtualSpoolFs({ root, files = ['req-1.json'], rootIsSymlink = false, lstatThrows = false }) {
+  /** @type {string[]} */
+  const removed = []
+  return {
+    removed,
+    fs: /** @type {any} */ ({
+      /** @param {string} p */
+      async readdir(p) {
+        if (p !== root) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+        return files.map((name) => ({ name, isDirectory: () => false }))
+      },
+      /** @param {string} p */
+      async lstat(p) {
+        if (p === root) {
+          if (lstatThrows) throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+          return { isSymbolicLink: () => rootIsSymlink, size: 0 }
+        }
+        return { isSymbolicLink: () => false, size: 10 }
+      },
+      /** @param {string} p */
+      async rm(p) {
+        removed.push(p)
+      },
+    }),
+  }
+}
+
+// A path that exists nowhere on this machine, so the pre-change guard could
+// only ever have answered about it with the real filesystem's `false`.
+const VIRTUAL_SPOOL = path.join(path.sep, 'hyp-virtual-spool', 'claude-bodies')
+
+test('the injected filesystem answers the containment check, not node:fs', async () => {
+  const v = virtualSpoolFs({ root: VIRTUAL_SPOOL, rootIsSymlink: true })
+
+  const swept = await sweepCaptureSpool(VIRTUAL_SPOOL, { fs: v.fs })
+
+  assert.deepEqual(swept, { filesRemoved: 0, bytesRemoved: 0, failed: 0 })
+  assert.deepEqual(v.removed, [], 'a symlink the injected filesystem confirms removes nothing')
+})
+
+test('an ordinary directory on an injected filesystem is still emptied', async () => {
+  const v = virtualSpoolFs({ root: VIRTUAL_SPOOL, files: ['req-1.json', 'req-2.json'] })
+
+  const swept = await sweepCaptureSpool(VIRTUAL_SPOOL, { fs: v.fs })
+
+  assert.equal(swept.filesRemoved, 2, 'the seam is not a reason to stop reclaiming')
+  assert.equal(swept.bytesRemoved, 20)
+  assert.deepEqual(v.removed, [
+    path.join(VIRTUAL_SPOOL, 'req-1.json'),
+    path.join(VIRTUAL_SPOOL, 'req-2.json'),
+  ])
+})
+
+// Positive evidence, asked of the seam. An injected filesystem that will not
+// answer says nothing about the directory, exactly as an unanswerable
+// `lstatSync` says nothing about a real one.
+test('an injected filesystem that cannot stat the spool is not read as an escape', async () => {
+  const v = virtualSpoolFs({ root: VIRTUAL_SPOOL, lstatThrows: true })
+
+  const swept = await sweepCaptureSpool(VIRTUAL_SPOOL, { fs: v.fs })
+
+  assert.equal(swept.filesRemoved, 1)
+  assert.deepEqual(v.removed, [path.join(VIRTUAL_SPOOL, 'req-1.json')])
+})

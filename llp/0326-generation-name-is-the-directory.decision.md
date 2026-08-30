@@ -284,6 +284,8 @@ fifth consumer added later is the one that would inherit the defect.
 - Code: `src/core/cache/paths.js` (`isConfirmedSymlink`),
   `src/core/cache/partition.js` (`generationDirIsContained`,
   `generationDirIsSymlink`, `defaultGenerationDirs`),
-  `src/core/cache/maintenance.js` (`sweepPathComponents`,
-  `reportPlantedSweepPath`), `src/core/cache/spool.js` (`listFlushFiles`),
+  `src/core/cache/maintenance.js` (`sweepPathComponents`),
+  `src/core/cache/sweep_guard.js` (`reportPlantedSweepPath`, moved there by
+  LLP 0331 so both cache passes share one refusal message),
+  `src/core/cache/spool.js` (`listFlushFiles`),
   `test/core/cache-cursor-containment.test.js`.

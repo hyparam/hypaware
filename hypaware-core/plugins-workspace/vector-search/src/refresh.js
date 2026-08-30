@@ -6,6 +6,7 @@ import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 
+import { isConfirmedSymlink } from '../../../../src/core/cache/paths.js'
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { atomicWriteJson } from 'hypaware/core/util'
 import { loadHypvector } from './hypvector.js'
@@ -304,13 +305,49 @@ export async function collectShardTexts({ decl, partition, storage }) {
 }
 
 /**
+ * Delete one orphaned shard: the parquet and its sidecar, by name, inside the
+ * index directory.
+ *
+ * The last segment of that directory is `decl.name`, which comes out of the
+ * user's config, and `path.join` performs no `readlink`: the directory is
+ * inside the plugin state root by spelling and can be a symlink in fact. The
+ * pair below is then unlinked wherever the link points. The names are
+ * predicated (`.parquet` and `.meta.json` under one base) and there is no
+ * recursion, which is why this is narrower than the spool door LLP 0328
+ * measured, but it is the same gap between a name a string approved and a
+ * path a syscall will follow.
+ *
+ * Resolved once, and the resolved spelling is what is checked and what the
+ * two unlinks are built from, rather than `shardPaths`' unresolved join: a
+ * trailing separator on either half makes `lstat` resolve the last component
+ * and report on the target while `rmSync` still follows the link.
+ *
+ * An index directory the filesystem confirms is a symlink reclaims nothing
+ * and says so. Only a confirmed one: an `lstat` that cannot answer accepts,
+ * because refusing on silence would stop a real index reclaiming its orphans
+ * on an ordinary transient, and the failure to reclaim is invisible where the
+ * failure to delete is at least reported.
+ *
+ * @ref LLP 0326#one-level-down [implements]: every pass that unlinks by path checks the path it will walk.
+ * @ref LLP 0331#guard-travels-with-the-delete [implements]: the check sits in the function that unlinks, and the resolved path is the one it checks, walks, and reports
  * @param {string} indexesDir
  * @param {string} indexName
  * @param {string} fileBase
  * @param {PluginLogger} log
  */
 function sweepOrphan(indexesDir, indexName, fileBase, log) {
-  const { file, meta } = shardPaths(indexesDir, indexName, fileBase)
+  const dir = path.resolve(path.join(indexesDir, indexName))
+  if (isConfirmedSymlink(dir)) {
+    log.warn('vector.orphan_sweep_refused', {
+      [Attr.PLUGIN]: PLUGIN_NAME,
+      [Attr.ERROR_KIND]: 'vector_index_dir_is_symlink',
+      vector_index: indexName,
+      index_dir: dir,
+    })
+    return
+  }
+  const file = path.join(dir, `${fileBase}.parquet`)
+  const meta = path.join(dir, `${fileBase}.meta.json`)
   try {
     fs.rmSync(file, { force: true })
     fs.rmSync(meta, { force: true })

@@ -9,6 +9,9 @@
 **Extends:** [LLP 0253](./0253-body-spool-is-capped-and-swept.decision.md)
 (#purge-and-detach-sweep: the sweep now asks the filesystem about each
 directory as well as asking the string about the name)
+**Extended-by:** [LLP 0331](./0331-a-deleting-pass-carries-its-own-check.decision.md)
+(#sweep-path: "the code that deletes" is the function rather than its caller,
+and "the filesystem" is the one the walk reads rather than `node:fs`)
 **Related:** LLP 0258, LLP 0323, LLP 0326
 
 > `isCaptureSpoolDir` decides whether a name is a spool this install owns, and
