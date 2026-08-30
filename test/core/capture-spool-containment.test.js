@@ -192,6 +192,64 @@ test('sweepCaptureSpool removes nothing through a symlinked entry path', { skip:
   assert.deepEqual(await outsideTreeIntact(outside), { top: true, nested: true })
 })
 
+// The same plant, spelled with one more character. `lstat` reports on a link
+// only when the path names the link: POSIX makes a trailing slash resolve the
+// last component, so a guard asked about `<spool>/claude-bodies/` inspects the
+// TARGET while `readdir` walks it. That spelling reaches the guard because
+// detach passes the marker string verbatim while `isCaptureSpoolDir` judged a
+// `path.resolve`d copy of it, which is the same hand-editable settings input
+// the string gate exists for.
+test('a symlinked entry path spelled with a trailing separator is still refused', { skip: skipSymlinks }, async (t) => {
+  const home = await tmpDir('trailing')
+  const outside = await tmpDir('trailing-target')
+  t.after(async () => {
+    for (const dir of [home, outside]) await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  await plantOutsideTree(outside)
+  const dir = claudeBodySpoolDir(home)
+  await fs.mkdir(captureSpoolRoot(home), { recursive: true })
+  await fs.symlink(outside, dir, 'dir')
+
+  for (const spelling of [dir + '/', dir + '/.', dir + '//']) {
+    const swept = await sweepCaptureSpool(spelling)
+    assert.deepEqual(swept, { filesRemoved: 0, bytesRemoved: 0, failed: 0 }, spelling)
+    assert.deepEqual(await outsideTreeIntact(outside), { top: true, nested: true }, spelling)
+  }
+})
+
+// And through the real verb, because the spelling only matters if something
+// can hand it to the sweep. Detach reads `spool_dir` off the marker in the
+// user's own settings file and passes it on unchanged.
+test('detach refuses a marker whose spool_dir spells the symlink with a trailing separator', { skip: skipSymlinks }, async (t) => {
+  const r = await detachRig()
+  const outside = await tmpDir('detach-trailing-target')
+  t.after(async () => {
+    await r.cleanup()
+    await fs.rm(outside, { recursive: true, force: true })
+  })
+
+  await plantOutsideTree(outside)
+  await r.attachOtel()
+
+  // The hand edit: one trailing separator on a path the gate still approves.
+  const settingsPath = path.join(r.root, '.claude', 'settings.json')
+  const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+  settings._hypaware.spool_dir = r.spoolDir + '/'
+  await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2))
+  assert.equal(isCaptureSpoolDir(settings._hypaware.spool_dir, r.hypHome), true, 'the string gate still passes')
+
+  await fs.symlink(outside, r.spoolDir, 'dir')
+
+  const result = await r.detach()
+  assert.equal(result.changed, true, 'the detach itself still lands')
+  assert.deepEqual(
+    await outsideTreeIntact(outside),
+    { top: true, nested: true },
+    'a spelling that makes lstat resolve the link is not a way past the guard'
+  )
+})
+
 // ---------------------------------------------------------------------------
 // The over-tightening controls. A guard that refuses too much means the spool
 // silently stops being reclaimed, which is quieter than the bug above.

@@ -111,6 +111,14 @@ function reportPlantedSpoolPath(root, planted) {
  * silence as an escape would replace that with the same zero-count success an
  * empty spool returns.
  *
+ * The entry path is resolved before any of that, because `lstat` answers about
+ * a link only when the path names the link: a trailing `/` or `/.` makes the
+ * kernel resolve the last component, so the guard would inspect the target
+ * while `readdir` walked it. Detach hands this function the attach marker's
+ * `spool_dir` verbatim, and `isCaptureSpoolDir` approved a `path.resolve`d
+ * form of that same string, so an un-normalized spelling is the one input that
+ * can make the checked path and the walked path differ.
+ *
  * @ref LLP 0253#purge-and-detach-sweep [implements]: purge and detach both
  *   remove the spool directory's contents
  * @ref LLP 0328#sweep-path [implements]: the containment test is a string, so
@@ -125,8 +133,13 @@ export async function sweepCaptureSpool(dir, opts = {}) {
   let bytesRemoved = 0
   let failed = 0
 
+  // One spelling for the check, the walk, and the report. `path.resolve`
+  // strips a trailing separator and folds a `.` component, which is what makes
+  // the `lstat` below ask about the same path `readdir` will open.
+  const root = path.resolve(dir)
+
   /** @type {string[]} */
-  const pending = [dir]
+  const pending = [root]
   while (pending.length > 0) {
     const current = /** @type {string} */ (pending.pop())
     // Asked of the entry path and of every subdirectory alike, because the
@@ -135,7 +148,7 @@ export async function sweepCaptureSpool(dir, opts = {}) {
     // not `isDirectory()`, so it is removed as the link it is and never
     // queued); this covers the one path no dirent ever described.
     if (isConfirmedSymlink(current)) {
-      reportPlantedSpoolPath(dir, current)
+      reportPlantedSpoolPath(root, current)
       continue
     }
     /** @type {Dirent[]} */
