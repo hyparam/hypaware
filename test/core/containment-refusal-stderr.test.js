@@ -182,7 +182,26 @@ test('the sweep\'s refusal of a symlinked component reaches process stderr', asy
     const stderr = await captureProcessStderr(async () => {
       await maintainCache({ cacheRoot })
     })
-    assert.match(stderr, /sweep_path_is_symlink/, 'the sweep says which component it refused, somewhere visible')
+    // Asserted per `operation`, not on the `error_kind` alone. Two passes walk
+    // these same components on one tick for this dataset - the unreferenced-set
+    // sweep and, because `ai_gateway_messages` is the grep-indexed dataset, the
+    // index-scratch sweep - and both report through the one
+    // `reportPlantedSweepPath`, so both lines carry the same
+    // `sweep_path_is_symlink`. A bare match on the kind is satisfied by either
+    // line, which means it stays green if one pass loses its guard entirely
+    // while the other keeps reporting. The `operation` attribute is the only
+    // field on the line that tells the two passes apart, so it is what the
+    // assertion reads.
+    const refusals = stderr.split('\n').filter((line) => line.includes('sweep_path_is_symlink'))
+    const operations = refusals.map((line) => /"hyp_operation":"([^"]+)"/.exec(line)?.[1])
+    assert.ok(
+      operations.includes('cache.sweep_unreferenced'),
+      'the unreferenced-set sweep names its own refusal, somewhere visible'
+    )
+    assert.ok(
+      operations.includes('maintenance.grep_index'),
+      'and so does the index-scratch sweep, which walks the same components'
+    )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
