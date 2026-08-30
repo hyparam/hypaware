@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
 
 /**
- * @import { DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetDisposition, DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { IdentityClient } from './identity_client.js'
  * @import { CentralSinkConfig, DatasetRolloutRecord, DatasetRolloutStore } from './types.js'
@@ -214,6 +214,44 @@ export function createForwardSink(args) {
       }
     },
 
+    /**
+     * The same verdict `exportBatch` acts on, stated instead of acted on, so
+     * `hyp sync`'s consent prompt does not quote rows this sink will refuse to
+     * send. It shares `datasetForwardingVerdict` with the export path rather
+     * than restating the rule, because a second copy of a privacy verdict is a
+     * copy that can drift toward promising less egress than occurs.
+     *
+     * Everything withheld is `skips`: a local-only-content dataset and a name a
+     * legacy ingest path has reserved alike, because from the prompt's side
+     * both are rows that never leave. Everything else is `forwards`, legacy
+     * signal and eligible open dataset alike.
+     *
+     * An eligible open dataset answers `forwards` and not `starts-from-now`,
+     * even though its rollout does skip the history it finds. `starts-from-now`
+     * is not a claim about rollout, it is a claim about a partition with no
+     * durable cursor: LLP 0324#starts-from-now makes an uncursored partition
+     * count zero. For this sink an uncursored partition means the opposite.
+     * Rollout state is established at sink creation (LLP 0307#rollout-instant),
+     * so every partition that existed then already carries a baseline cursor,
+     * and a partition with no cursor is one that appeared *after* rollout,
+     * which LLP 0307#future-partitions admits at `seq 0` and forwards in full.
+     * Answering `starts-from-now` would quote that partition's whole backlog as
+     * zero at the consent prompt while the next export shipped it, the
+     * under-disclosure LLP 0324#drift-pinned exists to prevent.
+     * `starts-from-now` stays on the seam for the case LLP 0324 built it for: a
+     * sink whose baseline is not written at creation.
+     *
+     * @ref LLP 0324#disposition-seam [implements]: central answers from the predicate its forwarding path already enforces
+     * @ref LLP 0324#drift-pinned [constrained-by]: an answer more restrictive than this sink's export would make the prompt promise less egress than occurs
+     * @ref LLP 0307#future-partitions [constrained-by]: an uncursored partition is post-rollout and forwards from seq 0, so a missing cursor here is not a start-now zero
+     * @ref LLP 0305#eligibility [constrained-by]: the eligibility rule stays declared on the dataset and enforced here, so the preview asks rather than reimplements
+     * @param {DatasetRegistration} dataset
+     * @returns {DatasetDisposition}
+     */
+    datasetDisposition(dataset) {
+      return 'withheld' in datasetForwardingVerdict(dataset, dataset.name) ? 'skips' : 'forwards'
+    },
+
     async close() {
       // No background loops to stop here: the config pull loop wraps
       // this sink's close() in index.js, and identity refresh is lazy
@@ -246,15 +284,34 @@ function forwardingTarget(query, partition) {
   if (!dataset) {
     throw new Error(`central.forward: dataset '${partition.dataset}' is not registered locally`)
   }
+  return datasetForwardingVerdict(dataset, partition.dataset)
+}
+
+/**
+ * The forwarding rule itself, over a resolved registration. Split out from
+ * {@link forwardingTarget} so `datasetDisposition` can answer the `hyp sync`
+ * preview from this exact predicate: the preview's whole claim is that it
+ * quotes what the export would do, and two copies of this rule would let the
+ * prompt drift into promising less egress than the export performs.
+ *
+ * `name` is passed rather than read off `dataset`, because the export path
+ * resolves the registration by the partition's dataset name and must keep
+ * routing by that name.
+ *
+ * @param {DatasetRegistration} dataset
+ * @param {string} name
+ * @returns {{ ingestName: string, registration?: DatasetRegistration } | { withheld: string, level: 'info' | 'warn' }}
+ */
+function datasetForwardingVerdict(dataset, name) {
   // A built-in dataset claims its reserved route explicitly. Without this
   // ordering, an unrelated open dataset named `logs` with no sourceSignal
   // falls through the default and silently impersonates the legacy endpoint.
-  if (KNOWN_SIGNALS.has(partition.dataset) && dataset.sourceSignal !== partition.dataset) {
+  if (KNOWN_SIGNALS.has(name) && dataset.sourceSignal !== name) {
     // A plugin bug rather than a policy outcome, so it reports at warn: the
     // dataset silently forwards nothing until the name is changed.
     return { withheld: 'name is reserved by a legacy ingest path', level: 'warn' }
   }
-  const signal = dataset.sourceSignal ?? partition.dataset
+  const signal = dataset.sourceSignal ?? name
   if (KNOWN_SIGNALS.has(signal)) return { ingestName: signal }
   // @ref LLP 0305#eligibility [implements]: fail closed when a dataset declares unprovenanced local-only content that this raw-row protocol cannot suppress.
   // @ref LLP 0105#graph-provenance [constrained-by]: unprovenanced derived content cannot leave through a raw-row export path that has no column-suppression seam.
@@ -263,7 +320,7 @@ function forwardingTarget(query, partition) {
     // reports at info.
     return { withheld: 'declares local-only content columns', level: 'info' }
   }
-  return { ingestName: partition.dataset, registration: dataset }
+  return { ingestName: name, registration: dataset }
 }
 
 /**

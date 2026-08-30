@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
+import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { runSync } from '../../src/core/commands/sync.js'
 import { previewPendingRows } from '../../src/core/sinks/pending.js'
 
@@ -24,6 +25,8 @@ import { previewPendingRows } from '../../src/core/sinks/pending.js'
 //      and a rewound watermark changes what the plan says.
 //   4. A count that is a floor says "at least"; a count that could not be
 //      taken says "unknown". Neither is ever rendered as zero.
+//   5. The count is per destination, not per machine: a dataset one
+//      destination refuses to forward must not be quoted on its line.
 // @ref LLP 0101#no-release [tests]: the "prints what would leave" half, in rows
 // @ref LLP 0070#incremental [tests]: withheld rows are disclosed apart from the payload rows
 
@@ -763,4 +766,265 @@ test('an incomplete count marks the withheld line as a floor too, and an exact c
   assert.equal(await runSync(['--dry-run'], wholeRun.ctx), 0)
   assert.match(wholeRun.stdout.text, /^ +2 rows withheld by policy \(not sent\)/m)
   assert.doesNotMatch(wholeRun.stdout.text, /at least 2 rows withheld/)
+})
+
+// ---------------------------------------------------------------------------
+// Claim 5: the count belongs to the destination, not to the machine.
+// ---------------------------------------------------------------------------
+
+/**
+ * A real `@hypaware/central` forward sink, built only far enough to answer
+ * `datasetDisposition`. Its `fetchFn` throws on purpose: the preview asks this
+ * sink what it would forward and must never make it forward anything.
+ *
+ * @param {{ query: unknown, storage: unknown }} args
+ */
+function centralForwardSink({ query, storage }) {
+  const noop = () => {}
+  return createForwardSink({
+    config: /** @type {any} */ ({ url: 'http://server:8740', identity: {} }),
+    identityClient: /** @type {any} */ ({ async getCurrentJwt() { return 'jwt' }, async refresh() {} }),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (storage),
+    watermarks: /** @type {any} */ ({
+      keyFor: () => ({ dataset: 'unused', partitionKey: 'unused' }),
+      filePath: () => 'unused',
+      async read() { return null },
+      async write() { throw new Error('the preview must not move a watermark') },
+    }),
+    rollouts: /** @type {any} */ ({
+      filePath: () => 'unused',
+      async read() { return null },
+      async write() { throw new Error('the preview must not write a rollout manifest') },
+    }),
+    log: /** @type {any} */ ({ debug: noop, info: noop, warn: noop, error: noop }),
+    fetchFn: /** @type {any} */ (async () => { throw new Error('the preview must not reach the network') }),
+    sleepFn: async () => {},
+  })
+}
+
+test('a local-only dataset counts for a local-fs destination and not for a central one', async () => {
+  // The over-count LLP 0324 exists to remove. `@hypaware/central` refuses any
+  // dataset declaring `localOnlyContentColumns`, so quoting its rows on the
+  // central line tells the person at the prompt that data leaves the machine
+  // which never will. `@hypaware/local-fs` exports that same dataset, so the
+  // rows are real for it - which is exactly why the kernel cannot filter them
+  // generically and has to ask each destination.
+  //
+  // The load-bearing assertion is that the two lines differ. Two destinations
+  // over one machine's cache quoting one number is the defect.
+  // @ref LLP 0324#disposition-seam [tests]: one dataset, two destinations, two different pending counts
+  // @ref LLP 0324#skips [tests]: a skipped dataset leaves the destination's tally entirely rather than moving to the withheld line
+  const hypHome = await makeHome('localonly')
+  const table = path.join(cacheRoot(hypHome), 'datasets', 'context_graph_nodes', 'source=claude')
+  const dataset = {
+    name: 'context_graph_nodes',
+    plugin: '@hypaware/context-graph',
+    schema: { fields: [{ name: 'id', type: 'string' }] },
+    localOnlyContentColumns: ['content_text'],
+    discoverPartitions: () => [
+      { dataset: 'context_graph_nodes', partition: { source: 'claude' }, tablePath: table },
+    ],
+  }
+  const query = { listDatasets: () => [dataset], getDataset: () => dataset }
+  const storage = {
+    cacheRoot: cacheRoot(hypHome),
+    tableExists: (/** @type {string} */ p) => p === table,
+    hasPendingSync: () => false,
+    async flushTable() {},
+    async *readRowsSince(/** @type {string} */ p, /** @type {any} */ opts = {}) {
+      if (p !== table) return
+      const since = opts.since ? Number(opts.since.seq) : 0
+      for (let seq = 1; seq <= 12; seq += 1) {
+        if (seq > since) yield { row: { id: seq }, after: { v: 1, seq: String(seq) } }
+      }
+    },
+  }
+
+  const central = {
+    ...fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central'),
+    sink: centralForwardSink({ query, storage }),
+  }
+  const local = fakeSink('local', { dir: '/home/u/exports' }, '@hypaware/local-fs')
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([central, local]),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (storage),
+    stateRoot: stateDir(hypHome),
+  })
+  const centralVolume = /** @type {any} */ (volumes.get('central'))
+  const localVolume = /** @type {any} */ (volumes.get('local'))
+
+  assert.equal(localVolume.rows, 12, 'local-fs exports this dataset, so all twelve rows are real for it')
+  assert.equal(centralVolume.rows, 0, 'central refuses this dataset, so none of these rows leave through it')
+  assert.notEqual(
+    centralVolume.rows,
+    localVolume.rows,
+    'two destinations with different forwarding rules must not quote one number'
+  )
+  // A skipped dataset is not a policy drop: its cursor never advances, so
+  // folding it into the withheld line would overstate what policy did.
+  assert.equal(centralVolume.withheldRows, 0)
+  // Nor is it a range: central would forward nothing, so it reaches nowhere.
+  assert.equal(centralVolume.resume.kind, 'unknown')
+  assert.notEqual(centralVolume.resume.kind, 'beginning')
+  // Zero here is the destination's real answer, not a count that failed, so it
+  // is a counted zero and the plan may say so.
+  assert.equal(centralVolume.status, 'counted')
+
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [central, local], storage })
+  ctx.query = query
+  assert.equal(await runSync(['--dry-run'], ctx), 0)
+  assert.match(stdout.text, /12 rows pending, the full local history/)
+  assert.match(stdout.text, /nothing pending/)
+  assert.doesNotMatch(stdout.text, /withheld by policy/)
+})
+
+// ---------------------------------------------------------------------------
+// The disposition seam's degraded and non-central answers. Central answers only
+// `forwards` and `skips`, so nothing else in the suite reaches the kernel's
+// `starts-from-now` arm or its fail-open path, and an untested arm on a consent
+// surface is an arm that can rot into under-disclosure unnoticed.
+// ---------------------------------------------------------------------------
+
+/** Twelve plain rows, nothing withheld, so a count is either 12 or a decision. */
+const TWELVE_PLAIN_ROWS = Array.from({ length: 12 }, (_, i) => ({ seq: i + 1 }))
+
+/**
+ * One destination whose sink answers `datasetDisposition` however the caller
+ * says, over the twelve-row cache every other test in this file uses.
+ *
+ * @param {{ hypHome: string, disposition?: (dataset: any) => unknown }} args
+ */
+async function previewWithDisposition({ hypHome, disposition }) {
+  const sink = /** @type {any} */ ({
+    async exportBatch() { return { status: 'exported', partitionsExported: 0, bytesWritten: 0 } },
+  })
+  if (disposition) sink.datasetDisposition = disposition
+  const handle = /** @type {any} */ ({
+    instanceName: 'dest', plugin: '@hypaware/fake', kind: 'blob', config: {}, sink,
+  })
+  const volumes = await previewPendingRows({
+    handles: [handle],
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries: TWELVE_PLAIN_ROWS })),
+    stateRoot: stateDir(hypHome),
+  })
+  return /** @type {any} */ (volumes.get('dest'))
+}
+
+test('every answer the kernel cannot use is counted as `forwards`, not as a skip', async () => {
+  // The degraded direction is chosen. `forwards` is today's behaviour and the
+  // over-disclosing answer, so a sink that cannot be asked, throws when asked,
+  // or answers something outside the union is counted in full rather than
+  // quietly dropped off the prompt.
+  // @ref LLP 0324#fail-open-loud [tests]: absence, a throw, and an unrecognized answer all read as `forwards`
+  /** @type {[string, ((dataset: any) => unknown) | undefined][]} */
+  const answers = [
+    ['no method at all', undefined],
+    ['a method that throws', () => { throw new Error('plugin blew up') }],
+    ['undefined', () => undefined],
+    ['null', () => null],
+    ['a number', () => 3],
+    ['the near-miss string `skip`', () => 'skip'],
+    ['the wrong case `SKIPS`', () => 'SKIPS'],
+    ['an object that stringifies to `skips`', () => ({ toString: () => 'skips' })],
+    ['a promise of `skips`', async () => 'skips'],
+  ]
+  for (const [label, disposition] of answers) {
+    const hypHome = await makeHome('failopen')
+    const volume = await previewWithDisposition({ hypHome, disposition })
+    assert.equal(volume.rows, 12, `${label} must be counted in full, not silently removed from the prompt`)
+    assert.equal(volume.withheldRows, 0, label)
+    assert.equal(volume.resume.kind, 'beginning', `${label} must still claim the reach it would have`)
+  }
+})
+
+test('a `starts-from-now` destination counts zero without a cursor and incrementally with one', async () => {
+  // The kernel arm LLP 0324 built for a sink whose baseline is not written at
+  // creation. No central sink answers this today, so this synthetic one is the
+  // only thing holding the rule.
+  // @ref LLP 0324#starts-from-now [tests]: a missing watermark means zero, not the beginning, and a present one counts incrementally
+  const fresh = await makeHome('startnow-fresh')
+  const freshVolume = await previewWithDisposition({
+    hypHome: fresh,
+    disposition: () => 'starts-from-now',
+  })
+  assert.equal(freshVolume.rows, 0, 'this destination ships none of the history it has no cursor for')
+  assert.equal(freshVolume.status, 'counted', "zero here is the sink's own answer, not a count that failed")
+  assert.notEqual(freshVolume.resume.kind, 'beginning', 'a range it does not reach must not be announced')
+
+  const cursored = await makeHome('startnow-cursored')
+  await writeWatermark({
+    hypHome: cursored,
+    plugin: '@hypaware/fake',
+    instance: 'dest',
+    seq: '3',
+    updatedAt: '2026-08-12T00:50:31.004Z',
+  })
+  const cursoredVolume = await previewWithDisposition({
+    hypHome: cursored,
+    disposition: () => 'starts-from-now',
+  })
+  assert.equal(cursoredVolume.rows, 9, 'a partition with a cursor counts incrementally, unchanged')
+  assert.equal(cursoredVolume.resume.kind, 'since')
+})
+
+test('a `skips` destination stays out of the withheld tally and out of the resume range', async () => {
+  // A skipped dataset's cursor never advances, so folding it into the withheld
+  // line would report policy activity that did not happen, and letting it claim
+  // a resume range would describe a reach the destination does not have.
+  // @ref LLP 0324#skips [tests]: a skipped dataset contributes to neither tally and claims no range, with or without a cursor
+  const hypHome = await makeHome('skips-cursored')
+  await writeWatermark({
+    hypHome,
+    plugin: '@hypaware/fake',
+    instance: 'dest',
+    seq: '3',
+    updatedAt: '2026-08-12T00:50:31.004Z',
+  })
+  const volume = await previewWithDisposition({ hypHome, disposition: () => 'skips' })
+  assert.equal(volume.rows, 0)
+  assert.equal(volume.withheldRows, 0)
+  assert.equal(volume.status, 'counted')
+  assert.equal(volume.resume.kind, 'unknown')
+})
+
+test('a partition named after some other dataset is counted in full, not skipped on its behalf', async () => {
+  // The seam is asked about a `DatasetRegistration`, but the driver routes a
+  // partition by `partition.dataset`. When a registration emits a partition
+  // under a different name, a `skips` answer describes a dataset the export
+  // would not have routed under that name, so believing it could drop rows the
+  // export ships. Fail open, like every other answer the preview cannot use.
+  // @ref LLP 0324#fail-open-loud [tests]: a disposition that cannot be lined up with what the export routes counts as `forwards`
+  const hypHome = await makeHome('namemismatch')
+  const misnaming = {
+    listDatasets: () => [
+      {
+        name: 'some_other_dataset',
+        discoverPartitions: () => [
+          { dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath: tablePathFor(hypHome) },
+        ],
+      },
+    ],
+  }
+  const handle = /** @type {any} */ ({
+    instanceName: 'dest',
+    plugin: '@hypaware/fake',
+    kind: 'blob',
+    config: {},
+    sink: {
+      datasetDisposition: () => 'skips',
+      async exportBatch() { return { status: 'exported', partitionsExported: 0, bytesWritten: 0 } },
+    },
+  })
+  const volume = /** @type {any} */ ((await previewPendingRows({
+    handles: [handle],
+    query: /** @type {any} */ (misnaming),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries: TWELVE_PLAIN_ROWS })),
+    stateRoot: stateDir(hypHome),
+  })).get('dest'))
+  assert.equal(volume.rows, 12)
+  assert.equal(volume.resume.kind, 'beginning')
 })

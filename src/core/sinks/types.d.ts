@@ -1,6 +1,8 @@
 import type {
+  DatasetRegistration,
   ExportResult,
   HypAwareV2Config,
+  QueryPartition,
   QueryRegistry,
   SinkContinuation,
 } from '../../../hypaware-plugin-kernel-types.d.ts'
@@ -116,6 +118,26 @@ export interface PendingVolume {
   resume: { kind: 'beginning' } | { kind: 'unknown' } | { kind: 'since'; at: string }
   /** Why the count is `partial` or `unknown`. Short enough to print. */
   reason?: string
+}
+
+/**
+ * What one preview run found in the cache, shared by every destination it then
+ * counts for. Discovery is paid once; the per-destination work reads this.
+ */
+export interface Discovered {
+  /** Materialized partitions, deduplicated by table path, in driver order. */
+  partitions: QueryPartition[]
+  /**
+   * The registration each partition came from, keyed by table path exactly as
+   * `partitions` is deduplicated. Carried because the count is per destination
+   * and a destination may refuse a dataset outright: asking it requires the
+   * same `DatasetRegistration` the sink's own export rule reads.
+   */
+  datasets: Map<string, DatasetRegistration>
+  /** Rows sit in an unflushed spool, so any count off these tables is a floor. */
+  unflushed: boolean
+  /** Datasets whose partition discovery threw. */
+  failures: number
 }
 
 export interface PendingPreviewOptions {

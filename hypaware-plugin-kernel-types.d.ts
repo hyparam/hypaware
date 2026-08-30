@@ -1401,6 +1401,23 @@ export interface SinkHandle {
   sink: Sink
 }
 
+/**
+ * What a sink would do with one dataset, as a consent surface needs to state
+ * it: the sink forwards the dataset, it skips the dataset entirely, or it
+ * forwards the dataset but starts from now, so history predating the sink
+ * ships nothing.
+ *
+ * `starts-from-now` is narrower than it reads, and the narrowing is what keeps
+ * the prompt honest. It is a claim about a partition with *no durable
+ * watermark*: the preview counts such a partition as zero and lets it bound no
+ * resume range. Answer it only if your export really would ship nothing from an
+ * uncursored partition. A sink that establishes its baselines up front, so an
+ * uncursored partition is instead one that appeared afterwards and forwards in
+ * full, must answer `forwards`, or the prompt reads "nothing pending" over rows
+ * the next export sends.
+ */
+export type DatasetDisposition = 'forwards' | 'skips' | 'starts-from-now'
+
 export interface Sink {
   /**
    * Called by the sink driver on the configured schedule. The driver
@@ -1412,6 +1429,24 @@ export interface Sink {
   close(): Promise<void>
   /** Implemented by sinks that declare `supports: ["queryable"]`. */
   reader?(): SinkQueryReader
+  /**
+   * Consultative and preview-only: what this sink would do with `dataset`.
+   * `hyp sync`'s pending preview asks, so it does not quote rows a destination
+   * refuses to forward. Nothing else asks. The driver keeps handing every
+   * discovered partition to every sink, the first-sync hold stays driver-wide,
+   * and the sink's own export path stays the sole authority on what ships, so
+   * an answer here can never gate, hold, or release an export.
+   *
+   * Not implementing it, throwing from it, and answering something the kernel
+   * does not recognize all read as `forwards`. That is over-disclosure, the
+   * only direction a consent prompt may be wrong in, and it is exactly what a
+   * sink implementing nothing gets today.
+   *
+   * An implementation must answer from the same rule its export path enforces:
+   * answering `skips` or `starts-from-now` while `exportBatch` ships the rows
+   * anyway makes the prompt promise less egress than occurs.
+   */
+  datasetDisposition?(dataset: DatasetRegistration): DatasetDisposition
 }
 
 export interface ExportBatch {
