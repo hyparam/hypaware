@@ -160,6 +160,23 @@ test('the flush\'s refusal of a symlinked spool directory reaches process stderr
       await spool.flushTable(tablePath, { reason: 'test' })
     })
     assert.match(stderr, /spool_dir_is_symlink/, 'the flush says which spool it refused, somewhere visible')
+    // Counted, not just matched. LLP 0329#consequences prices a standing
+    // refusal at one line per refusing flush pass, and `runFlush` lists the
+    // spool up to three times, so a report left on every list costs two
+    // identical lines for one pass. That is a real bill: the sink driver's
+    // default schedule is `* * * * *` and adapters flush once per partition
+    // per tick, into a daemon log the service manager never truncates.
+    const perPass = stderr.split('\n').filter((line) => line.includes('spool_dir_is_symlink'))
+    assert.equal(perPass.length, 1, 'one refusing flush pass costs exactly one line')
+
+    // And the other direction, which is what LLP 0329 actually settled: the
+    // line repeats because the condition persists. Deduplicating within a
+    // pass must not turn into suppressing the standing signal across passes.
+    const second = await captureProcessStderr(async () => {
+      await spool.flushTable(tablePath, { reason: 'test' })
+    })
+    const secondPass = second.split('\n').filter((line) => line.includes('spool_dir_is_symlink'))
+    assert.equal(secondPass.length, 1, 'the next pass says it again; the standing signal is not throttled')
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

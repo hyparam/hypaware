@@ -149,8 +149,20 @@ export function createCacheSpool(args) {
     // tick and the driver's default schedule is every minute, so exempting
     // `force` would move the growth off query traffic and onto a cron that
     // strands ~1440 files a day per partition.
+    // One refusal line per flush pass, which is the rate LLP 0329
+    // #consequences priced ("one line per refusing flush or sweep pass"). This
+    // pass lists the spool up to three times and every list re-asks the guard,
+    // so without a shared budget one refusing flush says the same thing twice,
+    // once a minute per partition on the sink driver's default schedule, into
+    // a daemon log the service manager appends to and never truncates. A box
+    // rather than a positional flag so the first list that refuses is the one
+    // that speaks, wherever in the pass that turns out to be: a symlink
+    // planted after the opening list still gets said out loud once.
+    // @ref LLP 0329#consequences [constrained-by]: a refusing pass costs one stderr line, and it costs it again next pass
+    const saidRefusal = { yet: false }
+
     // @ref LLP 0322#coalesce-the-retry [implements]: a retry under a standing stamp reuses the files already rotated
-    const stranded = listFlushFiles(tablePath)
+    const stranded = listFlushFiles(tablePath, saidRefusal)
     const coalescing = stranded.length > 0 && (await readFlushFailedAt(tablePath)) !== null
     if (!coalescing) {
       await withWriteLock(tablePath, async () => {
@@ -158,7 +170,7 @@ export function createCacheSpool(args) {
       })
     }
 
-    await drainFlushFiles(tablePath, coalescing ? stranded : listFlushFiles(tablePath), totals)
+    await drainFlushFiles(tablePath, coalescing ? stranded : listFlushFiles(tablePath, saidRefusal), totals)
 
     // Reaching here from a coalesced pass means the cache accepted the very
     // rows it was rejecting, so the condition that suppressed the rotation is
@@ -176,7 +188,7 @@ export function createCacheSpool(args) {
       await withWriteLock(tablePath, async () => {
         await rotateActiveFile(tablePath)
       })
-      await drainFlushFiles(tablePath, listFlushFiles(tablePath), totals)
+      await drainFlushFiles(tablePath, listFlushFiles(tablePath, saidRefusal), totals)
     }
 
     if (totals.chunkCount > 0) {
@@ -553,14 +565,26 @@ async function rotateActiveFile(tablePath) {
  * less. Refusing inside `spoolDir` would instead fail `append`, which is
  * the contract that decides whether a caller replays rows.
  *
+ * The guard is asked on every call, because every call is a list a drain
+ * would act on, and re-asking is one `lstat`. Saying so is the half with a
+ * standing cost, so the report is spent from the calling pass's budget
+ * instead: the first list that refuses says it, and the rest of that pass
+ * stays quiet.
+ *
  * @ref LLP 0326#one-level-down [implements]: a pass that unlinks by path checks the path it will walk.
+ * @ref LLP 0329#consequences [constrained-by]: the refusal is priced per refusing pass, not per list the pass makes.
  * @param {string} tablePath
+ * @param {{ yet: boolean }} saidRefusal  the calling pass's one-line budget,
+ *   flipped by the first list that refuses
  * @returns {string[]}
  */
-function listFlushFiles(tablePath) {
+function listFlushFiles(tablePath, saidRefusal) {
   const dir = spoolDir(tablePath)
   if (isConfirmedSymlink(dir)) {
-    reportPlantedSpoolDir(tablePath, dir)
+    if (!saidRefusal.yet) {
+      saidRefusal.yet = true
+      reportPlantedSpoolDir(tablePath, dir)
+    }
     return []
   }
   try {
