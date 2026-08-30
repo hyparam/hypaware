@@ -242,12 +242,13 @@ function defaultGenerationDirs(cursor) {
  * `warn`, not `error`: nothing failed, and the tick carries on.
  *
  * @ref LLP 0323#say-it [implements]: this is the one corrupt-cursor case that knows its cause, so it does not degrade silently.
+ * @ref LLP 0329#stderr-mirror [implements]: the refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
  * @param {string} partitionDir
  * @param {unknown} tableDir  the rejected value, which need not be a string
  */
 function reportEscapingTableDir(partitionDir, tableDir) {
   try {
-    getLogger('cache').warn(
+    getLogger('cache', { mirrorStderr: true }).warn(
       'cursor.tableDir does not name a generation in its partition; treating the cursor as unreadable',
       {
         [Attr.OPERATION]: 'cache.cursor_read',

@@ -2004,13 +2004,14 @@ function sweepPathComponents(tableDir) {
  * is two different reports, and a refusal that said nothing at all would be
  * the silent half of exactly the symptom this line exists to name.
  *
+ * @ref LLP 0329#stderr-mirror [implements]: the refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
  * @param {string} tableDir
  * @param {string} operation
  * @param {string} plantedComponent
  */
 function reportPlantedSweepPath(tableDir, operation, plantedComponent) {
   try {
-    getLogger('cache').warn('a symlink stands on the sweep path; reclaiming nothing in this generation', {
+    getLogger('cache', { mirrorStderr: true }).warn('a symlink stands on the sweep path; reclaiming nothing in this generation', {
       [Attr.OPERATION]: operation,
       [Attr.ERROR_KIND]: 'sweep_path_is_symlink',
       table_dir: tableDir,

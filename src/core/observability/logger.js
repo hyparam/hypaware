@@ -28,8 +28,8 @@ const SEVERITY_TEXT = Object.freeze({
 
 /**
  * Install a LoggerProvider with the same exporter strategy as the
- * tracer. Also configures a stderr mirror in dev mode so a developer
- * watching the smoke harness sees decisions live.
+ * tracer. The stderr mirror is not configured here: it is a per-call-site
+ * option on {@link getLogger}, and it works with no provider at all.
  *
  * @param {object} args
  * @param {ObservabilityEnv} args.env
@@ -68,8 +68,15 @@ export function installLoggerProvider({ env, resource }) {
 /**
  * Resolve a structured logger scoped to the given component. The
  * returned object emits OTel LogRecords through the global provider
- * and, in dev mode, mirrors each call to stderr.
+ * and, when `mirrorStderr` is set, mirrors each call to stderr.
  *
+ * The mirror writes whether or not a provider is installed, which is the
+ * property the containment-refusal reports rely on: on a default install
+ * (no dev telemetry, no OTLP endpoint) the provider is null and the OTel
+ * half of `emit` drops the record, so the mirror is the one channel that
+ * exists without configuration.
+ *
+ * @ref LLP 0329#stderr-mirror [implements]: stderr is the channel of last resort a refusal report opts into per call site.
  * @param {string} component
  * @param {{ mirrorStderr?: boolean }} [opts]
  */

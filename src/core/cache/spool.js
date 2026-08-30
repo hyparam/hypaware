@@ -502,12 +502,13 @@ function spoolDir(tablePath) {
  * it would have drained are somewhere the cache does not own. `ls -l` at the
  * logged path answers in one line.
  *
+ * @ref LLP 0329#stderr-mirror [implements]: the refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
  * @param {string} tablePath
  * @param {string} dir
  */
 function reportPlantedSpoolDir(tablePath, dir) {
   try {
-    getLogger('cache').warn('the spool directory is a symlink; draining nothing for this table', {
+    getLogger('cache', { mirrorStderr: true }).warn('the spool directory is a symlink; draining nothing for this table', {
       [Attr.OPERATION]: 'cache.spool_flush',
       [Attr.ERROR_KIND]: 'spool_dir_is_symlink',
       table_path: tablePath,
