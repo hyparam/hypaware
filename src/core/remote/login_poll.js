@@ -24,6 +24,11 @@ const DEFAULT_INTERVAL_MS = 2000
 // deadline is only consulted between polls. Aborting just retries on the next
 // tick, which is exactly what a transient hang deserves.
 const POLL_REQUEST_TIMEOUT_MS = 10 * 1000
+// The floor a 429 backs off to when the limiter sends no usable `retry-after`.
+// Polling on at the normal cadence through a rate limit is what walks the
+// source into the escalating lockout (the server rate-limits this endpoint,
+// LLP 0342#d4), so an unreadable hint must not mean no backoff at all.
+const RATE_LIMITED_BACKOFF_MS = 10 * 1000
 const CLOSED_MESSAGE = 'login poller closed before a code arrived'
 
 /**
@@ -44,16 +49,18 @@ function defaultSleep(ms) {
  * `unknown_state` is NOT terminal: the flight parks only when the browser
  * opens the start URL, so every poll before the user clicks legitimately
  * answers 404 unknown_state, and the poller keeps going to the deadline. A
- * stale server is told apart by the *shape* of its 404: the generic
- * `unknown_path` (or anything that is not `unknown_state`), which no
- * poll-capable server returns on this path.
+ * stale server is told apart by the *shape* of its 404: the server's own
+ * generic `unknown_path` body, which a poll-capable server never returns on
+ * this path. Any other 404 came from something between us and the server, so
+ * it is transient.
  *
  * Transient trouble (a network error, a hung request, a 5xx, a 429) never
- * fails the login: the poller keeps polling to the deadline, honoring
- * `retry-after` on a 429 so it cannot poll itself into the limiter's
- * escalating lockout. Each poll is aborted after `POLL_REQUEST_TIMEOUT_MS`
- * so one silent socket cannot swallow the whole budget, and `close()` cuts a
- * wait that is already in flight.
+ * fails the login: the poller keeps polling to the deadline, backing off on a
+ * 429 (to `retry-after` when it is readable, to `RATE_LIMITED_BACKOFF_MS`
+ * otherwise) so it cannot poll itself into the limiter's escalating lockout.
+ * Each poll is aborted after `POLL_REQUEST_TIMEOUT_MS` so one silent socket
+ * cannot swallow the whole budget, and `close()` cuts a wait that is already
+ * in flight.
  *
  * @param {{
  *   identityBase: string,
@@ -66,6 +73,7 @@ function defaultSleep(ms) {
  * }} args
  * @returns {{ waitForCode: () => Promise<{ code: string }>, close: () => void }}
  * @ref LLP 0342#d3 [implements]: 2s cadence, 5-minute budget, single delivery consumed on pickup; the token exchange downstream is untouched
+ * @ref LLP 0342#d4 [constrained-by]: `state` is all the poll URL carries; PKCE at redemption, not a second poll secret, is what makes that safe
  */
 export function startLoginPoller({
   identityBase,
@@ -163,18 +171,25 @@ export function startLoginPoller({
             const safeError = sanitizeErrorCode(typeof body.error === 'string' ? body.error : '')
             throw fail(`login failed: ${safeError}`, safeError, safeError)
           }
-          if (response.status === 404 && body && body.error !== 'unknown_state') {
-            // A poll-capable server answers this path with unknown_state or a
-            // flight status, never the generic unknown_path 404: this server
-            // predates poll login (LLP 0342#d2). Fail loudly, not by timeout.
-            // Only a *parsed* body says that: an unparseable 404 is some proxy
-            // or ingress between us and the server (an HTML error page during a
-            // rolling deploy), which is transient and must not end the login.
+          if (response.status === 404 && body?.error === 'unknown_path') {
+            // The stale-server tell is the server's *own* generic 404 body,
+            // which is what a server predating this endpoint answers here
+            // (LLP 0342#d2). Fail loudly on that, not by timeout.
+            // Matched positively on purpose: any other 404 came from something
+            // between us and the server - an ingress serving an HTML error
+            // page, or its own JSON `{"message":"Not Found"}`, during a
+            // rolling deploy - which is transient and must not end a login the
+            // human may be mid-completing.
             throw fail('this server does not support poll login yet - upgrade hypaware-server', 'no_poll_endpoint')
           }
           if (response.status === 429) {
+            // `retry-after` is only readable in its delta-seconds form; the
+            // HTTP-date form (and an absent header) reads as NaN. Back off to
+            // the floor there rather than polling straight back into the
+            // limiter at the normal cadence.
             const retryAfter = Number(response.headers?.get?.('retry-after'))
-            if (Number.isFinite(retryAfter) && retryAfter > 0) delayMs = Math.max(delayMs, retryAfter * 1000)
+            const hinted = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : RATE_LIMITED_BACKOFF_MS
+            delayMs = Math.max(delayMs, hinted)
           }
           // 200 pending, 404 unknown_state (the browser has not opened the
           // start URL yet), and transient 5xx all just keep polling.

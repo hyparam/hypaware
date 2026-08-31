@@ -182,3 +182,31 @@ test('an unparseable 404 (a proxy error page) is transient, not a stale server',
   const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, sleep })
   assert.deepEqual(await poller.waitForCode(), { code: 'cd_proxy' })
 })
+
+test("an ingress's own JSON 404 is transient, not a stale server", async () => {
+  // Not every 404 in front of the identity server is HTML: API gateways and
+  // ingress controllers answer with their own JSON. Only the server's generic
+  // `unknown_path` body says "this server predates poll login" (LLP 0342 D2),
+  // so anything else has to keep polling.
+  const { fetchImpl } = scriptedFetch([
+    { status: 404, body: { message: 'Not Found' } },
+    { status: 200, body: { status: 'complete', code: 'cd_ingress' } },
+  ])
+  const { sleep } = recordingSleep()
+  const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, sleep })
+  assert.deepEqual(await poller.waitForCode(), { code: 'cd_ingress' })
+})
+
+test('a 429 with no readable retry-after still backs off', async () => {
+  // An absent header, or the RFC 9110 HTTP-date form, reads as NaN. Polling on
+  // at the 2s cadence would be ~150 requests into a limiter that just said no.
+  const { fetchImpl } = scriptedFetch([
+    { status: 429, body: { error: 'rate_limited' }, headers: { 'retry-after': 'Wed, 21 Oct 2015 07:28:00 GMT' } },
+    { status: 429, body: { error: 'rate_limited' } },
+    { status: 200, body: { status: 'complete', code: 'cd_limited' } },
+  ])
+  const { delays, sleep } = recordingSleep()
+  const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, intervalMs: 2000, sleep })
+  assert.deepEqual(await poller.waitForCode(), { code: 'cd_limited' })
+  assert.deepEqual(delays.slice(0, 2), [10000, 10000])
+})
