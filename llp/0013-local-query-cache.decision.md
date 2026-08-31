@@ -6,7 +6,10 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0012, LLP 0014, LLP 0015
-**Extended-by:** LLP 0321
+**Extended-by:** LLP 0321,
+[LLP 0336](./0336-retention-rides-the-maintenance-tick.decision.md)
+(#retention-is-the-central-tradeoff: where and how often the window is
+enforced)
 
 > The always-on intrinsic store. Decomposed from `hypaware-design.md`
 > (Local Query Cache).

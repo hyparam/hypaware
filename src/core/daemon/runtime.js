@@ -749,8 +749,25 @@ export async function runDaemon(opts = {}) {
   const maintenanceEnabled = maintenanceCfg?.enabled !== false
   if (maintenanceEnabled) {
     const { maintainCache, normalizeMaintenanceConfig } = await import('../cache/maintenance.js')
+    const { createRetentionEnforcer } = await import('../cache/retention.js')
     const mCfg = normalizeMaintenanceConfig(maintenanceCfg)
     const intervalMs = mCfg.interval_minutes * 60 * 1000
+    // @ref LLP 0336#rides-the-maintenance-tick [implements]: the retention
+    // window `hyp status` reports is enforced here, on the tail of the
+    // maintenance tick, not by `maintainCache` (whose only age cutoff is
+    // Iceberg snapshot expiry) and not by a timer of its own.
+    const retention = createRetentionEnforcer({
+      cacheRoot: boot.runtime.storage.cacheRoot,
+      config: boot.config?.query?.cache?.retention,
+      getDataset: (dataset) => boot.runtime.query.getDataset(dataset),
+    })
+    // @ref LLP 0336#daily-cadence [implements]: windows are whole days and a
+    // non-skipped pass re-reads every data file's timestamp column, so the
+    // pass runs on the first tick after boot and then at most daily. The
+    // stamp advances only when a pass completes, so a failed pass retries on
+    // the next maintenance tick instead of standing unenforced for a day.
+    const retentionPassMinIntervalMs = 24 * 60 * 60 * 1000
+    let retentionRanAtMs = 0
     // @ref LLP 0220#tick-reports-degraded [constrained-by]: not built on
     // `withSpan`. `withSpan` (src/core/observability/span_helpers.js)
     // derives the span's status code from the `status` attribute snapshot
@@ -882,6 +899,54 @@ export async function runDaemon(opts = {}) {
         const message = err instanceof Error ? err.message : String(err)
         fileLog.error('daemon.maintenance_failed', { message })
       })
+      // Retention rides the tail of the same tick, so `maintenanceInFlight`
+      // (and with it shutdown, which awaits it) covers a delete in progress.
+      // It runs after `maintainCache`, never instead of it, and a
+      // maintenance failure above does not cost the day's retention pass.
+      if (Date.now() - retentionRanAtMs >= retentionPassMinIntervalMs) {
+        await withSpan(
+          'retention.tick',
+          {
+            [Attr.COMPONENT]: 'daemon',
+            [Attr.OPERATION]: 'retention.tick',
+            daemon_mode: mode,
+            status: 'ok',
+          },
+          async (span) => {
+            const result = await retention.tick()
+            let rowsDeleted = 0
+            // A retention delete is the one cache mutation nothing can
+            // reconstruct afterwards, so every partition that lost rows gets
+            // a durable line, not only a child span a tracer may not have
+            // been collecting when the pass fired.
+            for (const evictedPart of result.evicted) {
+              rowsDeleted += evictedPart.rowCount
+              fileLog.info('daemon.retention_evicted', {
+                [Attr.DATASET]: evictedPart.dataset,
+                partition: evictedPart.partition,
+                rows_deleted: evictedPart.rowCount,
+              })
+            }
+            for (const tableResult of result.sourceTableResults) {
+              if (tableResult.rowsDeleted === 0) continue
+              rowsDeleted += tableResult.rowsDeleted
+              fileLog.info('daemon.retention_rows_deleted', {
+                [Attr.DATASET]: tableResult.dataset,
+                source: tableResult.source,
+                cutoff_date: tableResult.cutoffDate,
+                rows_deleted: tableResult.rowsDeleted,
+              })
+            }
+            span.setAttribute('partitions_evicted', result.evicted.length)
+            span.setAttribute('rows_deleted', rowsDeleted)
+            retentionRanAtMs = Date.now()
+          },
+          { component: 'daemon' }
+        ).catch((err) => {
+          const message = err instanceof Error ? err.message : String(err)
+          fileLog.error('daemon.retention_failed', { message })
+        })
+      }
     }
     if (intervalMs > 0) {
       maintenanceHandle = setInterval(() => {
