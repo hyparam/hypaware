@@ -20,6 +20,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs/promises'
+import { closeSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -28,7 +29,9 @@ import { sweepCaptureSpool } from '../../src/core/capture_spool.js'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
+import { JsonlSpanExporter } from '../../src/core/observability/jsonl_exporters.js'
 import { getLogger } from '../../src/core/observability/logger.js'
+import { installObservability, readObservabilityEnv } from '../../src/core/observability/index.js'
 import { logs, trace, LoggerProvider, TracerProvider } from '../../src/core/observability/runtime.js'
 import { Attr } from '../../src/core/observability/attrs.js'
 
@@ -1217,4 +1220,170 @@ test('a provider that rejects is diagnosed even if another is installed before t
   })
   assert.match(stderr, /the provider installed after it threw/, 'the newer provider is diagnosed')
   assert.match(stderr, /the provider that emitted this rejected/, 'and so is the one whose rejection landed after it was replaced')
+})
+
+// The in-tree half of the close-failure gap. LLP 0335#close-failures could
+// name the report but not demonstrate it on anything this repo ships:
+// `JsonlWriter.close` resolved from `stream.end`'s callback without reading
+// the error that callback is handed, so a disk that took none of the buffered
+// records produced a clean shutdown and no line anywhere
+// (hyparam/hypaware#1130 item 2, hyparam/hypaware#1137 item 3). The stream is
+// broken the way the operating system breaks it, by taking the descriptor
+// away, rather than by a fake that agrees with the assertion.
+//
+// @ref LLP 0337#close-rejects [tests]: a JSONL close that lost its records is diagnosed once on stderr.
+test('a JSONL exporter whose stream fails at close says so instead of reporting a clean shutdown', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-close-'))
+  try {
+    const exporter = new JsonlSpanExporter({ dir, pid: 4242 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'a record the disk will not keep' }])
+    await new Promise((resolve) => { writer.stream.once('open', resolve) })
+    // Everything after this write has nowhere to land. The stream reports it
+    // asynchronously, which is the failure mode the old close could not see.
+    closeSync(writer.stream.fd)
+    writer.writeBatch([{ note: 'nor this one' }])
+
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.shutdown()
+    })
+    assert.match(stderr, /telemetry_shutdown_threw/, 'the failed close names itself')
+    assert.match(stderr, /"telemetry_source":"JsonlSpanExporter"/, 'as the exporter that lost the records')
+    assert.match(stderr, /buffered records may be lost/, 'and says what the failure costs')
+    assert.match(stderr, /EBADF/, 'carrying what the stream actually failed with')
+    const reports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_threw'))
+    assert.equal(reports.length, 1, 'one line for the failed close')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The other direction, and the standing constraint on every line above: a
+// JSONL exporter that closes cleanly writes nothing to stderr and everything
+// to its file.
+test('a healthy JSONL exporter closes silently, with its records on disk', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-close-ok-'))
+  try {
+    const exporter = new JsonlSpanExporter({ dir, pid: 4243 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'a record the disk keeps' }])
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.forceFlush()
+      await provider.shutdown()
+    })
+    assert.equal(stderr, '', 'a healthy close is byte-silent')
+    const written = await fs.readFile(path.join(dir, 'traces-4243.jsonl'), 'utf8')
+    assert.match(written, /a record the disk keeps/, 'and the records are on disk')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The boundary LLP 0335#never-throws named as outside every seam it has: a
+// component that fails on a resource it owns rather than on the call we made.
+// An `fs.WriteStream` reports such a failure on its own 'error' event, and an
+// unlistened 'error' event ends the process - the exact outcome the guard
+// exists to prevent, reached without passing through it. A subprocess,
+// because the assertion is that the process is still alive.
+//
+// @ref LLP 0337#writer-owns-its-stream [tests]: a write that fails after the write call returned costs the telemetry, not the process.
+test('a JSONL write that fails after the write call returned does not end the process', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-async-'))
+  try {
+    const exportersUrl = pathToFileURL(path.join(REPO_ROOT, 'src', 'core', 'observability', 'jsonl_exporters.js')).href
+    const script = [
+      "import fs from 'node:fs'",
+      `import { JsonlSpanExporter } from '${exportersUrl}'`,
+      `const exporter = new JsonlSpanExporter({ dir: ${JSON.stringify(dir)}, pid: 4244 })`,
+      "const writer = exporter.writer",
+      "writer.writeBatch([{ note: 'the first record' }])",
+      "await new Promise((resolve) => { writer.stream.once('open', resolve) })",
+      "fs.closeSync(writer.stream.fd)",
+      "writer.writeBatch([{ note: 'the record the closed descriptor cannot take' }])",
+      "await new Promise((resolve) => { setTimeout(resolve, 300) })",
+      "process.stdout.write('still running\\n')",
+    ].join('\n')
+    const run = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' })
+    assert.equal(run.status, 0, `the process survived its telemetry: ${run.stderr}`)
+    assert.match(run.stdout, /still running/, 'and went on doing its work')
+    assert.doesNotMatch(run.stderr, /Unhandled 'error' event/, 'no uncaught stream error')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The other boundary #close-failures named: a close that hangs rather than
+// rejecting. `installObservability`'s shutdown races each provider against a
+// budget whose timeout arm resolves, so a provider that never settles lost the
+// race, the process exited, and everything it still buffered went with it -
+// indistinguishable from a clean shutdown (hyparam/hypaware#1137 item 1).
+//
+// @ref LLP 0337#budget-report [tests]: a close that outruns the budget is named on stderr, and one that finishes inside it is not.
+test('a provider whose close never settles is named when the shutdown budget runs out', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-close-budget-'))
+  /** @type {NodeJS.Timeout|undefined} */
+  let stuck
+  try {
+    // No dev telemetry, so the budget is the short one and the test does not
+    // wait five seconds to prove it; an endpoint, so providers exist at all.
+    const env = readObservabilityEnv({
+      HYP_HOME: root,
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:1',
+    })
+    const obs = installObservability({ env })
+    // A close that hangs the way a real one does, on something that keeps the
+    // event loop alive. A promise pending on nothing at all is a different
+    // failure: the loop empties, the process exits, and no report of any kind
+    // can run after that (LLP 0337#budget-report names it as the residue).
+    const hanging = {
+      /** @param {unknown[]} _batch */
+      exportBatch(_batch) {},
+      shutdown() {
+        return new Promise((resolve) => { stuck = setTimeout(resolve, 60_000) })
+      },
+    }
+    const provider = /** @type {any} */ (obs.tracer.provider)
+    provider.exporters.push(hanging)
+    const stderr = await captureProcessStderr(async () => {
+      await obs.shutdown()
+    })
+    assert.match(stderr, /telemetry_shutdown_timed_out/, 'the hung close is named')
+    assert.match(stderr, /"telemetry_channel":"traces"/, 'on the channel whose provider hung')
+    assert.match(stderr, /shutdown budget/, 'saying the budget ran out rather than that something threw')
+    assert.match(stderr, /buffered records may be lost/, 'and what that costs')
+    assert.doesNotMatch(stderr, /"telemetry_channel":"logs"/, 'the providers that closed in time say nothing')
+    const reports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_timed_out'))
+    assert.equal(reports.length, 1, 'one line, not one per provider')
+    // Leave no globally registered provider behind for whatever runs next.
+    provider.exporters.pop()
+    await provider.shutdown()
+  } finally {
+    if (stuck) clearTimeout(stuck)
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a shutdown whose providers all close inside the budget stays byte-silent', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-close-budget-ok-'))
+  try {
+    const env = readObservabilityEnv({
+      HYP_HOME: root,
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:1',
+    })
+    const obs = installObservability({ env })
+    const stderr = await captureProcessStderr(async () => {
+      await obs.shutdown()
+    })
+    assert.equal(stderr, '', 'a shutdown that finishes says nothing')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })

@@ -10,6 +10,11 @@
 (#stderr-mirror: the mirror's guarantee forced a guard around everything the
 mirror shares a path with, and the guard's own diagnostic is a fifth
 unconditional stderr write that 0329's per-call-site opt-in does not predict)
+**Extended-by:** [LLP 0337](./0337-a-telemetry-close-reports-what-it-lost.decision.md)
+(#never-throws' resource-owned failure and both boundaries in #close-failures
+are closed for the exporters this tree ships: the JSONL writer listens to its
+own stream, rejects the close that lost records, and a provider close that
+outruns the shutdown budget is reported instead of abandoned)
 **Related:** LLP 0021 (#shutdown-and-flush and the exporter strategy this
 leaves unchanged), hyparam/hypaware#1122, hyparam/hypaware#1125,
 hyparam/hypaware#1130
@@ -33,12 +38,12 @@ point where control leaves our code:
 - `exportGuarded` (`src/core/observability/runtime.js`) wraps every
   exporter's `exportBatch` on all three channels, per exporter, so a broken
   one cannot take down the caller or the healthy exporters queued behind it.
-- `guardTelemetryResult` covers the other half of the same seam: an
-  asynchronous exporter does not throw, it rejects, and on Node's default
+- `guardTelemetryResult` is the second seam, over the other half of the same
+  call: an asynchronous exporter does not throw, it rejects, and on Node's default
   policy an unhandled rejection ends the process one tick after the mirror
   wrote its line. A returned thenable therefore gets the same treatment as a
   synchronous throw.
-- `getLogger`'s emit guard (`src/core/observability/logger.js`) is the second
+- `getLogger`'s emit guard (`src/core/observability/logger.js`) is the third
   seam, for a globally installed logger provider that is not ours: our
   provider guards its exporters, but the global slot accepts anything.
 
@@ -58,7 +63,12 @@ listener to its `fs.WriteStream`, so a write that fails after
 `stream.write` returned emits `'error'` with nobody listening and ends the
 process, outside every seam above. And one call our own code makes:
 `Instrument._record` hands its value to the global meter provider with no
-seam around it, knowingly and under the boundary in #meter-seam. So the
+seam around it, knowingly and under the boundary in #meter-seam.
+(**Extended-by
+[LLP 0337 #writer-owns-its-stream](./0337-a-telemetry-close-reports-what-it-lost.decision.md#writer-owns-its-stream)**:
+`JsonlWriter` now listens for that `'error'` event, so the one in-tree
+component that could end the process this way no longer does. The boundary
+itself stands for an exporter we did not write.) So the
 three seams cover every call an emit path makes into an exporter, plus the
 logger's provider seam; they do not cover the meter's provider seam, and
 they cannot cover a component that breaks on its own resources.
@@ -142,6 +152,13 @@ Two boundaries the report does not reach, neither of them introduced by it:
   JSONL writer to reject on its stream error is a change to that exporter,
   not to this seam, and it is where the buffered-record loss in
   hyparam/hypaware#1130 item 2 actually has to be fixed.
+
+**Extended-by
+[LLP 0337](./0337-a-telemetry-close-reports-what-it-lost.decision.md)**: both
+boundaries are closed. #close-rejects makes that change to the JSONL exporter,
+so the report above fires for it; #budget-report resolves the shutdown race
+with a sentinel and names a close that outran the budget, leaving only a hang
+that keeps nothing alive, where no report can run at all.
 
 ## Not a fifth mirror, and not blanket mirroring {#not-a-fifth-mirror}
 

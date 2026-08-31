@@ -584,22 +584,27 @@ export function guardTelemetryResult(result, seam) {
  * @param {'export'|'flush'|'shutdown'} [args.operation] which telemetry
  *   operation threw; an export drops the record in hand, a flush or shutdown
  *   risks whatever the exporter still buffers
+ * @param {'threw'|'timed_out'} [args.outcome] how it failed. A close that
+ *   never settles loses the same records as one that rejects, so it gets the
+ *   same line; saying it "threw" would send a reader looking for a stack that
+ *   does not exist (LLP 0337#budget-report)
  */
-export function reportTelemetryFailure({ channel, source, key = source, error, reported, operation = 'export' }) {
+export function reportTelemetryFailure({ channel, source, key = source, error, reported, operation = 'export', outcome = 'threw' }) {
   if (reported.has(key)) return
   reported.add(key)
   const message = describeThrown(error)
   const attributes = {
     hyp_component: 'observability',
     hyp_operation: `observability.${operation}_${channel}`,
-    error_kind: `telemetry_${operation}_threw`,
+    error_kind: `telemetry_${operation}_${outcome}`,
     telemetry_channel: channel,
     telemetry_source: source,
     error_message: message.slice(0, 200),
   }
   const consequence = operation === 'export' ? 'the record is dropped' : 'buffered records may be lost'
+  const verb = outcome === 'timed_out' ? 'timed out' : 'threw'
   try {
-    process.stderr.write(`[hypaware:observability] WARN a telemetry ${operation} threw; ${consequence} ${JSON.stringify(attributes)}\n`)
+    process.stderr.write(`[hypaware:observability] WARN a telemetry ${operation} ${verb}; ${consequence} ${JSON.stringify(attributes)}\n`)
   } catch { /* stderr itself is gone; there is nowhere left to say so */ }
 }
 
@@ -660,11 +665,12 @@ async function shutdownExporters(channel, exporters, reported) {
  * close is still diagnosable after its export line was never needed, and the
  * other way round.
  *
- * Neither in-tree exporter can reach this today: `JsonlWriter.close` resolves
- * from `stream.end`'s callback without reading the error it is handed, and
- * the OTLP flush is an `allSettled` over posts that already caught their own
- * failure. What this covers is the case the guard was minted for, an exporter
- * we did not write (LLP 0335#close-failures).
+ * The JSONL exporters reach this since LLP 0337#close-rejects: their writer
+ * holds the failure its stream reported and rejects the close with it, which
+ * is the buffered-record loss in hyparam/hypaware#1130 item 2 arriving here as
+ * one line. The OTLP flush still cannot: it is an `allSettled` over posts that
+ * already caught their own failure. What this was minted for either way is the
+ * case in LLP 0335#close-failures, an exporter we did not write.
  *
  * The names are read before the await that produced `results`, not from the
  * exporter array afterwards: `provider.exporters` is a public mutable field,

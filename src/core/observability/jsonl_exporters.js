@@ -26,12 +26,32 @@ class JsonlWriter {
     this.filePath = path.join(dir, filename)
     /** @type {fs.WriteStream|null} */
     this.stream = null
+    // The first failure the stream reported on its own, held so the flush or
+    // close that follows can say what went wrong instead of resolving as if
+    // the records had landed.
+    /** @type {unknown} */
+    this.streamError = null
   }
 
+  // @ref LLP 0337#writer-owns-its-stream [implements]: the writer listens for the failure its own resource reports, so it is neither fatal nor silent.
   ensureOpen() {
     if (this.stream) return
     fs.mkdirSync(this.dir, { recursive: true })
-    this.stream = fs.createWriteStream(this.filePath, { flags: 'a' })
+    // A failure belongs to the stream that reported it. Reopening after a
+    // close means a new descriptor, and the old one's error must not be
+    // reported against it.
+    this.streamError = null
+    const stream = fs.createWriteStream(this.filePath, { flags: 'a' })
+    // A write that fails after `stream.write` returned reports itself here, a
+    // tick after the try/catch in `exportBatch` has gone. With no listener
+    // that is an uncaught 'error' event, which ends the process: the outcome
+    // LLP 0335#never-throws exists to prevent, arriving by the one route its
+    // seams cannot cover. Listened, it becomes the failure `flush` and
+    // `close` report, and the daemon keeps running without its telemetry.
+    stream.on('error', (error) => {
+      if (this.streamError === null) this.streamError = error
+    })
+    this.stream = stream
   }
 
   /**
@@ -48,34 +68,62 @@ class JsonlWriter {
 
   /** @returns {Promise<void>} */
   flush() {
+    if (this.streamError !== null) return Promise.reject(this.streamError)
     if (!this.stream) return Promise.resolve()
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const stream = /** @type {fs.WriteStream} */ (this.stream)
-      if (typeof stream.write === 'function') {
-        // drain
-        if (stream.writableNeedDrain) {
-          stream.once('drain', () => resolve())
-        } else {
-          resolve()
-        }
-      } else {
-        resolve()
-      }
-    })
-  }
-
-  /** @returns {Promise<void>} */
-  close() {
-    return new Promise((resolve) => {
-      if (!this.stream) {
+      // drain
+      if (typeof stream.write !== 'function' || !stream.writableNeedDrain) {
         resolve()
         return
       }
-      const stream = /** @type {fs.WriteStream} */ (this.stream)
-      stream.end(() => {
-        this.stream = null
+      // A stream that fails while draining never drains, so waiting only on
+      // 'drain' here would hang the flush rather than report it.
+      const onDrain = () => {
+        stream.off('error', onError)
         resolve()
+      }
+      /** @param {unknown} error */
+      const onError = (error) => {
+        stream.off('drain', onDrain)
+        reject(error)
+      }
+      stream.once('drain', onDrain)
+      stream.once('error', onError)
+    })
+  }
+
+  /**
+   * Close the stream, rejecting with whatever it failed on.
+   *
+   * Resolved from `stream.end`'s callback without reading the failure it is
+   * handed, this reported a clean close for a disk that had taken none of the
+   * buffered records, and the settled-failure report in LLP 0335#close-failures
+   * could never fire for either exporter this repo ships.
+   *
+   * Settled on 'close' rather than on `end`'s callback because the two carry
+   * different halves of the failure: the callback is handed the write error,
+   * the event arrives with the close error, and only the 'error' listener in
+   * `ensureOpen` sees both. 'close' is emitted after either outcome, so one
+   * wait covers both.
+   *
+   * @ref LLP 0337#close-rejects [implements]: a close that lost its records rejects, and the shutdown seam turns that into one line.
+   * @returns {Promise<void>}
+   */
+  close() {
+    const stream = this.stream
+    this.stream = null
+    // An already-failed or already-destroyed stream emitted its 'close' before
+    // this call, so waiting for another one would wait forever.
+    if (!stream || this.streamError !== null || stream.destroyed) {
+      return this.streamError !== null ? Promise.reject(this.streamError) : Promise.resolve()
+    }
+    return new Promise((resolve, reject) => {
+      stream.once('close', () => {
+        if (this.streamError !== null) reject(this.streamError)
+        else resolve()
       })
+      stream.end()
     })
   }
 }

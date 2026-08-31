@@ -6,6 +6,7 @@ import { installTracerProvider } from './tracer.js'
 import { installLoggerProvider } from './logger.js'
 import { installMeterProvider, resetKernelInstruments } from './meter.js'
 import { installRuntimeMetrics } from './runtime_metrics.js'
+import { reportTelemetryFailure } from './runtime.js'
 
 /**
  * @import { LoggerProvider, MeterProvider, TracerProvider } from './runtime.js'
@@ -14,6 +15,13 @@ import { installRuntimeMetrics } from './runtime_metrics.js'
 
 /** @type {ReturnType<typeof buildHandle> | null} */
 let installed = null
+
+/**
+ * What {@link withTimeout} resolves with when the budget ran out rather than
+ * the operation finishing. A sentinel rather than a boolean flag because the
+ * operation is free to resolve with anything, including `undefined`.
+ */
+const TIMED_OUT = Symbol('hyp.telemetry.timed-out')
 
 /**
  * Install tracer, logger, and meter providers using a single shared
@@ -51,24 +59,33 @@ function buildHandle({ env, resource, tracer, logger, meter, runtimeMetrics }) {
   async function shutdown() {
     runtimeMetrics?.stop()
     const timeoutMs = env.devTelemetry ? 5_000 : 500
+    // Per handle, like the exporter guard's own set: a process that installs
+    // a second provider after tearing the first one down starts clean.
+    /** @type {Set<string>} */
+    const reportedCloseTimeouts = new Set()
+    // Still on the silent `safe()`, knowingly: both return paths in
+    // `installMeterProvider` return `readers: []`, so this loop is
+    // unreachable and a report added here could not be run, let alone tested
+    // (hyparam/hypaware#1137 item 2). The day a real `MetricReader` lands, it
+    // gets `closeStep` like every provider below (LLP 0337#budget-report).
     for (const reader of meter.readers ?? []) {
       if (env.devTelemetry) await safe(() => withTimeout(reader.forceFlush(), timeoutMs))
       await safe(() => withTimeout(reader.shutdown(), timeoutMs))
     }
     const meterProvider = meter.provider
     if (meterProvider) {
-      if (env.devTelemetry) await safe(() => withTimeout(meterProvider.forceFlush(), timeoutMs))
-      await safe(() => withTimeout(meterProvider.shutdown(), timeoutMs))
+      if (env.devTelemetry) await closeStep('metrics', 'flush', () => meterProvider.forceFlush(), timeoutMs, reportedCloseTimeouts)
+      await closeStep('metrics', 'shutdown', () => meterProvider.shutdown(), timeoutMs, reportedCloseTimeouts)
     }
     const loggerProvider = logger.provider
     if (loggerProvider) {
-      if (env.devTelemetry) await safe(() => withTimeout(loggerProvider.forceFlush(), timeoutMs))
-      await safe(() => withTimeout(loggerProvider.shutdown(), timeoutMs))
+      if (env.devTelemetry) await closeStep('logs', 'flush', () => loggerProvider.forceFlush(), timeoutMs, reportedCloseTimeouts)
+      await closeStep('logs', 'shutdown', () => loggerProvider.shutdown(), timeoutMs, reportedCloseTimeouts)
     }
     const tracerProvider = tracer.provider
     if (tracerProvider) {
-      if (env.devTelemetry) await safe(() => withTimeout(tracerProvider.forceFlush(), timeoutMs))
-      await safe(() => withTimeout(tracerProvider.shutdown(), timeoutMs))
+      if (env.devTelemetry) await closeStep('traces', 'flush', () => tracerProvider.forceFlush(), timeoutMs, reportedCloseTimeouts)
+      await closeStep('traces', 'shutdown', () => tracerProvider.shutdown(), timeoutMs, reportedCloseTimeouts)
     }
     resetKernelInstruments()
     installed = null
@@ -77,9 +94,48 @@ function buildHandle({ env, resource, tracer, logger, meter, runtimeMetrics }) {
 }
 
 /**
+ * Run one provider's flush or close under the shutdown budget, and say once
+ * on stderr when the budget ran out.
+ *
+ * A provider whose close never settles loses the race in {@link withTimeout},
+ * the process exits, and whatever that provider still buffered is gone. That
+ * outcome used to be indistinguishable from a clean shutdown, which is the
+ * same silence LLP 0335#close-failures ended for a close that rejects; the
+ * hang was left as a named boundary there. It is not a false alarm on a
+ * merely slow close: when the budget expires the shutdown moves on regardless,
+ * so the records at stake are lost either way and the line says so.
+ *
+ * Like every other report on this path, it must not throw: a shutdown that
+ * rejects here would skip the teardown after it.
+ *
+ * @ref LLP 0337#budget-report [implements]: a close that outruns the shutdown budget is reported, not silently abandoned.
+ * @param {'traces'|'logs'|'metrics'} channel
+ * @param {'flush'|'shutdown'} operation
+ * @param {() => Promise<unknown>|unknown} run
+ * @param {number} timeoutMs
+ * @param {Set<string>} reported
+ */
+async function closeStep(channel, operation, run, timeoutMs, reported) {
+  try {
+    const outcome = await withTimeout(run(), timeoutMs)
+    if (outcome !== TIMED_OUT) return
+    const source = `${channel}_provider`
+    reportTelemetryFailure({
+      channel,
+      source,
+      key: `${source}#${operation}`,
+      error: `no result within the ${timeoutMs}ms shutdown budget`,
+      reported,
+      operation,
+      outcome: 'timed_out',
+    })
+  } catch { /* shutdown should not throw */ }
+}
+
+/**
  * @param {Promise<unknown>|unknown} operation
  * @param {number} timeoutMs
- * @returns {Promise<unknown>}
+ * @returns {Promise<unknown>} the operation's result, or {@link TIMED_OUT}
  */
 function withTimeout(operation, timeoutMs) {
   /** @type {NodeJS.Timeout | undefined} */
@@ -87,7 +143,7 @@ function withTimeout(operation, timeoutMs) {
   return Promise.race([
     Promise.resolve(operation),
     new Promise((resolve) => {
-      timer = setTimeout(resolve, timeoutMs)
+      timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs)
       if (typeof timer.unref === 'function') timer.unref()
     }),
   ]).finally(() => {
