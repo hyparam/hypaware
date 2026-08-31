@@ -885,7 +885,6 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
 
   // A matching sink already existed: this was a re-seed (already enrolled).
   for (const s of seeded) {
-    ctx.stdout.write(`seeded forwarding identity for sink '${s.sink}' (gateway ${session.gateway.gatewayId})\n`)
     // Never silent about a displaced identity (LLP 0061 D4). A re-login over a
     // prior login seed for the same server is idempotent (the server dedups to
     // the same gateway), so only a different provenance is worth a note.
