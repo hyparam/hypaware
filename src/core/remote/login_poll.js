@@ -18,6 +18,13 @@ import { NO_FETCH_MESSAGE, trimSlash } from './identity_client.js'
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000
 const DEFAULT_INTERVAL_MS = 2000
+// One poll is bounded on its own, the way `identity_client.js` bounds its token
+// POST: an endpoint that accepts the connection and never answers would
+// otherwise eat the whole 5-minute budget inside a single request, since the
+// deadline is only consulted between polls. Aborting just retries on the next
+// tick, which is exactly what a transient hang deserves.
+const POLL_REQUEST_TIMEOUT_MS = 10 * 1000
+const CLOSED_MESSAGE = 'login poller closed before a code arrived'
 
 /**
  * @param {number} ms
@@ -41,15 +48,19 @@ function defaultSleep(ms) {
  * `unknown_path` (or anything that is not `unknown_state`), which no
  * poll-capable server returns on this path.
  *
- * Transient trouble (a network error, a 5xx, a 429) never fails the login:
- * the poller keeps polling to the deadline, honoring `retry-after` on a 429
- * so it cannot poll itself into the limiter's escalating lockout.
+ * Transient trouble (a network error, a hung request, a 5xx, a 429) never
+ * fails the login: the poller keeps polling to the deadline, honoring
+ * `retry-after` on a 429 so it cannot poll itself into the limiter's
+ * escalating lockout. Each poll is aborted after `POLL_REQUEST_TIMEOUT_MS`
+ * so one silent socket cannot swallow the whole budget, and `close()` cuts a
+ * wait that is already in flight.
  *
  * @param {{
  *   identityBase: string,
  *   state: string,
  *   timeoutMs?: number,
  *   intervalMs?: number,
+ *   requestTimeoutMs?: number,
  *   fetchImpl?: typeof fetch,
  *   sleep?: (ms: number) => Promise<void>,
  * }} args
@@ -61,12 +72,19 @@ export function startLoginPoller({
   state,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   intervalMs = DEFAULT_INTERVAL_MS,
+  requestTimeoutMs = POLL_REQUEST_TIMEOUT_MS,
   fetchImpl,
   sleep = defaultSleep,
 }) {
   const log = getLogger('remote')
   const doFetch = fetchImpl ?? /** @type {typeof fetch | undefined} */ (globalThis.fetch)
   let closed = false
+  /** The controller of the poll currently in flight, so `close()` can cut it. */
+  let inFlight = /** @type {AbortController | undefined} */ (undefined)
+  let wake = /** @type {() => void} */ (() => {})
+  // Resolved by `close()`. Raced against the inter-poll sleep so a close lands
+  // at once rather than up to `intervalMs` later.
+  const closedSignal = new Promise((resolve) => { wake = () => resolve(undefined) })
 
   const pollUrl = new URL(`${trimSlash(identityBase)}/login/poll`)
   pollUrl.searchParams.set('state', state)
@@ -96,21 +114,34 @@ export function startLoginPoller({
       })
       const deadline = Date.now() + timeoutMs
       for (;;) {
-        if (closed) throw new Error('login poller closed before a code arrived')
+        if (closed) throw new Error(CLOSED_MESSAGE)
 
         /** @type {Response | undefined} */
         let response
         /** @type {any} */
         let body
+        const controller = new AbortController()
+        inFlight = controller
+        // Never overshoot the overall budget either: the last poll before the
+        // deadline gets only what is left of it.
+        const perPollMs = Math.max(1, Math.min(requestTimeoutMs, deadline - Date.now()))
+        const timer = setTimeout(() => controller.abort(), perPollMs)
         try {
-          response = await doFetch(pollUrl.toString(), { headers: { accept: 'application/json' } })
+          response = await doFetch(pollUrl.toString(), {
+            headers: { accept: 'application/json' },
+            signal: controller.signal,
+          })
           body = JSON.parse(await response.text())
         } catch {
-          // A network error or an unparseable body is transient: keep polling
-          // to the deadline rather than failing a login the human may be
-          // mid-completing in the browser.
+          // A network error, a hung request we aborted, or an unparseable body
+          // is transient: keep polling to the deadline rather than failing a
+          // login the human may be mid-completing in the browser.
           body = undefined
+        } finally {
+          clearTimeout(timer)
+          inFlight = undefined
         }
+        if (closed) throw new Error(CLOSED_MESSAGE)
 
         // Honor the limiter's hint before anything else: polling through a
         // 429 would walk the source into the escalating lockout.
@@ -132,11 +163,14 @@ export function startLoginPoller({
             const safeError = sanitizeErrorCode(typeof body.error === 'string' ? body.error : '')
             throw fail(`login failed: ${safeError}`, safeError, safeError)
           }
-          if (response.status === 404 && body?.error !== 'unknown_state') {
+          if (response.status === 404 && body && body.error !== 'unknown_state') {
             // A poll-capable server answers this path with unknown_state or a
             // flight status, never the generic unknown_path 404: this server
             // predates poll login (LLP 0342#d2). Fail loudly, not by timeout.
-            throw fail("this server does not support poll login yet - upgrade hypaware-server (or pass a static token with --token-file <path>)", 'no_poll_endpoint')
+            // Only a *parsed* body says that: an unparseable 404 is some proxy
+            // or ingress between us and the server (an HTML error page during a
+            // rolling deploy), which is transient and must not end the login.
+            throw fail('this server does not support poll login yet - upgrade hypaware-server', 'no_poll_endpoint')
           }
           if (response.status === 429) {
             const retryAfter = Number(response.headers?.get?.('retry-after'))
@@ -152,12 +186,17 @@ export function startLoginPoller({
         }
         // Floor at 1ms so a non-positive intervalMs (test seam) cannot
         // busy-spin; cap at the remaining budget so we never oversleep it.
-        await sleep(Math.max(1, Math.min(delayMs, remaining)))
+        await Promise.race([sleep(Math.max(1, Math.min(delayMs, remaining))), closedSignal])
       }
     },
 
     close() {
       closed = true
+      // Cut the in-flight poll and the sleep, so a caller that closes mid-wait
+      // gets its rejection now instead of one poll interval later (or never,
+      // behind a hung request).
+      inFlight?.abort()
+      wake()
     },
   }
 }

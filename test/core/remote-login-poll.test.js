@@ -133,3 +133,52 @@ test('close() before a code arrives rejects the wait', async () => {
   poller.close()
   await assert.rejects(poller.waitForCode(), /closed before a code arrived/)
 })
+
+test('close() rejects a wait that is already in flight', { timeout: 5000 }, async () => {
+  // A sleep that never resolves stands in for the parked interval: if `close()`
+  // could only be noticed at the top of the next iteration, this wait would
+  // hang forever rather than reject.
+  const { fetchImpl } = scriptedFetch([{ status: 200, body: { status: 'pending' } }])
+  const poller = startLoginPoller({
+    identityBase: 'https://h/v1/identity', state: 's', fetchImpl,
+    sleep: () => new Promise(() => {}),
+  })
+  const wait = poller.waitForCode()
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  poller.close()
+  await assert.rejects(wait, /closed before a code arrived/)
+})
+
+test('a hung request is aborted and retried instead of eating the whole budget', { timeout: 5000 }, async () => {
+  let calls = 0
+  const fetchImpl = /** @type {any} */ ((/** @type {string} */ _url, /** @type {any} */ init) => {
+    calls += 1
+    if (calls === 1) {
+      // Never answers, and only reacts to a signal the poller supplies: an
+      // unbounded request would sit here for the whole login budget.
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+    }
+    return Promise.resolve({ status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ status: 'complete', code: 'cd_hung' }) })
+  })
+  const { sleep } = recordingSleep()
+  const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, sleep, timeoutMs: 5000, requestTimeoutMs: 20 })
+  assert.deepEqual(await poller.waitForCode(), { code: 'cd_hung' })
+  assert.equal(calls, 2)
+})
+
+test('an unparseable 404 (a proxy error page) is transient, not a stale server', async () => {
+  // An ingress between the client and the identity server can answer 404 with
+  // HTML for a few seconds during a deploy; ending the login there would be
+  // wrong, and the upgrade message would be a lie.
+  let calls = 0
+  const fetchImpl = /** @type {any} */ (async () => {
+    calls += 1
+    if (calls === 1) return { status: 404, headers: { get: () => null }, text: async () => '<html>404 Not Found</html>' }
+    return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ status: 'complete', code: 'cd_proxy' }) }
+  })
+  const { sleep } = recordingSleep()
+  const poller = startLoginPoller({ identityBase: 'https://h/v1/identity', state: 's', fetchImpl, sleep })
+  assert.deepEqual(await poller.waitForCode(), { code: 'cd_proxy' })
+})
