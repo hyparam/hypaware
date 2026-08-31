@@ -6,7 +6,10 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0002, LLP 0012, LLP 0014
-**Extended-by:** LLP 0318 (opt-in, bounded process/runtime diagnostic metrics)
+**Extended-by:** LLP 0318 (opt-in, bounded process/runtime diagnostic metrics),
+LLP 0339 (the non-dev shutdown budget in #shutdown-and-flush is no longer the
+literal 500ms recorded here: it is derived from the OTLP export timeout so it
+sits above it by construction; the dev budget and flush order stand)
 
 > How HypAware instruments itself. Lifts the "Self-Instrumentation Contract" from
 > the tombstoned implementation plan ([LLP 0018](./tombstones/0018-implementation-plan.plan.md))
@@ -95,6 +98,11 @@ in `buildAttrs` is a backstop, not the policy: emitters are responsible for not
 putting secrets in attributes in the first place.
 
 ## Shutdown and flush
+
+*Extended-by [LLP 0339](./0339-the-shutdown-budget-outlasts-the-export-timeout.decision.md):
+the non-dev 500ms below is no longer a literal. It is derived from
+`OTLP_EXPORT_TIMEOUT_MS` so it sits above the export timeout it races. The dev
+budget and the flush order below are unchanged.*
 
 `shutdown()` closes exporters in reverse install order. Dev telemetry gets a
 longer budget (5s vs 500ms) and an explicit `forceFlush` before close, so a

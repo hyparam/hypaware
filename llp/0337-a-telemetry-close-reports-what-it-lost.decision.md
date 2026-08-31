@@ -12,6 +12,9 @@ hangs and a close that swallows its own error, and #never-throws named a third
 thing outside all its seams, a component that fails on a resource it owns.
 This decision closes all three for the exporters this repo ships, which is
 what makes 0335's report reachable in-tree at all)
+**Extended-by:** [LLP 0339](./0339-the-shutdown-budget-outlasts-the-export-timeout.decision.md)
+(settles the boundary #budget-report named: the non-dev shutdown budget now
+sits above the OTLP export timeout by construction)
 **Related:** LLP 0021 (#shutdown-and-flush: the budget this spends and the
 exporter strategy it leaves otherwise unchanged), LLP 0329 (#stderr-mirror:
 the guarantee the whole series exists to keep), hyparam/hypaware#1130,
