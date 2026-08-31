@@ -69,12 +69,13 @@ export function isCaptureSpoolDir(dir, hypHome) {
  * the attach marker named, and the component that refused is the only fact
  * worth saying about it.
  *
+ * @ref LLP 0329#stderr-mirror [implements]: this refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
  * @param {string} root the spool the sweep was asked to empty
  * @param {string} planted the component on the way down that is a symlink
  */
 function reportPlantedSpoolPath(root, planted) {
   try {
-    getLogger('capture-spool').warn('a symlink stands on the spool sweep path; emptying nothing beneath it', {
+    getLogger('capture-spool', { mirrorStderr: true }).warn('a symlink stands on the spool sweep path; emptying nothing beneath it', {
       [Attr.COMPONENT]: 'capture-spool',
       [Attr.OPERATION]: 'capture_spool.sweep',
       [Attr.ERROR_KIND]: 'capture_spool_path_is_symlink',

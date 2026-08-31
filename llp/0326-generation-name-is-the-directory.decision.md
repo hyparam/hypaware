@@ -7,6 +7,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-30
 **Extends:** [LLP 0323](./0323-cursor-names-a-generation-in-its-own-partition.decision.md) (#contained: containment is now checked against the filesystem as well as the string)
+**Extended-by:** [LLP 0329](./0329-a-containment-refusal-reaches-stderr.decision.md) (#stderr-mirror: the refusals `#consequences` calls loud reached no channel on a default install; they now mirror to stderr at the emitting site)
 **Related:** LLP 0304, LLP 0310, LLP 0316, LLP 0323
 **Extended-by:** [LLP 0328](./0328-a-spool-path-is-checked-where-it-is-walked.decision.md)
 (#one-level-down: the same check, on the capture-spool sweep, so the principle

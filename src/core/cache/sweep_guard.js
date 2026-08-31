@@ -22,12 +22,19 @@ import { Attr, getLogger } from '../observability/index.js'
  *
  * The logger is a parameter with the global as its default, so a pass that
  * already takes an injectable log reports its refusal through the same one it
- * reports everything else through. That is also the only way a test can see a
- * refusal at all: on a default install the global provider is null and the
- * record is dropped (#1108), which is why no existing containment guard has a
- * regression control on the fact that it SPOKE rather than on the fact that it
- * deleted nothing.
+ * reports everything else through, and a test can see that the refusal SPOKE
+ * rather than only that it deleted nothing.
  *
+ * The default carries `mirrorStderr`, and every production caller takes it.
+ * A pass with an injectable log leaves an absent one absent rather than
+ * resolving it at the call site, because resolving it there would hand this
+ * function a logger on every real run and leave the default dead on the one
+ * path an operator actually has: with no dev telemetry and no OTLP endpoint
+ * the global provider is null and the structured record is dropped, so the
+ * mirror is the only channel this sentence reaches. Dropping it from any one
+ * guard would make that guard the silent one.
+ *
+ * @ref LLP 0329#stderr-mirror [implements]: the refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
  * @ref LLP 0331#guard-travels-with-the-delete [implements]: the report travels
  *   with the check, so a pass that moves its guard inward keeps its voice
  * @param {string} tableDir
@@ -37,7 +44,7 @@ import { Attr, getLogger } from '../observability/index.js'
  */
 export function reportPlantedSweepPath(tableDir, operation, plantedComponent, log) {
   try {
-    const sink = log ?? getLogger('cache')
+    const sink = log ?? getLogger('cache', { mirrorStderr: true })
     sink.warn('a symlink stands on the sweep path; reclaiming nothing in this generation', {
       [Attr.OPERATION]: operation,
       [Attr.ERROR_KIND]: 'sweep_path_is_symlink',
