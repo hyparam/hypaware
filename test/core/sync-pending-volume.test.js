@@ -272,23 +272,112 @@ test('rewinding a watermark changes what the dry-run plan discloses', async () =
 
 test('a count that hits its scan budget is disclosed as a floor, never as a total', async () => {
   const hypHome = await makeHome('floor')
+  const handles = /** @type {any[]} */ ([
+    fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central'),
+  ])
+
+  // The clock is frozen rather than real, so the only thing that can stop this
+  // count is `DEFAULT_ROW_LIMIT`. Read off the real clock, this case asserted
+  // that 200,000 rows are scanned inside the 3000ms budget, which is a claim
+  // about the machine and not about the code: under CPU contention the budget
+  // lands first and the plan reads "at least 198,144", a false failure in the
+  // direction load can only push it (#1105). Freezing the clock keeps every
+  // deadline unreachable and leaves the row limit as the sole stop, which is
+  // the shortfall this case exists to pin. Nothing here passes `rowLimit`, so
+  // the 200,000 below is the shipped limit and not a fixture's. A frozen clock
+  // cannot also pin `DEFAULT_BUDGET_MS`: every budget above zero leaves the
+  // deadline unreachable, so the same freeze that removes the flake removes
+  // this case's hold on the budget. That default is pinned on its own injected
+  // clock, two cases below.
+  const now = () => 1_000
+
+  const volumes = await previewPendingRows({
+    handles,
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({
+      hypHome,
+      entries: function* () {
+        for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
+      },
+    })),
+    stateRoot: stateDir(hypHome),
+    now,
+  })
+
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'partial', 'a count stopped at its limit is a floor, not a total')
+  assert.equal(volume.rows, 200000, 'the floor is the row limit reached, never the 250,000 rows behind it')
+})
+
+test('a four-digit backlog is grouped for a reader, not printed as a bare integer', async () => {
+  // `formatCount` pins `en-US` grouping so the same backlog cannot render as
+  // `1.234` on one machine and `1,234` on another, and the only assertion that
+  // ever put a separator in front of it was the scan-limit case above, back
+  // when it read `at least 200,000 rows pending` off `runSync`. That case now
+  // counts through `previewPendingRows` and never reaches the renderer
+  // (#1105), so the grouping is pinned here instead, on the cheapest fixture
+  // that has four digits in it. This still counts against the real clock, as
+  // every `runSync` case in this file does, but a four-digit fixture is two
+  // orders of magnitude smaller than the 250,000-row one whose margin against
+  // the 3000ms budget load could close.
+  const hypHome = await makeHome('grouped')
   const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
   const { ctx, stdout } = makeCtx({
     hypHome,
     sinks,
     storage: fakeStorage({
       hypHome,
-      entries: function* () {
-        for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
-      },
+      entries: Array.from({ length: 1234 }, (_, i) => ({ seq: i + 1 })),
     }),
   })
 
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /at least 200,000 rows pending, the full local history/)
-  assert.doesNotMatch(stdout.text, /nothing pending/)
+  assert.match(stdout.text, /1,234 rows pending, the full local history/)
+  assert.doesNotMatch(stdout.text, /1234 rows pending/, 'a count a person has to read is grouped, not a bare integer')
+})
+
+test('the shipped wall-clock budget is the one that stops a long count, not a fixture\'s', async () => {
+  // `DEFAULT_BUDGET_MS` bounds how long somebody waits in front of the consent
+  // prompt, so a change that shrinks it to 100ms is a real regression and has
+  // to fail something. It used to fail the scan-limit case above, which reached
+  // 200,000 rows inside the default budget on a real clock - the wall-clock
+  // claim #1105 was filed about, and the one the freeze above deliberately
+  // gives up. Pinned here instead, with no clock left in it: one millisecond
+  // per row on an injected clock, and no `budgetMs` argument, so the row the
+  // count stops on is read off the shipped default rather than off the machine.
+  const hypHome = await makeHome('defaultbudget')
+  const handles = /** @type {any[]} */ ([
+    fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central'),
+  ])
+  let t = 0
+  const now = () => t
+  // Comfortably past the stop below, and comfortably short of the 200,000-row
+  // limit, so the budget is the only thing that can end this count.
+  const entries = function* () {
+    for (let seq = 1; seq <= 6000; seq += 1) {
+      t += 1
+      yield { seq }
+    }
+  }
+
+  const volumes = await previewPendingRows({
+    handles,
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries })),
+    stateRoot: stateDir(hypHome),
+    now,
+  })
+
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'partial', 'a count the budget stopped is a floor, not a total')
+  // Two-sided on purpose: a budget shrunk to 100ms stops at 512, and a budget
+  // widened past the fixture never stops at all and reports an exact 6000.
+  // 3072 is where 3000ms lands because the row loop checks the clock every 512
+  // rows, which is also this pin's resolution - it catches a budget moved out
+  // of (2560, 3072], not a one-millisecond nudge inside it.
+  assert.equal(volume.rows, 3072, 'the count stops on the shipped 3000ms budget, neither sooner nor later')
 })
 
 test('a count that cannot be taken says unknown, never zero', async () => {
@@ -506,7 +595,15 @@ test('rows still buffered in the spool make the count a floor rather than a sile
   const code = await runSync(['--dry-run'], ctx)
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /at least 10 rows pending/)
+  // The whole rendered line, resume clause included. A shortened count reaches
+  // the renderer as `status: 'partial'` whatever shortened it, so the cheap
+  // shortfall to stage proves the rendering for the expensive one: the
+  // scan-limit case above is counted through `previewPendingRows` on a frozen
+  // clock precisely so it stops asserting how fast the machine is (#1105), and
+  // this is where the string it used to check is pinned instead.
+  assert.match(stdout.text, /at least 10 rows pending, the full local history/)
+  assert.doesNotMatch(stdout.text, /^ +10 rows pending/m, 'a floor rendered as a total overstates what the scan saw')
+  assert.doesNotMatch(stdout.text, /nothing pending/)
 })
 
 test('a plan still renders when the count itself throws: unknown, never a missing or zero line', async () => {
@@ -732,8 +829,9 @@ test('an incomplete count marks the withheld line as a floor too, and an exact c
   // The renderer keys off `status === 'partial'`, not off which shortfall
   // produced it, so one shortfall proves the rendering for all of them. This
   // case uses the cheapest one to stage, an unflushed spool: `runSync` does not
-  // plumb `rowLimit`/`budgetMs`, so reaching `partial` by scan budget through it
-  // costs a 250,000-row fixture, which is the price the floor case above pays.
+  // plumb `rowLimit`/`budgetMs`/`now`, so reaching `partial` by scan limit through
+  // it would cost a 250,000-row fixture counted against a real clock, which is the
+  // wall-clock dependence the scan-limit case above was rewritten to shed (#1105).
   const short = await makeHome('withheld-floor')
   const shortStorage = fakeStorage({ hypHome: short, entries: TWELVE_ROWS })
   // Buffered rows the preview will not flush to count: the same short pass
