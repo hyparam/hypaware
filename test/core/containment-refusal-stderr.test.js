@@ -706,3 +706,68 @@ test('a refusal reaches stderr even when the installed provider itself throws', 
   assert.match(stderr, /capture_spool_path_is_symlink/, 'the mirror survives a provider that throws')
   assert.match(stderr, /telemetry_export_threw/, 'and the broken provider is diagnosed once')
 })
+
+// The two guards inside the guards. Both were added by the review of #1122
+// and neither was pinned: removing either left the file green, which for a
+// change whose whole subject is "a guard that can itself throw" is the one
+// omission that matters.
+
+// A Proxy exporter is the reason `exporterName` exists. The premise of the
+// whole seam is an exporter we did not write, and one whose `get` trap throws
+// throws from `exporter.constructor.name` as readily as from `exportBatch`.
+// Read straight inside the `catch`, that throw is outside every guard: it
+// escapes `exportGuarded` and takes the mirror below it with it.
+test('an exporter that throws when asked its own name is still diagnosed, under a fallback name', async () => {
+  const hostile = /** @type {any} */ (new Proxy({}, {
+    /** @param {object} _target @param {string|symbol} key */
+    get(_target, key) {
+      if (key === 'exportBatch') return () => { throw new Error('this exporter is a hostile proxy') }
+      throw new Error(`every other read on this exporter throws: ${String(key)}`)
+    },
+  }))
+  const stderr = await captureProcessStderr(async () => {
+    await withLoggerProvider([hostile], () => {
+      getLogger('capture-spool', { mirrorStderr: true }).warn('a symlink stands on the spool sweep path', {
+        [Attr.ERROR_KIND]: 'capture_spool_path_is_symlink',
+      })
+    })
+  })
+  assert.match(stderr, /capture_spool_path_is_symlink/, 'the mirror is not hostage to an exporter that cannot be named')
+  assert.match(stderr, /this exporter is a hostile proxy/, 'and the exporter is diagnosed with what it threw')
+  assert.match(stderr, /"telemetry_source":"exporter"/, 'under a fallback name, rather than throwing while reading its own')
+})
+
+// And the report's own last line of defence. `guardTelemetryResult` is
+// exported, and its contract says the seam is read only on the failure path
+// "so a caller on a hot path can pass one that costs something to describe":
+// a seam that costs something to describe is a seam that can throw while
+// being described. That throw happens inside a rejection handler, so
+// unwrapped it is an unhandled rejection again, which is the exact outcome
+// the handler exists to prevent. Nothing in tree can hand it such a seam
+// today, so this reaches for the exported function directly, and it has to be
+// a subprocess: the failure is the process dying a tick later, and an
+// in-process assertion would already have passed by then.
+test('a seam that throws while being described does not turn the rejection back into an unhandled one', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-refusal-seam-'))
+  try {
+    const script = path.join(root, 'seam-probe.mjs')
+    const runtimeUrl = pathToFileURL(path.join(REPO_ROOT, 'src', 'core', 'observability', 'runtime.js')).href
+    await fs.writeFile(script, [
+      `import { guardTelemetryResult } from '${runtimeUrl}'`,
+      'const hostileSeam = {',
+      "  channel: 'logs',",
+      "  source: 'a seam that cannot be described',",
+      "  get key() { throw new Error('describing this seam throws') },",
+      '  reported: new Set(),',
+      '}',
+      "guardTelemetryResult(Promise.reject(new Error('the export rejected')), hostileSeam)",
+      "setTimeout(() => process.stdout.write('SURVIVED\\n'), 20)",
+      '',
+    ].join('\n'))
+    const out = spawnSync(process.execPath, [script], { encoding: 'utf8' })
+    assert.equal(out.status, 0, 'a seam that throws while being described must not end the process')
+    assert.match(out.stdout, /SURVIVED/, 'and the process is still running once the rejection has settled')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
