@@ -10,7 +10,7 @@
 LLP 0339 (the non-dev shutdown budget in #shutdown-and-flush is no longer the
 literal 500ms recorded here: it is derived from the OTLP export timeout so it
 sits above it by construction; the dev budget stands),
-LLP 0342 (the reverse-order close in #shutdown-and-flush is no longer ordered:
+LLP 0343 (the reverse-order close in #shutdown-and-flush is no longer ordered:
 the three channels close concurrently, so a hung close costs one budget rather
 than three; the dev flush and the flush-before-close order within a channel
 stand)
@@ -108,7 +108,7 @@ the non-dev 500ms below is no longer a literal. It is derived from
 `OTLP_EXPORT_TIMEOUT_MS` so it sits above the export timeout it races. The dev
 budget below is unchanged.*
 
-*Extended-by [LLP 0342](./0342-the-telemetry-channels-close-at-once.decision.md):
+*Extended-by [LLP 0343](./0343-the-telemetry-channels-close-at-once.decision.md):
 "reverse install order" below is no longer an order. The three channels close
 concurrently, because none of them can emit through another, so a close hung on
 every one of them costs one budget rather than three. The dev flush, and the

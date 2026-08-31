@@ -281,7 +281,7 @@ function runNode(entry) {
 // registration, and the timed-out report writes straight to stderr rather than
 // back through any of them.
 //
-// @ref LLP 0342#one-budget [tests]: a hang on all three channels costs one budget, not one per channel.
+// @ref LLP 0343#one-budget [tests]: a hang on all three channels costs one budget, not one per channel.
 test('a hang on every channel costs one budget, not one per channel', async () => {
   const { server, url } = await listen((req, res) => {
     req.on('data', () => {})
@@ -334,7 +334,7 @@ test('a hang on every channel costs one budget, not one per channel', async () =
 // wall clock here on purpose - the ceiling is a fact about the constants, and
 // the trip wire is for whoever tunes `OTLP_EXPORT_TIMEOUT_MS` next.
 //
-// @ref LLP 0342#stop-window [tests]: the telemetry shutdown ceiling stays a fraction of the daemon stop window.
+// @ref LLP 0343#stop-window [tests]: the telemetry shutdown ceiling stays a fraction of the daemon stop window.
 test('the telemetry shutdown ceiling leaves the daemon stop window room for the rest of the stop', () => {
   assert.ok(SHUTDOWN_BUDGET_MS * 2 <= DAEMON_STOP_TIMEOUT_MS,
     `telemetry may spend at most half the stop window (ceiling=${SHUTDOWN_BUDGET_MS}ms, window=${DAEMON_STOP_TIMEOUT_MS}ms)`)

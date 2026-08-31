@@ -1,4 +1,4 @@
-# LLP 0342: The telemetry channels close at once
+# LLP 0343: The telemetry channels close at once
 
 **Type:** Decision
 **Status:** Accepted

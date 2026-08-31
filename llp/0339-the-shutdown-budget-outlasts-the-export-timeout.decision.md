@@ -12,7 +12,7 @@ shutdown budget of 500ms against an OTLP export timeout of 1000ms, reported
 but not decided), [LLP 0021](./0021-observability.spec.md) (#shutdown-and-flush
 recorded the 500ms number this replaces; the dev budget and the flush order
 are unchanged)
-**Extended-by:** [LLP 0342](./0342-the-telemetry-channels-close-at-once.decision.md)
+**Extended-by:** [LLP 0343](./0343-the-telemetry-channels-close-at-once.decision.md)
 (the "about 3.75s if every provider's close hangs" #budget-derived accepts is
 now one budget: the channels close concurrently, so the ceiling is
 `SHUTDOWN_BUDGET_MS`, not three of them. The budget itself and its derivation

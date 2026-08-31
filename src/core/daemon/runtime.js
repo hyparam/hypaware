@@ -1445,7 +1445,7 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
  * concurrent now, so the telemetry ceiling is one budget, and a test pins the
  * relationship so it stays a checked fact rather than a coincidence.
  *
- * @ref LLP 0342#stop-window [implements]: the stop window is a named constant the telemetry ceiling is checked against
+ * @ref LLP 0343#stop-window [implements]: the stop window is a named constant the telemetry ceiling is checked against
  */
 export const DAEMON_STOP_TIMEOUT_MS = 5_000
 

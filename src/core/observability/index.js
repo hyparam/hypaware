@@ -46,7 +46,7 @@ const SHUTDOWN_BUDGET_MARGIN_MS = 250
  * numbers are pinned against each other in a test: raising
  * `OTLP_EXPORT_TIMEOUT_MS` cannot eat that window unnoticed.
  *
- * @ref LLP 0342#one-budget [implements]: closing the channels concurrently makes the per-channel budget the whole-shutdown ceiling
+ * @ref LLP 0343#one-budget [implements]: closing the channels concurrently makes the per-channel budget the whole-shutdown ceiling
  */
 export const SHUTDOWN_BUDGET_MS = OTLP_EXPORT_TIMEOUT_MS + SHUTDOWN_BUDGET_MARGIN_MS
 
@@ -82,7 +82,7 @@ export function installObservability(opts = {}) {
  * }} parts
  */
 function buildHandle({ env, resource, tracer, logger, meter, runtimeMetrics }) {
-  // @ref LLP 0021#shutdown-and-flush [implements]: dev gets a 5s budget and a forceFlush before the close (the order that section recorded is now LLP 0342's)
+  // @ref LLP 0021#shutdown-and-flush [implements]: dev gets a 5s budget and a forceFlush before the close (the order that section recorded is now LLP 0343's)
   async function shutdown() {
     runtimeMetrics?.stop()
     // @ref LLP 0339#budget-derived [implements]: the non-dev budget sits above the OTLP export timeout by construction, so an in-flight export settles before the budget can abandon it
@@ -106,7 +106,7 @@ function buildHandle({ env, resource, tracer, logger, meter, runtimeMetrics }) {
     // has to be gone inside `DAEMON_STOP_TIMEOUT_MS`. Concurrently the same
     // three hangs cost one budget, and a slow-but-answering channel no longer
     // has to wait out the channel closed before it.
-    // @ref LLP 0342#one-budget [implements]: the channels close concurrently, so a hang costs one budget rather than one per channel
+    // @ref LLP 0343#one-budget [implements]: the channels close concurrently, so a hang costs one budget rather than one per channel
     await Promise.all([
       closeChannel('metrics', meter.provider, env.devTelemetry, timeoutMs, reportedCloseTimeouts),
       closeChannel('logs', logger.provider, env.devTelemetry, timeoutMs, reportedCloseTimeouts),
