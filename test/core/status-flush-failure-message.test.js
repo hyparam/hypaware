@@ -359,7 +359,13 @@ test('hyp status names the table whose flush is failing and quotes the reason', 
     const diagnostic = report.diagnostics.find((d) => d.kind === 'cache_flush_failing')
     assert.ok(diagnostic, 'a standing flush failure reaches the diagnostics block')
     assert.equal(diagnostic.severity, 'warning')
-    assert.match(diagnostic.message, /failing for 2 tables/)
+    // Attempt tense, because that is all the stamp asserts: the last attempt
+    // failed and no attempt has completed since. "is failing" would claim an
+    // ongoing condition the stamp cannot witness once the cause is fixed and
+    // nothing has retried yet.
+    // @ref LLP 0333#attempt-tense [tests]: the message states the stamp's assertion, not a present-progressive claim
+    assert.match(diagnostic.message, /last spool-to-cache flush attempt failed for 2 tables/)
+    assert.doesNotMatch(diagnostic.message, /is failing/)
     assert.match(
       diagnostic.message,
       /datasets[\\/]ai_gateway_messages[\\/]source=claude/,

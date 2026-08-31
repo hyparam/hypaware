@@ -6,9 +6,10 @@ import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { useColor } from '../cli/stdio.js'
+import { sanitizeLabel } from '../util/json_util.js'
 
 /**
- * @import { CommandRunContext, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunContext, QueryPartition, VerbInputSchema } from '../../../hypaware-plugin-kernel-types.js'
  * @import { OverviewRows } from '../../../src/core/query/types.js'
  */
 
@@ -308,31 +309,74 @@ export async function runQueryRefresh(argv, ctx) {
     return 1
   }
   let total = 0
+  /** @type {{ label: string, message: string }[]} */
+  const failures = []
+  /**
+   * Both interpolations reach a TTY and neither is this build's own text:
+   * the reason is whatever the cache rejected with, so both ride the label
+   * policy (LLP 0225), the reason clamped where the `hyp status` line clamps
+   * its quote.
+   * @param {string} label
+   * @param {unknown} err
+   */
+  const recordFailure = (label, err) => {
+    failures.push({
+      label: sanitizeLabel(label) ?? 'unknown',
+      message: sanitizeLabel(err instanceof Error ? err.message : String(err), 200) ?? 'unknown error',
+    })
+  }
+  // A throw records the failure and the loop moves on. This command is the
+  // retry half of the `cache_flush_failing` repair pair (LLP 0330), and
+  // aborting at the first still-failing table left every table behind it
+  // untried on every run - including tables whose own cause was already
+  // fixed and whose stamp only a completed attempt clears (LLP
+  // 0322#clearing). LLP 0321's strict outcome stands below: any failure
+  // still exits non-zero with each original error reported.
+  // @ref LLP 0333#every-table-before-failure [implements]: attempt every table, accumulate every error, still fail
   for (const dataset of filtered) {
     if (typeof dataset.refreshPartition !== 'function') continue
-    const partitions = await dataset.discoverPartitions({
-      config: ctx.config,
-      scope: { limit: 1_000_000 },
-      cacheDir: ctx.storage.cacheRoot,
-    })
-    for (const partition of partitions) {
-      const result = await dataset.refreshPartition(partition, {
+    /** @type {QueryPartition[]} */
+    let partitions
+    try {
+      partitions = await dataset.discoverPartitions({
+        config: ctx.config,
+        scope: { limit: 1_000_000 },
         cacheDir: ctx.storage.cacheRoot,
-        force: true,
-        log: {
-          debug() {},
-          info() {},
-          warn() {},
-          error() {},
-        },
-        storage: ctx.storage,
       })
-      const storage = /** @type {typeof ctx.storage & { flushTable?: (tablePath: string, opts?: { force?: boolean, reason?: string }) => Promise<unknown> }} */ (ctx.storage)
-      if (partition.tablePath && typeof storage.flushTable === 'function') {
-        await storage.flushTable(partition.tablePath, { force: true, reason: 'query_refresh' })
-      }
-      if (result.status === 'written') total += result.rows
+    } catch (err) {
+      recordFailure(dataset.name, err)
+      continue
     }
+    for (const partition of partitions) {
+      try {
+        const result = await dataset.refreshPartition(partition, {
+          cacheDir: ctx.storage.cacheRoot,
+          force: true,
+          log: {
+            debug() {},
+            info() {},
+            warn() {},
+            error() {},
+          },
+          storage: ctx.storage,
+        })
+        const storage = /** @type {typeof ctx.storage & { flushTable?: (tablePath: string, opts?: { force?: boolean, reason?: string }) => Promise<unknown> }} */ (ctx.storage)
+        if (partition.tablePath && typeof storage.flushTable === 'function') {
+          await storage.flushTable(partition.tablePath, { force: true, reason: 'query_refresh' })
+        }
+        if (result.status === 'written') total += result.rows
+      } catch (err) {
+        const partKey = Object.entries(partition.partition ?? {}).map(([k, v]) => `${k}=${v}`).join('/')
+        recordFailure(`${dataset.name}/${partKey || 'all'}`, err)
+      }
+    }
+  }
+  for (const failure of failures) {
+    ctx.stderr.write(`hyp query refresh: ${failure.label}: ${failure.message}\n`)
+  }
+  if (failures.length > 0) {
+    ctx.stdout.write(`refreshed ${filtered.length} dataset(s), wrote ${total} row(s), ${failures.length} refresh failure(s)\n`)
+    return 1
   }
   ctx.stdout.write(`refreshed ${filtered.length} dataset(s), wrote ${total} row(s)\n`)
   return 0
