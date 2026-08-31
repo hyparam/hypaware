@@ -197,6 +197,14 @@ the diagnostic message carries the attempt-tense wording; and one overview
 runner surfaces two distinct reasons from two failing datasets exactly once
 each.
 
+The label policy and the guard on discovery get their own pins too, because
+neither shows in the happy shape of a failure line: a dataset name carrying
+an escape opener, a bell, a zero-width space and a right-to-left override
+reaches stderr with all four stripped, and a 500-character reason arrives
+clamped to 200 and marked truncated; and a dataset whose
+`discoverPartitions` throws is recorded under its own name while the dataset
+behind it still gets its forced flush.
+
 The N-table incident this document is written for gets its own two pins,
 because a single failure only proves the loop does not break on a throw and
 not that the pass survives the failure after that: a refresh over two
