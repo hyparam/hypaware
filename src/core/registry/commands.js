@@ -1,5 +1,7 @@
 // @ts-check
 
+import { compareStrings } from '../util/compare_strings.js'
+
 /**
  * @import { CommandGroupRegistration, CommandRegistration, CommandRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
@@ -179,11 +181,11 @@ export function createCommandRegistry() {
    * not a lookup.
    */
   function listGroups() {
-    return Array.from(groups.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    return Array.from(groups.values()).sort((a, b) => compareStrings(a.name, b.name))
   }
 
   function list() {
-    return Array.from(byName.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    return Array.from(byName.values()).sort((a, b) => compareStrings(a.name, b.name))
   }
 
   /** @param {string} name */

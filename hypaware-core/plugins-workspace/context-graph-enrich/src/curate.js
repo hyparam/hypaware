@@ -1,5 +1,7 @@
 // @ts-check
 
+import { compareStrings } from 'hypaware/core/util'
+
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 
 import { columnsFor, COMMITTED_DATASET, enrichTablePath, PROSPECTS_DATASET, RESOLUTIONS_DATASET } from './datasets.js'
@@ -377,7 +379,7 @@ export function greedyCosineClusters(items, threshold) {
   const sorted = [...items].sort((a, b) => {
     const ia = strField(a.p.prospect_id)
     const ib = strField(b.p.prospect_id)
-    return ia < ib ? -1 : ia > ib ? 1 : 0
+    return compareStrings(ia, ib)
   })
   /** @type {Array<{ seed: ArrayLike<number>, members: Record<string, unknown>[] }>} */
   const clusters = []

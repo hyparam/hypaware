@@ -5,6 +5,8 @@ import path from 'node:path'
 
 import { loadLatestFileCatalogMetadata } from 'icebird'
 
+import { compareStrings } from 'hypaware/core/util'
+
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../../../src/core/cache/iceberg/resolver.js'
 import { columnsFromIcebergSchema } from '../../../../src/core/cache/iceberg/schema.js'
@@ -211,7 +213,7 @@ async function compactGraphDataset({ storage, dataset, dryRun }) {
   const ordered = [...affectedParts].sort((a, b) => {
     const ha = mergedByPart.has(a) ? 0 : 1
     const hb = mergedByPart.has(b) ? 0 : 1
-    return ha !== hb ? ha - hb : a < b ? -1 : a > b ? 1 : 0
+    return ha !== hb ? ha - hb : compareStrings(a, b)
   })
   for (const part of ordered) {
     const live = liveByPart.get(part)
@@ -405,8 +407,8 @@ function compareDupRows(a, b) {
   const fa = firstSeenTime(a.row.first_seen) ?? Infinity
   const fb = firstSeenTime(b.row.first_seen) ?? Infinity
   if (fa !== fb) return fa < fb ? -1 : 1
-  if (a.part !== b.part) return a.part < b.part ? -1 : 1
+  if (a.part !== b.part) return compareStrings(a.part, b.part)
   const ra = typeof a.row._hyp_cache_row_id === 'string' ? a.row._hyp_cache_row_id : ''
   const rb = typeof b.row._hyp_cache_row_id === 'string' ? b.row._hyp_cache_row_id : ''
-  return ra < rb ? -1 : ra > rb ? 1 : 0
+  return compareStrings(ra, rb)
 }
