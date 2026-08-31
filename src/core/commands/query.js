@@ -1,6 +1,6 @@
 // @ts-check
 
-import { Attr, withSpan } from '../observability/index.js'
+import { Attr, getActiveSpan, withSpan } from '../observability/index.js'
 import { migrateLegacyPartitions } from '../cache/migrate.js'
 import { renderSchema, schemaForDataset } from '../query/schema.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
@@ -334,32 +334,72 @@ export async function runQueryRefresh(argv, ctx) {
   // still exits non-zero with each original error reported.
   // @ref LLP 0333#every-table-before-failure [implements]: attempt every table, accumulate every error, still fail
   for (const dataset of filtered) {
-    if (typeof dataset.refreshPartition !== 'function') continue
+    // Hoisted only so the `typeof` narrowing survives into the closure below.
+    // Every call of it goes back through `.call(dataset, ...)`: the plugin
+    // contract declares `refreshPartition` as a *method*
+    // (`hypaware-plugin-kernel-types.d.ts`), the scaffold this repo hands
+    // plugin authors writes it as method shorthand, and a bare hoisted call
+    // is a strict-mode call with `this === undefined`. Same reason
+    // `src/core/query/sql.js` reaches for `scan.call(source, ...)` rather
+    // than calling its hoisted local directly.
+    const refreshPartition = dataset.refreshPartition
+    if (typeof refreshPartition !== 'function') continue
     /** @type {QueryPartition[]} */
     let partitions
     try {
-      partitions = await dataset.discoverPartitions({
-        config: ctx.config,
-        scope: { limit: 1_000_000 },
-        cacheDir: ctx.storage.cacheRoot,
-      })
+      // The two plugin calls this loop guards get a span each, for the same
+      // reason the forced flush between them has one: the guard turns a throw
+      // into an accumulated failure, so without a span of its own a
+      // plugin-thrown error reaches the trace nowhere at all, while a
+      // `flushTable` throw lands on `cache.flush` with the exception on it.
+      // Every in-repo `refreshPartition` returns `skipped`, and every in-repo
+      // `discoverPartitions` builds paths over `discoverCachePartitions`,
+      // which swallows its own fs errors - so the throwing caller is a
+      // third-party plugin, which is exactly the one whose failure nobody can
+      // read out of this repo's source.
+      // @ref LLP 0021#span-helpers [implements]: the sanctioned wrapper, so a guarded plugin call still reaches the trace
+      partitions = await withSpan(
+        'dataset.discover_partitions',
+        {
+          [Attr.COMPONENT]: 'query',
+          [Attr.OPERATION]: 'dataset.discover_partitions',
+          [Attr.DATASET]: dataset.name,
+          status: 'ok',
+        },
+        () => dataset.discoverPartitions({
+          config: ctx.config,
+          scope: { limit: 1_000_000 },
+          cacheDir: ctx.storage.cacheRoot,
+        }),
+        { component: 'query' }
+      )
     } catch (err) {
       recordFailure(dataset.name, err)
       continue
     }
     for (const partition of partitions) {
       try {
-        const result = await dataset.refreshPartition(partition, {
-          cacheDir: ctx.storage.cacheRoot,
-          force: true,
-          log: {
-            debug() {},
-            info() {},
-            warn() {},
-            error() {},
+        const result = await withSpan(
+          'dataset.refresh_partition',
+          {
+            [Attr.COMPONENT]: 'query',
+            [Attr.OPERATION]: 'dataset.refresh_partition',
+            [Attr.DATASET]: dataset.name,
+            status: 'ok',
           },
-          storage: ctx.storage,
-        })
+          () => refreshPartition.call(dataset, partition, {
+            cacheDir: ctx.storage.cacheRoot,
+            force: true,
+            log: {
+              debug() {},
+              info() {},
+              warn() {},
+              error() {},
+            },
+            storage: ctx.storage,
+          }),
+          { component: 'query' }
+        )
         const storage = /** @type {typeof ctx.storage & { flushTable?: (tablePath: string, opts?: { force?: boolean, reason?: string }) => Promise<unknown> }} */ (ctx.storage)
         if (partition.tablePath && typeof storage.flushTable === 'function') {
           await storage.flushTable(partition.tablePath, { force: true, reason: 'query_refresh' })
@@ -375,6 +415,21 @@ export async function runQueryRefresh(argv, ctx) {
     ctx.stderr.write(`hyp query refresh: ${failure.label}: ${failure.message}\n`)
   }
   if (failures.length > 0) {
+    // The failures were caught here rather than rethrown, so the dispatcher's
+    // generic catch - the thing that tags `command.run` with `error_kind` -
+    // never runs, and the root span of a failed refresh carries only a
+    // nonzero `exit_code`. LLP 0021 owes a handled failure its `error_kind`
+    // too; `hyp privacy` already carries its own kind for the same reason
+    // (issue #413). An attribute, not a `recordException`: every cause is
+    // already an exception event on its own child span in this trace, and
+    // restating one of N at the root would name a single cause as if it were
+    // the failure. Purely additive - stdout, stderr and the exit code are
+    // unchanged.
+    // @ref LLP 0021#the-attribute-contract [implements]: a handled failure still owes its span an `error_kind`
+    const span = getActiveSpan()
+    span?.setAttribute(Attr.ERROR_KIND, 'refresh_failed')
+    span?.setAttribute('refresh_failure_count', failures.length)
+    span?.setAttribute('refresh_first_failure', `${failures[0].label}: ${failures[0].message}`)
     ctx.stdout.write(`refreshed ${filtered.length} dataset(s), wrote ${total} row(s), ${failures.length} refresh failure(s)\n`)
     return 1
   }
