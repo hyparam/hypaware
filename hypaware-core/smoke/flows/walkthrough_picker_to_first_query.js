@@ -682,11 +682,13 @@ async function goldenPickerConfig(hypHome) {
         // @ref LLP 0262#requirements [tests]: R5 - a composed claude install needs no CA and no keychain trust
       },
     },
+    // Ahead of otel: opencode is a first-class client row, and
+    // `PICKER_DISPLAY_ORDER` puts those before the infra receivers.
+    { name: '@hypaware/opencode' },
     {
       name: '@hypaware/otel',
       config: { listen_host: '127.0.0.1', listen_port: 4318 },
     },
-    { name: '@hypaware/opencode' },
     { name: '@hypaware/local-fs' },
     { name: '@hypaware/format-parquet' },
     { name: '@hypaware/claude' },
