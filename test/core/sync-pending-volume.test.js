@@ -93,13 +93,21 @@ function captureStream() {
  * locale, for a case pinning `pinned` as the locale the code under test names.
  *
  * Node fixes the `Intl` default at startup from the environment, so nothing
- * inside this process can move it. What can be moved is the single place a
- * dropped locale argument would read it from: `Number.prototype.toLocaleString`
- * called with no `locales`. An explicit locale passes through untouched, so
- * code that names its locale is unaffected and code that took the machine's
- * renders as `substitute` would. That is what makes a locale pin fail on the
- * box that wrote it rather than only on a differently configured one, with no
+ * inside this process can move it. What can be moved is where a dropped locale
+ * argument reads it from: `Number.prototype.toLocaleString` called with no
+ * `locales`. An explicit locale passes through untouched, so code that names
+ * its locale is unaffected and code that took the machine's renders as
+ * `substitute` would. That is what makes a locale pin fail on the box that
+ * wrote it rather than only on a differently configured one, with no
  * subprocess and no export widened for a test to reach.
+ *
+ * Scoped to that one route, not to the ambient locale in general.
+ * `Intl.NumberFormat` is a separate binding and is deliberately left alone, so
+ * a `formatCount` rewritten as `new Intl.NumberFormat().format(n)` reads the
+ * machine's locale and this helper does not see it. Shimming a global
+ * constructor the codebase never calls would buy a hypothetical at real cost;
+ * the fix that closes the route for good is `formatCount` grouping without a
+ * locale at all, which retires this helper rather than widening it.
  *
  * @template T
  * @param {string} substitute
@@ -425,10 +433,13 @@ test('`hyp sync` counts to the shipped scan limit, not to one its own call passe
 
 test('a four-digit backlog is grouped for a reader, not printed as a bare integer', async () => {
   // `formatCount` pins `en-US` grouping so the same backlog cannot render as
-  // `1.234` on one machine and `1,234` on another. It counts against the real
-  // clock, as every `runSync` case in this file does, but a four-digit fixture
-  // is two orders of magnitude smaller than the 250,000-row one whose margin
-  // against the 3000ms budget load could close (#1105).
+  // `1.234` on one machine and `1,234` on another. What this case is about is
+  // the separator, never the budget, so it runs on a frozen clock: a
+  // four-digit fixture makes losing the race against the 3000ms budget
+  // unlikely rather than impossible, and a count the budget stopped at the
+  // 512-row check renders `at least 512 rows pending` and reds a correct tree
+  // (#1105). The freeze costs the case nothing and removes the last thing in
+  // it that reads the machine.
   //
   // Run under a substituted ambient locale, because the realistic regression
   // is deleting the `'en-US'` argument as redundant and a US-locale box
@@ -447,7 +458,7 @@ test('a four-digit backlog is grouped for a reader, not printed as a bare intege
     }),
   })
 
-  const code = await onAmbientLocale('de-DE', 'en-US', () => runSync(['--dry-run'], ctx))
+  const code = await onFrozenClock(() => onAmbientLocale('de-DE', 'en-US', () => runSync(['--dry-run'], ctx)))
 
   assert.equal(code, 0)
   assert.match(stdout.text, /1,234 rows pending, the full local history/)
@@ -619,12 +630,23 @@ test('a survey that ran out of budget stays spent, even once the clock reads ear
   // @ref LLP 0325#floor-to-unknown [tests]: a destination whose survey outran its deadline reports absence, not a floor built from the partitions the survey happened to reach
   const hypHome = await makeHome('spent-survey')
   const cache = cacheRoot(hypHome)
-  const surveyed = path.join(cache, 'datasets', 'ai_gateway_messages', 'source=claude')
-  const unsurveyed = path.join(cache, 'datasets', 'ai_gateway_messages', 'source=codex')
-  // Readings 1 and 2 anchor the budget, reading 3 lets pass 1 survey the first
-  // partition, reading 4 is the step past the deadline that ends the survey,
-  // and every reading after it is back inside the budget again.
-  const script = [0, 0, 0, 500]
+  const sources = ['claude', 'codex', 'openclaw', 'gemini', 'copilot']
+  const tablePaths = sources.map((source) => path.join(cache, 'datasets', 'ai_gateway_messages', `source=${source}`))
+  // Readings 1 and 2 anchor the budget, readings 3 and 4 let pass 1 survey the
+  // first two partitions, reading 5 is the step past the deadline that ends the
+  // survey, and every reading after it is back inside the budget again.
+  //
+  // Five partitions rather than the two this needs, and the step two readings
+  // into pass 1 rather than at its first, because the script is positional and
+  // its premise - that the step lands on a pass 1 check - is not itself pinned
+  // by anything. Padding buys it slack: readings taken before pass 1 are
+  // `start` and `scanStart` today, and at two either side of that the step
+  // still lands inside pass 1, so a refactor that adds or drops one does not
+  // slide it onto pass 2's own pre-partition check, where the outcome is
+  // identical (`unknown`, 0 rows, the same reason) and the seed this case
+  // exists for would go unpinned in silence. Slide it further and pass 1 never
+  // breaks at all, which fails this case rather than quietly passing it.
+  const script = [0, 0, 0, 0, 500]
   let reading = 0
   const now = () => (reading < script.length ? script[reading++] : 0)
   const storage = {
@@ -638,10 +660,9 @@ test('a survey that ran out of budget stays spent, even once the clock reads ear
   const query = {
     listDatasets: () => [{
       name: 'ai_gateway_messages',
-      discoverPartitions: () => [
-        { dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath: surveyed },
-        { dataset: 'ai_gateway_messages', partition: { source: 'codex' }, tablePath: unsurveyed },
-      ],
+      discoverPartitions: () => sources.map((source, i) => (
+        { dataset: 'ai_gateway_messages', partition: { source }, tablePath: tablePaths[i] }
+      )),
     }],
   }
 
