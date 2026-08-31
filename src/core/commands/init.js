@@ -229,6 +229,36 @@ export function resolveInitExportChoice(flags) {
 }
 
 /**
+ * Resolve the sources a non-interactive `hyp setup` captures, from
+ * `--source`, `--client`, and the `--yes` default. An empty result is the
+ * run that named nothing and did not accept the defaults either; the
+ * caller turns that into the usage error.
+ *
+ * A named client *is* a source pick: the fold below is what makes
+ * `--client codex` sufficient without a matching `--source codex`. So the
+ * `--yes` default belongs only to the run that expressed no preference at
+ * all, and testing `flags.sources` alone was not that test. It let
+ * `--yes --client opencode` compose Claude capture and rewrite the real
+ * `~/.claude/settings.json` for a client the operator never named, which
+ * is a capture surface opened without anyone asking for it.
+ *
+ * @param {InitFlags} flags
+ * @returns {InitFlags['sources']}
+ * @ref LLP 0002#v1-acceptance-criteria-summary [implements]: --yes default install captures Claude + OTEL
+ * @ref LLP 0011#autodetect-vs-default [constrained-by]: a default fills a silence, it never overrides a pick
+ */
+export function resolveInitSources(flags) {
+  const sources = flags.sources.slice()
+  if (sources.length === 0 && flags.clients.length === 0 && flags.yes) {
+    sources.push('claude', 'otel')
+  }
+  for (const c of flags.clients) {
+    if (!sources.includes(c)) sources.push(c)
+  }
+  return sources
+}
+
+/**
  * Non-interactive Phase 5 init. Composes picks from CLI flags,
  * optionally seeds the config from a file (`--from-file`), and
  * delegates to {@link runInitWizard}, which short-circuits to its pick
@@ -248,22 +278,13 @@ async function runPickerInit(flags, ctx) {
     return runInitFromFile(flags, ctx)
   }
 
-  // Default sources when `--yes` is the only signal: capture Claude +
-  // OTEL. (Export defaults separately, below.)
-  // @ref LLP 0002#v1-acceptance-criteria-summary [implements]: --yes default install captures Claude + OTEL
-  const sources = flags.sources.slice()
+  // `--source`, `--client`, and the `--yes` default, in one place so the
+  // rule that keeps a default from overriding a pick is testable.
+  // (Export defaults separately, below.)
+  const sources = resolveInitSources(flags)
   if (sources.length === 0) {
-    if (flags.yes) {
-      sources.push('claude', 'otel')
-    } else {
-      ctx.stderr.write('hyp setup: no sources selected - pass --source <kind> or --yes\n')
-      return 2
-    }
-  }
-  // Folding clients into sources, so `--client claude` alone is
-  // sufficient even without an explicit `--source claude`.
-  for (const c of flags.clients) {
-    if (!sources.includes(c)) sources.push(c)
+    ctx.stderr.write('hyp setup: no sources selected - pass --source <kind>, --client <name>, or --yes\n')
+    return 2
   }
 
   // Export defaults to local-parquet whenever `--export` is omitted, so
