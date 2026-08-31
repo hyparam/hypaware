@@ -10,7 +10,7 @@ import { narrateAcceptedGate, runWizardExpressGate } from '../../../../src/core/
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { runWizardFolderAsk } from '../../../../src/core/cli/wizard/folder_ask.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
-import { readFolderAskMode } from '../../../../src/core/usage-policy/folder_ask.js'
+import { readFolderAskMode, writeFolderAskMode } from '../../../../src/core/usage-policy/folder_ask.js'
 import { readClientSyncEntries, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 
@@ -108,6 +108,30 @@ test('the gate claims a server only when told it has one', async () => {
   assert.equal(state.question.options[1].summary, 'Choose what to record.')
 })
 
+test('the sync claim drops when the store already withholds one of the named rows', async () => {
+  const { env } = await makeHome()
+  const { confirm, state } = capturingConfirm('defaults')
+
+  await runWizardExpressGate(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env, enrolled: true, syncWithheld: true, rows: ROWS, confirm,
+  }))
+
+  // An express accept preserves standing opt-outs verbatim rather than
+  // clearing them, so on that reconfigure "and sync everything" is a
+  // promise the accept does not keep. The retired sync gate carried this
+  // distinction itself ("Sync all" against "Keep this"); with that gate
+  // gone this row is the only screen the user decides on.
+  // @ref LLP 0201#gate [tests]: the accept row claims sync only when accepting would in fact sync everything it names
+  assert.equal(state.question.options[0].label, 'Record everything')
+  // Only the claim narrows. The disclosure is unconditional, and the
+  // decline row still opens both menus.
+  assert.equal(
+    state.question.options[0].summary,
+    'Configures Claude Code and Codex to record through HypAware.'
+  )
+  assert.equal(state.question.options[1].summary, 'Choose what to record and what syncs.')
+})
+
 test('declining opens the menus; back and cancel are their own answers', async () => {
   const { env } = await makeHome()
   const io = { stdout: makeBuf(), stderr: makeBuf(), env }
@@ -168,6 +192,30 @@ test('the new-folder lane auto-accepts to the default and records it', async () 
   assert.equal(await readFolderAskMode({ stateDir }), 'sync')
   // No names threaded here, so the title takes the tool-free fallback.
   assert.match(stdout.text(), /When starting a session in a new project,/)
+})
+
+test('the new-folder lane auto-accepts the standing answer, not the constant', async () => {
+  const { env, stateDir } = await makeHome()
+  await writeFolderAskMode({ stateDir, mode: 'ask' })
+  const stdout = makeBuf()
+
+  const result = await runWizardFolderAsk(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    autoAccept: true,
+    confirm: async () => { throw new Error('the express path must not prompt') },
+  }))
+
+  // The sibling of the sync lane's "a standing opt-out survives the fast
+  // path" above: both lanes sit behind one keypress, and both must
+  // round-trip their own store rather than reset it (LLP 0200 #wizard).
+  // Hardcoding the default here overwrote a deliberate 'ask' with the
+  // less protective 'sync' and then announced the new value as though the
+  // user had answered it.
+  // @ref LLP 0200#wizard [tests]: an express accept round-trips the standing preference instead of resetting it
+  assert.deepEqual(result, { mode: 'ask' }, 'a standing preference survives the fast path')
+  assert.equal(await readFolderAskMode({ stateDir }), 'ask')
+  assert.match(stdout.text(), /you are asked the first time/)
+  assert.doesNotMatch(stdout.text(), /it syncs automatically/)
 })
 
 test('narrateAcceptedGate prints the gate title and its items verbatim, led by a blank line', () => {

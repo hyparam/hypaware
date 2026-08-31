@@ -10,6 +10,7 @@ import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 import { writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
 import { SUGGESTED_PROMPTS } from '../../../../src/core/cli/wizard/first_ask.js'
 
@@ -438,6 +439,54 @@ test('runInitWizard: a managed machine reconfiguring down the local pathway stil
   assert.deepEqual(calls, ['gate', 'fork', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
 })
 
+// The accept row's sync claim is read off the store the sync lane reads,
+// because an express accept preserves standing opt-outs rather than
+// clearing them (LLP 0188 #opt-out).
+test('runInitWizard: a standing opt-out on a named row narrows the express gate\'s sync claim', async () => {
+  const home = await tmpHome()
+  const stateDir = readObservabilityEnv({ HYP_HOME: path.join(home, '.hyp') }).stateDir
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'claude', class: 'local-only' }] })
+  const { opts } = wizardOpts(home, {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(opts._expressOpts.enrolled, true)
+  assert.equal(opts._expressOpts.syncWithheld, true, 'the gate may not promise sync for a row the store withholds')
+})
+
+test('runInitWizard: with nothing withheld the express gate keeps its unqualified sync claim', async () => {
+  const { opts } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(opts._expressOpts.enrolled, true)
+  assert.equal(opts._expressOpts.syncWithheld, undefined, 'an empty store withholds nothing')
+})
+
+test('runInitWizard: a solo run never pays for the store read', async () => {
+  const home = await tmpHome()
+  const stateDir = readObservabilityEnv({ HYP_HOME: path.join(home, '.hyp') }).stateDir
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'claude', class: 'local-only' }] })
+  const { opts } = wizardOpts(home, {
+    fork: async () => 'local',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  // Unenrolled the row claims no sync at all, so the store has no say.
+  assert.equal(opts._expressOpts.enrolled, false)
+  assert.equal(opts._expressOpts.syncWithheld, undefined)
+})
+
 test('runInitWizard: the team pathway runs the sync-scope and new-folder steps between pick and configure', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), { fork: async () => 'team' })
   const result = await runInitWizard(opts)
@@ -482,6 +531,30 @@ test('runInitWizard: the new-folder title drops the sources the sync step opted 
   })
   await runInitWizard(opts)
   assert.deepEqual(opts._folderOpts.names, ['Claude Code', 'OpenClaw'])
+})
+
+// The filter above reads `optedOut`, and a skipped lane returns `[]`
+// because it could not read the store, not because the store withholds
+// nothing (`sync_scope.js` warns and skips on an unreadable client policy
+// store). Naming every picked tool off that empty list promises "syncs
+// without asking" for rows the run has just said it cannot account for.
+// @ref LLP 0200#wizard [tests]: an unreadable sync store leaves the new-folder title with no names it can stand behind
+test('runInitWizard: a skipped sync step leaves the new-folder title tool-free', async () => {
+  const catalog = emptyCatalog()
+  const claude = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
+  const codex = { plugin: '@hypaware/codex', id: 'codex', label: 'Codex' }
+  catalog.pickerDescriptors.set('claude', claude)
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog,
+    pick: async () => pickResult({ lockedSources: ['claude'], descriptors: [codex] }),
+    syncScope: async () => ({ skipped: true, noQuestion: true, optedOut: [] }),
+  })
+  await runInitWizard(opts)
+  assert.deepEqual(opts._folderOpts.names, [], 'no list the run can stand behind, so no names')
+  // The question still runs: the preference is machine-local and worth
+  // recording whatever the client store says.
+  assert.equal(opts._folderOpts.progress !== undefined || opts._folderOpts.allowBack === true, true)
 })
 
 // The whole sync picture is the *visible* whole picture. `raw-anthropic` and

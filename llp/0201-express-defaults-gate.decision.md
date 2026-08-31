@@ -70,14 +70,25 @@ plainly; fleet-locked rows appear by name like any other, and the fleet
 detail stays on the later screens and the accept narration, not in this
 sentence.
 
-`sync` is claimed only on an enrolled run. On a solo machine nothing
-forwards, so the label drops to "Record everything" and the Customize
-summary to "Choose what to record." The accept summary is the same
-sentence either way: what it discloses is the configuring, which happens
-on a solo machine too. The new-folder policy that rides with an enrolled
-accept is deliberately not in the row copy - it is stated by the accept
-narration (#narrate) - so the row stays one readable sentence about the
-tools.
+`sync` is claimed only where accepting would in fact sync everything the
+row names. On a solo machine nothing forwards, so the label drops to
+"Record everything" and the Customize summary to "Choose what to record."
+The same drop applies on an enrolled machine whose client-sync store
+already withholds one of the named rows: an accept preserves standing
+opt-outs verbatim rather than clearing them (#narrate, and
+[LLP 0188 #opt-out](./0188-enrolled-default-sync-with-client-optout.decision.md#opt-out)),
+so "and sync everything" would be a promise the accept does not keep -
+the case the retired sync gate handled with its own "Sync all" against
+"Keep this" split, which this row inherits along with the decision. The
+gate reads the store the sync lane reads, and a read it cannot complete
+answers "withheld": a row that cannot prove everything syncs must not say
+it does. Only the claim narrows; the accept narration still states the
+split in full, so nothing goes unsaid. The accept summary is the same
+sentence in every case: what it discloses is the configuring, which
+happens on a solo machine too. The new-folder policy that rides with an
+enrolled accept is deliberately not in the row copy - it is stated by the
+accept narration (#narrate) - so the row stays one readable sentence
+about the tools.
 
 <a id="decline"></a>**Declining asks the real questions, linearly.** The
 per-lane defaults gates ([LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-gate),
@@ -107,8 +118,19 @@ and proceeds with the default instead of waiting for an answer. The pick
 lane narrates "HypAware will record:" with its rows (locked ones
 fleet-suffixed), the sync lane narrates "These will sync to your server:"
 with the split it would have shown, and the new-folder lane narrates its
-question and records the default answer. This is what keeps the fast path
+question and records its standing answer. This is what keeps the fast path
 inside LLP 0188 #never-silent.
+
+**Accepting takes each lane's standing answer, which is its default only
+where the user has no standing one.** The two stores behind the gate are
+read, never reset: the sync lane keeps its `local-only` entries
+([LLP 0188 #opt-out](./0188-enrolled-default-sync-with-client-optout.decision.md#opt-out))
+and the new-folder lane keeps its recorded mode
+([LLP 0200 #wizard](./0200-folder-ask-is-a-preference.decision.md#wizard)).
+"Accept the defaults" is an answer to the questions this run asks, not a
+licence to discard answers a previous one recorded - and each of these
+lanes narrates the value it took, so a lane that reset one would announce
+the new value as though the user had just chosen it.
 
 **The narration is blocked, not streamed.** Each statement is led by a
 blank line and its detail is indented under a title, because on this path

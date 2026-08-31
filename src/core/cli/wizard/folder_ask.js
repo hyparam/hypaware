@@ -4,7 +4,7 @@ import { Attr, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
-import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe, writeFolderAskMode } from '../../usage-policy/index.js'
+import { readFolderAskModeSafe, writeFolderAskMode } from '../../usage-policy/index.js'
 import { joinNames, narrateAcceptedGate } from './express.js'
 
 /**
@@ -85,14 +85,28 @@ export async function runWizardFolderAsk(opts) {
   const title = folderAskTitle(opts.names ?? [])
 
   // The express gate already answered this lane (LLP 0201): state the
-  // question and its default answer, record it, and move on.
+  // question and its standing answer, record it, and move on.
+  //
+  // `before`, not the constant: an accept takes the answer the prompted
+  // arm would have offered (`default: before` below), which on a machine
+  // that never set one *is* the default and on a machine that did is what
+  // that user chose. Hardcoding the default here made "accept the
+  // defaults" silently overwrite a standing `ask` with `sync` - the less
+  // protective value - and then print the new value as though the user
+  // had just answered it. LLP 0200 #wizard binds the round-trip to the
+  // re-run, not to the prompt shape, and the sibling auto-accepted lane
+  // round-trips its own store the same way (`sync_scope.js`, which keeps
+  // `optedOutBefore` verbatim on this exact keypress). The answer is
+  // still written on every run, which is what #wizard requires of the
+  // step whether or not the value moved.
+  // @ref LLP 0200#wizard [implements]: an express accept round-trips the standing preference instead of resetting it
   // @ref LLP 0201#narrate [implements]: an auto-accepted question prints its statement instead of prompting
   if (opts.autoAccept) {
     narrateAcceptedGate({ stdout: opts.stdout, title })
     // Inline: the title is a sentence lead-in still on screen, so the
     // answer belongs under it as an indented line completing it rather
     // than as a second flush-left announcement repeating the subject.
-    return await recordAnswer(DEFAULT_FOLDER_ASK_MODE, { stateDir, before, opts, inline: true })
+    return await recordAnswer(before, { stateDir, before, opts, inline: true })
   }
 
   const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory(opts)

@@ -47,7 +47,18 @@ export async function runWizardExpressGate(opts) {
       options: [
         {
           value: 'defaults',
-          label: opts.enrolled ? 'Record and sync everything' : 'Record everything',
+          // "and sync" is claimed only where accepting would in fact sync
+          // everything named. Unenrolled, nothing forwards. Enrolled with a
+          // standing opt-out in the store, accepting *keeps* that opt-out
+          // (`sync_scope.js` returns `optedOutBefore` verbatim on this
+          // keypress), so the unqualified promise is false on exactly the
+          // reconfigure the retired sync gate handled with its
+          // "Sync all" / "Keep this" split. Dropping the clause rather than
+          // qualifying it reuses the shipped solo label and keeps the row
+          // one short line; the accept narration still states the split
+          // (LLP 0201 #narrate), so nothing goes unsaid.
+          // @ref LLP 0201#gate [implements]: the accept row claims sync only when the install can keep the promise
+          label: opts.enrolled && !opts.syncWithheld ? 'Record and sync everything' : 'Record everything',
           // The one row guaranteed to be read on the fast path, so the
           // tool names and the side-effect disclosure live here rather
           // than above the prompt chrome (LLP 0201 #gate). One sentence

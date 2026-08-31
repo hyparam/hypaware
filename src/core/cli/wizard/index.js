@@ -23,6 +23,7 @@ import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
+import { optedOutClientSourceIds, readClientSyncEntries } from '../../usage-policy/index.js'
 import {
   LOCAL_INSTALL_RETENTION_DAYS,
   defaultConfirmSelectPromptFactory,
@@ -385,11 +386,14 @@ export async function runInitWizard(opts) {
         // pick lane's own default rows, computed once here, so
         // "everything" names exactly what the lane would record.
         // Resolution failure degrades to no gate.
-        const rows = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
+        const { labels: rows, optOutIds } = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
         // Nothing detected and nothing locked is nothing to accept, so
         // there is no gate to show; the pick lane opens its menu as it
         // always would (LLP 0201 #no-default-no-accept).
         if (rows.length > 0) {
+          // Only an enrolled run makes a sync claim at all, so only an
+          // enrolled run pays for the store read.
+          const syncWithheld = enrolled() && (await syncWithheldSafe({ opts, ids: optOutIds }))
           const expressFn = opts.express ?? runWizardExpressGate
           const choice = await expressFn({
             stdout: opts.stdout,
@@ -398,6 +402,7 @@ export async function runInitWizard(opts) {
             env: opts.env,
             rows,
             enrolled: enrolled(),
+            ...(syncWithheld ? { syncWithheld: true } : {}),
             // The fork is always behind this question.
             allowBack: true,
             ...(opts.confirm ? { confirm: opts.confirm } : {}),
@@ -591,10 +596,26 @@ export async function runInitWizard(opts) {
               // without asking" for a client the user just stopped syncing
               // at all. Locked rows always sync (LLP 0188 #locked), so they
               // are never filtered.
-              names: [
-                ...lockedDescriptors,
-                ...candidateDescriptors.filter((d) => !sourcesOptedOut.includes(d.id)),
-              ].map((d) => d.label),
+              //
+              // A skipped lane answers nothing, so it can filter nothing:
+              // `optedOut` is `[]` on the unreadable-store path because the
+              // store could not be read, not because it withholds nothing
+              // (`sync_scope.js` warns and returns `{ skipped: true }`
+              // there). Naming every picked tool off that empty list would
+              // promise "syncs without asking" for rows the run just said
+              // it cannot account for, which is the same false promise the
+              // filter exists to prevent. With no list we can stand behind,
+              // the title takes its tool-free phrasing (LLP 0200 #wizard):
+              // the preference is machine-local and worth recording either
+              // way, so the question still runs, it just stops naming
+              // names it cannot check.
+              // @ref LLP 0200#wizard [implements]: the title names only rows the run can say still sync, so an unreadable store falls back to the tool-free phrasing
+              names: syncScope.skipped
+                ? []
+                : [
+                    ...lockedDescriptors,
+                    ...candidateDescriptors.filter((d) => !sourcesOptedOut.includes(d.id)),
+                  ].map((d) => d.label),
               ...(foldersProgress ? { progress: foldersProgress } : {}),
               ...(opts.confirm ? { confirm: opts.confirm } : {}),
               ...(express ? { autoAccept: true } : {}),
@@ -1052,6 +1073,10 @@ async function narrateEnrolledAbort(opts) {
  * is the right failure; guessing at a list the user is about to accept is
  * not.
  *
+ * `optOutIds` rides along for the accept row's sync claim: the same rows
+ * by id, minus the locked ones, which always sync (LLP 0188 #locked) and
+ * so can never be what makes the claim false.
+ *
  * @ref LLP 0201#gate [implements]: the gate names the pick lane's rows, from one computation, or is not shown
  * @param {{
  *   opts: RunInitWizardOptions,
@@ -1060,7 +1085,7 @@ async function narrateEnrolledAbort(opts) {
  *   pickSeed: PickerSource[] | undefined,
  *   detect: (args: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>,
  * }} args
- * @returns {Promise<string[]>}
+ * @returns {Promise<{ labels: string[], optOutIds: string[] }>}
  */
 async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
   try {
@@ -1071,9 +1096,46 @@ async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
       ...(pickSeed ? { initialSelection: pickSeed } : {}),
       detect,
     }))
-    return seeding.defaultRows.map((d) => d.label)
+    return {
+      labels: seeding.defaultRows.map((d) => d.label),
+      optOutIds: seeding.defaultRows.filter((d) => !seeding.lockedSet.has(d.id)).map((d) => d.id),
+    }
   } catch {
-    return []
+    return { labels: [], optOutIds: [] }
+  }
+}
+
+/**
+ * Does the client-sync store already withhold one of the rows the express
+ * gate is about to name?
+ *
+ * The accept row promises "Record and sync everything", and an express
+ * accept preserves standing opt-outs verbatim rather than clearing them
+ * (`sync_scope.js`'s auto-accept arm returns `optedOutBefore`), so on a
+ * reconfigure the unqualified promise is false. The retired sync gate
+ * carried this distinction itself ("Sync all" against "Keep this"); with
+ * that gate gone the express row is the only screen the user decides on,
+ * so it has to read the store the sync lane reads.
+ *
+ * Fails toward the weaker claim: an unreadable or throwing store answers
+ * "withheld", because a gate that cannot prove everything syncs must not
+ * say it does. That is also the run where the sync lane skips itself with
+ * a warning and writes nothing, leaving whatever the store holds standing.
+ *
+ * @ref LLP 0188#opt-out [constrained-by]: the standing opt-out the accept keeps is the store's, so the claim about it is read from the store
+ * @param {{ opts: RunInitWizardOptions, ids: string[] }} args
+ * @returns {Promise<boolean>}
+ */
+async function syncWithheldSafe({ opts, ids }) {
+  if (ids.length === 0) return false
+  try {
+    const stateDir = readObservabilityEnv(opts.env).stateDir
+    const entries = await readClientSyncEntries({ stateDir })
+    if (!entries || entries.length === 0) return false
+    const optedOut = new Set(optedOutClientSourceIds(entries))
+    return ids.some((id) => optedOut.has(id))
+  } catch {
+    return true
   }
 }
 

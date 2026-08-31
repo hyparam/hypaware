@@ -117,7 +117,13 @@ The answer is written either way, even when it
 matches the default: the user answered a question, and a recorded answer
 is what `hyp status`, `hyp policy list`, and a later re-run read back. A
 re-run defaults to the standing answer, so re-entering the wizard
-round-trips the preference instead of resetting it. A failed write warns
+round-trips the preference instead of resetting it. That binds the re-run,
+not the prompt: an express accept
+([LLP 0201 #narrate](./0201-express-defaults-gate.decision.md#narrate))
+records the standing answer too, and states it. Hardcoding the default on
+the accepted path would flip a deliberate `ask` to `sync` - the less
+protective value - and then print the new value as though the user had
+answered it, on the one screen they did answer. A failed write warns
 and leaves the previous mode standing; onboarding has done its
 load-bearing work by then and `hyp policy folders` can set it later.
 Escape steps back to the sync lane, cancel ends the run at 130 like any

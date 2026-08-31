@@ -211,6 +211,16 @@ export interface RunWizardExpressGateOptions {
    * honestly make on a machine with a server.
    */
   enrolled?: boolean
+  /**
+   * Does the client-sync store already withhold one of `rows` from the
+   * server? The accept row may only promise sync for what would in fact
+   * sync (LLP 0201 #gate), and an express accept preserves standing
+   * opt-outs verbatim rather than clearing them, so on a reconfigure the
+   * unqualified claim is false. Resolution failure passes `true`: a gate
+   * that cannot prove everything syncs must not say it does. Ignored on
+   * an unenrolled run, which claims no sync at all.
+   */
+  syncWithheld?: boolean
   /** Offer back-navigation to the fork (LLP 0191). */
   allowBack?: boolean
   /** Prompt seam (tests); defaults to the confirm-select factory. */

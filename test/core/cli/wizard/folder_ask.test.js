@@ -154,6 +154,30 @@ test('autoAccept states the question and records the default without prompting (
   assert.match(stdout.text(), /^ {2}it syncs automatically; change later with hyp privacy folders ask$/m)
 })
 
+test('an express accept round-trips the standing answer instead of resetting it', async () => {
+  const { env, stateDir } = await makeHome()
+  const stdout = makeBuf()
+  await writeFolderAskMode({ stateDir, mode: 'ask' })
+
+  const result = await runWizardFolderAsk(/** @type {any} */ ({
+    stdout, stderr: makeBuf(), env,
+    names: ['Claude Code'],
+    autoAccept: true,
+    confirm: async () => { throw new Error('the express path must not prompt') },
+  }))
+
+  // The prompted arm round-trips through `default: before` (the test
+  // above). The auto-accepted arm has to reach the same answer: LLP 0200
+  // #wizard binds the round-trip to the re-run, not to the prompt shape,
+  // and flipping a deliberate 'ask' to 'sync' silently weakens a
+  // preference the user set with `hyp privacy folders ask`.
+  // @ref LLP 0200#wizard [tests]: the auto-accepted arm round-trips the preference too
+  assert.deepEqual(result, { mode: 'ask' })
+  assert.equal(await readFolderAskMode({ stateDir }), 'ask', 'the standing answer was not overwritten')
+  // And the screen reports what is now true, not the constant.
+  assert.match(stdout.text(), /^ {2}you are asked the first time; change later with hyp privacy folders sync$/m)
+})
+
 test('an unwritable preference warns and leaves the previous mode standing', async () => {
   const { env, stateDir } = await makeHome()
   // A directory where the file belongs makes the atomic write fail.
