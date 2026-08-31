@@ -256,6 +256,13 @@ export async function runInitWizard(opts) {
       pathway = undefined
       // 'first-run' and 'reconfigure' both enter here, managed or not.
       while (!pathway) {
+        // The fork is re-asked on its own, without passing the `atFork`
+        // top: a back into the returning gate, a failed join, a failed
+        // leave. This is a loop level like any other, so it checks on
+        // entry too - otherwise the second and later fork questions of a
+        // run open on a surface the first one may have killed.
+        // @ref LLP 0341#dead-surface [implements]: every loop level checks on entry, the fork's re-ask included
+        if (!(await guard.checkpoint())) return await cancelDeadOutput()
         const forkFn = opts.fork ?? runWizardFork
         const choice = await forkFn({
           stdout: opts.stdout,
@@ -266,6 +273,9 @@ export async function runInitWizard(opts) {
         })
         if (choice === 'back') {
           // Offered only when the gate showed its menu; re-present it.
+          // The gate is a question lane, so it does not re-open on a
+          // dead surface either (LLP 0341 #dead-surface).
+          if (!(await guard.checkpoint())) return await cancelDeadOutput()
           const gateExit = await runGate()
           if (gateExit) return gateExit
           continue
@@ -293,6 +303,13 @@ export async function runInitWizard(opts) {
           // the fork and ctrl+c ends the run, neither of them disconnecting.
           // @ref LLP 0190#fork-disconnect [implements]: local-on-managed asks "disconnect?" once; yes is hyp leave, no is the managed local pathway
           if (enrolled()) {
+            // A question with an acting default, opened between the
+            // fork's answer and the run's most destructive act, so it
+            // gets its own boundary: the surface can die while the fork
+            // is on screen, and a "Yes, disconnect" nobody could read is
+            // not consent to tear down the enrollment.
+            // @ref LLP 0341#dead-surface [implements]: the disconnect question does not open on a dead surface
+            if (!(await guard.checkpoint())) return await cancelDeadOutput()
             const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory(opts)
             /** @type {string | number} */
             let disconnect
@@ -331,6 +348,12 @@ export async function runInitWizard(opts) {
               return { exitCode: 130, cancelled: true }
             }
             if (disconnect === 'disconnect') {
+              // `hyp leave` is an acting phase inside the fork loop, and
+              // the one act of the run that is not a retained answer
+              // (LLP 0341 #retained): it tears the enrollment down. It
+              // takes the same boundary the config commit takes.
+              // @ref LLP 0341#dead-surface [implements]: the disconnect teardown checks the surface before it acts
+              if (!(await guard.checkpoint())) return await cancelDeadOutput()
               const leaveFn = opts.leave ?? (() => opts.ctx.commands.run('leave', []))
               const code = await leaveFn()
               if (code !== 0) {

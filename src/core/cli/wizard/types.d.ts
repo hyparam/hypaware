@@ -671,17 +671,6 @@ export interface RunWizardFirstAskOptions {
 }
 
 /**
- * Options for `runInitWizard`, the fork -> join -> pick -> configure ->
- * privacy -> finale orchestrator (LLP 0135 #orchestration). Non-interactive
- * callers (`--yes`, `--dry-run`, presets, `--from-file`) set `picks` and the
- * orchestrator short-circuits straight to the pick phase + finale, matching
- * the walkthrough's `interactive = !opts.picks` split.
- *
- * The phase overrides (`gate`, `fork`, `join`, `pick`, `configure`,
- * `finaleRunner`) exist for tests, which drive the state machine with
- * scripted phases; production callers pass none of them.
- */
-/**
  * One of the wizard's two output streams, as the stream guard (LLP 0341)
  * accepts and returns it: the same union every lane option declares,
  * with the two read-only properties the prompt runtime consults.
@@ -711,6 +700,17 @@ export interface WizardOutputGuard {
   checkpoint(): Promise<boolean>
 }
 
+/**
+ * Options for `runInitWizard`, the fork -> join -> pick -> configure ->
+ * privacy -> finale orchestrator (LLP 0135 #orchestration). Non-interactive
+ * callers (`--yes`, `--dry-run`, presets, `--from-file`) set `picks` and the
+ * orchestrator short-circuits straight to the pick phase + finale, matching
+ * the walkthrough's `interactive = !opts.picks` split.
+ *
+ * The phase overrides (`gate`, `fork`, `join`, `pick`, `configure`,
+ * `finaleRunner`) exist for tests, which drive the state machine with
+ * scripted phases; production callers pass none of them.
+ */
 export interface RunInitWizardOptions {
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }

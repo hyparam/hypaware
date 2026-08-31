@@ -92,7 +92,7 @@ function wrapSink(sink) {
   return {
     sink: wrapped,
     dead: () => dead,
-    settle: () => settleSink(raw, () => dead),
+    settle: () => settleSink(raw, () => dead, () => { dead = true }),
   }
 }
 
@@ -103,11 +103,18 @@ function wrapSink(sink) {
  * guarantee the boundary check needs. A sink with no callback support (a
  * test buffer) has nothing pending by construction and resolves at once.
  *
+ * The callback's own error argument is what records the death, not only
+ * the stream's `error` event: both carry the same failure, but only the
+ * callback is certain to be in hand at the moment the boundary check
+ * reads its verdict. Reading the event alone left the check depending on
+ * Node delivering it before the settle promise's continuation.
+ *
  * @param {any} raw
  * @param {() => boolean} isDead
+ * @param {() => void} markDead
  * @returns {Promise<void>}
  */
-function settleSink(raw, isDead) {
+function settleSink(raw, isDead, markDead) {
   if (isDead() || raw.destroyed === true) return Promise.resolve()
   if (typeof raw.on !== 'function') return Promise.resolve()
   return new Promise((resolve) => {
@@ -121,7 +128,10 @@ function settleSink(raw, isDead) {
     const timer = setTimeout(finish, SETTLE_TIMEOUT_MS)
     if (typeof timer.unref === 'function') timer.unref()
     try {
-      raw.write('', finish)
+      raw.write('', (err) => {
+        if (err) markDead()
+        finish()
+      })
     } catch {
       finish()
     }

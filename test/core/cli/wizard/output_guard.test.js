@@ -328,3 +328,120 @@ test('a real closing pipe ends the run as a cancel: no crash, no commit, the rec
   assert.equal(await readFolderAskModeSafe({ stateDir }), 'ask')
   await assert.rejects(fs.access(path.join(home, 'config.json')))
 })
+
+// The fork loop is a loop level like any other, and the disconnect
+// question it can open is the run's most destructive act: "yes" runs the
+// real `hyp leave` teardown (LLP 0190 #fork-disconnect). Unlike every
+// store the lanes write, that teardown is not a retained answer
+// (LLP 0341 #retained) - it undoes an enrollment - so it must not run on
+// the strength of a default nobody could read.
+// @ref LLP 0341#dead-surface [tests]: the disconnect question and its teardown take the boundary too
+test('a stdout that dies at the fork question stops the run before the disconnect question opens', async () => {
+  const home = await tmpHome('hyp-guard-leave-')
+  const acts = []
+  let writes = 0
+  let deadFrom = Infinity
+  const dying = {
+    write() {
+      writes += 1
+      if (writes >= deadFrom) throw new Error('EPIPE: broken pipe')
+      return true
+    },
+  }
+  const opts = drivenOpts(home, {
+    stdout: dying,
+    // A managed machine reconfiguring: choosing local opens the
+    // disconnect question.
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    // The surface dies while the fork question is on screen: the lane's
+    // own frame is the write that fails, absorbed by the guard.
+    fork: async (lane) => {
+      deadFrom = writes + 1
+      lane.stdout.write('fork question frame\n')
+      return 'local'
+    },
+    confirm: async () => { acts.push('disconnect-question-asked'); return 'disconnect' },
+    leave: async () => { acts.push('leave-ran'); return 0 },
+    configure: async () => { acts.push('configure-ran'); return { results: [] } },
+  })
+
+  const result = await runInitWizard(opts)
+
+  assert.equal(result.exitCode, 130)
+  assert.equal(result.cancelled, true)
+  assert.deepEqual(acts, [])
+  await assert.rejects(fs.access(path.join(home, 'config.json')))
+})
+
+// The settle is what makes the boundary check see a failure the stream
+// has not announced yet. It reads the write callback's own error, so a
+// sink that reports only that way - without an `error` event, and
+// without the event arriving before the promise continuation - is still
+// caught.
+// @ref LLP 0341#absorb [tests]: the settle records a failure reported through the write callback alone
+test('guard: a failure reported only through the write callback is caught by the checkpoint', async () => {
+  /** A sink whose writes report failure through the callback alone. */
+  const callbackOnly = {
+    on() {},
+    /** @param {string} _chunk @param {(err?: Error) => void} [cb] */
+    write(_chunk, cb) {
+      if (typeof cb === 'function') cb(new Error('EPIPE: broken pipe'))
+      return false
+    },
+  }
+  const guard = guardWizardOutput(/** @type {any} */ ({ stdout: callbackOnly, stderr: makeBuf() }))
+
+  // No throw, no `error` event: nothing has marked the surface dead yet.
+  assert.equal(guard.stdout.write('narration\n'), false)
+  assert.equal(guard.outputDead(), false)
+  // The boundary check settles first, and the settle's callback error is
+  // the verdict.
+  assert.equal(await guard.checkpoint(), false)
+  assert.equal(guard.outputDead(), true)
+})
+
+// The same disconnect path, through a real closing pipe rather than a
+// stubbed throw: the drive that found it.
+// @ref LLP 0341#dead-surface [tests]: the disconnect teardown, proved absent through a real closing pipe
+test('a real closing pipe at the fork question leaves the enrollment standing', async () => {
+  const home = await tmpHome('hyp-guard-pipe-leave-')
+  const fixture = fileURLToPath(new URL('./fixtures/output_closed_pipe_leave_child.mjs', import.meta.url))
+  const child = spawn(process.execPath, [fixture], {
+    env: { ...process.env, DRIVE_HOME: home },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stderrText = ''
+  child.stderr.on('data', (d) => { stderrText += d })
+  child.stdout.on('data', () => {})
+  child.stdout.on('error', () => {})
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  let sawReady = false
+  for (let i = 0; i < 1000; i += 1) {
+    try {
+      await fs.access(path.join(home, 'ready.marker'))
+      sawReady = true
+      break
+    } catch {
+      await sleep(10)
+    }
+  }
+  assert.equal(sawReady, true, 'the drive never reached the fork answer')
+  child.stdout.destroy()
+  await fs.writeFile(path.join(home, 'closed.marker'), '')
+
+  const exitCode = await new Promise((resolve) => {
+    child.on('exit', (code, signal) => resolve(code ?? `signal:${signal}`))
+  })
+
+  assert.equal(exitCode, 130, `child exited ${exitCode}; stderr:\n${stderrText}`)
+  assert.match(stderrText, /output closed - cancelled/)
+  assert.doesNotMatch(stderrText, /EPIPE/)
+
+  const { result, acts } = JSON.parse(await fs.readFile(path.join(home, 'result.json'), 'utf8'))
+  assert.equal(result.cancelled, true)
+  // Nothing was asked and nothing acted after the surface died - the
+  // enrollment this machine had is the enrollment it still has.
+  assert.deepEqual(acts, [])
+  await assert.rejects(fs.access(path.join(home, 'config.json')))
+})
