@@ -49,13 +49,20 @@ test('groupThousands: a count is rendered as a whole number', () => {
 })
 
 test('groupThousands: past the integer range the digits run out, and it says so', () => {
-  // `String(1e21)` is already exponential, so there are no thousands to group
-  // and none are invented. Documented rather than fixed: neither caller can
-  // reach it (a pending count stops at the 200,000-row scan limit, and a token
-  // sum is bounded by what a provider reported), and this is the second
-  // assertion no locale can satisfy - every `Intl` route spells 1e21 out in
-  // full digits.
+  // `String(1e21)` is already exponential, so there are no thousands left to
+  // group. Documented rather than fixed: neither caller can reach it (a
+  // pending count stops at the 200,000-row scan limit, and a token sum is
+  // bounded by what a provider reported), and this is the second assertion no
+  // locale can satisfy - every `Intl` route spells 1e21 out in full digits.
   assert.equal(groupThousands(1e21), '1e+21')
+
+  // What a mantissa of three or more digits gets is worse than nothing, and
+  // pinned here because the range limit is easy to read as "leaves the string
+  // alone", which it does not: the separator lands inside the mantissa. This
+  // is inherited unchanged from the overview table's private helper and stays
+  // unreachable from both callers, but the helper now has a general name and a
+  // bare `@param {number}`, so the shape of the edge belongs in writing.
+  assert.equal(groupThousands(1.2345e25), '1.2,345e+25')
 })
 
 // The assertions above pin `groupThousands`. They cannot pin that the two
@@ -167,4 +174,52 @@ test('the gate reads code and not the comments about it', () => {
 
   // Blanking keeps the line numbering, so a report still points at the line.
   assert.equal(codeLines('// a\n// b\nreturn n.toLocaleString()').length, 3)
+})
+
+/**
+ * The body of `formatCount` in `source`, from its `function` line to the first
+ * line that is a bare `}`. Both spellings are top-level declarations closed at
+ * column zero, so nothing subtler is needed to find where one ends.
+ *
+ * @param {string} source
+ * @returns {string}
+ */
+function formatCountBody(source) {
+  const lines = codeLines(source)
+  const start = lines.findIndex((line) => /^(export )?function formatCount\(/.test(line))
+  assert.notEqual(start, -1, 'expected a top-level formatCount to pin')
+  const end = lines.findIndex((line, i) => i > start && line === '}')
+  assert.notEqual(end, -1, 'expected formatCount to close at column zero')
+  return lines.slice(start, end + 1).join('\n')
+}
+
+test('the surfaces that render counts still route the digits through the one grouping', async () => {
+  // The scan above is a two-file grep, so it only sees a host call that stays
+  // in one of those two files. The regression it cannot see is relocation:
+  // move the digits into `src/core/util/pretty.js` spelled `toLocaleString()`,
+  // import it here, and both files are clean while a German-locale user reads
+  // `1.234 rows pending` on the surface that asks for egress consent. That is
+  // not a hypothetical shape - `formatFirstSyncDeadline` in
+  // `src/core/usage-policy/first_sync_hold.js` is exactly a host-formatting
+  // helper one module over that `hyp sync` already calls, deliberately, for a
+  // local time.
+  //
+  // The deleted `onAmbientLocale` shim caught relocation for free, because it
+  // moved the ambient locale under the whole call and read the real output. It
+  // could only reach `Number.prototype.toLocaleString`, and it went because a
+  // one-locale ICU build resolves its substitute back and turns it green
+  // (#1121 item 3). What replaces that reach is this: the grouping is proven
+  // locale-free by the exact strings at the top of this file, and the two
+  // callers are proven to be the ones asking for it. A third module cannot get
+  // between them without reddening here, on every machine.
+  for (const rel of COUNT_RENDERERS) {
+    const source = await fs.readFile(path.join(REPO_ROOT, rel), 'utf8')
+    assert.match(
+      formatCountBody(source),
+      /\bgroupThousands\(/,
+      `formatCount in ${rel} no longer renders its digits with groupThousands; ` +
+        'whatever replaced it is unpinned, and a formatter that reads the host ' +
+        'is invisible to the scan above once it lives in another module'
+    )
+  }
 })

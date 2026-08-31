@@ -18,6 +18,12 @@
  * already wrong before it is rendered. Non-finite input is the caller's to
  * screen; this is the digit transform, not the empty-value policy.
  *
+ * Counts only, up to `Number.MAX_SAFE_INTEGER`. At `1e21` and above `String`
+ * switches to exponential and the separator lands inside the mantissa
+ * (`1.2,345e+25`), which is why this is not a general number formatter.
+ * Neither caller can reach that: a pending count stops at the 200,000-row
+ * scan limit and a token sum is bounded by what a provider reported.
+ *
  * @param {number} n
  * @returns {string}
  */
