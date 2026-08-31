@@ -14,7 +14,7 @@ import { fetchAvroRecords, fetchDeleteMaps } from 'icebird/src/fetch.js'
 import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stage-position-delete.js'
 
 import { Attr, getMeter, withSpan } from '../observability/index.js'
-import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
+import { clearEscapeReport, discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { physicalProjection, readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
 
@@ -286,6 +286,11 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
       },
       async () => {
         await fs.promises.rm(part.path, { recursive: true, force: true })
+        // The directory is gone, so no later read of it can clear the
+        // cursor-escape report keyed on this path. Doing it here is free:
+        // the path is in hand and the delete just happened
+        // (LLP 0334#eviction-clears).
+        clearEscapeReport(part.path)
         if (rowCount > 0) {
           counter.add(rowCount, {
             [Attr.DATASET]: part.dataset,
@@ -365,6 +370,11 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
       },
       async () => {
         fs.rmSync(partitionDir, { recursive: true, force: true })
+        // The directory is gone, so no later read of it can clear the
+        // cursor-escape report keyed on this path. Doing it here is free:
+        // the path is in hand and the delete just happened
+        // (LLP 0334#eviction-clears).
+        clearEscapeReport(partitionDir)
         if (rowCount > 0) {
           counter.add(rowCount, {
             [Attr.DATASET]: part.dataset,

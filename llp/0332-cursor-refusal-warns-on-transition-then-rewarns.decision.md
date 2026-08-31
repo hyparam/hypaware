@@ -10,6 +10,11 @@
 (#consequences: the per-refusal price is kept, but for the cursor guard the
 unit of "a refusal" is rebased from one cursor read to one standing
 condition, warned on transition and re-warned on an interval)
+**Extended-by:** [LLP 0334](./0334-the-escape-report-tracks-the-partition-it-names.decision.md)
+(#transition-plus-rewarn: the strand accepted there is cleared wherever a
+whole partition directory stops existing, and the rejected-value comparison
+is qualified by type; #consequences: the silent recovery accepted there is
+announced once per armed refusal that clears)
 **Related:** LLP 0323, LLP 0326, hyparam/hypaware#1115
 
 > LLP 0329 prices the standing refusal signal at one stderr write per
