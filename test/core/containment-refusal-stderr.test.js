@@ -22,7 +22,7 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { sweepCaptureSpool } from '../../src/core/capture_spool.js'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
@@ -454,6 +454,208 @@ test('a real containment guard still names its refusal with a throwing exporter 
     })
     assert.deepEqual(out.swept, { filesRemoved: 0, bytesRemoved: 0, failed: 0 })
     assert.match(stderr, /capture_spool_path_is_symlink/, 'the guard reaches stderr through a broken provider')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The emit seam's bound is per installed provider, not per process. On the
+// seam's name alone the first broken provider consumes the one line and every
+// provider installed after it is undiagnosable, which is the diagnosability
+// half of #1122 again, and it is why the second emit-seam case in this file
+// had to be a subprocess before this.
+test('a broken provider installed after another broken one is diagnosed too', async () => {
+  /** @param {string} label */
+  const broken = (label) => /** @type {any} */ ({
+    resource: { attributes: {} },
+    /** @param {unknown} _record */
+    exportRecord(_record) { throw new Error(`broken provider ${label}`) },
+  })
+  const stderr = await captureProcessStderr(async () => {
+    try {
+      logs.setGlobalLoggerProvider(broken('one'))
+      getLogger('cache').warn('a record the first one cannot take')
+      logs.setGlobalLoggerProvider(broken('two'))
+      getLogger('cache').warn('nor the second')
+    } finally {
+      logs.setGlobalLoggerProvider(/** @type {any} */ (null))
+    }
+  })
+  const reports = stderr.split('\n').filter((line) => line.includes('telemetry_export_threw'))
+  assert.equal(reports.length, 2, 'one line per installed provider, not one for the process')
+  assert.match(stderr, /broken provider one/)
+  assert.match(stderr, /broken provider two/)
+})
+
+// The same contract one seam later. `flushExporters` reaches its exporters
+// through `Promise.allSettled(exporters.map(...))`, which absorbs rejections
+// but not synchronous throws: the throw unwinds the `map` that was building
+// allSettled's input, so it came back out of `provider.shutdown()` and left
+// every exporter behind the broken one neither flushed nor closed. On the
+// shutdown path that is a JSONL writer left open with records still in it.
+test('an exporter whose forceFlush throws does not fail the shutdown, nor strand its siblings', async () => {
+  class ThrowingFlushExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    forceFlush() { throw new Error('forceFlush threw synchronously') }
+  }
+  const closed = { flushed: false, shut: false }
+  const healthy = {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {},
+    async forceFlush() { closed.flushed = true },
+    async shutdown() { closed.shut = true },
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new ThrowingFlushExporter(), healthy]),
+  })
+  await provider.shutdown()
+  assert.deepEqual(closed, { flushed: true, shut: true }, 'the exporter behind the broken one was still flushed and closed')
+})
+
+// And what the diagnosis itself must survive. `String(Object.create(null))`
+// is a TypeError, so a rejection carrying one used to throw out of the
+// rejection handler, which is an unhandled rejection again: the exact outcome
+// the async guard exists to prevent, reintroduced by the line that reports it.
+test('a thrown value that cannot be stringified is still reported, and still does not kill the process', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-refusal-exotic-'))
+  try {
+    const run = await runModule(root, [
+      'class ExoticRejectingExporter {',
+      '  async exportBatch() {',
+      '    await Promise.resolve()',
+      '    throw Object.create(null)',
+      '  }',
+      '}',
+      'logs.setGlobalLoggerProvider(new LoggerProvider({',
+      '  resource: { attributes: {} },',
+      '  exporters: [new ExoticRejectingExporter()],',
+      '}))',
+    ])
+    assertSurvivedAndDiagnosed(run, /a value that cannot be described/)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The bound is per broken exporter, not per class name. Two exporters of one
+// class is a shape only a third party builds, and it is two things to fix: a
+// name-only key would diagnose whichever broke first and hide the other for
+// the life of the process, which is the diagnosability half of #1122 again in
+// miniature.
+test('two broken exporters of the same class are each diagnosed once', async () => {
+  class SameNameBrokenExporter {
+    /** @param {string} label */
+    constructor(label) { this.label = label }
+    /** @param {unknown[]} _records */
+    exportBatch(_records) { throw new Error(`broken exporter ${this.label}`) }
+  }
+  const stderr = await captureProcessStderr(async () => {
+    await withLoggerProvider(
+      [new SameNameBrokenExporter('one'), new SameNameBrokenExporter('two')],
+      () => {
+        const log = getLogger('cache')
+        log.warn('a record neither of them can take')
+        log.warn('and a second one')
+      }
+    )
+  })
+  const reports = stderr.split('\n').filter((line) => line.includes('telemetry_export_threw'))
+  assert.equal(reports.length, 2, 'one line per broken exporter, still not one per record')
+  assert.match(stderr, /broken exporter one/)
+  assert.match(stderr, /broken exporter two/)
+})
+
+// The other exporter shape, and the one that matters more. `exportBatch` is
+// typed as returning `unknown` precisely because an exporter may do its work
+// asynchronously, and an asynchronous exporter does not throw, it rejects: a
+// synchronous try/catch never sees it, and Node's default
+// unhandled-rejection policy ends the process. The mirror line does get
+// written, one tick before the process dies, so an in-process test that reads
+// captured stderr passes while the daemon is dying. These two have to be real
+// subprocesses, judged by exit status.
+
+/**
+ * Run `lines` as an ES module in a fresh node process, on top of two imports
+ * of the real observability sources and a tail that emits five refusals
+ * through the mirror and then says it is still alive.
+ *
+ * @param {string} root a scratch directory to write the module into
+ * @param {string[]} lines
+ * @returns {Promise<{ status: number|null, stdout: string, stderr: string }>}
+ */
+async function runModule(root, lines) {
+  const script = path.join(root, 'telemetry-probe.mjs')
+  const runtimeUrl = pathToFileURL(path.join(REPO_ROOT, 'src', 'core', 'observability', 'runtime.js')).href
+  const loggerUrl = pathToFileURL(path.join(REPO_ROOT, 'src', 'core', 'observability', 'logger.js')).href
+  await fs.writeFile(script, [
+    `import { logs, LoggerProvider } from '${runtimeUrl}'`,
+    `import { getLogger } from '${loggerUrl}'`,
+    ...lines,
+    "const log = getLogger('capture-spool', { mirrorStderr: true })",
+    "for (let i = 0; i < 5; i++) log.warn('a symlink stands on the spool sweep path', { error_kind: 'capture_spool_path_is_symlink' })",
+    "setTimeout(() => process.stdout.write('SURVIVED\\n'), 20)",
+    '',
+  ].join('\n'))
+  const out = spawnSync(process.execPath, [script], { encoding: 'utf8' })
+  return { status: out.status, stdout: out.stdout, stderr: out.stderr }
+}
+
+/**
+ * Both subprocess cases assert the same property: the process lived, the
+ * refusal was mirrored anyway, the broken component named itself and said
+ * what it rejected with, and it said it once rather than once per record.
+ *
+ * @param {{ status: number|null, stdout: string, stderr: string }} run
+ * @param {RegExp} threw what the broken component rejected with
+ */
+function assertSurvivedAndDiagnosed(run, threw) {
+  assert.equal(run.status, 0, 'a rejection must not end the process whose refusals it is dropping')
+  assert.match(run.stdout, /SURVIVED/, 'and the process is still running after the rejection settles')
+  assert.match(run.stderr, /capture_spool_path_is_symlink/, 'the mirror still wrote the refusal')
+  assert.match(run.stderr, /telemetry_export_threw/, 'and the broken component still names itself')
+  assert.match(run.stderr, threw, 'with what it rejected with')
+  const reports = run.stderr.split('\n').filter((line) => line.includes('telemetry_export_threw'))
+  assert.equal(reports.length, 1, 'still one line, not one per record it dropped')
+}
+
+test('an exporter that rejects after an await is diagnosed, and the process lives', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-refusal-async-'))
+  try {
+    const run = await runModule(root, [
+      'class AsyncRejectingExporter {',
+      '  async exportBatch() {',
+      '    await Promise.resolve()',
+      "    throw new Error('async exporter blew up after an await')",
+      '  }',
+      '}',
+      'logs.setGlobalLoggerProvider(new LoggerProvider({',
+      '  resource: { attributes: {} },',
+      '  exporters: [new AsyncRejectingExporter()],',
+      '}))',
+    ])
+    assertSurvivedAndDiagnosed(run, /async exporter blew up after an await/)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// And the same shape one seam out, for the foreign provider that
+// `setGlobalLoggerProvider` will accept from anyone.
+test('a foreign provider whose exportRecord rejects is diagnosed, and the process lives', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-refusal-async-foreign-'))
+  try {
+    const run = await runModule(root, [
+      'logs.setGlobalLoggerProvider({',
+      '  resource: { attributes: {} },',
+      '  async exportRecord() {',
+      '    await Promise.resolve()',
+      "    throw new Error('this provider is not ours and it rejects')",
+      '  },',
+      '})',
+    ])
+    assertSurvivedAndDiagnosed(run, /this provider is not ours and it rejects/)
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

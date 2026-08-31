@@ -60,10 +60,24 @@ export const trace = Object.freeze({
   },
 })
 
+/**
+ * Bumped on every `setGlobalLoggerProvider`. `getLogger`'s emit-seam guard
+ * has no provider to hang its one-line bound off, the way the exporter guard
+ * hangs its own off the provider instance, so it counts against this instead:
+ * a swapped-in provider is a different thing to diagnose and re-arms the line.
+ */
+let loggerProviderGeneration = 0
+
+/** The generation of the currently installed global logger provider. */
+export function currentLoggerProviderGeneration() {
+  return loggerProviderGeneration
+}
+
 export const logs = Object.freeze({
   /** @param {LoggerProvider} provider */
   setGlobalLoggerProvider(provider) {
     globalLoggerProvider = provider
+    loggerProviderGeneration += 1
   },
   /**
    * @param {string} name
@@ -97,6 +111,7 @@ export class TracerProvider {
   constructor({ resource, exporters = [] }) {
     this.resource = resource
     this.exporters = exporters
+    /** @type {Set<string>} */
     this.reportedExporterFailures = new Set()
   }
 
@@ -129,6 +144,7 @@ export class LoggerProvider {
   constructor({ resource, exporters = [] }) {
     this.resource = resource
     this.exporters = exporters
+    /** @type {Set<string>} */
     this.reportedExporterFailures = new Set()
   }
 
@@ -157,6 +173,7 @@ export class MeterProvider {
   constructor({ resource, exporters = [] }) {
     this.resource = resource
     this.exporters = exporters
+    /** @type {Set<string>} */
     this.reportedExporterFailures = new Set()
   }
 
@@ -313,7 +330,10 @@ class Logger {
     if (!provider) return
     const now = nowHrTime()
     const activeSpan = trace.getActiveSpan()
-    provider.exportRecord({
+    // Returned, not discarded. A globally installed provider that is not ours
+    // may hand back a promise, and `getLogger` guards what it gets back the
+    // same way it guards a synchronous throw.
+    return provider.exportRecord({
       loggerName: this.name,
       loggerVersion: this.version,
       resource: provider.resource,
@@ -439,6 +459,10 @@ export function getActiveSpan() {
  * contract structural, and keeps a broken exporter from taking down the
  * healthy ones queued behind it.
  *
+ * One consequence worth knowing when writing a fake: an `assert` placed
+ * inside a test exporter's `exportBatch` is now swallowed like any other
+ * throw, so a fake that asserts has to record instead and let the test assert.
+ *
  * @ref LLP 0329#stderr-mirror [constrained-by]: the channel of last resort cannot sit downstream of an exporter that can throw.
  * @template T
  * @param {'traces'|'logs'|'metrics'} channel
@@ -447,27 +471,92 @@ export function getActiveSpan() {
  * @param {Set<string>} reported which exporters have already been diagnosed
  */
 function exportGuarded(channel, exporters, batch, reported) {
-  for (const exporter of exporters) {
+  for (const [index, exporter] of exporters.entries()) {
     try {
-      exporter.exportBatch(batch)
+      // The seam is built in the two failure branches rather than up front:
+      // this loop runs once per record, and both in-tree exporters return
+      // nothing, so the healthy path allocates neither the object nor its key.
+      const result = exporter.exportBatch(batch)
+      if (result) guardTelemetryResult(result, exporterSeam(channel, exporter, index, reported))
     } catch (error) {
-      reportTelemetryFailure({
-        channel,
-        source: exporter?.constructor?.name || 'exporter',
-        error,
-        reported,
-      })
+      reportTelemetryFailure({ ...exporterSeam(channel, exporter, index, reported), error })
     }
   }
+}
+
+/**
+ * Name one exporter for the report, and give the one-line bound a key that
+ * distinguishes it from a sibling of the same class. Two exporters of one
+ * class is a shape only a third party builds (two OTLP endpoints, say), and
+ * it is two things to fix: on a name-only key the first one to break consumes
+ * the report and the second is undiagnosable for the life of the process.
+ *
+ * @param {'traces'|'logs'|'metrics'} channel
+ * @param {unknown} exporter
+ * @param {number} index
+ * @param {Set<string>} reported
+ */
+function exporterSeam(channel, exporter, index, reported) {
+  const source = exporterName(exporter)
+  return { channel, source, key: `${source}#${index}`, reported }
+}
+
+/**
+ * Name an exporter for the report, without trusting it to have a name. The
+ * whole premise is an exporter we did not write, and a Proxy with a throwing
+ * `get` trap would otherwise throw here rather than in `exportBatch`, which
+ * is outside every guard below.
+ *
+ * @param {unknown} exporter
+ */
+function exporterName(exporter) {
+  try {
+    const name = /** @type {{ constructor?: { name?: unknown } }} */ (exporter)?.constructor?.name
+    return typeof name === 'string' && name.length > 0 ? name : 'exporter'
+  } catch {
+    return 'exporter'
+  }
+}
+
+/**
+ * Guard the other half of the same contract: what an export *returns*.
+ *
+ * `exportBatch` is typed as returning `unknown` because an exporter is free to
+ * do its work asynchronously, and an asynchronous one does not throw, it
+ * rejects. A synchronous try/catch never sees that, and on Node's default
+ * unhandled-rejection policy the rejection ends the process a tick after the
+ * mirror wrote its line: strictly worse than the dropped record this guard
+ * exists to bound, and the same silencing by another route, since a dead
+ * daemon reports no further refusals either. So a returned thenable gets the
+ * same treatment, and the same one-line bound, as a synchronous throw.
+ *
+ * The seam is read only on the failure path, so a caller on a hot path can
+ * pass one that costs something to describe.
+ *
+ * @param {unknown} result whatever the telemetry seam returned
+ * @param {{ channel: 'traces'|'logs'|'metrics', source: string, key?: string, reported: Set<string> }} seam
+ */
+export function guardTelemetryResult(result, seam) {
+  if (!result || (typeof result !== 'object' && typeof result !== 'function')) return
+  const thenable = /** @type {{ then?: unknown }} */ (result)
+  if (typeof thenable.then !== 'function') return
+  Promise.resolve(result).catch((error) => {
+    // A handler that throws is an unhandled rejection again, which is the
+    // outcome this function exists to prevent.
+    try {
+      reportTelemetryFailure({ ...seam, error })
+    } catch { /* nothing left to say it with */ }
+  })
 }
 
 /**
  * Say on stderr, once, that a telemetry component threw and its export was
  * dropped. Losing the telemetry is acceptable; losing the refusal is not, but
  * neither is a broken exporter that nobody can diagnose. Bounded to one line
- * per source because the throwing call sits on the path of every record: an
- * exporter broken by configuration would otherwise print once per row for the
- * life of the daemon.
+ * per broken component (`key`, which defaults to `source`) because the
+ * throwing call sits on the path of every record: an exporter broken by
+ * configuration would otherwise print once per row for the life of the
+ * daemon.
  *
  * Deliberately `process.stderr`, like the mirror in `getLogger`, and for the
  * same reason: this is the report that fires when the structured substrate is
@@ -476,13 +565,15 @@ function exportGuarded(channel, exporters, batch, reported) {
  * @param {object} args
  * @param {'traces'|'logs'|'metrics'} args.channel
  * @param {string} args.source the exporter class, or the emit seam, that threw
+ * @param {string} [args.key] what the one-line bound is counted against, when
+ *   the source name alone does not identify the thing that threw
  * @param {unknown} args.error
  * @param {Set<string>} args.reported
  */
-export function reportTelemetryFailure({ channel, source, error, reported }) {
-  if (reported.has(source)) return
-  reported.add(source)
-  const message = error instanceof Error ? error.message : String(error)
+export function reportTelemetryFailure({ channel, source, key = source, error, reported }) {
+  if (reported.has(key)) return
+  reported.add(key)
+  const message = describeThrown(error)
   const attributes = {
     hyp_component: 'observability',
     hyp_operation: `observability.export_${channel}`,
@@ -496,15 +587,56 @@ export function reportTelemetryFailure({ channel, source, error, reported }) {
   } catch { /* stderr itself is gone; there is nowhere left to say so */ }
 }
 
-/** @param {Array<{ forceFlush?: () => Promise<void>|void }>} exporters */
+/**
+ * Say what was thrown, for a value that need not be an `Error` and need not
+ * be convertible to a string: `String(Object.create(null))` is a `TypeError`,
+ * and one thrown from here would escape the guard that called us.
+ *
+ * @param {unknown} error
+ */
+function describeThrown(error) {
+  try {
+    if (error instanceof Error && typeof error.message === 'string') return error.message
+    return String(error)
+  } catch {
+    return 'a value that cannot be described'
+  }
+}
+
+/**
+ * Flush every exporter, absorbing a synchronous throw as well as a rejection.
+ *
+ * `Promise.allSettled` absorbs only rejections: a `forceFlush` that throws
+ * synchronously throws out of the `map` callback before the array exists, so
+ * it rejected the provider's own `forceFlush`/`shutdown` into the caller and
+ * left every exporter after it neither flushed nor closed. Same contract as
+ * {@link exportGuarded}, one seam later (hyparam/hypaware#1122).
+ *
+ * @param {Array<{ forceFlush?: () => Promise<void>|void }>} exporters
+ */
 async function flushExporters(exporters) {
-  await Promise.allSettled(exporters.map((exporter) => exporter.forceFlush?.()))
+  await Promise.allSettled(exporters.map((exporter) => settled(() => exporter.forceFlush?.())))
 }
 
 /** @param {Array<{ forceFlush?: () => Promise<void>|void, shutdown?: () => Promise<void>|void }>} exporters */
 async function shutdownExporters(exporters) {
   await flushExporters(exporters)
-  await Promise.allSettled(exporters.map((exporter) => exporter.shutdown?.()))
+  await Promise.allSettled(exporters.map((exporter) => settled(() => exporter.shutdown?.())))
+}
+
+/**
+ * Run `fn` and hand back its outcome as a promise either way, so a
+ * synchronous throw reaches `Promise.allSettled` as a rejection instead of
+ * unwinding the `map` that was building its input.
+ *
+ * @param {() => unknown} fn
+ */
+function settled(fn) {
+  try {
+    return Promise.resolve(fn())
+  } catch (error) {
+    return Promise.reject(error)
+  }
 }
 
 function nowHrTime() {

@@ -3,7 +3,14 @@
 import { JsonlLogRecordExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
 import { Attr, buildAttrs } from './attrs.js'
-import { logs, LoggerProvider, reportTelemetryFailure, SeverityNumber } from './runtime.js'
+import {
+  currentLoggerProviderGeneration,
+  guardTelemetryResult,
+  logs,
+  LoggerProvider,
+  reportTelemetryFailure,
+  SeverityNumber,
+} from './runtime.js'
 import { OtlpLogExporter } from './otlp_exporters.js'
 
 /**
@@ -13,10 +20,34 @@ import { OtlpLogExporter } from './otlp_exporters.js'
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
 /**
- * Emit seams already diagnosed on stderr. Process-wide and bounded to one
- * line per seam: see {@link reportTelemetryFailure}.
+ * Emit seams already diagnosed on stderr, keyed by {@link EMIT_SEAM}: see
+ * {@link reportTelemetryFailure} for what the bound buys.
+ *
+ * @type {Set<string>}
  */
 const EMIT_FAILURES = new Set()
+
+/**
+ * The one emit seam this module guards. Keyed by the installed provider's
+ * generation rather than by the seam's name alone: the exporter guard bounds
+ * itself per provider instance, and a seam bounded process-wide would let the
+ * first broken provider consume the report for every provider installed after
+ * it, which is a broken provider nobody can diagnose by another route.
+ *
+ * The key is a getter so the quiet path pays nothing for it: with no provider
+ * installed the emit returns nothing and neither guard ever reads it. The set
+ * therefore holds one entry per provider that was installed and broke, which
+ * is at most one per process in practice, because `installObservability` is
+ * idempotent and installs exactly one.
+ *
+ * @type {{ channel: 'logs', source: string, key: string, reported: Set<string> }}
+ */
+const EMIT_SEAM = {
+  channel: 'logs',
+  source: 'Logger.emit',
+  get key() { return `Logger.emit#${currentLoggerProviderGeneration()}` },
+  reported: EMIT_FAILURES,
+}
 
 const SEVERITY_MAP = Object.freeze({
   debug: SeverityNumber.DEBUG,
@@ -109,14 +140,17 @@ export function getLogger(component, opts = {}) {
     // The exporters are guarded at the provider now, so this catch is the
     // second seam, for a globally installed provider that is not ours.
     try {
-      otelLogger.emit({
+      // The result too, not just the throw: a foreign provider whose
+      // `exportRecord` is async rejects rather than throws, and an unhandled
+      // rejection ends the process rather than skipping one line.
+      guardTelemetryResult(otelLogger.emit({
         severityNumber,
         severityText: SEVERITY_TEXT[severityNumber],
         body: message,
         attributes,
-      })
+      }), EMIT_SEAM)
     } catch (error) {
-      reportTelemetryFailure({ channel: 'logs', source: 'Logger.emit', error, reported: EMIT_FAILURES })
+      reportTelemetryFailure({ ...EMIT_SEAM, error })
     }
     if (mirror) {
       const tag = SEVERITY_TEXT[severityNumber]
