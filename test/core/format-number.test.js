@@ -121,8 +121,28 @@ const COUNT_RENDERERS = ['src/core/commands/sync.js', 'src/core/query/overview.j
  * same needle runs over every shipped module further down, so relocating a
  * host call out of these two files does not hide it, it only changes which
  * line the report names.
+ *
+ * `localeCompare` is here for the same reason as the rest, one step over from
+ * spelling to order. A bare `a.localeCompare(b)` asks the host's locale and
+ * ICU build how two strings sort, so a listing ordered by it prints one way on
+ * an `en-US` box, another on a `de-DE` one, and a third under `--without-intl`
+ * where it collapses to code unit order. That was the shape of 19 shipped
+ * comparators until #1142 moved them to `compareStrings`, several of them
+ * ordering what `hyp status` and `hyp --help` put on screen. Sorting is not
+ * formatting, but "what this prints moves with the machine" is the same
+ * hazard and wants the same gate, so the constant's name is read as host
+ * *presentation* rather than host spelling.
+ *
+ * Each alternative carries a left `\b`. Without one, `toLocale` matches inside
+ * any identifier that happens to contain it, and a module holding
+ * `const autoLocaleDetect = opts.autoLocaleDetect === true` reds twice while
+ * consulting nothing (#1142 item 2). Every real call has a non-word character
+ * before the `t` or the `l` (`n.toLocaleString`, `d.toLocaleDateString`,
+ * `n['toLocale' + 'String']`, `a.localeCompare`), so the boundary frees
+ * identifier substrings and costs no coverage. The cases below pin both
+ * halves of that.
  */
-const HOST_FORMATTING = /toLocale|\bIntl\b/
+const HOST_FORMATTING = /\btoLocale|\bIntl\b|\blocaleCompare\b/
 
 /**
  * The index of the `//` that opens a line comment in `line`, or -1.
@@ -255,6 +275,24 @@ test('the gate reads code and not the comments about it', () => {
     "return 'https://hyparam.dev/rows ' + n.toLocaleString()",
   ])
   assert.deepEqual(flagged('  /** @returns {string} the toLocaleString spelling */'), [])
+
+  // Order is presentation too, so the host's collation is in the needle.
+  assert.deepEqual(flagged('  rows.sort((a, b) => a.name.localeCompare(b.name))'), [
+    '  rows.sort((a, b) => a.name.localeCompare(b.name))',
+  ])
+
+  // Each alternative is left-anchored on a word boundary, so an identifier
+  // that merely carries one as an interior substring is not a host call and is
+  // not reported. Without the boundary this module reds twice while consulting
+  // nothing, which is a maintainer sent to fix correct code (#1142 item 2).
+  assert.deepEqual(flagged('  const autoLocaleDetect = opts.autoLocaleDetect === true'), [])
+  assert.deepEqual(flagged('  return autoLocaleDetect'), [])
+  assert.deepEqual(flagged('  const nonLocaleCompare = compareStrings'), [])
+  // The boundary frees identifier substrings and nothing else: every real call
+  // has a non-word character in front of it, including the split-string one.
+  assert.deepEqual(flagged("  return n['toLocale' + 'String']()"), [
+    "  return n['toLocale' + 'String']()",
+  ])
 
   // Blanking keeps the line numbering, so a report still points at the line.
   assert.equal(codeLines('// a\n// b\nreturn n.toLocaleString()').length, 3)
@@ -476,11 +514,11 @@ test('the only shipped module that asks the host how to format is the one that m
   assert.deepEqual(
     offenders,
     [],
-    'a shipped module formats through the host, so what it prints moves with ' +
-      'the machine it runs on. Render counts through groupThousands. If the ' +
-      'value really is meant to be local, give it a named helper the way ' +
-      'formatFirstSyncDeadline is one, and add the module to ' +
-      'HOST_FORMATTING_ALLOWED with the reason'
+    'a shipped module presents through the host, so what it prints moves with ' +
+      'the machine it runs on. Render counts through groupThousands, and order ' +
+      'strings through compareStrings. If the value really is meant to be ' +
+      'local, give it a named helper the way formatFirstSyncDeadline is one, ' +
+      'and add the module to HOST_FORMATTING_ALLOWED with the reason'
   )
 
   // The other half of equality. An exemption that no longer excuses a call is
@@ -526,9 +564,12 @@ test('every shipped module that renders counts through the grouping is named in 
   assert.deepEqual(
     importers.slice().sort(),
     COUNT_RENDERERS.slice().sort(),
-    'a shipped module renders counts through groupThousands without being in ' +
-      'COUNT_RENDERERS, so neither the host-formatting scan nor the delegation ' +
-      'pin covers it. Add it to COUNT_RENDERERS, and give whatever renders its ' +
-      'digits the same delegation pin formatCount has'
+    'COUNT_RENDERERS no longer names exactly the shipped modules that import ' +
+      'groupThousands, so a count surface is either uncovered by the scan and ' +
+      'the delegation pin or registered for a module that no longer renders ' +
+      'one. The diff says which side gained: if the tree gained the importer, ' +
+      'add it to COUNT_RENDERERS and give whatever renders its digits the same ' +
+      'delegation pin formatCount has; if COUNT_RENDERERS holds a module that ' +
+      'has stopped importing the grouping, drop the entry'
   )
 })

@@ -1,6 +1,7 @@
 // @ts-check
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
+import { compareStrings } from '../util/compare_strings.js'
 
 /**
  * @import { PluginActivationContext, SourceContribution, SourceStatus, StartedSource } from '../../../hypaware-plugin-kernel-types.js'
@@ -59,7 +60,7 @@ export function createSourceRegistry() {
   }
 
   function list() {
-    return Array.from(contributions.values()).sort((a, b) => a.name.localeCompare(b.name))
+    return Array.from(contributions.values()).sort((a, b) => compareStrings(a.name, b.name))
   }
 
   /**

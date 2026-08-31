@@ -4,6 +4,7 @@ import { Attr, withSpan } from '../observability/index.js'
 import { collectHypAwareStatus, describeMaintenanceSkipReasons } from '../daemon/status.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { sanitizeLabel } from '../util/json_util.js'
+import { compareStrings } from '../util/compare_strings.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 
@@ -1226,5 +1227,5 @@ function inferDatasetsFromPlugins(activePlugins) {
       { name: 'traces', plugin: '@hypaware/otel' }
     )
   }
-  return datasets.sort((a, b) => a.name.localeCompare(b.name))
+  return datasets.sort((a, b) => compareStrings(a.name, b.name))
 }

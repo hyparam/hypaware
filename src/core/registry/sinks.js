@@ -1,6 +1,7 @@
 // @ts-check
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
+import { compareStrings } from '../util/compare_strings.js'
 
 /**
  * @import { SinkContribution, SinkCreateContext, SinkEncoder, SinkSupportTag, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
@@ -75,9 +76,7 @@ export function createSinkRegistry() {
   }
 
   function list() {
-    return Array.from(handles.values()).sort((a, b) =>
-      a.instanceName.localeCompare(b.instanceName)
-    )
+    return Array.from(handles.values()).sort((a, b) => compareStrings(a.instanceName, b.instanceName))
   }
 
   /**
