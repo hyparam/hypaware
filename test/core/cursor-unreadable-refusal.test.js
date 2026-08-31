@@ -251,3 +251,43 @@ test('a partition evicted while unreadable warns again when it comes back', asyn
   }
 })
 
+test('a cursor.json that parses to anything but an object is unreadable', async () => {
+  // Only `null` makes the field reads throw. An array, a number, a string
+  // and a boolean all answer `undefined` to `.epoch`, so without a guard
+  // they read as an epoch-0 cursor: `walkForRetired` then takes `epoch=0`
+  // for the live generation, the real `table/` matches no live name, and
+  // the orphan sweep removes it. Silently, and in the deleting direction.
+  for (const bytes of ['[]', '5', '"x"', 'true', 'null']) {
+    const partition = await makePartition()
+    try {
+      await fs.mkdir(path.join(partition, 'table'), { recursive: true })
+      await writeRawCursor(partition, bytes)
+      const lines = await linesFrom(() => {
+        assert.equal(tryReadCursorSync(partition), null, `${bytes} is not a cursor`)
+      }, REFUSAL)
+      assert.equal(lines.length, 1, `${bytes} is refused out loud, not read as epoch 0`)
+    } finally {
+      await fs.rm(path.dirname(partition), { recursive: true, force: true })
+    }
+  }
+})
+
+test('a read failure that is not ENOENT leaves the refusal standing', async () => {
+  // The bytes are still whatever they were, so the condition has not ended
+  // and nothing may retract it. Only an absent cursor is "no cursor".
+  const partition = await makePartition()
+  try {
+    await writeRawCursor(partition, '{ not json')
+    assert.equal((await linesFrom(() => { tryReadCursorSync(partition) }, REFUSAL)).length, 1)
+
+    // A directory in the cursor's place, not a chmod: EISDIR means the same
+    // thing to a suite running as root, where mode bits do not.
+    await fs.rm(path.join(partition, 'cursor.json'))
+    await fs.mkdir(path.join(partition, 'cursor.json'))
+    assert.equal((await linesFrom(() => {
+      assert.equal(tryReadCursorSync(partition), null)
+    }, RECOVERY)).length, 0, 'a read that itself failed retracts nothing')
+  } finally {
+    await fs.rm(path.dirname(partition), { recursive: true, force: true })
+  }
+})

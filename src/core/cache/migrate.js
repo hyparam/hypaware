@@ -105,14 +105,14 @@ function resolveIcebergDirForLegacy(partition) {
  * longer discovered.
  *
  * The scan above this read every legacy cursor, so a poisoned one has
- * already armed an escape report keyed on this path; the rename then leaves
+ * already armed a standing cursor refusal keyed on this path; the rename leaves
  * that path with nothing behind it to ever clear the entry. It is the third
  * site where a whole partition directory stops existing, and it clears for
  * the same reason the two in `retention.js` do (LLP 0334#eviction-clears):
  * a partition later recreated at this path must warn as the transition it
  * is, not be throttled against a window armed for a directory that is gone.
  *
- * @ref LLP 0334#eviction-clears [implements]: no escape report outlives the partition directory it is keyed on.
+ * @ref LLP 0334#eviction-clears [implements]: no standing cursor refusal outlives the partition directory it is keyed on.
  * @param {string} partitionPath
  */
 async function retirePartition(partitionPath) {

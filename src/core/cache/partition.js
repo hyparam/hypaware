@@ -85,27 +85,48 @@ export function tryReadCursorSync(partitionDir) {
   let raw
   try {
     raw = fs.readFileSync(path.join(partitionDir, CURSOR_FILE), 'utf8')
-  } catch {
+  } catch (err) {
     noteEscapeCleared(partitionDir)
-    noteUnreadableCleared(partitionDir)
+    // Only "there is no cursor here" retires the unreadable condition. Any
+    // other read failure (an EACCES, an EIO, a directory where the file
+    // was) is that condition rather than its end: the bytes on disk are
+    // still whatever they were, so retracting on one would put the
+    // partition back into the silence this refusal exists to remove. The
+    // escape condition is genuinely unproven either way, which is why it
+    // clears above (LLP 0334#recovery-is-announced).
+    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') {
+      noteUnreadableCleared(partitionDir)
+    } else {
+      reportUnreadableCursor(partitionDir, err)
+    }
     return null
   }
   try {
     const parsed = JSON.parse(raw)
+    // `JSON.parse` answers with any JSON value, and only `null` makes the
+    // field reads below throw: an array, a number, a string and a boolean
+    // all answer `undefined` to `.epoch` and would synthesize an epoch-0
+    // cursor. That is the exact value `walkForRetired` reads a null for
+    // rather than trust, because a live `table/` generation under a
+    // synthesized `epoch=0` matches no live name and goes to the orphan
+    // sweep (LLP 0323#whole-cursor).
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      const kind = parsed === null ? 'null' : Array.isArray(parsed) ? 'an array' : `a ${typeof parsed}`
+      throw new TypeError(`cursor.json holds ${kind}, not a cursor object`)
+    }
     /** @type {PartitionCursor} */
     const cursor = {
       epoch: typeof parsed.epoch === 'number' ? parsed.epoch : 0,
       rowCount: typeof parsed.rowCount === 'number' ? parsed.rowCount : 0,
       compaction: parsed.compaction ?? null,
     }
-    // Here, and not one line earlier: the field reads above are the ones
-    // that throw when the bytes parse to something that is not an object
-    // (`null` is valid JSON and has no `epoch`), so this is the first point
-    // at which the file is known to have read as a cursor. Clearing right
-    // after `JSON.parse` would retract and re-arm the refusal on every read
-    // of such a file, which is the throttle spending itself on a standing
-    // condition (LLP 0332#not-a-pass-object). Every refusal below this line
-    // is an escape refusal, which carries its own report.
+    // Here, and not one line earlier: the guard above is what decides
+    // whether the bytes read as a cursor at all, so this is the first point
+    // at which they are known to. Clearing right after `JSON.parse` would
+    // retract and re-arm the refusal on every read of a file that parses to
+    // something that is not a cursor, which is the throttle spending itself
+    // on a standing condition (LLP 0332#not-a-pass-object). Every refusal
+    // below this line is an escape refusal, which carries its own report.
     noteUnreadableCleared(partitionDir)
     if (parsed.layout === 'source-table' || parsed.layout === 'epoch') {
       cursor.layout = parsed.layout
@@ -448,7 +469,7 @@ function noteEscapeCleared(partitionDir) {
 function noteUnreadableCleared(partitionDir) {
   clearStandingRefusal(unreadableReportedAt, partitionDir, () => {
     getLogger('cache', { mirrorStderr: true }).info(
-      'the unreadable-cursor refusal for this partition has cleared; this read did not fail to read a cursor',
+      'the unreadable-cursor refusal for this partition has cleared; this read did not refuse the cursor as unreadable',
       {
         [Attr.OPERATION]: 'cache.cursor_read',
         [Attr.STATUS]: 'ok',
@@ -469,8 +490,12 @@ function noteUnreadableCleared(partitionDir) {
  * does not parse produced the same permanent skip with nothing on any
  * channel, so a partition stopped compacting, stopped being swept, and read
  * as empty with no line anywhere saying why. The refusal is permanent by
- * design and safe in direction (skip, never delete), and that is defensible
- * only while it is loud, which it was for one of the two exits.
+ * design, and it is not purely a skip: every strict reader does skip, but
+ * retention's `tick()` reads through the lenient `readCursorSync`, so an
+ * unreadable cursor still routes to `evictLegacyPartition` and takes the
+ * whole partition on directory mtime alone. A permanent refusal that can
+ * end in a delete is defensible only while it is loud, and it was loud for
+ * one of its two exits.
  *
  * Same shape as the escape refusal because it is the same signal: `warn`
  * rather than `error` (nothing failed and the tick carries on), mirrored to
