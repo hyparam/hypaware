@@ -63,21 +63,21 @@ put on the retired pick gate's accept row) and the evidence (what was
 found), in the one line the happy path is guaranteed to read. Both halves
 have to stay: an express accept never opens the menu whose per-row
 summaries carry the specifics, so a sentence that only named the tools
-would leave "this changes your tools' configuration" stated nowhere on the
-path most users take. The names are the pick
-lane's own default rows from one computation (`resolvePickSeeding`, shared
-with the lane), joined plainly; fleet-locked rows appear by name like any
-other, and the fleet detail stays on the later screens and the accept
-narration, not in this sentence.
+would leave "this changes your tools' configuration" stated nowhere on
+the path most users take. The names are the pick lane's own default rows
+from one computation (`resolvePickSeeding`, shared with the lane), joined
+plainly; fleet-locked rows appear by name like any other, and the fleet
+detail stays on the later screens and the accept narration, not in this
+sentence.
 
 `sync` is claimed only on an enrolled run. On a solo machine nothing
 forwards, so the label drops to "Record everything" and the Customize
-summary to "Choose what to record." (the accept summary is the same
+summary to "Choose what to record." The accept summary is the same
 sentence either way: what it discloses is the configuring, which happens
-on a solo machine too). The
-new-folder policy that rides with an enrolled accept is deliberately not
-in the row copy - it is stated by the accept narration (#narrate) - so the
-row stays one readable sentence about the tools.
+on a solo machine too. The new-folder policy that rides with an enrolled
+accept is deliberately not in the row copy - it is stated by the accept
+narration (#narrate) - so the row stays one readable sentence about the
+tools.
 
 <a id="decline"></a>**Declining asks the real questions, linearly.** The
 per-lane defaults gates ([LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-gate),
