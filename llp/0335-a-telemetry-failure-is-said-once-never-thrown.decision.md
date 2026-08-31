@@ -192,8 +192,10 @@ inherits this sentence.
 - `test/core/containment-refusal-stderr.test.js` pins every clause: the
   mirror surviving a throwing and a rejecting exporter, the per-component,
   per-index, per-operation and per-generation bounds, the export line byte for
-  byte, the channel the close report names, the exotic thrown values, a report
-  that itself throws, and the silence of every healthy path.
+  byte, the channel the close report names, the mark taken before the write
+  and the cap on the message, the name each settled result carries, the exotic
+  thrown values, a report that itself throws without stranding the provider it
+  was diagnosing, and the silence of every healthy path.
 
 ## References {#references}
 

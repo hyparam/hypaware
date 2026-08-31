@@ -29,7 +29,7 @@ import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
 import { getLogger } from '../../src/core/observability/logger.js'
-import { logs, LoggerProvider, TracerProvider } from '../../src/core/observability/runtime.js'
+import { logs, trace, LoggerProvider, TracerProvider } from '../../src/core/observability/runtime.js'
 import { Attr } from '../../src/core/observability/attrs.js'
 
 /**
@@ -733,6 +733,163 @@ test('a report that throws does not reject the shutdown it was diagnosing', asyn
   await captureProcessStderr(async () => {
     await provider.shutdown()
   })
+})
+
+// Not rejecting is only half of what that guard buys. The other half is the
+// line after the await: a rejecting `shutdown` skips
+// `globalTracerProvider = null`, leaving a provider that failed to close
+// still installed and still taking every later span. Pinned on the tracer
+// channel because its global slot is the one readable from outside.
+//
+// @ref LLP 0335#never-throws [tests]: a report that throws cannot strand the provider it was reporting on.
+test('a report that throws still lets the provider deregister itself', async () => {
+  class RejectingCloseExporter {
+    /** @param {unknown[]} _spans */
+    exportBatch(_spans) {}
+    async shutdown() { throw new Error('close failed') }
+  }
+  const provider = new TracerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new RejectingCloseExporter()]),
+  })
+  provider.register()
+  assert.equal(trace.getTracerProvider(), provider, 'the provider under test is the installed one')
+  provider.reportedExporterFailures = /** @type {any} */ ({
+    has() { throw new Error('the report itself is broken') },
+    add() {},
+  })
+  await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+  assert.notEqual(trace.getTracerProvider(), provider, 'and it still deregistered itself')
+})
+
+// `reported.add(key)` precedes the `process.stderr.write`, so a write syscall
+// that itself throws (an EPIPE'd stderr) spends the report instead of being
+// retried once per record for the life of the daemon. LLP 0335#one-line calls
+// that trade deliberate and nothing pinned it: moving the `add` below the
+// write leaves every other test green.
+//
+// @ref LLP 0335#one-line [tests]: the report is marked spent before the write, so a dead stderr is not retried per record.
+test('a report whose own write throws is spent, not retried once per record', async () => {
+  class BrokenExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) { throw new Error('boom') }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new BrokenExporter()]),
+  })
+  const realWrite = process.stderr.write.bind(process.stderr)
+  let attempts = 0
+  process.stderr.write = /** @type {typeof process.stderr.write} */ (() => {
+    attempts += 1
+    throw new Error('EPIPE')
+  })
+  try {
+    for (let index = 0; index < 5; index++) {
+      provider.exportRecord(/** @type {any} */ ({ body: 'a record this exporter cannot take', attributes: {} }))
+    }
+  } finally {
+    process.stderr.write = realWrite
+  }
+  assert.equal(attempts, 1, 'one write attempt is the whole budget; a stderr that is gone is not retried per record')
+})
+
+// The other half of what keeps the report safe on the path of every record:
+// one line, and a bounded one. An exporter that throws a megabyte of context
+// would otherwise put all of it in the daemon log.
+//
+// @ref LLP 0335#one-line [tests]: the message is capped, so a broken exporter cannot spill its whole context into the log.
+test('an enormous thrown message is capped, and still one line', async () => {
+  class VerboseBrokenExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) { throw new Error('x'.repeat(5000)) }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new VerboseBrokenExporter()]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    provider.exportRecord(/** @type {any} */ ({ body: 'a record', attributes: {} }))
+  })
+  assert.equal(stderr.split('\n').filter(Boolean).length, 1, 'still one line')
+  const attributes = JSON.parse(stderr.slice(stderr.indexOf('{'), stderr.lastIndexOf('}') + 1))
+  assert.equal(attributes.error_message.length, 200, 'the message is capped at the recorded length')
+})
+
+// The settled results are labelled from names taken before the await, not
+// read back off `provider.exporters` afterwards: that field is public and
+// mutable, so a name read on the far side of the await can belong to a
+// different exporter than the result it is about to describe. Nothing
+// in-tree rewrites the array mid-shutdown, which is exactly why the
+// precaution is invisible to every other test.
+//
+// @ref LLP 0335#close-failures [tests]: a result is named for the exporter that produced it, not for whatever sits at its index later.
+test('a close report names the exporter that failed, even if the array is rewritten mid-shutdown', async () => {
+  class Impostor {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+  }
+  class FailingClose {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async shutdown() { throw new Error('close failed') }
+  }
+  class RewritesTheArray {
+    /** @param {{ exporters: unknown[] }} provider */
+    constructor(provider) { this.provider = provider }
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async shutdown() { this.provider.exporters.splice(0, 2, new Impostor(), new Impostor()) }
+  }
+  /** @type {any} */
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new FailingClose()]),
+  })
+  provider.exporters.push(new RewritesTheArray(provider))
+  const stderr = await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+  assert.match(stderr, /"telemetry_source":"FailingClose"/, 'the report names the exporter that actually failed')
+  assert.doesNotMatch(stderr, /Impostor/, 'not whatever took its index while the close was in flight')
+})
+
+// Same precaution one seam earlier. `flushExporters` takes its own names
+// before its own await, and a flush is the path a long-lived daemon walks
+// repeatedly, so the two are pinned separately rather than trusting the
+// shutdown case to cover both.
+//
+// @ref LLP 0335#close-failures [tests]: the flush path names its results from before its await too.
+test('a flush report names the exporter that failed, even if the array is rewritten mid-flush', async () => {
+  class Impostor {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+  }
+  class FailingFlush {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async forceFlush() { throw new Error('flush failed') }
+  }
+  class RewritesTheArray {
+    /** @param {{ exporters: unknown[] }} provider */
+    constructor(provider) { this.provider = provider }
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async forceFlush() { this.provider.exporters.splice(0, 2, new Impostor(), new Impostor()) }
+  }
+  /** @type {any} */
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new FailingFlush()]),
+  })
+  provider.exporters.push(new RewritesTheArray(provider))
+  const stderr = await captureProcessStderr(async () => {
+    await provider.forceFlush()
+  })
+  assert.match(stderr, /"telemetry_source":"FailingFlush"/, 'the report names the exporter that actually failed')
+  assert.doesNotMatch(stderr, /Impostor/, 'not whatever took its index while the flush was in flight')
 })
 
 // And what the diagnosis itself must survive. `String(Object.create(null))`
