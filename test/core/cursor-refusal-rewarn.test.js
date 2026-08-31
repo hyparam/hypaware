@@ -223,3 +223,39 @@ test('a refusal the log channel could not deliver is not recorded as said', asyn
     await fs.rm(path.dirname(partition), { recursive: true, force: true })
   }
 })
+
+test('two poisoned partitions of one dataset warn independently', async () => {
+  // Sibling partitions under one dataset directory, carrying the *same*
+  // rejected value, so neither the changed-value rule nor a differing parent
+  // can carry this: only a key that is the partition itself makes both
+  // speak. The real layout puts `client=<c>/date=<d>` siblings under one
+  // dataset, so a systematically poisoned dataset is exactly this shape, and
+  // a window keyed one level up would report one partition and go quiet
+  // about every other - silence, which is the degradation LLP 0332
+  // #not-a-pass-object says this throttle may never have.
+  const dataset = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cursor-rewarn-pair-'))
+  try {
+    const a = path.join(dataset, 'client=alpha', 'date=2026-08-30')
+    const b = path.join(dataset, 'client=alpha', 'date=2026-08-31')
+    await fs.mkdir(a, { recursive: true })
+    await fs.mkdir(b, { recursive: true })
+    await writeCursor(a, '../out')
+    await writeCursor(b, '../out')
+
+    const first = refusalLines(() => {
+      assert.equal(tryReadCursorSync(a), null)
+      assert.equal(tryReadCursorSync(b), null)
+    })
+    assert.equal(first.length, 2, 'one line per poisoned partition; neither absorbs the other')
+    assert.ok(first.some((line) => line.includes('date=2026-08-30')), 'the first partition is named')
+    assert.ok(first.some((line) => line.includes('date=2026-08-31')), 'and so is the second')
+
+    const second = refusalLines(() => {
+      assert.equal(tryReadCursorSync(b), null)
+      assert.equal(tryReadCursorSync(a), null)
+    })
+    assert.equal(second.length, 0, 'and each partition still throttles its own standing refusal')
+  } finally {
+    await fs.rm(dataset, { recursive: true, force: true })
+  }
+})

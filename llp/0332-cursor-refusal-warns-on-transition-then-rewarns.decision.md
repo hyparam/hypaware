@@ -163,6 +163,13 @@ throttle is suppressing the signal outright:
   `cursor.json` then turns unparseable, both warn afresh when the poison
   returns inside the window. A reset that a refactor drops must fail a
   test, because the failure it reopens is a swallowed refusal.
+- The key is pinned to be the partition and nothing above it: two sibling
+  partitions of one dataset, poisoned with the same value, cost two lines
+  and then throttle separately. A window keyed a level up passes every
+  other assertion here while reporting the first poisoned partition of a
+  dataset and going quiet about the rest, which is the shape a
+  systematically poisoned source takes in the real `client=`/`date=`
+  layout.
 - The two narrowing rules are pinned in the direction that costs silence: a
   wall clock stepped backwards under a live entry still warns, and a warn
   the log channel could not deliver arms no window, so the next read says
@@ -184,8 +191,12 @@ throttle is suppressing the signal outright:
 - Within a window this process can prove it holds, a refusing read is
   silent on both channels. An operator counting lines can no longer count
   reads; they were never a meaningful count, which is what this decision
-  settles. The two exceptions both err loud: an entry whose age reads
-  negative under a stepped clock, and a warn that never left the process.
+  settles. The exceptions all err loud, never quiet: an entry whose age
+  reads negative under a stepped clock, and a warn the log call raised on.
+  The second covers a line that reached nobody and, equally, one that
+  reached only the structured channel before the stderr mirror threw, which
+  then re-delivers per read. That is the pre-throttle rate on a channel that
+  is working, and it is the direction this decision tolerates.
 - Recovery is not announced, unlike `control.js`'s
   `daemon.control_scan_recovered`. Silence after a refusal therefore reads
   as either "healed" or "still poisoned, the next line is not due yet", and
