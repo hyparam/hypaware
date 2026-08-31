@@ -140,10 +140,22 @@ with `kind: 'cache_flush_failing'`, `severity: 'warning'`, a message naming
 the count and the newest failing table, and the repair pair the maintenance
 analog established: enumerate first (`hyp status --json`, per
 #count-beside-cap), retry second (`hyp query refresh`, whose forced flush
-clears the stamp on success per LLP 0322#clearing). The `[refresh cooling
-down]` tag on the capture-health line now points at a diagnostics block that
-carries something for it, which is the contract the `[capture gap]` tag it was
-modelled on already had.
+clears the stamp on success per LLP 0322#clearing).
+
+The retry reaches less than the enumeration does, and the pair is honest only
+if that is said. `collectCacheFlushFailures` finds stamps by walking the
+spool, which by design reaches a table no dataset has declared;
+`hyp query refresh` iterates the registered datasets and their discovered
+partitions. A stamp on an undeclared table, or on one whose plugin has since
+been deactivated, is therefore counted by this diagnostic and cleared by
+neither of its two commands. That is a gap in the repair, not in the count:
+the operator is told the truth about the incident and handed a command that
+fixes the ordinary case. Widening the refresh to the spool walk is a change to
+a shipped command's scope and belongs to its own document.
+
+The `[refresh cooling down]` tag on the capture-health line now points at a
+diagnostics block that carries something for it, which is the contract the
+`[capture gap]` tag it was modelled on already had.
 
 Warning and not error, for the same reason `maintenance_partitions_skipped`
 is: the daemon is running, capture is working, rows are durable in the spool

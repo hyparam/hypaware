@@ -1804,6 +1804,12 @@ export async function collectHypAwareStatus(opts = {}) {
     // Enumerate first, retry second, the maintenance analog's repair shape:
     // `hyp status --json` lists every failing table, and a `hyp query
     // refresh` that completes clears the stamp (LLP 0322#clearing).
+    // The retry reaches less than the count does, and the doc says so
+    // rather than letting a reader assume otherwise: the enumeration walks
+    // the spool (`collectCacheFlushFailures`, which reaches a table nothing
+    // declared) while `hyp query refresh` iterates registered datasets, so a
+    // stamp on an undeclared or deactivated table is counted here and
+    // cleared by neither command.
     // @ref LLP 0330#warning-diagnostic [implements]: a standing flush failure is a warning with a repair, not a degraded install
     diagnostics.push({
       severity: 'warning',
