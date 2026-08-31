@@ -2099,6 +2099,10 @@ async function runFinaleBackfill(args) {
 
   let consent = true
   let cancelled = false
+  // Told apart from a decline because they leave the user in different
+  // places: a decline was read and answered, while this one was never
+  // asked and its own "skipped" line goes to the stream that just died.
+  let surfaceDead = false
   if (interactive && asked.length > 0) {
     // The last consent question in the run, and the only one inside the
     // finale: the install, the attach, and the asset copy above it have
@@ -2111,6 +2115,7 @@ async function runFinaleBackfill(args) {
     // @ref LLP 0341#dead-surface [implements]: the backfill consent does not open on a dead surface, and a dead surface is a decline rather than the default it never printed
     if (args.checkBoundary && !(await args.checkBoundary())) {
       consent = false
+      surfaceDead = true
     } else {
       const ask = args.backfillConsentPrompt ?? defaultBackfillConsentPromptFactory({
         ...(args.stdin ? { stdin: args.stdin } : {}),
@@ -2139,6 +2144,7 @@ async function runFinaleBackfill(args) {
       interactive,
       consent,
       consent_cancelled: cancelled,
+      consent_surface_dead: surfaceDead,
       retention_days: retentionDays,
       until,
       ...(cancelled ? { exit_code: WALKTHROUGH_CANCEL_EXIT_CODE } : {}),
@@ -2152,7 +2158,17 @@ async function runFinaleBackfill(args) {
         stdout.write('backfill: skipped (cancelled)\n')
         return
       }
-      if (!consent) stdout.write('backfill: skipped (declined)\n')
+      // The one thing that outlives a run whose surface died inside the
+      // finale: the import did not happen, and a re-run is how it does.
+      // Said on stderr because stdout is the stream that just went, so
+      // the decline's own line would be written into nothing - and
+      // "declined" is not what happened anyway.
+      // @ref LLP 0341#dead-surface [implements]: what outlives the run is attempted on the surviving stream, as the post-commit cancel already does
+      if (surfaceDead) {
+        stderr.write("hyp setup: output closed - the local history import was skipped; re-run 'hyp setup' to import it\n")
+      } else if (!consent) {
+        stdout.write('backfill: skipped (declined)\n')
+      }
       const toRun = providers.filter((p) => consent || sweeping.has(p))
       // Guard each provider so one failure neither aborts sibling
       // providers nor the daemon (re)start that resumes live capture.

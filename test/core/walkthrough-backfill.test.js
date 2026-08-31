@@ -611,6 +611,43 @@ test('a dead consent surface declines the backfill instead of taking its default
   assert.deepEqual(summary.backfill, [])
 })
 
+// The skip above is silent on the surface that can still be read. The
+// `backfill: skipped (declined)` line it would otherwise print goes to
+// stdout, which is exactly the stream that just died, so someone whose
+// terminal went away mid-finale gets no signal at all that their local
+// history was not imported. The post-commit cancel already narrates its
+// unfinished install on stderr; the finale's own skip says the same kind
+// of thing on the same surviving stream.
+// @ref LLP 0341#dead-surface [tests]: the fact that outlives the run is attempted where a `2>log` invocation could still catch it
+test('a dead consent surface says on stderr that the backfill was skipped', async () => {
+  const env = await tmpEnv('hypaware-bf-dead-surface-notice-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const backfill = makeBackfill(['claude'])
+
+  await runPickerFinale(/** @type {any} */ ({
+    finale: { skipDaemon: true },
+    clientsPicked: ['claude'],
+    capabilities: noGateway,
+    config: { version: 2, plugins: [] },
+    configPath: path.join(String(env.HOME), 'config.json'),
+    env,
+    stdout,
+    stderr,
+    retentionDays: 30,
+    interactive: true,
+    backfill,
+    backfillConsentPrompt: async () => true,
+    checkBoundary: async () => false,
+  }))
+
+  assert.match(stderr.text(), /output closed/, 'the surviving stream names why the import did not run')
+  assert.match(stderr.text(), /re-run 'hyp setup'/, 'and says how to complete it, like the post-commit cancel does')
+  // The decline line stays off stdout: nothing can read it, and "declined"
+  // is not what happened.
+  assert.doesNotMatch(stdout.text(), /backfill: skipped \(declined\)/)
+})
+
 // The other side of the same seam: a live surface changes nothing, and a
 // caller with no boundary check to give (the standalone picker
 // walkthrough) still asks exactly as it did.
