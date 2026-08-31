@@ -126,11 +126,11 @@ export class TracerProvider {
   }
 
   async forceFlush() {
-    await flushExporters(this.exporters)
+    await flushExporters('traces', this.exporters, this.reportedExporterFailures)
   }
 
   async shutdown() {
-    await shutdownExporters(this.exporters)
+    await shutdownExporters('traces', this.exporters, this.reportedExporterFailures)
     if (globalTracerProvider === this) globalTracerProvider = null
   }
 }
@@ -155,11 +155,11 @@ export class LoggerProvider {
   }
 
   async forceFlush() {
-    await flushExporters(this.exporters)
+    await flushExporters('logs', this.exporters, this.reportedExporterFailures)
   }
 
   async shutdown() {
-    await shutdownExporters(this.exporters)
+    await shutdownExporters('logs', this.exporters, this.reportedExporterFailures)
     if (globalLoggerProvider === this) globalLoggerProvider = null
   }
 }
@@ -190,11 +190,11 @@ export class MeterProvider {
   }
 
   async forceFlush() {
-    await flushExporters(this.exporters)
+    await flushExporters('metrics', this.exporters, this.reportedExporterFailures)
   }
 
   async shutdown() {
-    await shutdownExporters(this.exporters)
+    await shutdownExporters('metrics', this.exporters, this.reportedExporterFailures)
     if (globalMeterProvider === this) globalMeterProvider = null
   }
 }
@@ -466,6 +466,7 @@ export function getActiveSpan() {
  * throw, so a fake that asserts has to record instead and let the test assert.
  *
  * @ref LLP 0329#stderr-mirror [constrained-by]: the channel of last resort cannot sit downstream of an exporter that can throw.
+ * @ref LLP 0335#never-throws [implements]: export never throws into the caller; a broken exporter cannot take down the ones behind it.
  * @template T
  * @param {'traces'|'logs'|'metrics'} channel
  * @param {Array<{ exportBatch(batch: T[]): unknown }>} exporters
@@ -572,6 +573,7 @@ export function guardTelemetryResult(result, seam) {
  * same reason: this is the report that fires when the structured substrate is
  * the broken thing.
  *
+ * @ref LLP 0335#one-line [implements]: one stderr line per broken component per operation per provider instance, marked before the write.
  * @param {object} args
  * @param {'traces'|'logs'|'metrics'} args.channel
  * @param {string} args.source the exporter class, or the emit seam, that threw
@@ -579,21 +581,25 @@ export function guardTelemetryResult(result, seam) {
  *   the source name alone does not identify the thing that threw
  * @param {unknown} args.error
  * @param {Set<string>} args.reported
+ * @param {'export'|'flush'|'shutdown'} [args.operation] which telemetry
+ *   operation threw; an export drops the record in hand, a flush or shutdown
+ *   risks whatever the exporter still buffers
  */
-export function reportTelemetryFailure({ channel, source, key = source, error, reported }) {
+export function reportTelemetryFailure({ channel, source, key = source, error, reported, operation = 'export' }) {
   if (reported.has(key)) return
   reported.add(key)
   const message = describeThrown(error)
   const attributes = {
     hyp_component: 'observability',
-    hyp_operation: `observability.export_${channel}`,
-    error_kind: 'telemetry_export_threw',
+    hyp_operation: `observability.${operation}_${channel}`,
+    error_kind: `telemetry_${operation}_threw`,
     telemetry_channel: channel,
     telemetry_source: source,
     error_message: message.slice(0, 200),
   }
+  const consequence = operation === 'export' ? 'the record is dropped' : 'buffered records may be lost'
   try {
-    process.stderr.write(`[hypaware:observability] WARN a telemetry export threw; the record is dropped ${JSON.stringify(attributes)}\n`)
+    process.stderr.write(`[hypaware:observability] WARN a telemetry ${operation} threw; ${consequence} ${JSON.stringify(attributes)}\n`)
   } catch { /* stderr itself is gone; there is nowhere left to say so */ }
 }
 
@@ -622,16 +628,77 @@ function describeThrown(error) {
  * left every exporter after it neither flushed nor closed. Same contract as
  * {@link exportGuarded}, one seam later (hyparam/hypaware#1122).
  *
+ * @param {'traces'|'logs'|'metrics'} channel
  * @param {Array<{ forceFlush?: () => Promise<void>|void }>} exporters
+ * @param {Set<string>} reported which exporters have already been diagnosed
  */
-async function flushExporters(exporters) {
-  await Promise.allSettled(exporters.map((exporter) => settled(() => exporter.forceFlush?.())))
+async function flushExporters(channel, exporters, reported) {
+  const names = exporters.map(exporterName)
+  const results = await Promise.allSettled(exporters.map((exporter) => settled(() => exporter.forceFlush?.())))
+  reportSettledFailures('flush', channel, names, results, reported)
 }
 
-/** @param {Array<{ forceFlush?: () => Promise<void>|void, shutdown?: () => Promise<void>|void }>} exporters */
-async function shutdownExporters(exporters) {
-  await flushExporters(exporters)
-  await Promise.allSettled(exporters.map((exporter) => settled(() => exporter.shutdown?.())))
+/**
+ * @param {'traces'|'logs'|'metrics'} channel
+ * @param {Array<{ forceFlush?: () => Promise<void>|void, shutdown?: () => Promise<void>|void }>} exporters
+ * @param {Set<string>} reported which exporters have already been diagnosed
+ */
+async function shutdownExporters(channel, exporters, reported) {
+  await flushExporters(channel, exporters, reported)
+  const names = exporters.map(exporterName)
+  const results = await Promise.allSettled(exporters.map((exporter) => settled(() => exporter.shutdown?.())))
+  reportSettledFailures('shutdown', channel, names, results, reported)
+}
+
+/**
+ * Say which exporters failed to flush or close, under the usual one-line
+ * bound. Absorbing the failure kept a broken `forceFlush`/`shutdown` from
+ * stranding its sibling exporters, but absorbing it silently meant an
+ * exporter that fails to close at daemon shutdown lost its buffered records
+ * with no line anywhere (hyparam/hypaware#1130 item 2). The key carries the
+ * operation, so an exporter that exports fine all day and only breaks at
+ * close is still diagnosable after its export line was never needed, and the
+ * other way round.
+ *
+ * Neither in-tree exporter can reach this today: `JsonlWriter.close` resolves
+ * from `stream.end`'s callback without reading the error it is handed, and
+ * the OTLP flush is an `allSettled` over posts that already caught their own
+ * failure. What this covers is the case the guard was minted for, an exporter
+ * we did not write (LLP 0335#close-failures).
+ *
+ * The names are read before the await that produced `results`, not from the
+ * exporter array afterwards: `provider.exporters` is a public mutable field,
+ * and a name read on the far side of the await could belong to a different
+ * exporter than the result it is about to label.
+ *
+ * @ref LLP 0335#close-failures [implements]: a failed flush or close gets the same one-line report as a failed export.
+ * @param {'flush'|'shutdown'} operation
+ * @param {'traces'|'logs'|'metrics'} channel
+ * @param {string[]} names the exporter names, taken before the await
+ * @param {PromiseSettledResult<unknown>[]} results
+ * @param {Set<string>} reported
+ */
+function reportSettledFailures(operation, channel, names, results, reported) {
+  for (let index = 0; index < results.length; index++) {
+    const result = results[index]
+    if (result.status !== 'rejected') continue
+    const source = names[index] ?? 'exporter'
+    // The report is the last thing on this path that could take the caller
+    // down, and `#never-throws` is the one property a future edit here must
+    // not cost. Guarded structurally rather than by discipline, for the
+    // reason that section gives: `shutdown` rejecting would also skip the
+    // `globalXProvider = null` teardown on the line after the await.
+    try {
+      reportTelemetryFailure({
+        channel,
+        source,
+        key: `${source}#${index}#${operation}`,
+        error: result.reason,
+        reported,
+        operation,
+      })
+    } catch { /* nothing left to say it with */ }
+  }
 }
 
 /**

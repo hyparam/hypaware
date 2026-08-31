@@ -29,7 +29,7 @@ import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
 import { getLogger } from '../../src/core/observability/logger.js'
-import { logs, LoggerProvider } from '../../src/core/observability/runtime.js'
+import { logs, trace, LoggerProvider, TracerProvider } from '../../src/core/observability/runtime.js'
 import { Attr } from '../../src/core/observability/attrs.js'
 
 /**
@@ -515,8 +515,381 @@ test('an exporter whose forceFlush throws does not fail the shutdown, nor strand
     resource: { attributes: { service_name: 'hypaware-test' } },
     exporters: /** @type {any} */ ([new ThrowingFlushExporter(), healthy]),
   })
-  await provider.shutdown()
+  const stderr = await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
   assert.deepEqual(closed, { flushed: true, shut: true }, 'the exporter behind the broken one was still flushed and closed')
+  assert.match(stderr, /telemetry_flush_threw/, 'and the broken flush names itself instead of being absorbed silently')
+})
+
+// Absorbing a close failure kept it from stranding the sibling exporters,
+// but absorbing it silently meant a JSONL writer that fails to close at
+// daemon shutdown lost its buffered records with no line anywhere
+// (hyparam/hypaware#1130 item 2). The settled rejections now route through
+// the same one-line report as a throwing export.
+//
+// @ref LLP 0335#close-failures [tests]: a failed flush or close is diagnosed once on stderr; a healthy close stays silent.
+test('an exporter whose shutdown rejects is diagnosed on stderr, once, without stranding its sibling', async () => {
+  class RejectingCloseExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async shutdown() { throw new Error('close failed; records still buffered') }
+  }
+  const closed = { shut: false }
+  const healthy = {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {},
+    async shutdown() { closed.shut = true },
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new RejectingCloseExporter(), healthy]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+  assert.equal(closed.shut, true, 'the exporter behind the broken one still closed')
+  assert.match(stderr, /telemetry_shutdown_threw/, 'the failed close names itself')
+  assert.match(stderr, /close failed; records still buffered/, 'with what it rejected with')
+  assert.match(stderr, /buffered records may be lost/, 'and says what the failure costs')
+  const reports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_threw'))
+  assert.equal(reports.length, 1, 'one line for the failed close, not one per settled rejection observer')
+})
+
+test('a persistently failing forceFlush is diagnosed once, not once per flush', async () => {
+  class RejectingFlushExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async forceFlush() { throw new Error('flush keeps failing') }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new RejectingFlushExporter()]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    await provider.forceFlush()
+    await provider.forceFlush()
+    await provider.forceFlush()
+  })
+  const reports = stderr.split('\n').filter((line) => line.includes('telemetry_flush_threw'))
+  assert.equal(reports.length, 1, 'the one-line bound holds across repeated flushes')
+})
+
+test('a healthy provider shuts down with nothing on stderr', async () => {
+  const healthy = {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {},
+    async forceFlush() {},
+    async shutdown() {},
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([healthy]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    await provider.forceFlush()
+    await provider.shutdown()
+  })
+  assert.equal(stderr, '', 'no failure, no line')
+})
+
+// The operation lives in the dedupe key, which is the clause that makes the
+// close report worth having: on a key of `source#index` alone, an exporter
+// that breaks on export spends the report there, and the same exporter losing
+// its buffered records at close is then silent, which is the JSONL-writer
+// case LLP 0335#close-failures exists to end. Pinned because collapsing the
+// key back is otherwise an invisible regression.
+//
+// @ref LLP 0335#close-failures [tests]: the export line and the close line are bounded independently.
+test('an exporter that breaks on export and again on close is diagnosed for both, not deduped into one', async () => {
+  class BrokenBothWays {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) { throw new Error('export is broken') }
+    async shutdown() { throw new Error('close is broken too') }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new BrokenBothWays()]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    provider.exportRecord(/** @type {any} */ ({ body: 'a record this exporter cannot take', attributes: {} }))
+    await provider.shutdown()
+  })
+  const exportReports = stderr.split('\n').filter((line) => line.includes('telemetry_export_threw'))
+  const closeReports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_threw'))
+  assert.equal(exportReports.length, 1, 'the broken export is diagnosed once')
+  assert.equal(closeReports.length, 1, 'and the broken close is diagnosed too, not swallowed as a duplicate')
+  assert.match(stderr, /close is broken too/, 'each line carries its own failure')
+})
+
+// The export line's exact shape, recorded in LLP 0335#one-line and relied on
+// by anyone grepping a daemon log for `telemetry_export_threw`. Pinned as a
+// whole line rather than by substring because the close-failure fix rebuilt
+// the message and two of the attributes out of an `operation` template
+// (hyparam/hypaware#1130 item 2), and a template that drifts silently breaks
+// every grep already written against it.
+//
+// @ref LLP 0335#one-line [tests]: the export report's message and attributes are exactly what the contract records.
+test('the export report is one line of exactly the recorded shape', async () => {
+  class NamedBrokenExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) { throw new Error('boom') }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new NamedBrokenExporter()]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    provider.exportRecord(/** @type {any} */ ({ body: 'a record', attributes: {} }))
+  })
+  const expected = '[hypaware:observability] WARN a telemetry export threw; the record is dropped '
+    + JSON.stringify({
+      hyp_component: 'observability',
+      hyp_operation: 'observability.export_logs',
+      error_kind: 'telemetry_export_threw',
+      telemetry_channel: 'logs',
+      telemetry_source: 'NamedBrokenExporter',
+      error_message: 'boom',
+    })
+    + '\n'
+  assert.equal(stderr, expected, 'the export line is unchanged by the operation parameter')
+})
+
+// The `#index#` half of the settled key, which the export path pins for
+// itself two tests above and this path did not. Two exporters of one class is
+// a shape only a third party builds (two OTLP endpoints, say) and it is two
+// things to fix; on a key of `source#operation` the first to break at close
+// consumes the report and the second is undiagnosable for the life of the
+// process, which is the bug LLP 0335#one-line minted the index for.
+//
+// @ref LLP 0335#one-line [tests]: two exporters of one class are two closes to diagnose, not one.
+test('two exporters of the same class that both fail to close are each diagnosed', async () => {
+  class TwinCloseFailure {
+    /** @param {string} label */
+    constructor(label) { this.label = label }
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async shutdown() { throw new Error(`close failed in ${this.label}`) }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new TwinCloseFailure('first'), new TwinCloseFailure('second')]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+  const reports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_threw'))
+  assert.equal(reports.length, 2, 'both siblings are diagnosed, not one consuming the other report')
+  assert.match(stderr, /close failed in first/, 'the first names itself')
+  assert.match(stderr, /close failed in second/, 'and so does the second')
+})
+
+// Every other test on this seam uses the logs channel, so a `'logs'` literal
+// pasted into the tracer or meter provider's flush and shutdown calls would
+// mislabel the report with nothing to catch it. The channel is what tells an
+// operator which substrate is broken.
+//
+// @ref LLP 0335#close-failures [tests]: the report names the channel whose provider is closing.
+test('a close failure on the traces channel is reported as traces, not logs', async () => {
+  class RejectingCloseExporter {
+    /** @param {unknown[]} _spans */
+    exportBatch(_spans) {}
+    async shutdown() { throw new Error('trace exporter will not close') }
+  }
+  const provider = new TracerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new RejectingCloseExporter()]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+  assert.match(stderr, /"telemetry_channel":"traces"/, 'the channel is the one that was closing')
+  assert.match(stderr, /"hyp_operation":"observability\.shutdown_traces"/, 'and the operation names it too')
+})
+
+// The property the whole contract rests on, at the seam this change added.
+// `reportSettledFailures` runs after the await inside `shutdownExporters`, so
+// a report that throws there rejects `provider.shutdown()` into the caller
+// and skips the `globalLoggerProvider = null` teardown on the next line: the
+// escape LLP 0335#never-throws exists to close, reintroduced by the line that
+// reports it. The bound's `reported` set is a public field, which is the
+// cheapest way to make the report itself throw at that exact seam.
+//
+// @ref LLP 0335#never-throws [tests]: a report that throws cannot reject the close it was reporting on.
+test('a report that throws does not reject the shutdown it was diagnosing', async () => {
+  class RejectingCloseExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async shutdown() { throw new Error('close failed') }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new RejectingCloseExporter()]),
+  })
+  provider.reportedExporterFailures = /** @type {any} */ ({
+    has() { throw new Error('the report itself is broken') },
+    add() {},
+  })
+  await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+})
+
+// Not rejecting is only half of what that guard buys. The other half is the
+// line after the await: a rejecting `shutdown` skips
+// `globalTracerProvider = null`, leaving a provider that failed to close
+// still installed and still taking every later span. Pinned on the tracer
+// channel because its global slot is the one readable from outside.
+//
+// @ref LLP 0335#never-throws [tests]: a report that throws cannot strand the provider it was reporting on.
+test('a report that throws still lets the provider deregister itself', async () => {
+  class RejectingCloseExporter {
+    /** @param {unknown[]} _spans */
+    exportBatch(_spans) {}
+    async shutdown() { throw new Error('close failed') }
+  }
+  const provider = new TracerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new RejectingCloseExporter()]),
+  })
+  provider.register()
+  assert.equal(trace.getTracerProvider(), provider, 'the provider under test is the installed one')
+  provider.reportedExporterFailures = /** @type {any} */ ({
+    has() { throw new Error('the report itself is broken') },
+    add() {},
+  })
+  await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+  assert.notEqual(trace.getTracerProvider(), provider, 'and it still deregistered itself')
+})
+
+// `reported.add(key)` precedes the `process.stderr.write`, so a write syscall
+// that itself throws (an EPIPE'd stderr) spends the report instead of being
+// retried once per record for the life of the daemon. LLP 0335#one-line calls
+// that trade deliberate and nothing pinned it: moving the `add` below the
+// write leaves every other test green.
+//
+// @ref LLP 0335#one-line [tests]: the report is marked spent before the write, so a dead stderr is not retried per record.
+test('a report whose own write throws is spent, not retried once per record', async () => {
+  class BrokenExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) { throw new Error('boom') }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new BrokenExporter()]),
+  })
+  const realWrite = process.stderr.write.bind(process.stderr)
+  let attempts = 0
+  process.stderr.write = /** @type {typeof process.stderr.write} */ (() => {
+    attempts += 1
+    throw new Error('EPIPE')
+  })
+  try {
+    for (let index = 0; index < 5; index++) {
+      provider.exportRecord(/** @type {any} */ ({ body: 'a record this exporter cannot take', attributes: {} }))
+    }
+  } finally {
+    process.stderr.write = realWrite
+  }
+  assert.equal(attempts, 1, 'one write attempt is the whole budget; a stderr that is gone is not retried per record')
+})
+
+// The other half of what keeps the report safe on the path of every record:
+// one line, and a bounded one. An exporter that throws a megabyte of context
+// would otherwise put all of it in the daemon log.
+//
+// @ref LLP 0335#one-line [tests]: the message is capped, so a broken exporter cannot spill its whole context into the log.
+test('an enormous thrown message is capped, and still one line', async () => {
+  class VerboseBrokenExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) { throw new Error('x'.repeat(5000)) }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new VerboseBrokenExporter()]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    provider.exportRecord(/** @type {any} */ ({ body: 'a record', attributes: {} }))
+  })
+  assert.equal(stderr.split('\n').filter(Boolean).length, 1, 'still one line')
+  const attributes = JSON.parse(stderr.slice(stderr.indexOf('{'), stderr.lastIndexOf('}') + 1))
+  assert.equal(attributes.error_message.length, 200, 'the message is capped at the recorded length')
+})
+
+// The settled results are labelled from names taken before the await, not
+// read back off `provider.exporters` afterwards: that field is public and
+// mutable, so a name read on the far side of the await can belong to a
+// different exporter than the result it is about to describe. Nothing
+// in-tree rewrites the array mid-shutdown, which is exactly why the
+// precaution is invisible to every other test.
+//
+// @ref LLP 0335#close-failures [tests]: a result is named for the exporter that produced it, not for whatever sits at its index later.
+test('a close report names the exporter that failed, even if the array is rewritten mid-shutdown', async () => {
+  class Impostor {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+  }
+  class FailingClose {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async shutdown() { throw new Error('close failed') }
+  }
+  class RewritesTheArray {
+    /** @param {{ exporters: unknown[] }} provider */
+    constructor(provider) { this.provider = provider }
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async shutdown() { this.provider.exporters.splice(0, 2, new Impostor(), new Impostor()) }
+  }
+  /** @type {any} */
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new FailingClose()]),
+  })
+  provider.exporters.push(new RewritesTheArray(provider))
+  const stderr = await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+  assert.match(stderr, /"telemetry_source":"FailingClose"/, 'the report names the exporter that actually failed')
+  assert.doesNotMatch(stderr, /Impostor/, 'not whatever took its index while the close was in flight')
+})
+
+// Same precaution one seam earlier. `flushExporters` takes its own names
+// before its own await, and a flush is the path a long-lived daemon walks
+// repeatedly, so the two are pinned separately rather than trusting the
+// shutdown case to cover both.
+//
+// @ref LLP 0335#close-failures [tests]: the flush path names its results from before its await too.
+test('a flush report names the exporter that failed, even if the array is rewritten mid-flush', async () => {
+  class Impostor {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+  }
+  class FailingFlush {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async forceFlush() { throw new Error('flush failed') }
+  }
+  class RewritesTheArray {
+    /** @param {{ exporters: unknown[] }} provider */
+    constructor(provider) { this.provider = provider }
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async forceFlush() { this.provider.exporters.splice(0, 2, new Impostor(), new Impostor()) }
+  }
+  /** @type {any} */
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new FailingFlush()]),
+  })
+  provider.exporters.push(new RewritesTheArray(provider))
+  const stderr = await captureProcessStderr(async () => {
+    await provider.forceFlush()
+  })
+  assert.match(stderr, /"telemetry_source":"FailingFlush"/, 'the report names the exporter that actually failed')
+  assert.doesNotMatch(stderr, /Impostor/, 'not whatever took its index while the flush was in flight')
 })
 
 // And what the diagnosis itself must survive. `String(Object.create(null))`
