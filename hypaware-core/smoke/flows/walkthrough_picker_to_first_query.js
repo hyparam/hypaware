@@ -105,6 +105,14 @@ export async function run({ harness, expect }) {
   await fs.mkdir(path.join(fakeHome, '.codex'), { recursive: true })
   const previousHome = process.env.HOME
   process.env.HOME = fakeHome
+  // Redirecting HOME is not enough to sandbox OpenCode. `resolveClientSettingsPath`
+  // relocates the `.config/opencode` prefix to `$XDG_CONFIG_HOME/opencode` when
+  // that variable is set, and it is an absolute path that HOME does not move, so
+  // an inherited one sends this run's attach at the developer's real config home:
+  // the assertions below then compare against a path the run never touched, and
+  // the smoke reds on a machine where nothing is wrong.
+  const previousXdgConfigHome = process.env.XDG_CONFIG_HOME
+  process.env.XDG_CONFIG_HOME = path.join(fakeHome, '.config')
   // Pin the version the LLP 0258 floor check sees, so the init-driven attach
   // never depends on whatever `claude` binary the machine running it carries.
   const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
@@ -580,6 +588,8 @@ export async function run({ harness, expect }) {
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
+    if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = previousXdgConfigHome
     if (previousClaudeVersion === undefined) delete process.env.HYP_CLAUDE_CODE_VERSION
     else process.env.HYP_CLAUDE_CODE_VERSION = previousClaudeVersion
     await echo.close()
