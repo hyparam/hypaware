@@ -552,7 +552,7 @@ run directly. The common Phase 8 conditions:
 | `gateway_missing_anthropic_upstream`  | a gateway-routed Anthropic client (OpenClaw) is enabled but no Anthropic upstream is registered  | re-run `hyp setup` and pick the Anthropic upstream                        |
 | `gateway_missing_openai_upstream`     | `@hypaware/codex` enabled but no OpenAI upstream is registered                     | re-run `hyp setup` and pick the OpenAI upstream                           |
 | `sink_missing_encoder`                | a local-fs sink is configured but no encoder plugin is enabled                     | re-run `hyp setup` and pick "local Parquet export"                        |
-| `client_attach_missing`               | a client plugin is enabled but its settings file shows no HypAware marker          | `hyp client attach <client>`                                               |
+| `client_attach_missing`               | a client plugin is enabled but its settings file shows no HypAware marker          | the printed repair names the client, e.g. `hyp client attach opencode`     |
 | `daemon_binary_missing`               | the daemon installer references a binary that no longer exists on disk             | `hyp daemon install`                                                     |
 | `daemon_loaded_no_pid`                | the daemon service file is installed but launchd / systemd is not loading it       | `hyp daemon restart`                                                     |
 | `recent_errors`                       | the local telemetry directory has recent error log entries                         | inspect `~/.hyp/hypaware/dev-telemetry`, then `hyp daemon restart`       |
@@ -561,7 +561,8 @@ Useful follow-on commands when a diagnostic fires:
 
 - `hyp daemon restart`: bounce the persistent daemon
 - `hyp daemon install`: re-install the launchd / systemd unit
-- `hyp client attach <client>`: wire a selected client into HypAware capture
+- `hyp client attach claude` (or `codex`, `opencode`, `openclaw`): wire a
+  selected client into HypAware capture
 - `hyp setup --from-file <path>`: rebuild the config from a known-good
   file without re-running the interactive picker
 
