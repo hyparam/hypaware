@@ -334,6 +334,14 @@ export async function runQueryRefresh(argv, ctx) {
   // still exits non-zero with each original error reported.
   // @ref LLP 0333#every-table-before-failure [implements]: attempt every table, accumulate every error, still fail
   for (const dataset of filtered) {
+    // Hoisted only so the `typeof` narrowing survives into the closure below.
+    // Every call of it goes back through `.call(dataset, ...)`: the plugin
+    // contract declares `refreshPartition` as a *method*
+    // (`hypaware-plugin-kernel-types.d.ts`), the scaffold this repo hands
+    // plugin authors writes it as method shorthand, and a bare hoisted call
+    // is a strict-mode call with `this === undefined`. Same reason
+    // `src/core/query/sql.js` reaches for `scan.call(source, ...)` rather
+    // than calling its hoisted local directly.
     const refreshPartition = dataset.refreshPartition
     if (typeof refreshPartition !== 'function') continue
     /** @type {QueryPartition[]} */
@@ -379,7 +387,7 @@ export async function runQueryRefresh(argv, ctx) {
             [Attr.DATASET]: dataset.name,
             status: 'ok',
           },
-          () => refreshPartition(partition, {
+          () => refreshPartition.call(dataset, partition, {
             cacheDir: ctx.storage.cacheRoot,
             force: true,
             log: {
