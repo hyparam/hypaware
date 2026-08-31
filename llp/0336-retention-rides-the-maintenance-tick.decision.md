@@ -9,7 +9,7 @@
 **Extends:** [LLP 0013](./0013-local-query-cache.decision.md)
 (#retention-is-the-central-tradeoff: the window that decision made the
 central tradeoff now has a shipped path that enforces it)
-**Related:** LLP 0137, LLP 0220, LLP 0334, hyparam/hypaware#1131
+**Related:** LLP 0137, LLP 0220, LLP 0323, LLP 0326, LLP 0331, LLP 0334, hyparam/hypaware#1131
 
 > `query.cache.retention` was schema-validated, cross-validated against the
 > dataset registry, defaulted by the onboarding pathway (LLP 0137), and
@@ -92,12 +92,26 @@ child spans (`retention.plan_deletes`, `retention.iceberg_delete`,
 
 ## What this makes live {#what-this-makes-live}
 
-- LLP 0334#consequences claims a daemon's `escapeReportedAt` is bounded by
-  the poisoned partitions that currently exist, on the strength of the
+- LLP 0334#consequences bounds a daemon's `escapeReportedAt` by the poisoned
+  partitions that currently exist, on the strength of the
   `clearEscapeReport` calls at retention's two whole-partition eviction
-  sites. Those sites were unreachable from any daemon until this wire; the
-  claim is now true of a running daemon, not only of the tests that
-  construct an enforcer by hand.
+  sites. Those sites were unreachable from any daemon until this wire. They
+  are reachable now, and the strand they close is narrower than 0332 and
+  0334 supposed, because the cursor gate in
+  #a-live-delete-carries-the-gates sits in front of them: an *armed* entry
+  means the cursor does not read, and a cursor that does not read is a
+  partition retention skips. So retention no longer removes a partition
+  while it is poisoned at all. The calls stay, because "the removal owns
+  the clear" is the rule LLP 0334 settled and each site is a removal; what
+  changes is that the escape strand now ends at the refusal rather than at
+  the delete. The bound is unaffected either way - it was always the count
+  of poisoned partitions on disk, and one retention declines to touch is
+  still one of them.
+- A partition retention refuses is a partition that ages past its window and
+  stays. That is the loud-refusal trade LLP 0328#loud-refusal already
+  accepts, and here the refusal is genuinely loud: the standing
+  `cursor_table_dir_escapes_partition` warning re-arms on the rewarn
+  interval, and it names the partition.
 - `hyp status`'s `cache retention: N days` line describes something that
   happens. The absent-config default (90 days, `DEFAULT_RETENTION_DAYS`)
   is now enforced too, which is what that line has reported all along.
@@ -105,6 +119,41 @@ child spans (`retention.plan_deletes`, `retention.iceberg_delete`,
   (compaction, snapshot expiry, migration), and its `--expire-only` still
   means snapshots. A manual retention trigger is a separate request if
   anyone wants one; this doc deliberately does not add a CLI surface.
+
+## A live delete carries the gates a live delete has to carry {#a-live-delete-carries-the-gates}
+
+Wiring the enforcer does not only schedule it: it makes
+`src/core/cache/retention.js` the newest `readdir`-then-`rm -rf` pass in the
+tree, and two rules this repo already settled apply to it for the first time
+because until now nothing reached it.
+
+- **LLP 0331#guard-travels-with-the-delete.** The pass walks
+  `<cacheRoot>/datasets` and recursively removes directories under it. Every
+  component below that root is descended from a `Dirent` the walk already
+  saw was a directory, so a symlinked dataset or partition is skipped
+  before anything opens it; `datasets/` itself is the one component opened
+  on a name alone. The check is written inside `tick()`, not at the daemon
+  call site, and it refuses the whole pass and says so through
+  `reportPlantedSweepPath`. Components *above* `datasets/` (a relocated
+  `query.cache.dir`, a `$HYP_HOME` on another volume) stay legitimate, which
+  is the same asymmetry LLP 0326#positive-evidence settled.
+- **LLP 0323#one-gate.** The pass read its cursor through `readCursorSync`,
+  which answers epoch 0 for a `cursor.json` that exists and does not parse
+  (or that names a generation outside its partition). That default is a
+  *deletion instruction* here: it routes a source-table or higher-epoch
+  partition into `evictLegacyPartition`, which weighs a retired `epoch=0`
+  generation's mtime and then removes the whole partition directory, live
+  generation and rows written today included. It reads through
+  `tryReadCursorSync` instead, and a partition whose cursor file is present
+  but unreadable is skipped: an unreadable cursor is not a licence to
+  delete. Discovery's `legacy` flag still marks the legitimate
+  table-with-no-cursor-file shape, which keeps the epoch-0 default.
+
+Neither is a new decision. Both are existing accepted ones arriving at a
+path that was dead code when they were made, which is the shape LLP 0331
+predicted: "a pass that exports its deletion and imports its containment
+from whoever happens to call it has published the deletion without the
+property that bounds it".
 
 ## Testable {#testable}
 
@@ -129,3 +178,8 @@ span's absence, which is the bug by name.
   #consequences).
 - hyparam/hypaware#1131: the gap, and the evidence the enforcer had no
   non-test caller.
+- [LLP 0323](./0323-cursor-names-a-generation-in-its-own-partition.decision.md),
+  [LLP 0326](./0326-generation-name-is-the-directory.decision.md),
+  [LLP 0331](./0331-a-deleting-pass-carries-its-own-check.decision.md): the
+  gates a delete path carries, applied here for the first time
+  (#a-live-delete-carries-the-gates).

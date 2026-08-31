@@ -927,9 +927,24 @@ export async function runDaemon(opts = {}) {
                 rows_deleted: evictedPart.rowCount,
               })
             }
+            let partitionsEvicted = result.evicted.length
             for (const tableResult of result.sourceTableResults) {
               if (tableResult.rowsDeleted === 0) continue
               rowsDeleted += tableResult.rowsDeleted
+              // A source-table partition with no resolvable timestamp column
+              // is removed whole, directory and cursor included, and that is
+              // a different sentence to the operator who reads this line
+              // later than "rows were position-deleted from it".
+              if (tableResult.evictedPartition) {
+                partitionsEvicted++
+                fileLog.info('daemon.retention_evicted', {
+                  [Attr.DATASET]: tableResult.dataset,
+                  partition: `source=${tableResult.source}`,
+                  cutoff_date: tableResult.cutoffDate,
+                  rows_deleted: tableResult.rowsDeleted,
+                })
+                continue
+              }
               fileLog.info('daemon.retention_rows_deleted', {
                 [Attr.DATASET]: tableResult.dataset,
                 source: tableResult.source,
@@ -937,7 +952,7 @@ export async function runDaemon(opts = {}) {
                 rows_deleted: tableResult.rowsDeleted,
               })
             }
-            span.setAttribute('partitions_evicted', result.evicted.length)
+            span.setAttribute('partitions_evicted', partitionsEvicted)
             span.setAttribute('rows_deleted', rowsDeleted)
             retentionRanAtMs = Date.now()
           },

@@ -14,7 +14,9 @@ import { fetchAvroRecords, fetchDeleteMaps } from 'icebird/src/fetch.js'
 import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stage-position-delete.js'
 
 import { Attr, getMeter, withSpan } from '../observability/index.js'
-import { clearEscapeReport, discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
+import { clearEscapeReport, discoverCachePartitions, tryReadCursorSync, writeCursor } from './partition.js'
+import { datasetsRoot, isConfirmedSymlink } from './paths.js'
+import { reportPlantedSweepPath } from './sweep_guard.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { physicalProjection, readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
 
@@ -52,13 +54,42 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
       /** @type {RetentionSourceTableResult[]} */
       const sourceTableResults = []
 
+      // @ref LLP 0331#guard-travels-with-the-delete [implements]: this pass
+      // walks `datasets/` and `rm -rf`s directories under it, so the
+      // containment check is written here rather than left to whoever
+      // constructs the enforcer. `datasets/` is the one component the walk
+      // opens without having descended a `Dirent` first - a symlinked child
+      // is already not a directory to `walk` - and nothing the cache writes
+      // mints a symlink at that name, so a confirmed one means this is not a
+      // tree to delete from. Every component above it (a relocated
+      // `query.cache.dir`, a `$HYP_HOME` on another volume) is a path the
+      // cache did not choose and stays legitimate (LLP 0326#positive-evidence).
+      const walkRoot = path.resolve(datasetsRoot(cacheRoot))
+      if (isConfirmedSymlink(walkRoot)) {
+        reportPlantedSweepPath(walkRoot, 'retention.tick', 'datasets')
+        return { evicted, sourceTableResults }
+      }
+
       const partitions = await discoverCachePartitions(cacheRoot)
 
       for (const part of partitions) {
         const retentionDays = cfg.datasets[part.dataset] ?? cfg.default_days
         if (retentionDays <= 0) continue
 
-        const cursor = readCursorSync(part.path)
+        // @ref LLP 0323#one-gate [constrained-by]: a destructive pass reads
+        // the cursor through the gate that can answer "unreadable", never
+        // through the one that answers epoch 0 on its behalf. A partition
+        // whose `cursor.json` exists but does not read is not a partition at
+        // epoch 0: on the synthesized default a source-table or
+        // higher-epoch partition falls through to `evictLegacyPartition`,
+        // which weighs a RETIRED `epoch=0` generation's mtime and then
+        // `rm -rf`s the whole partition directory, live generation and rows
+        // written today included. `part.legacy` is discovery's record that
+        // no cursor file was there at all, which is the legitimate
+        // table-without-a-cursor shape and still gets the epoch-0 default.
+        const readCursor = tryReadCursorSync(part.path)
+        if (readCursor === null && !part.legacy) continue
+        const cursor = readCursor ?? { epoch: 0, rowCount: 0, compaction: null }
 
         if (cursor.layout === 'source-table') {
           const timestampColumns = retentionTimestampColumns(part.dataset)
@@ -308,6 +339,7 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
       rowsDeleted: rowCount,
       batchCount: 0,
       candidateFileCount: 0,
+      evictedPartition: true,
     }
   }
 

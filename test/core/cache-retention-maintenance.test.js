@@ -9,7 +9,7 @@ import path from 'node:path'
 
 import { createRetentionEnforcer, DEFAULT_RETENTION_DAYS } from '../../src/core/cache/retention.js'
 import { maintainCache, cacheStatus, normalizeMaintenanceConfig } from '../../src/core/cache/maintenance.js'
-import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
+import { appendRowsToPartition, appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, readRowsFromTable, sortColumnsFromMetadata, tableExists } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 import { TracerProvider } from '../../src/core/observability/runtime.js'
@@ -1379,5 +1379,133 @@ test('neediest-first order reads the live table dir for source-table partitions'
     assert.equal(report.partitions[1].dataset, 'aaa_light')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+// --- LLP 0336#a-live-delete-carries-the-gates: the gates this wire made live ---
+
+test('an unreadable cursor is not a licence to delete: the live generation survives', async () => {
+  const cacheRoot = await makeTmpDir('retention-poisoned-cursor')
+  try {
+    // A legacy epoch partition whose live generation is epoch=1 and whose
+    // retired epoch=0 is old enough to be past any window. Written through
+    // the epoch layout so `evictLegacyPartition` is the branch under test.
+    const segments = ['client=a', 'date=2026-01-01']
+    await appendRowsToPartition(cacheRoot, 'legacy_ds', segments, COLUMNS, [
+      { id: 1, value: 'epoch0-old', timestamp: isoDateDaysAgo(400) },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'legacy_ds', ...segments)
+    await writeCursor(partitionDir, { ...readCursorSync(partitionDir), epoch: 1, rowCount: 0 })
+    await appendRowsToPartition(cacheRoot, 'legacy_ds', segments, COLUMNS, [
+      { id: 2, value: 'epoch1-written-today', timestamp: isoDateDaysAgo(0) },
+    ])
+    const staleDataDir = path.join(partitionDir, 'epoch=0', 'data')
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    for (const name of await fs.readdir(staleDataDir)) {
+      await fs.utimes(path.join(staleDataDir, name), stale, stale)
+    }
+
+    // Poison the cursor exactly the way LLP 0326 describes: a `tableDir`
+    // that names a generation outside its own partition makes the WHOLE
+    // cursor unreadable. `readCursorSync` answers epoch 0 for it, and epoch
+    // 0 here is the retired generation.
+    const cursorPath = path.join(partitionDir, 'cursor.json')
+    const poisoned = JSON.parse(await fs.readFile(cursorPath, 'utf8'))
+    poisoned.tableDir = '../escape'
+    await fs.writeFile(cursorPath, JSON.stringify(poisoned))
+
+    const enforcer = createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } })
+    const result = await enforcer.tick()
+
+    assert.deepEqual(result.evicted, [], 'a partition whose cursor does not read is not evicted')
+    assert.equal(
+      await pathExists(path.join(partitionDir, 'epoch=1')),
+      true,
+      'the live generation, holding rows written today, is still there - reading the ' +
+      'unreadable cursor as epoch 0 would have weighed epoch=0 and removed the whole partition'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a partition with no cursor file at all is still evicted (the gate is not a blanket refusal)', async () => {
+  const cacheRoot = await makeTmpDir('retention-no-cursor-file')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], [
+      { name: 'id', type: 'INT32', nullable: false },
+      { name: 'message', type: 'STRING', nullable: true },
+    ], [
+      { id: 1, message: 'no timestamp' },
+    ])
+    const sourceDir = path.join(cacheRoot, 'datasets', 'no_ts_ds', 'source=test')
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 30 } })
+      .tick({ now: new Date('2100-01-01T00:00:00.000Z') })
+
+    assert.equal(result.sourceTableResults[0].rowsDeleted, 1)
+    assert.equal(
+      result.sourceTableResults[0].evictedPartition,
+      true,
+      'a whole-directory eviction says so, so the daemon can log it as one (LLP 0336#durable-line)'
+    )
+    assert.equal(await pathExists(sourceDir), false)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a symlink at datasets/ refuses the whole pass rather than deleting through it', async () => {
+  const home = await makeTmpDir('retention-planted-datasets')
+  try {
+    const real = path.join(home, 'elsewhere')
+    // A partition with no resolvable timestamp column: the branch that
+    // removes a whole directory, which is what must not happen off-root.
+    await appendRowsToSourceTable(real, 'no_ts_ds', ['source=test'], [
+      { name: 'id', type: 'INT32', nullable: false },
+      { name: 'message', type: 'STRING', nullable: true },
+    ], [
+      { id: 1, message: 'no timestamp' },
+    ])
+    const victim = path.join(real, 'datasets', 'no_ts_ds', 'source=test')
+
+    const cacheRoot = path.join(home, 'cache')
+    await fs.mkdir(cacheRoot, { recursive: true })
+    await fs.symlink(path.join(real, 'datasets'), path.join(cacheRoot, 'datasets'), 'dir')
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 30 } })
+      .tick({ now: new Date('2100-01-01T00:00:00.000Z') })
+
+    assert.deepEqual(result, { evicted: [], sourceTableResults: [] })
+    assert.equal(
+      await pathExists(victim),
+      true,
+      'nothing outside the cache root is removed through a planted datasets/ link'
+    )
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('an ordinary cache root is not refused for the shape of the path it lives at', async () => {
+  // The control that dies under a blanket refusal: `isConfirmedSymlink` asks
+  // only about `datasets/`, so a cache reached THROUGH a symlinked ancestor
+  // (a $HYP_HOME on another volume, /tmp on macOS) still enforces.
+  const home = await makeTmpDir('retention-symlinked-ancestor')
+  try {
+    const realHome = path.join(home, 'real')
+    const cacheRoot = path.join(realHome, 'cache')
+    await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, [
+      { id: 1, value: 'old', timestamp: isoDateDaysAgo(120) },
+    ])
+    await fs.symlink(realHome, path.join(home, 'link'), 'dir')
+
+    const result = await createRetentionEnforcer({
+      cacheRoot: path.join(home, 'link', 'cache'),
+      config: { default_days: 30 },
+    }).tick()
+
+    assert.equal(result.sourceTableResults[0].rowsDeleted, 1)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
   }
 })
