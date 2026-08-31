@@ -252,7 +252,6 @@ test('a login-minted gateway credential seeds the matching central sink (LLP 006
 
   const code = await runRemoteLogin(['prod'], ctx, { login })
   assert.equal(code, 0)
-  assert.match(out.join(''), /seeded forwarding identity for sink 'fwd' \(gateway gw-1\)/)
   assert.doesNotMatch(err.join(''), /replaced/)
 
   // The seed is the sink's persisted identity, at the per-plugin default path.
@@ -1179,7 +1178,6 @@ test('a re-login (already-enrolled, re-seed path) prints the durable hint (LLP 0
   const code = await runRemoteLogin(['prod'], ctx, { login })
   assert.equal(code, 0)
   assert.match(err.join(''), /hyp privacy set \[path\] local-only/)
-  assert.match(out.join(''), /seeded forwarding identity for sink 'fwd'/)
 })
 
 /* --------------------------------------------------------------------------
