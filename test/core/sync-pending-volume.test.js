@@ -108,6 +108,18 @@ function captureStream() {
 async function onAmbientLocale(locale, fn) {
   const proto = /** @type {any} */ (Number.prototype)
   const real = proto.toLocaleString
+  // Checked, not assumed: a substitution that renders like the ambient default
+  // pins nothing, because the assertion under it reads the same string whether
+  // or not the code names its locale. Node's own builds have shipped full ICU
+  // since v13, but a `small-icu` or `--without-intl` build resolves `locale`
+  // back to the default and would restore the exact "green on the mutant"
+  // blind spot this helper exists to close (#1117), silently and in the
+  // passing direction. Fail loudly there instead.
+  assert.notEqual(
+    real.call(1234, locale),
+    real.call(1234),
+    `${locale} groups like this machine's default, so substituting it pins nothing`
+  )
   proto.toLocaleString = function (/** @type {any} */ locales, /** @type {any} */ options) {
     return real.call(this, locales ?? locale, options)
   }
