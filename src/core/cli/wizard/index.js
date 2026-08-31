@@ -45,6 +45,7 @@ import { runWizardSyncScope } from './sync_scope.js'
 import { runWizardFolderAsk } from './folder_ask.js'
 import { runWizardExpressGate } from './express.js'
 import { runConfigurePhase } from './configure.js'
+import { guardWizardOutput } from './output_guard.js'
 import { wizardStepProgress } from './steps.js'
 
 /**
@@ -84,6 +85,12 @@ import { wizardStepProgress } from './steps.js'
  * @returns {Promise<InitWizardResult>}
  */
 export async function runInitWizard(opts) {
+  // The stream guard (LLP 0341): wrapped once, before any lane runs, so
+  // no narration or warning can crash the run - a dying stream is
+  // recorded here and acted on at the boundaries below, never thrown.
+  // @ref LLP 0341#absorb [implements]: the orchestrator wraps both streams once and every lane writes through the guard
+  const guard = guardWizardOutput({ stdout: opts.stdout, stderr: opts.stderr })
+  opts = { ...opts, stdout: guard.stdout, stderr: guard.stderr }
   const log = getLogger('wizard')
   const interactive = !opts.picks
   const catalog = opts.catalog ?? (await loadWizardCatalog())
@@ -205,6 +212,25 @@ export async function runInitWizard(opts) {
    */
   const enrolled = () => managed || joined !== undefined
 
+  /**
+   * The run's exit when its consent surface is gone (LLP 0341): the
+   * same cancel ctrl+c produces, reached at a boundary rather than by
+   * an uncaught stream error. The enrolled consequence is narrated on
+   * stderr, the surviving stream, because the one fact that outlives
+   * the run - this machine syncs by default - must be attempted
+   * somewhere a `2>log` invocation could still catch it. Every write
+   * here goes through the guard, so none of it can throw.
+   *
+   * @ref LLP 0341#dead-surface [implements]: a dead stdout ends the run as a cancel, with the enrolled abort narrated on the surviving stream
+   * @returns {Promise<InitWizardResult>}
+   */
+  const cancelDeadOutput = async () => {
+    log.warn('wizard.output_closed', { [Attr.COMPONENT]: 'wizard', ...(pathway ? { pathway } : {}) })
+    if (joined) await narrateEnrolledAbort({ stdout: opts.stderr, env: opts.env })
+    opts.stderr.write('hyp setup: output closed - cancelled\n')
+    return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
+  }
+
   // The question lanes and their back edges (LLP 0191 #back-edges):
   // escape steps one *screen* back - folders to sync (`continue atSync`,
   // or past it to pick when the sync lane asked nothing), sync to pick
@@ -220,6 +246,12 @@ export async function runInitWizard(opts) {
   // back-navigation ends at the commit point (LLP 0190 #commit-point).
   // @ref LLP 0191#back-edges [implements]: the orchestrator's loop carries every step-level back transition
   atFork: while (true) {
+    // The boundary rule (LLP 0341 #dead-surface): the surface may have
+    // died while the previous screen was up, and no new question may
+    // open on a stream nobody can see. Every loop level checks on
+    // entry; the acting phases below check before acting.
+    // @ref LLP 0341#dead-surface [implements]: no lane opens and no phase acts once the consent surface is gone
+    if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
     if (interactive) {
       pathway = undefined
       // 'first-run' and 'reconfigure' both enter here, managed or not.
@@ -324,6 +356,9 @@ export async function runInitWizard(opts) {
         // nothing, so a retry onto a different pathway never contradicts a
         // total already on screen.
         // @ref LLP 0135#progress [implements]: the denominator resolves the moment the fork does, not before
+        // The join is a question lane too (a login is an interaction),
+        // so it does not open on a dead surface either (LLP 0341).
+        if (!(await guard.checkpoint())) return await cancelDeadOutput()
         const joinProgress = wizardStepProgress('team', 'join')
         const joinFn = opts.join ?? runWizardJoin
         const join = await joinFn({
@@ -362,6 +397,7 @@ export async function runInitWizard(opts) {
     // than a step. Behind a gate that cannot render is the fork.
     let backFromPick = false
     atExpress: while (true) {
+      if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
       // One question, before the lanes, that accepts every lane's stated
       // default. Asked once per pass through the lanes and only on an
       // attended run; declining runs the lanes exactly as before. Like the
@@ -424,6 +460,7 @@ export async function runInitWizard(opts) {
       backFromPick = false
 
       atPick: while (true) {
+        if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
         // The lanes' positions, resolved when their pathway is: a back
         // through the fork can land on the other pathway, whose itinerary
         // then states its own positions - exactly as a failed join's retry
@@ -519,6 +556,7 @@ export async function runInitWizard(opts) {
           // question re-presents the sync lane, not the picker.
           // @ref LLP 0200#wizard [implements]: the new-folder step follows the sync lane and backs into it
           atSync: while (true) {
+            if (!(await guard.checkpoint())) return await cancelDeadOutput()
             const syncFn = opts.syncScope ?? runWizardSyncScope
             // The locked descriptors ride along so the lane can state the whole
             // sync picture: org rows always sync and are shown read-only there.
@@ -580,6 +618,7 @@ export async function runInitWizard(opts) {
             }
             sourcesOptedOut = syncScope.optedOut
 
+            if (!(await guard.checkpoint())) return await cancelDeadOutput()
             const folderFn = opts.folderAsk ?? runWizardFolderAsk
             const folders = await folderFn({
               stdout: opts.stdout,
@@ -662,6 +701,14 @@ export async function runInitWizard(opts) {
   // and on the team pathway narrates the enrolled state it leaves behind.
   // Scripted phase stubs (tests) return no `configPending` and skip this.
   // @ref LLP 0190#commit-point [implements]: the overwrite confirm is the wizard's last question, after the sync lane
+  //
+  // The one act that must never outrun the stream's death report: a
+  // config the user never saw confirmed must not land because the run
+  // stopped being able to say so. The checkpoint settles pending writes
+  // first, so a failure the stream has not delivered yet still counts
+  // (LLP 0341 #absorb).
+  // @ref LLP 0341#dead-surface [implements]: the commit point checks the surface before the config lands
+  if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
   if (picked.configPending) {
     const committed = await commitWizardPickedConfig({
       stdout: opts.stdout,
@@ -681,6 +728,7 @@ export async function runInitWizard(opts) {
 
   // Attended-only (LLP 0131): the configure phase itself no-ops when
   // `picks` is set, so threading it through keeps the rule in one place.
+  if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
   const configureFn = opts.configure ?? runConfigurePhase
   const configured = await configureFn(picked, {
     stdout: opts.stdout,
@@ -691,6 +739,7 @@ export async function runInitWizard(opts) {
 
   /** @type {FinaleSummary | undefined} */
   let finaleSummary
+  if (interactive && opts.finale && !(await guard.checkpoint())) return await cancelDeadOutput()
   if (opts.finale) {
     finaleSummary = await runWizardFinale({
       opts,
@@ -793,7 +842,11 @@ export async function runInitWizard(opts) {
   // @ref LLP 0203#offer [implements]: the enrolled closing sequence offers the release, after stating the wait
   /** @type {WizardSyncNowResult | undefined} */
   let syncNow
-  if (holdDeadline !== null && interactive && !cancelled && opts.finale?.dryRun !== true) {
+  // A question does not open on a dead surface; past the finale the run
+  // is already committed and its acts done, so the offer is skipped
+  // rather than the run cancelled (LLP 0341 #dead-surface).
+  if (holdDeadline !== null && interactive && !cancelled && opts.finale?.dryRun !== true
+    && (await guard.checkpoint())) {
     syncNow = await runWizardSyncNow({
       deadline: holdDeadline,
       stdout: opts.stdout,
