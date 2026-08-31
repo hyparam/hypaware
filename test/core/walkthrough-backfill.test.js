@@ -229,6 +229,12 @@ test('interactive onboarding lets the user decline backfill', async () => {
   assert.equal(backfill.calls.length, 0, 'declining must skip the backfill run')
   assert.deepEqual(result.finale?.backfill, [])
   assert.match(stdout.text(), /backfill: skipped \(declined\)/)
+  // The other half of the dead-surface notice below: a decline was read
+  // and answered on a surface that still works, so it says so where the
+  // user is looking and leaves the surviving stream alone. Keying that
+  // notice on `!consent` rather than on the dead surface itself would
+  // warn every user who simply said no.
+  assert.doesNotMatch(stderr.text(), /output closed/, 'a decline is not an output failure')
 })
 
 test('interactive onboarding maps cancelled backfill consent to the cancel exit path', async () => {
@@ -609,6 +615,107 @@ test('a dead consent surface declines the backfill instead of taking its default
   assert.equal(asked, false, 'no question opens on a surface nobody can read')
   assert.equal(backfill.calls.length, 0, 'a dead surface must not import local transcript history')
   assert.deepEqual(summary.backfill, [])
+})
+
+// The skip above is silent on the surface that can still be read. The
+// `backfill: skipped (declined)` line it would otherwise print goes to
+// stdout, which is exactly the stream that just died, so someone whose
+// terminal went away mid-finale gets no signal at all that their local
+// history was not imported. The post-commit cancel already narrates its
+// unfinished install on stderr; the finale's own skip says the same kind
+// of thing on the same surviving stream.
+// The pick is mixed on purpose. A sweep-backed provider is never asked
+// and runs its first import whatever the answer was (LLP 0180, pinned
+// above), so a notice that claimed "the local history import" outright
+// would name work that did happen - in the one message whose whole job
+// is to say accurately what did not.
+// @ref LLP 0341#dead-surface [tests]: the fact that outlives the run is attempted where a `2>log` invocation could still catch it, and says only what was skipped
+test('a dead consent surface says on stderr which backfill was skipped', async () => {
+  const env = await tmpEnv('hypaware-bf-dead-surface-notice-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const backfill = makeBackfill(['claude', 'openclaw'], {}, ['openclaw'])
+
+  await runPickerFinale(/** @type {any} */ ({
+    finale: { skipDaemon: true },
+    clientsPicked: ['claude', 'openclaw'],
+    capabilities: noGateway,
+    config: { version: 2, plugins: [] },
+    configPath: path.join(String(env.HOME), 'config.json'),
+    env,
+    stdout,
+    stderr,
+    retentionDays: 30,
+    interactive: true,
+    backfill,
+    backfillConsentPrompt: async () => true,
+    checkBoundary: async () => false,
+  }))
+
+  assert.match(stderr.text(), /output closed/, 'the surviving stream names why the import did not run')
+  // The precise command, not the wizard: re-running `hyp setup` to redo
+  // one import drags the install, the attach and the overwrite confirm
+  // along with it, and `hyp client history import` is the thing that was
+  // skipped (`core_commands.js`, alias `hyp backfill`).
+  assert.match(stderr.text(), /run 'hyp client history import claude' to import it/, 'and says how to finish it')
+  // Only the provider the dead question would have covered.
+  assert.match(stderr.text(), /import for claude was skipped/)
+  assert.doesNotMatch(stderr.text(), /openclaw/, 'the sweep-backed import below is not something to re-run for')
+  assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
+  // The decline line stays off stdout: nothing can read it, and "declined"
+  // is not what happened.
+  assert.doesNotMatch(stdout.text(), /backfill: skipped \(declined\)/)
+})
+
+// Whatever took stdout can have taken stderr with it (a closed terminal
+// takes both), and this arm's contract is to warn and let the finale
+// finish. The warning therefore may not become the thing that stops the
+// sweep import and the daemon restart that follow it. The wizard hands
+// down guard-wrapped sinks that swallow this already; the guard here is
+// what makes the contract hold for a direct caller of the exported
+// finale, which is typed to take any writable.
+// The notice is not the only stderr write between the dead surface and
+// the daemon restart: the per-provider failure line is the other, in the
+// same warn-and-continue loop, so the provider fails on purpose here.
+// @ref LLP 0341#warnings [tests]: a warning that cannot be written does not unmake the decision it qualifies
+test('a stderr that throws does not cost the finale the work after the notice', async () => {
+  const env = await tmpEnv('hypaware-bf-dead-stderr-')
+  /** @type {Array<{ provider: string }>} */
+  const calls = []
+  const backfill = {
+    available: ['claude', 'openclaw'],
+    sweeping: ['openclaw'],
+    calls,
+    /** @param {{ provider: string }} args */
+    async run(args) {
+      calls.push(args)
+      throw new Error('provider blew up')
+    },
+  }
+  const throwing = { write() { throw new Error('EPIPE: broken pipe') } }
+
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    finale: { skipDaemon: true },
+    clientsPicked: ['claude', 'openclaw'],
+    capabilities: noGateway,
+    config: { version: 2, plugins: [] },
+    configPath: path.join(String(env.HOME), 'config.json'),
+    env,
+    stdout: makeBuf(),
+    stderr: throwing,
+    retentionDays: 30,
+    interactive: true,
+    backfill,
+    backfillConsentPrompt: async () => true,
+    checkBoundary: async () => false,
+  }))
+
+  assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
+  // Recorded after the failure line, so it is what proves the finale got
+  // past the second unwritable warning rather than only the first.
+  assert.deepEqual(summary.backfill, [
+    { provider: 'openclaw', dryRun: false, ok: false, scanned: 0, rowsWritten: 0, skipped: 0 },
+  ])
 })
 
 // The other side of the same seam: a live surface changes nothing, and a

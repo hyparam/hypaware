@@ -2062,8 +2062,11 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
  *   - `--no-daemon`: still backfill (it is a local file import).
  *
  * Each provider's outcome is pushed onto `summary.backfill` and a
- * one-line status is written to stdout. Wrapped in a `walkthrough.backfill`
- * span so the step is observable even when no provider runs.
+ * one-line status is written to stdout, except the skip forced by a
+ * consent surface that died inside the finale: that one goes to stderr,
+ * because stdout is the stream it is reporting the death of
+ * (LLP 0341 #dead-surface). Wrapped in a `walkthrough.backfill` span so
+ * the step is observable even when no provider runs.
  *
  * @param {{
  *   backfill?: PickerBackfillRunner,
@@ -2099,6 +2102,10 @@ async function runFinaleBackfill(args) {
 
   let consent = true
   let cancelled = false
+  // Told apart from a decline because they leave the user in different
+  // places: a decline was read and answered, while this one was never
+  // asked and its own "skipped" line goes to the stream that just died.
+  let surfaceDead = false
   if (interactive && asked.length > 0) {
     // The last consent question in the run, and the only one inside the
     // finale: the install, the attach, and the asset copy above it have
@@ -2111,6 +2118,7 @@ async function runFinaleBackfill(args) {
     // @ref LLP 0341#dead-surface [implements]: the backfill consent does not open on a dead surface, and a dead surface is a decline rather than the default it never printed
     if (args.checkBoundary && !(await args.checkBoundary())) {
       consent = false
+      surfaceDead = true
     } else {
       const ask = args.backfillConsentPrompt ?? defaultBackfillConsentPromptFactory({
         ...(args.stdin ? { stdin: args.stdin } : {}),
@@ -2139,6 +2147,7 @@ async function runFinaleBackfill(args) {
       interactive,
       consent,
       consent_cancelled: cancelled,
+      consent_surface_dead: surfaceDead,
       retention_days: retentionDays,
       until,
       ...(cancelled ? { exit_code: WALKTHROUGH_CANCEL_EXIT_CODE } : {}),
@@ -2152,7 +2161,37 @@ async function runFinaleBackfill(args) {
         stdout.write('backfill: skipped (cancelled)\n')
         return
       }
-      if (!consent) stdout.write('backfill: skipped (declined)\n')
+      // The one thing that outlives a run whose surface died inside the
+      // finale: the import did not happen, and it names the one command
+      // that does it rather than the whole wizard, which would re-run the
+      // install, the attach and the overwrite confirm to redo one import.
+      // Said on stderr because stdout is the stream that just went, so
+      // the decline's own line would be written into nothing - and
+      // "declined" is not what happened anyway. It names `asked` rather
+      // than every provider because a sweep-backed sibling still imports
+      // a few lines below (LLP 0180), so a bare "the import was skipped"
+      // would claim more than was skipped.
+      //
+      // Guarded, like the two cancel notices it is modelled on
+      // (`writeCancelledNotice` below, the wizard's post-finale cancel):
+      // a terminal that took stdout with it can have taken stderr too,
+      // and this arm's whole contract is to warn and let the finale
+      // finish - a warning that cannot be written must not cost the run
+      // the sweep import and the daemon restart that follow it.
+      // @ref LLP 0341#warnings [implements]: a warn-and-continue arm guards its own warning write, so the contract holds for direct callers of the exported finale too
+      // @ref LLP 0341#dead-surface [implements]: what outlives the run is attempted on the surviving stream, as the post-commit cancel already does
+      if (surfaceDead) {
+        try {
+          stderr.write(
+            `hyp setup: output closed - the local history import for ${asked.join(', ')} was skipped; ` +
+            `run 'hyp client history import ${asked.join(' ')}' to import it\n`
+          )
+        } catch {
+          // best-effort: whatever took stdout may have taken stderr too
+        }
+      } else if (!consent) {
+        stdout.write('backfill: skipped (declined)\n')
+      }
       const toRun = providers.filter((p) => consent || sweeping.has(p))
       // Guard each provider so one failure neither aborts sibling
       // providers nor the daemon (re)start that resumes live capture.
@@ -2183,7 +2222,17 @@ async function runFinaleBackfill(args) {
           )
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          stderr.write(`backfill ${provider} failed: ${message}\n`)
+          // Guarded for the same reason the dead-surface notice above is,
+          // and for the same callers: this arm exists so one provider's
+          // failure costs neither its siblings nor the daemon restart, and
+          // an unwritable warning must not cost them instead - nor drop
+          // the failed entry the summary is still owed.
+          // @ref LLP 0341#warnings [implements]: the per-provider warn-and-continue arm guards its own write too
+          try {
+            stderr.write(`backfill ${provider} failed: ${message}\n`)
+          } catch {
+            // best-effort: the provider failure is the news, not this line
+          }
           summary.backfill.push({ provider, dryRun, ok: false, scanned: 0, rowsWritten: 0, skipped: 0 })
         }
       }
