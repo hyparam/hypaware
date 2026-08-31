@@ -548,7 +548,7 @@ run directly. The common Phase 8 conditions:
 |---------------------------------------|------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
 | `config_missing`                      | no `~/.hyp/hypaware-config.json` was found                                         | `hyp setup` or `hyp setup --from-file <config.json>`                       |
 | `config_invalid`                      | the loaded config failed schema / cross-plugin validation                          | `hyp setup --from-file <config.json>`                                     |
-| `client_without_gateway`              | a client plugin (Claude / Codex) is enabled but `@hypaware/ai-gateway` is not      | re-run `hyp setup`, then `hyp client attach --client <name>`                     |
+| `client_without_gateway`              | a gateway-backed client plugin (Claude / Codex / OpenClaw) is enabled but `@hypaware/ai-gateway` is not | re-run `hyp setup`, then `hyp client attach --client <name>`                     |
 | `gateway_missing_anthropic_upstream`  | a gateway-routed Anthropic client (OpenClaw) is enabled but no Anthropic upstream is registered  | re-run `hyp setup` and pick the Anthropic upstream                        |
 | `gateway_missing_openai_upstream`     | `@hypaware/codex` enabled but no OpenAI upstream is registered                     | re-run `hyp setup` and pick the OpenAI upstream                           |
 | `sink_missing_encoder`                | a local-fs sink is configured but no encoder plugin is enabled                     | re-run `hyp setup` and pick "local Parquet export"                        |

@@ -622,6 +622,13 @@ function runPerPluginSectionValidators(config, registry, errors) {
 const AI_GATEWAY_PLUGIN = /** @type {PluginName} */ ('@hypaware/ai-gateway')
 
 /**
+ * The capability the gateway provides. A client adapter that reaches its
+ * client registry through the gateway declares this in its manifest
+ * `requires`, which is the fact {@link clientRegistersViaGateway} reads.
+ */
+const AI_GATEWAY_CAPABILITY = /** @type {CapabilityName} */ ('hypaware.ai-gateway')
+
+/**
  * Fallback client descriptors for first-party clients. `hyp status`
  * uses catalog-derived descriptors when manifest discovery succeeds,
  * but diagnostics should still catch common Claude/Codex wiring gaps
@@ -654,6 +661,36 @@ function firstPartyClientDescriptors() {
       requiredUpstreams: ['openai', 'chatgpt'],
     }],
   ]))
+}
+
+/**
+ * Would enabling this client with no gateway in the config actually break
+ * its attach? Only for an adapter that registers itself with the
+ * *gateway's* client registry (`@hypaware/claude`, `@hypaware/codex`,
+ * `@hypaware/openclaw`). An endpoint-free adapter registers with the
+ * kernel's own `ctx.clients` and attaches with no gateway present at all,
+ * which is what `src/core/commands/clients.js` means by "endpoint-free
+ * clients do not need the gateway capability".
+ *
+ * Which kind a plugin is, is already stated in its manifest: a
+ * gateway-backed one declares `requires.capabilities['hypaware.ai-gateway']`.
+ * Reading that keeps this from becoming a second list to maintain
+ * alongside the manifests.
+ *
+ * Without the test, `hyp setup --source opencode` composed exactly the one
+ * plugin it was asked for and then reported itself degraded, warning that
+ * attach would fail after attach had already succeeded, and pointing the
+ * operator at a gateway OpenCode does not use.
+ *
+ * A plugin the catalog does not know yields no warning, which is the safe
+ * direction: an unrecognized name is not evidence of a broken wiring.
+ *
+ * @param {Map<PluginName, PluginMetadata>} knownPlugins
+ * @param {PluginName} pluginName
+ * @returns {boolean}
+ */
+function clientRegistersViaGateway(knownPlugins, pluginName) {
+  return knownPlugins.get(pluginName)?.requires?.[AI_GATEWAY_CAPABILITY] !== undefined
 }
 
 /**
@@ -704,7 +741,7 @@ export function diagnoseV1Config(config, ctx = {}) {
     const pluginName = descriptor.plugin
     if (!enabledByName.has(pluginName)) continue
 
-    if (gatewayConfig === undefined) {
+    if (gatewayConfig === undefined && clientRegistersViaGateway(knownPlugins, pluginName)) {
       out.push({
         kind: 'client_without_gateway',
         pointer: pluginPointer(config, pluginName),

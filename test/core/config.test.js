@@ -313,6 +313,31 @@ test('diagnoseV1Config reports advisory product wiring gaps', async () => {
   )
 })
 
+// `hyp setup --source opencode` composes exactly one plugin, and OpenCode's
+// adapter registers with the kernel's own client registry rather than the
+// gateway's, so `hyp client attach opencode` succeeds with no gateway in the
+// config. Warning anyway made the documented OpenCode onboarding end on
+// `overall: degraded`, claiming attach would fail after it already had.
+test('diagnoseV1Config does not ask an endpoint-free client to add a gateway', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const ctx = { clientDescriptors: catalog.clientDescriptors, knownPlugins: catalog.pluginMetadata }
+
+  const opencodeOnly = diagnoseV1Config(
+    { version: 2, plugins: [{ name: '@hypaware/opencode' }] },
+    ctx
+  )
+  assert.deepEqual(opencodeOnly.map((diagnostic) => diagnostic.kind), [])
+
+  // The gateway-backed clients still get the warning: their adapters
+  // register through the gateway, so attach really does fail without it.
+  const claudeOnly = diagnoseV1Config(
+    { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    ctx
+  )
+  assert.deepEqual(claudeOnly.map((diagnostic) => diagnostic.kind), ['client_without_gateway'])
+})
+
 test('diagnoseV1Config falls back to first-party client descriptors', () => {
   const withoutGateway = diagnoseV1Config({
     version: 2,
