@@ -114,9 +114,9 @@ function wizardOpts(home, over = {}) {
     pick: async (/** @type {any} */ o) => { opts._pickOpts = o; return pickResult() },
     syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: [] } },
     folderAsk: async (/** @type {any} */ o) => { opts._folderOpts = o; return { mode: 'sync' } },
-    // The express gate (LLP 0201) fronts the lanes on an enrolled attended
-    // run (LLP 0201 #one-lane-no-gate); these tests exercise the step-by-step
-    // path, so it declines by default.
+    // The express gate (LLP 0201) fronts the lanes on every attended run
+    // with default rows; these tests exercise the step-by-step path, so it
+    // declines by default.
     express: async (/** @type {any} */ o) => { opts._expressOpts = o; return 'choose' },
     configure: async () => ({ results: [] }),
     finaleRunner: async (/** @type {any} */ args) => {
@@ -397,30 +397,29 @@ test('runInitWizard: back at the express gate re-presents the fork', async () =>
   assert.equal(gates, 2)
 })
 
-// The gate exists to collapse several questions into one, and a solo
-// local run has only one: the pick gate, which offers the same rows
-// itself. Showing the express screen there asked the same question
-// twice - declining "Record all of these" landed on "Record all".
-// @ref LLP 0201#one-lane-no-gate [tests]: the solo local pathway opens with the pick gate, not the express gate
-test('runInitWizard: the unenrolled local pathway shows no express gate; the pick gate is the one question', async () => {
+// The gate is the wizard's only accept-or-customize screen, so the solo
+// local pathway shows it too (LLP 0201 #gate): accepting there is the
+// whole run, and declining opens the pick menu directly.
+// @ref LLP 0201#gate [tests]: the unenrolled local pathway shows the express gate and its accept auto-answers the pick lane
+test('runInitWizard: the unenrolled local pathway shows the express gate; accepting narrates the pick lane', async () => {
   let gates = 0
   const { opts } = wizardOpts(await tmpHome(), {
     fork: async () => 'local',
     catalog: detectableCatalog(),
     detect: async () => new Set(['claude']),
-    express: async () => { gates += 1; return 'defaults' },
+    express: async (/** @type {any} */ o) => { gates += 1; opts._expressOpts = o; return 'defaults' },
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
-  assert.equal(gates, 0, 'one gate to collapse is nothing to collapse (LLP 0201 #one-lane-no-gate)')
-  assert.equal(opts._pickOpts.autoAccept, undefined, 'the pick lane keeps its own gate')
-  assert.equal(opts._pickOpts.progress, 'Step 1 of 2 · Choose what to collect')
+  assert.equal(gates, 1, 'the accept question is asked on every pathway')
+  assert.equal(opts._expressOpts.enrolled, false, 'a solo run makes no sync claim')
+  assert.equal(opts._pickOpts.autoAccept, true)
+  assert.equal(opts._pickOpts.progress, undefined, 'an express run states no positions')
 })
 
 // Another enrolled shape: managed without a join this run. Its local
-// itinerary adds the sync and folder lanes (LLP 0188, LLP 0200), so the
-// gate has several questions to collapse and earns its screen.
-// @ref LLP 0201#one-lane-no-gate [tests]: a managed machine's local reconfigure keeps the express gate
+// itinerary adds the sync and folder lanes (LLP 0188, LLP 0200), and the
+// gate's accept answers them all.
 test('runInitWizard: a managed machine reconfiguring down the local pathway still gets the express gate', async () => {
   let gates = 0
   const { opts, calls } = wizardOpts(await tmpHome(), {
@@ -435,8 +434,7 @@ test('runInitWizard: a managed machine reconfiguring down the local pathway stil
   assert.equal(gates, 1)
   assert.equal(opts._pickOpts.autoAccept, true)
   // No `join`: a reconfigure never runs it. The extra lanes (`syncScope`,
-  // `folderAsk`) are what makes this run have several gates for the express
-  // gate to collapse (LLP 0201 #one-lane-no-gate) - the point of this case.
+  // `folderAsk`) still run behind the accept, narrating instead of asking.
   assert.deepEqual(calls, ['gate', 'fork', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
 })
 

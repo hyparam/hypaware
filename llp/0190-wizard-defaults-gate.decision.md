@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
 **Related:** LLP 0188 (#never-silent: the sync-scope step this reshapes), LLP 0135 (#pick: the pick lane this reshapes), LLP 0129 (fork/join/pick order, unchanged), LLP 0011 (autodetect seeds the default), LLP 0130 (picker descriptors)
-**Extended-by:** [LLP 0201](./0201-express-defaults-gate.decision.md) (one express gate now precedes the lanes and can accept every gate below at once; each lane keeps its gate, its statement, and its default, and an auto-accepted gate prints its statement instead of prompting)
+**Extended-by:** [LLP 0201](./0201-express-defaults-gate.decision.md) (revised 2026-08-30: one express gate precedes the lanes and is the wizard's only accept-or-customize screen; the per-lane gates of #pick-gate and #sync-gate below are retired, the lanes open directly with their menus, and an auto-accepted lane prints its statement instead of prompting)
 **Extended-by:** [LLP 0274](./0274-pick-menu-keeps-its-checked-state.decision.md) (#sync-gate below: the `enterKeepsChecked` opt-in widens from "the sync menu" to any menu that arrives with a checked state, so the wizard pick menu sets it too; that section's line "the pick menus keep the historical semantics untouched" is corrected for that menu, and `runPickerWalkthrough` is untouched)
 
 > Extends [LLP 0188 §never-silent](./0188-enrolled-default-sync-with-client-optout.decision.md#never-silent)
@@ -33,42 +33,40 @@ cost a menu walk on every run.
 
 ## Decision {#decision}
 
-<a id="pick-gate"></a>**The pick lane opens with a defaults gate.** When
-detection or the org's locked set yields a non-empty default, the lane
-first states it - the title "HypAware will record:" over one source per
-line (locked rows keep their "· managed by your fleet" suffix) - and asks
-a two-option select: "Record all" (the default, one keypress) or "Select
-what to record", which opens the unchanged multiselect. The list rides
-the prompt's `items` chrome, not the title: a comma-joined title was
-unreadable past a few sources, and rendering the lines inside the frame
-means `clearOnResolve` erases them with the prompt. The gate's rows carry
-bare labels - the title and list already name everything the choice
-covers - but the accept option carries a one-line summary disclosing
-that accepting *configures* the listed tools: the gate is the happy path
-(enter, enter, finale), so it is the one screen guaranteed to be seen,
-and the side-effect disclosure otherwise lives only on menu rows the
-happy path never shows. The per-row specifics (attach, config writes,
-helper skills, the OTLP receiver) stay on the menu rows' summaries.
-With nothing detected
-and nothing locked there is nothing worth confirming, so the menu shows
-directly. The gate is a statement of the same rows the menu would
-pre-check (LLP 0011 #autodetect-vs-default still holds: detection seeds,
-never forces - the menu remains one keypress away).
+<a id="pick-gate"></a>**The pick lane opens with its multiselect.**
+(Revised by [LLP 0201 #decline](./0201-express-defaults-gate.decision.md#decline):
+this section originally fronted the menu with a defaults gate - the title
+"HypAware will record:" over one source per line, with "Record all" /
+"Select what to record" - and that gate is retired. The wizard's single
+accept-or-customize question is the express gate, and a user who declined
+it has already asked for the menu.) When detection or the org's locked
+set yields a default, the menu opens with those rows checked (locked rows
+checked and disabled, with the "· managed by your fleet" suffix), and a
+bare enter keeps the checked state (LLP 0274). LLP 0011
+#autodetect-vs-default still holds: detection seeds, never forces. The
+side-effect disclosure that rode this lane's accept row - accepting
+*configures* the listed tools - lives on the express gate's accept
+summary (LLP 0201 #gate), the one line the happy path is guaranteed to
+read; the per-row specifics (attach, config writes, helper skills, the
+OTLP receiver) stay on the menu rows' summaries. On the express accept
+path the lane narrates "HypAware will record:" over its rows instead of
+prompting (LLP 0201 #narrate).
 
-<a id="sync-gate"></a>**The sync lane opens with a defaults gate, and its
-menu checks what syncs.** The gate states the split as a list - "These
-will sync to your server:" over one source per line, with a re-entry's
-standing opt-outs under a second "Staying local-only:" header - and
-accepts on a bare enter ("Sync all", or "Keep this" on a re-entry),
-which round-trips the store unchanged. The sync list is the *whole*
-picture: the org's locked sources always sync (LLP 0188 #locked), so
-they lead it, fleet-suffixed, and lead the menu as checked, disabled
-rows - the same read-only rendering the picker gives them. LLP 0188 kept
-locked sources out of the step entirely; a "these will sync" statement
-that omits sources that do sync understates what the server sees, so
-they are now shown but remain uneditable, and they never enter the
-opt-out computation.
-"Select what to sync" opens the multiselect, now titled "Choose what syncs - unchecked sources stay on this machine":
+<a id="sync-gate"></a>**The sync lane opens with its multiselect, and the
+menu checks what syncs.** (Revised by
+[LLP 0201 #decline](./0201-express-defaults-gate.decision.md#decline):
+this section originally fronted the menu with a defaults gate - "These
+will sync to your server:" with "Sync all" / "Keep this" - and that gate
+is retired. On the express accept path the lane narrates that same split
+instead of prompting, LLP 0201 #narrate; on the decline path the menu is
+the statement.) The menu is the *whole* picture: the org's locked sources
+always sync (LLP 0188 #locked), so they lead it, fleet-suffixed, as
+checked, disabled rows - the same read-only rendering the picker gives
+them. LLP 0188 kept locked sources out of the step entirely; a "choose
+what syncs" screen that omits sources that do sync understates what the
+server sees, so they are shown but remain uneditable, and they never
+enter the opt-out computation.
+The multiselect is titled "Choose what syncs - unchecked sources stay on this machine":
 every candidate renders checked by default (default-sync is the point),
 a previously opted-out source arrives unchecked, and the opt-out set is
 the candidates left unchecked at confirm. The numbered non-TTY fallback
@@ -181,12 +179,13 @@ no loopback listener left to finish the sign-in, EOF is a failure that
 says so, and with a listener up the paste lane stays pending rather than
 losing a race the browser may still win.
 
-<a id="prompt-shape"></a>**One gate prompt shape for both lanes.** The
-gate is a `ConfirmSelectQuestion` asked through
-`defaultConfirmSelectPromptFactory`: a TUI select on a real TTY, a
-numbered readline fallback elsewhere, a bare enter taking the stated
-default on both paths, and cancel behaving like any other wizard prompt
-(exit 130). Both wizard steps take an injectable `confirm` seam beside
+<a id="prompt-shape"></a>**One confirm-select prompt shape for every
+wizard gate.** A gate (the express gate of LLP 0201, the new-folder
+question, the disconnect confirm below) is a `ConfirmSelectQuestion`
+asked through `defaultConfirmSelectPromptFactory`: a TUI select on a real
+TTY, a numbered readline fallback elsewhere, a bare enter taking the
+stated default on both paths, and cancel behaving like any other wizard
+prompt (exit 130). The lanes take an injectable `confirm` seam beside
 the existing `prompt` seam, threaded from `runInitWizard` like the other
 prompt seams.
 
@@ -267,14 +266,14 @@ Rejected: folding the "accept defaults" row into the multiselect itself
 already exists; the confusion was about what the checkboxes mean, which
 a pseudo-row does not fix). Also rejected: auto-skipping the sync step
 entirely when nothing is opted out - LLP 0188 #never-silent requires the
-step to say what will ship before anything ships; the gate keeps the
-statement while removing the menu walk.
+step to say what will ship before anything ships; the express accept
+keeps the statement (LLP 0201 #narrate) while removing the menu walk.
 
 ## Consequences {#consequences}
 
-- The happy path through an enrolled wizard run is now: enter (collect
-  the detected defaults), enter (sync everything), finale. Each gate
-  still names exactly what it is accepting, so nothing ships silently.
+- The happy path through an attended run is LLP 0201's: fork, express
+  accept, narration, finale. The decline path is the menus, one enter
+  each to keep the stated defaults. Nothing ships silently either way.
 - The retired inverted wording ("check any to keep local-only") no
   longer appears anywhere; `hyp policy client` remains the standing
   post-onboarding control and is named on the "Keeping local-only" line

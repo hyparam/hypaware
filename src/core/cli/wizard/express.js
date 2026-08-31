@@ -8,35 +8,29 @@ import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
  * @import { RunWizardExpressGateOptions, WizardExpressChoice } from '../../../../src/core/cli/wizard/types.js'
  */
 
-const EXPRESS_TITLE = 'HypAware found these on this machine:'
+const EXPRESS_TITLE = 'Set up recording'
 
 /**
- * The wizard's express gate (LLP 0201): one question, before the question
- * lanes, that answers all of them at once.
+ * The wizard's express gate (LLP 0201): the one accept-or-customize
+ * question, before the question lanes, that answers all of them at once.
  *
- * Every lane already opens with a defaults gate of its own (LLP 0190), so
- * the common run is a sequence of bare enters whose answers were knowable
- * before the first one. This collapses that sequence into a single yes:
- * record what was detected, sync all of it, let new folders sync. Declining
- * runs the lanes exactly as before, gates and all.
+ * Accepting takes every lane's stated default; declining asks the real
+ * questions, linearly, with no further accept-or-customize screens
+ * (LLP 0201 #decline). Shown on every attended pass whose seeding yields
+ * default rows, on both pathways.
  *
- * The screen is the *list* plus two verbs, not a policy summary: `rows` are
- * the pick gate's own rows (LLP 0201 #gate), so "Record and sync all of
- * these" points at something concrete the user can read, and the alternative
- * is simply "Let me choose". A gate whose rows would be empty is never
- * asked - the orchestrator skips it, because there would be nothing to
- * accept. Nor is a gate with only one gate behind it (LLP 0201
- * #one-lane-no-gate): on a solo local run the pick gate is the only
- * question and already offers these rows itself, so the orchestrator
- * shows this screen only on an enrolled run, whose itinerary adds the
- * sync and new-folder lanes.
+ * The rows are self-explaining (LLP 0201 #gate): the detected tool names
+ * live in the accept row's own summary sentence, not in the items chrome
+ * above the key-hint line, which goes unread. The sentence is both the
+ * disclosure (what accepting does) and the evidence (what was found).
+ * `sync` is claimed only on an enrolled run - on a solo machine nothing
+ * forwards, so promising it would be a claim the install cannot keep.
  *
  * Accepting is never silent (LLP 0188 #never-silent): each lane still
- * narrates the statement its gate would have shown, it simply does not stop
- * for an answer. The user therefore sees the same rows in the same order,
- * minus the keypresses.
+ * narrates the statement it would have shown, it simply does not stop
+ * for an answer.
  *
- * @ref LLP 0201#gate [implements]: one question before the lanes, naming the rows it will record, that accepts every lane's stated default
+ * @ref LLP 0201#gate [implements]: one self-explaining question before the lanes, naming the tools in the accept row's summary, that accepts every lane's stated default
  * @param {RunWizardExpressGateOptions} opts
  * @returns {Promise<WizardExpressChoice>}
  */
@@ -49,34 +43,21 @@ export async function runWizardExpressGate(opts) {
   try {
     choice = await confirm({
       title: EXPRESS_TITLE,
-      // The rows themselves are the explanation. They are the pick gate's
-      // own rows (LLP 0201 #gate), so accepting here records exactly what
-      // is on screen.
-      items: opts.rows,
       options: [
         {
           value: 'defaults',
-          // The label names the act on the listed things, not an abstract
-          // "defaults": one line the user can check against the list above
-          // it. `sync` is claimed only on an enrolled run - on a solo
-          // machine nothing forwards, so promising it would be a claim the
-          // install cannot keep.
-          label: opts.enrolled ? 'Record and sync all of these' : 'Record all of these',
+          label: opts.enrolled ? 'Record and sync everything' : 'Record everything',
           // The one row guaranteed to be read on the fast path, so the
-          // side-effect disclosure lives here as well as on the pick gate
-          // it stands in for (LLP 0190 #pick-gate). One line: what
-          // accepting does to the machine, plus the folder policy that
-          // rides with it.
-          summary: opts.enrolled
-            ? 'Configures each to record through HypAware; new folders sync too.'
-            : 'Configures each to record through HypAware.',
+          // tool names and the side-effect disclosure live here rather
+          // than above the prompt chrome (LLP 0201 #gate).
+          summary: `Record AI logs from ${joinNames(opts.rows)}.`,
         },
         {
           value: 'choose',
-          label: 'Let me choose',
-          // The decline row glosses the path it opens (LLP 0201): a bare
-          // "Let me choose" priced the longer path at zero screens.
-          summary: 'Step through what to record, what syncs, and new-folder behavior.',
+          label: 'Customize',
+          // The decline row glosses the questions it opens (LLP 0201
+          // #decline): the menus, not another round of gates.
+          summary: opts.enrolled ? 'Choose what to record and what syncs.' : 'Choose what to record.',
         },
       ],
       default: 'defaults',
@@ -106,14 +87,27 @@ export async function runWizardExpressGate(opts) {
 }
 
 /**
- * Print the statement a lane's defaults gate would have shown, when the
- * express gate already answered it.
+ * Join tool names into one spoken-order list: "Claude Code", "Claude Code
+ * and Codex", "Claude Code, Codex, and OpenClaw". The names arrive plain
+ * (no fleet or setup suffixes): the sentence names what was found, and
+ * the per-row detail stays on the later screens and narrations.
  *
- * This is what keeps the fast path honest: the lanes' gates are the
- * never-silent surfaces (LLP 0188 #never-silent, LLP 0190), and skipping
- * the *prompt* must not skip the *statement*. The wording is the gate's
- * own title and items, so the two paths read identically apart from the
- * missing question.
+ * @param {string[]} names
+ * @returns {string}
+ */
+export function joinNames(names) {
+  if (names.length <= 1) return names[0] ?? ''
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`
+}
+
+/**
+ * Print the statement a lane would have shown, when the express gate
+ * already answered it.
+ *
+ * This is what keeps the fast path honest: the lanes are the
+ * never-silent surfaces (LLP 0188 #never-silent), and skipping the
+ * *prompt* must not skip the *statement*.
  *
  * A blank line leads each block. On the express path these statements
  * arrive back to back with nothing to break them up - the prompts that
@@ -123,7 +117,7 @@ export async function runWizardExpressGate(opts) {
  * a double gap; no current caller needs it since the pick lane's welcome
  * banner (its former blank-line source) was retired with LLP 0211.
  *
- * @ref LLP 0201#narrate [implements]: an auto-accepted gate prints its statement instead of prompting
+ * @ref LLP 0201#narrate [implements]: an auto-accepted lane prints its statement instead of prompting
  * @param {{ stdout: { write(chunk: string): unknown }, title: string, items?: string[], lead?: boolean }} args
  */
 export function narrateAcceptedGate({ stdout, title, items = [], lead = true }) {

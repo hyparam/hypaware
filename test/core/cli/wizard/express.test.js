@@ -50,9 +50,9 @@ function descriptor(id) {
   return /** @type {any} */ ({ plugin: `@hypaware/${id}`, id, label: `capture ${id}`, summary: `${id} rows` })
 }
 
-const ROWS = ['  Claude Code · managed by your fleet', '  Codex · detected']
+const ROWS = ['Claude Code', 'Codex']
 
-test('the gate lists the rows it will record, and the accept row names the act on them', async () => {
+test('the accept row names the tools in its own summary; nothing rides the items chrome', async () => {
   const { env } = await makeHome()
   const { confirm, state } = capturingConfirm('defaults')
 
@@ -61,47 +61,40 @@ test('the gate lists the rows it will record, and the accept row names the act o
   }))
 
   assert.equal(choice, 'defaults')
-  // The list is the explanation: the rows themselves, verbatim, not a
-  // paraphrase of what "defaults" means.
-  assert.equal(state.question.title, 'HypAware found these on this machine:')
-  assert.deepEqual(state.question.items, ROWS)
+  // The rows are self-explaining (LLP 0201 #gate): the tool names live in
+  // the accept row's summary sentence, not in the items chrome above the
+  // key-hint line, which goes unread.
+  assert.equal(state.question.title, 'Set up recording')
+  assert.equal(state.question.items, undefined)
   assert.deepEqual(state.question.options.map((/** @type {any} */ o) => o.label), [
-    'Record and sync all of these',
-    'Let me choose',
+    'Record and sync everything',
+    'Customize',
   ])
   assert.deepEqual(state.question.options.map((/** @type {any} */ o) => o.value), ['defaults', 'choose'])
   assert.equal(state.question.default, 'defaults')
-  // One line of consequence on the accept row: what it does to the machine
-  // (LLP 0190 #pick-gate) plus the folder policy that rides with it.
-  const accept = state.question.options[0]
-  assert.match(accept.summary, /Configures each to record through HypAware/)
-  assert.match(accept.summary, /new folders sync too/)
-  // The decline row prices the longer path (LLP 0201): it names the
-  // screens choosing walks through.
-  assert.match(state.question.options[1].summary, /what to record, what syncs, and new-folder behavior/)
+  assert.equal(state.question.options[0].summary, 'Record AI logs from Claude Code and Codex.')
+  // The decline row glosses the questions it opens (LLP 0201 #decline):
+  // the menus, linearly, not another round of gates.
+  assert.equal(state.question.options[1].summary, 'Choose what to record and what syncs.')
   // No position line: the gate is what decides how many questions remain,
   // so it can no more state a total than the fork can (LLP 0135 #progress).
   assert.equal(state.question.progress, undefined)
 })
 
-// `opts.enrolled` is only ever `true` at the sole production call site
-// (LLP 0201 #one-lane-no-gate: the orchestrator now guards the gate itself
-// with `enrolled()`), so this pins the component's contract - what the gate
-// would render if ever called with `enrolled` unset or false - not a screen
-// any run reaches.
 test('the gate claims a server only when told it has one', async () => {
   const { env } = await makeHome()
   const { confirm, state } = capturingConfirm('defaults')
 
   await runWizardExpressGate(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env, rows: ROWS, confirm,
+    stdout: makeBuf(), stderr: makeBuf(), env, rows: ['Claude Code'], confirm,
   }))
 
-  assert.equal(state.question.options[0].label, 'Record all of these', 'nothing forwards from a solo machine')
-  assert.doesNotMatch(state.question.options[0].summary, /sync/)
+  assert.equal(state.question.options[0].label, 'Record everything', 'nothing forwards from a solo machine')
+  assert.equal(state.question.options[0].summary, 'Record AI logs from Claude Code.')
+  assert.equal(state.question.options[1].summary, 'Choose what to record.')
 })
 
-test('declining runs the lanes as they are; back and cancel are their own answers', async () => {
+test('declining opens the menus; back and cancel are their own answers', async () => {
   const { env } = await makeHome()
   const io = { stdout: makeBuf(), stderr: makeBuf(), env }
 

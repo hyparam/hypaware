@@ -38,7 +38,7 @@ import { evaluateReturningGate, runWizardFork } from './fork.js'
 import { writeSuggestedPrompts } from './first_ask.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
-import { commitWizardPickedConfig, defaultRowLabels, resolvePickSeeding, runWizardPick } from './pick.js'
+import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
 import { runWizardSyncNow } from './sync_now.js'
 import { runWizardSyncScope } from './sync_scope.js'
 import { runWizardFolderAsk } from './folder_ask.js'
@@ -375,20 +375,16 @@ export async function runInitWizard(opts) {
       // the pick lane's back edge then reaches the fork directly, exactly
       // as it did before the gate existed.
       let expressShown = false
-      // Enrolled runs are the runs with several gates to collapse: their
-      // itineraries add the sync and new-folder lanes. A solo local run's
-      // only question is the pick gate, which offers these same rows
-      // itself, so fronting it with this gate asked the same question
-      // twice - declining "Record all of these" landed on "Record all".
-      // The condition is the sync lane's own condition (see `pathway ===
-      // 'team' || enrolled()` below), restated here so the two can only
-      // drift apart if someone edits one and forgets the other.
-      // @ref LLP 0201#one-lane-no-gate [implements]: the gate is shown only when it collapses more than one lane's gate
-      if (interactive && (pathway === 'team' || enrolled())) {
-        // The rows accepting would record: the pick lane's own default
-        // rows, computed once here and listed verbatim on the gate, so
-        // "all of these" names something the user can read rather than an
-        // abstract "defaults". Resolution failure degrades to no gate.
+      // Every attended pass with default rows gets the gate, both
+      // pathways: it is the wizard's only accept-or-customize screen, and
+      // the lanes behind it are menus that never re-ask "defaults or
+      // customize" (LLP 0201 #decline).
+      // @ref LLP 0201#gate [implements]: the gate is asked on every attended pass whose seeding yields default rows
+      if (interactive) {
+        // The tool names the accept row's summary sentence claims: the
+        // pick lane's own default rows, computed once here, so
+        // "everything" names exactly what the lane would record.
+        // Resolution failure degrades to no gate.
         const rows = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
         // Nothing detected and nothing locked is nothing to accept, so
         // there is no gate to show; the pick lane opens its menu as it
@@ -455,7 +451,6 @@ export async function runInitWizard(opts) {
           ...(opts.exportOrigin ? { exportOrigin: opts.exportOrigin } : {}),
           ...(opts.force ? { force: opts.force } : {}),
           ...(opts.prompt ? { prompt: opts.prompt } : {}),
-          ...(opts.confirm ? { confirm: opts.confirm } : {}),
           // Retention is never asked; the default follows where the durable
           // copy lives. Only an unmanaged local install keeps the longer
           // 120-day window (its cache is the only copy of history); a team run,
@@ -565,7 +560,7 @@ export async function runInitWizard(opts) {
                 .filter((d) => !visibleCandidateIds.has(d.id))
                 .map((d) => d.id),
               ...(syncProgress ? { progress: syncProgress } : {}),
-              ...(opts.confirm ? { confirm: opts.confirm } : {}),
+              ...(opts.prompt ? { prompt: opts.prompt } : {}),
               ...(express ? { autoAccept: true } : {}),
               // The pick lane is always behind this one.
               allowBack: true,
@@ -1032,9 +1027,10 @@ async function narrateEnrolledAbort(opts) {
 }
 
 /**
- * The rows the express gate lists: the pick lane's own default rows
- * (LLP 0201 #gate), labelled by the shared labeller so the two screens
- * cannot disagree about what "all of these" means.
+ * The tool names the express gate's accept summary claims: the pick
+ * lane's own default rows (LLP 0201 #gate), by plain label - the
+ * sentence names the tools, and the fleet or setup detail stays on the
+ * later screens and narrations.
  *
  * Best-effort like every other pre-question probe here: a catalog or
  * config read that throws yields no rows, which the caller reads as "no
@@ -1061,7 +1057,7 @@ async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
       ...(pickSeed ? { initialSelection: pickSeed } : {}),
       detect,
     }))
-    return defaultRowLabels(seeding)
+    return seeding.defaultRows.map((d) => d.label)
   } catch {
     return []
   }

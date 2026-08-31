@@ -116,20 +116,17 @@ export interface RunWizardSyncScopeOptions {
   /** The step's position line, rendered on the prompt like the pick lane's. */
   progress?: string
   /**
-   * Offer back-navigation out of the lane (LLP 0191): escape at the gate
+   * Offer back-navigation out of the lane (LLP 0191): escape at the menu
    * returns `back: true` to the orchestrator (which re-runs the pick
-   * lane). The menu's own back always returns to the gate regardless.
+   * lane).
    */
   allowBack?: boolean
   /** Prompt seam (tests); defaults to the walkthrough prompt factory. */
   prompt?: AsyncPickPrompt
-  /** Defaults-gate seam (tests); defaults to the confirm-select factory. */
-  confirm?: AsyncConfirmSelectPrompt
   /**
-   * Take the gate's stated default without stopping at it (LLP 0201): the
-   * express gate already answered this lane, so it narrates the statement
-   * its gate would have shown and proceeds. Has no effect on a lane with
-   * no default to state, which still asks.
+   * Take the stated default without stopping at it (LLP 0201 #narrate):
+   * the express gate already answered this lane, so it narrates the sync
+   * split the menu would have shown and proceeds.
    */
   autoAccept?: boolean
 }
@@ -195,17 +192,17 @@ export interface RunWizardExpressGateOptions {
   stdin?: NodeJS.ReadableStream
   env: NodeJS.ProcessEnv
   /**
-   * The rows accepting will record, already labelled (locked rows
-   * fleet-suffixed) by `defaultRowLabels`. These are the pick gate's own
-   * rows, so the two screens can never disagree about what "all of these"
-   * means. Never empty: the orchestrator skips the gate when there is
-   * nothing to accept.
+   * The plain names of the tools accepting will record (no fleet or
+   * setup suffixes), joined into the accept row's summary sentence
+   * (LLP 0201 #gate). These are the pick lane's own default rows from
+   * `resolvePickSeeding`, so the gate and the lane can never disagree
+   * about what "everything" means. Never empty: the orchestrator skips
+   * the gate when there is nothing to accept.
    */
   rows: string[]
   /**
-   * Whether this run is enrolled. Gates the two claims the gate can only
-   * honestly make on a machine with a server: that everything syncs, and
-   * that new folders sync without a question.
+   * Whether this run is enrolled. Gates the sync claim the gate can only
+   * honestly make on a machine with a server.
    */
   enrolled?: boolean
   /** Offer back-navigation to the fork (LLP 0191). */
@@ -494,17 +491,11 @@ export interface RunWizardPickOptions {
   /** Override the source prompt (tests pre-bake answers). */
   prompt?: AsyncPickPrompt
   /**
-   * Override the defaults gate (LLP 0190 #pick-gate) shown before the
-   * source menu when detection or the locked set yields a default;
-   * defaults to the confirm-select factory (tests pre-bake the choice).
-   */
-  confirm?: AsyncConfirmSelectPrompt
-  /**
-   * Take the defaults gate's stated rows without stopping at it
-   * (LLP 0201): the express gate already answered this lane, so it
-   * narrates what the gate would have shown and proceeds. With nothing
-   * detected and nothing locked there is no gate and no default to take,
-   * so the menu still opens - "defaults where there are defaults".
+   * Take the default rows without asking (LLP 0201 #narrate): the express
+   * gate already answered this lane, so it narrates the rows it accepted
+   * and proceeds. With nothing detected and nothing locked there is no
+   * default to take, so the menu still opens - "defaults where there are
+   * defaults".
    */
   autoAccept?: boolean
   /**
@@ -524,9 +515,8 @@ export interface RunWizardPickOptions {
   retentionDefault?: number
   /**
    * Offer back-navigation out of the lane (LLP 0191): escape (or `b`) at
-   * the lane's first screen returns `back: true` to the orchestrator,
-   * which re-presents the fork. The menu's back returns to the defaults
-   * gate whenever the gate was shown, regardless of this flag.
+   * the menu returns `back: true` to the orchestrator, which re-presents
+   * the express gate when it was shown, and the fork otherwise.
    */
   allowBack?: boolean
   /**

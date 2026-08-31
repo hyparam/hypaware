@@ -27,8 +27,8 @@ import { buildPluginCatalog } from '../../../../src/core/plugin_catalog.js'
 
 // Wizard back-navigation (LLP 0191): escape steps back one screen where a
 // screen exists behind the prompt (`allowBack`), ctrl+c stays the cancel,
-// lanes loop menu-to-gate internally and propagate `back` from their first
-// screen, the orchestrator carries the step-level edges, a completed join
+// each lane is one screen whose menu propagates `back` to the caller,
+// the orchestrator carries the step-level edges, a completed join
 // is reused rather than re-run, and a re-entered pick lane is seeded with
 // the previously confirmed selection.
 // @ref LLP 0191#esc-back [tests]:
@@ -135,7 +135,7 @@ test('runWizardFork: without allowBack a stray b quits, and the prompt never men
   assert.doesNotMatch(stdout.text(), /b back/)
 })
 
-// --- the pick lane: gate/menu loop, back propagation, re-entry seeding ---
+// --- the pick lane: back propagation, re-entry seeding ---
 
 /**
  * @param {string} tmpPrefix
@@ -146,18 +146,17 @@ async function hermeticEnv(tmpPrefix) {
   return { HOME: tmp, HYP_HOME: path.join(tmp, '.hyp'), HYP_NO_TUI: '1' }
 }
 
-test('runWizardPick: back at the gate propagates only when the orchestrator allowed it', async () => {
-  const env = await hermeticEnv('hyp-back-pick-gate-')
+test('runWizardPick: back at the menu propagates only when the orchestrator allowed it', async () => {
+  const env = await hermeticEnv('hyp-back-pick-menu-')
   const catalog = await realCatalog()
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env, catalog,
     detect: async () => new Set(['claude']),
     allowBack: true,
-    confirm: async (/** @type {any} */ q) => {
-      assert.equal(q.allowBack, true, 'the gate carries the orchestrator opt-in')
+    prompt: async (/** @type {any} */ q) => {
+      assert.equal(q.allowBack, true, 'the menu carries the orchestrator opt-in')
       throw new PromptBackRequestedError()
     },
-    prompt: async () => { throw new Error('the menu must not open') },
   }))
   assert.equal(result.back, true)
   assert.equal(result.exitCode, 0)
@@ -165,38 +164,12 @@ test('runWizardPick: back at the gate propagates only when the orchestrator allo
   assert.equal(result.configPath, '')
 })
 
-test('runWizardPick: back at the menu returns to the gate, not out of the lane', async () => {
-  const env = await hermeticEnv('hyp-back-pick-menu-')
-  const catalog = await realCatalog()
-  /** @type {string[]} */
-  const screens = []
-  let confirmCalls = 0
-  const result = await runWizardPick(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env, catalog,
-    detect: async () => new Set(['claude']),
-    confirm: async () => {
-      screens.push('gate')
-      confirmCalls += 1
-      return confirmCalls === 1 ? 'customize' : 'accept'
-    },
-    prompt: async (/** @type {any} */ q) => {
-      screens.push('menu')
-      assert.equal(q.allowBack, true, 'the menu can always back into an existing gate')
-      throw new PromptBackRequestedError()
-    },
-  }))
-  assert.deepEqual(screens, ['gate', 'menu', 'gate'], 'menu escape re-presents the gate')
-  assert.equal(result.back, undefined)
-  assert.deepEqual(result.sourcesPicked, ['claude'], 'the second gate pass accepted the defaults')
-})
-
-test('runWizardPick: without a gate and without allowBack the menu offers no back', async () => {
-  const env = await hermeticEnv('hyp-back-pick-nogate-')
+test('runWizardPick: without allowBack the menu offers no back', async () => {
+  const env = await hermeticEnv('hyp-back-pick-noback-')
   const catalog = await realCatalog()
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env, catalog,
     detect: async () => new Set(),
-    confirm: async () => { throw new Error('no defaults, no gate') },
     prompt: async (/** @type {any} */ q) => {
       assert.equal(q.allowBack, undefined, 'no screen exists behind this prompt')
       return ['claude']
@@ -216,7 +189,6 @@ test('runWizardPick: initialSelection seeds the boxes and skips detection', asyn
     stdout: makeBuf(), stderr: makeBuf(), env, catalog,
     detect: async () => { detectCalled = true; return new Set(['codex']) },
     initialSelection: ['claude'],
-    confirm: async () => 'customize',
     prompt: async (/** @type {any} */ q) => { menuQuestion = q; return ['claude'] },
   }))
   assert.equal(detectCalled, false, 're-entry must not overwrite the previous answer with detection')
@@ -228,53 +200,28 @@ test('runWizardPick: initialSelection seeds the boxes and skips detection', asyn
   assert.deepEqual(result.sourcesPicked, ['claude'])
 })
 
-// --- the sync lane: gate/menu loop, back propagation ---
+// --- the sync lane: back propagation ---
 
 /** @param {string} id */
 function descriptor(id) {
   return /** @type {any} */ ({ plugin: `@hypaware/${id}`, id, label: `capture ${id}` })
 }
 
-test('runWizardSyncScope: back at the gate propagates and leaves the store unwritten', async () => {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-back-sync-gate-'))
+test('runWizardSyncScope: back at the menu propagates and leaves the store unwritten', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-back-sync-menu-'))
   const env = { HYP_HOME: hypHome }
   const stateDir = readObservabilityEnv(env).stateDir
   const result = await runWizardSyncScope(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env,
     candidates: [descriptor('claude')],
     allowBack: true,
-    confirm: async (/** @type {any} */ q) => {
+    prompt: async (/** @type {any} */ q) => {
       assert.equal(q.allowBack, true)
       throw new PromptBackRequestedError()
     },
-    prompt: async () => { throw new Error('the menu must not open') },
   }))
   assert.equal(result.back, true)
   await assert.rejects(fs.access(clientSyncListPath(stateDir)), 'a backed-out lane writes nothing')
-})
-
-test('runWizardSyncScope: back at the menu returns to the gate', async () => {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-back-sync-menu-'))
-  const env = { HYP_HOME: hypHome }
-  /** @type {string[]} */
-  const screens = []
-  let confirmCalls = 0
-  const result = await runWizardSyncScope(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env,
-    candidates: [descriptor('claude')],
-    confirm: async () => {
-      screens.push('gate')
-      confirmCalls += 1
-      return confirmCalls === 1 ? 'customize' : 'accept'
-    },
-    prompt: async (/** @type {any} */ q) => {
-      screens.push('menu')
-      assert.equal(q.allowBack, true)
-      throw new PromptBackRequestedError()
-    },
-  }))
-  assert.deepEqual(screens, ['gate', 'menu', 'gate'])
-  assert.deepEqual(result, { optedOut: [] })
 })
 
 // --- the orchestrator: step-level edges ---
@@ -787,18 +734,14 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
   const env = { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', NO_COLOR: '1' }
   const io = scriptedIo([
     '1',    // fork: Collect shared agent logs
-    '2',    // express gate: No, take me through the steps
+    '2',    // express gate: Customize
     'b',    // pick menu: step back one screen - the express gate
     'b',    // express gate: step back one screen - the fork
     '2',    // fork: Collect agent logs locally
     '2',    // disconnect?: No, stay connected
-    '2',    // express gate (asked again on this pass): step by step
-    '1',    // pick menu: Record all - this defaults-gate is a confirm-select
-            // (LLP 0299), so an unrecognized answer like "all" now re-asks
-            // instead of silently rounding to the default; picking "Record
-            // all" outright is the answer that still means "record
-            // everything offered".
-    '1',    // sync gate: Sync all
+    '2',    // express gate (asked again on this pass): Customize
+    '',     // pick menu: bare enter keeps the detected row checked (LLP 0274)
+    '',     // sync menu: bare enter keeps everything syncing
     '1',    // new folders: Sync them all
   ])
   const stderr = makeBuf()
@@ -841,7 +784,7 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
   assert.equal(out.split('How do you want to collect agent logs?').length - 1, 2)
   // Enrolled-state decisions survive the walk to the local pathway.
   assert.match(out, /This machine syncs to your team server\. Disconnect and go local-only\?/)
-  assert.match(out, /These will sync to your server:/)
+  assert.match(out, /Choose what syncs\. Unchecked sources stay on this machine\./)
   // The itinerary is the enrolled one (pick, sync, folders, finish), not
   // the solo two-step local one: the denominator is the same `enrolled()`
   // read both enrolled lanes are gated on, so a regression there shows up
