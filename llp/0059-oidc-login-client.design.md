@@ -15,7 +15,7 @@
 > document is the implementation design: the modules and functions to add, the exact
 > wire contract with hypaware-server, and the test plan.
 >
-> **Extended by [LLP 0337](./0337-poll-login-completion.decision.md):** the
+> **Extended by [LLP 0342](./0342-poll-login-completion.decision.md):** the
 > loopback delivery described here (`redirect_uri`, `loopback.js`, the
 > callback contract) is replaced by poll-based completion; `/login/start`
 > loses `redirect_uri` on the CLI lane and a poll endpoint delivers the code.

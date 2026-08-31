@@ -9,13 +9,13 @@ import { openBrowser as defaultOpenBrowser } from './open_browser.js'
 import { createPkcePair } from './pkce.js'
 
 /**
- * Orchestrate the browser authorization-code flow (LLP 0058 D3, LLP 0337):
+ * Orchestrate the browser authorization-code flow (LLP 0058 D3, LLP 0342):
  * generate a PKCE pair and a random `state`, build the `/login/start` URL,
  * open the browser (or print the URL), poll the server for the one-time code,
  * exchange it at `/token`, and return the session. No persistence here: the
  * caller stores the returned session.
  *
- * The code arrives by polling, not by a loopback redirect (LLP 0337 D1): the
+ * The code arrives by polling, not by a loopback redirect (LLP 0342 D1): the
  * browser can be on any machine, so `hyp remote login` works over SSH and in
  * containers with no flags. The start URL carries no `redirect_uri`; its
  * absence is what selects poll delivery on the server.
@@ -38,7 +38,7 @@ import { createPkcePair } from './pkce.js'
  * }} args
  * @returns {Promise<OidcSession>}
  * @ref LLP 0058#d3 [implements]: client orchestrates the downstream PKCE leg; verifier held in memory, presented at /token
- * @ref LLP 0337#d1 [implements]: the outcome is pulled from the server, never pushed to a listener; loopback.js is gone
+ * @ref LLP 0342#d1 [implements]: the outcome is pulled from the server, never pushed to a listener; loopback.js is gone
  */
 export async function loginWithBrowser({
   identityBase,
@@ -103,7 +103,7 @@ export async function loginWithBrowser({
 
 /**
  * Build the `GET /login/start` URL the browser navigates to (LLP 0059 §the-
- * server-contract, as amended by LLP 0337 D3). `org` is an optional selector
+ * server-contract, as amended by LLP 0342 D3). `org` is an optional selector
  * only; the server resolves the real org. Deliberately no `redirect_uri`:
  * its absence selects poll delivery on the server.
  *

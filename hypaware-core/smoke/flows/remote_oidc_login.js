@@ -23,7 +23,7 @@ import { verbToCommand } from '../../../src/core/cli/verb_command.js'
 
 /**
  * Hermetic smoke for the multi-tenant OIDC client login (LLP 0058-0060, poll
- * delivery per LLP 0337). One in-process server plays both roles against a
+ * delivery per LLP 0342). One in-process server plays both roles against a
  * single origin:
  *
  *  - the identity surface `<origin>/v1/identity/{login/start,login/poll,token}`
@@ -74,7 +74,7 @@ export async function run({ harness, expect }) {
     await writeSession(stateDir, 'prod', session)
 
     const afterLogin = await readCredentials(stateDir)
-    // @ref LLP 0337#d3 [tests]: the start URL carries no redirect_uri; its absence selects poll delivery
+    // @ref LLP 0342#d3 [tests]: the start URL carries no redirect_uri; its absence selects poll delivery
     expect.that('login: start carried no redirect_uri', server.state.sawRedirectUri, (v) => v === false)
     expect.that('login: session stored as kind oidc', afterLogin.prod?.kind, (v) => v === 'oidc')
     expect.that('login: resolved org is acme', session.org, (v) => v === 'acme')

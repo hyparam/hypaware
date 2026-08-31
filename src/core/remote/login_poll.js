@@ -4,7 +4,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { NO_FETCH_MESSAGE, trimSlash } from './identity_client.js'
 
 /**
- * Poll-based login completion (LLP 0337). The client prints/opens the
+ * Poll-based login completion (LLP 0342). The client prints/opens the
  * `/login/start` URL and *pulls* the outcome from the server instead of
  * listening for a loopback redirect: the flight parks when the browser opens
  * the start URL, the callback holds the one-time code (or the D7 refusal) on
@@ -54,7 +54,7 @@ function defaultSleep(ms) {
  *   sleep?: (ms: number) => Promise<void>,
  * }} args
  * @returns {{ waitForCode: () => Promise<{ code: string }>, close: () => void }}
- * @ref LLP 0337#d3 [implements]: 2s cadence, 5-minute budget, single delivery consumed on pickup; the token exchange downstream is untouched
+ * @ref LLP 0342#d3 [implements]: 2s cadence, 5-minute budget, single delivery consumed on pickup; the token exchange downstream is untouched
  */
 export function startLoginPoller({
   identityBase,
@@ -135,7 +135,7 @@ export function startLoginPoller({
           if (response.status === 404 && body?.error !== 'unknown_state') {
             // A poll-capable server answers this path with unknown_state or a
             // flight status, never the generic unknown_path 404: this server
-            // predates poll login (LLP 0337#d2). Fail loudly, not by timeout.
+            // predates poll login (LLP 0342#d2). Fail loudly, not by timeout.
             throw fail("this server does not support poll login yet - upgrade hypaware-server (or pass a static token with --token-file <path>)", 'no_poll_endpoint')
           }
           if (response.status === 429) {

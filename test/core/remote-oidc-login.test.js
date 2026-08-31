@@ -59,7 +59,7 @@ test('drives PKCE -> poll -> exchange and returns the session', async () => {
   assert.ok(opened.searchParams.get('code_challenge'))
   assert.ok(opened.searchParams.get('state'))
   assert.equal(opened.searchParams.get('org'), 'acme')
-  // No redirect_uri: its absence is what selects poll delivery (LLP 0337 D3).
+  // No redirect_uri: its absence is what selects poll delivery (LLP 0342 D3).
   assert.equal(opened.searchParams.get('redirect_uri'), null)
   // The poller was keyed by the same state the start URL carries.
   assert.equal(startArgs[0].state, opened.searchParams.get('state'))

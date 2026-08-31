@@ -633,7 +633,7 @@ async function persistStaticToken(name, token, ctx) {
 /**
  * The browser authorization-code path (LLP 0058 D1/D6/D7). Derives the
  * identity base from the configured target URL's origin, runs the poll-based
- * browser flow (LLP 0337), and stores the resulting OIDC session. When the server also mints a
+ * browser flow (LLP 0342), and stores the resulting OIDC session. When the server also mints a
  * login gateway (LLP 0061), the returned credential is seeded into the
  * matching `central` forward sinks' persisted identity. On a fresh box with
  * no such sink, an enrolling login *provisions* one (LLP 0063) so logs forward

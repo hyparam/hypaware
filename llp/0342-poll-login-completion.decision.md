@@ -1,4 +1,4 @@
-# LLP 0337: Poll-based login completion replaces the loopback redirect
+# LLP 0342: Poll-based login completion replaces the loopback redirect
 
 **Type:** Decision
 **Status:** Accepted
@@ -189,12 +189,12 @@ RFC 8628 (D1).
 
 ## @refs to add when the code lands
 
-- the poller: `@ref LLP 0337#d3 [implements]` (poll contract, single
-  delivery, cadence) and `@ref LLP 0337#d4 [constrained-by]` (no poll
+- the poller: `@ref LLP 0342#d3 [implements]` (poll contract, single
+  delivery, cadence) and `@ref LLP 0342#d4 [constrained-by]` (no poll
   secret; PKCE is the redemption gate)
-- `oidc_login.js` orchestration: `@ref LLP 0337#d1 [implements]` (pull, not
+- `oidc_login.js` orchestration: `@ref LLP 0342#d1 [implements]` (pull, not
   push); the existing `@ref LLP 0058#d3` (PKCE) stays
-- the first-poll 404 explanation: `@ref LLP 0337#d2 [implements]`
+- the first-poll 404 explanation: `@ref LLP 0342#d2 [implements]`
 - deleted with `loopback.js`: its `@ref LLP 0058#d2` annotations
 
 ## References
