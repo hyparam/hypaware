@@ -283,10 +283,13 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
   // lands first and the plan reads "at least 198,144", a false failure in the
   // direction load can only push it (#1105). Freezing the clock keeps every
   // deadline unreachable and leaves the row limit as the sole stop, which is
-  // the shortfall this case exists to pin. Both defaults stay in play: nothing
-  // here passes `rowLimit` or `budgetMs`, so the 200,000 below is the shipped
-  // limit and not a fixture's.
-  const frozen = () => 1_000
+  // the shortfall this case exists to pin. Nothing here passes `rowLimit`, so
+  // the 200,000 below is the shipped limit and not a fixture's. A frozen clock
+  // cannot also pin `DEFAULT_BUDGET_MS`: every budget above zero leaves the
+  // deadline unreachable, so the same freeze that removes the flake removes
+  // this case's hold on the budget. That default is pinned on its own injected
+  // clock, two cases below.
+  const now = () => 1_000
 
   const volumes = await previewPendingRows({
     handles,
@@ -298,13 +301,12 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
       },
     })),
     stateRoot: stateDir(hypHome),
-    now: frozen,
+    now,
   })
 
   const volume = /** @type {any} */ (volumes.get('central'))
   assert.equal(volume.status, 'partial', 'a count stopped at its limit is a floor, not a total')
   assert.equal(volume.rows, 200000, 'the floor is the row limit reached, never the 250,000 rows behind it')
-  assert.notEqual(volume.rows, 250000)
 })
 
 test('a four-digit backlog is grouped for a reader, not printed as a bare integer', async () => {
@@ -334,6 +336,48 @@ test('a four-digit backlog is grouped for a reader, not printed as a bare intege
   assert.equal(code, 0)
   assert.match(stdout.text, /1,234 rows pending, the full local history/)
   assert.doesNotMatch(stdout.text, /1234 rows pending/, 'a count a person has to read is grouped, not a bare integer')
+})
+
+test('the shipped wall-clock budget is the one that stops a long count, not a fixture\'s', async () => {
+  // `DEFAULT_BUDGET_MS` bounds how long somebody waits in front of the consent
+  // prompt, so a change that shrinks it to 100ms is a real regression and has
+  // to fail something. It used to fail the scan-limit case above, which reached
+  // 200,000 rows inside the default budget on a real clock - the wall-clock
+  // claim #1105 was filed about, and the one the freeze above deliberately
+  // gives up. Pinned here instead, with no clock left in it: one millisecond
+  // per row on an injected clock, and no `budgetMs` argument, so the row the
+  // count stops on is read off the shipped default rather than off the machine.
+  const hypHome = await makeHome('defaultbudget')
+  const handles = /** @type {any[]} */ ([
+    fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central'),
+  ])
+  let t = 0
+  const now = () => t
+  // Comfortably past the stop below, and comfortably short of the 200,000-row
+  // limit, so the budget is the only thing that can end this count.
+  const entries = function* () {
+    for (let seq = 1; seq <= 6000; seq += 1) {
+      t += 1
+      yield { seq }
+    }
+  }
+
+  const volumes = await previewPendingRows({
+    handles,
+    query: /** @type {any} */ (fakeQuery(hypHome)),
+    storage: /** @type {any} */ (fakeStorage({ hypHome, entries })),
+    stateRoot: stateDir(hypHome),
+    now,
+  })
+
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'partial', 'a count the budget stopped is a floor, not a total')
+  // Two-sided on purpose: a budget shrunk to 100ms stops at 512, and a budget
+  // widened past the fixture never stops at all and reports an exact 6000.
+  // 3072 is where 3000ms lands because the row loop checks the clock every 512
+  // rows, which is also this pin's resolution - it catches a budget moved out
+  // of (2560, 3072], not a one-millisecond nudge inside it.
+  assert.equal(volume.rows, 3072, 'the count stops on the shipped 3000ms budget, neither sooner nor later')
 })
 
 test('a count that cannot be taken says unknown, never zero', async () => {
