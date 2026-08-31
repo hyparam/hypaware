@@ -121,6 +121,13 @@ test('sweepIndexScratch reclaims nothing through a symlinked generation director
 // or `/.` makes the kernel resolve the last component, so a guard handed an
 // unnormalized spelling inspects the target while `readdirSync` walks the
 // link. One `path.resolve`, then check, walk, and report that one spelling.
+//
+// Stated rather than implied: this spelling is not reachable through the one
+// existing caller. A `cursor.tableDir` whose `basename` differs from itself
+// fails `generationDirIsContained`, which makes the whole cursor unreadable, so
+// maintenance falls back to the layout default. What this pins is the exported
+// entry point, which is the whole of LLP 0331: the pass may not depend on its
+// caller having normalized the string.
 test('a symlinked generation spelled with a trailing separator is still refused', { skip: skipSymlinks }, async (t) => {
   const root = await tmpDir('gen-trailing')
   const outside = await tmpDir('gen-trailing-target')

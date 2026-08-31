@@ -70,11 +70,16 @@ export async function refreshIndexes({ decls, embedder, storage, indexesDir, log
 
     // Orphans sweep even on an exhausted budget: deletion is cheap and
     // never spends embedding tokens.
+    //
+    // Counted only when the pass reached its unlinks. `orphansSwept` becomes
+    // `orphans_swept` in the source's `status()` details, so counting a
+    // refusal there would report deletion that did not happen - a positive
+    // claim of work, which is a worse reading of a refusal than the zero LLP
+    // 0331 already accepts.
+    // @ref LLP 0331#guard-travels-with-the-delete [constrained-by]: a refusal is not a sweep, and the count an operator reads must not say it was.
     for (const state of states) {
-      if (state.state === 'orphan') {
-        sweepOrphan(indexesDir, decl.name, state.fileBase, log)
-        report.orphansSwept++
-      }
+      if (state.state !== 'orphan') continue
+      if (sweepOrphan(indexesDir, decl.name, state.fileBase, log)) report.orphansSwept++
     }
 
     const pending = states.filter((s) => REBUILD_STATES.has(s.state))
@@ -334,6 +339,10 @@ export async function collectShardTexts({ decl, partition, storage }) {
  * @param {string} indexName
  * @param {string} fileBase
  * @param {PluginLogger} log
+ * @returns {boolean} whether the pass reached its unlinks. A refusal returns
+ *   `false` and deletes nothing; an unlink that threw returns `true`, because
+ *   it did reach them, and the caller's count means the same thing it meant
+ *   before this guard existed.
  */
 function sweepOrphan(indexesDir, indexName, fileBase, log) {
   const dir = path.resolve(path.join(indexesDir, indexName))
@@ -344,7 +353,7 @@ function sweepOrphan(indexesDir, indexName, fileBase, log) {
       vector_index: indexName,
       index_dir: dir,
     })
-    return
+    return false
   }
   const file = path.join(dir, `${fileBase}.parquet`)
   const meta = path.join(dir, `${fileBase}.meta.json`)
@@ -359,6 +368,7 @@ function sweepOrphan(indexesDir, indexName, fileBase, log) {
       message: err instanceof Error ? err.message : String(err),
     })
   }
+  return true
 }
 
 /**

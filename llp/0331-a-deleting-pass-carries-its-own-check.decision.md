@@ -60,9 +60,19 @@ escape, and worse.
 One `path.resolve` first, and the resolved spelling is what is checked, walked,
 and reported. `lstat` answers about a link only when the path *names* the link;
 a trailing `/` or `/.` makes the kernel resolve the last component. That was a
-live bypass in 0328's own first fix, and both new passes take a caller-supplied
-string (an exported `tableDir`, a config-declared index name) that can carry
-one.
+live bypass in 0328's own first fix, where detach handed the sweep the attach
+marker's `spool_dir` verbatim.
+
+Neither of the two new passes has a live bypass of that shape today, and each
+control that pins the rule says so in place rather than implying a door it did
+not measure. Both existing inputs are normalized upstream: a `cursor.tableDir`
+whose `basename` differs from itself makes the whole cursor unreadable
+(`generationDirIsContained`, LLP 0323#one-gate), and an index name containing
+`/` is rejected by `INDEX_NAME_RE` before it reaches a decl. What the resolve
+pins is the same thing the rest of this document pins: the property belongs to
+the pass, so it holds for a caller that has not been through those gates. A
+guard whose correctness rests on its current caller's input hygiene is the
+guard-at-the-call-site defect wearing a different hat.
 
 The refusal report moves to `src/core/cache/sweep_guard.js` so both cache
 passes say the same sentence with the same `error_kind`, and it takes the
@@ -151,5 +161,18 @@ Both are new requests. Neither is this one.
   mutant except where stated in the test file.
 - The Claude body-spool cap keeps its current behaviour, and with it the bound
   it puts on a spool the sweep refuses.
+- A refused index directory accumulates orphaned shards, and a refused
+  generation accumulates publish scratch, because each refused pass is the only
+  reclaimer of what it reclaims. That is the same shape as the retention half
+  of #body-spool-cap-deferred and it is accepted here rather than deferred, on
+  two differences the deferral turns on: the contents are derived vectors and
+  build scratch rather than raw prompt bodies, and the relocation a user
+  actually performs (a state root or a cache root on another volume) is above
+  the components these passes ask about, so it still reclaims. What is refused
+  is a link at the leaf, which nothing in the tree mints.
+- `orphansSwept` counts only sweeps that reached their unlinks. It reaches an
+  operator through the vector source's `status()` details, and a refusal that
+  incremented it would report deletion that did not happen, which is a worse
+  reading of a refusal than the zero it is allowed to look like.
 - One `lstat` per pass, against passes that already `readdir` and `stat` every
   file they weigh.

@@ -142,18 +142,30 @@ test('the orphan sweep deletes nothing through a symlinked index directory', { s
   fs.symlinkSync(outside, path.join(indexesDir, DECL.name), 'dir')
 
   const log = recordingLog()
-  await refresh({ indexesDir, log })
+  const report = await refresh({ indexesDir, log })
 
   assert.equal(fs.existsSync(planted.file), true, 'a shard pair outside the state root is not ours to unlink')
   assert.equal(fs.existsSync(planted.meta), true)
   assert.equal(log.refusals().length, 1, 'and the refusal is said, not merely done')
   assert.equal(log.swept().length, 0)
+  // `orphans_swept` is a `hyp status` detail. A refusal that still counted
+  // would report a deletion that did not happen, which reads worse than the
+  // zero a refusal is allowed to look like.
+  assert.equal(report.orphansSwept, 0, 'a refusal is not a sweep, and the operator-facing count says so')
 })
 
-// The index name is config-declared and reaches the join verbatim, so a
-// spelling that ends in a separator is one a config file can carry. `lstat`
-// reports on a link only when the path NAMES the link, so that spelling would
-// otherwise inspect the target while `rmSync` still followed the link.
+// `lstat` reports on a link only when the path NAMES the link, so an index
+// name ending in a separator would otherwise have the guard inspect the target
+// while `rmSync` still followed the link.
+//
+// Stated rather than implied, to the same standard as the silence control
+// below: this spelling is NOT reachable through config today. `INDEX_NAME_RE`
+// (`/^[A-Za-z0-9][A-Za-z0-9._-]*$/`, `vector-search/src/config.js`) rejects a
+// `/`, and both production callers of `refreshIndexes` pass decls that came
+// out of `validateVectorSearchConfig`. What this control pins is the exported
+// entry point rather than a live bypass: `refreshIndexes` takes `decls` from
+// its caller, and LLP 0331 is precisely about a deleting pass not depending on
+// who called it to have normalized its input.
 test('a trailing separator on the configured index name is not a way past the guard', { skip: skipSymlinks }, async (t) => {
   const indexesDir = tmpDir('trailing')
   const outside = tmpDir('trailing-target')
@@ -165,7 +177,7 @@ test('a trailing separator on the configured index name is not a way past the gu
   fs.symlinkSync(outside, path.join(indexesDir, DECL.name), 'dir')
 
   const log = recordingLog()
-  await refreshIndexes({
+  const report = await refreshIndexes({
     decls: [{ ...DECL, name: `${DECL.name}/` }],
     embedder: stubEmbedder(),
     storage: noPartitions(),
@@ -176,6 +188,7 @@ test('a trailing separator on the configured index name is not a way past the gu
   assert.equal(fs.existsSync(planted.file), true)
   assert.equal(fs.existsSync(planted.meta), true)
   assert.equal(log.refusals().length, 1)
+  assert.equal(report.orphansSwept, 0)
 })
 
 // ---------------------------------------------------------------------------
