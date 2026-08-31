@@ -89,39 +89,47 @@ function captureStream() {
 }
 
 /**
- * Run `fn` with `locale` standing in for the process's ambient number locale.
+ * Run `fn` with `substitute` standing in for the process's ambient number
+ * locale, for a case pinning `pinned` as the locale the code under test names.
  *
  * Node fixes the `Intl` default at startup from the environment, so nothing
  * inside this process can move it. What can be moved is the single place a
  * dropped locale argument would read it from: `Number.prototype.toLocaleString`
  * called with no `locales`. An explicit locale passes through untouched, so
  * code that names its locale is unaffected and code that took the machine's
- * renders as `locale` would. That is what makes a locale pin fail on the box
- * that wrote it rather than only on a differently configured one, with no
+ * renders as `substitute` would. That is what makes a locale pin fail on the
+ * box that wrote it rather than only on a differently configured one, with no
  * subprocess and no export widened for a test to reach.
  *
  * @template T
- * @param {string} locale
+ * @param {string} substitute
+ * @param {string} pinned
  * @param {() => Promise<T>} fn
  * @returns {Promise<T>}
  */
-async function onAmbientLocale(locale, fn) {
+async function onAmbientLocale(substitute, pinned, fn) {
   const proto = /** @type {any} */ (Number.prototype)
   const real = proto.toLocaleString
-  // Checked, not assumed: a substitution that renders like the ambient default
-  // pins nothing, because the assertion under it reads the same string whether
+  // Checked, not assumed: a substitution that renders like `pinned` pins
+  // nothing, because the assertion under it then reads the same string whether
   // or not the code names its locale. Node's own builds have shipped full ICU
-  // since v13, but a `small-icu` or `--without-intl` build resolves `locale`
-  // back to the default and would restore the exact "green on the mutant"
-  // blind spot this helper exists to close (#1117), silently and in the
-  // passing direction. Fail loudly there instead.
+  // since v13, but a `small-icu` or `--without-intl` build resolves
+  // `substitute` back to the one locale it carries and would restore the exact
+  // "green on the mutant" blind spot this helper exists to close (#1117),
+  // silently and in the passing direction. Fail loudly there instead.
+  //
+  // Compared against `pinned`, never against this machine's own default: once
+  // the substitution is in, the machine's locale is not what the assertion
+  // reads, so it cannot blunt the pin. Reading it here would instead fail a
+  // correct tree on every box already running in `substitute`, which is the
+  // same environment-conditional outcome #1117 is about, pointed at red.
   assert.notEqual(
-    real.call(1234, locale),
-    real.call(1234),
-    `${locale} groups like this machine's default, so substituting it pins nothing`
+    real.call(1234, substitute),
+    real.call(1234, pinned),
+    `${substitute} groups like ${pinned} here, so substituting it pins nothing`
   )
   proto.toLocaleString = function (/** @type {any} */ locales, /** @type {any} */ options) {
-    return real.call(this, locales ?? locale, options)
+    return real.call(this, locales ?? substitute, options)
   }
   try {
     return await fn()
@@ -439,7 +447,7 @@ test('a four-digit backlog is grouped for a reader, not printed as a bare intege
     }),
   })
 
-  const code = await onAmbientLocale('de-DE', () => runSync(['--dry-run'], ctx))
+  const code = await onAmbientLocale('de-DE', 'en-US', () => runSync(['--dry-run'], ctx))
 
   assert.equal(code, 0)
   assert.match(stdout.text, /1,234 rows pending, the full local history/)
