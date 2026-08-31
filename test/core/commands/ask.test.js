@@ -112,6 +112,23 @@ test('runAsk: --list exits 0 regardless of launchability', async () => {
   assert.match(stdout.text(), /Questions worth asking/)
 })
 
+// A hint that cannot be typed is not a repair. `hyp client attach <client>`
+// reads as an input redirection from a file called `client` in every shell
+// the CLI runs under, and answers `unknown client` when typed literally, so
+// the line names one of the launchable clients outright. The names come from
+// the descriptors, not a literal, so a new adapter that declares a `launch`
+// block appears here without an edit.
+// @ref LLP 0139#repair-must-be-runnable [tests]: the no-launcher hint prints a command that runs
+test('runAsk "<question>": the no-launcher hint names real clients, not a placeholder', async () => {
+  const hypHome = await freshHome()
+  const { ctx, stderr } = makeCtx({ env: { HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' } })
+  const code = await runAsk(['which sessions touched the auth module'], ctx)
+  assert.equal(code, 1)
+  const text = stderr.text()
+  assert.match(text, /Attach one with `hyp client attach claude` \(or codex, opencode\)/)
+  assert.doesNotMatch(text, /<client>/)
+})
+
 /* --------------------------------- N7 -------------------------------------- */
 
 // `hyp ask --list` used to pass `launchable: true` unconditionally, so a
