@@ -340,7 +340,7 @@ function buildCoreCommands(registry) {
         'other flags need.',
         '',
         '  --yes, -y              accept the defaults (captures claude + otel',
-        '                         when no --source is given)',
+        '                         when no --source and no --client is given)',
         '  --client <name>        client to attach: claude, codex, opencode (repeatable)',
         '  --source <name>        source to capture (repeatable)',
         '  --export <choice>      keep-local | local-parquet | configure-later',
