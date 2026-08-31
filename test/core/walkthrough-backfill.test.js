@@ -653,7 +653,11 @@ test('a dead consent surface says on stderr which backfill was skipped', async (
   }))
 
   assert.match(stderr.text(), /output closed/, 'the surviving stream names why the import did not run')
-  assert.match(stderr.text(), /re-run 'hyp setup'/, 'and says how to complete it, like the post-commit cancel does')
+  // The precise command, not the wizard: re-running `hyp setup` to redo
+  // one import drags the install, the attach and the overwrite confirm
+  // along with it, and `hyp client history import` is the thing that was
+  // skipped (`core_commands.js`, alias `hyp backfill`).
+  assert.match(stderr.text(), /run 'hyp client history import claude' to import it/, 'and says how to finish it')
   // Only the provider the dead question would have covered.
   assert.match(stderr.text(), /import for claude was skipped/)
   assert.doesNotMatch(stderr.text(), /openclaw/, 'the sweep-backed import below is not something to re-run for')
@@ -670,13 +674,27 @@ test('a dead consent surface says on stderr which backfill was skipped', async (
 // down guard-wrapped sinks that swallow this already; the guard here is
 // what makes the contract hold for a direct caller of the exported
 // finale, which is typed to take any writable.
+// The notice is not the only stderr write between the dead surface and
+// the daemon restart: the per-provider failure line is the other, in the
+// same warn-and-continue loop, so the provider fails on purpose here.
 // @ref LLP 0341#warnings [tests]: a warning that cannot be written does not unmake the decision it qualifies
 test('a stderr that throws does not cost the finale the work after the notice', async () => {
   const env = await tmpEnv('hypaware-bf-dead-stderr-')
-  const backfill = makeBackfill(['claude', 'openclaw'], {}, ['openclaw'])
+  /** @type {Array<{ provider: string }>} */
+  const calls = []
+  const backfill = {
+    available: ['claude', 'openclaw'],
+    sweeping: ['openclaw'],
+    calls,
+    /** @param {{ provider: string }} args */
+    async run(args) {
+      calls.push(args)
+      throw new Error('provider blew up')
+    },
+  }
   const throwing = { write() { throw new Error('EPIPE: broken pipe') } }
 
-  await runPickerFinale(/** @type {any} */ ({
+  const summary = await runPickerFinale(/** @type {any} */ ({
     finale: { skipDaemon: true },
     clientsPicked: ['claude', 'openclaw'],
     capabilities: noGateway,
@@ -693,6 +711,11 @@ test('a stderr that throws does not cost the finale the work after the notice', 
   }))
 
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
+  // Recorded after the failure line, so it is what proves the finale got
+  // past the second unwritable warning rather than only the first.
+  assert.deepEqual(summary.backfill, [
+    { provider: 'openclaw', dryRun: false, ok: false, scanned: 0, rowsWritten: 0, skipped: 0 },
+  ])
 })
 
 // The other side of the same seam: a live surface changes nothing, and a

@@ -2162,7 +2162,9 @@ async function runFinaleBackfill(args) {
         return
       }
       // The one thing that outlives a run whose surface died inside the
-      // finale: the import did not happen, and a re-run is how it does.
+      // finale: the import did not happen, and it names the one command
+      // that does it rather than the whole wizard, which would re-run the
+      // install, the attach and the overwrite confirm to redo one import.
       // Said on stderr because stdout is the stream that just went, so
       // the decline's own line would be written into nothing - and
       // "declined" is not what happened anyway. It names `asked` rather
@@ -2182,7 +2184,7 @@ async function runFinaleBackfill(args) {
         try {
           stderr.write(
             `hyp setup: output closed - the local history import for ${asked.join(', ')} was skipped; ` +
-            "re-run 'hyp setup' to import it\n"
+            `run 'hyp client history import ${asked.join(' ')}' to import it\n`
           )
         } catch {
           // best-effort: whatever took stdout may have taken stderr too
@@ -2220,7 +2222,17 @@ async function runFinaleBackfill(args) {
           )
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          stderr.write(`backfill ${provider} failed: ${message}\n`)
+          // Guarded for the same reason the dead-surface notice above is,
+          // and for the same callers: this arm exists so one provider's
+          // failure costs neither its siblings nor the daemon restart, and
+          // an unwritable warning must not cost them instead - nor drop
+          // the failed entry the summary is still owed.
+          // @ref LLP 0341#warnings [implements]: the per-provider warn-and-continue arm guards its own write too
+          try {
+            stderr.write(`backfill ${provider} failed: ${message}\n`)
+          } catch {
+            // best-effort: the provider failure is the news, not this line
+          }
           summary.backfill.push({ provider, dryRun, ok: false, scanned: 0, rowsWritten: 0, skipped: 0 })
         }
       }
