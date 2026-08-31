@@ -593,6 +593,68 @@ test('a healthy provider shuts down with nothing on stderr', async () => {
   assert.equal(stderr, '', 'no failure, no line')
 })
 
+// The operation lives in the dedupe key, which is the clause that makes the
+// close report worth having: on a key of `source#index` alone, an exporter
+// that breaks on export spends the report there, and the same exporter losing
+// its buffered records at close is then silent, which is the JSONL-writer
+// case LLP 0335#close-failures exists to end. Pinned because collapsing the
+// key back is otherwise an invisible regression.
+//
+// @ref LLP 0335#close-failures [tests]: the export line and the close line are bounded independently.
+test('an exporter that breaks on export and again on close is diagnosed for both, not deduped into one', async () => {
+  class BrokenBothWays {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) { throw new Error('export is broken') }
+    async shutdown() { throw new Error('close is broken too') }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new BrokenBothWays()]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    provider.exportRecord(/** @type {any} */ ({ body: 'a record this exporter cannot take', attributes: {} }))
+    await provider.shutdown()
+  })
+  const exportReports = stderr.split('\n').filter((line) => line.includes('telemetry_export_threw'))
+  const closeReports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_threw'))
+  assert.equal(exportReports.length, 1, 'the broken export is diagnosed once')
+  assert.equal(closeReports.length, 1, 'and the broken close is diagnosed too, not swallowed as a duplicate')
+  assert.match(stderr, /close is broken too/, 'each line carries its own failure')
+})
+
+// The export line's exact shape, recorded in LLP 0335#one-line and relied on
+// by anyone grepping a daemon log for `telemetry_export_threw`. Pinned as a
+// whole line rather than by substring because the close-failure fix rebuilt
+// the message and two of the attributes out of an `operation` template
+// (hyparam/hypaware#1130 item 2), and a template that drifts silently breaks
+// every grep already written against it.
+//
+// @ref LLP 0335#one-line [tests]: the export report's message and attributes are exactly what the contract records.
+test('the export report is one line of exactly the recorded shape', async () => {
+  class NamedBrokenExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) { throw new Error('boom') }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new NamedBrokenExporter()]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    provider.exportRecord(/** @type {any} */ ({ body: 'a record', attributes: {} }))
+  })
+  const expected = '[hypaware:observability] WARN a telemetry export threw; the record is dropped '
+    + JSON.stringify({
+      hyp_component: 'observability',
+      hyp_operation: 'observability.export_logs',
+      error_kind: 'telemetry_export_threw',
+      telemetry_channel: 'logs',
+      telemetry_source: 'NamedBrokenExporter',
+      error_message: 'boom',
+    })
+    + '\n'
+  assert.equal(stderr, expected, 'the export line is unchanged by the operation parameter')
+})
+
 // And what the diagnosis itself must survive. `String(Object.create(null))`
 // is a TypeError, so a rejection carrying one used to throw out of the
 // rejection handler, which is an unhandled rejection again: the exact outcome

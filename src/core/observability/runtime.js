@@ -573,7 +573,7 @@ export function guardTelemetryResult(result, seam) {
  * same reason: this is the report that fires when the structured substrate is
  * the broken thing.
  *
- * @ref LLP 0335#one-line [implements]: one stderr line per broken component per provider instance, marked before the write.
+ * @ref LLP 0335#one-line [implements]: one stderr line per broken component per operation per provider instance, marked before the write.
  * @param {object} args
  * @param {'traces'|'logs'|'metrics'} args.channel
  * @param {string} args.source the exporter class, or the emit seam, that threw
