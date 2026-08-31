@@ -37,10 +37,12 @@ class JsonlWriter {
   ensureOpen() {
     if (this.stream) return
     fs.mkdirSync(this.dir, { recursive: true })
-    // A failure belongs to the stream that reported it. Reopening after a
-    // close means a new descriptor, and the old one's error must not be
-    // reported against it.
-    this.streamError = null
+    // Nothing is cleared here. A failure belongs to the stream that reported
+    // it and must not be reported against the next descriptor, but the close
+    // that reports it is what takes it off the writer; clearing on the way in
+    // would drop a held failure no close had said anything about yet, which
+    // for the open failure `writeBatch` holds is a real loss going quiet
+    // again the moment the disk comes back.
     const stream = fs.createWriteStream(this.filePath, { flags: 'a' })
     // A write that fails after `stream.write` returned reports itself here, a
     // tick after the try/catch in `exportBatch` has gone. With no listener
@@ -70,8 +72,10 @@ class JsonlWriter {
     // reaches the caller, which left every record lost and the close resolving
     // clean over them: the same silence the 'error' listener above ends, by
     // the one route that listener cannot cover. Held the same way, so the
-    // close says the records were lost. Not sticky: the next `ensureOpen` that
-    // succeeds clears it, because it opened a descriptor this one never had.
+    // close says the records were lost, and held until a close has said it:
+    // an outage that clears mid-run opens a healthy descriptor over records
+    // that are gone regardless, and clearing on that reopen put the silence
+    // back for exactly the runs that recovered.
     try {
       this.ensureOpen()
     } catch (error) {
@@ -95,12 +99,16 @@ class JsonlWriter {
    * which is the clean-shutdown-over-lost-records silence this class exists
    * to end. Reading `errored` too closes the window.
    *
+   * The third place is a stream that was destroyed with no error at all, which
+   * carries the same loss and, read from the two above alone, resolved clean
+   * over it. {@link abandonedRecords} names it.
+   *
    * @param {fs.WriteStream|null} stream
    * @returns {unknown} the failure, or null
    */
   failureOf(stream) {
     if (this.streamError !== null) return this.streamError
-    return stream?.errored ?? null
+    return stream?.errored ?? abandonedRecords(stream)
   }
 
   /** @returns {Promise<void>} */
@@ -148,7 +156,9 @@ class JsonlWriter {
    * The failure is read through {@link failureOf}, not off the held value
    * alone: `destroyed` is set synchronously and the 'error' event arrives
    * ticks later, so a close in between saw a destroyed stream with nothing
-   * held and resolved clean over records that were never written.
+   * held and resolved clean over records that were never written. A stream
+   * destroyed with no error at all is the same loss with nothing to read, and
+   * {@link abandonedRecords} is what says so.
    *
    * @ref LLP 0337#close-rejects [implements]: a close that lost its records rejects, and the shutdown seam turns that into one line.
    * @returns {Promise<void>}
@@ -158,27 +168,51 @@ class JsonlWriter {
     this.stream = null
     const failure = this.failureOf(stream)
     // Read before it is cleared, and cleared here rather than in `ensureOpen`:
-    // an export arriving while this close is in flight reopens the writer, and
-    // a reset done there would wipe the failure this close still has to report.
-    // The failure belongs to the descriptor being closed, and it has now been
-    // taken off it.
+    // the close that reports a failure is what takes it off the writer, so a
+    // held failure no close has said anything about yet survives a reopen.
     this.streamError = null
-    // An already-failed or already-destroyed stream emitted its 'close' before
-    // this call, so waiting for another one would wait forever.
-    if (!stream || failure !== null || stream.destroyed) {
+    // The branch is on the stream, not on the failure. A stream that failed or
+    // was destroyed emits no further 'close' to wait for, so waiting would wait
+    // forever; but a *live* stream still has to be ended even when there is a
+    // failure to report, because the failure can be one this descriptor never
+    // had - the open failure `writeBatch` held before this stream existed.
+    // Branching on the failure closed nothing and leaked the descriptor.
+    if (!stream || stream.errored || stream.destroyed) {
       return failure !== null ? Promise.reject(failure) : Promise.resolve()
     }
     return new Promise((resolve, reject) => {
       stream.once('close', () => {
-        // Off the stream, not off `this`: a reopened writer's held error would
-        // belong to a different descriptor than the one that just closed.
-        const closeFailure = stream.errored ?? null
+        // Off the stream first, not off `this`: a reopened writer's held error
+        // would belong to a different descriptor than the one that just closed.
+        // `failure` is the fallback because it was read off this writer before
+        // the reopen could happen.
+        const closeFailure = stream.errored ?? failure ?? null
         if (closeFailure !== null) reject(closeFailure)
         else resolve()
       })
       stream.end()
     })
   }
+}
+
+/**
+ * The loss a destroyed stream carries when it has no error to show for it.
+ *
+ * `destroy()` with no argument throws away whatever the stream still had
+ * buffered and leaves `errored` null, so a close reading only the failure
+ * *reported* resolved clean over records that were never written: the same
+ * silence as the destroy window, reached without an error anywhere. A stream
+ * that finished its writes before being destroyed lost nothing and is not
+ * named here, and a healthy writer's stream is not destroyed at all when its
+ * close is called, so this cannot fire on the clean path.
+ *
+ * @ref LLP 0337#close-rejects [implements]: a close reports the records the stream abandoned, error or no error.
+ * @param {fs.WriteStream|null} stream
+ * @returns {Error|null}
+ */
+function abandonedRecords(stream) {
+  if (!stream || !stream.destroyed || stream.writableFinished) return null
+  return new Error('the stream was destroyed before its records were written')
 }
 
 /**

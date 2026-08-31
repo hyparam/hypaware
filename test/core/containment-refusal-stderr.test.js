@@ -1492,3 +1492,78 @@ test('a JSONL writer reopened after a failed close does not re-report the old fa
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
+
+// The open failure held by `writeBatch` used to be cleared by the next
+// `ensureOpen` that succeeded, on the reasoning that a new descriptor should
+// not carry the old one's error. True of the error, false of the loss: an
+// outage that clears mid-run leaves a healthy descriptor over records that are
+// gone regardless, and the close resolved clean over them with nothing on
+// stderr. The close is what takes a held failure off the writer now, so a
+// recovery cannot erase a loss no close has reported yet.
+//
+// @ref LLP 0337#writer-owns-its-stream [tests]: a writer whose disk came back still says what it lost while the disk was gone.
+test('a JSONL exporter that recovers mid-run still reports what it lost before it could open', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-recovers-'))
+  try {
+    // A file where the parent directory has to be: `ensureOpen` throws, and
+    // there is no stream for the failure to be reported on.
+    const blocker = path.join(root, 'blocker')
+    await fs.writeFile(blocker, 'not a directory')
+    const dir = path.join(blocker, 'telemetry')
+    const exporter = new JsonlSpanExporter({ dir, pid: 4248 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'a record lost while the disk was gone' }])
+    // The outage clears, and the writer opens a perfectly healthy descriptor.
+    await fs.rm(blocker)
+    writer.writeBatch([{ note: 'a record the disk keeps' }])
+    assert.ok(writer.stream, 'the writer reopened')
+
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.shutdown()
+    })
+    assert.match(stderr, /ENOTDIR/, 'the loss the recovery would have erased is still named')
+    assert.match(stderr, /buffered records may be lost/, 'and says what it cost')
+    // The live descriptor is still closed, with its records on disk: the
+    // report must not be paid for with the file the writer did open.
+    const written = await fs.readFile(path.join(dir, 'traces-4248.jsonl'), 'utf8')
+    assert.match(written, /a record the disk keeps/, 'and the healthy descriptor was still flushed and closed')
+    assert.doesNotMatch(written, /while the disk was gone/, 'the lost record really was lost')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The last way a close could resolve clean over lost records: a stream
+// destroyed with no error at all. `destroy()` throws the write buffer away and
+// leaves `errored` null, so both places the writer reads a failure from are
+// empty and the close took the already-destroyed branch and resolved.
+//
+// @ref LLP 0337#close-rejects [tests]: a destroyed stream with no error to show for it is still a loss, and the close says so.
+test('a JSONL close over a stream destroyed with no error does not report a clean shutdown', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-destroyed-'))
+  try {
+    const exporter = new JsonlSpanExporter({ dir, pid: 4249 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'the record the destroy throws away' }])
+    writer.stream.destroy()
+    assert.equal(writer.stream.destroyed, true, 'the stream is destroyed')
+    assert.equal(writer.stream.errored, null, 'with no error to read off it')
+    assert.equal(writer.streamError, null, 'and nothing held against it')
+
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.shutdown()
+    })
+    assert.match(stderr, /telemetry_shutdown_threw/, 'the close names itself')
+    assert.match(stderr, /destroyed before its records were written/, 'saying what happened to the records')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})

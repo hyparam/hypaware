@@ -45,14 +45,26 @@ the stream reports. Keeping the first rather than the last is deliberate: the
 first is the cause, and the ones after it are usually the same broken
 descriptor saying so again.
 
-One failure never reaches that listener: a directory that cannot be made or a
-file that cannot be opened throws out of `ensureOpen` itself, before there is a
-stream to report anything. Each exporter's `exportBatch` swallows that throw so
-an export never reaches the caller, which left every record lost and the close
+One failure never reaches that listener: a directory that cannot be made
+throws out of `ensureOpen` itself, before there is a stream to report
+anything. (A file that cannot be *opened* does reach the listener;
+`createWriteStream` reports that asynchronously, which is why an `EISDIR` or
+an `EACCES` on the file is diagnosed by the paragraph above and only the
+`mkdir` by this one.) Each exporter's `exportBatch` swallows that throw so an
+export never reaches the caller, which left every record lost and the close
 resolving clean over them: the same silence by the one route the listener
-cannot cover. `writeBatch` holds it the same way, so the close says so. It is
-not sticky; the next `ensureOpen` that succeeds opened a descriptor this one
-never had, and clears it.
+cannot cover. `writeBatch` holds it the same way, so the close says so.
+
+The held failure is taken off the writer by the close that reports it, and by
+nothing else. Clearing it on the next successful `ensureOpen` was the first
+shape of this, on the reasoning that a fresh descriptor should not carry the
+old one's error. That is true of the error and false of the loss: an outage
+that clears mid-run leaves a healthy descriptor standing over records that are
+gone regardless, and the clear put the close back to resolving clean over them
+for exactly the runs that recovered. What follows from holding it instead is
+that `close` cannot branch on the failure: a failure the current descriptor
+never had is still a live stream that has to be ended, so the branch is on the
+stream's own state and the report rides the ordinary close.
 
 This does not widen the guard's promise: a component that breaks on its own
 resources is still outside the seams in LLP 0335#never-throws, and an exporter
@@ -67,15 +79,18 @@ exactly the one line LLP 0335#close-failures specified, under the same
 per-source, per-index, per-operation bound. The buffered-record loss in
 hyparam/hypaware#1130 item 2 is a diagnosis now instead of a silence.
 
-Three mechanical choices this rests on:
+Four mechanical choices this rests on:
 
 - **Settled on the stream's `'close'` event, not on `end`'s callback.** The
   two carry different halves of the failure: the callback is handed the write
   error, the `'error'` event arrives with the close error, and only the
   listener above sees both. `'close'` is emitted after either outcome, so one
-  wait covers both. A stream that already failed, or was already destroyed,
-  has emitted its `'close'` before the call and is settled from the held error
-  directly, because waiting for a second one would wait forever.
+  wait covers both. A stream that already failed, or was already destroyed, is
+  settled from what the writer read off it rather than waited on, because a
+  stream Node has finished with owes no further `'close'` and the wait would
+  not end. The branch is on the stream's own state, not on whether there is a
+  failure to report: a live stream still has to be ended even when the writer
+  is carrying a failure that belongs to a descriptor before it.
 - **The flush's drain wait rejects on error too.** A stream that fails while
   draining never drains, so a wait on `'drain'` alone would hang the flush
   rather than report it, which is the failure mode #budget-report is about.
@@ -88,6 +103,15 @@ Three mechanical choices this rests on:
   written; reading `errored` is what closes it. The held value is taken off
   the writer by the close that reports it, so a stale failure cannot be
   reported a second time, nor against the next descriptor.
+- **A destroyed stream with no error to show for it is still a loss.**
+  `destroy()` with no argument throws away whatever was buffered and leaves
+  `errored` null, so both places a failure is recorded are empty and the close
+  read a clean shutdown off a stream that had abandoned its records: the
+  destroy window's silence again, reached without an error anywhere. A stream
+  destroyed before its writes finished is named on its own terms. It cannot
+  fire on the clean path, where the stream is not destroyed when its close is
+  called; nothing in this tree destroys a writer's stream from outside, so
+  what this closes is the shape of the hole rather than a reachable case.
 
 The residue here, named the way #budget-report names its own: an export that
 arrives while a close is in flight reopens the writer, and nothing closes that
@@ -125,11 +149,27 @@ would skip the teardown after it.
 
 This is not an alarm on a merely slow close, which was the argument against
 raising it at all. When the budget expires the shutdown moves on regardless,
-so whatever that provider still buffered is lost either way; the line is a
-true statement about a real loss, not a prediction. It costs nothing on a
-default install, where no exporter is configured and no provider exists to
-close (LLP 0021#exporter-selection), and one line per provider per operation
-on an install where a close really does hang.
+and the caller this repo ships exits immediately afterwards
+(`bin/hypaware.js`, `process.exit` on the line after `obs.shutdown()`), so
+whatever that provider still buffered is lost; the line is a true statement
+about a real loss, not a prediction. The qualifier matters and is stated
+rather than assumed: a caller that tears telemetry down and then lets the
+event loop drain can see the abandoned export complete after the line was
+already written, and for that caller the line is early rather than wrong. No
+such caller exists in this tree. It costs nothing on a default install, where
+no exporter is configured and no provider exists to close (LLP
+0021#exporter-selection), and one line per provider per operation on an
+install where a close really does hang.
+
+One boundary this leaves standing, named rather than settled here: **the
+non-dev budget is half the exporter's own export timeout.** 500ms against
+`OTLP_EXPORT_TIMEOUT_MS` of 1000ms, so a configured OTLP install whose
+collector answers between the two loses every export at process exit, and now
+says so once per channel per invocation on a path that was byte-silent before.
+The silence was the bug and the line is the diagnosis, but a budget set below
+the timeout it is racing is its own decision to make: raising it buys the
+records back at the cost of up to a second of shutdown latency on every `hyp`
+invocation, which is not a trade this decision was minted to make.
 
 The residue, named so nobody reads the guarantee wider than it is: **a close
 that hangs on nothing at all is still silent.** The budget's timer is
@@ -160,13 +200,23 @@ above it.
   `threw`; every existing line is byte-identical to what LLP 0335#one-line
   settled.
 - Healthy operation is unchanged and still byte-silent on stderr: a clean
-  close resolves, writes its file, and says nothing.
+  close resolves, writes its file, and says nothing. The one install that
+  gains a line it did not have is the one that was losing records without
+  one: a configured OTLP endpoint whose collector answers slower than the
+  shutdown budget (#budget-report).
 - `test/core/containment-refusal-stderr.test.js` pins each clause: the failed
   close diagnosed once and named as the exporter that lost the records, the
   healthy close silent with its records on disk, the asynchronous write
   failure that no longer ends the process (in a subprocess, because the
   assertion is that the process is still there), the hung close named when the
   budget runs out, and the shutdown that finishes inside it staying silent.
+  Each way a close could still have resolved clean over lost records is pinned
+  beside them: the close inside the destroy window, the writer that could
+  never open its file, the writer whose disk came back before the close (whose
+  healthy descriptor is still flushed and closed, so the report is not paid
+  for with the file the writer did open), the stream destroyed with no error
+  to show for it, and the reopened writer that does not re-report a failure
+  already said.
 
 ## References {#references}
 
