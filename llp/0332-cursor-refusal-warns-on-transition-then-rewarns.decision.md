@@ -81,6 +81,22 @@ last warned about and when. The rules:
   practice: the next append rewrites `cursor.json` with a contained
   `tableDir`, and a re-poisoned partition announces itself again.
 
+Two further rules fall out of the same principle, that this throttle's only
+permitted degradation is an extra line (#not-a-pass-object). Both make the
+window narrower than the three rules above alone would:
+
+- **An entry whose age reads negative is not a window.** `Date.now` is
+  wall-clock and NTP-steppable, and a daemon that starts before the first
+  sync reads into the past. A backwards step under a live entry would make
+  the recorded warn look like it happened in the future, and a bare
+  "younger than the interval" test would then hold indefinitely. A negative
+  age therefore rewarns.
+- **An entry is armed only once the line is out.** The report records what
+  it said, not what it attempted. `getLogger`'s OTel emit runs before the
+  stderr mirror and the whole call is guarded, so a provider that throws
+  takes both channels with it; arming the window there would spend a full
+  interval on a refusal that reached nobody.
+
 The throttle gates the whole report, the structured WARN and the stderr
 mirror together, because they are one signal on two channels (LLP 0329
 #stderr-mirror: the mirror is an addition, not a rerouting) and `control.js`
@@ -89,7 +105,14 @@ unsynchronized: a fresh CLI process always warns its first refusal, which is
 the property the interactive case needs, and the daemon is one long-lived
 process, which is the case the interval bounds. Entries are deleted on heal
 and one at most exists per partition that ever refused, so the map is
-bounded by the partition count.
+bounded by the number of partitions this process saw refuse. That is not a
+static bound: retention deletes whole date partitions
+(`src/core/cache/retention.js`), and a partition removed while poisoned
+never gets the non-refusing read that would clear it, so a daemon running
+for months against a persistently poisoned source strands about one entry
+per day. Accepted at that size: the leak is a fraction of the log the same
+condition is writing, and probing the filesystem to prune it would put a
+syscall in a hot synchronous reader.
 
 ## Not a pass object threaded through the readers {#not-a-pass-object}
 
@@ -135,6 +158,15 @@ throttle is suppressing the signal outright:
   changed rejected value warns immediately; and with mocked time, the same
   standing condition warns again after `ESCAPE_REWARN_MS`, so the throttle
   is a floor and never a lifetime mute.
+- Each reset exit is pinned by the sequence it guards, not only the healthy
+  one: a poison whose `cursor.json` then vanishes, and one whose
+  `cursor.json` then turns unparseable, both warn afresh when the poison
+  returns inside the window. A reset that a refactor drops must fail a
+  test, because the failure it reopens is a swallowed refusal.
+- The two narrowing rules are pinned in the direction that costs silence: a
+  wall clock stepped backwards under a live entry still warns, and a warn
+  the log channel could not deliver arms no window, so the next read says
+  it for real.
 
 ## Consequences {#consequences}
 
@@ -149,9 +181,19 @@ throttle is suppressing the signal outright:
   A rejected value that changes warns without waiting out the window.
 - Two poisoned partitions warn independently: the state is per-partition,
   so one partition's window never absorbs another's refusal.
-- Within the window, a refusing read is silent on both channels. An
-  operator counting lines can no longer count reads; they were never a
-  meaningful count, which is what this decision settles.
+- Within a window this process can prove it holds, a refusing read is
+  silent on both channels. An operator counting lines can no longer count
+  reads; they were never a meaningful count, which is what this decision
+  settles. The two exceptions both err loud: an entry whose age reads
+  negative under a stepped clock, and a warn that never left the process.
+- Recovery is not announced, unlike `control.js`'s
+  `daemon.control_scan_recovered`. Silence after a refusal therefore reads
+  as either "healed" or "still poisoned, the next line is not due yet", and
+  telling them apart means knowing `ESCAPE_REWARN_MS` and the maintenance
+  interval. Accepted here rather than settled: a recovery line is a signal
+  this decision does not need in order to rebase the rate, and adding one
+  is its own decision about a channel every healthy cursor read would sit
+  on.
 - The state is process-local, so `N` distinct short-lived CLI invocations
   still pay `N` lines. Accepted: each process's first line is the one an
   interactive operator needs, and the unbounded accumulation this bounds

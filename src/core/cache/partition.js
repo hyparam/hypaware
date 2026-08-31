@@ -246,8 +246,11 @@ const ESCAPE_REWARN_MS = 10 * 60 * 1000
  * resolved partition directory: the rejected value the line named, and
  * when. One entry at most per partition that ever refused; cleared by
  * {@link clearEscapeReport} the moment any read of that partition stops
- * refusing for escape, so the map is bounded by the partition count and a
- * healed-then-repoisoned partition warns afresh.
+ * refusing for escape, so a healed-then-repoisoned partition warns afresh.
+ * Bounded by the partitions this process saw refuse, which is not a static
+ * bound: one removed by retention while still poisoned never gets the
+ * non-refusing read that would clear it. Accepted at roughly an entry a day
+ * under a standing poison (LLP 0332#transition-plus-rewarn).
  *
  * @type {Map<string, { rejected: string, warnedAtMs: number }>}
  */
@@ -301,7 +304,7 @@ function reportEscapingTableDir(partitionDir, tableDir) {
   // (`Date.now` is NTP-steppable, and a daemon that starts before the first
   // sync can read far into the past). The window is then not proven to hold,
   // so say it again: the only degradation this throttle may have is an extra
-  // line, never silence (LLP 0332#not-a-pass-object).
+  // line, never silence (LLP 0332#transition-plus-rewarn).
   const sinceMs = prior ? now - prior.warnedAtMs : 0
   if (prior && prior.rejected === rejected && sinceMs >= 0 && sinceMs < ESCAPE_REWARN_MS) return
   try {
