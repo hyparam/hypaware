@@ -27,8 +27,8 @@ hyparam/hypaware#1130
 
 ## Export never throws or rejects into the caller {#never-throws}
 
-Everything an emit path hands to a telemetry component is guarded at the
-seam where control leaves our code:
+Three seams guard what an emit path hands to a telemetry component, at the
+point where control leaves our code:
 
 - `exportGuarded` (`src/core/observability/runtime.js`) wraps every
   exporter's `exportBatch` on all three channels, per exporter, so a broken
@@ -51,13 +51,17 @@ not its own telemetry but the silencing of every containment guard in LLP
 Structural guarding at the seam makes the mirror's "beside" true by
 construction.
 
-What this does not reach, named so the guarantee is not read wider than it
-is: a component that fails asynchronously on a resource it owns rather than
-on the call we made. `JsonlWriter` attaches no `'error'` listener to its
-`fs.WriteStream`, so a write that fails after `stream.write` returned emits
-`'error'` with nobody listening and ends the process, outside every seam
-above. The guard covers every call our code makes into a telemetry
-component, not every way such a component can break.
+Two things this does not reach, named so the guarantee is not read wider
+than it is. A component that fails asynchronously on a resource it owns
+rather than on the call we made: `JsonlWriter` attaches no `'error'`
+listener to its `fs.WriteStream`, so a write that fails after
+`stream.write` returned emits `'error'` with nobody listening and ends the
+process, outside every seam above. And one call our own code makes:
+`Instrument._record` hands its value to the global meter provider with no
+seam around it, knowingly and under the boundary in #meter-seam. So the
+three seams cover every call an emit path makes into an exporter, plus the
+logger's provider seam; they do not cover the meter's provider seam, and
+they cannot cover a component that breaks on its own resources.
 
 One consequence for test authors, recorded in the code and repeated here
 because it surprises: an `assert` inside a fake exporter's `exportBatch` is
@@ -72,7 +76,8 @@ component, and what it threw. Its bound and its shape are each a decision:
 - **Bounded to one line per broken component.** The throwing call sits on the
   path of every record, so an exporter broken by configuration would
   otherwise print once per row for the life of the daemon. The key is
-  `source#index` per provider instance, not the class name alone: two
+  `source#index` per provider instance (`source#index#operation` on the flush
+  and close paths, #close-failures), not the class name alone: two
   exporters of one class (two OTLP endpoints, say) are two things to fix, and
   on a name-only key the first to break would consume the report and leave
   the second undiagnosable for the life of the process.
