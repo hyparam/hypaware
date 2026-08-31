@@ -81,7 +81,7 @@ Rule 1 decides it, because the alternatives need something rule 1 forbids:
   which is a runtime property. Rule 2 excludes phases, not question lanes
   having a quiet day.
 
-Rule 2's other half already reaches the same answer from the front:
+Rule 3 already reaches the same answer from the front:
 "a lane counts once, however many prompts it contains", written for
 `join`, whose internal prompt count is unknowable at fork resolution.
 Zero is the bottom of that range, not an exception to it.
@@ -112,9 +112,12 @@ would still be guessing.
 - `wizardItinerary` stays a pure function of pathway and `managed`, with
   no lane-emptiness input, and `steps.js` stays a data module with no I/O.
   Every pathway prints exactly what it printed before this decision.
-- `first look` remains the only prompt-shaped surface outside the
-  denominator, and remains so on the static ground that it is never a
-  question anywhere.
+- Of the lanes the wizard could have counted, `first look` remains the
+  only one held outside the denominator, and remains so on the static
+  ground that it is never a question anywhere. The fork (rule 3) and the
+  express gate (LLP 0201 #no-counter) are outside it for the prior
+  reason and are untouched here: each is what fixes the total, so neither
+  can state one.
 - LLP 0191 #back-edges is unaffected and stays asymmetric with this on
   purpose: the back edge skips a lane that asked nothing because it is
   chosen *after* that lane ran and reported `noQuestion`, so it can use a

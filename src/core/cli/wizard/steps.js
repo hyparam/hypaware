@@ -20,7 +20,7 @@ export const WIZARD_STEP_LABELS = /** @type {Record<WizardStepName, string>} */ 
 /**
  * The counted lanes per pathway, in the order they run.
  *
- * Three rules produce these lists, and each one exists to stop the
+ * Four rules produce these lists, and each one exists to stop the
  * denominator from being a lie:
  *
  * 1. **Only lanes that ask something are counted.** The `configure` phase
@@ -40,16 +40,19 @@ export const WIZARD_STEP_LABELS = /** @type {Record<WizardStepName, string>} */ 
  * 4. **A question lane counts on the machine where it has nothing to ask.**
  *    The sync lane asks nothing on a fully fleet-managed machine (LLP 0276
  *    #no-candidates) and still prints `Step 3 of 5 · Choose what syncs`
- *    above the statement it makes instead. Rule 1 is why: its candidates
- *    are the pick lane's result, so at fork resolution nobody knows
- *    whether it will have a row to offer, and a total that waited for
- *    that answer would move. Blanking the numerator alone would print
- *    step 2, then a screen with no position, then step 4, and on a consent
- *    surface a missing number reads as a screen skipped without being
- *    shown. `first look` is outside the count on different ground: it is a
- *    report on every run, which the fork already knows, so it leaves no
- *    hole. Rule 2 says the same thing from the front - a lane counts once
- *    however many prompts it holds, and zero is the bottom of that range.
+ *    above the statement it makes instead. The fixed denominator is why
+ *    (LLP 0135 #progress, restated on `wizardStepProgress` below: it
+ *    resolves at the fork and never moves): the lane's candidates are the
+ *    pick lane's result, so at fork resolution nobody knows whether it
+ *    will have a row to offer, and a total that waited for that answer
+ *    would move. Blanking the numerator alone would print step 2, then a
+ *    screen with no position, then step 4, and on a consent surface a
+ *    missing number reads as a screen skipped without being shown.
+ *    `first look` leaves the count under rule 1 on different ground: it
+ *    is a report on every run, which the fork already knows, so dropping
+ *    it leaves no hole. Rule 2 says the same thing from the front - a
+ *    lane counts once however many prompts it holds, and zero is the
+ *    bottom of that range.
  */
 const WIZARD_ITINERARIES = /** @type {Record<WizardPathway, WizardStepName[]>} */ ({
   team: ['join', 'pick', 'sync', 'folders', 'finale'],

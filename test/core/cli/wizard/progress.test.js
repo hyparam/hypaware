@@ -155,7 +155,10 @@ test('the sync lane states its position even when it has nothing to ask', async 
     lockedHidden: 0,
     candidatesHiddenIds: [],
     progress: 'Step 3 of 5 · Choose what syncs',
-    confirm: async () => { throw new Error('a fully fleet-managed machine has nothing to ask') },
+    // The lane's prompt seam is `prompt`, not `confirm`: a guard on the
+    // wrong field is inert, and a regression in the no-candidates arm
+    // would reach the real stdin instead of failing here.
+    prompt: async () => { throw new Error('a fully fleet-managed machine has nothing to ask') },
   }))
 
   assert.equal(result.noQuestion, true, 'the lane asked nothing')
@@ -177,17 +180,36 @@ test('the sync lane states its position even when it has nothing to ask', async 
 // after the fork has fixed the total (LLP 0338 #counts-anyway).
 // @ref LLP 0338#counts-anyway [tests]: the denominator is a function of the pathway alone, so an empty lane never leaves it
 test('wizardItinerary: no lane emptiness can reach the denominator', async () => {
+  // Every shape a lane's emptiness could arrive in, offered to the
+  // function at once. A future seam that read any of them - a candidate
+  // list, a `noQuestion` flag, a pick result - would drop `sync` from the
+  // total here, which is what this asserts cannot happen. Asserting only
+  // over `managed` would not: it passes just as well against a function
+  // that grew the seam, because nothing would be passing through it.
+  const emptiness = /** @type {any} */ ({
+    managed: true,
+    syncEmpty: true,
+    noQuestion: true,
+    candidates: [],
+    picked: { descriptors: [] },
+  })
   const forEveryMachine = [
     wizardItinerary('team'),
     wizardItinerary('team', {}),
     wizardItinerary('team', { managed: true }),
     wizardItinerary('team', { managed: false }),
+    wizardItinerary('team', emptiness),
   ]
   for (const itinerary of forEveryMachine) {
     assert.deepEqual(itinerary, ['join', 'pick', 'sync', 'folders', 'finale'])
   }
   assert.equal(wizardStepProgress('team', 'sync'), 'Step 3 of 5 · Choose what syncs')
   assert.equal(wizardStepProgress('team', 'folders'), 'Step 4 of 5 · Choose how new folders are handled')
+  assert.equal(wizardStepProgress('team', 'sync', emptiness), 'Step 3 of 5 · Choose what syncs')
+  assert.equal(
+    wizardStepProgress('team', 'folders', emptiness),
+    'Step 4 of 5 · Choose how new folders are handled'
+  )
 })
 
 test('wizardStepProgress: an uncommitted pathway has no denominator', async () => {
