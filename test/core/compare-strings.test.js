@@ -244,6 +244,15 @@ test('the collation these lists came off really does move with the machine', () 
   // ICU canonicalises `lt-LT` to `lt` (LT is Lithuanian's likely region), so
   // a guard comparing against the requested tag returns early on every
   // full-ICU box and the two assertions below never run.
+  //
+  // Two predicates, deliberately not one, and neither of them is the
+  // interesting question. The first asks whether this runtime has `Intl` at
+  // all, the second whether it gave back Lithuanian rather than a substitute;
+  // whether Lithuanian actually *differs* from the characters is not guarded,
+  // it is the assertion. A build that answered `lt` from degraded data would
+  // red here rather than skip, which is the direction this pin wants. Folding
+  // the two guards into one shared `hasLocale` helper, here or across files,
+  // is how a resolution check quietly becomes the whole test again.
   if (typeof Intl === 'undefined' || typeof Intl.Collator !== 'function') return
   const collator = new Intl.Collator('lt-LT')
   const resolved = collator.resolvedOptions().locale
