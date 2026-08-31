@@ -33,6 +33,22 @@
  * `U+E000..U+FFFF` compared against one outside the BMP, and none of these
  * callers can produce that.
  *
+ * Both arguments have to be strings, and unlike the rest of this barrel that
+ * is a contract rather than something the body checks. `<` and `>` are false
+ * in both directions for `undefined`, so a non-string argument comes back as
+ * `0`: a stable tie that sorts into a plausible-looking but arbitrary order
+ * instead of raising. The `localeCompare` this replaced threw on the same
+ * input, so the quiet answer is new, and it is the reason the type is not
+ * `unknown`: `@ts-check` covers every caller in this repo, and the emitted
+ * declaration carries the same requirement out to anything reaching this
+ * through `hypaware/core/util`. A guard is deliberately not added here. It
+ * would put a `typeof` pair in the inner loop of every sort in the tree, and
+ * it would turn a mis-shaped row in a status listing back into a thrown error
+ * during rendering, which is a change of behaviour this helper has no business
+ * making on its callers' behalf. Coerce at the call site the way
+ * `hypaware-core/plugins-workspace/s3/src/query-dataset.js` does if the value
+ * may not be a string.
+ *
  * @param {string} a
  * @param {string} b
  * @returns {number} negative if `a` sorts first, positive if `b` does, 0 if neither

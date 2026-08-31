@@ -129,9 +129,13 @@ function commandNames() {
  * The name corpora this repo can harvest, bucketed the way the comparators
  * sort.
  *
- * `llp/` paths stand for `scripts/llp-numbers.js`, which sorts the files
- * claiming one number. Blob keys are deliberately absent and the last rule in
- * this file says why.
+ * `llp/` paths stand for `scripts/llp-numbers.js`, and they are a proxy rather
+ * than that script's own list: `claimsByNumber` keys on `basename(file)`, so
+ * what `collisions` actually sorts is the bare `NNNN-slug.type.md` names of the
+ * documents claiming one number. The tracked paths carry the same alphabet plus
+ * `/` and the directory prefixes, and the two lists sort identically here, so
+ * the wider corpus is the safe side of the approximation. Blob keys are
+ * deliberately absent and the last rule in this file says why.
  *
  * Not a one-to-one map onto the migrated sites, in either direction, and
  * saying so is what keeps the failure message below honest.
@@ -153,6 +157,17 @@ function commandNames() {
  * plugins register in code. The `sinks` bucket below harvests contribution
  * names (`forward`, `local-fs`, `s3`), which is a different list from the
  * one that registry sorts; it is not a stand-in for it.
+ *
+ * That last gap is the one place the migration is known to reorder a listing a
+ * user reads, and it is worth saying plainly rather than leaving as an absence.
+ * Sink instance names are free text, so a config holding both `nightly-export`
+ * and `nightly_export` lists them one way in `hyp sync`'s destination table
+ * before this change and the other way after, on the same `_` against `-` pair
+ * the rule above exists to catch. No harvest can pin a name a user has not
+ * written yet. What is claimed is narrower than "nothing reordered": every
+ * corpus this repo *ships* is unchanged, and where a user's own names decide,
+ * the order is now the machine-independent one, which is the same direction the
+ * blob keys moved in.
  *
  * @returns {Map<string, string[]>}
  */
@@ -221,21 +236,51 @@ test('moving these lists off the host collation did not reorder any of them', ()
 })
 
 test('the collation these lists came off really does move with the machine', () => {
-  // Lithuanian sorts `y` immediately after `i`, so it orders `sync` before
-  // `sink` where the characters order `sink` first. That pair is not a
-  // curiosity: the 102 command names `orderedHelpNames` sorts in
-  // `src/core/cli/dispatch.js` hold both, and it is the only corpus above that
-  // the two orders disagree on under any locale checked.
+  // Lithuanian makes `y` a secondary variant of `i` rather than a letter of
+  // its own, so `sink` and `sync` tie on those two positions at the primary
+  // strength and the later `c` against `k` decides: `sync` first, where the
+  // characters put `sink` first. Worth stating that way round, because "y
+  // sorts just after i" on its own would predict the opposite answer.
   //
-  // It is a hazard rather than a shipped symptom, and the difference is worth
-  // being exact about. Today every top-level token `hyp --help` prints is
-  // named in one of that renderer's four `preferred` rank lists, so the
-  // comparator only ever runs as a tiebreak that no shipped pair reaches, and
-  // the help text is byte-identical on an `lt-LT` box and an `en-US` one.
-  // The first plugin to contribute a top-level command outside those lists is
-  // what lands the pair in the tiebreak, and then the collation decides. So
-  // what is asserted here is the collation's disagreement itself, which is the
-  // thing the migration removed the dependency on.
+  // That pair lives in the `commands` corpus above, which holds both names.
+  // Of the corpora harvested here, `commands` and `skills` are the only two
+  // the two orders disagree on under any locale probed - `commands` under
+  // Lithuanian, `skills` under Azerbaijani, which sorts `q` before `p` and so
+  // swaps `hypaware-privacy` with `hypaware-query`. Neither is a shipped
+  // symptom: nothing sorts the `skills` bucket at all (see `sortedCorpora`),
+  // and `hyp --help` does not sort the pair below.
+  //
+  // Being exact about `hyp --help`, because it is the surface this pin used to
+  // claim was broken. `orderedHelpNames` in `src/core/cli/dispatch.js` does not
+  // sort the 102 command names; it sorts the top-level *heads*, split by
+  // section, and only as a tiebreak after a per-section `preferred` rank. Two
+  // separate things keep the collation out of it today:
+  //
+  //  - `sync` is declared `capture-movement` and `sink` `additional`, so the
+  //    two never appear in the same `available` list and no comparator in that
+  //    renderer ever sees the pair. It is not "the pair reaches the tiebreak
+  //    eventually"; on the current categories it cannot reach it at all.
+  //  - the tiebreak runs only between two heads of *equal* rank, which means
+  //    two heads that are both absent from their section's `preferred` list. A
+  //    single unranked command does not do it: its rank is MAX_SAFE_INTEGER
+  //    against every ranked neighbour's index, so `ar - br` decides every pair
+  //    it takes part in. Every non-hidden head the bundled plugins can
+  //    contribute is ranked, and the four heads that are not (`claude-hook`,
+  //    `codex-hook`, `claude-account`, `gascity`) come only from commands
+  //    marked `hidden`, which never reach a help row.
+  //
+  // Both halves are observable rather than argued: with every bundled plugin
+  // config-active, `hyp --help` is byte-identical before and after this change
+  // and across `en_US`, `lt_LT`, `az_AZ`, `lv_LV` and `tr_TR`. Stage one
+  // unranked plugin command and it stays identical; stage two and the
+  // pre-migration renderer orders them differently under `lt_LT` than under
+  // `en_US`. So the live hazard is a plugin shipping a second unranked
+  // top-level command, not the first, and the names at risk are that plugin's,
+  // not `sink` and `sync`.
+  //
+  // What is asserted below is therefore the collation's disagreement itself,
+  // which is the thing the migration removed the dependency on, and not a
+  // claim about what the help text prints.
   //
   // Conditional on the runtime actually having Lithuanian data: a `small-icu`
   // build resolves `lt` back to English and would show no disagreement, which
