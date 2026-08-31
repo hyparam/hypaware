@@ -60,8 +60,11 @@ async function linesFrom(fn, token) {
   }
   // The recovery line carries the refusal token as a substring
   // (`cursor_unreadable_recovered`), so a count of refusals has to exclude
-  // it or a heal would read as a fresh warning.
-  return captured.split('\n').filter((line) => line.includes(token) && (token === RECOVERY || !line.includes(RECOVERY)))
+  // it or a heal would read as a fresh warning. Only that token needs the
+  // exclusion: a capture of every line one read emitted (`CURSOR_READ`)
+  // wants the retractions in it, and dropping them silently would let an
+  // assertion that none went out pass without looking.
+  return captured.split('\n').filter((line) => line.includes(token) && (token !== REFUSAL || !line.includes(RECOVERY)))
 }
 
 /** @returns {Promise<string>} */
@@ -223,7 +226,7 @@ test('an escaping cursor that degrades to garbage leaves a refusal standing', as
     // pins that the retraction does not go out on its own.
     assert.equal(degraded.filter((line) => line.includes(ESCAPE_RECOVERY)).length, 1,
       'the escape refusal the bytes no longer prove is retracted')
-    assert.equal(degraded.filter((line) => line.includes(REFUSAL)).length, 1,
+    assert.equal(degraded.filter((line) => line.includes(REFUSAL) && !line.includes(RECOVERY)).length, 1,
       'and the same read arms the refusal that now stands')
 
     // The escape entry went with its retraction rather than staying armed,
@@ -305,9 +308,16 @@ test('a read failure that is not ENOENT leaves the refusal standing', async () =
     // thing to a suite running as root, where mode bits do not.
     await fs.rm(path.join(partition, 'cursor.json'))
     await fs.mkdir(path.join(partition, 'cursor.json'))
-    assert.equal((await linesFrom(() => {
+    const failed = await linesFrom(() => {
       assert.equal(tryReadCursorSync(partition), null)
-    }, RECOVERY)).length, 0, 'a read that itself failed retracts nothing')
+    }, CURSOR_READ)
+    assert.equal(failed.filter((line) => line.includes(RECOVERY)).length, 0,
+      'a read that itself failed retracts nothing')
+    // Both halves, or the branch is only half pinned: an exit that retracts
+    // nothing and reports nothing is the silent permanent skip this refusal
+    // exists to remove, and it satisfies the assertion above on its own.
+    assert.equal(failed.filter((line) => line.includes(REFUSAL) && !line.includes(RECOVERY)).length, 1,
+      'the read that failed says so, as the new fact it is')
   } finally {
     await fs.rm(path.dirname(partition), { recursive: true, force: true })
   }
