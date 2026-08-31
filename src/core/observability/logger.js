@@ -11,13 +11,11 @@ import {
   reportTelemetryFailure,
   SeverityNumber,
 } from './runtime.js'
-import { OtlpLogExporter } from './otlp_exporters.js'
+import { OtlpLogExporter, OTLP_EXPORT_TIMEOUT_MS } from './otlp_exporters.js'
 
 /**
  * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
  */
-
-const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
 /**
  * Emit seams already diagnosed on stderr, keyed by {@link emitSeam}: see

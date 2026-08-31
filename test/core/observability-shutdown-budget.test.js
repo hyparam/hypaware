@@ -1,0 +1,182 @@
+// @ts-check
+
+// LLP 0339: the non-dev shutdown budget is derived from the OTLP exporter's
+// own per-request timeout instead of sitting below it. The caller this repo
+// ships calls `process.exit` on the line after `obs.shutdown()`
+// (bin/hypaware.js), so the moment shutdown resolves is the moment the
+// process disconnects every in-flight export. A confirmation the collector
+// delivered before that moment survives any disconnect semantics; one still
+// in flight is at the collector's mercy (the reference OTel collector binds
+// processing to the request context and cancels it on disconnect). These
+// tests pin the three faces of the budget at the `installObservability`
+// seam, against a real HTTP listener:
+//
+// - a collector slower than the old 500ms budget but inside the exporter's
+//   1000ms timeout gets to confirm before shutdown resolves, silently
+// - a collector that never answers cannot hold the exit hostage: the
+//   exporter's own abort settles the shutdown, inside the budget, silently
+// - a provider close that hangs on nothing at all is still cut at the
+//   budget and still says so (the backstop LLP 0337#budget-report added)
+//
+// @ref LLP 0339#budget-derived [tests]: an export inside the exporter's own timeout settles before shutdown resolves; only a genuine hang meets the budget.
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import http from 'node:http'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+import { installObservability, readObservabilityEnv, getLogger } from '../../src/core/observability/index.js'
+import { OTLP_EXPORT_TIMEOUT_MS } from '../../src/core/observability/otlp_exporters.js'
+
+/**
+ * Capture everything written to `process.stderr` while `fn` runs. The
+ * shutdown's timed-out report writes to the process stream directly, not to
+ * a dispatch-bound stream, so this is the only place to observe it.
+ *
+ * @param {() => Promise<void>} fn
+ * @returns {Promise<string>}
+ */
+async function captureProcessStderr(fn) {
+  const realWrite = process.stderr.write.bind(process.stderr)
+  let captured = ''
+  process.stderr.write = /** @type {typeof process.stderr.write} */ ((chunk) => {
+    captured += typeof chunk === 'string' ? chunk : String(chunk)
+    return true
+  })
+  try {
+    await fn()
+  } finally {
+    process.stderr.write = realWrite
+  }
+  return captured
+}
+
+/**
+ * Start an HTTP listener on a loopback ephemeral port.
+ *
+ * @param {http.RequestListener} handler
+ * @returns {Promise<{ server: http.Server, url: string }>}
+ */
+function listen(handler) {
+  const server = http.createServer(handler)
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const address = /** @type {import('node:net').AddressInfo} */ (server.address())
+      resolve({ server, url: `http://127.0.0.1:${address.port}` })
+    })
+  })
+}
+
+/**
+ * A non-dev observability install pointed at `endpoint`, with a throwaway
+ * HYP_HOME so nothing touches the real state dir.
+ *
+ * @param {string} endpoint
+ */
+async function installAgainst(endpoint) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-shutdown-budget-'))
+  const env = readObservabilityEnv({
+    OTEL_EXPORTER_OTLP_ENDPOINT: endpoint,
+    HYP_HOME: home,
+  })
+  const handle = installObservability({ env })
+  return { handle, home }
+}
+
+test('an export confirmed slower than the old budget settles before shutdown resolves, silently', async () => {
+  // 700ms sits in the window the old 500ms budget abandoned: above the
+  // budget, inside the exporter's own 1000ms timeout.
+  const RESPONSE_DELAY_MS = 700
+  let responded = 0
+  const { server, url } = await listen((req, res) => {
+    req.on('data', () => {})
+    req.on('end', () => {
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{}')
+        responded += 1
+      }, RESPONSE_DELAY_MS)
+    })
+  })
+  const { handle, home } = await installAgainst(url)
+  try {
+    const stderr = await captureProcessStderr(async () => {
+      getLogger('shutdown-budget-test').warn('one record for a slow collector')
+      await handle.shutdown()
+    })
+    // When shutdown resolves the shipped CLI exits, so anything the
+    // collector has not confirmed by now is at its disconnect semantics'
+    // mercy. The confirmation must already be in.
+    assert.ok(responded >= 1,
+      `the export was confirmed before the exit line (responded=${responded})`)
+    // A merely slow collector is healthy operation, not a loss to report.
+    assert.ok(!stderr.includes('telemetry_shutdown_timed_out'),
+      `a confirmation inside the exporter timeout is not a timeout:\n${stderr}`)
+  } finally {
+    server.close()
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a collector that never answers cannot hold the exit past the exporter timeout', async () => {
+  const { server, url } = await listen((req) => {
+    req.on('data', () => {})
+    // read the body, never respond
+  })
+  const { handle, home } = await installAgainst(url)
+  try {
+    const started = Date.now()
+    const stderr = await captureProcessStderr(async () => {
+      getLogger('shutdown-budget-test').warn('one record for a black hole')
+      await handle.shutdown()
+    })
+    const elapsed = Date.now() - started
+    // The exporter's own abort is the bound; the budget above it is only a
+    // backstop. The slack over OTLP_EXPORT_TIMEOUT_MS absorbs scheduling
+    // jitter, not a second wait.
+    assert.ok(elapsed < OTLP_EXPORT_TIMEOUT_MS + 1_000,
+      `shutdown settled from the exporter's own abort (elapsed=${elapsed}ms)`)
+    // The exporter gave up on its own inside the budget, so the budget has
+    // nothing to report. (What the abort abandoned is the export timeout's
+    // own story, not the shutdown's.)
+    assert.ok(!stderr.includes('telemetry_shutdown_timed_out'),
+      `an abort inside the budget is not a shutdown timeout:\n${stderr}`)
+  } finally {
+    server.close()
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a provider close that hangs on nothing is still cut at the budget, and still says so', async () => {
+  const { server, url } = await listen((req, res) => {
+    req.on('data', () => {})
+    req.on('end', () => {
+      res.writeHead(200)
+      res.end('{}')
+    })
+  })
+  const { handle, home } = await installAgainst(url)
+  try {
+    const loggerProvider = handle.logger.provider
+    assert.ok(loggerProvider, 'the configured endpoint installed a logger provider')
+    // A hang with no timer of its own: the case the budget exists for
+    // (LLP 0337#budget-report), which no exporter timeout can settle.
+    loggerProvider.shutdown = () => new Promise(() => {})
+    const started = Date.now()
+    const stderr = await captureProcessStderr(async () => {
+      await handle.shutdown()
+    })
+    const elapsed = Date.now() - started
+    assert.ok(elapsed < OTLP_EXPORT_TIMEOUT_MS + 2_000,
+      `the budget cut the hang (elapsed=${elapsed}ms)`)
+    assert.match(stderr, /telemetry_shutdown_timed_out/,
+      'the cut close is reported, not silently abandoned')
+    assert.match(stderr, /"telemetry_source":"logs_provider"/,
+      'and the line names the provider that hung')
+  } finally {
+    server.close()
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})

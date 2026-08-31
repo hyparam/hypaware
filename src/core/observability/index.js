@@ -7,6 +7,7 @@ import { installLoggerProvider } from './logger.js'
 import { installMeterProvider, resetKernelInstruments } from './meter.js'
 import { installRuntimeMetrics } from './runtime_metrics.js'
 import { reportTelemetryFailure } from './runtime.js'
+import { OTLP_EXPORT_TIMEOUT_MS } from './otlp_exporters.js'
 
 /**
  * @import { LoggerProvider, MeterProvider, TracerProvider } from './runtime.js'
@@ -22,6 +23,16 @@ let installed = null
  * operation is free to resolve with anything, including `undefined`.
  */
 const TIMED_OUT = Symbol('hyp.telemetry.timed-out')
+
+/**
+ * How much longer than the exporter's own per-request timeout the non-dev
+ * shutdown waits. The margin covers the settle after an abort fires (the
+ * fetch's rejection has to reach `Promise.allSettled` and the provider's
+ * shutdown has to resolve), so the budget only ever expires on a close that
+ * hangs on something with no timer of its own, never on an export the
+ * exporter was about to confirm or abandon itself.
+ */
+const SHUTDOWN_BUDGET_MARGIN_MS = 250
 
 /**
  * Install tracer, logger, and meter providers using a single shared
@@ -58,9 +69,11 @@ function buildHandle({ env, resource, tracer, logger, meter, runtimeMetrics }) {
   // @ref LLP 0021#shutdown-and-flush [implements]: close exporters reverse order; dev gets 5s budget + forceFlush
   async function shutdown() {
     runtimeMetrics?.stop()
-    const timeoutMs = env.devTelemetry ? 5_000 : 500
-    // Per handle, like the exporter guard's own set: a process that installs
-    // a second provider after tearing the first one down starts clean.
+    // @ref LLP 0339#budget-derived [implements]: the non-dev budget sits above the OTLP export timeout by construction, so an in-flight export settles before the budget can abandon it
+    const timeoutMs = env.devTelemetry ? 5_000 : OTLP_EXPORT_TIMEOUT_MS + SHUTDOWN_BUDGET_MARGIN_MS
+    // Per shutdown invocation, like the exporter guard's own set: a process
+    // that installs a second provider after tearing the first one down
+    // starts clean.
     /** @type {Set<string>} */
     const reportedCloseTimeouts = new Set()
     // Still on the silent `safe()`, knowingly: both return paths in
