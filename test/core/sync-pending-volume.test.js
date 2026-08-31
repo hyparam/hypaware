@@ -32,10 +32,27 @@ import { previewPendingRows } from '../../src/core/sinks/pending.js'
 
 const CACHE_SUBDIR = 'cache'
 
+/**
+ * Every temp home this file has handed out, removed in one sweep after the
+ * last case. Each home is a few thousand inodes of watermark tree, and the
+ * file makes one per case, so leaving them behind is a slow leak in
+ * `os.tmpdir()` on any machine that runs the suite often (#1121). Swept once
+ * at the end rather than per case, because the homes are cheap to hold and a
+ * per-case teardown would have to be threaded through every one of them.
+ *
+ * @type {string[]}
+ */
+const homes = []
+
+test.after(async () => {
+  await Promise.all(homes.map((home) => fs.rm(home, { recursive: true, force: true })))
+})
+
 /** @param {string} prefix */
 async function makeHome(prefix) {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), `hyp-syncvol-${prefix}-`))
   await fs.mkdir(path.join(hypHome, 'hypaware'), { recursive: true })
+  homes.push(hypHome)
   return hypHome
 }
 
@@ -85,64 +102,6 @@ function captureStream() {
   return {
     write(/** @type {string} */ chunk) { buf += String(chunk); return true },
     get text() { return buf },
-  }
-}
-
-/**
- * Run `fn` with `substitute` standing in for the process's ambient number
- * locale, for a case pinning `pinned` as the locale the code under test names.
- *
- * Node fixes the `Intl` default at startup from the environment, so nothing
- * inside this process can move it. What can be moved is where a dropped locale
- * argument reads it from: `Number.prototype.toLocaleString` called with no
- * `locales`. An explicit locale passes through untouched, so code that names
- * its locale is unaffected and code that took the machine's renders as
- * `substitute` would. That is what makes a locale pin fail on the box that
- * wrote it rather than only on a differently configured one, with no
- * subprocess and no export widened for a test to reach.
- *
- * Scoped to that one route, not to the ambient locale in general.
- * `Intl.NumberFormat` is a separate binding and is deliberately left alone, so
- * a `formatCount` rewritten as `new Intl.NumberFormat().format(n)` reads the
- * machine's locale and this helper does not see it. Shimming a global
- * constructor the codebase never calls would buy a hypothetical at real cost;
- * the fix that closes the route for good is `formatCount` grouping without a
- * locale at all, which retires this helper rather than widening it.
- *
- * @template T
- * @param {string} substitute
- * @param {string} pinned
- * @param {() => Promise<T>} fn
- * @returns {Promise<T>}
- */
-async function onAmbientLocale(substitute, pinned, fn) {
-  const proto = /** @type {any} */ (Number.prototype)
-  const real = proto.toLocaleString
-  // Checked, not assumed: a substitution that renders like `pinned` pins
-  // nothing, because the assertion under it then reads the same string whether
-  // or not the code names its locale. Node's own builds have shipped full ICU
-  // since v13, but a `small-icu` or `--without-intl` build resolves
-  // `substitute` back to the one locale it carries and would restore the exact
-  // "green on the mutant" blind spot this helper exists to close (#1117),
-  // silently and in the passing direction. Fail loudly there instead.
-  //
-  // Compared against `pinned`, never against this machine's own default: once
-  // the substitution is in, the machine's locale is not what the assertion
-  // reads, so it cannot blunt the pin. Reading it here would instead fail a
-  // correct tree on every box already running in `substitute`, which is the
-  // same environment-conditional outcome #1117 is about, pointed at red.
-  assert.notEqual(
-    real.call(1234, substitute),
-    real.call(1234, pinned),
-    `${substitute} groups like ${pinned} here, so substituting it pins nothing`
-  )
-  proto.toLocaleString = function (/** @type {any} */ locales, /** @type {any} */ options) {
-    return real.call(this, locales ?? substitute, options)
-  }
-  try {
-    return await fn()
-  } finally {
-    proto.toLocaleString = real
   }
 }
 
@@ -432,21 +391,22 @@ test('`hyp sync` counts to the shipped scan limit, not to one its own call passe
 })
 
 test('a four-digit backlog is grouped for a reader, not printed as a bare integer', async () => {
-  // `formatCount` pins `en-US` grouping so the same backlog cannot render as
-  // `1.234` on one machine and `1,234` on another. What this case is about is
-  // the separator, never the budget, so it runs on a frozen clock: a
-  // four-digit fixture makes losing the race against the 3000ms budget
-  // unlikely rather than impossible, and a count the budget stopped at the
-  // 512-row check renders `at least 512 rows pending` and reds a correct tree
-  // (#1105). The freeze costs the case nothing and removes the last thing in
-  // it that reads the machine.
+  // `formatCount` groups thousands so a backlog reads as a magnitude and not
+  // as a digit run. What this case is about is the separator, never the
+  // budget, so it runs on a frozen clock: a four-digit fixture makes losing
+  // the race against the 3000ms budget unlikely rather than impossible, and a
+  // count the budget stopped at the 512-row check renders `at least 512 rows
+  // pending` and reds a correct tree (#1105). The freeze costs the case
+  // nothing and removes the last thing in it that reads the machine.
   //
-  // Run under a substituted ambient locale, because the realistic regression
-  // is deleting the `'en-US'` argument as redundant and a US-locale box
-  // renders both spellings identically: asserted against the real default,
-  // this case passes whether or not the locale is pinned at all, which is no
-  // pin (#1117). `onAmbientLocale` moves only the default, so the assertion
-  // below fails on any machine the moment the argument goes.
+  // The separator no longer depends on where this runs. `formatCount` is
+  // `groupThousands`, which derives the grouping from the digits and asks the
+  // host nothing, so this assertion reads the same string in every ambient
+  // locale and under every ICU build - which is why the helper that used to
+  // substitute the ambient locale under it is gone (#1121). The route to the
+  // host is pinned where it now lives, in `test/core/format-number.test.js`,
+  // and pinned against every spelling of it rather than the one a shim on
+  // `Number.prototype` could reach (#1121 item 2).
   const hypHome = await makeHome('grouped')
   const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
   const { ctx, stdout } = makeCtx({
@@ -458,7 +418,7 @@ test('a four-digit backlog is grouped for a reader, not printed as a bare intege
     }),
   })
 
-  const code = await onFrozenClock(() => onAmbientLocale('de-DE', 'en-US', () => runSync(['--dry-run'], ctx)))
+  const code = await onFrozenClock(() => runSync(['--dry-run'], ctx))
 
   assert.equal(code, 0)
   assert.match(stdout.text, /1,234 rows pending, the full local history/)

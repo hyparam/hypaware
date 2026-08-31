@@ -13,6 +13,7 @@ import {
   readFirstSyncDeadline,
 } from '../usage-policy/first_sync_hold.js'
 import { readClientSyncEntries, readLocalOnlyEntries } from '../usage-policy/index.js'
+import { groupThousands } from '../util/format_number.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -531,13 +532,16 @@ function sum(volumes, pick) {
 }
 
 /**
- * Thousands-grouped, pinned to `en-US` rather than the ambient locale: a row
- * count is the number this prompt turns on, and it must not render as
- * `236.650` on one machine and `236,650` on another.
+ * Thousands-grouped without a locale: a row count is the number this prompt
+ * turns on, and it must not render as `236.650` on one machine and `236,650`
+ * on another. Pinning `en-US` rendered the same string, but left that property
+ * one deleted argument away from being false, and testable only by moving the
+ * ambient locale out from under the running process. {@link groupThousands}
+ * makes it true of the code instead (#1121).
  *
  * @param {number} n
  * @returns {string}
  */
 function formatCount(n) {
-  return n.toLocaleString('en-US')
+  return groupThousands(n)
 }
