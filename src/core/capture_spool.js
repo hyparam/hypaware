@@ -3,7 +3,7 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 
-import { isConfirmedSymlink } from './cache/paths.js'
+import { isConfirmedSymlinkVia } from './cache/paths.js'
 import { Attr, getLogger } from './observability/index.js'
 import { errCode } from './util/json_util.js'
 
@@ -112,6 +112,13 @@ function reportPlantedSpoolPath(root, planted) {
  * silence as an escape would replace that with the same zero-count success an
  * empty spool returns.
  *
+ * The `lstat` goes through the same `{ fs }` the walk does. The seam exists so
+ * a caller can hand this function a different filesystem, and a check that
+ * asked `node:fs` while `readdir` asked the injected one would answer about a
+ * path the walk never opens - and answer `false`, because a path absent from
+ * the real filesystem is not a confirmed symlink, so the seam failed open on
+ * exactly the plant the guard is for.
+ *
  * The entry path is resolved before any of that, because `lstat` answers about
  * a link only when the path names the link: a trailing `/` or `/.` makes the
  * kernel resolve the last component, so the guard would inspect the target
@@ -124,6 +131,8 @@ function reportPlantedSpoolPath(root, planted) {
  *   remove the spool directory's contents
  * @ref LLP 0328#sweep-path [implements]: the containment test is a string, so
  *   the walk asks the filesystem about each directory at the point it walks it
+ * @ref LLP 0331#seam-answers-the-check [implements]: the filesystem the walk
+ *   reads is the filesystem the guard asks
  * @param {string} dir
  * @param {{ fs?: typeof fsp }} [opts]
  * @returns {Promise<{ filesRemoved: number, bytesRemoved: number, failed: number }>}
@@ -148,7 +157,7 @@ export async function sweepCaptureSpool(dir, opts = {}) {
     // about who supplied it. In-walk dirents are already safe (a symlink is
     // not `isDirectory()`, so it is removed as the link it is and never
     // queued); this covers the one path no dirent ever described.
-    if (isConfirmedSymlink(current)) {
+    if (await isConfirmedSymlinkVia(fs, current)) {
       reportPlantedSpoolPath(root, current)
       continue
     }

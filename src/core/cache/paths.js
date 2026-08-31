@@ -88,3 +88,49 @@ export function isConfirmedSymlink(p) {
     return false
   }
 }
+
+/**
+ * The same question as {@link isConfirmedSymlink}, asked of a filesystem the
+ * caller supplies.
+ *
+ * It exists because one caller of the containment check reads the directory
+ * through an injectable seam. A guard that answers from `node:fs` while the
+ * walk behind it reads from somewhere else is not a guard: it says nothing
+ * about the path the walk is going to open, and it fails OPEN, because a path
+ * that does not exist on the real filesystem is not a confirmed symlink. The
+ * seam and the check have to mean the same thing by "the filesystem".
+ *
+ * Deliberately here, immediately beside the synchronous spelling, and
+ * deliberately the same three clauses in the same order. This is the second
+ * spelling of the asymmetry LLP 0326#positive-evidence settled, which LLP
+ * 0328#sweep-path warns about; adjacency is the answer to that warning, since
+ * a drift toward `realpath` or toward reading a throw as an escape is visible
+ * in one screen rather than in two files.
+ *
+ * `lstat` throwing is the promise-API spelling of `throwIfNoEntry: false`
+ * returning `undefined`: ENOENT, EACCES, and every other refusal to answer
+ * accept, exactly as the synchronous form does.
+ *
+ * A filesystem with no `lstat` to call is the one thing that is not silence.
+ * It has not declined to answer; it was never asked, and swallowing the
+ * `TypeError` would return `false` about a path nothing looked at - the same
+ * fail-open this function exists to close, one level further down. So it is
+ * raised rather than caught, before the `try`. The check refuses to stand in
+ * front of a walk it cannot see, and says so where the caller wired the seam.
+ *
+ * @ref LLP 0326#positive-evidence [implements]: only a symlink the filesystem confirms refuses anything.
+ * @ref LLP 0331#seam-answers-the-check [implements]: an incomplete seam is a check that was never asked, not a check that answered no
+ * @param {{ lstat: (p: string) => Promise<{ isSymbolicLink(): boolean }> }} fsLike
+ * @param {string} p
+ * @returns {Promise<boolean>}
+ */
+export async function isConfirmedSymlinkVia(fsLike, p) {
+  if (typeof fsLike?.lstat !== 'function') {
+    throw new TypeError('isConfirmedSymlinkVia: the injected filesystem has no lstat(), so the containment check cannot be asked')
+  }
+  try {
+    return (await fsLike.lstat(p)).isSymbolicLink() === true
+  } catch {
+    return false
+  }
+}

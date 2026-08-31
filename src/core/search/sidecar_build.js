@@ -5,6 +5,8 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
+import { isConfirmedSymlink } from '../cache/paths.js'
+import { reportPlantedSweepPath } from '../cache/sweep_guard.js'
 import { urlToPath } from '../cache/iceberg/resolver.js'
 import { listLiveDataFiles } from '../cache/iceberg/store.js'
 import { Attr, getLogger } from '../observability/index.js'
@@ -142,14 +144,39 @@ function scanForBuildable(dataDir, quarantine) {
  * this on every tick over a table that carries sidecars, whatever its
  * coverage.
  *
+ * Its own containment check, rather than one at the caller. This pass lists
+ * `<generation>/data` and unlinks by path, so it is the code LLP
+ * 0326#one-level-down is about, and an exported deleting pass whose guard
+ * lives in one call site hands the next caller the deletion without it. The
+ * two components asked about are the two this pass walks; the sibling
+ * `metadata/` belongs to a different sweep and refusing on it here would
+ * refuse work this pass could safely have done.
+ *
+ * One `path.resolve` first, and the resolved spelling is used for the check,
+ * the walk, and the report. `lstat` reports on a link only when the path
+ * NAMES the link: a trailing `/` or `/.` makes the kernel resolve the last
+ * component, so an unnormalized `tableDir` would have the guard inspect the
+ * target while `readdirSync` walked the link.
+ *
  * @ref LLP 0304#scratch-sweep-site [implements]: the sweep has to run on coverage-complete ticks too, because the republished sidecar is what hides the scratch
+ * @ref LLP 0331#guard-travels-with-the-delete [implements]: the pass that unlinks carries the check, so a second caller cannot inherit the delete without it
  * @param {string} tableDir
  * @param {{ warn(msg: string, fields?: object): void }} [log]
  * @returns {void}
  */
 export function sweepIndexScratch(tableDir, log) {
   const logger = log ?? getLogger('cache')
-  const dataDir = path.join(tableDir, 'data')
+  const root = path.resolve(tableDir)
+  const dataDir = path.join(root, 'data')
+  const planted = [root, dataDir].find(isConfirmedSymlink)
+  if (planted !== undefined) {
+    // `log`, not `logger`: an absent one is left for the report to default,
+    // so the module that owns the refusal sentence owns how it is emitted.
+    // Resolving it here would make every production call pass a logger and
+    // leave that default dead on the one path an operator actually has.
+    reportPlantedSweepPath(root, 'maintenance.grep_index', planted, log)
+    return
+  }
   const cutoff = Date.now() - SCRATCH_GRACE_MS
   /** @type {string[]} */
   let names

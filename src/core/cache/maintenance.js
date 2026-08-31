@@ -13,12 +13,13 @@ import {
 } from 'icebird'
 import { fetchAvroRecords } from 'icebird/src/fetch.js'
 
-import { Attr, getActiveSpan, getLogger, getMeter, withSpan } from '../observability/index.js'
+import { Attr, getActiveSpan, getMeter, withSpan } from '../observability/index.js'
 import { MAINTENANCE_DEFAULTS } from './maintenance_defaults.js'
 import { isGatewayFallbackRow } from './gateway_fallback.js'
 import { inferColumnType } from './migrate.js'
 import { discoverCachePartitions, readCursorSync, tryReadCursorSync, withPartitionMutationLock, writeCursor } from './partition.js'
 import { datasetsRoot, isConfirmedSymlink } from './paths.js'
+import { reportPlantedSweepPath } from './sweep_guard.js'
 import { createLocalIcebergIO, isStagedWriteName, tableUrlForDir } from './iceberg/resolver.js'
 import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, listLiveDataFiles, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
@@ -378,10 +379,15 @@ export async function maintainCache(opts) {
         // through the LENIENT reader: a cursor the gate rejected still
         // yields a default generation name at this line, so the cursor gate
         // upstream is not standing in front of it.
-        // @ref LLP 0326#one-level-down [implements]: every pass that unlinks by path checks the path it will walk.
-        const plantedScratchPath = sweepPathComponents(liveDir).find(isConfirmedSymlink)
-        if (plantedScratchPath === undefined) sweepIndexScratch(liveDir)
-        else reportPlantedSweepPath(liveDir, 'maintenance.grep_index', plantedScratchPath)
+        //
+        // The check is no longer written here. It lives inside
+        // {@link sweepIndexScratch}, which is the code that unlinks, so a
+        // second caller cannot acquire the deletion without the guard that
+        // bounds it - and so the components asked about are the two the pass
+        // actually walks rather than the three this call site happened to
+        // name.
+        // @ref LLP 0331#guard-travels-with-the-delete [constrained-by]: the containment property belongs to the pass that deletes, not to whoever calls it.
+        sweepIndexScratch(liveDir)
         const coverage = countIndexCoverage(liveDir)
         if (coverage.indexed < coverage.indexable) {
           await withSpan(
@@ -1992,32 +1998,6 @@ async function sweepUnreferencedTableFiles(tableDir) {
  */
 function sweepPathComponents(tableDir) {
   return [tableDir, path.join(tableDir, 'metadata'), path.join(tableDir, 'data')]
-}
-
-/**
- * Say that a sweep refused a path, and say it out loud. The symptom is
- * otherwise a partition that quietly never reclaims anything; `ls -l` at the
- * logged component answers why in one line.
- *
- * Both refusing passes report through here, and the operation says which one
- * stood down. They reclaim different leaks, so "nothing is being reclaimed"
- * is two different reports, and a refusal that said nothing at all would be
- * the silent half of exactly the symptom this line exists to name.
- *
- * @ref LLP 0329#stderr-mirror [implements]: the refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
- * @param {string} tableDir
- * @param {string} operation
- * @param {string} plantedComponent
- */
-function reportPlantedSweepPath(tableDir, operation, plantedComponent) {
-  try {
-    getLogger('cache', { mirrorStderr: true }).warn('a symlink stands on the sweep path; reclaiming nothing in this generation', {
-      [Attr.OPERATION]: operation,
-      [Attr.ERROR_KIND]: 'sweep_path_is_symlink',
-      table_dir: tableDir,
-      planted_component: plantedComponent,
-    })
-  } catch { /* a sweep must not fail on a logger provider that is not installed */ }
 }
 
 /**

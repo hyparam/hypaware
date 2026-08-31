@@ -188,20 +188,30 @@ test('the sweep\'s refusal of a symlinked component reaches process stderr', asy
   try {
     const cacheRoot = path.join(root, 'cache')
     const outside = path.join(root, 'outside')
-    await fs.mkdir(path.join(outside, 'metadata'), { recursive: true })
+    await fs.mkdir(path.join(outside, 'data'), { recursive: true })
     await appendRowsToSourceTable(
       cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
       [{ id: 1, session_id: 's-1' }]
     )
     const generation = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude', 'table')
-    await fs.rm(path.join(generation, 'metadata'), { recursive: true, force: true })
-    await fs.symlink(path.join(outside, 'metadata'), path.join(generation, 'metadata'), 'dir')
+    // Planted at `data/`, which is a component BOTH passes open: the
+    // unreferenced sweep joins `metadata/` and `data/` onto the generation,
+    // and the index-scratch sweep lists `data/`. An earlier spelling of this
+    // test planted at `metadata/`, which stopped being a component the scratch
+    // sweep asks about when LLP 0331#guard-travels-with-the-delete moved that
+    // pass's guard inside the pass and narrowed it to the two directories the
+    // pass actually walks. That loosening is deliberate, and the property this
+    // test exists for is unchanged by it: what is pinned is that each refusing
+    // pass says so on stderr, so the plant has to be somewhere both of them
+    // refuse.
+    await fs.rm(path.join(generation, 'data'), { recursive: true, force: true })
+    await fs.symlink(path.join(outside, 'data'), path.join(generation, 'data'), 'dir')
 
     const stderr = await captureProcessStderr(async () => {
       await maintainCache({ cacheRoot })
     })
     // Asserted per `operation`, not on the `error_kind` alone. Two passes walk
-    // these same components on one tick for this dataset - the unreferenced-set
+    // this same component on one tick for this dataset - the unreferenced-set
     // sweep and, because `ai_gateway_messages` is the grep-indexed dataset, the
     // index-scratch sweep - and both report through the one
     // `reportPlantedSweepPath`, so both lines carry the same
@@ -218,7 +228,7 @@ test('the sweep\'s refusal of a symlinked component reaches process stderr', asy
     )
     assert.ok(
       operations.includes('maintenance.grep_index'),
-      'and so does the index-scratch sweep, which walks the same components'
+      'and so does the index-scratch sweep, which walks the same component'
     )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
