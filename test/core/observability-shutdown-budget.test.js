@@ -26,6 +26,8 @@ import http from 'node:http'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 
 import { installObservability, readObservabilityEnv, getLogger } from '../../src/core/observability/index.js'
 import { OTLP_EXPORT_TIMEOUT_MS } from '../../src/core/observability/otlp_exporters.js'
@@ -195,3 +197,76 @@ test('a provider close that hangs on nothing is still cut at the budget, and sti
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+// The three tests above run inside the node test runner, whose own handles
+// hold the event loop open for as long as the suite lasts. The shipped caller
+// has no such luxury: `bin/hypaware.js` awaits `obs.shutdown()` at top level
+// and the loop is free to drain underneath it. That difference is load
+// bearing here, because deriving the budget from the export timeout is
+// exactly what removes the last referenced handle before the budget expires
+// (the pending OTLP fetch aborts at 1000ms, the budget lands at 1250ms). Run
+// the hang in a real child process, where the loop can drain, and either the
+// budget holds it open to report or the process leaves through Node's
+// unsettled-top-level-await path with no report at all.
+//
+// @ref LLP 0337#budget-report [tests]: the report has to survive a shutdown whose only remaining handle is the budget itself.
+test('a hung close is reported even when nothing but the budget holds the loop open', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-budget-drain-'))
+  try {
+    const observability = pathToFileURL(
+      path.join(import.meta.dirname, '..', '..', 'src', 'core', 'observability', 'index.js')
+    ).href
+    // `127.0.0.1:1` refuses instantly, so the exports never hold the loop:
+    // providers exist (an endpoint is configured) but nothing outlives the
+    // budget except the budget. The same address the sibling budget test in
+    // `containment-refusal-stderr.test.js` uses, for the same reason.
+    const script = [
+      `import { installObservability, readObservabilityEnv } from ${JSON.stringify(observability)}`,
+      'const env = readObservabilityEnv({',
+      `  HYP_HOME: ${JSON.stringify(home)},`,
+      "  OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:1',",
+      '})',
+      'const obs = installObservability({ env })',
+      'const provider = obs.tracer.provider',
+      'if (!provider) { process.exit(3) }',
+      // A close that hangs on nothing at all, the shape LLP 0337#budget-report
+      // exists for and the shape no exporter timeout can settle.
+      'provider.exporters.push({ exportBatch() {}, shutdown() { return new Promise(() => {}) } })',
+      'await obs.shutdown()',
+      // Only reachable if the shutdown actually resolved. An exit code Node
+      // never picks on its own, so it cannot be confused with a drained loop
+      // (0) or an unsettled top-level await (13).
+      'process.exit(21)',
+    ].join('\n')
+    const entry = path.join(home, 'drain.mjs')
+    await fs.writeFile(entry, script)
+    const child = await runNode(entry)
+    assert.equal(child.code, 21,
+      `the shutdown resolved and the caller kept its exit code (code=${child.code}, stderr=${child.stderr})`)
+    assert.doesNotMatch(child.stderr, /unsettled top-level await/,
+      'the process did not leave through the drained-loop path with the shutdown still pending')
+    assert.match(child.stderr, /telemetry_shutdown_timed_out/,
+      'the hung close is reported on the path that actually ships')
+    assert.match(child.stderr, /"telemetry_channel":"traces"/,
+      'and the line names the channel that hung')
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Run one module in a child `node`, and collect how it left.
+ *
+ * @param {string} entry
+ * @returns {Promise<{ code: number|null, stderr: string }>}
+ */
+function runNode(entry) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [entry], { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.on('error', reject)
+    child.on('close', (code) => resolve({ code, stderr }))
+  })
+}

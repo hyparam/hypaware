@@ -155,9 +155,21 @@ function withTimeout(operation, timeoutMs) {
   let timer
   return Promise.race([
     Promise.resolve(operation),
+    // The budget timer stays referenced, and the `finally` below clears it the
+    // instant the close settles, so a shutdown that finishes pays nothing for
+    // it. Unreferenced it can only fire while some other handle holds the loop
+    // open, and the one handle that used to - a pending OTLP fetch - is now
+    // gone first by construction, because the budget is derived to outlast the
+    // exporter's own abort (LLP 0339#budget-derived). On the single case the
+    // budget exists for, a close hanging on something with no timer of its
+    // own, the loop drains, this race never settles, and the process leaves
+    // through Node's unsettled-top-level-await path instead: no report, and
+    // `bin/hypaware.js`'s exit code and stream flush both skipped. That is the
+    // residue `containment-refusal-stderr.test.js` names beside its own hung
+    // close, and holding the timer is what closes it.
+    // @ref LLP 0337#budget-report [implements]: the report can only fire if the budget can hold the loop open long enough to reach it
     new Promise((resolve) => {
       timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs)
-      if (typeof timer.unref === 'function') timer.unref()
     }),
   ]).finally(() => {
     if (timer) clearTimeout(timer)
