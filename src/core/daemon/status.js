@@ -24,6 +24,7 @@ import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { compareStrings } from '../util/compare_strings.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { describeSelfUpdate } from '../update/self_update.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
@@ -2321,7 +2322,7 @@ function inferConfiguredSources(activePlugins) {
       state: 'stopped',
     })
   }
-  return sources.sort((a, b) => a.name.localeCompare(b.name))
+  return sources.sort((a, b) => compareStrings(a.name, b.name))
 }
 
 /**
@@ -2374,7 +2375,7 @@ async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
       stillCoolingDown: nowMs - failure.failedAtMs < QUERY_FLUSH_FAILURE_COOLDOWN_MS,
     })
   }
-  failures.sort((a, b) => (a.failedAt < b.failedAt ? 1 : a.failedAt > b.failedAt ? -1 : a.table.localeCompare(b.table)))
+  failures.sort((a, b) => (a.failedAt < b.failedAt ? 1 : a.failedAt > b.failedAt ? -1 : compareStrings(a.table, b.table)))
   return { total: failures.length, failures }
 }
 

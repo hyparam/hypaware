@@ -18,6 +18,7 @@ import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 import { maintainCache } from '../../../src/core/cache/maintenance.js'
 import { readCursorSync } from '../../../src/core/cache/partition.js'
+import { compareStrings } from '../../../src/core/util/compare_strings.js'
 
 /**
  * @import { ActivePlugin, ColumnSpec } from '../../../hypaware-plugin-kernel-types.js'
@@ -225,7 +226,7 @@ async function readBlobs(destDir) {
     }
   }
   await walk(destDir)
-  return out.sort((a, b) => a.name.localeCompare(b.name))
+  return out.sort((a, b) => compareStrings(a.name, b.name))
 }
 
 /**

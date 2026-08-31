@@ -18,6 +18,7 @@ import { createQueryStorageService } from '../cache/storage.js'
 import { createUsagePolicyResolver } from '../usage-policy/matcher.js'
 import { localOnlyListPath } from '../usage-policy/local_only.js'
 import { isSafeContributionName } from './contribution_names.js'
+import { compareStrings } from '../util/compare_strings.js'
 
 /**
  * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SkillContribution, SkillRegistry, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
@@ -384,7 +385,7 @@ function createInitPresetRegistry() {
       return presets.get(name)
     },
     list() {
-      return Array.from(presets.values()).sort((a, b) => a.name.localeCompare(b.name))
+      return Array.from(presets.values()).sort((a, b) => compareStrings(a.name, b.name))
     },
   }
 }

@@ -17,6 +17,7 @@ import { createCommandRegistry } from '../../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
+import { compareStrings } from '../../../src/core/util/compare_strings.js'
 import { executeQuerySql } from '../../../src/core/query/sql.js'
 import { rowsToColumnSources } from '../../plugins-workspace/format-parquet/src/columns.js'
 
@@ -138,7 +139,7 @@ export async function run({ harness, expect }) {
       const prefix = typeof input.Prefix === 'string' ? input.Prefix : ''
       const contents = Array.from(bucketObjects.entries())
         .filter(([key]) => prefix.length === 0 || key.startsWith(prefix))
-        .sort((a, b) => a[0].localeCompare(b[0]))
+        .sort((a, b) => compareStrings(a[0], b[0]))
         .map(([key, { bytes, lastModified }]) => ({ Key: key, Size: bytes.byteLength, LastModified: lastModified }))
       return { Contents: contents }
     },

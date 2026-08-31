@@ -10,6 +10,7 @@ import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { compareStrings } from '../../src/core/util/compare_strings.js'
 
 // `hyp status` on a centrally-managed host must restore inspectability of
 // the merged config: per-entry provenance + the dropped-local section.
@@ -137,7 +138,7 @@ test('status JSON renders per-row provenance and the config_layers block', async
   ])
   assert.deepEqual(json.config_layers.central_sinks, ['central'])
   assert.equal(json.config_layers.central_query_ignored, true)
-  assert.deepEqual(json.config_layers.local_not_applied.sort((/** @type {any} */ a, /** @type {any} */ b) => a.key.localeCompare(b.key)), [
+  assert.deepEqual(json.config_layers.local_not_applied.sort((/** @type {any} */ a, /** @type {any} */ b) => compareStrings(a.key, b.key)), [
     { section: 'plugins', key: '@hypaware/ai-gateway', reason: 'collides_with_central' },
     { section: 'plugins', key: '@hypaware/format-jsonl', reason: 'invalid_merge', detail: 'capability_ambiguous' },
   ])

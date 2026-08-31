@@ -7,6 +7,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 
+import { compareStrings } from '../../src/core/util/compare_strings.js'
+
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { collect, executeSql } from 'squirreling'
 
@@ -45,7 +47,7 @@ function fakeBlobStore(objects) {
       const wanted = prefix ?? ''
       return {
         async *[Symbol.asyncIterator]() {
-          const entries = [...objects.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+          const entries = [...objects.entries()].sort((a, b) => compareStrings(a[0], b[0]))
           for (const [key, bytes] of entries) {
             if (wanted.length > 0 && !key.startsWith(wanted)) continue
             yield { key, size: bytes.byteLength, lastModified: new Date(0) }

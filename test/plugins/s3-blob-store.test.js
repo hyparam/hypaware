@@ -5,6 +5,8 @@ import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { Readable } from 'node:stream'
 
+import { compareStrings } from '../../src/core/util/compare_strings.js'
+
 import {
   createS3BlobStore,
   createUnconfiguredS3BlobStore,
@@ -63,7 +65,7 @@ function makeFakeS3Client() {
       const prefix = typeof input.Prefix === 'string' ? input.Prefix : ''
       const contents = Array.from(objects.entries())
         .filter(([k]) => prefix.length === 0 || k.startsWith(prefix))
-        .sort((a, b) => a[0].localeCompare(b[0]))
+        .sort((a, b) => compareStrings(a[0], b[0]))
         .map(([key, { bytes, lastModified }]) => ({ Key: key, Size: bytes.byteLength, LastModified: lastModified }))
       return { Contents: contents }
     },

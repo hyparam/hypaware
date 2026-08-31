@@ -4,6 +4,7 @@ import { Buffer } from 'node:buffer'
 
 import { parquetMetadataAsync } from 'hyparquet'
 import { parquetDataSource, unionSources, emptySource } from 'hypaware/core/query'
+import { compareStrings } from 'hypaware/core/util'
 
 /**
  * @import { AsyncBuffer } from 'hyparquet'
@@ -65,7 +66,7 @@ async function discoverPartitions(source, blobStore) {
     partitions.push({ dataset: source.name, partition: {}, tableUrl: entry.key })
   }
   // Stable order so multi-file unions and tests are deterministic.
-  partitions.sort((a, b) => String(a.tableUrl).localeCompare(String(b.tableUrl)))
+  partitions.sort((a, b) => compareStrings(String(a.tableUrl), String(b.tableUrl)))
   return partitions
 }
 

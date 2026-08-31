@@ -29,6 +29,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
 import { colorizeStderr } from './style.js'
+import { compareStrings } from '../util/compare_strings.js'
 import { materializeSinks } from '../sinks/materialize.js'
 
 /**
@@ -896,7 +897,7 @@ function orderedHelpNames(rows, category, preferred) {
   return available.sort((a, b) => {
     const ar = rank.get(a) ?? Number.MAX_SAFE_INTEGER
     const br = rank.get(b) ?? Number.MAX_SAFE_INTEGER
-    return ar - br || a.localeCompare(b)
+    return ar - br || compareStrings(a, b)
   })
 }
 

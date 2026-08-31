@@ -20,6 +20,7 @@ import { createCommandRegistry } from '../../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
+import { compareStrings } from '../../../src/core/util/compare_strings.js'
 import {
   createBlobStoreIO,
   tableUrlForBlobPrefix,
@@ -153,7 +154,7 @@ export async function run({ harness, expect }) {
       const prefix = typeof input.Prefix === 'string' ? input.Prefix : ''
       const contents = Array.from(bucketObjects.entries())
         .filter(([key]) => prefix.length === 0 || key.startsWith(prefix))
-        .sort((a, b) => a[0].localeCompare(b[0]))
+        .sort((a, b) => compareStrings(a[0], b[0]))
         .map(([key, { bytes, lastModified }]) => ({
           Key: key,
           Size: bytes.byteLength,

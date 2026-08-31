@@ -6,6 +6,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 
+import { compareStrings } from 'hypaware/core/util'
+
 /**
  * @import { BlobStore, DeleteObjectInput, GetObjectInput, GetObjectResult, ListObjectResult, ListObjectsInput, PutObjectInput, PutObjectResult } from '../../../../hypaware-plugin-kernel-types.js'
  */
@@ -192,7 +194,7 @@ export function createLocalFsBlobStore({ baseDir }) {
           /** @type {Array<ListObjectResult>} */
           const results = []
           await walk(start)
-          results.sort((a, b) => a.key.localeCompare(b.key))
+          results.sort((a, b) => compareStrings(a.key, b.key))
           for (const r of results) yield r
 
           /**

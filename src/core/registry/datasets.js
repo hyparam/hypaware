@@ -1,5 +1,7 @@
 // @ts-check
 
+import { compareStrings } from '../util/compare_strings.js'
+
 /**
  * @import { DatasetRegistration, DatasetSchema, QueryRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { CachePartitioningDeclaration } from '../../../src/core/cache/types.js'
@@ -94,7 +96,7 @@ export function createQueryRegistry() {
       return datasets.get(name)
     },
     listDatasets() {
-      return Array.from(datasets.values()).sort((a, b) => a.name.localeCompare(b.name))
+      return Array.from(datasets.values()).sort((a, b) => compareStrings(a.name, b.name))
     },
   }
 }
