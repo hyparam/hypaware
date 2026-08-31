@@ -20,12 +20,13 @@ import { groupThousands } from '../util/format_number.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
  * @import { PendingVolume } from '../../../src/core/sinks/types.js'
+ * @import { SourceHistoryReplayPreview } from '../../../hypaware-plugin-kernel-types.js'
  */
 
-const USAGE = 'usage: hyp sync [instance] [--yes] [--dry-run]'
+const USAGE = 'usage: hyp sync [instance] [--history <client>] [--yes] [--dry-run]'
 
 /**
- * `hyp sync [instance] [--yes] [--dry-run]`
+ * `hyp sync [instance] [--history <client>] [--yes] [--dry-run]`
  *
  * Export every configured sink now, rather than on its cron schedule. The
  * user-facing name for the one action the driver performs; it replaced
@@ -54,6 +55,7 @@ export async function runSync(argv, ctx) {
       type: 'object',
       properties: {
         instance: { type: 'string' },
+        history: { type: 'string' },
         yes: { type: 'boolean', default: false },
         'dry-run': { type: 'boolean', default: false },
       },
@@ -69,8 +71,8 @@ export async function runSync(argv, ctx) {
     ctx.stderr.write(`hyp sync: ${parsed.error}\n${USAGE}\n`)
     return 2
   }
-  const { instance, yes, 'dry-run': dryRun } =
-    /** @type {{ instance?: string, yes: boolean, 'dry-run': boolean }} */ (parsed.params)
+  const { instance, history, yes, 'dry-run': dryRun } =
+    /** @type {{ instance?: string, history?: string, yes: boolean, 'dry-run': boolean }} */ (parsed.params)
 
   const allHandles = /** @type {ExtendedSinkRegistry} */ (ctx.sinks).listHandles?.() ?? []
   const handles = instance ? allHandles.filter((h) => h.instanceName === instance) : allHandles
@@ -89,6 +91,19 @@ export async function runSync(argv, ctx) {
   const deadline = await readFirstSyncDeadline({ stateDir })
   const remotes = effectiveRemotes(ctx.config)
   const destinations = handles.map((handle) => describeDestination(handle, remotes))
+
+  if (history) {
+    return runHistorySync({
+      source: history,
+      handles,
+      destinations,
+      stateDir,
+      deadline,
+      yes,
+      dryRun,
+      ctx,
+    })
+  }
 
   // Two refusals, both because the hold is driver-wide (LLP 0101 #hold)
   // while the consent in front of it would not be. They come before the plan
@@ -247,6 +262,158 @@ export async function runSync(argv, ctx) {
     )
   }
   return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
+}
+
+/**
+ * Preview and execute the explicit retained-history mode. It is separate from
+ * the ordinary driver tick: the incremental cursor stays untouched and only
+ * sinks that prove a replay-safe implementation participate.
+ *
+ * @ref LLP 0345#command [implements]: a separately confirmed `hyp sync --history <client>` path
+ * @ref LLP 0345#sink-capability [implements]: use only sinks that expose both preview and execution
+ * @param {{
+ *   source: string,
+ *   handles: ExtendedSinkHandle[],
+ *   destinations: { instance: string, text: string, offMachine: boolean | null }[],
+ *   stateDir: string,
+ *   deadline: number | null,
+ *   yes: boolean,
+ *   dryRun: boolean,
+ *   ctx: CommandRunContext,
+ * }} args
+ * @returns {Promise<number>}
+ */
+async function runHistorySync({ source, handles, destinations, stateDir, deadline, yes, dryRun, ctx }) {
+  let clientEntries
+  try {
+    clientEntries = (await readClientSyncEntries({ stateDir })) ?? []
+  } catch (err) {
+    ctx.stderr.write(`hyp sync --history: cannot verify client policy (${err instanceof Error ? err.message : String(err)})\n`)
+    return 1
+  }
+  if (clientEntries.some((entry) => entry.source === source)) {
+    ctx.stderr.write(
+      `hyp sync --history: '${source}' is still local-only; nothing was sent\n` +
+      `  First run: hyp privacy client ${source} sync\n`
+    )
+    return 1
+  }
+
+  if (deadline !== null && !dryRun) {
+    ctx.stderr.write(
+      `hyp sync --history: the first-sync review window is open until ${formatFirstSyncDeadline(deadline)}.\n` +
+      '  Historical replay cannot bypass or clear that hold. Run `hyp sync` first,\n' +
+      '  then repeat this command.\n'
+    )
+    return 2
+  }
+
+  const capable = handles.filter((handle) => (
+    typeof handle.sink.previewSourceHistory === 'function' &&
+    typeof handle.sink.replaySourceHistory === 'function'
+  ))
+  if (capable.length === 0) {
+    ctx.stderr.write('hyp sync --history: no configured destination supports client-history replay\n')
+    return 1
+  }
+
+  /** @type {Map<string, SourceHistoryReplayPreview>} */
+  const previews = new Map()
+  for (const handle of capable) {
+    try {
+      const preview = await handle.sink.previewSourceHistory?.({ source })
+      if (!preview) throw new Error('history preview became unavailable')
+      previews.set(handle.instanceName, preview)
+    } catch (err) {
+      ctx.stderr.write(
+        `hyp sync --history: could not preview '${handle.instanceName}' (${err instanceof Error ? err.message : String(err)})\n` +
+        '  Nothing was sent.\n'
+      )
+      return 1
+    }
+  }
+
+  const capableNames = new Set(capable.map((handle) => handle.instanceName))
+  const selectedDestinations = destinations.filter((destination) => capableNames.has(destination.instance))
+  const unsupported = destinations.filter((destination) => !capableNames.has(destination.instance))
+  ctx.stdout.write(renderHistoryPlan({ source, destinations: selectedDestinations, previews, unsupported }))
+
+  if (dryRun) {
+    ctx.stdout.write('\n[dry-run] nothing was sent\n')
+    return 0
+  }
+
+  const totalRows = [...previews.values()].reduce((sum, preview) => sum + preview.rows, 0)
+  const outcome = await requireConfirmation({
+    ctx,
+    yes,
+    question: `Replay ${plural(totalRows, 'retained row')} for '${source}' now? [Y/n] `,
+    defaultYes: true,
+  })
+  if (outcome === 'no-tty') {
+    ctx.stderr.write('error: refusing to replay history without confirmation - pass --yes to send non-interactively\n')
+    return 2
+  }
+  if (outcome === 'declined') {
+    ctx.stdout.write('historical sync cancelled\n')
+    return 0
+  }
+
+  let failed = false
+  for (const handle of capable) {
+    let result
+    try {
+      result = await handle.sink.replaySourceHistory?.({ source })
+    } catch (err) {
+      failed = true
+      ctx.stdout.write(
+        `${handle.instanceName}: failed (${err instanceof Error ? err.message : String(err)})\n`
+      )
+      continue
+    }
+    if (!result) {
+      failed = true
+      ctx.stdout.write(`${handle.instanceName}: failed (history replay became unavailable)\n`)
+      continue
+    }
+    ctx.stdout.write(
+      `${handle.instanceName}: ${result.status} (rows=${result.rowsReplayed}, bytes=${result.bytesWritten}${
+        result.error ? `, error=${result.error}` : ''
+      })\n`
+    )
+    if (result.status === 'failed') failed = true
+  }
+  return failed ? 1 : 0
+}
+
+/**
+ * @param {{
+ *   source: string,
+ *   destinations: { instance: string, text: string, offMachine: boolean | null }[],
+ *   previews: Map<string, SourceHistoryReplayPreview>,
+ *   unsupported: { instance: string, text: string }[],
+ * }} args
+ */
+function renderHistoryPlan({ source, destinations, previews, unsupported }) {
+  const width = Math.max(...destinations.map((destination) => destination.instance.length))
+  const lines = [`hyp sync: retained '${source}' history\n`, '\n']
+  for (const destination of destinations) {
+    const preview = /** @type {SourceHistoryReplayPreview} */ (previews.get(destination.instance))
+    const note = destination.offMachine === true
+      ? '  (leaves this machine)'
+      : destination.offMachine === false
+        ? '  (stays on this machine)'
+        : ''
+    lines.push(`  ${destination.instance.padEnd(width)}  ${destination.text}${note}\n`)
+    lines.push(`  ${' '.repeat(width)}  ${plural(preview.rows, 'row')} retained and eligible\n`)
+    if (preview.withheldRows > 0) {
+      lines.push(`  ${' '.repeat(width)}  ${plural(preview.withheldRows, 'row')} withheld by directory policy (not sent)\n`)
+    }
+  }
+  if (unsupported.length > 0) {
+    lines.push(`\n  not replayed (destination does not support history): ${unsupported.map((d) => d.instance).join(' · ')}\n`)
+  }
+  return lines.join('')
 }
 
 /**
