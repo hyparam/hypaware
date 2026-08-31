@@ -45,6 +45,15 @@ the stream reports. Keeping the first rather than the last is deliberate: the
 first is the cause, and the ones after it are usually the same broken
 descriptor saying so again.
 
+One failure never reaches that listener: a directory that cannot be made or a
+file that cannot be opened throws out of `ensureOpen` itself, before there is a
+stream to report anything. Each exporter's `exportBatch` swallows that throw so
+an export never reaches the caller, which left every record lost and the close
+resolving clean over them: the same silence by the one route the listener
+cannot cover. `writeBatch` holds it the same way, so the close says so. It is
+not sticky; the next `ensureOpen` that succeeds opened a descriptor this one
+never had, and clears it.
+
 This does not widen the guard's promise: a component that breaks on its own
 resources is still outside the seams in LLP 0335#never-throws, and an exporter
 we did not write can still end the process that way. What changes is that the
@@ -58,7 +67,7 @@ exactly the one line LLP 0335#close-failures specified, under the same
 per-source, per-index, per-operation bound. The buffered-record loss in
 hyparam/hypaware#1130 item 2 is a diagnosis now instead of a silence.
 
-Two mechanical choices this rests on:
+Three mechanical choices this rests on:
 
 - **Settled on the stream's `'close'` event, not on `end`'s callback.** The
   two carry different halves of the failure: the callback is handed the write
@@ -70,6 +79,23 @@ Two mechanical choices this rests on:
 - **The flush's drain wait rejects on error too.** A stream that fails while
   draining never drains, so a wait on `'drain'` alone would hang the flush
   rather than report it, which is the failure mode #budget-report is about.
+- **The failure is read from `errored` as well as from the listener.**
+  `destroy(err)` sets `errored` and `destroyed` in the same synchronous step
+  and only then queues the `'error'` event, so there is a window of several
+  ticks in which the stream is already destroyed and the listener is still
+  holding nothing. A flush or close landing in that window took the
+  already-destroyed branch and resolved clean, over records that were never
+  written; reading `errored` is what closes it. The held value is taken off
+  the writer by the close that reports it, so a stale failure cannot be
+  reported a second time, nor against the next descriptor.
+
+The residue here, named the way #budget-report names its own: an export that
+arrives while a close is in flight reopens the writer, and nothing closes that
+second descriptor, so its records are lost without a line. Refusing to reopen
+would trade that for a silent drop, which is the trade this decision exists to
+refuse, so it is left as a boundary rather than settled badly. It is strictly
+narrower than what preceded it, where the same export hit an ended stream and
+its unlistened `'error'` ended the process (#writer-owns-its-stream).
 
 What this changes for a caller: `forceFlush` and `shutdown` on a JSONL
 exporter can now reject where they previously always resolved. Nothing on the

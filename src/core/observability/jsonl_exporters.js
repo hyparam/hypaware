@@ -49,6 +49,11 @@ class JsonlWriter {
     // seams cannot cover. Listened, it becomes the failure `flush` and
     // `close` report, and the daemon keeps running without its telemetry.
     stream.on('error', (error) => {
+      // Only while this is still the writer's descriptor. The event can arrive
+      // after the close that already reported the failure, and holding it then
+      // would strand a failure on a writer whose stream is gone, to be reported
+      // again by the next close.
+      if (this.stream !== stream) return
       if (this.streamError === null) this.streamError = error
     })
     this.stream = stream
@@ -59,16 +64,49 @@ class JsonlWriter {
    */
   writeBatch(records) {
     if (!records.length) return
-    this.ensureOpen()
+    // A directory that cannot be made, or a file that cannot be opened, throws
+    // out of `ensureOpen` rather than reporting itself on a stream that never
+    // existed. The exporters below swallow that throw so an export never
+    // reaches the caller, which left every record lost and the close resolving
+    // clean over them: the same silence the 'error' listener above ends, by
+    // the one route that listener cannot cover. Held the same way, so the
+    // close says the records were lost. Not sticky: the next `ensureOpen` that
+    // succeeds clears it, because it opened a descriptor this one never had.
+    try {
+      this.ensureOpen()
+    } catch (error) {
+      if (this.streamError === null) this.streamError = error
+      return
+    }
     const stream = /** @type {fs.WriteStream} */ (this.stream)
     for (const record of records) {
       stream.write(JSON.stringify(record) + '\n')
     }
   }
 
+  /**
+   * The failure the current descriptor is carrying, from both places it can
+   * be recorded.
+   *
+   * The 'error' listener holds what the stream *emitted*, which is several
+   * ticks after the failure: `destroy(err)` sets `errored` and `destroyed`
+   * synchronously and only then queues the event. A flush or close landing
+   * inside that window sees a destroyed stream with nothing held against it,
+   * which is the clean-shutdown-over-lost-records silence this class exists
+   * to end. Reading `errored` too closes the window.
+   *
+   * @param {fs.WriteStream|null} stream
+   * @returns {unknown} the failure, or null
+   */
+  failureOf(stream) {
+    if (this.streamError !== null) return this.streamError
+    return stream?.errored ?? null
+  }
+
   /** @returns {Promise<void>} */
   flush() {
-    if (this.streamError !== null) return Promise.reject(this.streamError)
+    const failure = this.failureOf(this.stream)
+    if (failure !== null) return Promise.reject(failure)
     if (!this.stream) return Promise.resolve()
     return new Promise((resolve, reject) => {
       const stream = /** @type {fs.WriteStream} */ (this.stream)
@@ -107,20 +145,35 @@ class JsonlWriter {
    * `ensureOpen` sees both. 'close' is emitted after either outcome, so one
    * wait covers both.
    *
+   * The failure is read through {@link failureOf}, not off the held value
+   * alone: `destroyed` is set synchronously and the 'error' event arrives
+   * ticks later, so a close in between saw a destroyed stream with nothing
+   * held and resolved clean over records that were never written.
+   *
    * @ref LLP 0337#close-rejects [implements]: a close that lost its records rejects, and the shutdown seam turns that into one line.
    * @returns {Promise<void>}
    */
   close() {
     const stream = this.stream
     this.stream = null
+    const failure = this.failureOf(stream)
+    // Read before it is cleared, and cleared here rather than in `ensureOpen`:
+    // an export arriving while this close is in flight reopens the writer, and
+    // a reset done there would wipe the failure this close still has to report.
+    // The failure belongs to the descriptor being closed, and it has now been
+    // taken off it.
+    this.streamError = null
     // An already-failed or already-destroyed stream emitted its 'close' before
     // this call, so waiting for another one would wait forever.
-    if (!stream || this.streamError !== null || stream.destroyed) {
-      return this.streamError !== null ? Promise.reject(this.streamError) : Promise.resolve()
+    if (!stream || failure !== null || stream.destroyed) {
+      return failure !== null ? Promise.reject(failure) : Promise.resolve()
     }
     return new Promise((resolve, reject) => {
       stream.once('close', () => {
-        if (this.streamError !== null) reject(this.streamError)
+        // Off the stream, not off `this`: a reopened writer's held error would
+        // belong to a different descriptor than the one that just closed.
+        const closeFailure = stream.errored ?? null
+        if (closeFailure !== null) reject(closeFailure)
         else resolve()
       })
       stream.end()
