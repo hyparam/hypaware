@@ -19,8 +19,24 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
+import { migrateLegacyPartitions } from '../../src/core/cache/migrate.js'
 import { tryReadCursorSync } from '../../src/core/cache/partition.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
+
+/**
+ * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
+ */
+
+/**
+ * The narrowest legacy table the migration will carry rows out of.
+ *
+ * @type {ColumnSpec[]}
+ */
+const MIGRATE_COLUMNS = [
+  { name: 'id', type: 'INT32', nullable: false },
+  { name: 'client_name', type: 'STRING', nullable: true },
+]
 
 /**
  * A cursor whose `tableDir` is the given value. `"../out"` fails the
@@ -183,5 +199,72 @@ test('a poison that changes only its JSON type is a changed value', async () => 
     assert.equal(second.length, 1, 'the string is a different rejected value from the array that renders as it')
   } finally {
     await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a refusal that follows a retraction the log channel dropped still warns', async () => {
+  // The delete happens before the emit and regardless of it. An entry kept
+  // alive because the channel threw would throttle the next genuine refusal
+  // against a condition that had already ended, which is silence over a live
+  // poison - the one degradation this series may never have
+  // (LLP 0334#recovery-is-announced). Counted here rather than asserted in
+  // prose: with no provider installed the mirror IS the emit, so a stderr
+  // that throws is the whole retraction failing.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-escape-throw-'))
+  try {
+    const partition = path.join(root, 'source=claude')
+    await fs.mkdir(partition, { recursive: true })
+    await writePoisonedCursor(partition, '../out')
+    assert.equal((await linesFrom(() => { tryReadCursorSync(partition) }, REFUSAL)).length, 1)
+
+    await fs.mkdir(path.join(partition, 'table'), { recursive: true })
+    await writePoisonedCursor(partition, 'table')
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = /** @type {typeof process.stderr.write} */ (() => {
+      throw new Error('EPIPE')
+    })
+    try {
+      assert.notEqual(tryReadCursorSync(partition), null, 'the read survives a channel that throws')
+    } finally {
+      process.stderr.write = realWrite
+    }
+
+    // The same poison, well inside the rewarn window. It is a transition
+    // because the entry went with the retraction that never got out.
+    await writePoisonedCursor(partition, '../out')
+    const after = await linesFrom(() => { assert.equal(tryReadCursorSync(partition), null) }, REFUSAL)
+    assert.equal(after.length, 1, 'losing the retraction line does not cost the operator the next refusal')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a legacy partition the migration retires while poisoned warns again when it comes back', async () => {
+  // The same strand as retention's, at the third site where a whole
+  // partition directory stops existing: `migrateLegacyPartitions` scans
+  // every legacy cursor (arming the report) and then renames the directory
+  // into `.retired/` (LLP 0334#eviction-clears).
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-escape-migrate-'))
+  try {
+    const partition = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'proxy_messages_v4')
+    await fs.mkdir(path.join(partition, 'epoch=0'), { recursive: true })
+    await appendRowsToTable(path.join(partition, 'epoch=0'), MIGRATE_COLUMNS, [
+      { id: 1, client_name: 'claude' },
+    ])
+    await writePoisonedCursor(partition, '../out')
+
+    const migrating = await linesFrom(
+      () => migrateLegacyPartitions({ cacheRoot, force: true }),
+      REFUSAL
+    )
+    assert.equal(migrating.length, 1, 'the migrating scan still says the cursor it read was poisoned')
+    await assert.rejects(() => fs.stat(partition), 'and the migration really retired the partition')
+
+    await fs.mkdir(partition, { recursive: true })
+    await writePoisonedCursor(partition, '../out')
+    const reborn = await linesFrom(() => { assert.equal(tryReadCursorSync(partition), null) }, REFUSAL)
+    assert.equal(reborn.length, 1, 'a poison on a partition this process no longer holds is a transition')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })

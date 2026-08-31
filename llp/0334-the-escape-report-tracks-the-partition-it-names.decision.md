@@ -41,7 +41,14 @@ whole-partition eviction sites (`evictSourceTableByMtime`,
 `evictLegacyPartition`); clearing the entry beside the `rm` is a `Map.delete`
 on a path the code has in hand, on the slow asynchronous eviction path, and
 adds nothing at all to `tryReadCursorSync`. So the entry is cleared there,
-and `clearEscapeReport` is exported for that one caller.
+and `clearEscapeReport` is exported for those callers.
+
+Retention is not the only one. `retirePartition` in
+`src/core/cache/migrate.js` renames a whole legacy partition into
+`.retired/`, and the scan above it read that partition's cursor, so a
+poisoned one is armed and then stranded exactly as retention's was. The rule
+is the site, not the subsystem: wherever a whole partition directory stops
+existing at its path, the entry keyed on that path goes with it.
 
 Silently, deliberately. The eviction is not the condition ending; it is the
 subject of the report ceasing to exist, and retention's own
@@ -105,9 +112,13 @@ only when a warn was armed, and resets. So:
 LLP 0332#transition-plus-rewarn says an entry "whose rejected value differs
 from this one" warns immediately, because a poison that changes shape is a
 new fact. The code compared the rendered string: a non-string `tableDir` is
-reported as `JSON.stringify(tableDir)`, so the number `5` and the string
-`"5"` produced the same comparison key and the second was absorbed into the
-first's window. The window now compares a key qualified by
+reported as `JSON.stringify(tableDir)`, so a value and a string that renders
+identically produced the same comparison key and the second was absorbed
+into the first's window. The pair that can be observed is one where both
+spellings escape: the array `["a/b"]` and the string `'["a/b"]'`. (The
+number `5` and the string `"5"` collide the same way, but `"5"` is a bare
+segment and is contained, so it is never refused and never reaches the
+window at all.) The window now compares a key qualified by
 `typeof tableDir`, while the logged `table_dir` stays the rendered value it
 always was. This is not a new rule; it is the rule 0332 stated, applied to
 the value rather than to its rendering.
@@ -120,12 +131,20 @@ tested in the direction of silence:
 - Eviction: a poisoned partition that a real `createRetentionEnforcer` tick
   evicts, then reappears at the same path with the same poison inside the
   rewarn window, warns again. Against a stranded entry that read is mute.
+  The same assertion runs against a real `migrateLegacyPartitions` retire,
+  so the rule is tested at the site rather than in one subsystem.
 - Recovery: a heal after a refusal writes exactly one `cursor_escape_recovered`
   line, a heal with no refusal before it writes none, and the refusal that
   follows a recovery still warns. The line is counted, not just detected,
   so a clear that fires on every read of a healthy partition fails.
-- Type-qualified key: a `tableDir` of `5` followed by `"5"` inside the
-  window costs two lines, not one.
+- Type-qualified key: a `tableDir` of `["a/b"]` followed by the string
+  `'["a/b"]'` inside the window costs two refusals, not one. That pair, not
+  the `5`/`"5"` one the issue named: `"5"` is a bare segment and is never
+  refused, so only one of those two spellings ever reaches the window.
+- The retraction the channel dropped: a heal whose emit throws is still a
+  clear, so the next refusal in the same window warns. Asserted through a
+  `process.stderr.write` that throws, because with no provider installed the
+  mirror is the whole emit.
 
 ## Consequences {#consequences}
 
@@ -147,7 +166,9 @@ tested in the direction of silence:
   and the structured channel re-delivers per read, is untouched here. It is
   a property of `getLogger`'s two-channel emit rather than of this report,
   and it degrades toward extra lines on a working channel, which is the
-  direction both decisions tolerate.
+  direction both decisions tolerate. It outlives the issue this doc closes,
+  so it is carried as hyparam/hypaware#1129 rather than only as a bullet
+  here.
 
 ## References {#references}
 
