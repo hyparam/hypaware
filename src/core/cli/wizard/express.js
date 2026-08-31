@@ -88,7 +88,16 @@ export async function runWizardExpressGate(opts) {
           // Unenrolled, the sync and new-folder lanes do not run
           // (nothing forwards from a solo machine), so the gloss keeps
           // naming only the menu that does.
+          //
+          // The middle clause can overstate by one on a fully fleet-managed
+          // machine, whose sync lane states its outcome and asks nothing
+          // (LLP 0276 #no-candidates). It stays: whether that lane asks
+          // depends on pick-menu answers this gate has not collected yet,
+          // so the row names the lanes a decline opens - true on every run -
+          // and the lane itself is the earliest surface that can say there
+          // is nothing left to choose, which it does.
           // @ref LLP 0201#decline [implements]: the decline row names every question the decline opens
+          // @ref LLP 0338#gloss [constrained-by]: the gloss names lanes, not the questions this machine turns out to have, because the gate runs before the answers that decide them
           summary: opts.enrolled
             ? 'Choose what to record, what syncs, and how new folders are handled.'
             : 'Choose what to record.',

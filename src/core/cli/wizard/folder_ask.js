@@ -177,12 +177,35 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
     // warning belongs: under the statement it qualifies. The two streams
     // are separate sinks in tests, so only the terminal can see this
     // ordering, which is why a test asserts it through one shared sink.
+    //
+    // Both writes are best-effort, and guarded separately. This is the arm
+    // the step documents as one that warns rather than failing the run, so
+    // a stream that throws must not be the thing that fails it; the cancel
+    // path above already guards its one write for exactly that reason (a
+    // stream can be closed under a run that is shutting down). The guards
+    // are separate because the two halves are separate obligations: a
+    // stdout that throws must not take the warning down with it, and a
+    // warning that cannot be written must not take the run down with it.
+    // Nothing is made conditional here - both writes still happen on every
+    // reachable run, and the guard only covers the case that today ends the
+    // run with the warning unsaid anyway.
     // @ref LLP 0201#narrate [implements]: a narrated question finishes its sentence even when the write behind it fails, before the warning that qualifies it
-    if (inline) opts.stdout.write(`${standingClause(before)}\n`)
-    opts.stderr.write(
-      `warning: could not record the new-folder answer (${detail}); ` +
-      `it stays '${before}' - set it later with 'hyp privacy folders ${mode}'\n`
-    )
+    // @ref LLP 0200#wizard [implements]: the failed-write arm warns and leaves the previous mode standing rather than failing the run, including when the warning itself cannot be written
+    if (inline) {
+      try {
+        opts.stdout.write(`${standingClause(before)}\n`)
+      } catch {
+        // best-effort: stdout might be closed during cleanup
+      }
+    }
+    try {
+      opts.stderr.write(
+        `warning: could not record the new-folder answer (${detail}); ` +
+        `it stays '${before}' - set it later with 'hyp privacy folders ${mode}'\n`
+      )
+    } catch {
+      // best-effort: stderr might be closed during cleanup
+    }
     return await finishSpan({ mode: before, skipped: true }, opts)
   }
 
