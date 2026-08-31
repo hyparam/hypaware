@@ -115,7 +115,18 @@ function wrapSink(sink) {
  * @returns {Promise<void>}
  */
 function settleSink(raw, isDead, markDead) {
-  if (isDead() || raw.destroyed === true) return Promise.resolve()
+  if (isDead()) return Promise.resolve()
+  // A destroyed stream is gone whether or not it ever emitted `error`:
+  // a bare `destroy()` (an embedder tearing its stream down, a socket
+  // whose peer closed cleanly) emits nothing to listen for. `wrapSink`'s
+  // `write` already reads `destroyed` that way, so the settle has to
+  // read it the same way - reporting the surface alive here and dead on
+  // the very next narration is exactly the split verdict the boundary
+  // check exists to close.
+  if (raw.destroyed === true) {
+    markDead()
+    return Promise.resolve()
+  }
   if (typeof raw.on !== 'function') return Promise.resolve()
   return new Promise((resolve) => {
     let done = false

@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { PassThrough } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
 import { guardWizardOutput } from '../../../../src/core/cli/wizard/output_guard.js'
@@ -90,6 +91,24 @@ test('guard: a throwing stderr never marks the consent surface dead', async () =
   assert.equal(await guard.checkpoint(), true)
   assert.equal(guard.stdout.write('on we go\n'), true)
   assert.equal(stdout.text(), 'on we go\n')
+})
+
+test('guard: a stream destroyed without an error event is dead at the next boundary', async () => {
+  const stdout = new PassThrough()
+  stdout.resume()
+  const guard = guardWizardOutput({ stdout, stderr: makeBuf() })
+  assert.equal(guard.stdout.write('a line on a live surface\n'), true)
+
+  // A bare `destroy()` emits `close`, not `error`, so the listener never
+  // fires: only the settle's own read of `destroyed` can tell the
+  // boundary the surface is gone. Reporting it alive here and dead on
+  // the next narration - which `wrapSink.write` does read `destroyed`
+  // for - is the split verdict the boundary check exists to close.
+  stdout.destroy()
+
+  assert.equal(await guard.checkpoint(), false)
+  assert.equal(guard.outputDead(), true)
+  assert.equal(guard.stdout.write('never lands'), false)
 })
 
 test('guard: isTTY and columns delegate to the wrapped stream', () => {
@@ -226,6 +245,37 @@ test('a stdout that dies during the sync narration stops the run before the fold
   assert.equal(folderConfirmAsked, false)
   const stateDir = readObservabilityEnv(opts.env).stateDir
   await assert.rejects(fs.access(folderAskPath(stateDir)))
+  await assert.rejects(fs.access(path.join(home, 'config.json')))
+})
+
+test('a stdout already gone when the run starts stops it before the returning gate opens', async () => {
+  const home = await tmpHome('hyp-guard-gate-')
+  const stderr = makeBuf()
+  let gateAsked = false
+  let statusRan = false
+  // Dead before the wizard's first word: the terminal closed during
+  // plugin discovery or the update check. The gate is the run's first
+  // question, so it takes the boundary like every later lane.
+  const stdout = new PassThrough()
+  stdout.resume()
+  stdout.destroy()
+  const opts = drivenOpts(home, {
+    stdout,
+    stderr,
+    gate: async () => {
+      gateAsked = true
+      return { action: 'first-run', managed: false, report: {} }
+    },
+    runStatus: async () => { statusRan = true; return 0 },
+  })
+
+  const result = await runInitWizard(opts)
+
+  assert.equal(result.exitCode, 130)
+  assert.equal(result.cancelled, true)
+  assert.equal(gateAsked, false)
+  assert.equal(statusRan, false)
+  assert.match(stderr.text(), /output closed - cancelled/)
   await assert.rejects(fs.access(path.join(home, 'config.json')))
 })
 

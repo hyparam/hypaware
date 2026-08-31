@@ -143,11 +143,6 @@ export async function runInitWizard(opts) {
     return null
   }
 
-  if (interactive) {
-    const gateExit = await runGate()
-    if (gateExit) return gateExit
-  }
-
   /**
    * A completed join, remembered across back-navigation: the sign-in is
    * a completed transaction (LLP 0063 D3), so stepping back past the
@@ -253,6 +248,21 @@ export async function runInitWizard(opts) {
       )
     }
     return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
+  }
+
+  // The returning gate is the run's first question, so it takes the
+  // boundary too: a surface that died before the wizard got its first
+  // word in - the terminal closed during plugin discovery or the update
+  // check, a SIGHUP - would otherwise render the gate's menu into
+  // nothing and take its EOF default, `hyp status` report included,
+  // before the `atFork` check below could stop the run. The call sits
+  // here rather than above only because the cancel it may return reads
+  // state declared between the two.
+  // @ref LLP 0341#dead-surface [implements]: no lane opens on a dead surface, the returning gate included
+  if (interactive) {
+    if (!(await guard.checkpoint())) return await cancelDeadOutput()
+    const gateExit = await runGate()
+    if (gateExit) return gateExit
   }
 
   // The question lanes and their back edges (LLP 0191 #back-edges):
