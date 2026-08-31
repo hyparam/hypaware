@@ -125,6 +125,37 @@ const COUNT_RENDERERS = ['src/core/commands/sync.js', 'src/core/query/overview.j
 const HOST_FORMATTING = /toLocale|\bIntl\b/
 
 /**
+ * The index of the `//` that opens a line comment in `line`, or -1.
+ *
+ * Quote-aware, because the plain `indexOf('//')` truncates at the `//` inside a
+ * URL and reads `return 'https://hyparam.dev/rows ' + n.toLocaleString()` as
+ * clean. 218 lines of the shipped tree carry a `//` inside a string literal, so
+ * that is a hole shaped like the tree rather than a curiosity.
+ *
+ * Still not a tokenizer. A line that opens a quote it never closes, which is
+ * what a continuation line of a multi-line template usually is, keeps its whole
+ * self, so it can only over-report, and an over-report fails loud with a file
+ * and a line to look at.
+ *
+ * @param {string} line
+ * @returns {number}
+ */
+function lineCommentAt(line) {
+  let quote = ''
+  for (let i = 0; i < line.length - 1; i += 1) {
+    const c = line[i]
+    if (quote !== '') {
+      if (c === '\\') i += 1
+      else if (c === quote) quote = ''
+      continue
+    }
+    if (c === '"' || c === "'" || c === '`') quote = c
+    else if (c === '/' && line[i + 1] === '/') return i
+  }
+  return -1
+}
+
+/**
  * `source` with its comments blanked, line count preserved so the report can
  * still say `file:line`.
  *
@@ -138,17 +169,25 @@ const HOST_FORMATTING = /toLocale|\bIntl\b/
  * scanned files rather than in this one. So the comments come out instead, and
  * the file stays free to explain why it does not do the thing.
  *
- * Deliberately crude, and wrong in both directions on code it was not built
- * for. It drops coverage when a `//` inside a string truncates the rest of its
- * line (`'https://x' + n.toLocaleString()` reads as clean) and when a line
- * inside a template literal opens with `*`, `//` or `/*` (a markdown bullet in
- * help copy) and is blanked whole. It over-reports when a block comment's
- * continuation lines are not `*`-prefixed, or when a runtime string names the
- * call it forbids. None of the four is closed here: closing them wants a
- * tokenizer, and the JSDoc line above is what the blanking is for. They are the
- * same class as the computed access named on `HOST_FORMATTING` - this is a lint
- * against the edit someone makes, not a proof - except that the over-reporting
- * pair fails loud, with the file and line to look at.
+ * A line that opens a block comment and also closes it on the same line keeps
+ * whatever follows the close. That is not a nicety: an inline `@type` cast,
+ * opened and closed before the value it casts, is this repo's own way of
+ * spelling a type on an expression. 24 shipped modules already write a line
+ * that way and `src/core/commands/sync.js:73` is one of them, so blanking such
+ * a line whole hid real code in one of the two files the scan above reads.
+ *
+ * What is left is still crude, and still wrong in both directions on code it
+ * was not built for. It drops coverage inside a multi-line template literal,
+ * where a line opening with `*` or `//` is blanked whole and a `//` later in
+ * the line still truncates, because the backtick that would have said "string"
+ * was on an earlier line. It over-reports when a block comment's continuation
+ * lines are not `*`-prefixed, when a runtime string names the call it forbids,
+ * and when a line leaves a quote open. Neither direction is closed here:
+ * closing them wants a tokenizer, and the `*`-blanking is what saves the JSDoc
+ * line above. They are the same class as the computed access named on
+ * `HOST_FORMATTING` - this is a lint against the edit someone makes, not a
+ * proof - except that the over-reporting three fail loud, with the file and
+ * line to look at.
  *
  * @param {string} source
  * @returns {string[]}
@@ -156,14 +195,27 @@ const HOST_FORMATTING = /toLocale|\bIntl\b/
 function codeLines(source) {
   return source.split('\n').map((line) => {
     const trimmed = line.trim()
-    if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) return ''
-    const comment = line.indexOf('//')
-    return comment === -1 ? line : line.slice(0, comment)
+    if (trimmed.startsWith('//') || trimmed.startsWith('*')) return ''
+    let code = line
+    if (trimmed.startsWith('/*')) {
+      const close = line.indexOf('*/')
+      if (close === -1) return ''
+      code = ' '.repeat(close + 2) + line.slice(close + 2)
+    }
+    const comment = lineCommentAt(code)
+    return comment === -1 ? code : code.slice(0, comment)
   })
 }
 
 test('the surfaces that render counts ask the host nothing', async () => {
   for (const rel of COUNT_RENDERERS) {
+    // The allowlist below binds here too. Without this skip, this scan and the
+    // `COUNT_RENDERERS` rule at the bottom of the file hand out contradictory
+    // remedies the day an allowlisted module wants the grouping: register it
+    // and this rule reds on the very host call it is exempted for, leave it
+    // unregistered and that rule reds, and there is no third state. That is the
+    // red-lock the delegation pin was already fixed for, in the other rule.
+    if (Object.hasOwn(HOST_FORMATTING_ALLOWED, rel)) continue
     const source = await fs.readFile(path.join(REPO_ROOT, rel), 'utf8')
     const offenders = codeLines(source)
       .map((line, i) => ({ line, at: `${rel}:${i + 1}` }))
@@ -193,6 +245,17 @@ test('the gate reads code and not the comments about it', () => {
   assert.deepEqual(flagged(' * Thousands separators without `toLocaleString`.'), [])
   assert.deepEqual(flagged('// Intl is not consulted here.'), [])
 
+  // The repo's own cast idiom is code, not a comment, and a URL is a string
+  // rather than the start of one. Both used to be blanked whole.
+  const trimmedFlags = (/** @type {string} */ source) => flagged(source).map((line) => line.trim())
+  assert.deepEqual(trimmedFlags('  /** @type {number} */ (n).toLocaleString()'), [
+    '(n).toLocaleString()',
+  ])
+  assert.deepEqual(trimmedFlags("  return 'https://hyparam.dev/rows ' + n.toLocaleString()"), [
+    "return 'https://hyparam.dev/rows ' + n.toLocaleString()",
+  ])
+  assert.deepEqual(flagged('  /** @returns {string} the toLocaleString spelling */'), [])
+
   // Blanking keeps the line numbering, so a report still points at the line.
   assert.equal(codeLines('// a\n// b\nreturn n.toLocaleString()').length, 3)
 })
@@ -201,7 +264,14 @@ test('the gate reads code and not the comments about it', () => {
  * The body of `formatCount` in `source`, from its `function` line to the first
  * line that is a bare `}`, or `null` if the module declares no such function.
  * Both spellings are top-level declarations closed at column zero, so nothing
- * subtler is needed to find where one ends.
+ * subtler is needed to find where one ends when one is found.
+ *
+ * `null` also when the declaration is there but this crude delimiter cannot
+ * bound it. `function formatCount(n) { return groupThousands(n) }` is valid,
+ * correct, and one line, the repo runs no formatter that would expand it, and
+ * reddening on it with "expected formatCount to close at column zero" is
+ * another block on correct code. Either way the module falls through to the
+ * per-module check below, which every registered module gets.
  *
  * `null` rather than a failure, because `COUNT_RENDERERS` is no longer a
  * hand-kept pair: the rule at the bottom of this file derives it from the tree
@@ -222,9 +292,17 @@ function formatCountBody(source) {
   const start = lines.findIndex((line) => /^(export )?function formatCount\(/.test(line))
   if (start === -1) return null
   const end = lines.findIndex((line, i) => i > start && line === '}')
-  assert.notEqual(end, -1, 'expected formatCount to close at column zero')
+  if (end === -1) return null
   return lines.slice(start, end + 1).join('\n')
 }
+
+/**
+ * A module that hands the grouping on rather than rendering with it. It has no
+ * renderer to pin, so the per-module fallback below lets it through: the trap
+ * to avoid is a registration the gate's own message asks for and then cannot
+ * accept.
+ */
+const GROUPING_REEXPORT = /\bexport\s*(?:\*|\{[^}]*\})\s*from\s*['"][^'"]*format_number\.js['"]/
 
 test('the surfaces that render counts still route the digits through the one grouping', async () => {
   // The scan above is a two-file grep, so it only sees a host call that stays
@@ -245,24 +323,41 @@ test('the surfaces that render counts still route the digits through the one gro
   // locale-free by the exact strings at the top of this file, and the two
   // callers are proven to be the ones asking for it. A third module cannot get
   // between them without reddening here, on every machine.
-  let pinned = 0
   for (const rel of COUNT_RENDERERS) {
     const source = await fs.readFile(path.join(REPO_ROOT, rel), 'utf8')
     const body = formatCountBody(source)
-    if (body === null) continue
-    pinned += 1
+    if (body !== null) {
+      assert.match(
+        body,
+        /\bgroupThousands\(/,
+        `formatCount in ${rel} no longer renders its digits with groupThousands; ` +
+          'whatever replaced it is unpinned, and a formatter that reads the host ' +
+          'is invisible to the scan above once it lives in another module'
+      )
+      continue
+    }
+    // Every registered module is covered, not only the ones that spell their
+    // renderer `formatCount`. A global "something was pinned" counter cannot do
+    // that: it passes while one registered module silently drops out of the
+    // rule, and it reds on the day both renderers are correctly renamed at
+    // once, which is a block on correct code of exactly the kind the skip above
+    // was written to remove. So the weaker statement is made per module
+    // instead. It is weaker on purpose - it says the grouping is called here,
+    // not that the renderer is what calls it - and the strong statement is
+    // still made wherever the delimiter can find a body.
+    //
+    // A module that only re-exports the grouping declares no renderer and calls
+    // nothing, so it is the one registered shape with nothing to pin.
+    const code = codeLines(source).join('\n')
+    if (GROUPING_REEXPORT.test(code)) continue
     assert.match(
-      body,
+      code,
       /\bgroupThousands\(/,
-      `formatCount in ${rel} no longer renders its digits with groupThousands; ` +
-        'whatever replaced it is unpinned, and a formatter that reads the host ' +
-        'is invisible to the scan above once it lives in another module'
+      `${rel} is registered as a count surface and imports the grouping without ` +
+        'ever calling it, so whatever renders its digits is unpinned; render them ' +
+        'through groupThousands, or drop the import and the COUNT_RENDERERS entry'
     )
   }
-  // The skip above is per module, so a rule that pinned nothing at all would
-  // still pass. Both registered surfaces spell their renderer `formatCount`
-  // today, and the day neither does is the day this pin has stopped being a pin.
-  assert.ok(pinned > 0, 'no registered count surface declares a formatCount, so nothing was pinned')
 })
 
 // The two rules above are a closed pair only for the two modules they name.
@@ -283,9 +378,9 @@ test('the surfaces that render counts still route the digits through the one gro
 // reads the same on every machine.
 
 /**
- * Every tracked module the project ships, repo-relative, with its comments
- * already blanked by `codeLines`. Read once and reused, since both rules below
- * walk the same few hundred files.
+ * Every tracked JavaScript module outside `test/`, repo-relative, with its
+ * comments already blanked by `codeLines`. Read once and reused, since both
+ * rules below walk the same few hundred files.
  *
  * All three ES suffixes, not just `.js`: `scripts/` already holds an `.mjs`,
  * and a scan that named one suffix would let the next count surface out through
@@ -303,9 +398,15 @@ test('the surfaces that render counts still route the digits through the one gro
  * to be free to name the thing it forbids, and here the needle sits in code
  * (the regex, and the cases that pin it) where blanking cannot reach it.
  * Everything else is in scope, not just `src/`: the bundled plugins, `bin/`,
- * the smoke flows, `scripts/`. A count rendered by a plugin command reads the
- * machine exactly as hard as one rendered by `hyp sync`, and scoping this to
- * core would have exempted most of the tree a new command can land in.
+ * the smoke flows, `scripts/`, and also `x/` and `benchmarks/`, which the
+ * published `files` list does not carry. Wider than what ships, deliberately.
+ * A count rendered by a plugin command reads the machine exactly as hard as one
+ * rendered by `hyp sync`, scoping this to core would have exempted most of the
+ * tree a new command can land in, and the alternative to "everything but
+ * `test/`" is a second list of directories to keep in step with the first. The
+ * price is that a throwaway repro under `x/` is held to the same rule as a
+ * command, which is a sentence in a scratch file rather than a block on
+ * anything a user sees.
  *
  * @type {{ rel: string, lines: string[] }[] | null}
  */
@@ -320,6 +421,19 @@ async function shippedModules() {
   // A pathspec that stopped matching would leave both rules passing over an
   // empty tree and say nothing, which is the failure mode a lint cannot afford.
   assert.ok(paths.length > 100, `expected the shipped tree, got ${paths.length} modules`)
+  // That count cannot see a *narrowed* extension set: drop `.mjs` and the 479
+  // `.js` modules still clear the floor, which is how the eight `.mjs` files
+  // went unscanned until #1140. So the suffixes are held to the tree as well,
+  // and the next count surface cannot leave through a rename of the file.
+  const covered = new Set(paths)
+  const uncovered = trackedFiles(REPO_ROOT).filter(
+    (rel) => !rel.startsWith('test/') && /\.[cm]?js$/.test(rel) && !covered.has(rel)
+  )
+  assert.deepEqual(
+    uncovered,
+    [],
+    'these JavaScript modules are outside the scan; widen the extension set it lists by'
+  )
   shippedCache = await Promise.all(
     paths.map(async (rel) => ({
       rel,
@@ -372,10 +486,18 @@ test('the only shipped module that asks the host how to format is the one that m
   // The other half of equality. An exemption that no longer excuses a call is
   // a hole nobody is holding open on purpose, so the diff that removes the
   // call has to remove the line.
-  const stale = Object.keys(HOST_FORMATTING_ALLOWED).filter(
-    (allowed) =>
-      !modules.some(({ rel, lines }) => rel === allowed && lines.some((line) => HOST_FORMATTING.test(line)))
-  )
+  const stale = Object.keys(HOST_FORMATTING_ALLOWED).filter((allowed) => {
+    const module = modules.find(({ rel }) => rel === allowed)
+    // Absent is not the same as no longer formatting. `trackedFiles` drops a
+    // path the index names but the working tree does not have, which is the
+    // ordinary mid-rename or mid-rebase state, so asking whether any *listed*
+    // module still matches reports a merely-moved file as a stale exemption and
+    // tells the reader to delete a live one. Say nothing until it is readable
+    // again: that is the same transient the helper was adopted for, and the
+    // helper turns it from a loud ENOENT into quiet bad advice unless the
+    // caller asks the question this way.
+    return module !== undefined && !module.lines.some((line) => HOST_FORMATTING.test(line))
+  })
   assert.deepEqual(
     stale,
     [],
