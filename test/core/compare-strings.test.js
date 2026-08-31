@@ -126,11 +126,33 @@ function commandNames() {
 }
 
 /**
- * Every corpus a migrated comparator actually sorts, named by the site.
+ * The name corpora this repo can harvest, bucketed the way the comparators
+ * sort.
  *
  * `llp/` paths stand for `scripts/llp-numbers.js`, which sorts the files
- * claiming one number. Blob keys are deliberately absent and the rule below
- * says why.
+ * claiming one number. Blob keys are deliberately absent and the last rule in
+ * this file says why.
+ *
+ * Not a one-to-one map onto the migrated sites, in either direction, and
+ * saying so is what keeps the failure message below honest.
+ *
+ * Wider than the sites in one direction: `sources`, `datasets`, `commands`,
+ * `init_presets` and the `llp/` paths are each sorted by a migrated
+ * comparator, but nothing sorts `config_sections`, `picker`, `skills` or
+ * `agents` today (the picker has its own rank order in
+ * `src/core/cli/walkthrough.js`, and the skill and agent registries do not
+ * sort at all). They are kept because a registry that starts sorting its
+ * bucket is a two-line change nobody would come here for, and because the
+ * remedy the message offers - rename, or accept the reorder on purpose - is
+ * still available on a bucket nothing prints in order.
+ *
+ * Narrower in the other: three migrated sites sort names no manifest declares,
+ * so no harvest here can cover them. `createSinkRegistry().list()`
+ * (`src/core/registry/sinks.js`) sorts the `instanceName`s a user writes in
+ * their own config, and the backfill and verb registries sort names their
+ * plugins register in code. The `sinks` bucket below harvests contribution
+ * names (`forward`, `local-fs`, `s3`), which is a different list from the
+ * one that registry sorts; it is not a stand-in for it.
  *
  * @returns {Map<string, string[]>}
  */
@@ -172,7 +194,14 @@ test('moving these lists off the host collation did not reorder any of them', ()
   // collation there to compare against, `localeCompare` is already this
   // comparator, and the gate that actually stops a regression is the source
   // scan in `format-number.test.js`, which reds on every build.
-  if (typeof Intl?.Collator !== 'function') {
+  //
+  // Asked as `typeof Intl === 'undefined'` first, and repeated in that shape
+  // at the two guards below. `typeof` only swallows a ReferenceError for a
+  // bare identifier: `typeof Intl?.Collator` is a member expression, so it
+  // still evaluates `Intl` and throws where the global is absent, which is
+  // the `--without-intl` build these guards exist for. The short spelling
+  // reads as a skip and behaves as a crash on the one runtime it is about.
+  if (typeof Intl === 'undefined' || typeof Intl.Collator !== 'function') {
     assert.ok(true, 'no ICU on this runtime, so there is no host collation to differ from')
     return
   }
@@ -182,10 +211,11 @@ test('moving these lists off the host collation did not reorder any of them', ()
       [...corpus].sort(compareStrings),
       [...corpus].sort(reference),
       `the ${name} list sorts differently under compareStrings than it did under ` +
-        'the host collation, so this listing is about to print in a new order. ' +
-        'Either the new name mixes `_` with `-`, `.` or `/` against a sibling, ' +
-        'or it carries an uppercase letter; rename it, or accept the reorder ' +
-        'here on purpose'
+        'the host collation, so any listing ordered by this bucket is about to ' +
+        'print in a new order (see the note on sortedCorpora for which buckets ' +
+        'a comparator actually sorts today). Either the new name mixes `_` with ' +
+        '`-`, `.` or `/` against a sibling, or it carries an uppercase letter; ' +
+        'rename it, or accept the reorder here on purpose'
     )
   }
 })
@@ -214,7 +244,7 @@ test('the collation these lists came off really does move with the machine', () 
   // ICU canonicalises `lt-LT` to `lt` (LT is Lithuanian's likely region), so
   // a guard comparing against the requested tag returns early on every
   // full-ICU box and the two assertions below never run.
-  if (typeof Intl?.Collator !== 'function') return
+  if (typeof Intl === 'undefined' || typeof Intl.Collator !== 'function') return
   const collator = new Intl.Collator('lt-LT')
   const resolved = collator.resolvedOptions().locale
   if (resolved !== 'lt' && !resolved.startsWith('lt-')) return
@@ -239,7 +269,7 @@ test('blob keys are the one migrated corpus whose order does change, and it chan
   // `ds/A.parquet` and `ds/a.parquet` listed them in an order no bucket would.
   // The fixtures got closer to the service they stand in for.
   assert.ok(compareStrings('CLAUDE.md', 'bin/hypaware.js') < 0)
-  if (typeof Intl?.Collator !== 'function') return
+  if (typeof Intl === 'undefined' || typeof Intl.Collator !== 'function') return
   const reference = new Intl.Collator('en-US').compare
   assert.ok(reference('CLAUDE.md', 'bin/hypaware.js') > 0)
 })

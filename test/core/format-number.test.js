@@ -287,7 +287,13 @@ test('the gate reads code and not the comments about it', () => {
   // nothing, which is a maintainer sent to fix correct code (#1142 item 2).
   assert.deepEqual(flagged('  const autoLocaleDetect = opts.autoLocaleDetect === true'), [])
   assert.deepEqual(flagged('  return autoLocaleDetect'), [])
-  assert.deepEqual(flagged('  const nonLocaleCompare = compareStrings'), [])
+  // Case-correct, and it has to be: the needle carries no `i` flag, so a
+  // camelCased `nonLocaleCompare` spells `LocaleCompare` and cannot match with
+  // the boundary or without it - a pin that would stay green on a needle that
+  // had lost its boundaries, which is the one thing a pin may not do. These two
+  // spell the name the way the needle does, and red without the boundaries.
+  assert.deepEqual(flagged('  const xlocaleCompare = compareStrings'), [])
+  assert.deepEqual(flagged('  const localeCompareStrings = compareStrings'), [])
   // The boundary frees identifier substrings and nothing else: every real call
   // has a non-word character in front of it, including the split-string one.
   assert.deepEqual(flagged("  return n['toLocale' + 'String']()"), [
