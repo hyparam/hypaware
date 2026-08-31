@@ -376,8 +376,8 @@ export interface InitFlags {
   yes: boolean
   noDaemon: boolean
   dryRun: boolean
-  clients: ('claude' | 'codex')[]
-  sources: ('claude' | 'codex' | 'raw-anthropic' | 'raw-openai' | 'otel')[]
+  clients: ('claude' | 'codex' | 'opencode')[]
+  sources: PickerSource[]
   exportChoice: ('keep-local' | 'local-parquet' | 'configure-later') | undefined
   retentionDays: number
   fromFile?: string

@@ -545,7 +545,7 @@ export function backfillConsentTitle(providers, retentionDays) {
  *
  * @type {string[]}
  */
-const PICKER_DISPLAY_ORDER = ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']
+const PICKER_DISPLAY_ORDER = ['claude', 'codex', 'opencode', 'raw-anthropic', 'raw-openai', 'otel']
 
 /**
  * Phase 5 export options.

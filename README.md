@@ -55,6 +55,7 @@ On a TTY this launches the interactive walkthrough:
 1. Pick the **sources** to capture. Any subset of:
    - Claude Code conversations (`claude`)
    - Codex conversations, CLI and Desktop (`codex`)
+   - OpenCode conversations, CLI and Desktop (`opencode`)
    - OTEL logs / traces / metrics (`otel`)
 
    The raw proxy sources (`raw-anthropic`, `raw-openai`) are not offered in
@@ -100,7 +101,7 @@ Other init flags:
 | `--yes` / `-y`             | Accept defaults; do not prompt                          |
 | `--no-daemon`              | Skip daemon install and restart                         |
 | `--dry-run`                | Render the config + planned actions, write nothing      |
-| `--client claude\|codex`   | Attach a client (repeatable)                            |
+| `--client claude\|codex\|opencode` | Attach a client (repeatable)                   |
 | `--source <id>`            | Add a capture source (repeatable)                       |
 | `--export <choice>`        | `keep-local`, `local-parquet`, or `configure-later`     |
 | `--retention-days <N>`     | Override the default 90-day retention window            |
@@ -280,7 +281,7 @@ on your behalf.
 Attach a single client (idempotent: running twice is a no-op):
 
 ```sh
-hyp client attach <client>             # claude, codex, openclaw, ...
+hyp client attach <client>             # claude, codex, opencode, openclaw, ...
 # Equivalent flag form:
 hyp client attach --client <client>
 # Pre-rollover spelling, still accepted:
@@ -547,11 +548,11 @@ run directly. The common Phase 8 conditions:
 |---------------------------------------|------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
 | `config_missing`                      | no `~/.hyp/hypaware-config.json` was found                                         | `hyp setup` or `hyp setup --from-file <config.json>`                       |
 | `config_invalid`                      | the loaded config failed schema / cross-plugin validation                          | `hyp setup --from-file <config.json>`                                     |
-| `client_without_gateway`              | a client plugin (Claude / Codex) is enabled but `@hypaware/ai-gateway` is not      | re-run `hyp setup`, then `hyp client attach --client <name>`                     |
+| `client_without_gateway`              | a gateway-backed client plugin (Claude / Codex / OpenClaw) is enabled but `@hypaware/ai-gateway` is not | re-run `hyp setup`, then `hyp client attach --client <name>`                     |
 | `gateway_missing_anthropic_upstream`  | a gateway-routed Anthropic client (OpenClaw) is enabled but no Anthropic upstream is registered  | re-run `hyp setup` and pick the Anthropic upstream                        |
 | `gateway_missing_openai_upstream`     | `@hypaware/codex` enabled but no OpenAI upstream is registered                     | re-run `hyp setup` and pick the OpenAI upstream                           |
 | `sink_missing_encoder`                | a local-fs sink is configured but no encoder plugin is enabled                     | re-run `hyp setup` and pick "local Parquet export"                        |
-| `client_attach_missing`               | a client plugin is enabled but its settings file shows no HypAware marker          | `hyp client attach --client claude` or `hyp client attach --client codex`              |
+| `client_attach_missing`               | a client plugin is enabled but its settings file shows no HypAware marker          | the printed repair names the client, e.g. `hyp client attach opencode`     |
 | `daemon_binary_missing`               | the daemon installer references a binary that no longer exists on disk             | `hyp daemon install`                                                     |
 | `daemon_loaded_no_pid`                | the daemon service file is installed but launchd / systemd is not loading it       | `hyp daemon restart`                                                     |
 | `recent_errors`                       | the local telemetry directory has recent error log entries                         | inspect `~/.hyp/hypaware/dev-telemetry`, then `hyp daemon restart`       |
@@ -560,7 +561,7 @@ Useful follow-on commands when a diagnostic fires:
 
 - `hyp daemon restart`: bounce the persistent daemon
 - `hyp daemon install`: re-install the launchd / systemd unit
-- `hyp client attach --client claude` / `hyp client attach --client codex`: wire a
+- `hyp client attach claude` (or `codex`, `opencode`, `openclaw`): wire a
   selected client into HypAware capture
 - `hyp setup --from-file <path>`: rebuild the config from a known-good
   file without re-running the interactive picker
