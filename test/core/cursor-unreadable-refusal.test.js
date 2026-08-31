@@ -32,6 +32,10 @@ const REWARN_MS = 10 * 60 * 1000
 const REFUSAL = 'cursor_unreadable'
 const RECOVERY = 'cursor_unreadable_recovered'
 const ESCAPE_REFUSAL = 'cursor_table_dir_escapes_partition'
+const ESCAPE_RECOVERY = 'cursor_escape_recovered'
+// Both refusals and both retractions carry it, so one capture sees every
+// line a single read emitted, which is what the handover below needs.
+const CURSOR_READ = 'cache.cursor_read'
 
 /**
  * Capture what `fn` writes to the real `process.stderr`, where the mirror
@@ -213,8 +217,25 @@ test('an escaping cursor that degrades to garbage leaves a refusal standing', as
     await writeRawCursor(partition, '{ not json')
     const degraded = await linesFrom(() => {
       assert.equal(tryReadCursorSync(partition), null, 'still skipped, for a different reason')
-    }, REFUSAL)
-    assert.equal(degraded.length, 1, 'the read that retracts the escape refusal arms the one that now stands')
+    }, CURSOR_READ)
+    // Both halves of the handover, from the one read that performs it. The
+    // arming alone is also counted by the tests above; only the pairing
+    // pins that the retraction does not go out on its own.
+    assert.equal(degraded.filter((line) => line.includes(ESCAPE_RECOVERY)).length, 1,
+      'the escape refusal the bytes no longer prove is retracted')
+    assert.equal(degraded.filter((line) => line.includes(REFUSAL)).length, 1,
+      'and the same read arms the refusal that now stands')
+
+    // The escape entry went with its retraction rather than staying armed,
+    // so the same escaping value coming back warns as the transition it is
+    // instead of waiting out a window opened before the bytes stopped
+    // proving it.
+    await writeRawCursor(
+      partition,
+      JSON.stringify({ epoch: 1, rowCount: 3, compaction: null, layout: 'source-table', tableDir: '../out' })
+    )
+    assert.equal((await linesFrom(() => { tryReadCursorSync(partition) }, ESCAPE_REFUSAL)).length, 1,
+      'an escape refusal that comes back after a retraction is a transition, not a repeat')
   } finally {
     await fs.rm(path.dirname(partition), { recursive: true, force: true })
   }
