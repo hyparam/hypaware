@@ -34,10 +34,12 @@ doing at each one:
 1. **Sign in.** A browser window opens for sign-in with your work email.
    This completes enrollment: your organization is identified from your
    email address, so there are no codes or keys to enter.
-2. **Select what to record.** A checklist of AI tools. Tools your team
-   manages are already selected and locked; tools detected on your
-   machine are pre-selected as well. A later step chooses which of your
-   own additions sync to the server and which stay on this machine.
+2. **Set up recording.** One question with two answers. **Record and sync
+   everything** takes the default answer to every remaining question: the
+   setup names the tools it is about to configure, then states what it will
+   record, what will sync to your team, and how new folders are handled,
+   and continues without stopping again. **Customize** asks you those three
+   questions instead, one screen at a time (see below).
 3. **Complete any additional setup.** A tool whose adapter needs one more
    step asks for it here, and you may defer any of them; the remaining setup
    continues. No tool shipped today asks for one, so on a stock install this
@@ -46,7 +48,34 @@ doing at each one:
    system-level file, so it is opt-in only, outside the wizard, via
    `hyp client claude-desktop install`.
 
+### If you choose Customize
+
+Three screens, in order, each with the same answer already selected that
+**Record and sync everything** would have taken. A bare enter accepts what
+is on the screen, so inspecting everything and changing nothing is one
+keypress per screen.
+
+1. **Choose what to collect.** A checklist of AI tools. Tools your team
+   manages are already selected and locked; tools detected on your machine
+   are pre-selected as well.
+2. **Choose what syncs.** Which of your own additions sync to the server
+   and which stay on this machine. Team-managed tools always sync and are
+   shown read-only.
+3. **Choose how new folders are handled.** Whether recording in a project
+   you have not worked in before syncs without asking, or asks you the
+   first time. This is a standing preference; `hyp privacy folders`
+   changes it later.
+
 <img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed tools locked on as managed by your fleet and a detected tool pre-checked.">
+
+<!--
+  Screenshots need re-shooting on a real terminal (see issue #1139).
+  There is no image of the "Set up recording" question, which is now the
+  screen most people see after signing in, and wizard-pick.png predates
+  the step being renumbered, so its position line may not match what the
+  checklist shows today. The prose above was verified against the code;
+  the images were not.
+-->
 
 The setup then installs the components, imports your recent AI history, and
 reports when the first upload will occur.
