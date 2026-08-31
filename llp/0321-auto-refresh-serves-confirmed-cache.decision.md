@@ -6,7 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-08-28
 **Related:** LLP 0013, LLP 0015, LLP 0311
-**Extended-by:** LLP 0322 (#stamp-the-failure: the automatic degrade is paced by a failure stamp and the retry stops rotating a new spool file each time; #degrade-reaches-the-signals carries the degrade into the span status code and the `queryRunsTotal` dimension)
+**Extended-by:** LLP 0322 (#stamp-the-failure: the automatic degrade is paced by a failure stamp and the retry stops rotating a new spool file each time; #degrade-reaches-the-signals carries the degrade into the span status code and the `queryRunsTotal` dimension); LLP 0330 (#query-quotes-the-reason: the one warning settled here gains a second stderr line quoting why the last attempt failed, on both the live and the cooled branch; `AUTO_REFRESH_FAILURE_MESSAGE` and its per-query deduplication are unchanged)
 
 > A query using automatic refresh still reads the last confirmed cache when
 > moving waiting spool rows into that cache fails. It gives one clear warning

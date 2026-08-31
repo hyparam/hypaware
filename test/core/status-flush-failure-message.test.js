@@ -9,13 +9,15 @@
 // stamp must never cross: it is a pacing record, so it may say why a retry is
 // being held off and may not be read as a write that happened.
 //
-// Be honest about which is which. Tests 1, 4, 5, 6 and 7 fail against the
-// pre-change source, so they pin the new plumbing. Tests 2 and 3 pass either
-// way by design: they are guards on behaviour #1077 already shipped (an unreadable
-// message still paces the retry; a cooled query never claims a write), held
-// here because this is the change that gives someone a reason to reach for
-// that state, and a guard that only starts failing later has done its job.
+// Be honest about which is which. Against the pre-#1086 source, every test
+// but the two #1077 invariant guards fails (an unreadable message still paces
+// the retry; a cooled query never claims a write - though both now also carry
+// LLP 0330 assertions that fail against #1086 as merged). Against #1086 as
+// merged, the LLP 0330 additions fail: the diagnostic assertions, the
+// uncapped `--json` and the pointer on the overflow line, and every
+// reason-line assertion on the query path.
 // @ref LLP 0322#what-the-stamp-is-not [tests]:
+// @ref LLP 0330#decision [tests]:
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -138,6 +140,30 @@ test('a stamp whose message is missing or unreadable still paces the retry, with
       assert.equal(typeof info.flushFailedAtMs, 'number', 'the pacing half never depends on the message')
       assert.equal(info.flushFailureMessage ?? null, null)
     }
+
+    // And the query warning stands alone: a stamp with nothing readable to
+    // quote appends no reason line, exactly the pre-reason shape.
+    // @ref LLP 0330#query-quotes-the-reason [tests]: no readable reason, no reason line
+    /** @type {string[]} */
+    const messages = []
+    const settled = await settlePendingCacheForQuery({
+      partitions: [{ tablePath }],
+      storage: /** @type {any} */ ({
+        cacheRoot,
+        /** @param {string} p */
+        pendingInfo: (p) => spool.pendingInfo(p),
+        /**
+         * @param {string} p
+         * @param {{ reason?: string, force?: boolean }} [o]
+         */
+        flushTable: (p, o) => spool.flushTable(p, o),
+      }),
+      refresh: 'auto',
+      messages,
+    })
+    assert.equal(settled.degraded, true)
+    assert.equal(messages.some((m) => m.startsWith('cache: last refresh attempt failed: ')), false)
+    assert.equal(messages.length > 0, true, 'the LLP 0321 warning still stands')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
@@ -182,6 +208,76 @@ test('the cooling-down query still says only that the cache may be stale, never 
     // one: the freshness line quotes `lastFlushAtMs`, which no failure moves.
     // @ref LLP 0322#what-the-stamp-is-not [tests]:
     assert.equal(cooled.some((m) => m.includes('last write to query cache')), false)
+
+    // Both branches quote why, in the same words, so the warning does not
+    // flicker with the cooldown window: the live branch from the error in
+    // hand, the cooled branch from the stamped message - the field that had
+    // zero production consumers while the user it was recorded for was told
+    // "the cache may be stale" with no way to learn the reason.
+    // @ref LLP 0330#query-quotes-the-reason [tests]: live and cooled branches append the same bounded reason line
+    const reasonLine = `cache: last refresh attempt failed: ${PARTITION_ERROR}`
+    assert.equal(first.includes(reasonLine), true, 'the live failure quotes its reason')
+    assert.equal(cooled.includes(reasonLine), true, 'the cooled query quotes the stamped reason')
+    assert.equal(
+      cooled.filter((m) => m.startsWith('cache: last refresh attempt failed: ')).length,
+      1,
+      'at most one reason line per query run'
+    )
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a hostile stamped reason cannot drive the terminal through the query warning', async () => {
+  const cacheRoot = await makeRoot('hyp-flush-failure-message-hostile-query-')
+  try {
+    const tablePath = path.join(cacheRoot, 'ai_gateway_messages')
+    const { spool } = spoolWithSwitchableCommit(cacheRoot)
+    await spool.append(tablePath, COLUMNS, [{ id: 1 }])
+
+    // The reason line is stderr a person reads, assembled from a stamp some
+    // other process wrote, so it holds the same policy as the `hyp status`
+    // line: strip and clamp, one payload instance per LLP 0225 group.
+    // @ref LLP 0330#query-quotes-the-reason [tests]: the reason line is bounded and terminal-safe
+    const hostile = [
+      `${ESC}[2J${ESC}[Hforged`,
+      'benign\rEVIL',
+      '\u009b2J\u007f',
+      'gnitsurt\u202e evil \u202c',
+      'a\u200bb\ufeffc\u180ed\ufe0fe',
+      'x'.repeat(600),
+    ].join('')
+    const stampPath = path.join(tablePath, SPOOL_DIR, 'last-flush-failure.json')
+    await fs.mkdir(path.dirname(stampPath), { recursive: true })
+    await fs.writeFile(
+      stampPath,
+      JSON.stringify({ failedAt: new Date().toISOString(), errorMessage: hostile })
+    )
+
+    /** @type {string[]} */
+    const messages = []
+    const settled = await settlePendingCacheForQuery({
+      partitions: [{ tablePath }],
+      storage: /** @type {any} */ ({
+        cacheRoot,
+        /** @param {string} p */
+        pendingInfo: (p) => spool.pendingInfo(p),
+        /**
+         * @param {string} p
+         * @param {{ reason?: string, force?: boolean }} [o]
+         */
+        flushTable: (p, o) => spool.flushTable(p, o),
+      }),
+      refresh: 'auto',
+      messages,
+    })
+    assert.equal(settled.degraded, true)
+    const line = messages.find((m) => m.startsWith('cache: last refresh attempt failed: '))
+    assert.ok(line, 'the reason is still quoted')
+    assert.equal(TERMINAL_DRIVING.test(line), false, 'no character that drives a terminal survives')
+    assert.equal(BIDI_FORMATTING.test(line), false, 'no character that reorders survives')
+    assert.equal(INVISIBLE_FORMATTING.test(line), false, 'no character that occupies no width survives')
+    assert.ok(line.length < 250, `the reason is clipped, got ${line.length} chars`)
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
@@ -252,6 +348,26 @@ test('hyp status names the table whose flush is failing and quotes the reason', 
     assert.equal(report.cacheFlushFailures[0].stillCoolingDown, true)
     assert.equal(report.cacheFlushFailures[1].stillCoolingDown, false)
 
+    // The `[refresh cooling down]` tag is modelled on `[capture gap]`, whose
+    // contract is that the tag points at a diagnostics block carrying the
+    // repair. A standing failure now holds that contract: one warning with
+    // the enumerate-then-retry repair pair, and warning only - the daemon
+    // runs, the rows are durable in the spool, and the paging-grade signal
+    // lives on the span status code and the run metric where LLP 0322 put
+    // it, so `overall` stays healthy.
+    // @ref LLP 0330#warning-diagnostic [tests]: a standing flush failure is a warning with a repair, never a degraded install
+    const diagnostic = report.diagnostics.find((d) => d.kind === 'cache_flush_failing')
+    assert.ok(diagnostic, 'a standing flush failure reaches the diagnostics block')
+    assert.equal(diagnostic.severity, 'warning')
+    assert.match(diagnostic.message, /failing for 2 tables/)
+    assert.match(
+      diagnostic.message,
+      /datasets[\\/]ai_gateway_messages[\\/]source=claude/,
+      'the newest failing table is named'
+    )
+    assert.deepEqual(diagnostic.repair, ['hyp status --json', 'hyp query refresh'])
+    assert.equal(report.overall, 'healthy', 'a warning never flips overall')
+
     const stdout = buffer()
     renderStatusText({ report, clientNames: [], datasets: [], cacheRoot, stdout })
     const text = stdout.text()
@@ -286,6 +402,11 @@ test('a healthy cache adds no line, and a hostile stamp cannot repaint the termi
     await fs.mkdir(path.join(cacheRoot, 'datasets'), { recursive: true })
     const clean = await collectHypAwareStatus(collectOpts(hypHome))
     assert.deepEqual(clean.cacheFlushFailures, [])
+    assert.equal(
+      clean.diagnostics.some((d) => d.kind === 'cache_flush_failing'),
+      false,
+      'no standing failure, no diagnostic'
+    )
     const quiet = buffer()
     renderStatusText({ report: clean, clientNames: [], datasets: [], cacheRoot, stdout: quiet })
     assert.doesNotMatch(quiet.text(), /cache flush \(/)
@@ -357,13 +478,18 @@ test('a healthy cache adds no line, and a hostile stamp cannot repaint the termi
   }
 })
 
-test('the capped list still reports how many tables it is not naming', async () => {
+test('the text plane names eight and points at --json, which names all twelve', async () => {
   const { hypHome, cacheRoot } = await makeHome()
   try {
-    // Twelve tables, all refusing writes. Eight is a screenful and the cap is
-    // right; showing eight and implying that is the whole incident is not.
-    // The same rule `MAX_SKIPPED_PARTITIONS_REPORTED` settled for the
-    // maintenance block: cap the list, never the size of the problem.
+    // Twelve tables, all refusing writes. Eight is a screenful and the text
+    // cap is right; showing eight and implying that is the whole incident is
+    // not, so the exact total rides beside the list, the same rule
+    // `MAX_SKIPPED_PARTITIONS_REPORTED` settled for the maintenance block.
+    // And LLP 0228's shape is a count plus a pointer to where the rest are
+    // listed, so the machine plane is uncapped and the overflow line names
+    // it: an operator learns the scale of the incident here and the identity
+    // of every table one command away.
+    // @ref LLP 0330#count-beside-cap [tests]: eight named, the exact total beside them, and the pointer's target carries them all
     for (let i = 0; i < 12; i++) {
       await writeStamp(cacheRoot, `t${String(i).padStart(2, '0')}`, {
         failedAt: new Date(Date.now() - (i + 1) * 60_000).toISOString(),
@@ -372,17 +498,17 @@ test('the capped list still reports how many tables it is not naming', async () 
     }
 
     const report = await collectHypAwareStatus(collectOpts(hypHome))
-    assert.equal(report.cacheFlushFailures.length, 8, 'the list is capped')
-    assert.equal(report.cacheFlushFailuresTotal, 12, 'the count is not')
+    assert.equal(report.cacheFlushFailures.length, 12, 'the collector hands over the whole list')
+    assert.equal(report.cacheFlushFailuresTotal, 12, 'and the exact count beside it')
 
     const stdout = buffer()
     renderStatusText({ report, clientNames: [], datasets: [], cacheRoot, stdout })
     const text = stdout.text()
-    assert.equal(text.split('\n').filter((l) => l.includes('cache flush (')).length, 8)
-    assert.match(text, /\.\.\. and 4 more tables whose last flush failed/)
+    assert.equal(text.split('\n').filter((l) => l.includes('cache flush (')).length, 8, 'the terminal block is capped')
+    assert.match(text, /\.\.\. and 4 more tables whose last flush failed \(hyp status --json lists them all\)/)
 
     const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot })
-    assert.equal(json.cache_flush_failures.length, 8)
+    assert.equal(json.cache_flush_failures.length, 12, 'the pointer target is not capped, or it would be a lie')
     assert.equal(json.cache_flush_failures_total, 12)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })

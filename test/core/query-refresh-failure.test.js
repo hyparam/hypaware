@@ -43,8 +43,13 @@ test('automatic refresh serves confirmed data once and marks the query degraded'
     })
 
     assert.equal(storage.flushes, 2, 'one failed stream does not stop the remaining refresh attempts')
+    // One warning and one reason, not two of each: both failing partitions
+    // dedupe into the same pair, and the reason line says what the attempt
+    // failed with so the user is not sent to the spool internals to learn it.
+    // @ref LLP 0330#query-quotes-the-reason [tests]:
     assert.deepEqual(messages, [
       'cache: refresh failed; using previously saved data; newer waiting rows may be missing',
+      `cache: last refresh attempt failed: ${PARTITION_ERROR}`,
     ])
     const span = captured.find((candidate) => candidate.name === 'test.query')
     assert.equal(span?.attributes.status, 'degraded')

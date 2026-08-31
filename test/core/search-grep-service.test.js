@@ -493,9 +493,19 @@ test('automatic refresh searches confirmed rows when the spool cannot enter the 
 
   const automatic = await grep(storage, { refresh: 'auto' })
   assert.deepEqual(automatic.hits.map((hit) => hit.sessionId), ['s1'])
-  assert.deepEqual(automatic.freshnessMessages, [
-    'cache: refresh failed; using previously saved data; newer waiting rows may be missing',
-  ])
+  assert.equal(
+    automatic.freshnessMessages[0],
+    'cache: refresh failed; using previously saved data; newer waiting rows may be missing'
+  )
+  // The real rejection's message rides beside the warning, bounded; matched
+  // rather than equalled because it is produced by the real cache, not a
+  // fixture this file wrote.
+  // @ref LLP 0330#query-quotes-the-reason [tests]:
+  assert.equal(automatic.freshnessMessages.length, 2)
+  assert.match(
+    automatic.freshnessMessages[1],
+    /^cache: last refresh attempt failed: .*partition field "session_id" is new/
+  )
   assert.equal((await storage.pendingInfo(labelTable)).pending, true, 'the failed flush leaves its rows in the spool')
   /** @type {unknown[]} */
   const retained = []

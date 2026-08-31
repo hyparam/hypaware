@@ -179,6 +179,7 @@ export type StatusDiagnosticKind =
   | 'client_sync_list_unreadable'
   | 'maintenance_partitions_skipped'
   | 'capture_gap'
+  | 'cache_flush_failing'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -556,18 +557,21 @@ export interface HypAwareStatusReport {
    */
   captureHealth: CaptureHealthReport[]
   /**
-   * Tables whose last spool-to-cache flush failed, newest first and capped
-   * at eight (LLP 0322). Empty on every healthy install, so the ordinary
-   * status surface is unchanged. Unlike `maintenance` this is read from the
-   * spool rather than status.json, because the stamp is written by whichever
-   * process attempted the flush and no single process sees them all.
+   * Tables whose last spool-to-cache flush failed, newest first and uncapped:
+   * the text renderer applies the eight-line terminal cap, and `--json`
+   * carries this whole list, because it is where the overflow line's pointer
+   * points (LLP 0330#count-beside-cap). Empty on every healthy install, so
+   * the ordinary status surface is unchanged. Unlike `maintenance` this is
+   * read from the spool rather than status.json, because the stamp is
+   * written by whichever process attempted the flush and no single process
+   * sees them all.
    */
   cacheFlushFailures: CacheFlushFailureReport[]
   /**
-   * How many tables carried a readable failure stamp before the cap above,
-   * so a render can say how much of the problem it is not showing. The same
-   * relationship `MaintenanceSkipSnapshot.skippedTotal` has to its capped
-   * `partitions`: the list is bounded, the size of the incident is not.
+   * How many tables carried a readable failure stamp. Always equal to the
+   * list's length now that the list is uncapped, and kept anyway: it is a
+   * shipped `--json` key, the text plane's overflow arithmetic reads it, and
+   * the equality is an invariant a consumer may rely on.
    */
   cacheFlushFailuresTotal: number
   /**

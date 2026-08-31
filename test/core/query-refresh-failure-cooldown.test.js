@@ -30,6 +30,7 @@ import { parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
 import {
   AUTO_REFRESH_FAILURE_MESSAGE,
+  REFRESH_FAILURE_REASON_PREFIX,
   executeQuerySql,
   settlePendingCacheForQuery,
 } from '../../src/core/query/sql.js'
@@ -149,12 +150,15 @@ test('a failed automatic refresh holds the gate closed instead of retrying on ev
   const info = await spool.pendingInfo(tablePath)
   assert.equal(typeof info.flushFailedAtMs, 'number', 'the failed flush leaves a readable stamp')
 
-  // The cooled queries are still degraded, and still say so exactly once.
+  // The cooled queries are still degraded, and still say so exactly once,
+  // with the stamped reason beside the warning on every round: the same two
+  // lines the live failure printed, so nothing flickers with the window.
+  // @ref LLP 0330#query-quotes-the-reason [tests]: the cooled rounds quote the same reason the live failure did
   assert.equal(/** @type {any} */ (first).degraded, true)
   for (const messages of rounds) {
     assert.deepEqual(
       messages,
-      [AUTO_REFRESH_FAILURE_MESSAGE],
+      [AUTO_REFRESH_FAILURE_MESSAGE, `${REFRESH_FAILURE_REASON_PREFIX}${PARTITION_ERROR}`],
       'the user warning does not flicker on and off with the window'
     )
   }
