@@ -16,7 +16,7 @@ import {
   readOpenclawSessionMessages,
   SESSION_FILE_NAME,
 } from './session_file.js'
-import { isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
+import { compareStrings, isPlainObject, sha256Hex, stringValue } from 'hypaware/core/util'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillEvent, BackfillItem, BackfillPlan, BackfillPlanContext, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
@@ -805,7 +805,7 @@ async function listSessionFiles(agentsDir, quiesceBeforeMs) {
       out.push({ agentId, filePath })
     }
   }
-  out.sort((a, b) => (a.filePath < b.filePath ? -1 : a.filePath > b.filePath ? 1 : 0))
+  out.sort((a, b) => compareStrings(a.filePath, b.filePath))
   return out
 }
 

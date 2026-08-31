@@ -3,6 +3,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { compareStrings } from 'hypaware/core/util'
+
 import { captureSpoolRoot } from '../../../../../src/core/capture_spool.js'
 
 /**
@@ -134,7 +136,7 @@ export async function enforceClaudeBodySpoolCap(dir, maxBytes) {
   let evictedBytes = 0
   if (spoolBytes <= maxBytes) return { spoolBytes, evictedCount, evictedBytes }
 
-  files.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  files.sort((a, b) => a.mtimeMs - b.mtimeMs || compareStrings(a.name, b.name))
   for (const file of files) {
     if (spoolBytes <= maxBytes) break
     try {
