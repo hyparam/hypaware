@@ -9,9 +9,10 @@ import path from 'node:path'
 
 import { createRetentionEnforcer, DEFAULT_RETENTION_DAYS } from '../../src/core/cache/retention.js'
 import { maintainCache, cacheStatus, normalizeMaintenanceConfig } from '../../src/core/cache/maintenance.js'
-import { appendRowsToPartition, appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
+import { appendRowsToPartition, appendRowsToSourceTable, readCursorSync, withPartitionMutationLock, writeCursor } from '../../src/core/cache/partition.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, readRowsFromTable, sortColumnsFromMetadata, tableExists } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
+import { createCacheSpool } from '../../src/core/cache/spool.js'
 import { TracerProvider } from '../../src/core/observability/runtime.js'
 import { fileCatalog, icebergRewrite, loadLatestFileCatalogMetadata } from 'icebird'
 import { parquetMetadata } from 'hyparquet'
@@ -53,6 +54,26 @@ async function pathExists(p) {
   } catch {
     return false
   }
+}
+
+/** @type {ColumnSpec[]} */
+const NO_TIMESTAMP_COLUMNS = [
+  { name: 'id', type: 'INT32', nullable: false },
+  { name: 'message', type: 'STRING', nullable: true },
+]
+
+/**
+ * A spool wired for capture only. `appendChunk` is the flush seam and
+ * nothing here flushes; these tests are about what a partition holds when
+ * retention arrives, not about draining it.
+ *
+ * @param {string} cacheRoot
+ */
+function captureOnlySpool(cacheRoot) {
+  return createCacheSpool({
+    cacheRoot,
+    appendChunk: async () => ({ bytesWritten: 0 }),
+  })
 }
 
 /** @type {ColumnSpec[]} */
@@ -566,10 +587,7 @@ test('retention expires rows in a data file written before the timestamp column 
 test('retention evicts source table by mtime when no timestamp column is resolvable', async () => {
   const cacheRoot = await makeTmpDir('retention-mtime-fallback')
   try {
-    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], [
-      { name: 'id', type: 'INT32', nullable: false },
-      { name: 'message', type: 'STRING', nullable: true },
-    ], [
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], NO_TIMESTAMP_COLUMNS, [
       { id: 1, message: 'no timestamp' },
     ])
 
@@ -1429,13 +1447,10 @@ test('an unreadable cursor is not a licence to delete: the live generation survi
   }
 })
 
-test('a partition with no cursor file at all is still evicted (the gate is not a blanket refusal)', async () => {
+test('a source-table with no resolvable timestamp column is removed whole, and says so', async () => {
   const cacheRoot = await makeTmpDir('retention-no-cursor-file')
   try {
-    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], [
-      { name: 'id', type: 'INT32', nullable: false },
-      { name: 'message', type: 'STRING', nullable: true },
-    ], [
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], NO_TIMESTAMP_COLUMNS, [
       { id: 1, message: 'no timestamp' },
     ])
     const sourceDir = path.join(cacheRoot, 'datasets', 'no_ts_ds', 'source=test')
@@ -1460,10 +1475,7 @@ test('a symlink at datasets/ refuses the whole pass rather than deleting through
     const real = path.join(home, 'elsewhere')
     // A partition with no resolvable timestamp column: the branch that
     // removes a whole directory, which is what must not happen off-root.
-    await appendRowsToSourceTable(real, 'no_ts_ds', ['source=test'], [
-      { name: 'id', type: 'INT32', nullable: false },
-      { name: 'message', type: 'STRING', nullable: true },
-    ], [
+    await appendRowsToSourceTable(real, 'no_ts_ds', ['source=test'], NO_TIMESTAMP_COLUMNS, [
       { id: 1, message: 'no timestamp' },
     ])
     const victim = path.join(real, 'datasets', 'no_ts_ds', 'source=test')
@@ -1507,5 +1519,188 @@ test('an ordinary cache root is not refused for the shape of the path it lives a
     assert.equal(result.sourceTableResults[0].rowsDeleted, 1)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a partition carrying NO cursor.json at all is still evicted', async () => {
+  // The control the `!part.legacy` clause exists for, and the one that dies
+  // first if the LLP 0323 gate above it is ever widened to "any cursor that
+  // does not read is a partition retention skips". `discoverCachePartitions`
+  // sets `legacy` for a table under `datasets/` with no cursor file beside
+  // it - the pre-cursor on-disk shape - and for that partition
+  // `tryReadCursorSync` answers null because the file is ABSENT, not because
+  // it is corrupt. A blanket refusal reads the two as the same answer and
+  // silently stops reclaiming every such partition forever, which is this
+  // series' standing failure and not one the poisoned-cursor test can see:
+  // that one writes a cursor file.
+  const cacheRoot = await makeTmpDir('retention-cursorless-legacy')
+  try {
+    const partitionDir = path.join(cacheRoot, 'datasets', 'legacy_ds', 'client=a', 'date=2026-01-01')
+    await appendRowsToTable(partitionDir, COLUMNS, [
+      { id: 1, value: 'old', timestamp: isoDateDaysAgo(400) },
+    ])
+    assert.equal(
+      await pathExists(path.join(partitionDir, 'cursor.json')),
+      false,
+      'the fixture only means anything while there is genuinely no cursor file'
+    )
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    const dataDir = path.join(partitionDir, 'data')
+    for (const name of await fs.readdir(dataDir)) {
+      await fs.utimes(path.join(dataDir, name), stale, stale)
+    }
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } }).tick()
+
+    assert.deepEqual(
+      result.evicted,
+      [{ dataset: 'legacy_ds', partition: 'client=a/date=2026-01-01', rowCount: 1 }],
+      'an over-age partition with no cursor file is reclaimed, not skipped'
+    )
+    assert.equal(await pathExists(partitionDir), false)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('retention rewrites a cursor from disk under the lock, not from its own snapshot', async () => {
+  // Retention reads a partition's cursor, then spends the length of a scan,
+  // a delete commit and a rescan away from it while live ingest appends to
+  // the same partition. Writing its pre-pass snapshot back reverts whatever
+  // landed in between - `rowCount` cosmetically and `pendingFallbacks` not,
+  // since a dropped increment strands provisional rows against the settle
+  // sweep. Holding the lock stands in for that interleaving deterministically.
+  const cacheRoot = await makeTmpDir('retention-cursor-rebase')
+  try {
+    await appendRowsToSourceTable(cacheRoot, 'test_ds', ['source=claude'], COLUMNS, [
+      { id: 1, value: 'old', timestamp: isoDateDaysAgo(120) },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'test_ds', 'source=claude')
+
+    let released = false
+    const held = withPartitionMutationLock(partitionDir, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      await writeCursor(partitionDir, { ...readCursorSync(partitionDir), pendingFallbacks: 3 })
+      released = true
+    })
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 30 } }).tick()
+    // Asked HERE, not after `held`: re-reading the cursor without taking the
+    // lock still passes the assertion below by luck, because the holder's
+    // write happens to land last. Only "the pass had not returned while the
+    // lock was held" distinguishes serialization from a narrower window.
+    const waited = released
+    await held
+
+    assert.equal(result.sourceTableResults[0].rowsDeleted, 1, 'the pass still deletes what the policy names')
+    assert.equal(waited, true, 'retention waited for the lock instead of writing through it')
+    const cursor = readCursorSync(partitionDir)
+    assert.equal(
+      cursor.pendingFallbacks,
+      3,
+      'the field another mutator wrote during the pass survives retention\'s cursor write'
+    )
+    assert.ok(cursor.retention?.rowsDeleted === 1, 'and retention still recorded its own pass')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('retention waits for the partition mutation lock before removing a partition', async () => {
+  const cacheRoot = await makeTmpDir('retention-evict-lock')
+  try {
+    const segments = ['client=a', 'date=2026-01-01']
+    await appendRowsToPartition(cacheRoot, 'legacy_ds', segments, COLUMNS, [
+      { id: 1, value: 'old', timestamp: isoDateDaysAgo(400) },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'legacy_ds', ...segments)
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    const dataDir = path.join(partitionDir, 'epoch=0', 'data')
+    for (const name of await fs.readdir(dataDir)) {
+      await fs.utimes(path.join(dataDir, name), stale, stale)
+    }
+
+    let released = false
+    const held = withPartitionMutationLock(partitionDir, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      released = true
+    })
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } }).tick()
+    assert.equal(
+      released,
+      true,
+      'an `rm -rf` of a live partition is a partition mutation, so it queues behind one'
+    )
+    assert.equal(result.evicted.length, 1, 'and it still happens')
+    assert.equal(await pathExists(partitionDir), false)
+    await held
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a whole-partition eviction weighs the capture spool, not only the committed files', async () => {
+  // The removal takes `part.path`, and `<part.path>/_hypaware_spool` is
+  // inside it. Committed files stale, source alive and spooling: the rows
+  // captured a minute ago are in the window and must not go with the
+  // directory.
+  const cacheRoot = await makeTmpDir('retention-spool-fresh')
+  try {
+    const spool = captureOnlySpool(cacheRoot)
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], NO_TIMESTAMP_COLUMNS, [
+      { id: 1, message: 'committed long ago' },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'no_ts_ds', 'source=test')
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    const dataDir = path.join(partitionDir, 'table', 'data')
+    for (const name of await fs.readdir(dataDir)) {
+      await fs.utimes(path.join(dataDir, name), stale, stale)
+    }
+    await spool.append(partitionDir, NO_TIMESTAMP_COLUMNS, [
+      { id: 2, message: 'captured a minute ago, not committed yet' },
+    ])
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } }).tick()
+
+    assert.equal(await pathExists(partitionDir), true, 'the partition survives')
+    assert.equal(
+      await pathExists(path.join(partitionDir, '_hypaware_spool', 'active.jsonl')),
+      true,
+      'rows captured inside the window are not removed with the directory that holds them'
+    )
+    assert.equal(result.sourceTableResults[0]?.evictedPartition, undefined)
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
+
+test('a spool whose own captured rows are past the window does not stop the eviction', async () => {
+  // The control against the other failure: weighing the spool must not turn
+  // a stranded flush into a partition that never reclaims again.
+  const cacheRoot = await makeTmpDir('retention-spool-stale')
+  try {
+    const spool = captureOnlySpool(cacheRoot)
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], NO_TIMESTAMP_COLUMNS, [
+      { id: 1, message: 'committed long ago' },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'no_ts_ds', 'source=test')
+    await spool.append(partitionDir, NO_TIMESTAMP_COLUMNS, [{ id: 2, message: 'stranded long ago' }])
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    const dataDir = path.join(partitionDir, 'table', 'data')
+    for (const name of await fs.readdir(dataDir)) {
+      await fs.utimes(path.join(dataDir, name), stale, stale)
+    }
+    const spoolDir = path.join(partitionDir, '_hypaware_spool')
+    for (const name of await fs.readdir(spoolDir)) {
+      await fs.utimes(path.join(spoolDir, name), stale, stale)
+    }
+
+    const result = await createRetentionEnforcer({ cacheRoot, config: { default_days: 90 } }).tick()
+
+    assert.equal(result.sourceTableResults[0].evictedPartition, true)
+    assert.equal(await pathExists(partitionDir), false, 'nothing here has been written since the cutoff')
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })

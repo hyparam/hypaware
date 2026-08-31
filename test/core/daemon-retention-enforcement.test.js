@@ -17,7 +17,7 @@ import path from 'node:path'
 
 import { runDaemon } from '../../src/core/daemon/runtime.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
-import { appendRowsToSourceTable, readCursorSync } from '../../src/core/cache/partition.js'
+import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
 import { readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
@@ -135,6 +135,79 @@ test('the daemon maintenance path enforces the configured retention window', asy
     // The delete is durable and attributed: the retention cursor on the
     // stale partition records the pass that removed its rows.
     assert.equal(staleCursor.retention?.rowsDeleted, 2)
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    if (savedHypHome === undefined) delete process.env.HYP_HOME
+    else process.env.HYP_HOME = savedHypHome
+    if (savedDevTelemetry === undefined) delete process.env.HYP_DEV_TELEMETRY
+    else process.env.HYP_DEV_TELEMETRY = savedDevTelemetry
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a whole-partition eviction leaves its durable line even when the cursor counted no rows', async () => {
+  // @ref LLP 0336#durable-line [tests]: the removal of a whole partition
+  // directory is the one cache mutation nothing can reconstruct afterwards,
+  // and `rowsDeleted` for that path is `cursor.rowCount` - a count of what
+  // OTHER passes committed, which can legitimately read 0 for a directory
+  // that still exists. Gating the line on it means the daemon deletes a
+  // partition and says nothing at all.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-daemon-retention-evict-'))
+  const savedHypHome = process.env.HYP_HOME
+  const savedDevTelemetry = process.env.HYP_DEV_TELEMETRY
+  let handle
+  try {
+    const cacheRoot = path.join(hypHome, 'hypaware', 'cache')
+    // No candidate timestamp column in the schema, so the pass falls back to
+    // removing the partition on data-file mtime.
+    await appendRowsToSourceTable(cacheRoot, 'no_ts_ds', ['source=test'], [
+      { name: 'id', type: 'INT32', nullable: false },
+      { name: 'message', type: 'STRING', nullable: true },
+    ], [
+      { id: 1, message: 'no timestamp' },
+    ])
+    const partitionDir = path.join(cacheRoot, 'datasets', 'no_ts_ds', 'source=test')
+    await writeCursor(partitionDir, { ...readCursorSync(partitionDir), rowCount: 0 })
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    const dataDir = path.join(partitionDir, 'table', 'data')
+    for (const name of await fs.readdir(dataDir)) {
+      await fs.utimes(path.join(dataDir, name), stale, stale)
+    }
+
+    const configPath = defaultConfigPath(hypHome)
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 2,
+      query: { cache: { retention: { default_days: 30 }, maintenance: { interval_minutes: 0.001 } } },
+    }))
+
+    process.env.HYP_HOME = hypHome
+    process.env.HYP_DEV_TELEMETRY = '1'
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'retention-evict-line-test',
+      tickIntervalMs: 0,
+      installSignalHandlers: false,
+    })
+
+    // Asserted from `daemon.log` and not from a span: the durable line is
+    // the channel #durable-line is about, and it is the only one an operator
+    // has with no tracer running. (`installObservability` is also process
+    // wide, so a second daemon in this file does not get its own span file.)
+    const logPath = path.join(hypHome, 'hypaware', 'logs', 'daemon.log')
+    const line = await pollJsonlFor(logPath, (r) => r.event === 'daemon.retention_evicted', 10_000)
+    assert.ok(
+      line,
+      'the directory is gone, so the durable line naming it is the only record left that it was ever here'
+    )
+    assert.equal(line.hyp_dataset, 'no_ts_ds')
+    assert.equal(line.partition, 'source=test')
+    assert.equal(await fs.access(partitionDir).then(() => true, () => false), false)
   } finally {
     if (handle) {
       await handle.stop()

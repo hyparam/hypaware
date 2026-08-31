@@ -85,7 +85,12 @@ same argument LLP 0228 and LLP 0311 made for the status file and the
 repartition line). Every partition that lost rows gets a `fileLog` line:
 `daemon.retention_evicted` for a whole-directory eviction (dataset,
 partition, rows) and `daemon.retention_rows_deleted` for a source-table
-purge (dataset, source, cutoff date, rows). The `retention.tick` span
+purge (dataset, source, cutoff date, rows). The eviction line is written on
+the removal, not on the count: `rowsDeleted` for that path is
+`cursor.rowCount`, a tally of what other passes committed, and a directory
+whose tally reads 0 is still a directory that stops existing. A row purge
+that deleted nothing has nothing to say and stays quiet; a removal never
+does. The `retention.tick` span
 carries `rows_deleted` and `partitions_evicted`, and the enforcer's own
 child spans (`retention.plan_deletes`, `retention.iceberg_delete`,
 `retention.evict`, `retention.evict_source_table`) are unchanged.
@@ -120,6 +125,19 @@ child spans (`retention.plan_deletes`, `retention.iceberg_delete`,
   means snapshots. A manual retention trigger is a separate request if
   anyone wants one; this doc deliberately does not add a CLI surface.
 
+## The window enforced is the window configured now {#window-read-per-pass}
+
+`createRetentionEnforcer` normalizes its window once, at construction, and
+`reload()` reassigns `boot.config`. So the daemon builds the enforcer per
+pass rather than once at boot: a boot-time enforcer would keep deleting at
+the boot-time window while `hyp status` reports the reloaded one off disk,
+which is issue #1131's reported-is-not-enforced divergence returning through
+the reload door. The asymmetry decides it - an operator who LOWERS the
+window and reloads merely waits for a restart, while one who RAISES it after
+a scare is still being deleted at the shorter window, and that is the
+direction that costs data. The pass runs at most daily, so building an
+enforcer per pass costs nothing.
+
 ## A live delete carries the gates a live delete has to carry {#a-live-delete-carries-the-gates}
 
 Wiring the enforcer does not only schedule it: it makes
@@ -149,7 +167,38 @@ because until now nothing reached it.
   delete. Discovery's `legacy` flag still marks the legitimate
   table-with-no-cursor-file shape, which keeps the epoch-0 default.
 
-Neither is a new decision. Both are existing accepted ones arriving at a
+- **The whole partition is not the committed half of it.** Both
+  whole-directory paths remove `part.path`, and the capture spool
+  (`<part.path>/_hypaware_spool`, rows this process captured and has not
+  committed) is inside it. The age decision read `<generation>/data` alone,
+  so a partition whose committed files date to March and whose source
+  resumed this morning read as untouched since March, and the removal took
+  rows captured minutes ago that no snapshot, manifest or `cursor.rowCount`
+  knows about - so `rowsDeleted` did not even report them. The spool is
+  weighed into the age decision instead of being made a refusal, because a
+  refusal is the other failure: a spool stranded behind a failing flush
+  would stop that partition reclaiming forever. A spool whose own newest
+  captured row is past the window is as evictable as the data files beside
+  it. Stamps (`last-flush.json`) are deliberately not weighed - a flush that
+  commits nothing rewrites one, and weighing it would make a merely
+  flush-attempted partition look perpetually fresh.
+- **The partition mutation lock.** Every cursor mutator in the tree holds
+  `withPartitionMutationLock` across its own read-modify-write: both append
+  paths, and every cursor write in `maintenance.js` (whose rebaseline write
+  carries the note explaining why re-reading without the lock is not
+  enough). Retention held it at neither of its cursor writes and at neither
+  of its whole-directory removals. That was harmless while nothing called
+  it; on the tail of a live tick a pass over one partition spans a metadata
+  load, a parquet scan of every data file, a commit per delete batch and a
+  full rescan, and ingest appends to the same partition throughout. Writing
+  the pre-pass snapshot back reverts what landed in between: `rowCount`
+  cosmetically, and `pendingFallbacks` not, since a dropped increment
+  strands provisional rows against the settle sweep. Retention now rewrites
+  from the cursor on disk, under the lock, and takes it around its removals
+  too, because an `rm -rf` of a live partition is the largest partition
+  mutation in the file.
+
+None is a new decision. All three are existing accepted ones arriving at a
 path that was dead code when they were made, which is the shape LLP 0331
 predicted: "a pass that exports its deletion and imports its containment
 from whoever happens to call it has published the deletion without the
@@ -164,6 +213,16 @@ daemon with a 30 day window, and asserts the over-age rows are gone, the
 under-age rows survive byte-for-byte, and the `retention.tick` span exists
 with the exact deleted-row count. Before the wire that test fails on the
 span's absence, which is the bug by name.
+
+Each gate above is pinned by a control that dies when only that gate is
+reverted, and two of them exist to die under an over-tightened one: a
+partition carrying **no** `cursor.json` at all is still evicted (the LLP
+0323 gate is not a blanket refusal on any cursor that fails to read), and a
+cache reached through a symlinked **ancestor** still enforces (the LLP 0331
+check asks only about `datasets/`). The first of those has to be built as
+the cursor-less on-disk shape discovery actually flags `legacy`, since a
+fixture that writes a cursor file exercises the other side of the gate and
+leaves the escape hatch unpinned.
 
 ## References {#references}
 

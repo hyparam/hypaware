@@ -756,7 +756,16 @@ export async function runDaemon(opts = {}) {
     // window `hyp status` reports is enforced here, on the tail of the
     // maintenance tick, not by `maintainCache` (whose only age cutoff is
     // Iceberg snapshot expiry) and not by a timer of its own.
-    const retention = createRetentionEnforcer({
+    //
+    // Built per pass rather than once, because `createRetentionEnforcer`
+    // normalizes the window at construction and `reload()` reassigns
+    // `boot.config`. A boot-time enforcer would keep deleting at the old
+    // window while `hyp status` reads the new one off disk, which is issue
+    // #1131's divergence coming back through the reload door - and in the
+    // direction that matters most, since an operator who RAISES the window
+    // after a scare and sends SIGHUP is the one who cannot afford to still
+    // be on the shorter one. At most once a day, so the cost is nothing.
+    const buildRetention = () => createRetentionEnforcer({
       cacheRoot: boot.runtime.storage.cacheRoot,
       config: boot.config?.query?.cache?.retention,
       getDataset: (dataset) => boot.runtime.query.getDataset(dataset),
@@ -913,7 +922,7 @@ export async function runDaemon(opts = {}) {
             status: 'ok',
           },
           async (span) => {
-            const result = await retention.tick()
+            const result = await buildRetention().tick()
             let rowsDeleted = 0
             // A retention delete is the one cache mutation nothing can
             // reconstruct afterwards, so every partition that lost rows gets
@@ -929,13 +938,20 @@ export async function runDaemon(opts = {}) {
             }
             let partitionsEvicted = result.evicted.length
             for (const tableResult of result.sourceTableResults) {
-              if (tableResult.rowsDeleted === 0) continue
-              rowsDeleted += tableResult.rowsDeleted
               // A source-table partition with no resolvable timestamp column
               // is removed whole, directory and cursor included, and that is
               // a different sentence to the operator who reads this line
               // later than "rows were position-deleted from it".
+              //
+              // Asked BEFORE the zero-rows skip below, not after: that
+              // removal reports `cursor.rowCount`, which is a count of
+              // committed rows written by other passes and can legitimately
+              // read 0 for a directory that still exists and is about to
+              // stop existing. Skipping on it would delete the one thing
+              // nothing can reconstruct and leave no line saying so, which
+              // is exactly what #durable-line is for.
               if (tableResult.evictedPartition) {
+                rowsDeleted += tableResult.rowsDeleted
                 partitionsEvicted++
                 fileLog.info('daemon.retention_evicted', {
                   [Attr.DATASET]: tableResult.dataset,
@@ -945,6 +961,8 @@ export async function runDaemon(opts = {}) {
                 })
                 continue
               }
+              if (tableResult.rowsDeleted === 0) continue
+              rowsDeleted += tableResult.rowsDeleted
               fileLog.info('daemon.retention_rows_deleted', {
                 [Attr.DATASET]: tableResult.dataset,
                 source: tableResult.source,
