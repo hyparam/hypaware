@@ -1435,8 +1435,12 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
 }
 
 /**
- * How long `requestDaemonStop` waits for the signalled daemon to clear its
- * pid file before it gives up and reports `timed_out`.
+ * How long `requestDaemonStop` waits for the signalled daemon to exit before
+ * it gives up and reports `timed_out`. The wait is on the process, not on the
+ * pid file: the daemon clears that file partway through its own shutdown, and
+ * the telemetry close whose ceiling is checked against this number runs after
+ * it, on the way out of `bin/hypaware.js`. Waiting on liveness is what keeps
+ * that close inside the window.
  *
  * Named rather than inline because the telemetry close inside that window has
  * a derived ceiling of its own (`SHUTDOWN_BUDGET_MS`), and the two used to be
@@ -1451,8 +1455,9 @@ export const DAEMON_STOP_TIMEOUT_MS = 5_000
 
 /**
  * `hyp daemon stop` helper. Reads the PID file, requests an orderly stop,
- * and waits (up to `timeoutMs`) for the process to clear the PID file.
- * Returns the resulting state for the command body to render.
+ * and waits (up to `timeoutMs`) for the process itself to go away, then
+ * clears the PID file on its behalf. Returns the resulting state for the
+ * command body to render.
  *
  * The request transport is per-platform: POSIX sends SIGTERM (the proven
  * path, and what the service managers speak regardless); win32 writes a

@@ -46,6 +46,13 @@ const SHUTDOWN_BUDGET_MARGIN_MS = 250
  * numbers are pinned against each other in a test: raising
  * `OTLP_EXPORT_TIMEOUT_MS` cannot eat that window unnoticed.
  *
+ * Dev telemetry is deliberately outside that pin. It keeps a flat 5s per
+ * step and adds a `forceFlush` before the close, so its ceiling is two of
+ * those steps and already exceeds the stop window on purpose: whoever sets
+ * `HYP_DEV_TELEMETRY=1` is debugging the telemetry path and wants the
+ * records more than a prompt exit. Nothing renders that variable into an
+ * installed daemon's environment, so the shipped stop is the pinned one.
+ *
  * @ref LLP 0343#one-budget [implements]: closing the channels concurrently makes the per-channel budget the whole-shutdown ceiling
  */
 export const SHUTDOWN_BUDGET_MS = OTLP_EXPORT_TIMEOUT_MS + SHUTDOWN_BUDGET_MARGIN_MS
