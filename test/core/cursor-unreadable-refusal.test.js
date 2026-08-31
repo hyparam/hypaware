@@ -253,10 +253,18 @@ test('a partition evicted while unreadable warns again when it comes back', asyn
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-unreadable-evict-'))
   try {
     const partition = path.join(cacheRoot, 'datasets', 'logs', 'date=2026-01-01')
-    await fs.mkdir(path.join(partition, 'metadata'), { recursive: true })
-    await fs.writeFile(path.join(partition, 'metadata', 'v1.metadata.json'), '{}')
+    // `epoch=0/`, not a table directly under the partition: with the cursor
+    // unreadable the tick reads the layout-less epoch-0 default, and
+    // `epoch=0` is the only live generation name that default matches. It is
+    // also the one shape a real cache holds that this site can reach - an
+    // epoch-layout partition never yet compacted - where a bare `metadata/`
+    // beside a `cursor.json` is a shape no writer in the tree mints.
+    const live = path.join(partition, 'epoch=0')
+    await fs.mkdir(path.join(live, 'metadata'), { recursive: true })
+    await fs.writeFile(path.join(live, 'metadata', 'v1.metadata.json'), '{}')
     await writeRawCursor(partition, '{ not json')
     const old = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000)
+    await fs.utimes(live, old, old)
     await fs.utimes(partition, old, old)
 
     const enforcer = createRetentionEnforcer({ cacheRoot, config: undefined })

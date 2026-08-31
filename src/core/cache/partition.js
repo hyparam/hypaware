@@ -6,6 +6,7 @@ import path from 'node:path'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
+import { errCode } from '../util/json_util.js'
 import { countGatewayFallbackRows } from './gateway_fallback.js'
 import { appendRowsToTable, tableExists as icebergTableExists } from './iceberg/store.js'
 import { cacheTablePath, datasetsRoot, isConfirmedSymlink } from './paths.js'
@@ -94,7 +95,7 @@ export function tryReadCursorSync(partitionDir) {
     // partition back into the silence this refusal exists to remove. The
     // escape condition is genuinely unproven either way, which is why it
     // clears above (LLP 0334#recovery-is-announced).
-    if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') {
+    if (errCode(err) === 'ENOENT') {
       noteUnreadableCleared(partitionDir)
     } else {
       reportUnreadableCursor(partitionDir, err)
@@ -269,8 +270,11 @@ function defaultGenerationDirs(cursor) {
 }
 
 /**
- * How long an unchanged standing escape refusal stays quiet between
- * repeats. The same 10-minute floor as `REWARN_MS` in
+ * How long an unchanged standing cursor refusal stays quiet between
+ * repeats, for both conditions: `reportStandingRefusal` applies one rate
+ * rule rather than one per condition. The name is the escape refusal's
+ * because LLP 0332 and LLP 0334 settled the window under it.
+ * The same 10-minute floor as `REWARN_MS` in
  * `src/core/daemon/control.js`, chosen for the same reason: a standing
  * condition must not be mute for the daemon's whole lifetime, and must not
  * be a line per read either. Under the default 60-minute maintenance
@@ -493,12 +497,17 @@ function noteUnreadableCleared(partitionDir) {
  * does not parse produced the same permanent skip with nothing on any
  * channel, so a partition stopped compacting, stopped being swept, and read
  * as empty with no line anywhere saying why. The refusal is permanent by
- * design, and it is not purely a skip: every strict reader does skip, but
- * retention's `tick()` reads through the lenient `readCursorSync`, so an
- * unreadable cursor still routes to `evictLegacyPartition` and takes the
- * whole partition on directory mtime alone. A permanent refusal that can
- * end in a delete is defensible only while it is loud, and it was loud for
- * one of its two exits.
+ * design, and what retention then does with the partition turns on a
+ * shape nothing surfaces. `tick()` reads through the lenient
+ * `readCursorSync`, so an unreadable cursor arrives as the layout-less
+ * epoch-0 default and routes to `evictLegacyPartition`, which acts only on
+ * an `epoch=0/` table or one directly under the partition. A partition
+ * still on its first epoch is therefore removed whole on directory mtime,
+ * and every other shape (source-table, or any later epoch) is skipped and
+ * keeps its rows past the configured window for as long as the cursor
+ * stays broken. Over-deleting on one shape and under-deleting on the rest
+ * is defensible only while something says the cursor could not be read,
+ * and that was true for one of the refusal set's two exits.
  *
  * Same shape as the escape refusal because it is the same signal: `warn`
  * rather than `error` (nothing failed and the tick carries on), mirrored to
