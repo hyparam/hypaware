@@ -244,6 +244,17 @@ LLP 0322's consequences promised it would not.
 - `hyp query` under a standing failure prints two stderr lines instead of one:
   the LLP 0321 warning and the reason. Scripts parsing stderr for the exact
   old text still match it, since that line is unchanged.
+- The reason reaches the MCP tool result too, not only a terminal.
+  `freshnessMessages` is a field of what `query_sql` and `grep` return from
+  `verb.operation`, and the stdio host serializes the whole result, so the
+  line rides along there as well. It is the first entry in that array whose
+  text varies with a local error rather than being a constant or a count, and
+  the MCP path pins `refresh` to `auto`, so the failure that produced it had
+  no route to a caller before. Accepted on the same ground as the terminal:
+  it is HypAware's own bounded, stripped error text about its own cache, the
+  host is local and stdio-only, and a caller who may read the rows may read
+  why the rows are incomplete. Any transport that is not local (the `--http`
+  host the stdio comment leaves room for) must decide this again.
 - The stamp gains a second production consumer (`reportRefreshCoolingDown`)
   beside the status collector, and `PendingInfo.flushFailureMessage` stops
   being a field only tests read.
