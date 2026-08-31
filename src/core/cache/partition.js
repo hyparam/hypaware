@@ -298,7 +298,12 @@ export function clearEscapeReport(partitionDir) {
  * It reports that the refusal cleared, not that the partition is well: two
  * of the three exits are an absent or unparseable `cursor.json`, which
  * still reads as unreadable. The escape condition ending is exactly the
- * fact the warn armed, and all this line retracts.
+ * fact the warn armed, and all this line retracts. The wording carries
+ * that: a read can fail for reasons that have nothing to do with the
+ * cursor's contents (an EACCES on `cursor.json`, an `lstat` the symlink
+ * check fails open on), and the identical poison can still be sitting on
+ * disk under it. Saying the `tableDir` no longer escapes would be a claim
+ * about the file this read never got to look at.
  *
  * @ref LLP 0334#recovery-is-announced [implements]: the read that clears an armed refusal says so, so silence after a refusal means the condition still stands.
  * @param {string} partitionDir
@@ -311,7 +316,7 @@ function noteEscapeCleared(partitionDir) {
   if (!clearEscapeReport(partitionDir)) return
   try {
     getLogger('cache', { mirrorStderr: true }).info(
-      'cursor.tableDir no longer escapes its partition; the containment refusal for this partition has cleared',
+      'the cursor containment refusal for this partition has cleared; this read did not refuse for escape',
       {
         [Attr.OPERATION]: 'cache.cursor_read',
         [Attr.STATUS]: 'ok',

@@ -268,3 +268,36 @@ test('a legacy partition the migration retires while poisoned warns again when i
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+test('a retraction forced by an unreadable cursor does not claim the poison is gone', { skip: process.getuid?.() === 0 && 'root reads through mode 000' }, async () => {
+  // A read can stop refusing for reasons that say nothing about the cursor's
+  // contents: an EACCES on `cursor.json` here, an `lstat` the symlink check
+  // fails open on elsewhere. The clear is still right (the escape condition
+  // is not proven, so it may not be throttled against), but the line may not
+  // certify a partition it never got to read (LLP 0334#recovery-is-announced).
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-escape-eacces-'))
+  try {
+    const partition = path.join(root, 'source=claude')
+    await fs.mkdir(partition, { recursive: true })
+    await writePoisonedCursor(partition, '../out')
+    assert.equal((await linesFrom(() => { tryReadCursorSync(partition) }, REFUSAL)).length, 1)
+
+    await fs.chmod(path.join(partition, 'cursor.json'), 0o000)
+    const retracted = await linesFrom(() => {
+      assert.equal(tryReadCursorSync(partition), null, 'an unreadable cursor still reads as unreadable')
+    }, RECOVERY)
+    await fs.chmod(path.join(partition, 'cursor.json'), 0o644)
+    assert.equal(retracted.length, 1, 'the armed refusal is retracted, because the condition is no longer proven')
+    assert.doesNotMatch(
+      retracted[0],
+      /no longer escapes/,
+      'the identical poison is still on disk, so the line may not say the tableDir stopped escaping'
+    )
+
+    // And the proof that it may not: the same bytes, unread since the warn.
+    const again = await linesFrom(() => { assert.equal(tryReadCursorSync(partition), null) }, REFUSAL)
+    assert.equal(again.length, 1, 'the poison the retraction did not certify away is refused again at once')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})

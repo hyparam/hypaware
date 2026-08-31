@@ -98,7 +98,15 @@ only when a warn was armed, and resets. So:
   fact the warn armed and the whole of what the entry holds. Announcing
   only the fully healthy exit would leave the other two silent and the
   ambiguity intact for them, for the sake of a stronger claim this report
-  is not entitled to make.
+  is not entitled to make. The wording carries the same limit. A read can
+  stop refusing because it could not read at all, with the identical poison
+  still on disk under it: an EACCES on `cursor.json`, or an `lstat` the
+  symlink check fails open on by LLP 0326#positive-evidence. Clearing is
+  still right there, because the escape condition is no longer proven and an
+  unproven condition may not throttle. Saying the `tableDir` no longer
+  escapes would not be: it is a claim about a file this read never saw. So
+  the line says the refusal cleared and that this read did not refuse for
+  escape, and stops.
 - **The delete happens whether or not the line does.** The emit is guarded
   like the refusal's, and the entry is gone before it runs. An entry kept
   alive by a throwing log channel would throttle the next genuine refusal
@@ -145,6 +153,9 @@ tested in the direction of silence:
   clear, so the next refusal in the same window warns. Asserted through a
   `process.stderr.write` that throws, because with no provider installed the
   mirror is the whole emit.
+- The retraction's claim: a refusal cleared by a `cursor.json` the process
+  cannot read is retracted, the line does not say the escape ended, and the
+  next readable read refuses the same bytes again at once.
 
 ## Consequences {#consequences}
 
