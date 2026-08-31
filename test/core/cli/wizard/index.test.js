@@ -462,6 +462,28 @@ test('runInitWizard: the sync-scope step receives the locked descriptors so it c
   assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor])
 })
 
+// The new-folder question's title names the tools whose sessions raise it
+// (LLP 0200 #wizard). A source the user sent local-only one screen earlier
+// never reaches the server from any folder, so naming it would promise
+// "syncs without asking" for a client that syncs nothing at all. Locked
+// rows always sync (LLP 0188 #locked) and are never filtered.
+// @ref LLP 0200#wizard [tests]: the title names the syncing rows, not the ones the sync menu just opted out
+test('runInitWizard: the new-folder title drops the sources the sync step opted out, and keeps the locked ones', async () => {
+  const catalog = emptyCatalog()
+  const claude = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
+  const codex = { plugin: '@hypaware/codex', id: 'codex', label: 'Codex' }
+  const openclaw = { plugin: '@hypaware/openclaw', id: 'openclaw', label: 'OpenClaw' }
+  catalog.pickerDescriptors.set('claude', claude)
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog,
+    pick: async () => pickResult({ lockedSources: ['claude'], descriptors: [codex, openclaw] }),
+    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: ['codex'] } },
+  })
+  await runInitWizard(opts)
+  assert.deepEqual(opts._folderOpts.names, ['Claude Code', 'OpenClaw'])
+})
+
 // The whole sync picture is the *visible* whole picture. `raw-anthropic` and
 // `raw-openai` are hidden (LLP 0202) and owned by `@hypaware/ai-gateway`,
 // which the central layer declares on every enrolled machine - so without

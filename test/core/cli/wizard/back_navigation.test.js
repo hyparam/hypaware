@@ -224,6 +224,26 @@ test('runWizardSyncScope: back at the menu propagates and leaves the store unwri
   await assert.rejects(fs.access(clientSyncListPath(stateDir)), 'a backed-out lane writes nothing')
 })
 
+// The sibling of the pick lane's "no screen exists behind this prompt"
+// case. While the sync menu was the lane's *second* screen its back always
+// had the lane's own gate to return to, so it offered back unconditionally;
+// with that gate retired (LLP 0201 #decline) the menu's back propagates
+// out, and a back with no target must not be offered at all.
+// @ref LLP 0191#lane-loops [tests]: the sync menu offers back only on the orchestrator's opt-in
+test('runWizardSyncScope: without allowBack the menu offers no back', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-back-sync-noback-'))
+  const env = { HYP_HOME: hypHome }
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env,
+    candidates: [descriptor('claude')],
+    prompt: async (/** @type {any} */ q) => {
+      assert.equal(q.allowBack, undefined, 'no screen exists behind this prompt')
+      return ['claude']
+    },
+  }))
+  assert.deepEqual(result, { optedOut: [] })
+})
+
 // --- the orchestrator: step-level edges ---
 
 /** Minimal empty catalog so the orchestrator never discovers real plugins. */

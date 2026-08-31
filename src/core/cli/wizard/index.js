@@ -584,8 +584,17 @@ export async function runInitWizard(opts) {
               // The title names the tools whose sessions raise the question:
               // this run's recorded rows, through the same display filter as
               // the sync lane, so a hidden row (LLP 0202) stays unnamed here
-              // too.
-              names: [...lockedDescriptors, ...candidateDescriptors].map((d) => d.label),
+              // too - minus the candidates the answer one screen back just
+              // sent local-only. The question is about what happens to a new
+              // folder's rows on the way to the server, and an opted-out
+              // source has no such way: naming it would promise "syncs
+              // without asking" for a client the user just stopped syncing
+              // at all. Locked rows always sync (LLP 0188 #locked), so they
+              // are never filtered.
+              names: [
+                ...lockedDescriptors,
+                ...candidateDescriptors.filter((d) => !sourcesOptedOut.includes(d.id)),
+              ].map((d) => d.label),
               ...(foldersProgress ? { progress: foldersProgress } : {}),
               ...(opts.confirm ? { confirm: opts.confirm } : {}),
               ...(express ? { autoAccept: true } : {}),

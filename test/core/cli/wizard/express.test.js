@@ -79,7 +79,7 @@ test('the accept row names the tools in its own summary; nothing rides the items
   // @ref LLP 0190#pick-gate [tests]: the happy-path accept row still discloses that accepting configures the listed tools
   assert.equal(
     state.question.options[0].summary,
-    'Configures Claude Code and Codex to record AI logs through HypAware.'
+    'Configures Claude Code and Codex to record through HypAware.'
   )
   // The decline row glosses the questions it opens (LLP 0201 #decline):
   // the menus, linearly, not another round of gates.
@@ -102,7 +102,7 @@ test('the gate claims a server only when told it has one', async () => {
   // the tool just the same, so only the sync claim drops.
   assert.equal(
     state.question.options[0].summary,
-    'Configures Claude Code to record AI logs through HypAware.'
+    'Configures Claude Code to record through HypAware.'
   )
   assert.doesNotMatch(state.question.options[0].summary, /sync/i)
   assert.equal(state.question.options[1].summary, 'Choose what to record.')

@@ -60,7 +60,7 @@ export async function runWizardExpressGate(opts) {
           // the specifics (attach, config writes, helper skills, the
           // OTLP receiver), so dropping it here drops it everywhere.
           // @ref LLP 0190#pick-gate [implements]: the happy path's accept row carries the one-line configures-your-tools disclosure
-          summary: `Configures ${joinNames(opts.rows)} to record AI logs through HypAware.`,
+          summary: `Configures ${joinNames(opts.rows)} to record through HypAware.`,
         },
         {
           value: 'choose',

@@ -132,6 +132,10 @@ test('non-TTY: opening the menu and pressing enter keeps the defaults, not opt-e
     stdout, stderr: makeBuf(), env,
     stdin: input,
     candidates: [descriptor('openclaw'), descriptor('hermes')],
+    // The orchestrator always offers back here (the pick lane is behind
+    // this one), and the fallback's enter-hint is worded per that flag, so
+    // the realistic screen is the one with it.
+    allowBack: true,
   }))
 
   assert.deepEqual(result, { optedOut: [] })

@@ -119,7 +119,7 @@ test('renderSelect: an option summary lands on its own indented line under its r
     kind: 'select',
     title: 'Set up recording',
     options: [
-      { value: 'defaults', label: 'Record and sync everything', summary: 'Configures Claude Code to record AI logs through HypAware.' },
+      { value: 'defaults', label: 'Record and sync everything', summary: 'Configures Claude Code to record through HypAware.' },
       { value: 'choose', label: 'Customize', summary: 'Choose what to record and what syncs.' },
     ],
     cursor: 0,
@@ -129,7 +129,7 @@ test('renderSelect: an option summary lands on its own indented line under its r
 
   const cursorRow = lines.findIndex((l) => l.trim() === '> Record and sync everything')
   assert.notEqual(cursorRow, -1, 'the cursor row rendered')
-  assert.equal(lines[cursorRow + 1], '    Configures Claude Code to record AI logs through HypAware.')
+  assert.equal(lines[cursorRow + 1], '    Configures Claude Code to record through HypAware.')
 
   // Rows the cursor is not on disclose too: the summary is documentation of
   // the row, not a property of the selection.
@@ -143,13 +143,13 @@ test('renderSelect: the summary line is dim, not the row colour', () => {
   const state = {
     kind: 'select',
     title: 'Set up recording',
-    options: [{ value: 'defaults', label: 'Record and sync everything', summary: 'Configures Claude Code to record AI logs through HypAware.' }],
+    options: [{ value: 'defaults', label: 'Record and sync everything', summary: 'Configures Claude Code to record through HypAware.' }],
     cursor: 0,
     status: 'active',
   }
   const summaryLine = render(state, { color: true })
     .split('\n')
-    .find((l) => l.includes('Configures Claude Code to record AI logs through HypAware.'))
+    .find((l) => l.includes('Configures Claude Code to record through HypAware.'))
   assert.ok(summaryLine, 'the summary reached the coloured frame too')
   assert.match(summaryLine, /\x1b\[2m/, 'summaries render dim (LLP 0189 palette)')
 })

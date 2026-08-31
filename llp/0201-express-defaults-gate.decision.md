@@ -48,7 +48,7 @@ whenever seeding yields default rows:
 ```
 Set up recording
 > Record and sync everything
-    Configures Claude Code and Codex to record AI logs through HypAware.
+    Configures Claude Code and Codex to record through HypAware.
   Customize
     Choose what to record and what syncs.
 ```

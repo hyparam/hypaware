@@ -730,11 +730,16 @@ export interface RunInitWizardOptions {
   express?: (opts: RunWizardExpressGateOptions) => Promise<WizardExpressChoice>
   configure?: (picked: ConfigurePhasePicked, opts: RunConfigurePhaseOptions) => Promise<ConfigurePhaseResult>
   finaleRunner?: (args: Record<string, unknown>) => Promise<FinaleSummary>
-  /** Pick-phase prompt seams, threaded through unchanged (tests). */
+  /**
+   * Multiselect seam, threaded unchanged to both menu lanes - pick and
+   * sync (tests). They are told apart by `pickType`.
+   */
   prompt?: AsyncPickPrompt
   /**
-   * Defaults-gate seam, threaded to the pick and sync lanes and used for
-   * the managed-local disconnect question (tests).
+   * Confirm-select seam, threaded to the express gate and the new-folder
+   * question and used for the managed-local disconnect question (tests).
+   * The pick and sync lanes no longer take one: their defaults gates are
+   * retired (LLP 0201 #decline) and they ask through `prompt` alone.
    */
   confirm?: AsyncConfirmSelectPrompt
   /**

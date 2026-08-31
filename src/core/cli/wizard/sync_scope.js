@@ -273,8 +273,14 @@ async function promptSyncScopeSelection({ opts, ask, optedOutBefore }) {
           ...(optedOutBefore.has(d.id) ? {} : { checked: true }),
         })),
       ],
-      // The pick lane is always behind this one.
-      allowBack: true,
+      // The orchestrator's opt-in, not a constant: this menu used to be
+      // the lane's *second* screen, so its back always had the lane's own
+      // gate to return to. With that gate retired (LLP 0201 #decline) the
+      // menu is the lane's only screen, and a back it offers propagates
+      // out - so it may only be offered where the caller said there is a
+      // previous step, exactly as the pick lane does it.
+      // @ref LLP 0191#lane-loops [implements]: the lane's only screen offers back only when the orchestrator said there is somewhere to go
+      ...(opts.allowBack ? { allowBack: true } : {}),
       // In this menu checked means "syncs", so the numbered non-TTY
       // fallback must keep the checked rows on a bare enter; its
       // historical enter-selects-none would silently opt every
