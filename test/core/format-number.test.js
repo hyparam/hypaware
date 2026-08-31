@@ -2,6 +2,9 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { groupThousands } from '../../src/core/util/format_number.js'
 
@@ -53,4 +56,50 @@ test('groupThousands: past the integer range the digits run out, and it says so'
   // assertion no locale can satisfy - every `Intl` route spells 1e21 out in
   // full digits.
   assert.equal(groupThousands(1e21), '1e+21')
+})
+
+// The assertions above pin `groupThousands`. They cannot pin that the two
+// surfaces which render counts to a person still go through it: `formatCount`
+// in `src/core/commands/sync.js` is a one-line delegation, and rewriting it as
+// `n.toLocaleString()` (the "drop the redundant wrapper" edit) leaves the whole
+// suite green on any box whose locale groups like `en-US`, which is every CI
+// runner and the machine that would make the edit. A German-locale user then
+// reads `1.234 rows pending` on the surface that asks for egress consent.
+//
+// That is #1117 exactly, moved up one level from the formatter to its caller,
+// so it needs a gate one level up too. Written as a property of the source
+// rather than of a rendered string on purpose: an assertion that reads the
+// output can only tell the two spellings apart on a box whose locale differs
+// from `en-US`, which is the environment-conditional pin #1121 set out to
+// retire. This one reds on every machine and under every ICU build, including
+// the `small-icu` and `--without-intl` ones that have no `de-DE` to render
+// differently.
+
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
+
+/**
+ * The modules that render a count for a reader. Both already spell their
+ * timestamps with `toISOString`, and the one deliberately local-time rendering
+ * in `hyp sync` lives behind `formatFirstSyncDeadline` in
+ * `src/core/usage-policy/first_sync_hold.js`, so neither module has a standing
+ * reason to ask the host how to format anything.
+ */
+const COUNT_RENDERERS = ['src/core/commands/sync.js', 'src/core/query/overview.js']
+
+/** Every route from these modules to the host's own formatting. */
+const HOST_FORMATTING = /toLocaleString|Intl\.(NumberFormat|DateTimeFormat)/
+
+test('the surfaces that render counts ask the host nothing', async () => {
+  for (const rel of COUNT_RENDERERS) {
+    const source = await fs.readFile(path.join(REPO_ROOT, rel), 'utf8')
+    const offenders = source
+      .split('\n')
+      .map((line, i) => ({ line, at: `${rel}:${i + 1}` }))
+      .filter(({ line }) => HOST_FORMATTING.test(line))
+    assert.deepEqual(
+      offenders.map(({ at, line }) => `${at}: ${line.trim()}`),
+      [],
+      `${rel} formats through the host; render counts with groupThousands and local times with formatFirstSyncDeadline`
+    )
+  }
 })
