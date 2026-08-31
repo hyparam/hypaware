@@ -307,6 +307,35 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
   assert.notEqual(volume.rows, 250000)
 })
 
+test('a four-digit backlog is grouped for a reader, not printed as a bare integer', async () => {
+  // `formatCount` pins `en-US` grouping so the same backlog cannot render as
+  // `1.234` on one machine and `1,234` on another, and the only assertion that
+  // ever put a separator in front of it was the scan-limit case above, back
+  // when it read `at least 200,000 rows pending` off `runSync`. That case now
+  // counts through `previewPendingRows` and never reaches the renderer
+  // (#1105), so the grouping is pinned here instead, on the cheapest fixture
+  // that has four digits in it. This still counts against the real clock, as
+  // every `runSync` case in this file does, but a four-digit fixture is two
+  // orders of magnitude smaller than the 250,000-row one whose margin against
+  // the 3000ms budget load could close.
+  const hypHome = await makeHome('grouped')
+  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks,
+    storage: fakeStorage({
+      hypHome,
+      entries: Array.from({ length: 1234 }, (_, i) => ({ seq: i + 1 })),
+    }),
+  })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /1,234 rows pending, the full local history/)
+  assert.doesNotMatch(stdout.text, /1234 rows pending/, 'a count a person has to read is grouped, not a bare integer')
+})
+
 test('a count that cannot be taken says unknown, never zero', async () => {
   const hypHome = await makeHome('unknown')
   const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
