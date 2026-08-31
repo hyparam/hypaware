@@ -74,10 +74,21 @@ export async function runWizardSyncScope(opts) {
     existing = (await readClientSyncEntries({ stateDir })) ?? []
   } catch (err) {
     if (!(err instanceof ClientSyncListUnreadableError)) throw err
-    opts.stderr.write(
-      `warning: the client policy store at '${clientSyncListPath(stateDir)}' is unreadable; ` +
-      'skipping the sync-scope step (exports fail until it is repaired or removed)\n'
-    )
+    // This arm's documented contract is to warn and skip rather than
+    // fail the run, and the warning write was the one way it could
+    // still fail it. Best-effort, like the folder-ask lane's arms: a
+    // warning that cannot be written must not unmake the skip it
+    // qualifies. The facts it carries are not lost with it - the
+    // export seam fails closed on this store and `hyp status` names it.
+    // @ref LLP 0341#warnings [implements]: a warn-and-continue arm guards its own warning so its contract holds for direct callers too
+    try {
+      opts.stderr.write(
+        `warning: the client policy store at '${clientSyncListPath(stateDir)}' is unreadable; ` +
+        'skipping the sync-scope step (exports fail until it is repaired or removed)\n'
+      )
+    } catch {
+      // best-effort: stderr might be closed during cleanup
+    }
     return await finishSpan({ skipped: true, noQuestion: true, optedOut: [] }, opts)
   }
 

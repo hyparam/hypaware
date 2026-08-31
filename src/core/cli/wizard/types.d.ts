@@ -671,6 +671,42 @@ export interface RunWizardFirstAskOptions {
 }
 
 /**
+ * One of the wizard's two output streams, as the stream guard (LLP 0341)
+ * accepts and returns it: the same union every lane option declares,
+ * with the two read-only properties the prompt runtime consults.
+ */
+export type WizardOutputSink = NodeJS.WritableStream | {
+  write(chunk: string): unknown
+  readonly isTTY?: boolean | undefined
+  readonly columns?: number | undefined
+}
+
+/**
+ * The wizard's stream guard (LLP 0341 #absorb): wrapped sinks whose
+ * writes never throw, plus the orchestrator's boundary check.
+ */
+export interface WizardOutputGuard {
+  /** The wrapped consent surface; hand this to every lane. */
+  stdout: WizardOutputSink
+  /** The wrapped qualifier stream; hand this to every lane. */
+  stderr: WizardOutputSink
+  /** Whether stdout is already known dead, without settling. */
+  outputDead(): boolean
+  /**
+   * The boundary check: settle stdout's pending writes (bounded), then
+   * report whether the consent surface is still alive. False means the
+   * run must end as a cancel (LLP 0341 #dead-surface).
+   */
+  checkpoint(): Promise<boolean>
+  /**
+   * Remove the guard's `error` listeners from the caller's streams. The
+   * run owns them only while it is running; call this when it ends,
+   * however it ends.
+   */
+  detach(): void
+}
+
+/**
  * Options for `runInitWizard`, the fork -> join -> pick -> configure ->
  * privacy -> finale orchestrator (LLP 0135 #orchestration). Non-interactive
  * callers (`--yes`, `--dry-run`, presets, `--from-file`) set `picks` and the

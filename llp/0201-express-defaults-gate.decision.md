@@ -5,7 +5,7 @@
 **Systems:** Onboarding, CLI
 **Author:** Brendan / Kenny / Claude
 **Date:** 2026-08-07 (revised 2026-08-31)
-**Related:** LLP 0190 (#pick-gate, #sync-gate: the per-lane defaults gates this retires; the menu semantics there are untouched), LLP 0188 (#never-silent: the floor this must not breach), LLP 0200 (#wizard: the third lane it answers), LLP 0135 (#progress, #orchestration), LLP 0131 (#attended-only), LLP 0129 (#fork), LLP 0191 (#back-edges)
+**Related:** LLP 0190 (#pick-gate, #sync-gate: the per-lane defaults gates this retires; the menu semantics there are untouched), LLP 0188 (#never-silent: the floor this must not breach), LLP 0200 (#wizard: the third lane it answers), LLP 0135 (#progress, #orchestration), LLP 0131 (#attended-only), LLP 0129 (#fork), LLP 0191 (#back-edges), LLP 0341 (a dead output stream ends the run as a cancel)
 
 > Extends [LLP 0190](./0190-wizard-defaults-gate.decision.md) and retires
 > its per-lane gates. The wizard asks "accept the defaults?" exactly once,
@@ -172,7 +172,11 @@ before the warning rather than after it: stdout and stderr are one
 terminal on an attended run, so a warning written first sits inside the
 sentence instead of under it. The "could not record" half stays on stderr
 and the recorded form's "change later with ..." tail is not repeated, so
-an unrecorded answer never reads like a recorded one.
+an unrecorded answer never reads like a recorded one. The failure this
+arm cannot absorb - the output stream itself dying - is settled run-wide
+by [LLP 0341](./0341-a-dead-consent-surface-ends-the-run-as-a-cancel.decision.md):
+lane writes never throw, and a dead stdout cancels the run at the next
+boundary.
 
 **The narration is blocked, not streamed.** Each statement is led by a
 blank line and its detail is indented under a title, because on this path

@@ -7,6 +7,10 @@
 **Extended-by:** [LLP 0338](./0338-a-question-lane-counts-even-with-nothing-to-ask.decision.md)
 (#progress: a lane the pathway runs keeps its position line and its place in
 the denominator even on a machine where it turns out to have nothing to ask)
+**Extended-by:** [LLP 0341](./0341-a-dead-consent-surface-ends-the-run-as-a-cancel.decision.md)
+(#orchestration: when the run's stdout dies, the orchestrator ends the run
+as a cancel at the next lane or phase boundary instead of crashing on the
+next write)
 **Related:** LLP 0128, LLP 0129, LLP 0130, LLP 0131, LLP 0132, LLP 0133, LLP 0134, LLP 0005, LLP 0011, LLP 0025, LLP 0031, LLP 0037, LLP 0044, LLP 0058, LLP 0062, LLP 0063, LLP 0070, LLP 0100, LLP 0101, LLP 0114, LLP 0115, LLP 0116, LLP 0117, LLP 0120
 
 > Buildable design for the six-phase `hyp init` wizard (Fork -> Join -> Pick ->
@@ -162,6 +166,13 @@ sites share it:
 > escape at a question lane returns to the lane before it, with a
 > completed join reused rather than re-run. The forward flow and every
 > phase's contract are unchanged.
+
+> **Extended-by [LLP 0341](./0341-a-dead-consent-surface-ends-the-run-as-a-cancel.decision.md):**
+> the sequence below assumes a live output stream. When stdout dies
+> mid-run, the orchestrator's stream guard absorbs the failure and the
+> run ends as a cancel at the next lane or phase boundary; warnings on
+> stderr are best-effort everywhere. The forward flow on a healthy
+> stream is unchanged.
 
 `runInitWizard(opts)` (`src/core/cli/wizard/index.js`) replaces
 `runPickerWalkthrough` as `runInit`'s entry point for the interactive case

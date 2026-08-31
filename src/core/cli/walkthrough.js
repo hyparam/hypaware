@@ -1577,6 +1577,13 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  * config takes effect), and `skipAttachClients` names picked clients the
  * join lane already attached.
  *
+ * `checkBoundary` is that same caller's boundary check (LLP 0341
+ * #dead-surface), threaded in because the finale is one *step* but
+ * several acts, and the backfill consent question sits behind three of
+ * them. A caller that has a consent surface to lose passes it; the
+ * standalone picker walkthrough has no guard and passes nothing, which
+ * leaves the question exactly as it was.
+ *
  * @param {{
  *   finale: PickerFinaleActions,
  *   clientsPicked: string[],
@@ -1596,6 +1603,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   stdin?: NodeJS.ReadableStream,
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
+ *   checkBoundary?: () => Promise<boolean>,
  *   skipAttachClients?: Set<string>,
  *   progress?: string,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
@@ -1867,6 +1875,7 @@ export async function runPickerFinale(args) {
   await runFinaleBackfill({
     ...(args.backfill ? { backfill: args.backfill } : {}),
     ...(args.backfillConsentPrompt ? { backfillConsentPrompt: args.backfillConsentPrompt } : {}),
+    ...(args.checkBoundary ? { checkBoundary: args.checkBoundary } : {}),
     clientsPicked,
     interactive: args.interactive,
     dryRun,
@@ -2059,6 +2068,7 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
  * @param {{
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
+ *   checkBoundary?: () => Promise<boolean>,
  *   clientsPicked: string[],
  *   interactive: boolean,
  *   dryRun: boolean,
@@ -2090,18 +2100,31 @@ async function runFinaleBackfill(args) {
   let consent = true
   let cancelled = false
   if (interactive && asked.length > 0) {
-    const ask = args.backfillConsentPrompt ?? defaultBackfillConsentPromptFactory({
-      ...(args.stdin ? { stdin: args.stdin } : {}),
-      stdout,
-      env,
-    })
-    try {
-      consent = await ask({ providers: asked, retentionDays })
-    } catch (err) {
-      if (!isPromptCancelledError(err)) throw err
-      cancelled = true
+    // The last consent question in the run, and the only one inside the
+    // finale: the install, the attach, and the asset copy above it have
+    // each narrated first, so the surface can die between the caller's
+    // pre-finale boundary and this line. Both default prompts answer an
+    // unreadable question with yes (the select's cursor starts on "Yes";
+    // the `[Y/n]` line reads EOF as the bare enter it advertised), and
+    // what that yes buys is an import of the user's local transcript
+    // history. A surface nobody can read declines it instead.
+    // @ref LLP 0341#dead-surface [implements]: the backfill consent does not open on a dead surface, and a dead surface is a decline rather than the default it never printed
+    if (args.checkBoundary && !(await args.checkBoundary())) {
       consent = false
-      summary.cancelled = true
+    } else {
+      const ask = args.backfillConsentPrompt ?? defaultBackfillConsentPromptFactory({
+        ...(args.stdin ? { stdin: args.stdin } : {}),
+        stdout,
+        env,
+      })
+      try {
+        consent = await ask({ providers: asked, retentionDays })
+      } catch (err) {
+        if (!isPromptCancelledError(err)) throw err
+        cancelled = true
+        consent = false
+        summary.cancelled = true
+      }
     }
   }
 
