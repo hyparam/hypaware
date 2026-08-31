@@ -798,6 +798,38 @@ test('overviewRunnerFromCtx: a failed refresh routes apart from the debounce lin
   )
 })
 
+test('overviewRunnerFromCtx: distinct failure reasons each surface once - the dedupe is byte-identical, not by prefix', async () => {
+  // One runner, many run() calls, and the failing cause differs between
+  // them. Each distinct reason is real information the person repairing the
+  // cache needs, so the runner's `said` set keeps them all and drops only
+  // exact repeats; collapsing to the first would hide cause B until cause A
+  // was repaired.
+  // @ref LLP 0333#overview-keeps-distinct-reasons [tests]: one reason line per distinct cause, not one per overview
+  const { ctx } = ctxWithRows()
+  const dataset = ctx.query.getDataset(OVERVIEW_DATASET)
+  dataset.discoverPartitions = async () => [{ tablePath: '/cache/ai_gateway_messages' }]
+  let calls = 0
+  ctx.storage = {
+    cacheRoot: '/cache',
+    pendingInfo: async () => ({ pending: true, pendingBytes: 1, lastFlushAtMs: null }),
+    flushTable: async () => {
+      calls += 1
+      throw new Error(calls === 1 ? 'ENOSPC: no space left on device' : 'EACCES: permission denied')
+    },
+  }
+  /** @type {{ kind: string, line: string }[]} */
+  const notices = []
+  const runner = overviewRunnerFromCtx(ctx, (notice) => notices.push(notice))
+  assert.ok(runner)
+  await collectOverview(runner)
+
+  const lines = notices.map((n) => n.line)
+  assert.equal(lines.filter((l) => l === `${AUTO_REFRESH_FAILURE_MESSAGE}\n`).length, 1)
+  assert.equal(lines.filter((l) => l === `${REFRESH_FAILURE_REASON_PREFIX}ENOSPC: no space left on device\n`).length, 1)
+  assert.equal(lines.filter((l) => l === `${REFRESH_FAILURE_REASON_PREFIX}EACCES: permission denied\n`).length, 1)
+  assert.equal(lines.length, 3, 'nothing repeats, nothing else rides along')
+})
+
 test('overviewRunnerFromCtx: no query registry yields no runner', () => {
   assert.equal(overviewRunnerFromCtx(/** @type {any} */ ({})), undefined)
   assert.equal(overviewRunnerFromCtx(/** @type {any} */ ({ query: {} })), undefined)

@@ -9,6 +9,11 @@
 **Extends:** [LLP 0322](./0322-a-failed-automatic-refresh-cools-down-and-is-visible.decision.md)
 (the stamp it minted as pacing state is now also rendered to the operator,
 without gaining any new meaning)
+**Extended-by:** LLP 0333 (#every-table-before-failure: the advertised retry
+now reaches every registered table in one run; #attempt-tense: the
+diagnostic's message states the stamp's assertion instead of "is failing";
+#overview-keeps-distinct-reasons: the overview's one-reason-per-cause
+rendering is settled as intended)
 **Related:** LLP 0225 (the prose-versus-values plane split applied here), LLP
 0228 (#last-tick-only: the count-plus-pointer shape the cap follows), LLP 0321
 (the degrade whose warning gains a reason), LLP 0257 (#status-and-health: the

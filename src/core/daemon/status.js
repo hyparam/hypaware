@@ -1811,10 +1811,18 @@ export async function collectHypAwareStatus(opts = {}) {
     // stamp on an undeclared or deactivated table is counted here and
     // cleared by neither command.
     // @ref LLP 0330#warning-diagnostic [implements]: a standing flush failure is a warning with a repair, not a degraded install
+    //
+    // Attempt tense, not "is failing": the stamp asserts that the last
+    // attempt failed and no attempt has completed since (LLP 0322#clearing),
+    // and it cannot witness an ongoing condition - the cause may be fixed
+    // with nothing retried yet. `stillCoolingDown` stays out of the message:
+    // it is per-table state a one-line summary over N tables cannot claim,
+    // and the capture-health line above renders it per table.
+    // @ref LLP 0333#attempt-tense [implements]: the message states the stamp's assertion, nothing more current
     diagnostics.push({
       severity: 'warning',
       kind: 'cache_flush_failing',
-      message: `spool-to-cache flush is failing for ${cacheFlushFailuresTotal} table${one ? '' : 's'} (newest: ${cacheFlushFailures[0]?.table ?? 'unknown'})`,
+      message: `last spool-to-cache flush attempt failed for ${cacheFlushFailuresTotal} table${one ? '' : 's'} (newest: ${cacheFlushFailures[0]?.table ?? 'unknown'})`,
       repair: [
         'hyp status --json',
         'hyp query refresh',

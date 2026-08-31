@@ -290,8 +290,27 @@ export function createCacheSpool(args) {
         droppedCount: 0,
         reason: opts.reason ?? 'manual',
       }
+      // Every table gets its attempt before the first error surfaces: a
+      // failing table must not strand the flush (and the stamp refresh,
+      // via `flushTable` above) of every table behind it in iteration
+      // order. Callers keep the throw-on-failure contract they had; only
+      // the abort order changes.
+      // @ref LLP 0333#every-table-before-failure [implements]: attempt every table, then rethrow the first error
+      let failed = false
+      /** @type {unknown} */
+      let firstError
       for (const tablePath of tables) {
-        const result = await this.flushTable(tablePath, opts)
+        /** @type {FlushResult} */
+        let result
+        try {
+          result = await this.flushTable(tablePath, opts)
+        } catch (err) {
+          if (!failed) {
+            failed = true
+            firstError = err
+          }
+          continue
+        }
         total.flushed ||= result.flushed
         total.rowCount += result.rowCount
         total.chunkCount += result.chunkCount
@@ -300,6 +319,7 @@ export function createCacheSpool(args) {
         total.malformedCount += result.malformedCount
         total.droppedCount += result.droppedCount
       }
+      if (failed) throw firstError
       return total
     },
 
