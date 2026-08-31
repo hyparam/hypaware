@@ -196,3 +196,11 @@ reaches the table behind a failing one and rethrows the first error;
 the diagnostic message carries the attempt-tense wording; and one overview
 runner surfaces two distinct reasons from two failing datasets exactly once
 each.
+
+The N-table incident this document is written for gets its own two pins,
+because a single failure only proves the loop does not break on a throw and
+not that the pass survives the failure after that: a refresh over two
+failing tables either side of a healthy one reports both causes on separate
+stderr lines and counts two in the summary, and a `flushAll` over the same
+shape flushes both healthy tables, stamps both failing ones in the one pass,
+and still rethrows the first error.
