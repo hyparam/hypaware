@@ -165,6 +165,12 @@ export interface RunWizardFolderAskOptions {
   /** The step's position line, rendered like the other lanes'. */
   progress?: string
   /**
+   * Plain tool names for the question's title ("When opening Claude Code
+   * or Codex in a new project,"): the run's picked and locked rows.
+   * Empty or absent falls back to the tool-free phrasing.
+   */
+  names?: string[]
+  /**
    * Offer back-navigation out of the lane (LLP 0191): escape returns
    * `back: true` and the orchestrator re-presents the sync lane.
    */

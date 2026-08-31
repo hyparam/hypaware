@@ -152,7 +152,8 @@ test('the new-folder lane auto-accepts to the default and records it', async () 
 
   assert.deepEqual(result, { mode: 'sync' })
   assert.equal(await readFolderAskMode({ stateDir }), 'sync')
-  assert.match(stdout.text(), /When you start a session in a new folder:/)
+  // No names threaded here, so the title takes the tool-free fallback.
+  assert.match(stdout.text(), /When starting a session in a new project,/)
 })
 
 test('narrateAcceptedGate prints the gate title and its items verbatim, led by a blank line', () => {

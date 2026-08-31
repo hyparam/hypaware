@@ -581,6 +581,11 @@ export async function runInitWizard(opts) {
               stderr: opts.stderr,
               ...(opts.stdin ? { stdin: opts.stdin } : {}),
               env: opts.env,
+              // The title names the tools whose sessions raise the question:
+              // this run's recorded rows, through the same display filter as
+              // the sync lane, so a hidden row (LLP 0202) stays unnamed here
+              // too.
+              names: [...lockedDescriptors, ...candidateDescriptors].map((d) => d.label),
               ...(foldersProgress ? { progress: foldersProgress } : {}),
               ...(opts.confirm ? { confirm: opts.confirm } : {}),
               ...(express ? { autoAccept: true } : {}),

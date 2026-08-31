@@ -5,38 +5,51 @@ import { readObservabilityEnv } from '../../observability/env.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
 import { DEFAULT_FOLDER_ASK_MODE, readFolderAskModeSafe, writeFolderAskMode } from '../../usage-policy/index.js'
-import { narrateAcceptedGate } from './express.js'
+import { joinNames, narrateAcceptedGate } from './express.js'
 
 /**
  * @import { RunWizardFolderAskOptions, WizardFolderAskResult } from '../../../../src/core/cli/wizard/types.js'
  * @import { FolderAskMode } from '../../../../src/core/usage-policy/types.js'
  */
 
-const FOLDER_ASK_TITLE = 'When you start a session in a new folder:'
+/**
+ * The question's title: a sentence lead-in the rows complete, naming the
+ * recorded tools so a first-time user knows what a "session" is. "or"
+ * because any one of them opening triggers the moment, not all at once.
+ * The names come from the run's own picks; a run that has none to offer
+ * falls back to the tool-free phrasing.
+ *
+ * @param {string[]} names
+ * @returns {string}
+ */
+export function folderAskTitle(names) {
+  return names.length > 0
+    ? `When opening ${joinNames(names, 'or')} in a new project,`
+    : 'When starting a session in a new project,'
+}
 
 /**
  * The two answers, in display order. Sync leads because it is the default
- * (LLP 0200 #default): a bare enter is "all my folders sync", which is the
+ * (LLP 0200 #default): a bare enter is "new folders sync", which is the
  * answer most users on an enrolled machine already mean.
  *
- * The summaries carry the consequence rather than restating the label,
- * because this is the one screen where the per-folder question is either
- * bought or declined, and neither answer should be a surprise later: the
- * sync row names the per-folder verb that still exists, and the ask row
- * names what the interruption will look like.
+ * Each row is self-explaining (LLP 0201 #gate): the label completes the
+ * title's sentence, and the summary carries the consequence rather than
+ * restating the label, so neither answer is a surprise later. Nothing
+ * rides the items chrome above the key-hint line, which goes unread.
  *
  * @type {ReadonlyArray<{ value: FolderAskMode, label: string, summary: string }>}
  */
 export const FOLDER_ASK_OPTIONS = [
   {
     value: 'sync',
-    label: 'Sync them all',
-    summary: 'No question at session start; mark exceptions with hyp privacy set',
+    label: 'Sync it automatically',
+    summary: 'Recording from a new folder syncs without asking.',
   },
   {
     value: 'ask',
-    label: 'Ask me about each new folder',
-    summary: 'A session opened somewhere new asks once: sync, local-only, or ignore',
+    label: 'Ask me the first time',
+    summary: 'Your first session in a new folder asks: sync, keep it local, or ignore it.',
   },
 ]
 
@@ -69,20 +82,16 @@ export const FOLDER_ASK_OPTIONS = [
 export async function runWizardFolderAsk(opts) {
   const stateDir = readObservabilityEnv(opts.env).stateDir
   const before = await readFolderAskModeSafe({ stateDir })
-
-  // One short line, not a paragraph: the two rows below already say what
-  // each answer does, so the only thing left worth stating is the caveat
-  // that neither answer disturbs a folder the user already decided about.
-  const items = ['  Folders you already marked keep their class either way.']
+  const title = folderAskTitle(opts.names ?? [])
 
   // The express gate already answered this lane (LLP 0201): state the
   // question and its default answer, record it, and move on.
   // @ref LLP 0201#narrate [implements]: an auto-accepted question prints its statement instead of prompting
   if (opts.autoAccept) {
-    narrateAcceptedGate({ stdout: opts.stdout, title: FOLDER_ASK_TITLE, items })
-    // Inline: the block's title already said "New folders", so the answer
-    // belongs under it as one more indented line rather than as a second
-    // flush-left announcement repeating the subject.
+    narrateAcceptedGate({ stdout: opts.stdout, title })
+    // Inline: the title is a sentence lead-in still on screen, so the
+    // answer belongs under it as an indented line completing it rather
+    // than as a second flush-left announcement repeating the subject.
     return await recordAnswer(DEFAULT_FOLDER_ASK_MODE, { stateDir, before, opts, inline: true })
   }
 
@@ -91,9 +100,8 @@ export async function runWizardFolderAsk(opts) {
   let choice
   try {
     choice = await confirm({
-      title: FOLDER_ASK_TITLE,
+      title,
       ...(opts.progress ? { progress: opts.progress } : {}),
-      items,
       options: FOLDER_ASK_OPTIONS.map((o) => ({ value: o.value, label: o.label, summary: o.summary })),
       // A re-run defaults to the standing answer, so re-entering the wizard
       // round-trips the preference instead of resetting it.
@@ -151,7 +159,7 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
     : 'You will be asked once per new folder.'
   opts.stdout.write(
     inline
-      ? `  ${mode === 'sync' ? 'Syncing them all' : 'Asking about each one'}; change later with ${undo}\n`
+      ? `  ${mode === 'sync' ? 'it syncs automatically' : 'you are asked the first time'}; change later with ${undo}\n`
       : `${said}\n  change this later: ${undo}\n`
   )
   return await finishSpan({ mode }, opts)

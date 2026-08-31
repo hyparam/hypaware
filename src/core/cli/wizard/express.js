@@ -93,12 +93,14 @@ export async function runWizardExpressGate(opts) {
  * the per-row detail stays on the later screens and narrations.
  *
  * @param {string[]} names
+ * @param {string} [conjunction] joins the last name; "and" unless the
+ *   sentence wants "or" (the folder-ask title reads any-of, not all-of)
  * @returns {string}
  */
-export function joinNames(names) {
+export function joinNames(names, conjunction = 'and') {
   if (names.length <= 1) return names[0] ?? ''
-  if (names.length === 2) return `${names[0]} and ${names[1]}`
-  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`
+  if (names.length === 2) return `${names[0]} ${conjunction} ${names[1]}`
+  return `${names.slice(0, -1).join(', ')}, ${conjunction} ${names[names.length - 1]}`
 }
 
 /**

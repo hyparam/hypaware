@@ -742,7 +742,7 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
     '2',    // express gate (asked again on this pass): Customize
     '',     // pick menu: bare enter keeps the detected row checked (LLP 0274)
     '',     // sync menu: bare enter keeps everything syncing
-    '1',    // new folders: Sync them all
+    '1',    // new folders: Sync it automatically
   ])
   const stderr = makeBuf()
   let joinCalls = 0
