@@ -3,7 +3,7 @@
 import { JsonlLogRecordExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
 import { Attr, buildAttrs } from './attrs.js'
-import { logs, LoggerProvider, SeverityNumber } from './runtime.js'
+import { logs, LoggerProvider, reportTelemetryFailure, SeverityNumber } from './runtime.js'
 import { OtlpLogExporter } from './otlp_exporters.js'
 
 /**
@@ -11,6 +11,12 @@ import { OtlpLogExporter } from './otlp_exporters.js'
  */
 
 const OTLP_EXPORT_TIMEOUT_MS = 1_000
+
+/**
+ * Emit seams already diagnosed on stderr. Process-wide and bounded to one
+ * line per seam: see {@link reportTelemetryFailure}.
+ */
+const EMIT_FAILURES = new Set()
 
 const SEVERITY_MAP = Object.freeze({
   debug: SeverityNumber.DEBUG,
@@ -97,12 +103,21 @@ export function getLogger(component, opts = {}) {
       ...(devRunId ? { [Attr.DEV_RUN_ID]: devRunId } : {}),
       ...fields,
     })
-    otelLogger.emit({
-      severityNumber,
-      severityText: SEVERITY_TEXT[severityNumber],
-      body: message,
-      attributes,
-    })
+    // Beside the OTel emit, not behind it. LLP 0329#stderr-mirror rests the
+    // whole guarantee on that word, and until hyparam/hypaware#1122 nothing
+    // enforced it: anything thrown from the emit skipped the mirror below.
+    // The exporters are guarded at the provider now, so this catch is the
+    // second seam, for a globally installed provider that is not ours.
+    try {
+      otelLogger.emit({
+        severityNumber,
+        severityText: SEVERITY_TEXT[severityNumber],
+        body: message,
+        attributes,
+      })
+    } catch (error) {
+      reportTelemetryFailure({ channel: 'logs', source: 'Logger.emit', error, reported: EMIT_FAILURES })
+    }
     if (mirror) {
       const tag = SEVERITY_TEXT[severityNumber]
       process.stderr.write(`[hypaware:${component}] ${tag} ${message} ${JSON.stringify(attributes)}\n`)

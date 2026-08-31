@@ -97,6 +97,7 @@ export class TracerProvider {
   constructor({ resource, exporters = [] }) {
     this.resource = resource
     this.exporters = exporters
+    this.reportedExporterFailures = new Set()
   }
 
   register() {
@@ -106,7 +107,7 @@ export class TracerProvider {
   /** @param {Span} span */
   exportSpan(span) {
     if (this.exporters.length === 0) return
-    for (const exporter of this.exporters) exporter.exportBatch([span])
+    exportGuarded('traces', this.exporters, [span], this.reportedExporterFailures)
   }
 
   async forceFlush() {
@@ -128,12 +129,13 @@ export class LoggerProvider {
   constructor({ resource, exporters = [] }) {
     this.resource = resource
     this.exporters = exporters
+    this.reportedExporterFailures = new Set()
   }
 
   /** @param {LogRecord} record */
   exportRecord(record) {
     if (this.exporters.length === 0) return
-    for (const exporter of this.exporters) exporter.exportBatch([record])
+    exportGuarded('logs', this.exporters, [record], this.reportedExporterFailures)
   }
 
   async forceFlush() {
@@ -155,6 +157,7 @@ export class MeterProvider {
   constructor({ resource, exporters = [] }) {
     this.resource = resource
     this.exporters = exporters
+    this.reportedExporterFailures = new Set()
   }
 
   /** @param {MetricRecord} record */
@@ -166,7 +169,7 @@ export class MeterProvider {
   exportRecords(records) {
     if (records.length === 0) return
     if (this.exporters.length === 0) return
-    for (const exporter of this.exporters) exporter.exportBatch(records)
+    exportGuarded('metrics', this.exporters, records, this.reportedExporterFailures)
   }
 
   async forceFlush() {
@@ -420,6 +423,77 @@ export function normalizeAttributes(value) {
 
 export function getActiveSpan() {
   return trace.getActiveSpan()
+}
+
+/**
+ * Hand a batch to every exporter, guarding each one on its own.
+ *
+ * Telemetry export must never throw into the caller's path. Both in-tree log
+ * exporters already promise that individually (jsonl_exporters.js swallows,
+ * otlp_exporters.js catches its own promise), but as per-exporter discipline
+ * it binds nobody: an exporter that throws synchronously used to propagate
+ * out of `Logger.emit` and abandon whatever the caller does after the emit
+ * returns. For a containment refusal that is the stderr mirror, which is the
+ * entire guarantee, so one third-party exporter could silence all four
+ * containment guards at once (hyparam/hypaware#1122). Guarding here makes the
+ * contract structural, and keeps a broken exporter from taking down the
+ * healthy ones queued behind it.
+ *
+ * @ref LLP 0329#stderr-mirror [constrained-by]: the channel of last resort cannot sit downstream of an exporter that can throw.
+ * @template T
+ * @param {'traces'|'logs'|'metrics'} channel
+ * @param {Array<{ exportBatch(batch: T[]): unknown }>} exporters
+ * @param {T[]} batch
+ * @param {Set<string>} reported which exporters have already been diagnosed
+ */
+function exportGuarded(channel, exporters, batch, reported) {
+  for (const exporter of exporters) {
+    try {
+      exporter.exportBatch(batch)
+    } catch (error) {
+      reportTelemetryFailure({
+        channel,
+        source: exporter?.constructor?.name || 'exporter',
+        error,
+        reported,
+      })
+    }
+  }
+}
+
+/**
+ * Say on stderr, once, that a telemetry component threw and its export was
+ * dropped. Losing the telemetry is acceptable; losing the refusal is not, but
+ * neither is a broken exporter that nobody can diagnose. Bounded to one line
+ * per source because the throwing call sits on the path of every record: an
+ * exporter broken by configuration would otherwise print once per row for the
+ * life of the daemon.
+ *
+ * Deliberately `process.stderr`, like the mirror in `getLogger`, and for the
+ * same reason: this is the report that fires when the structured substrate is
+ * the broken thing.
+ *
+ * @param {object} args
+ * @param {'traces'|'logs'|'metrics'} args.channel
+ * @param {string} args.source the exporter class, or the emit seam, that threw
+ * @param {unknown} args.error
+ * @param {Set<string>} args.reported
+ */
+export function reportTelemetryFailure({ channel, source, error, reported }) {
+  if (reported.has(source)) return
+  reported.add(source)
+  const message = error instanceof Error ? error.message : String(error)
+  const attributes = {
+    hyp_component: 'observability',
+    hyp_operation: `observability.export_${channel}`,
+    error_kind: 'telemetry_export_threw',
+    telemetry_channel: channel,
+    telemetry_source: source,
+    error_message: message.slice(0, 200),
+  }
+  try {
+    process.stderr.write(`[hypaware:observability] WARN a telemetry export threw; the record is dropped ${JSON.stringify(attributes)}\n`)
+  } catch { /* stderr itself is gone; there is nowhere left to say so */ }
 }
 
 /** @param {Array<{ forceFlush?: () => Promise<void>|void }>} exporters */
