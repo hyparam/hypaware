@@ -324,6 +324,8 @@ class Logger {
    *   body?: unknown,
    *   attributes?: Record<string, unknown>,
    * }} record
+   * @returns {unknown} whatever the installed provider handed back, which for
+   *   a provider that is not ours may be a promise its caller has to guard
    */
   emit(record) {
     const provider = globalLoggerProvider
@@ -471,11 +473,19 @@ export function getActiveSpan() {
  * @param {Set<string>} reported which exporters have already been diagnosed
  */
 function exportGuarded(channel, exporters, batch, reported) {
-  for (const [index, exporter] of exporters.entries()) {
+  // Indexed rather than `exporters.entries()`, which the index requirement
+  // makes tempting: this loop runs once per record on all three channels, and
+  // the iterator plus a fresh two-element tuple per exporter per record is a
+  // cost the guard has no reason to add.
+  for (let index = 0; index < exporters.length; index++) {
+    const exporter = exporters[index]
     try {
       // The seam is built in the two failure branches rather than up front:
       // this loop runs once per record, and both in-tree exporters return
-      // nothing, so the healthy path allocates neither the object nor its key.
+      // nothing (`jsonl_exporters.js` swallows and returns, `otlp_exporters.js`
+      // does not return its `post`), so their healthy path allocates neither
+      // the object nor its key. An exporter that does return a promise pays
+      // for one per record, which is the price of guarding what it returns.
       const result = exporter.exportBatch(batch)
       if (result) guardTelemetryResult(result, exporterSeam(channel, exporter, index, reported))
     } catch (error) {

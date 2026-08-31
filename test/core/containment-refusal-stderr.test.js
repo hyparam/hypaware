@@ -358,8 +358,6 @@ async function withLoggerProvider(exporters, fn) {
 }
 
 test('a refusal still reaches stderr when the installed exporter throws', async () => {
-  // Named uniquely: the provider reports a broken exporter once per exporter
-  // name, so a shared name would let one test consume another's report.
   class ThrowingMirrorExporter {
     /** @param {unknown[]} _records */
     exportBatch(_records) {
@@ -770,4 +768,73 @@ test('a seam that throws while being described does not turn the rejection back 
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
+})
+
+// The seam ahead of the guard. `buildAttrs` runs before both the emit and the
+// mirror, so a value it could not describe threw out of `warn()` and skipped
+// the refusal below it: hyparam/hypaware#1122 again, one line earlier, and
+// without needing a provider at all. `attrs.js` reached for `String(value)`
+// as its last resort, which is a TypeError for a null-prototype object, the
+// same trap `describeThrown` was hardened against on the other side of the
+// emit.
+test('a field value that cannot be described costs the field, not the refusal', async () => {
+  const undescribable = Object.create(null)
+  undescribable.self = undescribable
+  const stderr = await captureProcessStderr(async () => {
+    getLogger('capture-spool', { mirrorStderr: true }).warn('a symlink stands on the spool sweep path', {
+      [Attr.ERROR_KIND]: 'capture_spool_path_is_symlink',
+      detail: undescribable,
+    })
+  })
+  assert.match(stderr, /capture_spool_path_is_symlink/, 'the refusal still reaches stderr on a default install')
+  assert.match(stderr, /\[hypaware:capture-spool\] WARN/, 'at its own severity')
+  assert.doesNotMatch(stderr, /"detail"/, 'and the one field nobody can describe is simply dropped')
+})
+
+// And the field bag itself, one step further out: the spread that feeds
+// `buildAttrs` reads every own enumerable property of `fields`, so a throwing
+// getter there is ahead of everything. It costs the fields, not the refusal.
+test('a field bag whose getter throws costs the fields, not the refusal', async () => {
+  const hostileFields = {
+    [Attr.ERROR_KIND]: 'capture_spool_path_is_symlink',
+    get detail() { throw new Error('reading this field throws') },
+  }
+  const stderr = await captureProcessStderr(async () => {
+    getLogger('capture-spool', { mirrorStderr: true }).warn('a symlink stands on the spool sweep path', hostileFields)
+  })
+  assert.match(stderr, /\[hypaware:capture-spool\] WARN a symlink stands on the spool sweep path/, 'the refusal still reaches stderr')
+  assert.match(stderr, /"hyp_component":"capture-spool"/, 'with the attributes that survive the loss')
+})
+
+// The generation key has to be read when the record is emitted, not when a
+// rejection settles. Held as a lazy getter on a module constant it was read a
+// microtask late, so a rejection belonging to the provider that emitted it
+// was filed against whichever provider had been installed since and dropped
+// as that one's duplicate: the older provider never diagnosed, which is
+// exactly what the generation key was added to prevent.
+test('a provider that rejects is diagnosed even if another is installed before the rejection settles', async () => {
+  const stderr = await captureProcessStderr(async () => {
+    try {
+      const rejecting = /** @type {any} */ ({
+        resource: { attributes: {} },
+        async exportRecord() {
+          await Promise.resolve()
+          throw new Error('the provider that emitted this rejected')
+        },
+      })
+      const throwing = /** @type {any} */ ({
+        resource: { attributes: {} },
+        exportRecord() { throw new Error('the provider installed after it threw') },
+      })
+      logs.setGlobalLoggerProvider(rejecting)
+      getLogger('cache').warn('a record the first one cannot take')
+      logs.setGlobalLoggerProvider(throwing)
+      getLogger('cache').warn('nor the second')
+      await new Promise((resolve) => { setTimeout(resolve, 10) })
+    } finally {
+      logs.setGlobalLoggerProvider(/** @type {any} */ (null))
+    }
+  })
+  assert.match(stderr, /the provider installed after it threw/, 'the newer provider is diagnosed')
+  assert.match(stderr, /the provider that emitted this rejected/, 'and so is the one whose rejection landed after it was replaced')
 })
