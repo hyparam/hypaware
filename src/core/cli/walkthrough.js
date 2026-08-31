@@ -2062,8 +2062,11 @@ export function writeAttachedNotConfiguredReminder({ clients, stdout, dryRun }) 
  *   - `--no-daemon`: still backfill (it is a local file import).
  *
  * Each provider's outcome is pushed onto `summary.backfill` and a
- * one-line status is written to stdout. Wrapped in a `walkthrough.backfill`
- * span so the step is observable even when no provider runs.
+ * one-line status is written to stdout, except the skip forced by a
+ * consent surface that died inside the finale: that one goes to stderr,
+ * because stdout is the stream it is reporting the death of
+ * (LLP 0341 #dead-surface). Wrapped in a `walkthrough.backfill` span so
+ * the step is observable even when no provider runs.
  *
  * @param {{
  *   backfill?: PickerBackfillRunner,
@@ -2162,10 +2165,28 @@ async function runFinaleBackfill(args) {
       // finale: the import did not happen, and a re-run is how it does.
       // Said on stderr because stdout is the stream that just went, so
       // the decline's own line would be written into nothing - and
-      // "declined" is not what happened anyway.
+      // "declined" is not what happened anyway. It names `asked` rather
+      // than every provider because a sweep-backed sibling still imports
+      // a few lines below (LLP 0180), so a bare "the import was skipped"
+      // would claim more than was skipped.
+      //
+      // Guarded, like the two cancel notices it is modelled on
+      // (`writeCancelledNotice` below, the wizard's post-finale cancel):
+      // a terminal that took stdout with it can have taken stderr too,
+      // and this arm's whole contract is to warn and let the finale
+      // finish - a warning that cannot be written must not cost the run
+      // the sweep import and the daemon restart that follow it.
+      // @ref LLP 0341#warnings [implements]: a warn-and-continue arm guards its own warning write, so the contract holds for direct callers of the exported finale too
       // @ref LLP 0341#dead-surface [implements]: what outlives the run is attempted on the surviving stream, as the post-commit cancel already does
       if (surfaceDead) {
-        stderr.write("hyp setup: output closed - the local history import was skipped; re-run 'hyp setup' to import it\n")
+        try {
+          stderr.write(
+            `hyp setup: output closed - the local history import for ${asked.join(', ')} was skipped; ` +
+            "re-run 'hyp setup' to import it\n"
+          )
+        } catch {
+          // best-effort: whatever took stdout may have taken stderr too
+        }
       } else if (!consent) {
         stdout.write('backfill: skipped (declined)\n')
       }
