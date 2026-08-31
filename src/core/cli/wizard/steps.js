@@ -23,12 +23,12 @@ export const WIZARD_STEP_LABELS = /** @type {Record<WizardStepName, string>} */ 
  * Four rules produce these lists, and each one exists to stop the
  * denominator from being a lie:
  *
- * 1. **Only lanes that ask something are counted.** The `configure` phase
- *    and the privacy narration are output the user does not act on; a
- *    counter that advanced while text scrolled past would read as broken.
- *    `first look` has a prompt-shaped renderer but is a closing report,
- *    not a decision, so it renders without a counter rather than inflating
- *    the total with a step nobody answers.
+ * 1. **Only lanes that exist to ask something are counted.** The
+ *    `configure` phase and the privacy narration are output the user does
+ *    not act on; a counter that advanced while text scrolled past would
+ *    read as broken. `first look` has a prompt-shaped renderer but is a
+ *    closing report, not a decision, so it renders without a counter
+ *    rather than inflating the total with a step nobody answers.
  * 2. **The join lane counts once**, however many prompts happen inside it.
  *    It delegates to `runRemoteLogin`, which can ask for an org, so its
  *    internal prompt count is not knowable at fork resolution. Counting the
@@ -83,7 +83,13 @@ export function wizardItinerary(pathway, opts = {}) {
   if (pathway === 'local' && opts.managed === true) {
     return base.flatMap((step) => (step === 'pick' ? ['pick', 'sync', 'folders'] : [step]))
   }
-  return base
+  // A copy, never the module's own array. The itinerary is handed out, so
+  // a caller that edited what it was given would move the denominator for
+  // every later lane in the process - a moving total, reached through a
+  // seam no argument to this function passes through. The managed arm
+  // above already returns a fresh array; this makes both arms agree.
+  // @ref LLP 0338#consequences [implements]: the denominator stays a function of the pathway, which means no caller can edit it into something else either
+  return [...base]
 }
 
 /**

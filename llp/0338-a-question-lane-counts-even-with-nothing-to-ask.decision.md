@@ -47,13 +47,17 @@ Everything you picked is managed by your fleet and always syncs.
   Claude Code
 ```
 
-The same shape reaches the same arm when the opt-out store is unreadable.
+An unreadable opt-out store also leaves the lane with nothing to ask, but
+it never reaches this arm: it warns on stderr and returns at the read,
+before any screen is written, so there is no frame for a position line to
+sit above and no number is stated. This decision is about the arm that
+prints one.
 
 ## The itinerary is a property of the pathway, not of the machine {#counts-anyway}
 
-**A lane the pathway runs counts, and states its position, whether or not
-it turns out to have a question on this machine.** Nothing about the
-counter changes.
+**A lane the pathway runs counts, and states its position above the screen
+it prints, whether or not it turns out to have a question on this
+machine.** Nothing about the counter changes.
 
 Rule 1 decides it, because the alternatives need something rule 1 forbids:
 
@@ -112,12 +116,16 @@ would still be guessing.
 - `wizardItinerary` stays a pure function of pathway and `managed`, with
   no lane-emptiness input, and `steps.js` stays a data module with no I/O.
   Every pathway prints exactly what it printed before this decision.
-- Of the lanes the wizard could have counted, `first look` remains the
-  only one held outside the denominator, and remains so on the static
-  ground that it is never a question anywhere. The fork (rule 3) and the
-  express gate (LLP 0201 #no-counter) are outside it for the prior
-  reason and are untouched here: each is what fixes the total, so neither
-  can state one.
+- `first look` stays outside the denominator, on the static ground that it
+  is never a question anywhere, and it is the only lane this decision
+  considered holding out. The wizard's other prompt-shaped surfaces are
+  outside the count for their own prior reasons and are untouched here:
+  the returning gate and the fork run before any total exists (the fork is
+  what fixes it, so it can no more state one than the gate ahead of it),
+  the express gate decides how many questions remain and so states none
+  either ([LLP 0201 #no-counter](./0201-express-defaults-gate.decision.md#no-counter)),
+  and the closing send-now offer is asked after the last counted lane has
+  finished ([LLP 0203 #offer](./0203-setup-offers-the-first-sync.decision.md#offer)).
 - LLP 0191 #back-edges is unaffected and stays asymmetric with this on
   purpose: the back edge skips a lane that asked nothing because it is
   chosen *after* that lane ran and reported `noQuestion`, so it can use a
@@ -128,7 +136,7 @@ would still be guessing.
 
 ## References
 
-- LLP 0135 (#progress), LLP 0188, LLP 0191, LLP 0201, LLP 0276
+- LLP 0135 (#progress), LLP 0188, LLP 0191, LLP 0201, LLP 0203, LLP 0276
 - `src/core/cli/wizard/steps.js` (the itinerary and the position line),
   `src/core/cli/wizard/sync_scope.js` (the no-candidates arm that renders
   the position line above a statement),

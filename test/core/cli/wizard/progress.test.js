@@ -174,10 +174,11 @@ test('the sync lane states its position even when it has nothing to ask', async 
 
 // The other half of the same decision: the lane keeps its place in the
 // total, not just its line. `wizardItinerary` takes the pathway and
-// `managed` and nothing else, so there is no seam through which a lane's
-// emptiness could reach the denominator - which is the point, since the
-// sync lane's candidates are the pick lane's result and the pick lane runs
-// after the fork has fixed the total (LLP 0338 #counts-anyway).
+// `managed` and nothing else, and hands back a list no caller can edit,
+// so there is no seam through which a lane's emptiness could reach the
+// denominator - which is the point, since the sync lane's candidates are
+// the pick lane's result and the pick lane runs after the fork has fixed
+// the total (LLP 0338 #counts-anyway).
 // @ref LLP 0338#counts-anyway [tests]: the denominator is a function of the pathway alone, so an empty lane never leaves it
 test('wizardItinerary: no lane emptiness can reach the denominator', async () => {
   // Every shape a lane's emptiness could arrive in, offered to the
@@ -209,6 +210,36 @@ test('wizardItinerary: no lane emptiness can reach the denominator', async () =>
   assert.equal(
     wizardStepProgress('team', 'folders', emptiness),
     'Step 4 of 5 · Choose how new folders are handled'
+  )
+
+  // The other pathway that runs the lane, because it reaches it by the
+  // other route: `team` reads the sync lane off the table, a managed
+  // `local` run splices it in beside `pick`. A seam grown on that arm
+  // alone leaves every assertion above green, so the emptiness has to
+  // bounce off both routes and not just the one the shipped instance was
+  // rendered on.
+  for (const itinerary of [
+    wizardItinerary('local', { managed: true }),
+    wizardItinerary('local', emptiness),
+  ]) {
+    assert.deepEqual(itinerary, ['pick', 'sync', 'folders', 'finale'])
+  }
+  assert.equal(wizardStepProgress('local', 'sync', emptiness), 'Step 2 of 4 · Choose what syncs')
+  assert.equal(
+    wizardStepProgress('local', 'folders', emptiness),
+    'Step 3 of 4 · Choose how new folders are handled'
+  )
+
+  // An options bag cannot see the last seam: the returned list itself. It
+  // used to be the module's own array, so a caller that spliced a lane out
+  // of what it was handed moved the total for every lane after it, with
+  // nothing passing through an argument at all.
+  const handed = wizardItinerary('team')
+  handed.splice(2, 1)
+  assert.deepEqual(
+    wizardItinerary('team'),
+    ['join', 'pick', 'sync', 'folders', 'finale'],
+    'the itinerary a caller was handed is not the one the next caller gets'
   )
 })
 
