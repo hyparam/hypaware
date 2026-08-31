@@ -86,7 +86,7 @@ export function tryReadCursorSync(partitionDir) {
   try {
     raw = fs.readFileSync(path.join(partitionDir, CURSOR_FILE), 'utf8')
   } catch {
-    clearEscapeReport(partitionDir)
+    noteEscapeCleared(partitionDir)
     return null
   }
   try {
@@ -132,10 +132,10 @@ export function tryReadCursorSync(partitionDir) {
     if (typeof parsed.pendingFallbacks === 'number') {
       cursor.pendingFallbacks = parsed.pendingFallbacks
     }
-    clearEscapeReport(partitionDir)
+    noteEscapeCleared(partitionDir)
     return cursor
   } catch {
-    clearEscapeReport(partitionDir)
+    noteEscapeCleared(partitionDir)
     return null
   }
 }
@@ -243,28 +243,83 @@ const ESCAPE_REWARN_MS = 10 * 60 * 1000
 
 /**
  * The escape refusals this process has already said out loud, keyed by
- * resolved partition directory: the rejected value the line named, and
- * when. One entry at most per partition that ever refused; cleared by
- * {@link clearEscapeReport} the moment any read of that partition stops
- * refusing for escape, so a healed-then-repoisoned partition warns afresh.
- * Bounded by the partitions this process saw refuse, which is not a static
- * bound: one removed by retention while still poisoned never gets the
- * non-refusing read that would clear it. Accepted at roughly an entry a day
- * under a standing poison (LLP 0332#transition-plus-rewarn).
+ * resolved partition directory: a type-qualified key for the rejected value
+ * the line named, and when. One entry at most per partition that ever
+ * refused; cleared by {@link noteEscapeCleared} the moment any read of that
+ * partition stops refusing for escape, so a healed-then-repoisoned
+ * partition warns afresh, and cleared again by {@link clearEscapeReport}
+ * where retention removes the partition directory, so no entry outlives the
+ * partition it is keyed on (LLP 0334#eviction-clears). Bounded by the
+ * partitions this process saw refuse that still exist.
  *
- * @type {Map<string, { rejected: string, warnedAtMs: number }>}
+ * @type {Map<string, { rejectedKey: string, warnedAtMs: number }>}
  */
 const escapeReportedAt = new Map()
 
 /**
+ * Forget any escape refusal recorded for a partition, without saying
+ * anything: whatever the entry described is no longer what this partition
+ * is, so the next escape refusal is a transition and warns immediately.
+ *
+ * Exported for the one caller outside this file. Retention removes whole
+ * date partitions, and a partition evicted while poisoned never gets the
+ * non-refusing read that would clear it, so its entry would otherwise
+ * strand for the process lifetime. Retention already holds the path and is
+ * already deleting the directory, so clearing there adds nothing to the hot
+ * synchronous reader, which is the cost LLP 0332#transition-plus-rewarn
+ * weighed when it accepted the strand.
+ *
+ * @ref LLP 0334#eviction-clears [implements]: the entry is dropped where the partition it is keyed on is removed.
+ * @param {string} partitionDir
+ * @returns {boolean} whether there was an entry to forget
+ */
+export function clearEscapeReport(partitionDir) {
+  return escapeReportedAt.delete(path.resolve(partitionDir))
+}
+
+/**
  * Note that a read of this partition did not refuse for escape (it
  * returned a cursor, found no file, or failed to parse), so the next
- * escape refusal is a transition and warns immediately.
+ * escape refusal is a transition and warns immediately, and say so once if
+ * this process had warned about that partition.
  *
+ * The line is what makes silence mean one thing again. Under the throttle a
+ * quiet read is either "healed" or "still poisoned, the next line is not
+ * due yet"; announcing the clearing collapses that to the second, the way
+ * `daemon.control_scan_recovered` already does for the control channel
+ * (`src/core/daemon/control.js`). It is bounded to one line per refusal
+ * this process actually warned about, and a partition that never refused
+ * still costs one `Map.delete` that misses, as before.
+ *
+ * INFO, not WARN: nothing is wrong. It mirrors to stderr anyway, because it
+ * is only legible beside the refusal it answers, and that refusal is on
+ * stderr by default-install necessity (LLP 0329#stderr-mirror).
+ *
+ * It reports that the refusal cleared, not that the partition is well: two
+ * of the three exits are an absent or unparseable `cursor.json`, which
+ * still reads as unreadable. The escape condition ending is exactly the
+ * fact the warn armed, and all this line retracts.
+ *
+ * @ref LLP 0334#recovery-is-announced [implements]: the read that clears an armed refusal says so, so silence after a refusal means the condition still stands.
  * @param {string} partitionDir
  */
-function clearEscapeReport(partitionDir) {
-  escapeReportedAt.delete(path.resolve(partitionDir))
+function noteEscapeCleared(partitionDir) {
+  // Forget first and unconditionally. An entry kept alive because the log
+  // channel threw would throttle the next refusal against a condition that
+  // has already ended, and that is silence, the one degradation this series
+  // may never have (LLP 0332#not-a-pass-object).
+  if (!clearEscapeReport(partitionDir)) return
+  try {
+    getLogger('cache', { mirrorStderr: true }).info(
+      'cursor.tableDir no longer escapes its partition; the containment refusal for this partition has cleared',
+      {
+        [Attr.OPERATION]: 'cache.cursor_read',
+        [Attr.STATUS]: 'ok',
+        recovery_kind: 'cursor_escape_recovered',
+        partition_dir: partitionDir,
+      }
+    )
+  } catch { /* a cursor read must not fail on a logger provider that is not installed */ }
 }
 
 /**
@@ -292,12 +347,22 @@ function clearEscapeReport(partitionDir) {
  * @ref LLP 0323#say-it [implements]: this is the one corrupt-cursor case that knows its cause, so it does not degrade silently.
  * @ref LLP 0329#stderr-mirror [implements]: the refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
  * @ref LLP 0332#transition-plus-rewarn [implements]: the unit of the standing signal is the condition, not the read that noticed it.
+ * @ref LLP 0334#type-qualified-key [implements]: the window compares the rejected value, not the string the line renders it as.
  * @param {string} partitionDir
  * @param {unknown} tableDir  the rejected value, which need not be a string
  */
 function reportEscapingTableDir(partitionDir, tableDir) {
   const key = path.resolve(partitionDir)
   const rejected = typeof tableDir === 'string' ? tableDir : JSON.stringify(tableDir) ?? String(tableDir)
+  // The line says what was rejected; the window compares what it was. Those
+  // are not the same string: `JSON.stringify` renders the number 5 and the
+  // string "5" identically, so a poison that changed only its JSON type
+  // would look unchanged and wait out the window instead of warning as the
+  // new fact it is (LLP 0332#transition-plus-rewarn: a poison that changes
+  // shape is never absorbed into the old one's window). Qualifying the
+  // comparison key by type separates them without touching the reported
+  // `table_dir`, which is the rendered value either way.
+  const rejectedKey = `${typeof tableDir}:${rejected}`
   const now = Date.now()
   const prior = escapeReportedAt.get(key)
   // A negative age means the wall clock stepped back under this entry
@@ -306,7 +371,7 @@ function reportEscapingTableDir(partitionDir, tableDir) {
   // so say it again: the only degradation this throttle may have is an extra
   // line, never silence (LLP 0332#transition-plus-rewarn).
   const sinceMs = prior ? now - prior.warnedAtMs : 0
-  if (prior && prior.rejected === rejected && sinceMs >= 0 && sinceMs < ESCAPE_REWARN_MS) return
+  if (prior && prior.rejectedKey === rejectedKey && sinceMs >= 0 && sinceMs < ESCAPE_REWARN_MS) return
   try {
     getLogger('cache', { mirrorStderr: true }).warn(
       'cursor.tableDir does not name a generation in its partition; treating the cursor as unreadable',
@@ -320,7 +385,7 @@ function reportEscapingTableDir(partitionDir, tableDir) {
     // Recorded only once the line is out. `getLogger`'s OTel emit runs
     // before the stderr mirror, so an installed provider that throws would
     // otherwise arm a whole rewarn window over a refusal nobody ever saw.
-    escapeReportedAt.set(key, { rejected, warnedAtMs: now })
+    escapeReportedAt.set(key, { rejectedKey, warnedAtMs: now })
   } catch { /* a cursor read must not fail on a logger provider that is not installed */ }
 }
 
