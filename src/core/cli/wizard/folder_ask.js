@@ -157,10 +157,6 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
     await writeFolderAskMode({ stateDir, mode })
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
-    opts.stderr.write(
-      `warning: could not record the new-folder answer (${detail}); ` +
-      `it stays '${before}' - set it later with 'hyp privacy folders ${mode}'\n`
-    )
     // The inline path left its title on stdout as a sentence lead-in
     // ending in a comma, and the clause that completes it is written
     // below, after this branch has already returned. Nothing on stdout
@@ -172,8 +168,21 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
     // "could not record" half stays on stderr, where the failure belongs;
     // no new claim is made here, only the one the run was already about
     // to make.
-    // @ref LLP 0201#narrate [implements]: a narrated question finishes its sentence even when the write behind it fails
+    //
+    // Before the warning, not after it. stdout and stderr are the same
+    // terminal on the run this narration is for, so writing the warning
+    // first wedges it between the lead-in and the clause that completes
+    // it - a milder version of the half-written question this arm exists
+    // to close. Finishing the sentence first leaves the warning where a
+    // warning belongs: under the statement it qualifies. The two streams
+    // are separate sinks in tests, so only the terminal can see this
+    // ordering, which is why a test asserts it through one shared sink.
+    // @ref LLP 0201#narrate [implements]: a narrated question finishes its sentence even when the write behind it fails, before the warning that qualifies it
     if (inline) opts.stdout.write(`${standingClause(before)}\n`)
+    opts.stderr.write(
+      `warning: could not record the new-folder answer (${detail}); ` +
+      `it stays '${before}' - set it later with 'hyp privacy folders ${mode}'\n`
+    )
     return await finishSpan({ mode: before, skipped: true }, opts)
   }
 

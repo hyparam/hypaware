@@ -162,6 +162,17 @@ test('the enrolled decline gloss names every lane a decline opens', async () => 
   const opened = wizardItinerary('team').filter((step) => step !== 'join' && step !== 'finale')
   assert.deepEqual(opened, ['pick', 'sync', 'folders'], 'a decline opens three questions')
 
+  // The other run this gloss is shown on. An enrolled machine that
+  // reconfigures down the local pathway is `enrolled` at the gate
+  // (`index.js`: `enrolled()` is `managed || joined`, not the pathway
+  // label), so it reads this same sentence, and it runs the enrolled
+  // lanes off the managed-local itinerary rather than the team one. Pinned
+  // separately because that list is built by a different branch of
+  // `wizardItinerary`: a lane added there and not to `team` would leave
+  // this row glossing the old set on the pathway it still shows on.
+  const openedManagedLocal = wizardItinerary('local', { managed: true }).filter((step) => step !== 'finale')
+  assert.deepEqual(openedManagedLocal, opened, 'both enrolled pathways open the same questions')
+
   // One clause per lane, in the order the lanes open.
   const gloss = state.question.options[1].summary
   const clauses = gloss.replace(/\.$/, '').replace(/^Choose /, '').split(/, and | and |, /)

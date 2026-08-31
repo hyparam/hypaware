@@ -145,6 +145,21 @@ licence to discard answers a previous one recorded - and each of these
 lanes narrates the value it took, so a lane that reset one would announce
 the new value as though the user had just chosen it.
 
+**A narrated statement is finished on stdout even when the write behind
+it fails.** The new-folder lane's narration is a sentence split across two
+writes: the title is a lead-in ending in a comma and the indented clause
+under it completes it. A failed preference write warns and leaves the
+previous mode standing, which is the right outcome, but returning at that
+point left the lead-in on screen with the next phase's output under it -
+a question the run asked and never finished. The failed arm therefore
+prints the same clause, naming the mode that actually stands (the store
+was not written, so the standing answer is still true of the machine),
+before the warning rather than after it: stdout and stderr are one
+terminal on an attended run, so a warning written first sits inside the
+sentence instead of under it. The "could not record" half stays on stderr
+and the recorded form's "change later with ..." tail is not repeated, so
+an unrecorded answer never reads like a recorded one.
+
 **The narration is blocked, not streamed.** Each statement is led by a
 blank line and its detail is indented under a title, because on this path
 there are no prompts to separate the statements: without the spacing the
