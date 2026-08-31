@@ -260,6 +260,92 @@ test('a failed write keeps the narrated sentence contiguous on the screen', asyn
   )
 })
 
+// The failed-write arm is documented as one that warns and leaves the
+// previous mode standing "rather than failing the run" (LLP 0200 #wizard).
+// Its own two writes were the one way it could still fail it: a stream
+// that throws between the write that opened the sentence and the writes
+// that close it took the whole run down from inside the arm that exists
+// to keep the run alive. Each write is now guarded on its own, so neither
+// half can take the other, or the run, with it.
+// @ref LLP 0200#wizard [tests]: the failed-write arm cannot fail the run, including through its own writes
+
+/**
+ * A stream that writes normally until the nth write, which throws. The
+ * realistic shape: a pipe closes between two writes of the same block,
+ * not before the first one.
+ *
+ * @param {number} failOn 1-based index of the write that throws
+ */
+function throwingBuf(failOn) {
+  let value = ''
+  let writes = 0
+  return {
+    /** @param {string} chunk */
+    write(chunk) {
+      writes += 1
+      if (writes === failOn) throw new Error('EPIPE: broken pipe')
+      value += String(chunk)
+      return true
+    },
+    text() { return value },
+  }
+}
+
+test('a failed write survives a stdout that dies mid-sentence, and still warns', async () => {
+  const { env, stateDir } = await makeHome()
+  await fs.mkdir(folderAskPath(stateDir), { recursive: true })
+  // Write 1 is the narrated title; write 2 is the clause completing it.
+  const stdout = throwingBuf(2)
+  const stderr = makeBuf()
+
+  const result = await runWizardFolderAsk(/** @type {any} */ ({
+    stdout, stderr, env,
+    names: ['Claude Code'],
+    autoAccept: true,
+    confirm: async () => { throw new Error('the express path must not prompt') },
+  }))
+
+  assert.equal(result.skipped, true)
+  assert.equal(result.mode, 'ask', 'the mode already in force is what stands')
+  // The half that could still be written was written: a stdout that gave
+  // up must not swallow the explanation of why nothing was recorded.
+  assert.match(stderr.text(), /could not record the new-folder answer/)
+  assert.match(stderr.text(), /it stays 'ask'/)
+})
+
+test('a failed write survives a stderr that cannot take the warning', async () => {
+  const { env, stateDir } = await makeHome()
+  await fs.mkdir(folderAskPath(stateDir), { recursive: true })
+  const stdout = makeBuf()
+  const stderr = throwingBuf(1)
+
+  const result = await runWizardFolderAsk(/** @type {any} */ ({
+    stdout, stderr, env,
+    names: ['Claude Code'],
+    autoAccept: true,
+    confirm: async () => { throw new Error('the express path must not prompt') },
+  }))
+
+  assert.equal(result.skipped, true)
+  assert.equal(result.mode, 'ask', 'the mode already in force is what stands')
+  // stdout was healthy, so the narrated sentence is still finished on it.
+  assert.match(stdout.text(), /^When opening Claude Code in a new project,$/m)
+  assert.match(stdout.text(), /^ {2}you are asked the first time$/m)
+})
+
+test('the asked path survives a stderr that cannot take the warning', async () => {
+  const { env, stateDir } = await makeHome()
+  await fs.mkdir(folderAskPath(stateDir), { recursive: true })
+
+  const result = await runWizardFolderAsk(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: throwingBuf(1), env,
+    confirm: async () => 'ask',
+  }))
+
+  assert.equal(result.skipped, true)
+  assert.equal(result.mode, 'ask')
+})
+
 test('the two options are exactly sync and ask', () => {
   assert.deepEqual(FOLDER_ASK_OPTIONS.map((o) => o.value), ['sync', 'ask'])
 })

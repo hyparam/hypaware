@@ -9,6 +9,7 @@ import path from 'node:path'
 import { runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
 import { WIZARD_STEP_LABELS, wizardItinerary, wizardStepProgress } from '../../../../src/core/cli/wizard/steps.js'
+import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { defaultPromptFactory, runPickerFinale } from '../../../../src/core/cli/walkthrough.js'
 import { render } from '../../../../src/core/cli/tui/render.js'
 
@@ -132,6 +133,61 @@ test('wizardStepProgress: a managed machine on the local pathway gains both enro
   assert.equal(wizardStepProgress('local', 'sync', { managed: true }), 'Step 2 of 4 · Choose what syncs')
   assert.equal(wizardStepProgress('local', 'folders', { managed: true }), 'Step 3 of 4 · Choose how new folders are handled')
   assert.equal(wizardStepProgress('local', 'finale', { managed: true }), 'Step 4 of 4 · Finish setup')
+})
+
+// A question lane keeps its place in the total and states its position on
+// the machine where it turns out to have nothing to ask (LLP 0338
+// #counts-anyway). The sync lane on a fully fleet-managed machine is the
+// shipped instance: everything picked is the fleet's, so it states that
+// and asks nothing. Pinned by rendering the real lane, because the
+// alternatives this decision rejected - dropping the lane from the total,
+// or blanking its position line - are both invisible in `steps.js` and
+// only show up on the screen.
+// @ref LLP 0338#counts-anyway [tests]: a lane with no question still prints its position above the statement it makes instead
+test('the sync lane states its position even when it has nothing to ask', async () => {
+  const stdout = makeBuf()
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout,
+    stderr: makeBuf(),
+    env: { HYP_HOME: await tmpHome(), HYP_NO_TUI: '1' },
+    candidates: [],
+    locked: [{ id: 'claude', label: 'Claude Code' }],
+    lockedHidden: 0,
+    candidatesHiddenIds: [],
+    progress: 'Step 3 of 5 · Choose what syncs',
+    confirm: async () => { throw new Error('a fully fleet-managed machine has nothing to ask') },
+  }))
+
+  assert.equal(result.noQuestion, true, 'the lane asked nothing')
+  const lines = stdout.text().split('\n').filter((l) => l !== '')
+  // The position line, and then the statement that corrects what the
+  // label promised, in the same frame at the first moment it is knowable.
+  assert.deepEqual(lines, [
+    'Step 3 of 5 · Choose what syncs',
+    'Everything you picked is managed by your fleet and always syncs.',
+    '  Claude Code',
+  ], stdout.text())
+})
+
+// The other half of the same decision: the lane keeps its place in the
+// total, not just its line. `wizardItinerary` takes the pathway and
+// `managed` and nothing else, so there is no seam through which a lane's
+// emptiness could reach the denominator - which is the point, since the
+// sync lane's candidates are the pick lane's result and the pick lane runs
+// after the fork has fixed the total (LLP 0338 #counts-anyway).
+// @ref LLP 0338#counts-anyway [tests]: the denominator is a function of the pathway alone, so an empty lane never leaves it
+test('wizardItinerary: no lane emptiness can reach the denominator', async () => {
+  const forEveryMachine = [
+    wizardItinerary('team'),
+    wizardItinerary('team', {}),
+    wizardItinerary('team', { managed: true }),
+    wizardItinerary('team', { managed: false }),
+  ]
+  for (const itinerary of forEveryMachine) {
+    assert.deepEqual(itinerary, ['join', 'pick', 'sync', 'folders', 'finale'])
+  }
+  assert.equal(wizardStepProgress('team', 'sync'), 'Step 3 of 5 · Choose what syncs')
+  assert.equal(wizardStepProgress('team', 'folders'), 'Step 4 of 5 · Choose how new folders are handled')
 })
 
 test('wizardStepProgress: an uncommitted pathway has no denominator', async () => {

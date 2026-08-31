@@ -37,6 +37,19 @@ export const WIZARD_STEP_LABELS = /** @type {Record<WizardStepName, string>} */ 
  * 3. **The fork is not a step.** The pathway it asks for is exactly what
  *    fixes the total, so the fork can never state one. It is absent from
  *    every list here and `runInitWizard` passes it no progress line.
+ * 4. **A question lane counts on the machine where it has nothing to ask.**
+ *    The sync lane asks nothing on a fully fleet-managed machine (LLP 0276
+ *    #no-candidates) and still prints `Step 3 of 5 · Choose what syncs`
+ *    above the statement it makes instead. Rule 1 is why: its candidates
+ *    are the pick lane's result, so at fork resolution nobody knows
+ *    whether it will have a row to offer, and a total that waited for
+ *    that answer would move. Blanking the numerator alone would print
+ *    step 2, then a screen with no position, then step 4, and on a consent
+ *    surface a missing number reads as a screen skipped without being
+ *    shown. `first look` is outside the count on different ground: it is a
+ *    report on every run, which the fork already knows, so it leaves no
+ *    hole. Rule 2 says the same thing from the front - a lane counts once
+ *    however many prompts it holds, and zero is the bottom of that range.
  */
 const WIZARD_ITINERARIES = /** @type {Record<WizardPathway, WizardStepName[]>} */ ({
   team: ['join', 'pick', 'sync', 'folders', 'finale'],
@@ -85,6 +98,7 @@ export function wizardItinerary(pathway, opts = {}) {
  * rather than contradicting a total already on screen.
  *
  * @ref LLP 0135#progress [implements]: the denominator is resolved after the fork, counts prompt lanes rather than phases, and is absent when no pathway is committed
+ * @ref LLP 0338#counts-anyway [implements]: the itinerary is a property of the pathway, so a lane with nothing to ask on this machine keeps both its place in the total and its position line
  *
  * @param {WizardPathway | undefined} pathway
  * @param {WizardStepName} step

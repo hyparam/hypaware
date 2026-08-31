@@ -4,6 +4,9 @@
 **Status:** Active
 **Systems:** Onboarding, CLI, Config, Plugins
 **Generated-by:** neutral
+**Extended-by:** [LLP 0338](./0338-a-question-lane-counts-even-with-nothing-to-ask.decision.md)
+(#progress: a lane the pathway runs keeps its position line and its place in
+the denominator even on a machine where it turns out to have nothing to ask)
 **Related:** LLP 0128, LLP 0129, LLP 0130, LLP 0131, LLP 0132, LLP 0133, LLP 0134, LLP 0005, LLP 0011, LLP 0025, LLP 0031, LLP 0037, LLP 0044, LLP 0058, LLP 0062, LLP 0063, LLP 0070, LLP 0100, LLP 0101, LLP 0114, LLP 0115, LLP 0116, LLP 0117, LLP 0120
 
 > Buildable design for the six-phase `hyp init` wizard (Fork -> Join -> Pick ->
@@ -294,6 +297,14 @@ omitted field. Non-interactive runs (`--yes`, `--dry-run`, presets,
 `--from-file`) never commit a pathway, so they emit no breadcrumb and their
 output is byte-identical to what it was before this existed
 (`@ref LLP 0131#attended-only`).
+
+> Extended by [LLP 0338](./0338-a-question-lane-counts-even-with-nothing-to-ask.decision.md):
+> the two rules above meet on a lane that is a question lane on the pathway
+> but has no question on this machine (the sync lane on a fully fleet-managed
+> one). Rule 1 wins - the itinerary is a property of the pathway, so the lane
+> keeps its place in the denominator and states its position. `first look`
+> stays outside the count on the static ground that it is never a question on
+> any run.
 
 ## Join phase {#join}
 
