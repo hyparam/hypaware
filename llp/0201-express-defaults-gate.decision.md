@@ -1,132 +1,148 @@
-# LLP 0201: One question up front accepts every default the wizard would ask for
+# LLP 0201: One question up front accepts every default; declining asks the real questions
 
 **Type:** Decision
 **Status:** Draft
 **Systems:** Onboarding, CLI
-**Author:** Brendan / Claude
-**Date:** 2026-08-07
-**Related:** LLP 0190 (#pick-gate, #sync-gate: the per-lane defaults gates this collapses), LLP 0188 (#never-silent: the floor this must not breach), LLP 0200 (#wizard: the third lane it answers), LLP 0135 (#progress, #orchestration), LLP 0131 (#attended-only), LLP 0129 (#fork), LLP 0191 (#back-edges)
+**Author:** Brendan / Kenny / Claude
+**Date:** 2026-08-07 (revised 2026-08-30)
+**Related:** LLP 0190 (#pick-gate, #sync-gate: the per-lane defaults gates this retires; the menu semantics there are untouched), LLP 0188 (#never-silent: the floor this must not breach), LLP 0200 (#wizard: the third lane it answers), LLP 0135 (#progress, #orchestration), LLP 0131 (#attended-only), LLP 0129 (#fork), LLP 0191 (#back-edges)
 
-> Extends [LLP 0190](./0190-wizard-defaults-gate.decision.md). Each lane
-> keeps its gate, its statement, and its default. What changes is that the
-> user can accept all of them at once, before the first one, instead of
-> pressing enter through a sequence whose answers were knowable in advance.
+> Extends [LLP 0190](./0190-wizard-defaults-gate.decision.md) and retires
+> its per-lane gates. The wizard asks "accept the defaults?" exactly once,
+> right after the fork (and the join, on the team pathway). Yes skips every
+> remaining question; no asks the real questions, linearly, with no further
+> accept-or-customize screens.
 
 ## Context {#context}
 
 [LLP 0190](./0190-wizard-defaults-gate.decision.md) gave the pick and sync
-lanes a defaults gate each, so the common run became "enter, enter,
-finale". [LLP 0200 #wizard](./0200-folder-ask-is-a-preference.decision.md#wizard)
-adds a third question with its own default. Three screens, three defaults,
-and on the common path three keypresses that all mean the same thing:
-yes, do the obvious.
+lanes a defaults gate each, and the first revision of this document added
+an express gate in front of them that could accept all of them at once,
+while keeping every per-lane gate behind it.
 
-The obvious answer is knowable before the first screen. Detection already
-seeds the pick lane, everything configured already syncs by default
-([LLP 0188 #rule](./0188-enrolled-default-sync-with-client-optout.decision.md#rule)),
-and new folders already sync (LLP 0200 #default). A user who wants that
-whole package has no way to say so once; a user who wants to inspect it
-has no way to know, at the first screen, how many more are coming.
+Dogfooding that shape surfaced two failures:
+
+- **The gate-of-gates read as the same question twice.** Declining
+  "Record and sync all of these" landed immediately on the pick lane's
+  "Record all" over the same rows, then the sync lane's "Sync all", then
+  the folder question: up to three more accept-or-customize screens after
+  the user already said "let me choose". Saying no once must mean "ask me
+  the real questions now".
+- **The detected list went unread.** The gate rendered the detected tools
+  in the prompt's `items` chrome, above the key-hint line
+  (`up/down · enter pick · esc back`). Users read the option rows, not
+  the text above the chrome, so "all of these" pointed at a list nobody
+  had looked at.
 
 What must not be lost is the never-silent floor: LLP 0188 #never-silent
-requires the wizard to say what will ship before anything ships, and
-LLP 0190's gates are where it says it.
+requires the wizard to say what will ship before anything ships.
 
 ## Decision {#decision}
 
-<a id="gate"></a>**One express gate precedes the question lanes and can
-answer all of them.** On an attended run, after the fork (and the join, on
-the team pathway) and before the pick lane, the wizard lists what it found
-and offers two rows:
+<a id="gate"></a>**One express gate precedes the question lanes and is the
+wizard's only accept-or-customize screen.** On an attended run, after the
+fork (and the join, on the team pathway) and before the pick lane, the
+wizard asks one two-row question - on every pathway, local included,
+whenever seeding yields default rows:
 
 ```
-HypAware found these on this machine:
-  Claude Code · managed by your fleet
-  Codex
-
-> Record and sync all of these
-    Configures each to record through HypAware; new folders sync too.
-  Let me choose
-    Step through what to record, what syncs, and new-folder behavior.
+Set up recording
+> Record and sync everything
+    Configures Claude Code and Codex to record through HypAware.
+  Customize
+    Choose what to record and what syncs.
 ```
 
-**The list is the explanation.** An earlier draft asked "Set up with
-defaults?" over four lines paraphrasing what the defaults were, and read as
-policy text: the user had to decode a summary to find out what would happen
-to their machine. The rows say it directly, so the accept label can name
-the act on the things above it ("all of these") and the alternative can be
-the two words it always was.
+**The rows are self-explaining; nothing load-bearing rides the items
+chrome.** The first revision's "the list is the explanation" put the
+detected tools above the prompt as `items`, where nobody reads. The tool
+names now live in the accept row's own summary sentence, which is both the
+disclosure (accepting *configures* those tools - the one-line side-effect
+statement [LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-gate)
+put on the retired pick gate's accept row) and the evidence (what was
+found), in the one line the happy path is guaranteed to read. Both halves
+have to stay: an express accept never opens the menu whose per-row
+summaries carry the specifics, so a sentence that only named the tools
+would leave "this changes your tools' configuration" stated nowhere on
+the path most users take. The names are the pick lane's own default rows
+from one computation (`resolvePickSeeding`, shared with the lane), joined
+plainly; fleet-locked rows appear by name like any other, and the fleet
+detail stays on the later screens and the accept narration, not in this
+sentence.
 
-The rows are the pick lane's own default rows, from one computation
-(`resolvePickSeeding` + `defaultRowLabels`, shared with
-[LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-gate)),
-with the same fleet suffix on locked rows. Two derivations of "the
-defaults" could disagree, and the screen that accepts them all at once is
-the worst place for that. Detection runs once per wizard run and is shared
-with the lane for the same reason.
+`sync` is claimed only where accepting would in fact sync everything the
+row names. On a solo machine nothing forwards, so the label drops to
+"Record everything" and the Customize summary to "Choose what to record."
+The same drop applies on an enrolled machine whose client-sync store
+already withholds one of the named rows: an accept preserves standing
+opt-outs verbatim rather than clearing them (#narrate, and
+[LLP 0188 #opt-out](./0188-enrolled-default-sync-with-client-optout.decision.md#opt-out)),
+so "and sync everything" would be a promise the accept does not keep -
+the case the retired sync gate handled with its own "Sync all" against
+"Keep this" split, which this row inherits along with the decision. The
+gate reads the store the sync lane reads, and a read it cannot complete
+answers "withheld": a row that cannot prove everything syncs must not say
+it does. Only the claim narrows; the accept narration still states the
+split in full, so nothing goes unsaid. The accept summary is the same
+sentence in every case: what it discloses is the configuring, which
+happens on a solo machine too. The new-folder policy that rides with an
+enrolled accept is deliberately not in the row copy - it is stated by the
+accept narration (#narrate) - so the row stays one readable sentence
+about the tools.
 
-`sync` is claimed only on an enrolled run - on a solo machine nothing
-forwards, so the label drops to "Record all of these". The accept row keeps
-a single line of consequence: what accepting does to the machine (the
-disclosure [LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-gate)
-put on the happy-path row) plus the new-folder policy that rides with it.
-The alternative row glosses the path it opens ("Step through what to
-record, what syncs, and new-folder behavior"): a bare "Let me choose"
-priced the longer path at zero screens, and the gloss is what tells the
-user the trade they are making.
+<a id="decline"></a>**Declining asks the real questions, linearly.** The
+per-lane defaults gates ([LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decision.md#pick-gate),
+[#sync-gate](./0190-wizard-defaults-gate.decision.md#sync-gate)) are
+removed. Customize opens the pick multiselect directly, then - on enrolled
+runs - the sync multiselect and the new-folder question, in that order,
+then the finale. No later screen ever again asks "defaults or customize".
 
-After [#one-lane-no-gate](#one-lane-no-gate), the orchestrator only ever
-calls this gate from inside its own `enrolled()` guard, so `opts.enrolled`
-is always true at the sole production call site and the solo-machine label
-above is never rendered by a real run. The component still accepts
-`enrolled: false` (and treats a missing `enrolled` the same way) and keeps
-the "Record all of these" branch: that is the defensive default the gate
-falls back to if the predicate ever widens again, not a live path.
+The menus still open on the same defaults the retired gates stated: the
+pick menu's boxes are seeded by detection and the locked set, the sync
+menu's boxes are checked for everything that syncs with locked rows
+leading read-only, and a bare enter keeps the checked state
+(LLP 0274). So "inspect everything and change nothing" is still one
+enter per screen; what is gone is the extra screen per lane that asked
+whether the user wanted to see the screen.
 
-Declining runs the lanes exactly as they run today, gates and all.
+The menus are the never-silent statement on this path: each one names the
+rows it records or ships before anything ships, which is the same
+statement the retired gates carried (LLP 0188 #never-silent binds the
+statement, not the prompt shape). The sync lane's no-candidate narrations
+(LLP 0276 #no-candidates, LLP 0289 #ask-the-store) are unchanged: a lane
+with nothing to ask still states its facts and asks nothing.
 
 <a id="narrate"></a>**Accepting skips the prompts, never the statements.**
-Each lane still runs; it prints the title and items its gate would have
-shown and proceeds with the default instead of waiting for an answer. So
-the express path and the step-by-step path print the same rows, in the same
-order, and differ only by the keypresses. This is what keeps the fast path
-inside LLP 0188 #never-silent: the floor binds the statement, not the
-question. Concretely, the pick lane narrates "HypAware will record:" with
-its rows (locked ones still fleet-suffixed), the sync lane narrates "These
-will sync to your server:" with the split it would have shown, and the
-new-folder lane narrates its question and records the default answer.
+Each lane still runs; it prints the title and items it would have shown
+and proceeds with the default instead of waiting for an answer. The pick
+lane narrates "HypAware will record:" with its rows (locked ones
+fleet-suffixed), the sync lane narrates "These will sync to your server:"
+with the split it would have shown, and the new-folder lane narrates its
+question and records its standing answer. This is what keeps the fast path
+inside LLP 0188 #never-silent.
+
+**Accepting takes each lane's standing answer, which is its default only
+where the user has no standing one.** The two stores behind the gate are
+read, never reset: the sync lane keeps its `local-only` entries
+([LLP 0188 #opt-out](./0188-enrolled-default-sync-with-client-optout.decision.md#opt-out))
+and the new-folder lane keeps its recorded mode
+([LLP 0200 #wizard](./0200-folder-ask-is-a-preference.decision.md#wizard)).
+"Accept the defaults" is an answer to the questions this run asks, not a
+licence to discard answers a previous one recorded - and each of these
+lanes narrates the value it took, so a lane that reset one would announce
+the new value as though the user had just chosen it.
 
 **The narration is blocked, not streamed.** Each statement is led by a
 blank line and its detail is indented under a title, because on this path
-the prompts that used to separate the statements are exactly what was
-removed: without the spacing the run reads as one paragraph of mixed
-subjects. A lane whose answer is a single fact prints it as one more
-indented line of its own block rather than as a second flush-left sentence
-repeating the subject ("When you start a session in a new folder:" /
-"  Syncing them all; change later with `hyp policy folders ask`").
+there are no prompts to separate the statements: without the spacing the
+run reads as one paragraph of mixed subjects. A lane whose answer is a
+single fact prints it as one more indented line of its own block.
 
 <a id="no-default-no-accept"></a>**Nothing found means no gate.** With
-nothing detected and nothing locked there is no list to show and nothing to
-accept: "record all of these" over an empty list would be a question about
-nothing, and accepting it would mean "record nothing". The orchestrator
-skips the gate entirely and the pick lane opens its menu, exactly as it
-does today when its own gate has no rows.
-
-<a id="one-lane-no-gate"></a>**One gate to collapse means no gate.**
-The express gate earns its screen by answering several questions at
-once, and only the enrolled runs have several: the team pathway, and
-a managed machine reconfiguring down the local pathway, and a machine
-that joined this run and then chose Local without disconnecting (LLP 0191
-#join-not-undone), whose itineraries add the sync and new-folder lanes. A
-solo local run asks exactly one question, the pick gate, over these same
-rows with the same accept. Fronting it with the express gate asked that
-question twice: declining "Record all of these" landed immediately on
-"Record all", with nothing chosen in between. The orchestrator therefore
-shows the gate only on an enrolled run - the same `enrolled()` read that
-adds the extra lanes - and a solo run opens with the pick gate, whose
-decline is already the menu. The solo happy path stays two questions
-(fork, pick gate, finale), since the pick gate's accept is the same yes
-the express gate offered.
+nothing detected and nothing locked there is no default worth naming and
+nothing to accept: "record everything" over nothing would mean "record
+nothing". The orchestrator skips the gate entirely and the pick lane opens
+its menu, exactly as it does on a decline.
 
 <a id="no-counter"></a>**The gate carries no position line, and an express
 run states none.** The gate is what decides how many questions remain, so
@@ -142,52 +158,52 @@ steps back to the fork ([LLP 0191 #back-edges](./0191-wizard-back-navigation.dec
 ctrl+c cancels the run at 130, narrating the enrolled state first when this
 run has already joined. It is asked once per pass through the lanes, so a
 back to the fork and forward again asks it again and may be answered
-differently. The edge runs both ways: it is a screen on the back chain, so
-the pick lane behind it steps back *to it* rather than past it to the fork,
-and a back out of the sync lane re-presents the picker without re-asking it.
-Back edges mirror the forward edges one screen at a time, and a question
-inserted into the forward chain but not the back chain would make both of
-its neighbours overshoot. On a pass where there is nothing to accept and no
-gate is shown (#no-default-no-accept), the pick lane's back edge reaches the
-fork directly, exactly as it did before the gate existed - including the
-pass a back *into* the gate opens, since the rows are the picker's own
-confirmed defaults and a confirmed empty selection leaves none. Escape
-reaches the previous screen; a step that renders nothing is not one, and
-falling forward into the lane the user just left would make escape a redraw.
-Non-interactive runs (`--yes`, presets, `--from-file`) never
-see it: they already take every default without prompting (LLP 0131
-#attended-only).
+differently. With the per-lane gates gone each lane is one screen, so the
+back chain is: folder question to sync menu (or past a sync lane that
+asked nothing to the pick menu), sync menu to pick menu, pick menu to this
+gate whenever it was shown, and this gate to the fork. On a pass where
+there is nothing to accept and no gate is shown (#no-default-no-accept),
+the pick menu's back edge reaches the fork directly - including the pass a
+back *into* the gate opens, since the rows are the picker's own confirmed
+defaults and a confirmed empty selection leaves none. Non-interactive runs
+(`--yes`, presets, `--from-file`) never see the gate: they already take
+every default without prompting (LLP 0131 #attended-only).
 
-Rejected: making express the *only* path (the step-by-step lanes are how a
-user with an unusual machine says no, and LLP 0011 #autodetect-vs-default
-holds that detection seeds and never forces). Also rejected: silently
-auto-accepting a lane whose gate had exactly one obvious answer (the same
-never-silent objection LLP 0190 raised against skipping the sync step).
+Rejected: making express the *only* path (the menus are how a user with an
+unusual machine says no, and LLP 0011 #autodetect-vs-default holds that
+detection seeds and never forces). Rejected: keeping the per-lane gates
+behind the express gate (the first revision's shape; declining then asked
+"accept defaults?" up to three more times). Rejected: showing the express
+gate only on enrolled runs (the first revision's #one-lane-no-gate; with
+the pick gate gone, the solo pathway needs the accept question too, and
+one rule on every pathway beats two). Rejected: rendering the detected
+list in the items chrome (text above the key-hint line goes unread; the
+row summary is where the eyes are). Rejected: silently auto-accepting a
+lane whose gate had exactly one obvious answer (the never-silent objection
+LLP 0190 raised against skipping the sync step).
 
 ## Consequences {#consequences}
 
-- The attended happy path on an enrolled run is: fork, express gate,
-  narration, finale. Two questions, where it was four (five on the team
-  pathway), and the second one names the tools it is about to configure.
-  A solo local run keeps its own two-question path (fork, pick gate,
-  finale) without the express screen (#one-lane-no-gate).
-- The pick lane's pre-question seeding is now a named, exported step
-  (`resolvePickSeeding`). Any future default that a gate would state has
-  one place to be computed.
-- Every lane grows an `autoAccept` seam. A lane that later adds a question
-  must decide what accepting it means, which is the right place for that
-  decision to be forced.
+- The attended happy path on every pathway is: fork (plus join on team),
+  express gate, narration, finale. Two questions, and the second names
+  the tools it is about to configure in the row the user actually reads.
+- The decline path is linear: pick menu, then on enrolled runs the sync
+  menu and the folder question, then the finale. Each screen is a real
+  question; none of them is a gate.
+- Every lane keeps its `autoAccept` seam. A lane that later adds a
+  question must decide what accepting it means.
 - A user who accepts express and later wants to change any of it uses the
-  same standing controls as everyone else: `hyp policy client`,
-  `hyp policy folders`, `hyp policy set`, and re-running `hyp init`.
-- The step counter now describes only the step-by-step path. That is
-  honest, not a regression: an express run has no steps to count.
+  same standing controls as everyone else: `hyp privacy client`,
+  `hyp privacy folders`, and re-running `hyp init`.
+- The step counter describes only the decline path. That is honest, not a
+  regression: an express run has no steps to count.
 
 ## References
 
-- LLP 0190, LLP 0188, LLP 0200, LLP 0135, LLP 0131, LLP 0129, LLP 0191
+- LLP 0190, LLP 0188, LLP 0200, LLP 0135, LLP 0131, LLP 0129, LLP 0191,
+  LLP 0274, LLP 0276, LLP 0289
 - `src/core/cli/wizard/express.js` (the gate and the shared narration),
   `src/core/cli/wizard/index.js` (orchestration, the run-once detector),
-  `src/core/cli/wizard/pick.js` (`resolvePickSeeding`, `defaultRowLabels`),
-  `src/core/cli/wizard/sync_scope.js`,
+  `src/core/cli/wizard/pick.js` (`resolvePickSeeding`, the menu-only lane),
+  `src/core/cli/wizard/sync_scope.js` (the menu-only lane),
   `src/core/cli/wizard/folder_ask.js` (the `autoAccept` arms)

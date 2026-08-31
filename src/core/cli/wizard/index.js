@@ -23,6 +23,7 @@ import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
+import { optedOutClientSourceIds, readClientSyncEntries } from '../../usage-policy/index.js'
 import {
   LOCAL_INSTALL_RETENTION_DAYS,
   defaultConfirmSelectPromptFactory,
@@ -38,7 +39,7 @@ import { evaluateReturningGate, runWizardFork } from './fork.js'
 import { writeSuggestedPrompts } from './first_ask.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
-import { commitWizardPickedConfig, defaultRowLabels, resolvePickSeeding, runWizardPick } from './pick.js'
+import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
 import { runWizardSyncNow } from './sync_now.js'
 import { runWizardSyncScope } from './sync_scope.js'
 import { runWizardFolderAsk } from './folder_ask.js'
@@ -375,25 +376,24 @@ export async function runInitWizard(opts) {
       // the pick lane's back edge then reaches the fork directly, exactly
       // as it did before the gate existed.
       let expressShown = false
-      // Enrolled runs are the runs with several gates to collapse: their
-      // itineraries add the sync and new-folder lanes. A solo local run's
-      // only question is the pick gate, which offers these same rows
-      // itself, so fronting it with this gate asked the same question
-      // twice - declining "Record all of these" landed on "Record all".
-      // The condition is the sync lane's own condition (see `pathway ===
-      // 'team' || enrolled()` below), restated here so the two can only
-      // drift apart if someone edits one and forgets the other.
-      // @ref LLP 0201#one-lane-no-gate [implements]: the gate is shown only when it collapses more than one lane's gate
-      if (interactive && (pathway === 'team' || enrolled())) {
-        // The rows accepting would record: the pick lane's own default
-        // rows, computed once here and listed verbatim on the gate, so
-        // "all of these" names something the user can read rather than an
-        // abstract "defaults". Resolution failure degrades to no gate.
-        const rows = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
+      // Every attended pass with default rows gets the gate, both
+      // pathways: it is the wizard's only accept-or-customize screen, and
+      // the lanes behind it are menus that never re-ask "defaults or
+      // customize" (LLP 0201 #decline).
+      // @ref LLP 0201#gate [implements]: the gate is asked on every attended pass whose seeding yields default rows
+      if (interactive) {
+        // The tool names the accept row's summary sentence claims: the
+        // pick lane's own default rows, computed once here, so
+        // "everything" names exactly what the lane would record.
+        // Resolution failure degrades to no gate.
+        const { labels: rows, optOutIds } = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
         // Nothing detected and nothing locked is nothing to accept, so
         // there is no gate to show; the pick lane opens its menu as it
         // always would (LLP 0201 #no-default-no-accept).
         if (rows.length > 0) {
+          // Only an enrolled run makes a sync claim at all, so only an
+          // enrolled run pays for the store read.
+          const syncWithheld = enrolled() && (await syncWithheldSafe({ opts, ids: optOutIds }))
           const expressFn = opts.express ?? runWizardExpressGate
           const choice = await expressFn({
             stdout: opts.stdout,
@@ -402,6 +402,7 @@ export async function runInitWizard(opts) {
             env: opts.env,
             rows,
             enrolled: enrolled(),
+            ...(syncWithheld ? { syncWithheld: true } : {}),
             // The fork is always behind this question.
             allowBack: true,
             ...(opts.confirm ? { confirm: opts.confirm } : {}),
@@ -455,7 +456,6 @@ export async function runInitWizard(opts) {
           ...(opts.exportOrigin ? { exportOrigin: opts.exportOrigin } : {}),
           ...(opts.force ? { force: opts.force } : {}),
           ...(opts.prompt ? { prompt: opts.prompt } : {}),
-          ...(opts.confirm ? { confirm: opts.confirm } : {}),
           // Retention is never asked; the default follows where the durable
           // copy lives. Only an unmanaged local install keeps the longer
           // 120-day window (its cache is the only copy of history); a team run,
@@ -565,7 +565,7 @@ export async function runInitWizard(opts) {
                 .filter((d) => !visibleCandidateIds.has(d.id))
                 .map((d) => d.id),
               ...(syncProgress ? { progress: syncProgress } : {}),
-              ...(opts.confirm ? { confirm: opts.confirm } : {}),
+              ...(opts.prompt ? { prompt: opts.prompt } : {}),
               ...(express ? { autoAccept: true } : {}),
               // The pick lane is always behind this one.
               allowBack: true,
@@ -586,6 +586,36 @@ export async function runInitWizard(opts) {
               stderr: opts.stderr,
               ...(opts.stdin ? { stdin: opts.stdin } : {}),
               env: opts.env,
+              // The title names the tools whose sessions raise the question:
+              // this run's recorded rows, through the same display filter as
+              // the sync lane, so a hidden row (LLP 0202) stays unnamed here
+              // too - minus the candidates the answer one screen back just
+              // sent local-only. The question is about what happens to a new
+              // folder's rows on the way to the server, and an opted-out
+              // source has no such way: naming it would promise "syncs
+              // without asking" for a client the user just stopped syncing
+              // at all. Locked rows always sync (LLP 0188 #locked), so they
+              // are never filtered.
+              //
+              // A skipped lane answers nothing, so it can filter nothing:
+              // `optedOut` is `[]` on the unreadable-store path because the
+              // store could not be read, not because it withholds nothing
+              // (`sync_scope.js` warns and returns `{ skipped: true }`
+              // there). Naming every picked tool off that empty list would
+              // promise "syncs without asking" for rows the run just said
+              // it cannot account for, which is the same false promise the
+              // filter exists to prevent. With no list we can stand behind,
+              // the title takes its tool-free phrasing (LLP 0200 #wizard):
+              // the preference is machine-local and worth recording either
+              // way, so the question still runs, it just stops naming
+              // names it cannot check.
+              // @ref LLP 0200#wizard [implements]: the title names only rows the run can say still sync, so an unreadable store falls back to the tool-free phrasing
+              names: syncScope.skipped
+                ? []
+                : [
+                    ...lockedDescriptors,
+                    ...candidateDescriptors.filter((d) => !sourcesOptedOut.includes(d.id)),
+                  ].map((d) => d.label),
               ...(foldersProgress ? { progress: foldersProgress } : {}),
               ...(opts.confirm ? { confirm: opts.confirm } : {}),
               ...(express ? { autoAccept: true } : {}),
@@ -1032,15 +1062,20 @@ async function narrateEnrolledAbort(opts) {
 }
 
 /**
- * The rows the express gate lists: the pick lane's own default rows
- * (LLP 0201 #gate), labelled by the shared labeller so the two screens
- * cannot disagree about what "all of these" means.
+ * The tool names the express gate's accept summary claims: the pick
+ * lane's own default rows (LLP 0201 #gate), by plain label - the
+ * sentence names the tools, and the fleet or setup detail stays on the
+ * later screens and narrations.
  *
  * Best-effort like every other pre-question probe here: a catalog or
  * config read that throws yields no rows, which the caller reads as "no
  * gate" and falls through to the lanes' own questions. Losing a shortcut
  * is the right failure; guessing at a list the user is about to accept is
  * not.
+ *
+ * `optOutIds` rides along for the accept row's sync claim: the same rows
+ * by id, minus the locked ones, which always sync (LLP 0188 #locked) and
+ * so can never be what makes the claim false.
  *
  * @ref LLP 0201#gate [implements]: the gate names the pick lane's rows, from one computation, or is not shown
  * @param {{
@@ -1050,7 +1085,7 @@ async function narrateEnrolledAbort(opts) {
  *   pickSeed: PickerSource[] | undefined,
  *   detect: (args: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>,
  * }} args
- * @returns {Promise<string[]>}
+ * @returns {Promise<{ labels: string[], optOutIds: string[] }>}
  */
 async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
   try {
@@ -1061,9 +1096,46 @@ async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
       ...(pickSeed ? { initialSelection: pickSeed } : {}),
       detect,
     }))
-    return defaultRowLabels(seeding)
+    return {
+      labels: seeding.defaultRows.map((d) => d.label),
+      optOutIds: seeding.defaultRows.filter((d) => !seeding.lockedSet.has(d.id)).map((d) => d.id),
+    }
   } catch {
-    return []
+    return { labels: [], optOutIds: [] }
+  }
+}
+
+/**
+ * Does the client-sync store already withhold one of the rows the express
+ * gate is about to name?
+ *
+ * The accept row promises "Record and sync everything", and an express
+ * accept preserves standing opt-outs verbatim rather than clearing them
+ * (`sync_scope.js`'s auto-accept arm returns `optedOutBefore`), so on a
+ * reconfigure the unqualified promise is false. The retired sync gate
+ * carried this distinction itself ("Sync all" against "Keep this"); with
+ * that gate gone the express row is the only screen the user decides on,
+ * so it has to read the store the sync lane reads.
+ *
+ * Fails toward the weaker claim: an unreadable or throwing store answers
+ * "withheld", because a gate that cannot prove everything syncs must not
+ * say it does. That is also the run where the sync lane skips itself with
+ * a warning and writes nothing, leaving whatever the store holds standing.
+ *
+ * @ref LLP 0188#opt-out [constrained-by]: the standing opt-out the accept keeps is the store's, so the claim about it is read from the store
+ * @param {{ opts: RunInitWizardOptions, ids: string[] }} args
+ * @returns {Promise<boolean>}
+ */
+async function syncWithheldSafe({ opts, ids }) {
+  if (ids.length === 0) return false
+  try {
+    const stateDir = readObservabilityEnv(opts.env).stateDir
+    const entries = await readClientSyncEntries({ stateDir })
+    if (!entries || entries.length === 0) return false
+    const optedOut = new Set(optedOutClientSourceIds(entries))
+    return ids.some((id) => optedOut.has(id))
+  } catch {
+    return true
   }
 }
 

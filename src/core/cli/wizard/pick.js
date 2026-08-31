@@ -15,7 +15,6 @@ import {
   composePickerConfig,
   configuredExportChoice,
   configuredPickerSources,
-  defaultConfirmSelectPromptFactory,
   defaultOverwriteConfirmFactory,
   defaultPickerDetect,
   defaultPromptFactory,
@@ -31,7 +30,7 @@ import {
 /**
  * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { PickerDescriptor } from '../../../../src/core/types.js'
- * @import { AsyncConfirmSelectPrompt, AsyncPickPrompt, PickerExport, PickerSource, WalkthroughOption } from '../../../../src/core/cli/types.js'
+ * @import { AsyncPickPrompt, PickerExport, PickerSource, WalkthroughOption } from '../../../../src/core/cli/types.js'
  * @import { RunWizardPickOptions, SeedOrigin, WizardPickResult } from '../../../../src/core/cli/wizard/types.js'
  */
 
@@ -44,13 +43,13 @@ import {
 export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
 
 /**
- * Label suffix for a `needs_setup` row listed on a defaults gate. Such a
- * row reaches the gate only off a recorded answer (the config on disk, or
- * this run's own confirmed selection - detection never seeds one). Its
- * extra setup (a sign-in, a sudo prompt) runs when it is newly picked;
- * a reconfigure's carried row is not re-asked. Saying so on the gate is
- * what keeps "record all of these" from reading as if enter alone
- * finished the job.
+ * Label suffix for a `needs_setup` row listed on the accept narration.
+ * Such a row reaches the default rows only off a recorded answer (the
+ * config on disk, or this run's own confirmed selection - detection never
+ * seeds one). Its extra setup (a sign-in, a sudo prompt) runs when it is
+ * newly picked; a reconfigure's carried row is not re-asked. Saying so is
+ * what keeps "record everything" from reading as if enter alone finished
+ * the job.
  *
  * No BUNDLED row reaches it today: `claude-desktop` was the only one and is
  * now hidden (LLP 0297). `needs_setup` remains a kernel contract any plugin
@@ -75,13 +74,13 @@ export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
  *
  * Hidden rows (LLP 0202) are resolved here for the same reason: `visibleList`
  * is the single display filter's output, `defaultRows` is drawn from it so
- * neither gate can state a hidden row, and `carried` is the hidden-row
+ * no screen can state a hidden row, and `carried` is the hidden-row
  * carry-through, decided off `seedOrigin` before any screen renders, so the
- * express gate's auto-accept and the pick lane's own screens preserve a
+ * express gate's auto-accept and the pick lane's menu preserve a
  * raw-only config the same way.
  *
  * @ref LLP 0201#gate [implements]: one computation of "the defaults", read by both the express gate and the pick lane
- * @ref LLP 0202#hidden-rows [implements]: a `hidden` row stays out of the gates and the menu
+ * @ref LLP 0202#hidden-rows [implements]: a `hidden` row stays out of every wizard screen - the express gate's sentence, the accept narration, and the menu
  * @param {RunWizardPickOptions} opts
  */
 export async function resolvePickSeeding(opts) {
@@ -266,13 +265,12 @@ export async function resolvePickSeeding(opts) {
 }
 
 /**
- * The rows a defaults gate lists, one label per line, locked rows
- * fleet-suffixed. Shared so the pick gate (LLP 0190 #pick-gate) and the
- * express gate (LLP 0201 #gate) can never disagree about what "the
- * defaults" are: the express gate names exactly the rows accepting it will
- * record.
+ * The rows the accept narration lists, one label per line, locked rows
+ * fleet-suffixed. The express gate's summary sentence names these same
+ * rows (plain, unsuffixed) from the same `resolvePickSeeding` computation,
+ * so the two can never disagree about what "the defaults" are.
  *
- * @ref LLP 0201#gate [implements]: the express gate lists the pick gate's own rows, from one computation
+ * @ref LLP 0201#narrate [implements]: the accept narration lists the rows the express gate accepted, from one computation
  * @param {{ defaultRows: PickerDescriptor[], lockedSet: Set<string> }} seeding
  * @returns {string[]}
  */
@@ -291,10 +289,10 @@ export function defaultRowLabels({ defaultRows, lockedSet }) {
  * The wizard pick phase (LLP 0135 #pick). Keeps `runPickerWalkthrough`'s
  * prompt/write/guard/overwrite-confirm shape but sources its rows from the
  * catalog's picker descriptors (LLP 0130) instead of the retired hardcoded
- * `PICKER_SOURCES` table, and understands central-layer-locked rows. When
- * detection or the locked set yields a default selection, a defaults gate
- * (LLP 0190 #pick-gate) states it first and a bare enter accepts it; the
- * full menu opens only on request.
+ * `PICKER_SOURCES` table, and understands central-layer-locked rows. The
+ * lane asks one question, the multiselect, seeded by detection and the
+ * locked set; the accept-or-customize question lives on the express gate
+ * (LLP 0201), whose accept auto-answers this lane (`autoAccept`).
  *
  * A row's initial checked state is `locked.includes(id)`, then whatever the
  * local config on disk already collects, and only on a first run (no config
@@ -374,12 +372,11 @@ export async function runWizardPick(opts) {
     exportOrigin = opts.exportOrigin ?? 'default'
   } else {
     const ask = opts.prompt ?? defaultPromptFactory(opts)
-    const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory(opts)
 
     /** @type {{ rawSources: PickerSource[] } | { back: true }} */
     let selection
     try {
-      selection = await promptPickSelection({ opts, ask, confirm, visibleList, descriptors, seed, detected, lockedSet, defaultRows, carried })
+      selection = await promptPickSelection({ opts, ask, visibleList, descriptors, seed, detected, lockedSet, defaultRows, carried })
     } catch (err) {
       if (isPromptCancelledError(err)) return cancelledResult(opts)
       throw err
@@ -593,27 +590,25 @@ export async function commitWizardPickedConfig(args) {
 }
 
 /**
- * The pick lane's question screens: the defaults gate (LLP 0190
- * #pick-gate), shown when the seed or the locked set yields default rows,
- * and the full multiselect. The two screens loop rather than fall
- * through: the menu's back returns to the gate whenever the gate exists,
- * and only the lane's *first* screen propagates `back` to the caller -
- * and only when the orchestrator said there is somewhere to go
- * (`opts.allowBack`). A back with no target is not offered at all.
- * Cancellation propagates as the prompt's own throw.
+ * The pick lane's question screen: the multiselect, directly (LLP 0201
+ * #decline - the lane's former defaults gate is retired; the wizard's one
+ * accept-or-customize question is the express gate, and a user who
+ * declined it has already asked for this menu). The lane propagates
+ * `back` to the caller only when the orchestrator said there is
+ * somewhere to go (`opts.allowBack`); a back with no target is not
+ * offered at all. Cancellation propagates as the prompt's own throw.
  *
- * Both screens draw from `visibleList` and every selection they return is
+ * The menu draws from `visibleList` and every selection it returns is
  * widened by `carried`, so a hidden row (LLP 0202) is never shown and a
- * carried raw-only setup survives whichever screen confirms the selection,
+ * carried raw-only setup survives whichever path confirms the selection,
  * the express auto-accept included.
  *
- * @ref LLP 0191#lane-loops [implements]: menu backs to gate; the lane's first screen backs out to the previous wizard step
- * @ref LLP 0202#carry-through [implements]: every confirming screen returns the carried hidden rows with the picks
+ * @ref LLP 0191#lane-loops [implements]: the lane is one screen; its menu backs out to the previous wizard step
+ * @ref LLP 0202#carry-through [implements]: every confirming path returns the carried hidden rows with the picks
  *
  * @param {{
  *   opts: RunWizardPickOptions,
  *   ask: AsyncPickPrompt,
- *   confirm: AsyncConfirmSelectPrompt,
  *   visibleList: PickerDescriptor[],
  *   descriptors: Map<string, PickerDescriptor>,
  *   seed: ReadonlySet<string>,
@@ -624,112 +619,64 @@ export async function commitWizardPickedConfig(args) {
  * }} args
  * @returns {Promise<{ rawSources: PickerSource[] } | { back: true }>}
  */
-async function promptPickSelection({ opts, ask, confirm, visibleList, descriptors, seed, detected, lockedSet, defaultRows, carried }) {
+async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, detected, lockedSet, defaultRows, carried }) {
   const withCarried = (/** @type {string[]} */ picked) =>
     /** @type {PickerSource[]} */ ([...new Set([...picked, ...carried])])
-  // Defaults gate (LLP 0190 #pick-gate): when the seed (detection, or a
-  // re-entry's previous selection) or the org's locked set yields a
-  // usable default, state it in one line and let a bare enter accept it;
-  // the full menu opens only on request. With no default there is
-  // nothing to confirm, so the menu shows directly. `defaultRows` arrives
-  // from `resolvePickSeeding` rather than being re-derived here: the
-  // express gate accepts these exact rows, and LLP 0201 #gate is explicit
-  // that "the defaults" must have one definition, not two that happen to
-  // agree.
-  const hasGate = defaultRows.length > 0
-  // One source per line; the locked suffix matches the menu rows'. Built by
-  // the shared labeller, so the express gate lists these exact rows.
-  const gateItems = defaultRowLabels({ defaultRows, lockedSet })
   // The express gate already accepted this lane (LLP 0201): state the rows
-  // the gate would have shown and take them. With no gate there is no
-  // default to take, so the menu opens as it always would.
-  // @ref LLP 0201#narrate [implements]: an auto-accepted gate prints its statement instead of prompting
-  if (hasGate && opts.autoAccept) {
-    narrateAcceptedGate({ stdout: opts.stdout, title: 'HypAware will record:', items: gateItems })
+  // it accepted and take them. `defaultRows` arrives from
+  // `resolvePickSeeding` rather than being re-derived here: the express
+  // gate names these exact rows, and LLP 0201 #gate is explicit that "the
+  // defaults" must have one definition, not two that happen to agree.
+  // @ref LLP 0201#narrate [implements]: an auto-accepted lane prints its statement instead of prompting
+  if (defaultRows.length > 0 && opts.autoAccept) {
+    narrateAcceptedGate({
+      stdout: opts.stdout,
+      title: 'HypAware will record:',
+      // One source per line; the locked suffix matches the menu rows'.
+      items: defaultRowLabels({ defaultRows, lockedSet }),
+    })
     return { rawSources: withCarried(defaultRows.map((d) => d.id)) }
   }
-  let screen = hasGate ? 'gate' : 'menu'
-  while (true) {
-    if (screen === 'gate') {
-      let choice
-      try {
-        choice = await confirm({
-          title: 'HypAware will record:',
-          ...(opts.progress ? { progress: opts.progress } : {}),
-          items: gateItems,
-          options: [
-            {
-              value: 'accept',
-              label: 'Record all',
-              // The gate is the happy path (enter, enter, finale), so it is
-              // where the side-effect disclosure has to live: the rows stay
-              // bare, but accepting must say the machine is being changed.
-              // The per-row specifics stay on the menu rows' summaries.
-              // @ref LLP 0190#pick-gate [implements]: the accept option carries the one-line configures-your-tools disclosure
-              summary: 'Configures these tools to record through HypAware; the menu rows say how.',
-            },
-            { value: 'customize', label: 'Select what to record' },
-          ],
-          default: 'accept',
-          ...(opts.allowBack ? { allowBack: true } : {}),
-        })
-      } catch (err) {
-        if (isPromptBackError(err)) return { back: true }
-        throw err
-      }
-      if (choice === 'accept') {
-        return { rawSources: withCarried(defaultRows.map((d) => d.id)) }
-      }
-      screen = 'menu'
-    } else {
-      try {
-        const options = visibleList.map((d) => buildPickOption(d, seed, detected, lockedSet))
-        // Whether this menu arrives with a state worth keeping: a locked
-        // row, or one the seed already checked (the config on disk, a
-        // re-entry's selection, detection). Exactly the predicate behind
-        // `defaultRows`, read off the rows that render so the flag below
-        // can never disagree with the boxes on screen.
-        const hasChecked = options.some((o) => o.checked === true)
-        const sourceRaw = await ask({
-          pickType: 'sources',
-          // No keys in the title: the TUI's hint line and the numbered
-          // fallback's own select instructions each carry their controls,
-          // so a parenthetical here said it twice on every terminal.
-          title: 'What do you want to collect?',
-          // Carried on the question rather than composed into the title, so
-          // the TUI paints it dim on its own line and the legacy numbered
-          // fallback prints the same text as plain text.
-          // @ref LLP 0135#progress [implements]: the pick lane's position rides the prompt spec, not the title
-          ...(opts.progress ? { progress: opts.progress } : {}),
-          options,
-          // The TUI multiselect always renders and keeps the checked state;
-          // the numbered fallback only does so for a question that asks.
-          // Without this the non-TTY menu printed bare labels and read a
-          // bare enter as "collect nothing", so a reconfigure that walked
-          // gate then menu then enter rewrote a seeded config to collect
-          // nothing - past an overwrite confirm that defaults to yes.
-          // Opted in only when a box is actually checked: with none there
-          // is no state to keep, so enter stays the historical empty
-          // selection and a dropped terminal still cancels the run rather
-          // than carrying it into the daemon install with no sources.
-          // @ref LLP 0274#pick-menu [implements]: the pick menu keeps its checked state on a bare enter, and only where it has one
-          ...(hasChecked ? { enterKeepsChecked: true } : {}),
-          ...(hasGate || opts.allowBack ? { allowBack: true } : {}),
-        })
-        return {
-          rawSources: withCarried(sourceRaw.filter((v) => descriptors.has(v))),
-        }
-      } catch (err) {
-        if (isPromptBackError(err)) {
-          if (hasGate) {
-            screen = 'gate'
-            continue
-          }
-          return { back: true }
-        }
-        throw err
-      }
+  try {
+    const options = visibleList.map((d) => buildPickOption(d, seed, detected, lockedSet))
+    // Whether this menu arrives with a state worth keeping: a locked
+    // row, or one the seed already checked (the config on disk, a
+    // re-entry's selection, detection). Exactly the predicate behind
+    // `defaultRows`, read off the rows that render so the flag below
+    // can never disagree with the boxes on screen.
+    const hasChecked = options.some((o) => o.checked === true)
+    const sourceRaw = await ask({
+      pickType: 'sources',
+      // No keys in the title: the TUI's hint line and the numbered
+      // fallback's own select instructions each carry their controls,
+      // so a parenthetical here said it twice on every terminal.
+      title: 'What do you want to collect?',
+      // Carried on the question rather than composed into the title, so
+      // the TUI paints it dim on its own line and the legacy numbered
+      // fallback prints the same text as plain text.
+      // @ref LLP 0135#progress [implements]: the pick lane's position rides the prompt spec, not the title
+      ...(opts.progress ? { progress: opts.progress } : {}),
+      options,
+      // The TUI multiselect always renders and keeps the checked state;
+      // the numbered fallback only does so for a question that asks.
+      // Without this the non-TTY menu printed bare labels and read a
+      // bare enter as "collect nothing", so a reconfigure that reached
+      // the menu and pressed enter rewrote a seeded config to collect
+      // nothing - past an overwrite confirm that defaults to yes.
+      // Opted in only when a box is actually checked: with none there
+      // is no state to keep, so enter stays the historical empty
+      // selection and a dropped terminal still cancels the run rather
+      // than carrying it into the daemon install with no sources.
+      // @ref LLP 0274#pick-menu [implements]: the pick menu keeps its checked state on a bare enter, and only where it has one
+      ...(hasChecked ? { enterKeepsChecked: true } : {}),
+      ...(opts.allowBack ? { allowBack: true } : {}),
+    })
+    return {
+      rawSources: withCarried(sourceRaw.filter((v) => descriptors.has(v))),
     }
+  } catch (err) {
+    if (isPromptBackError(err)) return { back: true }
+    throw err
   }
 }
 

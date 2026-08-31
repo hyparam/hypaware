@@ -2,25 +2,24 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import fs from 'node:fs/promises'
-import os from 'node:os'
-import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import { render } from '../../../src/core/cli/tui/render.js'
 import { defaultConfirmSelectPromptFactory } from '../../../src/core/cli/walkthrough.js'
-import { runWizardPick } from '../../../src/core/cli/wizard/pick.js'
-import { discoverBundledPlugins } from '../../../src/core/runtime/bundled.js'
-import { buildPluginCatalog } from '../../../src/core/plugin_catalog.js'
+import { runWizardExpressGate } from '../../../src/core/cli/wizard/express.js'
 
-// The defaults gate's accept option carries the only side-effect disclosure
-// on the wizard's happy path ("Configures these tools to record through
-// HypAware..."). `test/core/cli/wizard/pick.test.js` pins it on the question
-// object; these tests pin it on the *screen*, on both prompt paths, because a
-// summary that no renderer forwards is a disclosure the user never reads. The
-// spec layer alone stayed green the first time the copy went missing.
-// @ref LLP 0190#pick-gate [tests]: the disclosure is asserted in the rendered
+// The express gate's accept row carries the only side-effect disclosure on
+// the wizard's happy path ("Configures ... to record ... through
+// HypAware."): the express accept never opens the pick menu, whose per-row
+// summaries carry the specifics. The wizard test layer pins the wording on
+// the question object; these tests pin it on the *screen*, on both prompt
+// paths, because a summary that no renderer forwards is a disclosure the
+// user never reads. The spec layer alone stayed green the first time the
+// copy went missing, and pinning only the tool names let it go missing a
+// second time - hence the shape assertion in `acceptSummary` below.
+// @ref LLP 0201#gate [tests]: the disclosure is asserted in the rendered
 // bytes, not just on the question spec, so dropping the forwarding fails here
+// @ref LLP 0190#pick-gate [tests]: the happy-path accept row still says that accepting configures the listed tools
 
 /**
  * Build a pair of PassThrough streams the TUI runtime accepts as a
@@ -44,7 +43,7 @@ function makeTty() {
 }
 
 /**
- * The real gate question, captured off `runWizardPick` rather than
+ * The real gate question, captured off `runWizardExpressGate` rather than
  * hand-written here: the tests then replay the shipped copy through the
  * shipped renderers, so neither end can drift without the other noticing.
  *
@@ -60,40 +59,41 @@ function gateQuestion() {
 
 /** @returns {Promise<any>} */
 async function captureGateQuestion() {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-pick-gate-disclosure-'))
-  test.after(() => fs.rm(tmp, { recursive: true, force: true }))
-  const bundled = await discoverBundledPlugins()
-  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
   /** @type {{ question: any }} */
   const state = { question: null }
   const sink = { write() { return true } }
-  await runWizardPick(/** @type {any} */ ({
+  const choice = await runWizardExpressGate(/** @type {any} */ ({
     stdout: sink,
     stderr: sink,
-    catalog,
-    env: { HOME: tmp, HYP_HOME: path.join(tmp, '.hyp'), HYP_NO_TUI: '1' },
-    prompt: async () => { throw new Error('the menu must not open when the gate is accepted') },
+    env: {},
+    rows: ['Claude Code', 'Codex'],
+    enrolled: true,
     confirm: async (/** @type {any} */ question) => {
       state.question = question
-      return 'accept'
+      return 'defaults'
     },
-    detect: async () => new Set(['codex']),
   }))
-  assert.ok(state.question, 'the wizard asked the defaults gate')
+  assert.equal(choice, 'defaults')
+  assert.ok(state.question, 'the wizard asked the express gate')
   return state.question
 }
 
 /**
  * The disclosure the gate's accept option must show. Read off the live
- * question so a copy edit in `pick.js` travels here for free; the wording
- * itself is pinned at the spec layer by `pick.test.js`.
+ * question so a copy edit in `express.js` travels here for free; the
+ * wording itself is pinned at the spec layer by `express.test.js`.
  *
  * @returns {Promise<string>}
  */
 async function acceptSummary() {
   const question = await gateQuestion()
-  const accept = question.options.find((/** @type {any} */ o) => o.value === 'accept')
+  const accept = question.options.find((/** @type {any} */ o) => o.value === 'defaults')
   assert.ok(accept?.summary, 'the gate spec still carries the accept disclosure')
+  // Not just "some summary": the summary has to be the side-effect
+  // disclosure. A copy edit that keeps a sentence here but drops the
+  // configuring verb leaves the happy path stating nothing about what
+  // accepting does to the machine (LLP 0190 #pick-gate).
+  assert.match(accept.summary, /configures/i, 'the accept row discloses that accepting configures the tools')
   return accept.summary
 }
 
@@ -117,39 +117,39 @@ test('renderSelect: an option summary lands on its own indented line under its r
   /** @type {any} */
   const state = {
     kind: 'select',
-    title: 'HypAware will record:',
+    title: 'Set up recording',
     options: [
-      { value: 'accept', label: 'Record all', summary: 'Configures these tools to record.' },
-      { value: 'customize', label: 'Select what to record', summary: 'Opens the full menu.' },
+      { value: 'defaults', label: 'Record and sync everything', summary: 'Configures Claude Code to record through HypAware.' },
+      { value: 'choose', label: 'Customize', summary: 'Choose what to record and what syncs.' },
     ],
     cursor: 0,
     status: 'active',
   }
   const lines = render(state, { color: false }).split('\n')
 
-  const cursorRow = lines.findIndex((l) => l.trim() === '> Record all')
+  const cursorRow = lines.findIndex((l) => l.trim() === '> Record and sync everything')
   assert.notEqual(cursorRow, -1, 'the cursor row rendered')
-  assert.equal(lines[cursorRow + 1], '    Configures these tools to record.')
+  assert.equal(lines[cursorRow + 1], '    Configures Claude Code to record through HypAware.')
 
   // Rows the cursor is not on disclose too: the summary is documentation of
   // the row, not a property of the selection.
-  const otherRow = lines.findIndex((l) => l.trim() === 'Select what to record')
+  const otherRow = lines.findIndex((l) => l.trim() === 'Customize')
   assert.notEqual(otherRow, -1, 'the non-cursor row rendered')
-  assert.equal(lines[otherRow + 1], '    Opens the full menu.')
+  assert.equal(lines[otherRow + 1], '    Choose what to record and what syncs.')
 })
 
 test('renderSelect: the summary line is dim, not the row colour', () => {
   /** @type {any} */
   const state = {
     kind: 'select',
-    title: 'HypAware will record:',
-    options: [{ value: 'accept', label: 'Record all', summary: 'Configures these tools to record.' }],
+    title: 'Set up recording',
+    options: [{ value: 'defaults', label: 'Record and sync everything', summary: 'Configures Claude Code to record through HypAware.' }],
     cursor: 0,
     status: 'active',
   }
   const summaryLine = render(state, { color: true })
     .split('\n')
-    .find((l) => l.includes('Configures these tools to record.'))
+    .find((l) => l.includes('Configures Claude Code to record through HypAware.'))
   assert.ok(summaryLine, 'the summary reached the coloured frame too')
   assert.match(summaryLine, /\x1b\[2m/, 'summaries render dim (LLP 0189 palette)')
 })
@@ -169,7 +169,7 @@ test('TTY gate: the accept disclosure reaches the screen through the real select
   })
   const answered = ask(question)
   await feed(io.stdin, ['\r'])
-  assert.equal(await answered, 'accept')
+  assert.equal(await answered, 'defaults')
 
   const screen = io.output()
   assert.ok(
@@ -178,7 +178,7 @@ test('TTY gate: the accept disclosure reaches the screen through the real select
   )
   // Under its own row, not floating somewhere else in the frame.
   const lines = screen.split('\n')
-  const row = lines.findIndex((l) => l.includes('Record all'))
+  const row = lines.findIndex((l) => l.includes('Record and sync everything'))
   assert.notEqual(row, -1, 'the accept row rendered')
   assert.ok(lines[row + 1].includes(summary), 'the disclosure sits directly under the accept row')
 })
@@ -209,14 +209,14 @@ test('non-TTY gate: the numbered fallback prints the accept disclosure under its
     stdout: /** @type {any} */ (stdout),
     env: {},
   })
-  assert.equal(await ask(question), 'accept')
+  assert.equal(await ask(question), 'defaults')
 
   assert.ok(
     screen.includes(summary),
     `the legacy gate must print the accept disclosure; output was:\n${screen}`
   )
   const lines = screen.split('\n')
-  const row = lines.findIndex((l) => /^\s*1\) Record all$/.test(l))
+  const row = lines.findIndex((l) => /^\s*1\) Record and sync everything$/.test(l))
   assert.notEqual(row, -1, 'the numbered accept row rendered')
   assert.ok(lines[row + 1].includes(summary), 'the disclosure sits directly under the numbered row')
 })

@@ -104,12 +104,26 @@ itinerary gains a fourth counted lane, `folders`, between `sync` and
 #enrolled-only: nothing forwards from a solo machine, so neither question
 has stakes there).
 
-The step offers two rows, `Sync them all` first and default, and `Ask me
-about each new folder`. The answer is written either way, even when it
+The question's title is a sentence lead-in naming the run's recorded
+tools ("When opening Claude Code or Codex in a new project,"), joined
+with "or" because any one of them opening triggers the moment; the rows
+complete the sentence and are self-explaining
+([LLP 0201 #gate](./0201-express-defaults-gate.decision.md#gate)), with
+nothing riding the items chrome. Two rows: `Sync it automatically` first
+and default, then `Ask me the first time`. The names go through the same
+display filter as the sync lane, so a hidden row (LLP 0202) stays unnamed
+here too; a run with no names to offer falls back to tool-free phrasing.
+The answer is written either way, even when it
 matches the default: the user answered a question, and a recorded answer
 is what `hyp status`, `hyp policy list`, and a later re-run read back. A
 re-run defaults to the standing answer, so re-entering the wizard
-round-trips the preference instead of resetting it. A failed write warns
+round-trips the preference instead of resetting it. That binds the re-run,
+not the prompt: an express accept
+([LLP 0201 #narrate](./0201-express-defaults-gate.decision.md#narrate))
+records the standing answer too, and states it. Hardcoding the default on
+the accepted path would flip a deliberate `ask` to `sync` - the less
+protective value - and then print the new value as though the user had
+answered it, on the one screen they did answer. A failed write warns
 and leaves the previous mode standing; onboarding has done its
 load-bearing work by then and `hyp policy folders` can set it later.
 Escape steps back to the sync lane, cancel ends the run at 130 like any
