@@ -51,8 +51,11 @@ test.after(async () => {
 /** @param {string} prefix */
 async function makeHome(prefix) {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), `hyp-syncvol-${prefix}-`))
-  await fs.mkdir(path.join(hypHome, 'hypaware'), { recursive: true })
+  // Registered before anything is put inside it: the directory exists from
+  // here on, so a throw below leaves the sweep something to remove rather
+  // than the one leak this registry was added to stop.
   homes.push(hypHome)
+  await fs.mkdir(path.join(hypHome, 'hypaware'), { recursive: true })
   return hypHome
 }
 

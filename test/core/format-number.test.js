@@ -86,20 +86,85 @@ const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
  */
 const COUNT_RENDERERS = ['src/core/commands/sync.js', 'src/core/query/overview.js']
 
-/** Every route from these modules to the host's own formatting. */
-const HOST_FORMATTING = /toLocaleString|Intl\.(NumberFormat|DateTimeFormat)/
+/**
+ * Every route from these modules to the host's own formatting.
+ *
+ * Named at the object rather than at one member of it. A pattern spelling out
+ * `Intl.NumberFormat` wants that dot literally, so `const { NumberFormat } =
+ * Intl` walks straight past it, and that mutant is green on every `en-US` box
+ * exactly the way the unpinned delegation was. Any mention of `Intl` at all,
+ * inside a module whose job is to render the same string everywhere, deserves
+ * a human, so the gate asks for the object; the `toLocale` prefix covers the
+ * date and time spellings alongside `toLocaleString` for the same reason.
+ *
+ * A string match cannot follow an alias it never sees. `n['toLocale' +
+ * 'String']()`, or a helper imported from a third module that formats through
+ * the host, still gets past this, and no regex closes that. The gate is a
+ * lint against the edit someone actually makes, not a proof.
+ */
+const HOST_FORMATTING = /toLocale|\bIntl\b/
+
+/**
+ * `source` with its comments blanked, line count preserved so the report can
+ * still say `file:line`.
+ *
+ * A scan for a name cannot tell a call from a mention, and a mention is what a
+ * module like this attracts: `overview.js` carried the JSDoc line "Thousands
+ * separators without `toLocaleString`" until #1121 rewrote it, and that
+ * comment would have failed this gate while the code under it was already
+ * correct - a maintainer sent to fix code that was never broken. The sibling
+ * lint in `house-style-em-dash.test.js` avoids this by spelling its needle as
+ * an escape, which is not available here because the needles sit in the
+ * scanned files rather than in this one. So the comments come out instead, and
+ * the file stays free to explain why it does not do the thing.
+ *
+ * Deliberately crude: whole-line comments and the tail after a `//`. It can
+ * only ever drop coverage from the tail of a line that carries a `//` inside a
+ * string, which no `toLocale` call is reachable behind.
+ *
+ * @param {string} source
+ * @returns {string[]}
+ */
+function codeLines(source) {
+  return source.split('\n').map((line) => {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) return ''
+    const comment = line.indexOf('//')
+    return comment === -1 ? line : line.slice(0, comment)
+  })
+}
 
 test('the surfaces that render counts ask the host nothing', async () => {
   for (const rel of COUNT_RENDERERS) {
     const source = await fs.readFile(path.join(REPO_ROOT, rel), 'utf8')
-    const offenders = source
-      .split('\n')
+    const offenders = codeLines(source)
       .map((line, i) => ({ line, at: `${rel}:${i + 1}` }))
       .filter(({ line }) => HOST_FORMATTING.test(line))
     assert.deepEqual(
       offenders.map(({ at, line }) => `${at}: ${line.trim()}`),
       [],
-      `${rel} formats through the host; render counts with groupThousands and local times with formatFirstSyncDeadline`
+      `${rel} formats through the host, so its output moves with the machine; ` +
+        'render counts through groupThousands, and give any deliberate local-time ' +
+        'rendering its own named helper the way formatFirstSyncDeadline is one'
     )
   }
+})
+
+test('the gate reads code and not the comments about it', () => {
+  // A scan that had stopped matching, or that had started matching prose,
+  // would leave the rule above passing forever and say nothing. Both halves
+  // are pinned here rather than against the tree, so this stays a statement
+  // about the gate even after the scanned files change.
+  const flagged = (/** @type {string} */ source) =>
+    codeLines(source).filter((line) => HOST_FORMATTING.test(line))
+
+  assert.deepEqual(flagged('  return n.toLocaleString()'), ['  return n.toLocaleString()'])
+  assert.deepEqual(flagged('  const { NumberFormat } = Intl'), ['  const { NumberFormat } = Intl'])
+  assert.deepEqual(flagged('  return d.toLocaleDateString()'), ['  return d.toLocaleDateString()'])
+  assert.deepEqual(flagged('  return f(n) // not n.toLocaleString(), see #1121'), [])
+  assert.deepEqual(flagged(' * Thousands separators without `toLocaleString`.'), [])
+  assert.deepEqual(flagged('// Intl is not consulted here.'), [])
+
+  // Blanking keeps the line numbering, so a report still points at the line.
+  assert.equal(codeLines('// a\n// b\nreturn n.toLocaleString()').length, 3)
 })
