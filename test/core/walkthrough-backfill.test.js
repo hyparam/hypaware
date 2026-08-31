@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runPickerWalkthrough, WALKTHROUGH_CANCEL_EXIT_CODE } from '../../src/core/cli/walkthrough.js'
+import { runPickerFinale, runPickerWalkthrough, WALKTHROUGH_CANCEL_EXIT_CODE } from '../../src/core/cli/walkthrough.js'
 import { PromptCancelledError } from '../../src/core/cli/tui/runtime.js'
 
 /** @import { BackfillFinaleResult } from '../../src/core/cli/types.js' */
@@ -568,4 +568,74 @@ test('cancelling consent skips sweep-backed providers too', async () => {
   assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE)
   assert.equal(backfill.calls.length, 0)
   assert.match(stdout.text(), /backfill: skipped \(cancelled\)/)
+})
+
+// The backfill consent is the run's last consent question and the only
+// one inside the finale, which is one *step* but several acts: the
+// daemon install, the attach, and the asset copy all narrate before it
+// opens. A caller's boundary check in front of the finale therefore
+// cannot speak for a surface that dies inside it, and both default
+// prompts answer an unreadable question with yes - the select's cursor
+// starts on "Yes" (walkthrough.js `default: 'yes'`), and the `[Y/n]`
+// line reads EOF as the bare enter it advertised. What that yes buys is
+// an import of the user's local transcript history, so a surface nobody
+// can read has to decline rather than take the default it never printed.
+// @ref LLP 0341#dead-surface [tests]: the finale's own question takes the boundary, and a dead surface declines
+test('a dead consent surface declines the backfill instead of taking its default', async () => {
+  const env = await tmpEnv('hypaware-bf-dead-surface-')
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const backfill = makeBackfill(['claude'])
+  let asked = false
+
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    finale: { skipDaemon: true },
+    clientsPicked: ['claude'],
+    capabilities: noGateway,
+    config: { version: 2, plugins: [] },
+    configPath: path.join(String(env.HOME), 'config.json'),
+    env,
+    stdout,
+    stderr,
+    retentionDays: 30,
+    interactive: true,
+    backfill,
+    // A prompt that would say yes, to prove the boundary runs *before* the
+    // question rather than filtering its answer.
+    backfillConsentPrompt: async () => { asked = true; return true },
+    checkBoundary: async () => false,
+  }))
+
+  assert.equal(asked, false, 'no question opens on a surface nobody can read')
+  assert.equal(backfill.calls.length, 0, 'a dead surface must not import local transcript history')
+  assert.deepEqual(summary.backfill, [])
+})
+
+// The other side of the same seam: a live surface changes nothing, and a
+// caller with no boundary check to give (the standalone picker
+// walkthrough) still asks exactly as it did.
+// @ref LLP 0341#dead-surface [tests]: the boundary only ever withholds the question, never adds one
+test('a live surface, and a caller with no boundary check, both still ask', async () => {
+  for (const checkBoundary of [async () => true, undefined]) {
+    const env = await tmpEnv('hypaware-bf-live-surface-')
+    const backfill = makeBackfill(['claude'])
+    let asked = false
+    await runPickerFinale(/** @type {any} */ ({
+      finale: { skipDaemon: true },
+      clientsPicked: ['claude'],
+      capabilities: noGateway,
+      config: { version: 2, plugins: [] },
+      configPath: path.join(String(env.HOME), 'config.json'),
+      env,
+      stdout: makeBuf(),
+      stderr: makeBuf(),
+      retentionDays: 30,
+      interactive: true,
+      backfill,
+      backfillConsentPrompt: async () => { asked = true; return true },
+      ...(checkBoundary ? { checkBoundary } : {}),
+    }))
+    assert.equal(asked, true)
+    assert.equal(backfill.calls.length, 1)
+  }
 })

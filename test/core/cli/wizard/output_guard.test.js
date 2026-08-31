@@ -697,3 +697,53 @@ test('the wizard leaves no stream listeners behind when the run ends', async () 
   assert.equal(stdout.listenerCount('error'), 0)
   assert.equal(stderr.listenerCount('error'), 0)
 })
+
+// The finale is one step but several acts, and the only question it opens
+// (the backfill consent) sits behind three of them. The orchestrator's
+// boundary in front of the finale cannot speak for a surface that dies
+// in that window, so the wizard - the caller that has a consent surface
+// to lose - hands the finale its own check. Pinned end to end here; what
+// the finale then does with a `false` is pinned in
+// `test/core/walkthrough-backfill.test.js`.
+// @ref LLP 0341#dead-surface [tests]: the wizard threads its boundary into the finale, so the finale's question sees a mid-finale death
+test('a stdout that dies inside the finale is visible to the finale question', async () => {
+  const home = await tmpHome('hyp-guard-in-finale-')
+  let deadFrom = Infinity
+  let writes = 0
+  const dying = {
+    write() {
+      writes += 1
+      if (writes >= deadFrom) throw new Error('EPIPE: broken pipe')
+      return true
+    },
+  }
+  /** @type {boolean | undefined} */
+  let aliveAtConsent
+  const result = await runInitWizard(drivenOpts(home, {
+    stdout: dying,
+    finaleRunner: async (/** @type {any} */ args) => {
+      // The install and attach steps narrate first, and the surface dies
+      // in that window - after the orchestrator's pre-finale boundary
+      // has already passed.
+      deadFrom = writes + 1
+      args.stdout.write('daemon installed\n')
+      aliveAtConsent = await args.checkBoundary()
+      return {
+        daemonInstall: { skipped: true, dryRun: false },
+        globalInstall: { skipped: true, installed: false },
+        attach: [],
+        skillsInstalled: [],
+        agentsInstalled: [],
+        daemonRestart: { skipped: true, dryRun: false, ok: false },
+        backfill: [],
+      }
+    },
+  }))
+
+  assert.equal(aliveAtConsent, false, 'the finale must be able to see a surface that died inside it')
+  // Past the finale the run is committed, configured, and reported, so a
+  // death there completes the run rather than cancelling it - the rule
+  // this test is checking is about the question, not the exit code.
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.cancelled, undefined)
+})

@@ -828,6 +828,14 @@ async function runGuardedInitWizard(opts, guard) {
       // run enrolled the machine even if the user then stepped back and
       // finished down the local path (LLP 0191 #join-not-undone).
       joinedAlready: joined !== undefined,
+      // The finale is one step made of several acts, and the backfill
+      // consent question sits behind three of them (install, attach,
+      // asset copy), each narrating first. The boundary above cannot
+      // speak for a surface that dies in that window, so the finale
+      // carries the check inward rather than the orchestrator checking
+      // once at the door.
+      // @ref LLP 0341#dead-surface [implements]: the boundary reaches the one question the finale opens
+      checkBoundary: () => guard.checkpoint(),
       ...(finaleProgress ? { progress: finaleProgress } : {}),
     })
   }
@@ -1062,11 +1070,12 @@ function printJoinFailure(opts, join) {
  *   opts: RunInitWizardOptions,
  *   picked: WizardPickResult,
  *   joinedAlready: boolean,
+ *   checkBoundary: () => Promise<boolean>,
  *   progress?: string,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
+async function runWizardFinale({ opts, picked, joinedAlready, checkBoundary, progress }) {
   const finaleActions = { ...(opts.finale ?? {}) }
   /** @type {Set<string> | undefined} */
   let skipAttachClients
@@ -1112,6 +1121,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, progress }) {
         ...(opts.stdin ? { stdin: opts.stdin } : {}),
         ...(opts.backfill ? { backfill: opts.backfill } : {}),
         ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
+        checkBoundary,
         ...(skipAttachClients ? { skipAttachClients } : {}),
         ...(progress ? { progress } : {}),
       }),
