@@ -120,7 +120,7 @@ test('renderSelect: an option summary lands on its own indented line under its r
     title: 'Set up recording',
     options: [
       { value: 'defaults', label: 'Record and sync everything', summary: 'Configures Claude Code to record through HypAware.' },
-      { value: 'choose', label: 'Customize', summary: 'Choose what to record and what syncs.' },
+      { value: 'choose', label: 'Customize', summary: 'Choose what to record, what syncs, and how new folders are handled.' },
     ],
     cursor: 0,
     status: 'active',
@@ -135,7 +135,7 @@ test('renderSelect: an option summary lands on its own indented line under its r
   // the row, not a property of the selection.
   const otherRow = lines.findIndex((l) => l.trim() === 'Customize')
   assert.notEqual(otherRow, -1, 'the non-cursor row rendered')
-  assert.equal(lines[otherRow + 1], '    Choose what to record and what syncs.')
+  assert.equal(lines[otherRow + 1], '    Choose what to record, what syncs, and how new folders are handled.')
 })
 
 test('renderSelect: the summary line is dim, not the row colour', () => {
@@ -181,6 +181,35 @@ test('TTY gate: the accept disclosure reaches the screen through the real select
   const row = lines.findIndex((l) => l.includes('Record and sync everything'))
   assert.notEqual(row, -1, 'the accept row rendered')
   assert.ok(lines[row + 1].includes(summary), 'the disclosure sits directly under the accept row')
+})
+
+test('TTY gate: the decline row names every question declining opens, on screen', async () => {
+  const question = await gateQuestion()
+  const decline = question.options.find((/** @type {any} */ o) => o.value === 'choose')
+  assert.ok(decline?.summary, 'the gate spec still carries the decline gloss')
+  const io = makeTty()
+  const ask = defaultConfirmSelectPromptFactory({
+    stdin: /** @type {any} */ (io.stdin),
+    stdout: /** @type {any} */ (io.stdout),
+    env: { NO_COLOR: '1' },
+  })
+  const answered = ask(question)
+  await feed(io.stdin, ['\r'])
+  assert.equal(await answered, 'defaults')
+
+  const lines = io.output().split('\n')
+  const row = lines.findIndex((l) => /^\s*Customize$/.test(l.replace(/\s+$/, '')))
+  assert.notEqual(row, -1, 'the decline row rendered')
+  const gloss = lines[row + 1]
+  assert.ok(gloss.includes(decline.summary), 'the gloss sits directly under the decline row')
+  // The three questions an enrolled decline opens, on the screen the user
+  // decides on. The spec layer pins the exact sentence; this pins that the
+  // renderer forwards all of it, because a gloss the frame truncates or
+  // drops is a disclosure the user never reads.
+  // @ref LLP 0201#decline [tests]: all three lanes are named in the rendered frame, not just on the spec
+  for (const clause of ['what to record', 'what syncs', 'how new folders are handled']) {
+    assert.ok(gloss.includes(clause), `the decline gloss must name "${clause}"; it read: ${gloss}`)
+  }
 })
 
 // --- the non-TTY numbered fallback ---

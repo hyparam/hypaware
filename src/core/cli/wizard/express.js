@@ -77,8 +77,21 @@ export async function runWizardExpressGate(opts) {
           value: 'choose',
           label: 'Customize',
           // The decline row glosses the questions it opens (LLP 0201
-          // #decline): the menus, not another round of gates.
-          summary: opts.enrolled ? 'Choose what to record and what syncs.' : 'Choose what to record.',
+          // #decline): the menus, not another round of gates. All of
+          // them, in the order they open. An enrolled decline opens
+          // three (pick, sync, new-folder), and a gloss that named two
+          // of them understated what saying no leads to on the wizard's
+          // one consent screen. The clauses track the counted lanes'
+          // own labels ("Choose what to collect", "Choose what syncs",
+          // "Choose how new folders are handled", `steps.js`), so the
+          // row and the position lines it opens say the same thing.
+          // Unenrolled, the sync and new-folder lanes do not run
+          // (nothing forwards from a solo machine), so the gloss keeps
+          // naming only the menu that does.
+          // @ref LLP 0201#decline [implements]: the decline row names every question the decline opens
+          summary: opts.enrolled
+            ? 'Choose what to record, what syncs, and how new folders are handled.'
+            : 'Choose what to record.',
         },
       ],
       default: 'defaults',

@@ -13,6 +13,7 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { readFolderAskMode, writeFolderAskMode } from '../../../../src/core/usage-policy/folder_ask.js'
 import { readClientSyncEntries, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
+import { WIZARD_STEP_LABELS, wizardItinerary } from '../../../../src/core/cli/wizard/steps.js'
 
 // The express gate (LLP 0201): one question before the lanes that accepts
 // every lane's stated default, and the narration that keeps the fast path
@@ -82,8 +83,15 @@ test('the accept row names the tools in its own summary; nothing rides the items
     'Configures Claude Code and Codex to record through HypAware.'
   )
   // The decline row glosses the questions it opens (LLP 0201 #decline):
-  // the menus, linearly, not another round of gates.
-  assert.equal(state.question.options[1].summary, 'Choose what to record and what syncs.')
+  // the menus, linearly, not another round of gates. All three of them on
+  // an enrolled run: naming the two menus and not the new-folder question
+  // understated what saying no leads to on the wizard's one consent
+  // screen.
+  // @ref LLP 0201#decline [tests]: the decline row names every question the decline opens
+  assert.equal(
+    state.question.options[1].summary,
+    'Choose what to record, what syncs, and how new folders are handled.'
+  )
   // No position line: the gate is what decides how many questions remain,
   // so it can no more state a total than the fork can (LLP 0135 #progress).
   assert.equal(state.question.progress, undefined)
@@ -129,7 +137,56 @@ test('the sync claim drops when the store already withholds one of the named row
     state.question.options[0].summary,
     'Configures Claude Code and Codex to record through HypAware.'
   )
-  assert.equal(state.question.options[1].summary, 'Choose what to record and what syncs.')
+  assert.equal(
+    state.question.options[1].summary,
+    'Choose what to record, what syncs, and how new folders are handled.'
+  )
+})
+
+// The gloss and the lanes it opens have to stay the same list. The wizard
+// counts those lanes in `steps.js` and prints their labels as position
+// lines on exactly the screens this row opens, so that itinerary is the
+// ground truth for what a decline leads to: if a lane is added or dropped
+// there, this fails rather than letting the row keep glossing the old set.
+// @ref LLP 0201#decline [tests]: the decline row's clauses track the counted lanes a decline actually opens
+test('the enrolled decline gloss names every lane a decline opens', async () => {
+  const { env } = await makeHome()
+  const { confirm, state } = capturingConfirm('choose')
+
+  await runWizardExpressGate(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env, enrolled: true, rows: ROWS, confirm,
+  }))
+
+  // The enrolled itinerary is join, pick, sync, folders, finale; the lanes
+  // a decline opens are the questions between the join and the finale.
+  const opened = wizardItinerary('team').filter((step) => step !== 'join' && step !== 'finale')
+  assert.deepEqual(opened, ['pick', 'sync', 'folders'], 'a decline opens three questions')
+
+  // The other run this gloss is shown on. An enrolled machine that
+  // reconfigures down the local pathway is `enrolled` at the gate
+  // (`index.js`: `enrolled()` is `managed || joined`, not the pathway
+  // label), so it reads this same sentence, and it runs the enrolled
+  // lanes off the managed-local itinerary rather than the team one. Pinned
+  // separately because that list is built by a different branch of
+  // `wizardItinerary`: a lane added there and not to `team` would leave
+  // this row glossing the old set on the pathway it still shows on.
+  const openedManagedLocal = wizardItinerary('local', { managed: true }).filter((step) => step !== 'finale')
+  assert.deepEqual(openedManagedLocal, opened, 'both enrolled pathways open the same questions')
+
+  // One clause per lane, in the order the lanes open.
+  const gloss = state.question.options[1].summary
+  const clauses = gloss.replace(/\.$/, '').replace(/^Choose /, '').split(/, and | and |, /)
+  assert.deepEqual(clauses, ['what to record', 'what syncs', 'how new folders are handled'])
+  assert.equal(clauses.length, opened.length, 'the row names as many questions as the decline opens')
+
+  // Two of the three are the counted lanes' own labels verbatim, so a
+  // rename there fails here. The pick lane is the exception on purpose:
+  // its label says "collect" and this row says "record", because the row
+  // above it says "Record and sync everything" and one screen should not
+  // use two verbs for the same thing.
+  const subject = (/** @type {any} */ step) => WIZARD_STEP_LABELS[step].replace(/^Choose /, '')
+  assert.equal(clauses[1], subject('sync'))
+  assert.equal(clauses[2], subject('folders'))
 })
 
 test('declining opens the menus; back and cancel are their own answers', async () => {

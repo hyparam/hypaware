@@ -198,6 +198,68 @@ test('an unwritable preference warns and leaves the previous mode standing', asy
   assert.match(stderr.text(), /hyp privacy folders ask/)
 })
 
+test(`a failed write still finishes the narrated title's sentence on stdout`, async () => {
+  const { env, stateDir } = await makeHome()
+  // A directory where the file belongs makes the atomic write fail, and
+  // makes the safe read answer 'ask' (LLP 0200 #fail-safe), so 'ask' is
+  // the mode standing when the write does not land.
+  await fs.mkdir(folderAskPath(stateDir), { recursive: true })
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+
+  const result = await runWizardFolderAsk(/** @type {any} */ ({
+    stdout, stderr, env,
+    names: ['Claude Code'],
+    autoAccept: true,
+    confirm: async () => { throw new Error('the express path must not prompt') },
+  }))
+
+  assert.equal(result.skipped, true)
+  assert.equal(result.mode, 'ask', 'the mode already in force is what stands')
+  // On the narrated path the title is a sentence lead-in ending in a
+  // comma, completed by the indented clause under it. A failed write used
+  // to return before writing that clause, leaving a half-written question
+  // on screen with the next phase's output under it while the whole
+  // explanation went to stderr.
+  // @ref LLP 0201#narrate [tests]: the narrated question is finished on stdout even when the write behind it fails
+  const out = stdout.text()
+  assert.match(out, /^When opening Claude Code in a new project,$/m)
+  assert.match(out, /^ {2}you are asked the first time$/m)
+  // Still one sentence, not two answers: the recorded-answer form (with
+  // its "change later with" tail) is not what an unrecorded answer says.
+  assert.doesNotMatch(out, /change later with/)
+  // And the failure itself is still reported, in full, on stderr.
+  assert.match(stderr.text(), /could not record the new-folder answer/)
+  assert.match(stderr.text(), /it stays 'ask'/)
+})
+
+test('a failed write keeps the narrated sentence contiguous on the screen', async () => {
+  const { env, stateDir } = await makeHome()
+  await fs.mkdir(folderAskPath(stateDir), { recursive: true })
+  // One sink for both streams: on the attended run this narration exists
+  // for, stdout and stderr are the same terminal, and the order the user
+  // reads is the order the writes happen in. Asserting each stream on its
+  // own cannot see that - it is how a warning came to sit between the
+  // title's lead-in and the clause completing it, which is the same
+  // half-written question the completing clause was added to close.
+  // @ref LLP 0201#narrate [tests]: the completed sentence is contiguous on a terminal, with the warning under it rather than inside it
+  const screen = makeBuf()
+
+  await runWizardFolderAsk(/** @type {any} */ ({
+    stdout: screen, stderr: screen, env,
+    names: ['Claude Code'],
+    autoAccept: true,
+    confirm: async () => { throw new Error('the express path must not prompt') },
+  }))
+
+  const lines = screen.text().split('\n').filter((l) => l !== '')
+  assert.deepEqual(
+    [lines[0], lines[1], lines[2]?.slice(0, 7)],
+    ['When opening Claude Code in a new project,', '  you are asked the first time', 'warning'],
+    `the sentence must finish before the warning; the screen read:\n${screen.text()}`
+  )
+})
+
 test('the two options are exactly sync and ask', () => {
   assert.deepEqual(FOLDER_ASK_OPTIONS.map((o) => o.value), ['sync', 'ask'])
 })

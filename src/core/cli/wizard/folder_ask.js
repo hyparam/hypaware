@@ -157,6 +157,28 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
     await writeFolderAskMode({ stateDir, mode })
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
+    // The inline path left its title on stdout as a sentence lead-in
+    // ending in a comma, and the clause that completes it is written
+    // below, after this branch has already returned. Nothing on stdout
+    // then finishes the sentence: the next thing the user sees is the
+    // configure phase's own output, under a half-written question. So
+    // this arm completes it with the mode that actually stands, which is
+    // `before` - the store was not written, so the standing answer is
+    // still true of the machine and the title is still true of it. The
+    // "could not record" half stays on stderr, where the failure belongs;
+    // no new claim is made here, only the one the run was already about
+    // to make.
+    //
+    // Before the warning, not after it. stdout and stderr are the same
+    // terminal on the run this narration is for, so writing the warning
+    // first wedges it between the lead-in and the clause that completes
+    // it - a milder version of the half-written question this arm exists
+    // to close. Finishing the sentence first leaves the warning where a
+    // warning belongs: under the statement it qualifies. The two streams
+    // are separate sinks in tests, so only the terminal can see this
+    // ordering, which is why a test asserts it through one shared sink.
+    // @ref LLP 0201#narrate [implements]: a narrated question finishes its sentence even when the write behind it fails, before the warning that qualifies it
+    if (inline) opts.stdout.write(`${standingClause(before)}\n`)
     opts.stderr.write(
       `warning: could not record the new-folder answer (${detail}); ` +
       `it stays '${before}' - set it later with 'hyp privacy folders ${mode}'\n`
@@ -173,10 +195,23 @@ async function recordAnswer(mode, { stateDir, before, opts, inline = false }) {
     : 'You will be asked once per new folder.'
   opts.stdout.write(
     inline
-      ? `  ${mode === 'sync' ? 'it syncs automatically' : 'you are asked the first time'}; change later with ${undo}\n`
+      ? `${standingClause(mode)}; change later with ${undo}\n`
       : `${said}\n  change this later: ${undo}\n`
   )
   return await finishSpan({ mode }, opts)
+}
+
+/**
+ * The indented clause that completes the title's sentence on the inline
+ * (narrated) path: "When opening Claude Code in a new project," + "it
+ * syncs automatically". One source for it, because both the recorded and
+ * the failed-write arms have to finish the same sentence.
+ *
+ * @param {FolderAskMode} mode
+ * @returns {string}
+ */
+function standingClause(mode) {
+  return mode === 'sync' ? '  it syncs automatically' : '  you are asked the first time'
 }
 
 /**

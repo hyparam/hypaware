@@ -4,7 +4,7 @@
 **Status:** Draft
 **Systems:** Onboarding, CLI
 **Author:** Brendan / Kenny / Claude
-**Date:** 2026-08-07 (revised 2026-08-30)
+**Date:** 2026-08-07 (revised 2026-08-31)
 **Related:** LLP 0190 (#pick-gate, #sync-gate: the per-lane defaults gates this retires; the menu semantics there are untouched), LLP 0188 (#never-silent: the floor this must not breach), LLP 0200 (#wizard: the third lane it answers), LLP 0135 (#progress, #orchestration), LLP 0131 (#attended-only), LLP 0129 (#fork), LLP 0191 (#back-edges)
 
 > Extends [LLP 0190](./0190-wizard-defaults-gate.decision.md) and retires
@@ -50,7 +50,7 @@ Set up recording
 > Record and sync everything
     Configures Claude Code and Codex to record through HypAware.
   Customize
-    Choose what to record and what syncs.
+    Choose what to record, what syncs, and how new folders are handled.
 ```
 
 **The rows are self-explaining; nothing load-bearing rides the items
@@ -73,6 +73,8 @@ sentence.
 `sync` is claimed only where accepting would in fact sync everything the
 row names. On a solo machine nothing forwards, so the label drops to
 "Record everything" and the Customize summary to "Choose what to record."
+That gloss is shorter for the same reason: the sync and new-folder lanes
+do not run on a solo machine, so a decline there opens only the pick menu.
 The same drop applies on an enrolled machine whose client-sync store
 already withholds one of the named rows: an accept preserves standing
 opt-outs verbatim rather than clearing them (#narrate, and
@@ -96,6 +98,31 @@ per-lane defaults gates ([LLP 0190 #pick-gate](./0190-wizard-defaults-gate.decis
 removed. Customize opens the pick multiselect directly, then - on enrolled
 runs - the sync multiselect and the new-folder question, in that order,
 then the finale. No later screen ever again asks "defaults or customize".
+
+**The decline row names every question it opens.** The gate is the one
+screen a user decides on before anything is configured, so its second row
+has to say what saying no leads to, in full: on an enrolled run that is
+three questions, not two, and a gloss naming the two menus left the
+new-folder question - a standing privacy preference (LLP 0200) - unnamed
+on the only screen that could have named it. The clauses track the
+counted lanes' own labels ("Choose what to collect", "Choose what
+syncs", "Choose how new folders are handled"), so the row and the
+position lines it opens read as the same list. Unenrolled the row names
+only the pick menu, which is the only lane a decline opens there.
+
+**A two-answer gate splits the prose that documents it, and what applies
+to both answers may not land under one of them.** `docs/TEAM_SETUP.md`
+describes the gate and then, below it, the screens Customize opens. That
+second block is a subsection, so everything after it is nested inside it
+until the next heading - and the first thing after it is the upload-hold
+callout, which is the doc's one pointer to the review window, the
+`hypaware-privacy` skill, and PRIVACY.md. Nesting it there hides it from
+exactly the reader who took the one-keypress accept and has no reason to
+read a section headed "If you choose Customize". The rule is structural,
+not editorial: a disclosure that holds for every reader of a section sits
+at that section's level, never under a heading that states a condition.
+Text unchanged and structure moved is the same regression as text removed,
+and it does not show up in a diff of sentences.
 
 The menus still open on the same defaults the retired gates stated: the
 pick menu's boxes are seeded by detection and the locked set, the sync
@@ -131,6 +158,21 @@ and the new-folder lane keeps its recorded mode
 licence to discard answers a previous one recorded - and each of these
 lanes narrates the value it took, so a lane that reset one would announce
 the new value as though the user had just chosen it.
+
+**A narrated statement is finished on stdout even when the write behind
+it fails.** The new-folder lane's narration is a sentence split across two
+writes: the title is a lead-in ending in a comma and the indented clause
+under it completes it. A failed preference write warns and leaves the
+previous mode standing, which is the right outcome, but returning at that
+point left the lead-in on screen with the next phase's output under it -
+a question the run asked and never finished. The failed arm therefore
+prints the same clause, naming the mode that actually stands (the store
+was not written, so the standing answer is still true of the machine),
+before the warning rather than after it: stdout and stderr are one
+terminal on an attended run, so a warning written first sits inside the
+sentence instead of under it. The "could not record" half stays on stderr
+and the recorded form's "change later with ..." tail is not repeated, so
+an unrecorded answer never reads like a recorded one.
 
 **The narration is blocked, not streamed.** Each statement is led by a
 blank line and its detail is indented under a title, because on this path
@@ -197,6 +239,17 @@ LLP 0190 raised against skipping the sync step).
   `hyp privacy folders`, and re-running `hyp init`.
 - The step counter describes only the decline path. That is honest, not a
   regression: an express run has no steps to count.
+- The accept summary grows with the number of detected tools, and is not
+  capped. With the shipped picker labels and the four-space indent it
+  measures 54 columns at one row, 64 at two, 75 at three, and 91 at four,
+  so from four detected tools up it soft-wraps on an 80-column terminal
+  with the continuation starting at column 0. Left as it is: the redraw is
+  correct either way (`countPhysicalRows` counts wrapped physical rows,
+  so frames do not smear), the one and two row cases that cover almost
+  every machine never wrap, and both repairs cost more than the wrap does.
+  Capping the list ("Claude Code, Codex, and 3 more") would drop names
+  from the sentence that is the evidence half of this row, and wrapping in
+  the renderer would change every prompt in the CLI to fix one summary.
 
 ## References
 
