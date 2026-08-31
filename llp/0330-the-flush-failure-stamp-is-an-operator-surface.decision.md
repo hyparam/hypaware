@@ -98,7 +98,7 @@ very command already exists and is exactly where a program or a scripted
 operator would look; LLP 0228's own pointer went to a command that already
 existed, not one minted for the purpose. And the bound question is real but
 answered: the population is spool tables, which scales with dataset times
-partition, but each entry is individually bounded (an 80-character label, a
+partition, but each entry is individually bounded (a 120-character label, a
 512-character message, one timestamp, one boolean), the collector already
 builds the full array in memory before any cap is applied, and this report is
 built fresh per invocation and never persisted, so there is no `status.json`

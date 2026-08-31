@@ -2315,7 +2315,7 @@ function inferConfiguredSources(activePlugins) {
  * all of them. The eight-line cap is the text renderer's, a terminal
  * legibility bound, and `--json` is the pointer that cap's overflow line
  * names, so the collector must hand over the whole list: each entry is
- * individually bounded (an 80-character label, a 512-character message), the
+ * individually bounded (a 120-character label, a 512-character message), the
  * array was always built whole in memory before any cap, and this report is
  * built per invocation and never persisted, so there is no status.json
  * growth to bound and no read-back to re-clamp, which is what forced the
