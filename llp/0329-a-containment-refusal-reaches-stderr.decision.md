@@ -11,6 +11,10 @@
 exists on a default install), and
 [LLP 0328](./0328-a-spool-path-is-checked-where-it-is-walked.decision.md)
 (#loud-refusal: the same qualification, for the capture-spool guard)
+**Extended-by:** [LLP 0332](./0332-cursor-refusal-warns-on-transition-then-rewarns.decision.md)
+(#consequences: the cursor guard's per-read line rate is rebased to
+warn-on-transition plus a rewarn interval; the refusal itself still reaches
+stderr)
 **Related:** LLP 0021, LLP 0189, LLP 0323, LLP 0326
 
 > Every containment guard in the symlink series says its refusal out loud at

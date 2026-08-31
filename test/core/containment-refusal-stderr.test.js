@@ -100,6 +100,13 @@ test('a refused cursor is named on the real CLI\'s stderr, and the verb still ex
     assert.equal(summary.rowsDeleted, 0, 'nothing was purged through the refused partition')
     assert.match(run.stderr, /cursor_table_dir_escapes_partition/, 'the refusal reaches stderr on a default install')
     assert.match(run.stderr, /WARN/, 'at its own severity')
+    // Counted, not just matched. The verb reads the poisoned cursor twice
+    // (partition discovery, then the post-delete recount) and both reads are
+    // one standing condition, so the second line said nothing the first did
+    // not (LLP 0332#per-read-bill). One line proves the throttle; the match
+    // above proves it did not become zero, which would be the worse bug.
+    const refusals = run.stderr.split('\n').filter((line) => line.includes('cursor_table_dir_escapes_partition'))
+    assert.equal(refusals.length, 1, 'one standing refusal, one line per verb invocation')
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

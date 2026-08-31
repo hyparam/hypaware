@@ -86,6 +86,7 @@ export function tryReadCursorSync(partitionDir) {
   try {
     raw = fs.readFileSync(path.join(partitionDir, CURSOR_FILE), 'utf8')
   } catch {
+    clearEscapeReport(partitionDir)
     return null
   }
   try {
@@ -131,8 +132,10 @@ export function tryReadCursorSync(partitionDir) {
     if (typeof parsed.pendingFallbacks === 'number') {
       cursor.pendingFallbacks = parsed.pendingFallbacks
     }
+    clearEscapeReport(partitionDir)
     return cursor
   } catch {
+    clearEscapeReport(partitionDir)
     return null
   }
 }
@@ -229,6 +232,42 @@ function defaultGenerationDirs(cursor) {
 }
 
 /**
+ * How long an unchanged standing escape refusal stays quiet between
+ * repeats. The same 10-minute floor as `REWARN_MS` in
+ * `src/core/daemon/control.js`, chosen for the same reason: a standing
+ * condition must not be mute for the daemon's whole lifetime, and must not
+ * be a line per read either. Under the default 60-minute maintenance
+ * interval this lands on one line per refusing tick.
+ */
+const ESCAPE_REWARN_MS = 10 * 60 * 1000
+
+/**
+ * The escape refusals this process has already said out loud, keyed by
+ * resolved partition directory: the rejected value the line named, and
+ * when. One entry at most per partition that ever refused; cleared by
+ * {@link clearEscapeReport} the moment any read of that partition stops
+ * refusing for escape, so a healed-then-repoisoned partition warns afresh.
+ * Bounded by the partitions this process saw refuse, which is not a static
+ * bound: one removed by retention while still poisoned never gets the
+ * non-refusing read that would clear it. Accepted at roughly an entry a day
+ * under a standing poison (LLP 0332#transition-plus-rewarn).
+ *
+ * @type {Map<string, { rejected: string, warnedAtMs: number }>}
+ */
+const escapeReportedAt = new Map()
+
+/**
+ * Note that a read of this partition did not refuse for escape (it
+ * returned a cursor, found no file, or failed to parse), so the next
+ * escape refusal is a transition and warns immediately.
+ *
+ * @param {string} partitionDir
+ */
+function clearEscapeReport(partitionDir) {
+  escapeReportedAt.delete(path.resolve(partitionDir))
+}
+
+/**
  * Say that a cursor was rejected for naming a generation outside its
  * partition, and say it out loud.
  *
@@ -241,12 +280,33 @@ function defaultGenerationDirs(cursor) {
  *
  * `warn`, not `error`: nothing failed, and the tick carries on.
  *
+ * Once per condition, not once per read: every destructive reader shares
+ * `tryReadCursorSync` (LLP 0323#one-gate), so one poisoned cursor is read
+ * by many callers that share no pass object, and repeating the identical
+ * line for each of them tells the operator nothing the first did not.
+ * A refusal warns when it appears or when the rejected value changes, then
+ * at most once per {@link ESCAPE_REWARN_MS} while it stands; both channels
+ * (the structured WARN and the stderr mirror) throttle together because
+ * they are one signal.
+ *
  * @ref LLP 0323#say-it [implements]: this is the one corrupt-cursor case that knows its cause, so it does not degrade silently.
  * @ref LLP 0329#stderr-mirror [implements]: the refusal leaves every counter at zero, so it opts into the mirror that exists without a provider.
+ * @ref LLP 0332#transition-plus-rewarn [implements]: the unit of the standing signal is the condition, not the read that noticed it.
  * @param {string} partitionDir
  * @param {unknown} tableDir  the rejected value, which need not be a string
  */
 function reportEscapingTableDir(partitionDir, tableDir) {
+  const key = path.resolve(partitionDir)
+  const rejected = typeof tableDir === 'string' ? tableDir : JSON.stringify(tableDir) ?? String(tableDir)
+  const now = Date.now()
+  const prior = escapeReportedAt.get(key)
+  // A negative age means the wall clock stepped back under this entry
+  // (`Date.now` is NTP-steppable, and a daemon that starts before the first
+  // sync can read far into the past). The window is then not proven to hold,
+  // so say it again: the only degradation this throttle may have is an extra
+  // line, never silence (LLP 0332#transition-plus-rewarn).
+  const sinceMs = prior ? now - prior.warnedAtMs : 0
+  if (prior && prior.rejected === rejected && sinceMs >= 0 && sinceMs < ESCAPE_REWARN_MS) return
   try {
     getLogger('cache', { mirrorStderr: true }).warn(
       'cursor.tableDir does not name a generation in its partition; treating the cursor as unreadable',
@@ -254,9 +314,13 @@ function reportEscapingTableDir(partitionDir, tableDir) {
         [Attr.OPERATION]: 'cache.cursor_read',
         [Attr.ERROR_KIND]: 'cursor_table_dir_escapes_partition',
         partition_dir: partitionDir,
-        table_dir: typeof tableDir === 'string' ? tableDir : JSON.stringify(tableDir) ?? String(tableDir),
+        table_dir: rejected,
       }
     )
+    // Recorded only once the line is out. `getLogger`'s OTel emit runs
+    // before the stderr mirror, so an installed provider that throws would
+    // otherwise arm a whole rewarn window over a refusal nobody ever saw.
+    escapeReportedAt.set(key, { rejected, warnedAtMs: now })
   } catch { /* a cursor read must not fail on a logger provider that is not installed */ }
 }
 
