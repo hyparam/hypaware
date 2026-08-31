@@ -454,12 +454,30 @@ test('blob keys are the one migrated corpus whose order does change, and it chan
  * `context-graph/src/maintenance.js`, because it sat two lines from one this
  * rule did catch; the rule did not ask for it and would not have.
  *
- * A number legitimately written this way (a BigInt pair, where `a - b` is a
- * BigInt and not a sort result) would red here as a false positive. There is
- * none in the tree today, and the remedy when one lands is the allowlist below
- * with its reason, not a looser needle: no regex can tell a string comparison
- * from a numeric one, and a needle that tried would stop catching the case this
- * rule is for.
+ * The descending spelling `x < y ? 1 : x > y ? -1 : 0` is out of scope as
+ * well, and that one is a boundary rather than a judgement: shipped modules
+ * still write it out, over values that are strings by the time they are
+ * sorted, and every one of them would read `compareStrings(b, a)`. They are
+ * left alone because #1148 enumerated the thirteen ascending ones and a
+ * comparator is not a thing to rewrite in a file nobody asked about. So the
+ * name below says `ascending`, and the sites the needle steps over are held
+ * as a list by the last rule in this file rather than described here: a
+ * count in a comment is the shape of claim this file exists to stop making.
+ *
+ * A number legitimately written this way reds here as a false positive, and
+ * that is any number, not only the BigInt pair where `a - b` is a BigInt
+ * rather than a sort result: `bytesA < bytesB ? -1 : bytesA > bytesB ? 1 : 0`
+ * is the same punctuation. There is none in the tree today. The remedy when
+ * one lands is the allowlist below with its reason, not a looser needle: no
+ * regex can tell a string comparison from a numeric one, and a needle that
+ * tried would stop catching the case this rule is for.
+ *
+ * That remedy is module-scoped, and the cost of it should be visible rather
+ * than discovered: allowlisting a module for one numeric comparator exempts
+ * every later string comparator in the same file too. It is the sibling gate's
+ * bargain as well, and it is why the reason is written next to the entry - the
+ * entry has to be re-read when the file changes shape, because nothing else
+ * will notice.
  */
 const INLINE_CODE_UNIT_COMPARATOR = /<[^?]*\?\s*-1\s*:[^?]*>[^?]*\?\s*1\s*:\s*0/
 
@@ -475,7 +493,7 @@ const INLINE_COMPARATOR_ALLOWED = {
     'the definition, which is the one place the comparison is written out',
 }
 
-test('no shipped module writes the comparison out instead of calling it', () => {
+test('no shipped module writes the ascending comparison out instead of calling it', () => {
   // Scanned raw rather than through a comment-blanking pass. The sibling gate
   // in `format-number.test.js` needs one because the names it forbids are the
   // names a module explaining itself would naturally write; this needle is a
@@ -514,11 +532,80 @@ test('the allowlist above names only modules that exist and still spell it out',
   // The equality the exemption list is held to runs the other way as well: an
   // entry for a file that no longer carries the shape is an exemption for
   // nothing, and it would go on excusing a line the next edit puts back.
+  // "Exist" is checked before "still spells it out", and separately, because
+  // a renamed or deleted allowlisted module read straight through
+  // `readFileSync` dies as a raw ENOENT rather than as this rule: the exact
+  // failure `trackedFiles` was written to keep out of the sibling gate above.
+  // An allowlist key is a hand-written path, so it is the likeliest one here.
+  const present = new Set(trackedFiles(REPO_ROOT, new Set(['.js', '.mjs', '.cjs'])))
   for (const rel of Object.keys(INLINE_COMPARATOR_ALLOWED)) {
+    assert.ok(
+      present.has(rel),
+      `${rel} is allowlisted but is not a readable tracked module; the file moved, so move the entry`
+    )
     const source = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')
     assert.ok(
       INLINE_CODE_UNIT_COMPARATOR.test(source),
       `${rel} is allowlisted but no longer writes the comparison out; drop the entry`
     )
   }
+})
+
+/**
+ * The descending spelling of the same comparison, which the rule above steps
+ * over: `x < y ? 1 : x > y ? -1 : ...`.
+ *
+ * Written out separately rather than folded into the needle above, because the
+ * two are not the same statement. The ascending shape is one this repo has
+ * decided about and migrated; this one is a residue, and a needle that caught
+ * both would red files no issue asked about and offer them a remedy that
+ * is a rewrite rather than a fix.
+ */
+const INLINE_DESCENDING_COMPARATOR = /<[^?]*\?\s*1\s*:[^?]*>[^?]*\?\s*-1\s*:/
+
+/**
+ * Every shipped site still spelling the descending comparison out, held as a
+ * list so the scope note on `INLINE_CODE_UNIT_COMPARATOR` is checked rather
+ * than asserted.
+ */
+const INLINE_DESCENDING_SITES = [
+  'hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js:102',
+  'hypaware-core/plugins-workspace/codex/src/rollout-cwd.js:184',
+  'src/core/daemon/status.js:518',
+  'src/core/daemon/status.js:2378',
+  'src/core/query/overview.js:416',
+]
+
+test('the descending spelling the rule steps over is a known list, not an open set', () => {
+  // The rule above says the descending sites are out of scope. Left as prose
+  // that would be a count in a comment, which is the claim shape item 4 of
+  // #1148 was about: nothing checks it, so it drifts. Held as a list it says
+  // two things instead. A new one appearing is a site that skipped the
+  // decision the ascending rule records, and one disappearing is a migration
+  // that should take its entry with it.
+  //
+  // Each of these sorts a value that is a string by the time it reaches the
+  // comparison - an ISO timestamp, a readdir name, a coerced date cell - so
+  // each would read `compareStrings(b, a)` and none is blocked on anything.
+  const paths = trackedFiles(REPO_ROOT, new Set(['.js', '.mjs', '.cjs'])).filter(
+    (rel) => !rel.startsWith('test/')
+  )
+  assert.ok(paths.length > 100, `expected the shipped tree, got ${paths.length} modules`)
+  const found = []
+  for (const rel of paths) {
+    const lines = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8').split('\n')
+    lines.forEach((line, i) => {
+      const trimmed = line.trim()
+      if (trimmed.startsWith('//') || trimmed.startsWith('*')) return
+      if (INLINE_DESCENDING_COMPARATOR.test(line)) found.push(`${rel}:${i + 1}`)
+    })
+  }
+  assert.deepEqual(
+    found,
+    INLINE_DESCENDING_SITES,
+    'the descending inline comparators moved. If one was migrated to ' +
+      'compareStrings(b, a), drop its entry; if a new one landed, it is a ' +
+      'comparator that answers for itself what a non-string sorts as, so ' +
+      'call the helper instead of adding it here'
+  )
 })
