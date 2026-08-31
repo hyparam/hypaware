@@ -24,6 +24,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { sweepCaptureSpool } from '../../src/core/capture_spool.js'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
@@ -219,6 +220,69 @@ test('the sweep\'s refusal of a symlinked component reaches process stderr', asy
       operations.includes('maintenance.grep_index'),
       'and so does the index-scratch sweep, which walks the same components'
     )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The fourth guard in the series, and the one LLP 0329 could not reach when
+// it was written: its code lived on hyparam/hypaware#1107's branch. That
+// branch is merged, so the rule LLP 0329#stderr-mirror states in general ("a
+// refusal that leaves every counter at zero must opt into the stderr mirror")
+// applies to it here rather than as a follow-up. Without the opt-in a user who
+// symlinks `<hyp-home>/spool/claude-bodies` onto a larger volume gets exactly
+// the issue #1108 symptom: the spool stops being emptied, `hyp purge` and
+// `hyp detach` both report success and zero, and nothing says why.
+test('the capture-spool sweep\'s refusal reaches process stderr', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-refusal-capture-'))
+  try {
+    const home = path.join(root, 'home')
+    const outside = path.join(root, 'outside')
+    const spoolRoot = path.join(home, 'spool')
+    const dir = path.join(spoolRoot, 'claude-bodies')
+    await fs.mkdir(spoolRoot, { recursive: true })
+    await fs.mkdir(outside, { recursive: true })
+    await fs.writeFile(path.join(outside, 'keep.txt'), 'not ours')
+    await fs.symlink(outside, dir, 'dir')
+
+    // A holder rather than a `let`: the assignment happens inside the
+    // stderr-capturing closure, and control-flow narrowing does not cross that
+    // boundary, so a plain binding reads back as `null` afterwards.
+    /** @type {{ swept: { filesRemoved: number, bytesRemoved: number, failed: number } | null }} */
+    const out = { swept: null }
+    const stderr = await captureProcessStderr(async () => {
+      out.swept = await sweepCaptureSpool(dir)
+    })
+    // The zero counts are the point: they are why the line has to exist.
+    assert.deepEqual(out.swept, { filesRemoved: 0, bytesRemoved: 0, failed: 0 })
+    assert.match(stderr, /capture_spool_path_is_symlink/, 'the sweep names the spool it refused, somewhere visible')
+    assert.match(stderr, /WARN/, 'at its own severity')
+    const refusals = stderr.split('\n').filter((line) => line.includes('capture_spool_path_is_symlink'))
+    assert.equal(refusals.length, 1, 'one refused component, one line')
+    // Its own error_kind, not the cache's (LLP 0328#loud-refusal): two spools
+    // in two subsystems that an operator resolves differently.
+    assert.doesNotMatch(stderr, /sweep_path_is_symlink|spool_dir_is_symlink/)
+    assert.equal(await fs.readFile(path.join(outside, 'keep.txt'), 'utf8'), 'not ours')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// And its quiet control, the same shape as the cache ones: an ordinary spool
+// is emptied without a word.
+test('an ordinary capture-spool sweep writes nothing to process stderr', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-refusal-capture-quiet-'))
+  try {
+    const dir = path.join(root, 'home', 'spool', 'claude-bodies')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'body-1.json'), '{}')
+    /** @type {{ swept: { filesRemoved: number, bytesRemoved: number, failed: number } | null }} */
+    const out = { swept: null }
+    const stderr = await captureProcessStderr(async () => {
+      out.swept = await sweepCaptureSpool(dir)
+    })
+    assert.equal(out.swept?.filesRemoved, 1, 'the ordinary sweep still empties the spool')
+    assert.doesNotMatch(stderr, /\[hypaware:/, 'no refusal, no line')
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

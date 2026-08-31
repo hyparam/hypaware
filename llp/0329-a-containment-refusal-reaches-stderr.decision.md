@@ -8,9 +8,9 @@
 **Date:** 2026-08-30
 **Extends:** [LLP 0326](./0326-generation-name-is-the-directory.decision.md)
 (#consequences: the loudness those bullets rely on now has a channel that
-exists on a default install), and LLP 0328 (#loud-refusal, on
-hyparam/hypaware#1107 at this writing: the same qualification, for the
-capture-spool guard)
+exists on a default install), and
+[LLP 0328](./0328-a-spool-path-is-checked-where-it-is-walked.decision.md)
+(#loud-refusal: the same qualification, for the capture-spool guard)
 **Related:** LLP 0021, LLP 0189, LLP 0323, LLP 0326
 
 > Every containment guard in the symlink series says its refusal out loud at
@@ -166,10 +166,11 @@ writes around a planted `_hypaware_spool` and a planted sweep component.
 
 - The `#consequences` bullets of LLP 0326 that call a refused state loud
   (`spool_dir_is_symlink` on every flush, the `ls -l` answer for a rejected
-  cursor) are true on a default install for the first time. LLP 0328
-  #loud-refusal becomes true the same way when its guard adopts the same
-  opt-in on landing; until then that one guard is loud only into the
-  substrate, which is the pre-existing state this decision was minted to end.
+  cursor) are true on a default install for the first time, and LLP 0328
+  #loud-refusal with them: its guard adopts the same opt-in here, so all
+  four refusals in the series reach a channel that exists with no telemetry
+  configured. None is left loud only into the substrate, which is the
+  pre-existing state this decision was minted to end.
 - `hyp purge` over a partition whose containment was refused still exits 0
   and still prints zero counts; what changes is one WARN line on stderr
   naming the refused path. The refusal is a standing condition an operator
@@ -192,10 +193,12 @@ writes around a planted `_hypaware_spool` and a planted sweep component.
 
 - [LLP 0326](./0326-generation-name-is-the-directory.decision.md): the three
   cache guards whose loudness this qualifies and delivers.
-- LLP 0328 (hyparam/hypaware#1107): the capture-spool guard; its
-  `#loud-refusal` section is the fourth claim this decision gives a channel.
-  Its `Extended-by:` forward-ref to this document is to be appended when
-  both changes are merged, as a mechanical edit.
+- [LLP 0328](./0328-a-spool-path-is-checked-where-it-is-walked.decision.md):
+  the capture-spool guard; its `#loud-refusal` section is the fourth claim
+  this decision gives a channel. Its guard landed on master as
+  hyparam/hypaware#1107 while this decision was in review, so the one-line
+  opt-in and the reciprocal `Extended-by:` forward-ref ride here rather than
+  as the deferred follow-up an earlier draft of this section described.
 - [LLP 0323](./0323-cursor-names-a-generation-in-its-own-partition.decision.md):
   `#say-it`, where the say-it-out-loud pattern started.
 - [LLP 0021](./0021-observability.spec.md): the OTel substrate and
