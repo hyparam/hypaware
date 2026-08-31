@@ -341,7 +341,7 @@ function buildCoreCommands(registry) {
         '',
         '  --yes, -y              accept the defaults (captures claude + otel',
         '                         when no --source is given)',
-        '  --client <name>        client to attach: claude, codex (repeatable)',
+        '  --client <name>        client to attach: claude, codex, opencode (repeatable)',
         '  --source <name>        source to capture (repeatable)',
         '  --export <choice>      keep-local | local-parquet | configure-later',
         '  --retention-days <n>   how long to keep cached rows',

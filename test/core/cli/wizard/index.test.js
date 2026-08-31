@@ -1199,7 +1199,7 @@ test('runInitWizard: the suggested questions come last, after the privacy narrat
   // Order: rows, then what leaves this machine, then the question.
   assert.ok(text.indexOf('First look') < text.indexOf('Nothing has been uploaded yet'))
   assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Questions worth asking'))
-  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want your AI client \(claude or codex\) to start/)
+  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want your attached AI client to start/)
 })
 
 // @ref LLP 0203#offer [tests]: the sync offer sits between the narration it acts on and the closing question list

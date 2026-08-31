@@ -221,9 +221,9 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
  *   *for* (putting one of these to a client) before naming the directory
  *   it must be run from, because a footer that only states the
  *   constraint leaves the reader to infer what they would be running it
- *   to do. The client binaries are named outright: a user who has just
- *   picked one in the wizard still has no reason to know the verb starts
- *   the same program they picked.
+ *   to do. It names the attached client generically because launchability
+ *   is manifest-contributed; adding a client must not require a second
+ *   hardcoded list in this copy.
  *
  * @ref LLP 0198#empty-cache [implements]: no rows reframes the list, and the reason is stated
  * @ref LLP 0198#onboarding-list [implements]: setup's footer names `hyp ask` and the directory to run it from
@@ -264,9 +264,9 @@ function promptListFooter(footer, hasRows) {
       // Must not name `hyp ask`: the reader either just ran it, or is
       // being told nothing here can be started. Either way it would
       // point at the screen they are already looking at.
-      return 'Paste one into a Claude Code or Codex session to get started.'
+      return 'Paste one into an AI client session to get started.'
     case 'onboarding':
-      return 'To ask any of these, run `hyp ask` from the directory where you want your AI client (claude or codex) to start.'
+      return 'To ask any of these, run `hyp ask` from the directory where you want your attached AI client to start.'
     default:
       return hasRows === false
         ? 'Run `hyp ask` then, to pick one and start your client on it.'

@@ -123,6 +123,6 @@ test('runAsk: --list on a host with nothing launchable prints the manual fallbac
   const { ctx, stdout } = makeCtx({ env: { HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' } })
   await runAsk(['--list'], ctx)
   const text = stdout.text()
-  assert.match(text, /Paste one into a Claude Code or Codex session/)
+  assert.match(text, /Paste one into an AI client session/)
   assert.doesNotMatch(text, /Run `hyp ask` to pick one of these/)
 })

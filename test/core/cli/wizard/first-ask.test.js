@@ -207,7 +207,7 @@ test('runWizardFirstAsk: no launchable client prints the list and launches nothi
   assert.match(text, /Questions worth asking/)
   for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
   // Nothing to start here, so the fallback names the manual route.
-  assert.match(text, /Paste one into a Claude Code or Codex session/)
+  assert.match(text, /Paste one into an AI client session/)
 })
 
 test('onboarding only prints the questions and tells the user to choose the launch directory later', () => {
@@ -216,7 +216,7 @@ test('onboarding only prints the questions and tells the user to choose the laun
   writeSuggestedPrompts({ stdout, footer: 'onboarding', hasRows: true })
   const text = stdout.text()
   for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
-  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want your AI client \(claude or codex\) to start/)
+  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want your attached AI client to start/)
   assert.doesNotMatch(text, /Starting Claude Code|Starting Codex/)
 })
 
