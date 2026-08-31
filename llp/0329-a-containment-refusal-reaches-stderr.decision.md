@@ -14,7 +14,11 @@ exists on a default install), and
 **Extended-by:** [LLP 0332](./0332-cursor-refusal-warns-on-transition-then-rewarns.decision.md)
 (#consequences: the cursor guard's per-read line rate is rebased to
 warn-on-transition plus a rewarn interval; the refusal itself still reaches
-stderr)
+stderr), and
+[LLP 0335](./0335-a-telemetry-failure-is-said-once-never-thrown.decision.md)
+(#stderr-mirror: the mirror's "beside the emit" is made structural by a guard
+whose own one-line diagnostic is a fifth unconditional stderr write, beyond
+the four opt-in refusal lines settled here)
 **Related:** LLP 0021, LLP 0189, LLP 0323, LLP 0326
 
 > Every containment guard in the symlink series says its refusal out loud at

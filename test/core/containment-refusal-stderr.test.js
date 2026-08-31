@@ -515,8 +515,82 @@ test('an exporter whose forceFlush throws does not fail the shutdown, nor strand
     resource: { attributes: { service_name: 'hypaware-test' } },
     exporters: /** @type {any} */ ([new ThrowingFlushExporter(), healthy]),
   })
-  await provider.shutdown()
+  const stderr = await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
   assert.deepEqual(closed, { flushed: true, shut: true }, 'the exporter behind the broken one was still flushed and closed')
+  assert.match(stderr, /telemetry_flush_threw/, 'and the broken flush names itself instead of being absorbed silently')
+})
+
+// Absorbing a close failure kept it from stranding the sibling exporters,
+// but absorbing it silently meant a JSONL writer that fails to close at
+// daemon shutdown lost its buffered records with no line anywhere
+// (hyparam/hypaware#1130 item 2). The settled rejections now route through
+// the same one-line report as a throwing export.
+//
+// @ref LLP 0335#close-failures [tests]: a failed flush or close is diagnosed once on stderr; a healthy close stays silent.
+test('an exporter whose shutdown rejects is diagnosed on stderr, once, without stranding its sibling', async () => {
+  class RejectingCloseExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async shutdown() { throw new Error('close failed; records still buffered') }
+  }
+  const closed = { shut: false }
+  const healthy = {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {},
+    async shutdown() { closed.shut = true },
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new RejectingCloseExporter(), healthy]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+  assert.equal(closed.shut, true, 'the exporter behind the broken one still closed')
+  assert.match(stderr, /telemetry_shutdown_threw/, 'the failed close names itself')
+  assert.match(stderr, /close failed; records still buffered/, 'with what it rejected with')
+  assert.match(stderr, /buffered records may be lost/, 'and says what the failure costs')
+  const reports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_threw'))
+  assert.equal(reports.length, 1, 'one line for the failed close, not one per settled rejection observer')
+})
+
+test('a persistently failing forceFlush is diagnosed once, not once per flush', async () => {
+  class RejectingFlushExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async forceFlush() { throw new Error('flush keeps failing') }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new RejectingFlushExporter()]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    await provider.forceFlush()
+    await provider.forceFlush()
+    await provider.forceFlush()
+  })
+  const reports = stderr.split('\n').filter((line) => line.includes('telemetry_flush_threw'))
+  assert.equal(reports.length, 1, 'the one-line bound holds across repeated flushes')
+})
+
+test('a healthy provider shuts down with nothing on stderr', async () => {
+  const healthy = {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {},
+    async forceFlush() {},
+    async shutdown() {},
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([healthy]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    await provider.forceFlush()
+    await provider.shutdown()
+  })
+  assert.equal(stderr, '', 'no failure, no line')
 })
 
 // And what the diagnosis itself must survive. `String(Object.create(null))`
