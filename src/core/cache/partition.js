@@ -457,11 +457,14 @@ function noteEscapeCleared(partitionDir) {
  * warned about that partition.
  *
  * The escape report's counterpart, for the same reason and on the same
- * terms: see {@link noteEscapeCleared}. It retracts the refusal rather than
- * certifying the partition. One of its two exits is a `cursor.json` this
- * read could not open at all (deleted, or an EACCES), where the identical
- * garbage may still be on disk underneath; the escape condition and the
- * unreadable condition are equally unproven then, and an unproven condition
+ * terms: see {@link noteEscapeCleared}, but reached from fewer of the same
+ * exits. It retracts the refusal rather than certifying the partition, and
+ * only two reads retract it: one that got a cursor out of the bytes, and
+ * one that found no `cursor.json` to read. A read that failed any other
+ * way (an EACCES, an EIO, a directory in the file's place) leaves whatever
+ * was on disk on disk, which satisfies the unreadable condition rather than
+ * ending it, so that exit arms the refusal instead. The escape condition is
+ * the one such a read leaves genuinely unproven, and an unproven condition
  * may not throttle.
  *
  * @param {string} partitionDir
