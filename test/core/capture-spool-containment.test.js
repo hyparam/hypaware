@@ -410,3 +410,36 @@ test('an injected filesystem that cannot stat the spool is not read as an escape
   assert.equal(swept.filesRemoved, 1)
   assert.deepEqual(v.removed, [path.join(VIRTUAL_SPOOL, 'req-1.json')])
 })
+
+// And the one shape that is NOT silence. A seam carrying `readdir` and `rm`
+// but no `lstat` has not declined to answer about the directory; it was never
+// asked. Swallowing that `TypeError` returns `false` about a path nothing
+// looked at, and the walk then empties a directory the guard never saw, which
+// is issue #1109 item 4 rebuilt one level inside its own fix. Measured before
+// the check was raised: `{ readdir, rm }` alone removed the planted file and
+// reported `filesRemoved: 1`, with `bytesRemoved: 0` because the size `lstat`
+// fails the same way and a `TypeError` carries no `code` to match ENOENT on.
+//
+// Loud rather than a refusal, deliberately: a seam missing half of itself is a
+// caller wiring the function wrong, not a directory that might be a plant, and
+// a guard that answered "refused" here would leave a spool unreclaimed for a
+// reason nobody could tell from a real symlink.
+test('a seam with no lstat is refused loudly rather than swept unchecked', async () => {
+  /** @type {string[]} */
+  const removed = []
+  const partial = /** @type {any} */ ({
+    /** @param {string} p */
+    async readdir(p) {
+      return p === VIRTUAL_SPOOL ? [{ name: 'req-1.json', isDirectory: () => false }] : []
+    },
+    /** @param {string} p */
+    async rm(p) { removed.push(p) },
+  })
+
+  await assert.rejects(
+    () => sweepCaptureSpool(VIRTUAL_SPOOL, { fs: partial }),
+    /lstat/,
+    'the check names the half of the seam it is missing rather than answering about a path it cannot see'
+  )
+  assert.deepEqual(removed, [], 'and nothing is unlinked through a directory the guard never saw')
+})

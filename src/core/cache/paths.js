@@ -111,12 +111,23 @@ export function isConfirmedSymlink(p) {
  * returning `undefined`: ENOENT, EACCES, and every other refusal to answer
  * accept, exactly as the synchronous form does.
  *
+ * A filesystem with no `lstat` to call is the one thing that is not silence.
+ * It has not declined to answer; it was never asked, and swallowing the
+ * `TypeError` would return `false` about a path nothing looked at - the same
+ * fail-open this function exists to close, one level further down. So it is
+ * raised rather than caught, before the `try`. The check refuses to stand in
+ * front of a walk it cannot see, and says so where the caller wired the seam.
+ *
  * @ref LLP 0326#positive-evidence [implements]: only a symlink the filesystem confirms refuses anything.
+ * @ref LLP 0331#seam-answers-the-check [implements]: an incomplete seam is a check that was never asked, not a check that answered no
  * @param {{ lstat: (p: string) => Promise<{ isSymbolicLink(): boolean }> }} fsLike
  * @param {string} p
  * @returns {Promise<boolean>}
  */
 export async function isConfirmedSymlinkVia(fsLike, p) {
+  if (typeof fsLike?.lstat !== 'function') {
+    throw new TypeError('isConfirmedSymlinkVia: the injected filesystem has no lstat(), so the containment check cannot be asked')
+  }
   try {
     return (await fsLike.lstat(p)).isSymbolicLink() === true
   } catch {

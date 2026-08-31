@@ -13,7 +13,7 @@ import {
 } from 'icebird'
 import { fetchAvroRecords } from 'icebird/src/fetch.js'
 
-import { Attr, getActiveSpan, getLogger, getMeter, withSpan } from '../observability/index.js'
+import { Attr, getActiveSpan, getMeter, withSpan } from '../observability/index.js'
 import { MAINTENANCE_DEFAULTS } from './maintenance_defaults.js'
 import { isGatewayFallbackRow } from './gateway_fallback.js'
 import { inferColumnType } from './migrate.js'

@@ -170,7 +170,11 @@ export function sweepIndexScratch(tableDir, log) {
   const dataDir = path.join(root, 'data')
   const planted = [root, dataDir].find(isConfirmedSymlink)
   if (planted !== undefined) {
-    reportPlantedSweepPath(root, 'maintenance.grep_index', planted, logger)
+    // `log`, not `logger`: an absent one is left for the report to default,
+    // so the module that owns the refusal sentence owns how it is emitted.
+    // Resolving it here would make every production call pass a logger and
+    // leave that default dead on the one path an operator actually has.
+    reportPlantedSweepPath(root, 'maintenance.grep_index', planted, log)
     return
   }
   const cutoff = Date.now() - SCRATCH_GRACE_MS

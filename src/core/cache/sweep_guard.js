@@ -37,7 +37,8 @@ import { Attr, getLogger } from '../observability/index.js'
  */
 export function reportPlantedSweepPath(tableDir, operation, plantedComponent, log) {
   try {
-    (log ?? getLogger('cache')).warn('a symlink stands on the sweep path; reclaiming nothing in this generation', {
+    const sink = log ?? getLogger('cache')
+    sink.warn('a symlink stands on the sweep path; reclaiming nothing in this generation', {
       [Attr.OPERATION]: operation,
       [Attr.ERROR_KIND]: 'sweep_path_is_symlink',
       table_dir: tableDir,
