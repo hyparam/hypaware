@@ -308,8 +308,15 @@ test('a real closing pipe ends the run as a cancel: no crash, no commit, the rec
   child.stdout.destroy()
   await fs.writeFile(path.join(home, 'closed.marker'), '')
 
+  // 'close', not 'exit': 'exit' can fire before the child's stdio pipes
+  // have drained, which would let `stderrText` be short when the
+  // assertions below read it - a flaky match and, worse, a
+  // `doesNotMatch` that passes on text that never arrived.
   const exitCode = await new Promise((resolve) => {
-    child.on('exit', (code, signal) => resolve(code ?? `signal:${signal}`))
+    /** @type {number | string} */
+    let code = 'no-exit'
+    child.on('exit', (c, signal) => { code = c ?? `signal:${signal}` })
+    child.on('close', () => resolve(code))
   })
 
   // A cancel, not a crash: exit 130 with the cancel named on stderr and
@@ -430,8 +437,15 @@ test('a real closing pipe at the fork question leaves the enrollment standing', 
   child.stdout.destroy()
   await fs.writeFile(path.join(home, 'closed.marker'), '')
 
+  // 'close', not 'exit': 'exit' can fire before the child's stdio pipes
+  // have drained, which would let `stderrText` be short when the
+  // assertions below read it - a flaky match and, worse, a
+  // `doesNotMatch` that passes on text that never arrived.
   const exitCode = await new Promise((resolve) => {
-    child.on('exit', (code, signal) => resolve(code ?? `signal:${signal}`))
+    /** @type {number | string} */
+    let code = 'no-exit'
+    child.on('exit', (c, signal) => { code = c ?? `signal:${signal}` })
+    child.on('close', () => resolve(code))
   })
 
   assert.equal(exitCode, 130, `child exited ${exitCode}; stderr:\n${stderrText}`)
@@ -444,4 +458,94 @@ test('a real closing pipe at the fork question leaves the enrollment standing', 
   // enrollment this machine had is the enrollment it still has.
   assert.deepEqual(acts, [])
   await assert.rejects(fs.access(path.join(home, 'config.json')))
+})
+
+// The settle is the liveness probe, so its own write has to answer the
+// same way a lane's write does. A sink that is healthy through the last
+// narration and throws from the next write on - the death landing between
+// a lane and the boundary - used to have that throw swallowed, and the
+// checkpoint reported the surface alive.
+// @ref LLP 0341#absorb [tests]: a throw from the settle's own probe write is the surface saying it is gone
+test('guard: a sink that starts throwing between writes is caught by the settle probe', async () => {
+  let armed = false
+  const sink = {
+    on() {},
+    /** @param {string} _chunk @param {(err?: Error) => void} [cb] */
+    write(_chunk, cb) {
+      if (armed) throw new Error('EPIPE: broken pipe')
+      if (typeof cb === 'function') cb()
+      return true
+    },
+  }
+  const guard = guardWizardOutput(/** @type {any} */ ({ stdout: sink, stderr: makeBuf() }))
+
+  assert.equal(guard.stdout.write('narration\n'), true)
+  assert.equal(await guard.checkpoint(), true)
+  // The surface dies after the last lane write, so nothing wrapped has
+  // thrown yet: the settle's own probe is the first write to hit it.
+  armed = true
+  assert.equal(guard.outputDead(), false)
+  assert.equal(await guard.checkpoint(), false)
+  assert.equal(guard.outputDead(), true)
+})
+
+// A cancel taken after the commit point leaves a machine that changed:
+// the config is on disk and its configure commands ran, but no daemon,
+// no attach, no backfill. The cancel line itself is the one the
+// pre-commit boundaries print, so on the surviving stream the run says
+// which of the two it was.
+// @ref LLP 0341#dead-surface [tests]: a post-commit cancel names the config it left behind
+test('a stdout that dies during the configure phase names the config it already committed', async () => {
+  const home = await tmpHome('hyp-guard-postcommit-')
+  const stderr = makeBuf()
+  let writes = 0
+  let deadFrom = Infinity
+  const dying = {
+    write() {
+      writes += 1
+      if (writes >= deadFrom) throw new Error('EPIPE: broken pipe')
+      return true
+    },
+  }
+  const opts = drivenOpts(home, {
+    stdout: dying,
+    stderr,
+    // The phase writes its own progress, and that write is the one
+    // that fails: the surface dies with the config already on disk.
+    configure: async (_picked, phase) => {
+      deadFrom = writes + 1
+      phase.stdout.write('configuring...\n')
+      return { results: [] }
+    },
+  })
+
+  const result = await runInitWizard(opts)
+
+  assert.equal(result.exitCode, 130)
+  assert.equal(result.cancelled, true)
+  // The config did land, before the death.
+  await fs.access(path.join(home, 'config.json'))
+  // ...and the run says so where a `2>log` invocation can read it.
+  assert.match(stderr.text(), /output closed - cancelled/)
+  assert.match(stderr.text(), /config\.json was written before the output closed/)
+  assert.match(stderr.text(), /re-run 'hyp setup' to complete it/)
+})
+
+// The mirror: a cancel taken before the commit point must not claim a
+// config it never wrote.
+test('a cancel before the commit point says nothing about a config it never wrote', async () => {
+  const home = await tmpHome('hyp-guard-precommit-')
+  const stderr = makeBuf()
+  const opts = drivenOpts(home, {
+    express: async () => 'defaults',
+    stdout: throwingBuf(1),
+    stderr,
+  })
+
+  const result = await runInitWizard(opts)
+
+  assert.equal(result.cancelled, true)
+  await assert.rejects(fs.access(path.join(home, 'config.json')))
+  assert.match(stderr.text(), /output closed - cancelled/)
+  assert.doesNotMatch(stderr.text(), /was written before the output closed/)
 })

@@ -213,6 +213,14 @@ export async function runInitWizard(opts) {
   const enrolled = () => managed || joined !== undefined
 
   /**
+   * The config this run committed, if it got that far: what a cancel
+   * after the commit point has to name, because the cancel's own line is
+   * the same one the pre-commit boundaries print.
+   * @type {string | undefined}
+   */
+  let landedConfigPath
+
+  /**
    * The run's exit when its consent surface is gone (LLP 0341): the
    * same cancel ctrl+c produces, reached at a boundary rather than by
    * an uncaught stream error. The enrolled consequence is narrated on
@@ -225,9 +233,25 @@ export async function runInitWizard(opts) {
    * @returns {Promise<InitWizardResult>}
    */
   const cancelDeadOutput = async () => {
-    log.warn('wizard.output_closed', { [Attr.COMPONENT]: 'wizard', ...(pathway ? { pathway } : {}) })
+    log.warn('wizard.output_closed', {
+      [Attr.COMPONENT]: 'wizard',
+      ...(pathway ? { pathway } : {}),
+      config_committed: landedConfigPath !== undefined,
+    })
     if (joined) await narrateEnrolledAbort({ stdout: opts.stderr, env: opts.env })
     opts.stderr.write('hyp setup: output closed - cancelled\n')
+    // The boundaries after the commit point cancel with the same words as
+    // the ones before it, and the two leave very different machines
+    // behind: one where nothing was written, and one carrying a config
+    // and its configure commands but no daemon, no attach, and no
+    // backfill. On the stream that outlives the run, say which
+    // (LLP 0341 #dead-surface: the fact that outlives the run is
+    // attempted where a `2>log` invocation could still catch it).
+    if (landedConfigPath) {
+      opts.stderr.write(
+        `hyp setup: ${landedConfigPath} was written before the output closed; the install did not finish - re-run 'hyp setup' to complete it\n`
+      )
+    }
     return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
   }
 
@@ -747,6 +771,8 @@ export async function runInitWizard(opts) {
       if (joined) await narrateEnrolledAbort(opts)
       return { exitCode: 1, ...(pathway ? { pathway } : {}) }
     }
+    // Past this line a cancel is a cancel over a machine that changed.
+    landedConfigPath = picked.configPath
   }
 
   // Attended-only (LLP 0131): the configure phase itself no-ops when

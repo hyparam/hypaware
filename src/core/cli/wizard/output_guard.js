@@ -133,6 +133,11 @@ function settleSink(raw, isDead, markDead) {
         finish()
       })
     } catch {
+      // The probe write threw where a lane write would have, so it says
+      // the same thing a lane write says: the surface is gone. Swallowing
+      // it left the settle reporting a sink alive that `wrapSink.write`
+      // would have marked dead on the very next narration.
+      markDead()
       finish()
     }
   })
