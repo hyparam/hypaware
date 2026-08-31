@@ -35,10 +35,36 @@ const TIMED_OUT = Symbol('hyp.telemetry.timed-out')
 const SHUTDOWN_BUDGET_MARGIN_MS = 250
 
 /**
+ * The non-dev shutdown budget, and, because the channels close concurrently,
+ * the ceiling on the whole non-dev shutdown: a hang on all three costs this
+ * once rather than once per channel.
+ *
+ * Exported so that ceiling can be checked against the window it has to fit
+ * inside instead of compared by hand. `requestDaemonStop` waits
+ * `DAEMON_STOP_TIMEOUT_MS` for the signalled daemon's process to go away,
+ * not for its pid file: the daemon clears that file partway through its own
+ * shutdown, and this close runs after it, on the way out of
+ * `bin/hypaware.js`. Waiting on liveness is what puts this close inside the
+ * window at all, and it is only one of the things spending it, so the two
+ * numbers are pinned against each other in a test: raising
+ * `OTLP_EXPORT_TIMEOUT_MS` cannot eat that window unnoticed.
+ *
+ * Dev telemetry is deliberately outside that pin. It keeps a flat 5s per
+ * step and adds a `forceFlush` before the close, so its ceiling is two of
+ * those steps and already exceeds the stop window on purpose: whoever sets
+ * `HYP_DEV_TELEMETRY=1` is debugging the telemetry path and wants the
+ * records more than a prompt exit. Nothing renders that variable into an
+ * installed daemon's environment, so the shipped stop is the pinned one.
+ *
+ * @ref LLP 0343#one-budget [implements]: closing the channels concurrently makes the per-channel budget the whole-shutdown ceiling
+ */
+export const SHUTDOWN_BUDGET_MS = OTLP_EXPORT_TIMEOUT_MS + SHUTDOWN_BUDGET_MARGIN_MS
+
+/**
  * Install tracer, logger, and meter providers using a single shared
  * Resource derived from env. Returns a handle exposing each provider
- * and a `shutdown()` that flushes and closes exporters in reverse
- * order. Idempotent: a second call returns the existing handle.
+ * and a `shutdown()` that flushes and closes every channel's exporters
+ * at once. Idempotent: a second call returns the existing handle.
  *
  * @param {{ env?: ObservabilityEnv }} [opts]
  * @ref LLP 0021#otel-is-the-substrate [implements]: idempotent install over one shared Resource; safe-by-default tracer
@@ -66,11 +92,11 @@ export function installObservability(opts = {}) {
  * }} parts
  */
 function buildHandle({ env, resource, tracer, logger, meter, runtimeMetrics }) {
-  // @ref LLP 0021#shutdown-and-flush [implements]: close exporters reverse order; dev gets 5s budget + forceFlush
+  // @ref LLP 0021#shutdown-and-flush [implements]: dev gets a 5s budget and a forceFlush before the close (the order that section recorded is now LLP 0343's)
   async function shutdown() {
     runtimeMetrics?.stop()
     // @ref LLP 0339#budget-derived [implements]: the non-dev budget sits above the OTLP export timeout by construction, so an in-flight export settles before the budget can abandon it
-    const timeoutMs = env.devTelemetry ? 5_000 : OTLP_EXPORT_TIMEOUT_MS + SHUTDOWN_BUDGET_MARGIN_MS
+    const timeoutMs = env.devTelemetry ? 5_000 : SHUTDOWN_BUDGET_MS
     // Per shutdown invocation, like the exporter guard's own set: a process
     // that installs a second provider after tearing the first one down
     // starts clean.
@@ -85,25 +111,44 @@ function buildHandle({ env, resource, tracer, logger, meter, runtimeMetrics }) {
       if (env.devTelemetry) await safe(() => withTimeout(reader.forceFlush(), timeoutMs))
       await safe(() => withTimeout(reader.shutdown(), timeoutMs))
     }
-    const meterProvider = meter.provider
-    if (meterProvider) {
-      if (env.devTelemetry) await closeStep('metrics', 'flush', () => meterProvider.forceFlush(), timeoutMs, reportedCloseTimeouts)
-      await closeStep('metrics', 'shutdown', () => meterProvider.shutdown(), timeoutMs, reportedCloseTimeouts)
-    }
-    const loggerProvider = logger.provider
-    if (loggerProvider) {
-      if (env.devTelemetry) await closeStep('logs', 'flush', () => loggerProvider.forceFlush(), timeoutMs, reportedCloseTimeouts)
-      await closeStep('logs', 'shutdown', () => loggerProvider.shutdown(), timeoutMs, reportedCloseTimeouts)
-    }
-    const tracerProvider = tracer.provider
-    if (tracerProvider) {
-      if (env.devTelemetry) await closeStep('traces', 'flush', () => tracerProvider.forceFlush(), timeoutMs, reportedCloseTimeouts)
-      await closeStep('traces', 'shutdown', () => tracerProvider.shutdown(), timeoutMs, reportedCloseTimeouts)
-    }
+    // The budget is per channel, so closing the channels one after another
+    // made the ceiling three budgets rather than one, and the daemon still
+    // has to be gone inside `DAEMON_STOP_TIMEOUT_MS`. Concurrently the same
+    // three hangs cost one budget, and a slow-but-answering channel no longer
+    // has to wait out the channel closed before it.
+    // @ref LLP 0343#one-budget [implements]: the channels close concurrently, so a hang costs one budget rather than one per channel
+    await Promise.all([
+      closeChannel('metrics', meter.provider, env.devTelemetry, timeoutMs, reportedCloseTimeouts),
+      closeChannel('logs', logger.provider, env.devTelemetry, timeoutMs, reportedCloseTimeouts),
+      closeChannel('traces', tracer.provider, env.devTelemetry, timeoutMs, reportedCloseTimeouts),
+    ])
     resetKernelInstruments()
     installed = null
   }
   return { env, resource, tracer, logger, meter, runtimeMetrics, shutdown }
+}
+
+/**
+ * Close one channel's provider: the dev flush first, then the close, each
+ * under its own budget.
+ *
+ * Ordered within the channel, because a flush after the close has nothing
+ * left to flush. Unordered against the other two, because the channels share
+ * nothing that could make one wait for another: each holds its own exporters,
+ * its own pending posts, and its own global registration, and the timed-out
+ * report writes straight to `process.stderr` rather than back through any
+ * provider (LLP 0335#one-line). That is what lets the three run at once.
+ *
+ * @param {'traces'|'logs'|'metrics'} channel
+ * @param {{ forceFlush(): Promise<void>|void, shutdown(): Promise<void>|void }|null} provider
+ * @param {boolean} devTelemetry
+ * @param {number} timeoutMs
+ * @param {Set<string>} reported
+ */
+async function closeChannel(channel, provider, devTelemetry, timeoutMs, reported) {
+  if (!provider) return
+  if (devTelemetry) await closeStep(channel, 'flush', () => provider.forceFlush(), timeoutMs, reported)
+  await closeStep(channel, 'shutdown', () => provider.shutdown(), timeoutMs, reported)
 }
 
 /**
