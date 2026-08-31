@@ -89,6 +89,90 @@ function captureStream() {
 }
 
 /**
+ * Run `fn` with `substitute` standing in for the process's ambient number
+ * locale, for a case pinning `pinned` as the locale the code under test names.
+ *
+ * Node fixes the `Intl` default at startup from the environment, so nothing
+ * inside this process can move it. What can be moved is where a dropped locale
+ * argument reads it from: `Number.prototype.toLocaleString` called with no
+ * `locales`. An explicit locale passes through untouched, so code that names
+ * its locale is unaffected and code that took the machine's renders as
+ * `substitute` would. That is what makes a locale pin fail on the box that
+ * wrote it rather than only on a differently configured one, with no
+ * subprocess and no export widened for a test to reach.
+ *
+ * Scoped to that one route, not to the ambient locale in general.
+ * `Intl.NumberFormat` is a separate binding and is deliberately left alone, so
+ * a `formatCount` rewritten as `new Intl.NumberFormat().format(n)` reads the
+ * machine's locale and this helper does not see it. Shimming a global
+ * constructor the codebase never calls would buy a hypothetical at real cost;
+ * the fix that closes the route for good is `formatCount` grouping without a
+ * locale at all, which retires this helper rather than widening it.
+ *
+ * @template T
+ * @param {string} substitute
+ * @param {string} pinned
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+async function onAmbientLocale(substitute, pinned, fn) {
+  const proto = /** @type {any} */ (Number.prototype)
+  const real = proto.toLocaleString
+  // Checked, not assumed: a substitution that renders like `pinned` pins
+  // nothing, because the assertion under it then reads the same string whether
+  // or not the code names its locale. Node's own builds have shipped full ICU
+  // since v13, but a `small-icu` or `--without-intl` build resolves
+  // `substitute` back to the one locale it carries and would restore the exact
+  // "green on the mutant" blind spot this helper exists to close (#1117),
+  // silently and in the passing direction. Fail loudly there instead.
+  //
+  // Compared against `pinned`, never against this machine's own default: once
+  // the substitution is in, the machine's locale is not what the assertion
+  // reads, so it cannot blunt the pin. Reading it here would instead fail a
+  // correct tree on every box already running in `substitute`, which is the
+  // same environment-conditional outcome #1117 is about, pointed at red.
+  assert.notEqual(
+    real.call(1234, substitute),
+    real.call(1234, pinned),
+    `${substitute} groups like ${pinned} here, so substituting it pins nothing`
+  )
+  proto.toLocaleString = function (/** @type {any} */ locales, /** @type {any} */ options) {
+    return real.call(this, locales ?? substitute, options)
+  }
+  try {
+    return await fn()
+  } finally {
+    proto.toLocaleString = real
+  }
+}
+
+/**
+ * Run `fn` with `Date.now` frozen at its current reading.
+ *
+ * `runSync` does not plumb a clock into the preview, so this is what takes the
+ * wall clock out of an end-to-end case. Frozen, the preview's budget deadline
+ * is unreachable and whatever the case is actually about is the only thing
+ * left that can stop the count, which is the same freeze the scan-limit case
+ * applies through its injected `now` and the reason neither flakes under load
+ * (#1105). Frozen at the real reading rather than at a constant, so nothing
+ * else in the command sees a clock from 1970.
+ *
+ * @template T
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+async function onFrozenClock(fn) {
+  const real = Date.now
+  const frozen = real()
+  Date.now = () => frozen
+  try {
+    return await fn()
+  } finally {
+    Date.now = real
+  }
+}
+
+/**
  * @param {string} instanceName
  * @param {Record<string, unknown>} config
  * @param {string} [plugin]
@@ -309,17 +393,60 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
   assert.equal(volume.rows, 200000, 'the floor is the row limit reached, never the 250,000 rows behind it')
 })
 
+test('`hyp sync` counts to the shipped scan limit, not to one its own call passed in', async () => {
+  // The end-to-end half of the scan-limit case above. `previewPendingRows`
+  // takes a `rowLimit`, and `runSync` deliberately passes none, so the command
+  // a person actually runs counts to `DEFAULT_ROW_LIMIT`. Nothing pinned that:
+  // an override inserted into `runSync`'s call was invisible to every test in
+  // the repo (#1117), because the only case that ever reached the renderer with
+  // a limit-sized number in it was the 250,000-row real-clock scan #1105 was
+  // filed about, and that one now counts through `previewPendingRows` directly.
+  //
+  // Restored without the clock rather than without the fixture: the limit is
+  // only observable at the row it stops on, so the fixture has to outrun it,
+  // and `onFrozenClock` is what stops the 3000ms budget from racing the scan
+  // for which one gets to end the count. Frozen, no deadline is reachable at
+  // any speed, so this asserts the shipped limit instead of the machine.
+  const hypHome = await makeHome('rowlimit')
+  const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks,
+    storage: fakeStorage({
+      hypHome,
+      entries: function* () {
+        for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
+      },
+    }),
+  })
+
+  const code = await onFrozenClock(() => runSync(['--dry-run'], ctx))
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /at least 200,000 rows pending/, 'the command counts to the shipped limit, not to a caller\'s')
+  assert.doesNotMatch(
+    stdout.text,
+    /250,000 rows pending/,
+    'the floor is the limit the scan reached, never the rows behind it'
+  )
+})
+
 test('a four-digit backlog is grouped for a reader, not printed as a bare integer', async () => {
   // `formatCount` pins `en-US` grouping so the same backlog cannot render as
-  // `1.234` on one machine and `1,234` on another, and the only assertion that
-  // ever put a separator in front of it was the scan-limit case above, back
-  // when it read `at least 200,000 rows pending` off `runSync`. That case now
-  // counts through `previewPendingRows` and never reaches the renderer
-  // (#1105), so the grouping is pinned here instead, on the cheapest fixture
-  // that has four digits in it. This still counts against the real clock, as
-  // every `runSync` case in this file does, but a four-digit fixture is two
-  // orders of magnitude smaller than the 250,000-row one whose margin against
-  // the 3000ms budget load could close.
+  // `1.234` on one machine and `1,234` on another. What this case is about is
+  // the separator, never the budget, so it runs on a frozen clock: a
+  // four-digit fixture makes losing the race against the 3000ms budget
+  // unlikely rather than impossible, and a count the budget stopped at the
+  // 512-row check renders `at least 512 rows pending` and reds a correct tree
+  // (#1105). The freeze costs the case nothing and removes the last thing in
+  // it that reads the machine.
+  //
+  // Run under a substituted ambient locale, because the realistic regression
+  // is deleting the `'en-US'` argument as redundant and a US-locale box
+  // renders both spellings identically: asserted against the real default,
+  // this case passes whether or not the locale is pinned at all, which is no
+  // pin (#1117). `onAmbientLocale` moves only the default, so the assertion
+  // below fails on any machine the moment the argument goes.
   const hypHome = await makeHome('grouped')
   const sinks = [fakeSink('central', { url: 'https://hypaware.example.com' }, '@hypaware/central')]
   const { ctx, stdout } = makeCtx({
@@ -331,10 +458,15 @@ test('a four-digit backlog is grouped for a reader, not printed as a bare intege
     }),
   })
 
-  const code = await runSync(['--dry-run'], ctx)
+  const code = await onFrozenClock(() => onAmbientLocale('de-DE', 'en-US', () => runSync(['--dry-run'], ctx)))
 
   assert.equal(code, 0)
   assert.match(stdout.text, /1,234 rows pending, the full local history/)
+  assert.doesNotMatch(
+    stdout.text,
+    /1\.234 rows pending/,
+    'a count read off the ambient locale renders one backlog two ways across machines'
+  )
   assert.doesNotMatch(stdout.text, /1234 rows pending/, 'a count a person has to read is grouped, not a bare integer')
 })
 
@@ -423,6 +555,133 @@ test('a spent wall-clock budget yields unknown, not a floor built from one parti
     assert.equal(volume.status, 'unknown', `${instance} must not claim a count it never took`)
     assert.equal(volume.rows, 0)
   }
+})
+
+test('a deadline crossed between partitions stops the count there, not one partition later', async () => {
+  // Pass 2's pre-partition deadline check, pinned on its own. Pass 1 finishes
+  // well inside the budget, so the count enters pass 2 untruncated and that
+  // check is the only thing that can stop it: the first partition's rows carry
+  // the clock past the deadline, and the check is what keeps the second
+  // partition's rows off a number somebody is about to consent to. Fewer than
+  // `CLOCK_CHECK_EVERY` rows in the first partition on purpose, so the in-loop
+  // clock check cannot fire and take the credit.
+  //
+  // Separate from the case below rather than folded into it. Pass 2 makes two
+  // deadline decisions - this check, and the `truncated = budgetSpent` seed -
+  // and each was individually deletable while the other still caught the
+  // observable, so the pair was pinned and neither member was (#1117).
+  const hypHome = await makeHome('midcount-deadline')
+  const cache = cacheRoot(hypHome)
+  const first = path.join(cache, 'datasets', 'ai_gateway_messages', 'source=claude')
+  const second = path.join(cache, 'datasets', 'ai_gateway_messages', 'source=codex')
+  // One millisecond per row pulled, and nothing else moves the clock: pass 1
+  // reads two watermark files at t = 0, so it cannot be what spends the budget.
+  let t = 0
+  const now = () => t
+  const storage = {
+    cacheRoot: cache,
+    tableExists: () => true,
+    hasPendingSync: () => false,
+    async *readRowsSince(/** @type {string} */ tablePath) {
+      const total = tablePath === first ? 400 : 100
+      for (let seq = 1; seq <= total; seq += 1) {
+        t += 1
+        yield { row: { seq }, after: { v: 1, seq: String(seq) } }
+      }
+    },
+  }
+  const query = {
+    listDatasets: () => [{
+      name: 'ai_gateway_messages',
+      discoverPartitions: () => [
+        { dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath: first },
+        { dataset: 'ai_gateway_messages', partition: { source: 'codex' }, tablePath: second },
+      ],
+    }],
+  }
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (storage),
+    stateRoot: stateDir(hypHome),
+    // The first partition's 400 rows overrun this, so the deadline arrives
+    // between the two partitions rather than inside either one.
+    budgetMs: 300,
+    now,
+  })
+
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.rows, 400, 'the partition the deadline arrived before must not be counted')
+  assert.equal(volume.status, 'partial', 'a count the deadline stopped is a floor, not a total')
+  assert.equal(volume.reason, 'the count hit its scan budget')
+})
+
+test('a survey that ran out of budget stays spent, even once the clock reads earlier again', async () => {
+  // The other half: `truncated` starts pass 2 at pass 1's verdict rather than
+  // at a fresh clock reading, and the two only differ when they disagree.
+  // `now` defaults to `Date.now()`, a wall clock an NTP step or a
+  // suspend/resume can move backwards, and a re-read taken after such a step
+  // says the budget is fine while the survey it was meant to bound is already
+  // short. Carrying pass 1's verdict forward is what keeps the destination on
+  // `unknown` instead of counting the one partition the survey did reach and
+  // quoting it as a floor over a backlog nothing surveyed.
+  //
+  // @ref LLP 0325#floor-to-unknown [tests]: a destination whose survey outran its deadline reports absence, not a floor built from the partitions the survey happened to reach
+  const hypHome = await makeHome('spent-survey')
+  const cache = cacheRoot(hypHome)
+  const sources = ['claude', 'codex', 'openclaw', 'gemini', 'copilot']
+  const tablePaths = sources.map((source) => path.join(cache, 'datasets', 'ai_gateway_messages', `source=${source}`))
+  // Readings 1 and 2 anchor the budget, readings 3 and 4 let pass 1 survey the
+  // first two partitions, reading 5 is the step past the deadline that ends the
+  // survey, and every reading after it is back inside the budget again.
+  //
+  // Five partitions rather than the two this needs, and the step two readings
+  // into pass 1 rather than at its first, because the script is positional and
+  // its premise - that the step lands on a pass 1 check - is not itself pinned
+  // by anything. Padding buys it slack: readings taken before pass 1 are
+  // `start` and `scanStart` today, and at two either side of that the step
+  // still lands inside pass 1, so a refactor that adds or drops one does not
+  // slide it onto pass 2's own pre-partition check, where the outcome is
+  // identical (`unknown`, 0 rows, the same reason) and the seed this case
+  // exists for would go unpinned in silence. Slide it further and pass 1 never
+  // breaks at all, which fails this case rather than quietly passing it.
+  const script = [0, 0, 0, 0, 500]
+  let reading = 0
+  const now = () => (reading < script.length ? script[reading++] : 0)
+  const storage = {
+    cacheRoot: cache,
+    tableExists: () => true,
+    hasPendingSync: () => false,
+    async *readRowsSince() {
+      for (let seq = 1; seq <= 12; seq += 1) yield { row: { seq }, after: { v: 1, seq: String(seq) } }
+    },
+  }
+  const query = {
+    listDatasets: () => [{
+      name: 'ai_gateway_messages',
+      discoverPartitions: () => sources.map((source, i) => (
+        { dataset: 'ai_gateway_messages', partition: { source }, tablePath: tablePaths[i] }
+      )),
+    }],
+  }
+
+  const volumes = await previewPendingRows({
+    handles: /** @type {any[]} */ ([fakeSink('central', {}, '@hypaware/central')]),
+    query: /** @type {any} */ (query),
+    storage: /** @type {any} */ (storage),
+    stateRoot: stateDir(hypHome),
+    budgetMs: 100,
+    now,
+  })
+
+  const volume = /** @type {any} */ (volumes.get('central'))
+  assert.equal(volume.status, 'unknown', 'a spent survey leaves no count, however the clock reads afterwards')
+  assert.equal(volume.rows, 0)
+  // The two shortfalls are different disclosures. A budget that ran out is not
+  // a partition that would not read, and reporting the second here would blame
+  // the cache for a clock.
+  assert.equal(volume.reason, 'the count hit its scan budget')
 })
 
 test('a slow scan degrades every destination to a floor, not the first to precision and the rest to unknown', async () => {
