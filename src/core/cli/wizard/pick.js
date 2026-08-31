@@ -74,13 +74,13 @@ export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
  *
  * Hidden rows (LLP 0202) are resolved here for the same reason: `visibleList`
  * is the single display filter's output, `defaultRows` is drawn from it so
- * neither gate can state a hidden row, and `carried` is the hidden-row
+ * no screen can state a hidden row, and `carried` is the hidden-row
  * carry-through, decided off `seedOrigin` before any screen renders, so the
- * express gate's auto-accept and the pick lane's own screens preserve a
+ * express gate's auto-accept and the pick lane's menu preserve a
  * raw-only config the same way.
  *
  * @ref LLP 0201#gate [implements]: one computation of "the defaults", read by both the express gate and the pick lane
- * @ref LLP 0202#hidden-rows [implements]: a `hidden` row stays out of the gates and the menu
+ * @ref LLP 0202#hidden-rows [implements]: a `hidden` row stays out of every wizard screen - the express gate's sentence, the accept narration, and the menu
  * @param {RunWizardPickOptions} opts
  */
 export async function resolvePickSeeding(opts) {

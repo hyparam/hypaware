@@ -43,8 +43,10 @@ function chromeLines(state, opts) {
   if (state.progress) lines.push(paint(state.progress, ANSI.dim, opts.color))
   if (state.title) lines.push(paint(state.title, ANSI.bold, opts.color))
   // Context lines (LLP 0190): rendered verbatim, unstyled, one per entry -
-  // the defaults gates list what they are about to accept here rather
-  // than cramming it into the title.
+  // a caller lists what a screen is about here rather than cramming it
+  // into the title. The wizard gates that drove this no longer use it
+  // (LLP 0201 #gate puts their copy in the option rows); the first-ask
+  // screen is the remaining caller.
   for (const item of state.items ?? []) lines.push(item)
   return lines
 }
