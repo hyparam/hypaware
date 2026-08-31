@@ -20,6 +20,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs/promises'
+import { closeSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -28,7 +29,9 @@ import { sweepCaptureSpool } from '../../src/core/capture_spool.js'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
+import { JsonlSpanExporter } from '../../src/core/observability/jsonl_exporters.js'
 import { getLogger } from '../../src/core/observability/logger.js'
+import { installObservability, readObservabilityEnv } from '../../src/core/observability/index.js'
 import { logs, trace, LoggerProvider, TracerProvider } from '../../src/core/observability/runtime.js'
 import { Attr } from '../../src/core/observability/attrs.js'
 
@@ -1217,4 +1220,350 @@ test('a provider that rejects is diagnosed even if another is installed before t
   })
   assert.match(stderr, /the provider installed after it threw/, 'the newer provider is diagnosed')
   assert.match(stderr, /the provider that emitted this rejected/, 'and so is the one whose rejection landed after it was replaced')
+})
+
+// The in-tree half of the close-failure gap. LLP 0335#close-failures could
+// name the report but not demonstrate it on anything this repo ships:
+// `JsonlWriter.close` resolved from `stream.end`'s callback without reading
+// the error that callback is handed, so a disk that took none of the buffered
+// records produced a clean shutdown and no line anywhere
+// (hyparam/hypaware#1130 item 2, hyparam/hypaware#1137 item 3). The stream is
+// broken the way the operating system breaks it, by taking the descriptor
+// away, rather than by a fake that agrees with the assertion.
+//
+// @ref LLP 0337#close-rejects [tests]: a JSONL close that lost its records is diagnosed once on stderr.
+test('a JSONL exporter whose stream fails at close says so instead of reporting a clean shutdown', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-close-'))
+  try {
+    const exporter = new JsonlSpanExporter({ dir, pid: 4242 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'a record the disk will not keep' }])
+    await new Promise((resolve) => { writer.stream.once('open', resolve) })
+    // Everything after this write has nowhere to land. The stream reports it
+    // asynchronously, which is the failure mode the old close could not see.
+    closeSync(writer.stream.fd)
+    writer.writeBatch([{ note: 'nor this one' }])
+
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.shutdown()
+    })
+    assert.match(stderr, /telemetry_shutdown_threw/, 'the failed close names itself')
+    assert.match(stderr, /"telemetry_source":"JsonlSpanExporter"/, 'as the exporter that lost the records')
+    assert.match(stderr, /buffered records may be lost/, 'and says what the failure costs')
+    assert.match(stderr, /EBADF/, 'carrying what the stream actually failed with')
+    const reports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_threw'))
+    assert.equal(reports.length, 1, 'one line for the failed close')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The other direction, and the standing constraint on every line above: a
+// JSONL exporter that closes cleanly writes nothing to stderr and everything
+// to its file.
+test('a healthy JSONL exporter closes silently, with its records on disk', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-close-ok-'))
+  try {
+    const exporter = new JsonlSpanExporter({ dir, pid: 4243 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'a record the disk keeps' }])
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.forceFlush()
+      await provider.shutdown()
+    })
+    assert.equal(stderr, '', 'a healthy close is byte-silent')
+    const written = await fs.readFile(path.join(dir, 'traces-4243.jsonl'), 'utf8')
+    assert.match(written, /a record the disk keeps/, 'and the records are on disk')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The boundary LLP 0335#never-throws named as outside every seam it has: a
+// component that fails on a resource it owns rather than on the call we made.
+// An `fs.WriteStream` reports such a failure on its own 'error' event, and an
+// unlistened 'error' event ends the process - the exact outcome the guard
+// exists to prevent, reached without passing through it. A subprocess,
+// because the assertion is that the process is still alive.
+//
+// @ref LLP 0337#writer-owns-its-stream [tests]: a write that fails after the write call returned costs the telemetry, not the process.
+test('a JSONL write that fails after the write call returned does not end the process', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-async-'))
+  try {
+    const exportersUrl = pathToFileURL(path.join(REPO_ROOT, 'src', 'core', 'observability', 'jsonl_exporters.js')).href
+    const script = [
+      "import fs from 'node:fs'",
+      `import { JsonlSpanExporter } from '${exportersUrl}'`,
+      `const exporter = new JsonlSpanExporter({ dir: ${JSON.stringify(dir)}, pid: 4244 })`,
+      "const writer = exporter.writer",
+      "writer.writeBatch([{ note: 'the first record' }])",
+      "await new Promise((resolve) => { writer.stream.once('open', resolve) })",
+      "fs.closeSync(writer.stream.fd)",
+      "writer.writeBatch([{ note: 'the record the closed descriptor cannot take' }])",
+      "await new Promise((resolve) => { setTimeout(resolve, 300) })",
+      "process.stdout.write('still running\\n')",
+    ].join('\n')
+    const run = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' })
+    assert.equal(run.status, 0, `the process survived its telemetry: ${run.stderr}`)
+    assert.match(run.stdout, /still running/, 'and went on doing its work')
+    assert.doesNotMatch(run.stderr, /Unhandled 'error' event/, 'no uncaught stream error')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The other boundary #close-failures named: a close that hangs rather than
+// rejecting. `installObservability`'s shutdown races each provider against a
+// budget whose timeout arm resolves, so a provider that never settles lost the
+// race, the process exited, and everything it still buffered went with it -
+// indistinguishable from a clean shutdown (hyparam/hypaware#1137 item 1).
+//
+// @ref LLP 0337#budget-report [tests]: a close that outruns the budget is named on stderr, and one that finishes inside it is not.
+test('a provider whose close never settles is named when the shutdown budget runs out', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-close-budget-'))
+  /** @type {NodeJS.Timeout|undefined} */
+  let stuck
+  try {
+    // No dev telemetry, so the budget is the short one and the test does not
+    // wait five seconds to prove it; an endpoint, so providers exist at all.
+    const env = readObservabilityEnv({
+      HYP_HOME: root,
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:1',
+    })
+    const obs = installObservability({ env })
+    // A close that hangs the way a real one does, on something that keeps the
+    // event loop alive. A promise pending on nothing at all is a different
+    // failure: the loop empties, the process exits, and no report of any kind
+    // can run after that (LLP 0337#budget-report names it as the residue).
+    const hanging = {
+      /** @param {unknown[]} _batch */
+      exportBatch(_batch) {},
+      shutdown() {
+        return new Promise((resolve) => { stuck = setTimeout(resolve, 60_000) })
+      },
+    }
+    const provider = /** @type {any} */ (obs.tracer.provider)
+    provider.exporters.push(hanging)
+    const stderr = await captureProcessStderr(async () => {
+      await obs.shutdown()
+    })
+    assert.match(stderr, /telemetry_shutdown_timed_out/, 'the hung close is named')
+    assert.match(stderr, /"telemetry_channel":"traces"/, 'on the channel whose provider hung')
+    assert.match(stderr, /shutdown budget/, 'saying the budget ran out rather than that something threw')
+    assert.match(stderr, /buffered records may be lost/, 'and what that costs')
+    assert.doesNotMatch(stderr, /"telemetry_channel":"logs"/, 'the providers that closed in time say nothing')
+    const reports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_timed_out'))
+    assert.equal(reports.length, 1, 'one line, not one per provider')
+    // Leave no globally registered provider behind for whatever runs next.
+    provider.exporters.pop()
+    await provider.shutdown()
+  } finally {
+    if (stuck) clearTimeout(stuck)
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a shutdown whose providers all close inside the budget stays byte-silent', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-close-budget-ok-'))
+  try {
+    const env = readObservabilityEnv({
+      HYP_HOME: root,
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:1',
+    })
+    const obs = installObservability({ env })
+    const stderr = await captureProcessStderr(async () => {
+      await obs.shutdown()
+    })
+    assert.equal(stderr, '', 'a shutdown that finishes says nothing')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The window between `destroy(err)` and the `'error'` event it queues. Node
+// sets `destroyed` and `errored` in the same synchronous step and emits ticks
+// later, so a close landing in between saw an already-destroyed stream with
+// nothing held against it and took the "settled from the held error" branch
+// with no held error - a clean shutdown reported over records that were never
+// written, which is the exact silence this file exists to end. The test above
+// misses it only because it closes before `destroy` has run.
+//
+// @ref LLP 0337#close-rejects [tests]: a close inside the async-destroy window is still diagnosed.
+test('a JSONL close that lands after destroy but before the error event is still diagnosed', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-destroy-window-'))
+  try {
+    const exporter = new JsonlSpanExporter({ dir, pid: 4245 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'a record the disk keeps' }])
+    await new Promise((resolve) => { writer.stream.once('open', resolve) })
+    closeSync(writer.stream.fd)
+    writer.writeBatch([{ note: 'the record that goes nowhere' }])
+    // Wait for the destroy, not for the event: this is the window.
+    let spins = 0
+    while (!writer.stream.destroyed && spins < 1000) {
+      await new Promise((resolve) => { setImmediate(resolve) })
+      spins++
+    }
+    assert.equal(writer.stream.destroyed, true, 'the stream destroyed itself')
+    assert.equal(writer.streamError, null, 'and the error event has not arrived yet')
+
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.shutdown()
+    })
+    assert.match(stderr, /telemetry_shutdown_threw/, 'the close in the window still names itself')
+    assert.match(stderr, /EBADF/, 'carrying what the stream actually failed with')
+    const written = await fs.readFile(path.join(dir, 'traces-4245.jsonl'), 'utf8')
+    assert.doesNotMatch(written, /goes nowhere/, 'and the record really was lost')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The failure that never reaches a stream at all: the directory cannot be
+// made, so `ensureOpen` throws and each `exportBatch`'s own `try`/`catch`
+// swallows it. Every record is lost and, until the writer held this the way it
+// holds what the stream reports, the close resolved clean over all of them.
+//
+// @ref LLP 0337#writer-owns-its-stream [tests]: a writer that could never open its file says so at close instead of closing clean.
+test('a JSONL exporter that cannot open its file at all is diagnosed at close', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-unopenable-'))
+  try {
+    // A file where the parent directory would have to be.
+    const blocker = path.join(root, 'blocker')
+    await fs.writeFile(blocker, 'not a directory')
+    const exporter = new JsonlSpanExporter({ dir: path.join(blocker, 'telemetry'), pid: 4246 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'a record with nowhere to go' }])
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.shutdown()
+    })
+    assert.match(stderr, /telemetry_shutdown_threw/, 'the close that lost everything names itself')
+    assert.match(stderr, /ENOTDIR/, 'carrying why the file could never be opened')
+    assert.match(stderr, /buffered records may be lost/, 'and says what it cost')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The bound on the report, on the writer's side of it: the failure belongs to
+// the descriptor that had it, so the close that reported it takes it off, and
+// a writer reopened after that close starts clean.
+//
+// @ref LLP 0337#close-rejects [tests]: a reported failure is not reported again against the next descriptor.
+test('a JSONL writer reopened after a failed close does not re-report the old failure', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-reopen-'))
+  try {
+    const exporter = new JsonlSpanExporter({ dir, pid: 4247 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'one' }])
+    await new Promise((resolve) => { writer.stream.once('open', resolve) })
+    closeSync(writer.stream.fd)
+    writer.writeBatch([{ note: 'two' }])
+    await assert.rejects(() => exporter.shutdown(), /EBADF/, 'the failed close rejects once')
+    await exporter.shutdown()
+    writer.writeBatch([{ note: 'three' }])
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.shutdown()
+    })
+    assert.equal(stderr, '', 'the reopened writer closes silently')
+    const written = await fs.readFile(path.join(dir, 'traces-4247.jsonl'), 'utf8')
+    assert.match(written, /three/, 'with the records the new descriptor took')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The open failure held by `writeBatch` used to be cleared by the next
+// `ensureOpen` that succeeded, on the reasoning that a new descriptor should
+// not carry the old one's error. True of the error, false of the loss: an
+// outage that clears mid-run leaves a healthy descriptor over records that are
+// gone regardless, and the close resolved clean over them with nothing on
+// stderr. The close is what takes a held failure off the writer now, so a
+// recovery cannot erase a loss no close has reported yet.
+//
+// @ref LLP 0337#writer-owns-its-stream [tests]: a writer whose disk came back still says what it lost while the disk was gone.
+test('a JSONL exporter that recovers mid-run still reports what it lost before it could open', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-recovers-'))
+  try {
+    // A file where the parent directory has to be: `ensureOpen` throws, and
+    // there is no stream for the failure to be reported on.
+    const blocker = path.join(root, 'blocker')
+    await fs.writeFile(blocker, 'not a directory')
+    const dir = path.join(blocker, 'telemetry')
+    const exporter = new JsonlSpanExporter({ dir, pid: 4248 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'a record lost while the disk was gone' }])
+    // The outage clears, and the writer opens a perfectly healthy descriptor.
+    await fs.rm(blocker)
+    writer.writeBatch([{ note: 'a record the disk keeps' }])
+    assert.ok(writer.stream, 'the writer reopened')
+
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.shutdown()
+    })
+    assert.match(stderr, /ENOTDIR/, 'the loss the recovery would have erased is still named')
+    assert.match(stderr, /buffered records may be lost/, 'and says what it cost')
+    // The live descriptor is still closed, with its records on disk: the
+    // report must not be paid for with the file the writer did open.
+    const written = await fs.readFile(path.join(dir, 'traces-4248.jsonl'), 'utf8')
+    assert.match(written, /a record the disk keeps/, 'and the healthy descriptor was still flushed and closed')
+    assert.doesNotMatch(written, /while the disk was gone/, 'the lost record really was lost')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The last way a close could resolve clean over lost records: a stream
+// destroyed with no error at all. `destroy()` throws the write buffer away and
+// leaves `errored` null, so both places the writer reads a failure from are
+// empty and the close took the already-destroyed branch and resolved.
+//
+// @ref LLP 0337#close-rejects [tests]: a destroyed stream with no error to show for it is still a loss, and the close says so.
+test('a JSONL close over a stream destroyed with no error does not report a clean shutdown', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-destroyed-'))
+  try {
+    const exporter = new JsonlSpanExporter({ dir, pid: 4249 })
+    const writer = /** @type {any} */ (exporter).writer
+    writer.writeBatch([{ note: 'the record the destroy throws away' }])
+    writer.stream.destroy()
+    assert.equal(writer.stream.destroyed, true, 'the stream is destroyed')
+    assert.equal(writer.stream.errored, null, 'with no error to read off it')
+    assert.equal(writer.streamError, null, 'and nothing held against it')
+
+    const provider = new TracerProvider({
+      resource: { attributes: { service_name: 'hypaware-test' } },
+      exporters: /** @type {any} */ ([exporter]),
+    })
+    const stderr = await captureProcessStderr(async () => {
+      await provider.shutdown()
+    })
+    assert.match(stderr, /telemetry_shutdown_threw/, 'the close names itself')
+    assert.match(stderr, /destroyed before its records were written/, 'saying what happened to the records')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
 })
