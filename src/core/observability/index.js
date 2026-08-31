@@ -41,8 +41,11 @@ const SHUTDOWN_BUDGET_MARGIN_MS = 250
  *
  * Exported so that ceiling can be checked against the window it has to fit
  * inside instead of compared by hand. `requestDaemonStop` waits
- * `DAEMON_STOP_TIMEOUT_MS` for the daemon to clear its pid file and the
- * telemetry close is only one of the things happening in there, so the two
+ * `DAEMON_STOP_TIMEOUT_MS` for the signalled daemon's process to go away,
+ * not for its pid file: the daemon clears that file partway through its own
+ * shutdown, and this close runs after it, on the way out of
+ * `bin/hypaware.js`. Waiting on liveness is what puts this close inside the
+ * window at all, and it is only one of the things spending it, so the two
  * numbers are pinned against each other in a test: raising
  * `OTLP_EXPORT_TIMEOUT_MS` cannot eat that window unnoticed.
  *
