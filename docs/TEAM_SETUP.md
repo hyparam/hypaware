@@ -78,6 +78,10 @@ keypress per screen.
   the images were not.
 -->
 
+### After the questions
+
+Both answers arrive here, so this applies whichever one you gave.
+
 The setup then installs the components, imports your recent AI history, and
 reports when the first upload will occur.
 

@@ -110,6 +110,20 @@ syncs", "Choose how new folders are handled"), so the row and the
 position lines it opens read as the same list. Unenrolled the row names
 only the pick menu, which is the only lane a decline opens there.
 
+**A two-answer gate splits the prose that documents it, and what applies
+to both answers may not land under one of them.** `docs/TEAM_SETUP.md`
+describes the gate and then, below it, the screens Customize opens. That
+second block is a subsection, so everything after it is nested inside it
+until the next heading - and the first thing after it is the upload-hold
+callout, which is the doc's one pointer to the review window, the
+`hypaware-privacy` skill, and PRIVACY.md. Nesting it there hides it from
+exactly the reader who took the one-keypress accept and has no reason to
+read a section headed "If you choose Customize". The rule is structural,
+not editorial: a disclosure that holds for every reader of a section sits
+at that section's level, never under a heading that states a condition.
+Text unchanged and structure moved is the same regression as text removed,
+and it does not show up in a diff of sentences.
+
 The menus still open on the same defaults the retired gates stated: the
 pick menu's boxes are seeded by detection and the locked set, the sync
 menu's boxes are checked for everything that syncs with locked rows
