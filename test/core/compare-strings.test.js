@@ -191,33 +191,53 @@ test('moving these lists off the host collation did not reorder any of them', ()
 })
 
 test('the collation these lists came off really does move with the machine', () => {
-  // Not a hypothetical. Lithuanian sorts `y` immediately after `i`, so on a
-  // `lt-LT` box the bare `localeCompare` in `hyp --help` listed `sync` ahead of
-  // `sink` while every other box listed them the other way round. This is the
-  // whole case for the migration, so it is asserted rather than described.
+  // Lithuanian sorts `y` immediately after `i`, so it orders `sync` before
+  // `sink` where the characters order `sink` first. That pair is not a
+  // curiosity: the 102 command names `orderedHelpNames` sorts in
+  // `src/core/cli/dispatch.js` hold both, and it is the only corpus above that
+  // the two orders disagree on under any locale checked.
+  //
+  // It is a hazard rather than a shipped symptom, and the difference is worth
+  // being exact about. Today every top-level token `hyp --help` prints is
+  // named in one of that renderer's four `preferred` rank lists, so the
+  // comparator only ever runs as a tiebreak that no shipped pair reaches, and
+  // the help text is byte-identical on an `lt-LT` box and an `en-US` one.
+  // The first plugin to contribute a top-level command outside those lists is
+  // what lands the pair in the tiebreak, and then the collation decides. So
+  // what is asserted here is the collation's disagreement itself, which is the
+  // thing the migration removed the dependency on.
   //
   // Conditional on the runtime actually having Lithuanian data: a `small-icu`
   // build resolves `lt` back to English and would show no disagreement, which
   // says nothing about Lithuanian and must not be read as saying the hazard is
-  // gone.
+  // gone. Asked of the *resolved* tag rather than the requested one, because
+  // ICU canonicalises `lt-LT` to `lt` (LT is Lithuanian's likely region), so
+  // a guard comparing against the requested tag returns early on every
+  // full-ICU box and the two assertions below never run.
   if (typeof Intl?.Collator !== 'function') return
   const collator = new Intl.Collator('lt-LT')
-  if (collator.resolvedOptions().locale !== 'lt-LT') return
+  const resolved = collator.resolvedOptions().locale
+  if (resolved !== 'lt' && !resolved.startsWith('lt-')) return
   assert.ok(compareStrings('sink', 'sync') < 0)
   assert.ok(collator.compare('sink', 'sync') > 0)
 })
 
 test('blob keys are the one migrated corpus whose order does change, and it changes toward S3', () => {
-  // `local-fs`'s `listObjects` and the two S3 fixtures under
-  // `hypaware-core/smoke/flows` sort object keys, and object keys are not
-  // identifiers: they are paths, they carry uppercase, and the tracked tree
+  // `local-fs`'s `listObjects`, the S3 dataset's partition discovery, the
+  // two S3 fixtures under `hypaware-core/smoke/flows` and the three
+  // `listObjects` doubles under `test/` all sort object keys, and object keys
+  // are not identifiers: they are paths, they carry uppercase (the S3 key
+  // renderer's segment allowlist is `[A-Za-z0-9._=,-]`), and the tracked tree
   // already holds a pair that the two orders disagree on. So this corpus is
   // excluded from the rule above rather than quietly asserted to be stable.
   //
-  // The reorder is the right one. Every one of those three sites implements or
-  // emulates `listObjects`, and S3 returns keys in UTF-8 byte order, which for
-  // these keys is what `compareStrings` gives and what the host collation did
-  // not. The fixtures got closer to the service they stand in for.
+  // The reorder is the right one. Every one of those sites implements or
+  // emulates `listObjects`, and for a general-purpose bucket S3 returns keys
+  // in lexicographical UTF-8 byte order, which for these keys is what
+  // `compareStrings` gives and what the host collation did not: collation puts
+  // `_` before `-` and lowercase before uppercase, so a store holding
+  // `ds/A.parquet` and `ds/a.parquet` listed them in an order no bucket would.
+  // The fixtures got closer to the service they stand in for.
   assert.ok(compareStrings('CLAUDE.md', 'bin/hypaware.js') < 0)
   if (typeof Intl?.Collator !== 'function') return
   const reference = new Intl.Collator('en-US').compare

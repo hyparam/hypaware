@@ -32,6 +32,7 @@ import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
+import { compareStrings } from '../../src/core/util/compare_strings.js'
 import { readCursorSync, discoverCachePartitions } from '../../src/core/cache/partition.js'
 import { createInstanceWatermarkStore } from '../../src/core/sinks/incremental.js'
 import { createSinkRegistry } from '../../src/core/registry/sinks.js'
@@ -251,7 +252,7 @@ async function listBlobs(destDir) {
     }
   }
   await walk(destDir)
-  return out.sort((a, b) => a.name.localeCompare(b.name))
+  return out.sort((a, b) => compareStrings(a.name, b.name))
 }
 
 // ==========================================================================

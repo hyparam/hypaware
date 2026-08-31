@@ -9,6 +9,8 @@ import path from 'node:path'
 import { Buffer } from 'node:buffer'
 import { Readable } from 'node:stream'
 
+import { compareStrings } from '../../src/core/util/compare_strings.js'
+
 import {
   collectStream,
   createLocalFsBlobStore,
@@ -279,7 +281,7 @@ function createInMemoryBlobStore() {
         async *[Symbol.asyncIterator]() {
           const entries = Array.from(objects.entries())
             .filter(([k]) => prefix.length === 0 || k.startsWith(prefix))
-            .sort((a, b) => a[0].localeCompare(b[0]))
+            .sort((a, b) => compareStrings(a[0], b[0]))
           for (const [key, { bytes, lastModified }] of entries) {
             yield { key, size: bytes.byteLength, lastModified }
           }
