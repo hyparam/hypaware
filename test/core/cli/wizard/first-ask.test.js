@@ -216,7 +216,7 @@ test('onboarding only prints the questions and tells the user to choose the laun
   writeSuggestedPrompts({ stdout, footer: 'onboarding', hasRows: true })
   const text = stdout.text()
   for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
-  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want your attached AI client to start/)
+  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want an attached AI client to start/)
   assert.doesNotMatch(text, /Starting Claude Code|Starting Codex/)
 })
 

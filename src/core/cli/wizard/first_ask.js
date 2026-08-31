@@ -223,7 +223,10 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
  *   constraint leaves the reader to infer what they would be running it
  *   to do. It names the attached client generically because launchability
  *   is manifest-contributed; adding a client must not require a second
- *   hardcoded list in this copy.
+ *   hardcoded list in this copy. Generically and *indefinitely*: this list
+ *   prints whether or not anything is attached, so "your attached AI
+ *   client" would be a claim about the reader's install that a
+ *   `--source otel` run makes false.
  *
  * @ref LLP 0198#empty-cache [implements]: no rows reframes the list, and the reason is stated
  * @ref LLP 0198#onboarding-list [implements]: setup's footer names `hyp ask` and the directory to run it from
@@ -266,7 +269,7 @@ function promptListFooter(footer, hasRows) {
       // point at the screen they are already looking at.
       return 'Paste one into an AI client session to get started.'
     case 'onboarding':
-      return 'To ask any of these, run `hyp ask` from the directory where you want your attached AI client to start.'
+      return 'To ask any of these, run `hyp ask` from the directory where you want an attached AI client to start.'
     default:
       return hasRows === false
         ? 'Run `hyp ask` then, to pick one and start your client on it.'
