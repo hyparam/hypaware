@@ -503,11 +503,15 @@ function noteUnreadableCleared(partitionDir) {
  * epoch-0 default and routes to `evictLegacyPartition`, which acts only on
  * an `epoch=0/` table or one directly under the partition. A partition
  * still on its first epoch is therefore removed whole on directory mtime,
- * and every other shape (source-table, or any later epoch) is skipped and
- * keeps its rows past the configured window for as long as the cursor
- * stays broken. Over-deleting on one shape and under-deleting on the rest
- * is defensible only while something says the cursor could not be read,
- * and that was true for one of the refusal set's two exits.
+ * which is what a healthy `epoch=0` cursor gets too: the broken cursor
+ * does not add that delete, it just fails to stand in the way of one it
+ * was never consulted for. Every other shape (source-table, or any later
+ * epoch) is skipped and keeps its rows past the configured window for as
+ * long as the cursor stays broken, and that silent suspension of the
+ * window is the change corruption actually makes. A delete that proceeds
+ * without the cursor and a retention window that quietly stops being
+ * enforced are both defensible only while something says the cursor could
+ * not be read, and that was true for one of the refusal set's two exits.
  *
  * Same shape as the escape refusal because it is the same signal: `warn`
  * rather than `error` (nothing failed and the tick carries on), mirrored to
