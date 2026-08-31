@@ -158,11 +158,25 @@ test('a provider close that hangs on nothing is still cut at the budget, and sti
     })
   })
   const { handle, home } = await installAgainst(url)
+  /** @type {(() => Promise<void>) | null} */
+  let releaseHungProvider = null
   try {
     const loggerProvider = handle.logger.provider
     assert.ok(loggerProvider, 'the configured endpoint installed a logger provider')
     // A hang with no timer of its own: the case the budget exists for
     // (LLP 0337#budget-report), which no exporter timeout can settle.
+    //
+    // The real close is the only thing that clears the global registration
+    // (`LoggerProvider.shutdown` nulls it in `runtime.js`), and the patch
+    // below is never going to reach that line. Held so the `finally` can run
+    // it: without that, this test leaves a provider registered globally whose
+    // exporter posts at the listener the same `finally` closes, and that is
+    // harmless only while nothing follows it in this file.
+    const realShutdown = loggerProvider.shutdown.bind(loggerProvider)
+    releaseHungProvider = async () => {
+      loggerProvider.shutdown = realShutdown
+      await realShutdown()
+    }
     loggerProvider.shutdown = () => new Promise(() => {})
     const started = Date.now()
     const stderr = await captureProcessStderr(async () => {
@@ -176,6 +190,7 @@ test('a provider close that hangs on nothing is still cut at the budget, and sti
     assert.match(stderr, /"telemetry_source":"logs_provider"/,
       'and the line names the provider that hung')
   } finally {
+    if (releaseHungProvider) await releaseHungProvider()
     server.close()
     await fs.rm(home, { recursive: true, force: true })
   }
