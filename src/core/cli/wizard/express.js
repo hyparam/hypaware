@@ -22,9 +22,10 @@ const EXPRESS_TITLE = 'Set up recording'
  * The rows are self-explaining (LLP 0201 #gate): the detected tool names
  * live in the accept row's own summary sentence, not in the items chrome
  * above the key-hint line, which goes unread. The sentence is both the
- * disclosure (what accepting does) and the evidence (what was found).
- * `sync` is claimed only on an enrolled run - on a solo machine nothing
- * forwards, so promising it would be a claim the install cannot keep.
+ * disclosure (accepting *configures* those tools, LLP 0190 #pick-gate)
+ * and the evidence (what was found). `sync` is claimed only on an
+ * enrolled run - on a solo machine nothing forwards, so promising it
+ * would be a claim the install cannot keep.
  *
  * Accepting is never silent (LLP 0188 #never-silent): each lane still
  * narrates the statement it would have shown, it simply does not stop
@@ -49,8 +50,17 @@ export async function runWizardExpressGate(opts) {
           label: opts.enrolled ? 'Record and sync everything' : 'Record everything',
           // The one row guaranteed to be read on the fast path, so the
           // tool names and the side-effect disclosure live here rather
-          // than above the prompt chrome (LLP 0201 #gate).
-          summary: `Record AI logs from ${joinNames(opts.rows)}.`,
+          // than above the prompt chrome (LLP 0201 #gate). One sentence
+          // doing both jobs: it names what was found, and it says that
+          // accepting *configures* those tools rather than merely
+          // watching them. That second half is the disclosure LLP 0190
+          // #pick-gate put on the happy-path accept row, which is this
+          // row now that the per-lane gates are retired - an express
+          // accept never opens the menu whose per-row summaries carry
+          // the specifics (attach, config writes, helper skills, the
+          // OTLP receiver), so dropping it here drops it everywhere.
+          // @ref LLP 0190#pick-gate [implements]: the happy path's accept row carries the one-line configures-your-tools disclosure
+          summary: `Configures ${joinNames(opts.rows)} to record AI logs through HypAware.`,
         },
         {
           value: 'choose',

@@ -9,13 +9,17 @@ import { defaultConfirmSelectPromptFactory } from '../../../src/core/cli/walkthr
 import { runWizardExpressGate } from '../../../src/core/cli/wizard/express.js'
 
 // The express gate's accept row carries the only side-effect disclosure on
-// the wizard's happy path ("Record AI logs from ..."). The wizard test
-// layer pins it on the question object; these tests pin it on the *screen*,
-// on both prompt paths, because a summary that no renderer forwards is a
-// disclosure the user never reads. The spec layer alone stayed green the
-// first time the copy went missing.
+// the wizard's happy path ("Configures ... to record ... through
+// HypAware."): the express accept never opens the pick menu, whose per-row
+// summaries carry the specifics. The wizard test layer pins the wording on
+// the question object; these tests pin it on the *screen*, on both prompt
+// paths, because a summary that no renderer forwards is a disclosure the
+// user never reads. The spec layer alone stayed green the first time the
+// copy went missing, and pinning only the tool names let it go missing a
+// second time - hence the shape assertion in `acceptSummary` below.
 // @ref LLP 0201#gate [tests]: the disclosure is asserted in the rendered
 // bytes, not just on the question spec, so dropping the forwarding fails here
+// @ref LLP 0190#pick-gate [tests]: the happy-path accept row still says that accepting configures the listed tools
 
 /**
  * Build a pair of PassThrough streams the TUI runtime accepts as a
@@ -85,6 +89,11 @@ async function acceptSummary() {
   const question = await gateQuestion()
   const accept = question.options.find((/** @type {any} */ o) => o.value === 'defaults')
   assert.ok(accept?.summary, 'the gate spec still carries the accept disclosure')
+  // Not just "some summary": the summary has to be the side-effect
+  // disclosure. A copy edit that keeps a sentence here but drops the
+  // configuring verb leaves the happy path stating nothing about what
+  // accepting does to the machine (LLP 0190 #pick-gate).
+  assert.match(accept.summary, /configures/i, 'the accept row discloses that accepting configures the tools')
   return accept.summary
 }
 
@@ -110,7 +119,7 @@ test('renderSelect: an option summary lands on its own indented line under its r
     kind: 'select',
     title: 'Set up recording',
     options: [
-      { value: 'defaults', label: 'Record and sync everything', summary: 'Record AI logs from Claude Code.' },
+      { value: 'defaults', label: 'Record and sync everything', summary: 'Configures Claude Code to record AI logs through HypAware.' },
       { value: 'choose', label: 'Customize', summary: 'Choose what to record and what syncs.' },
     ],
     cursor: 0,
@@ -120,7 +129,7 @@ test('renderSelect: an option summary lands on its own indented line under its r
 
   const cursorRow = lines.findIndex((l) => l.trim() === '> Record and sync everything')
   assert.notEqual(cursorRow, -1, 'the cursor row rendered')
-  assert.equal(lines[cursorRow + 1], '    Record AI logs from Claude Code.')
+  assert.equal(lines[cursorRow + 1], '    Configures Claude Code to record AI logs through HypAware.')
 
   // Rows the cursor is not on disclose too: the summary is documentation of
   // the row, not a property of the selection.
@@ -134,13 +143,13 @@ test('renderSelect: the summary line is dim, not the row colour', () => {
   const state = {
     kind: 'select',
     title: 'Set up recording',
-    options: [{ value: 'defaults', label: 'Record and sync everything', summary: 'Record AI logs from Claude Code.' }],
+    options: [{ value: 'defaults', label: 'Record and sync everything', summary: 'Configures Claude Code to record AI logs through HypAware.' }],
     cursor: 0,
     status: 'active',
   }
   const summaryLine = render(state, { color: true })
     .split('\n')
-    .find((l) => l.includes('Record AI logs from Claude Code.'))
+    .find((l) => l.includes('Configures Claude Code to record AI logs through HypAware.'))
   assert.ok(summaryLine, 'the summary reached the coloured frame too')
   assert.match(summaryLine, /\x1b\[2m/, 'summaries render dim (LLP 0189 palette)')
 })

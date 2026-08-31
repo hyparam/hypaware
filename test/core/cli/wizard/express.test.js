@@ -72,7 +72,15 @@ test('the accept row names the tools in its own summary; nothing rides the items
   ])
   assert.deepEqual(state.question.options.map((/** @type {any} */ o) => o.value), ['defaults', 'choose'])
   assert.equal(state.question.default, 'defaults')
-  assert.equal(state.question.options[0].summary, 'Record AI logs from Claude Code and Codex.')
+  // One sentence doing both jobs: the evidence (the tools that were
+  // found) and the disclosure that accepting *configures* them. The
+  // express accept never opens the pick menu, so this row is the only
+  // place the happy path can read it (LLP 0190 #pick-gate).
+  // @ref LLP 0190#pick-gate [tests]: the happy-path accept row still discloses that accepting configures the listed tools
+  assert.equal(
+    state.question.options[0].summary,
+    'Configures Claude Code and Codex to record AI logs through HypAware.'
+  )
   // The decline row glosses the questions it opens (LLP 0201 #decline):
   // the menus, linearly, not another round of gates.
   assert.equal(state.question.options[1].summary, 'Choose what to record and what syncs.')
@@ -90,7 +98,13 @@ test('the gate claims a server only when told it has one', async () => {
   }))
 
   assert.equal(state.question.options[0].label, 'Record everything', 'nothing forwards from a solo machine')
-  assert.equal(state.question.options[0].summary, 'Record AI logs from Claude Code.')
+  // The disclosure is unconditional: a solo machine's install configures
+  // the tool just the same, so only the sync claim drops.
+  assert.equal(
+    state.question.options[0].summary,
+    'Configures Claude Code to record AI logs through HypAware.'
+  )
+  assert.doesNotMatch(state.question.options[0].summary, /sync/i)
   assert.equal(state.question.options[1].summary, 'Choose what to record.')
 })
 
