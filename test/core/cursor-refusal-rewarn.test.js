@@ -138,3 +138,88 @@ test('an unchanged standing refusal says it again once the interval passes', asy
     await fs.rm(path.dirname(partition), { recursive: true, force: true })
   }
 })
+
+test('a cursor.json that vanishes resets the window, so the next poison warns', async () => {
+  const partition = await makePartition()
+  try {
+    await writeCursor(partition, '../out')
+    assert.equal(refusalLines(() => { tryReadCursorSync(partition) }).length, 1)
+
+    // "No cursor" is not the escape condition, so it re-arms the transition
+    // just as a healthy read does (LLP 0332#transition-plus-rewarn).
+    await fs.rm(path.join(partition, 'cursor.json'))
+    assert.equal(refusalLines(() => {
+      assert.equal(tryReadCursorSync(partition), null)
+    }).length, 0, 'an absent cursor is silent')
+
+    await writeCursor(partition, '../out')
+    assert.equal(refusalLines(() => { tryReadCursorSync(partition) }).length, 1,
+      'the refusal that reappears after an absence is a transition, not a repeat')
+  } finally {
+    await fs.rm(path.dirname(partition), { recursive: true, force: true })
+  }
+})
+
+test('an unparseable cursor resets the window, so the next poison warns', async () => {
+  const partition = await makePartition()
+  try {
+    await writeCursor(partition, '../out')
+    assert.equal(refusalLines(() => { tryReadCursorSync(partition) }).length, 1)
+
+    // Unreadable-for-another-reason is not the escape condition either.
+    await fs.writeFile(path.join(partition, 'cursor.json'), '{ not json')
+    assert.equal(refusalLines(() => {
+      assert.equal(tryReadCursorSync(partition), null)
+    }).length, 0, 'a corrupt cursor is silent about escape')
+
+    await writeCursor(partition, '../out')
+    assert.equal(refusalLines(() => { tryReadCursorSync(partition) }).length, 1,
+      'the refusal that reappears after a parse failure is a transition, not a repeat')
+  } finally {
+    await fs.rm(path.dirname(partition), { recursive: true, force: true })
+  }
+})
+
+test('a wall clock that steps backwards cannot mute a standing refusal', async (t) => {
+  const partition = await makePartition()
+  try {
+    await writeCursor(partition, '../out')
+    t.mock.timers.enable({ apis: ['Date'], now: 4 * ESCAPE_REWARN_MS })
+    assert.equal(refusalLines(() => { tryReadCursorSync(partition) }).length, 1)
+
+    // `Date.now` is NTP-steppable. A backwards step makes the recorded warn
+    // look like it is in the future, and a naive age comparison would then
+    // stay quiet until the clock caught up - silence, the one degradation
+    // this throttle promises it can never have (LLP 0332#not-a-pass-object).
+    t.mock.timers.setTime(ESCAPE_REWARN_MS)
+    assert.equal(refusalLines(() => { tryReadCursorSync(partition) }).length, 1,
+      'a window that cannot be proven to hold is not a window')
+  } finally {
+    t.mock.timers.reset()
+    await fs.rm(path.dirname(partition), { recursive: true, force: true })
+  }
+})
+
+test('a refusal the log channel could not deliver is not recorded as said', async () => {
+  const partition = await makePartition()
+  try {
+    await writeCursor(partition, '../out')
+
+    // The mirror writes after the OTel emit inside `getLogger`, so a provider
+    // that throws takes the whole line with it. Modelled here by a stderr
+    // that throws, which is the same shape: the warn raises, the cursor read
+    // still succeeds in refusing, and nothing reached the operator.
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = /** @type {typeof process.stderr.write} */ (() => { throw new Error('no channel') })
+    try {
+      assert.equal(tryReadCursorSync(partition), null, 'the read still refuses')
+    } finally {
+      process.stderr.write = realWrite
+    }
+
+    assert.equal(refusalLines(() => { tryReadCursorSync(partition) }).length, 1,
+      'the undelivered warn armed no window, so the next read says it for real')
+  } finally {
+    await fs.rm(path.dirname(partition), { recursive: true, force: true })
+  }
+})

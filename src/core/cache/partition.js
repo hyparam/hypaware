@@ -297,8 +297,13 @@ function reportEscapingTableDir(partitionDir, tableDir) {
   const rejected = typeof tableDir === 'string' ? tableDir : JSON.stringify(tableDir) ?? String(tableDir)
   const now = Date.now()
   const prior = escapeReportedAt.get(key)
-  if (prior && prior.rejected === rejected && now - prior.warnedAtMs < ESCAPE_REWARN_MS) return
-  escapeReportedAt.set(key, { rejected, warnedAtMs: now })
+  // A negative age means the wall clock stepped back under this entry
+  // (`Date.now` is NTP-steppable, and a daemon that starts before the first
+  // sync can read far into the past). The window is then not proven to hold,
+  // so say it again: the only degradation this throttle may have is an extra
+  // line, never silence (LLP 0332#not-a-pass-object).
+  const sinceMs = prior ? now - prior.warnedAtMs : 0
+  if (prior && prior.rejected === rejected && sinceMs >= 0 && sinceMs < ESCAPE_REWARN_MS) return
   try {
     getLogger('cache', { mirrorStderr: true }).warn(
       'cursor.tableDir does not name a generation in its partition; treating the cursor as unreadable',
@@ -309,6 +314,10 @@ function reportEscapingTableDir(partitionDir, tableDir) {
         table_dir: rejected,
       }
     )
+    // Recorded only once the line is out. `getLogger`'s OTel emit runs
+    // before the stderr mirror, so an installed provider that throws would
+    // otherwise arm a whole rewarn window over a refusal nobody ever saw.
+    escapeReportedAt.set(key, { rejected, warnedAtMs: now })
   } catch { /* a cursor read must not fail on a logger provider that is not installed */ }
 }
 
