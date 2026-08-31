@@ -6,27 +6,29 @@ import assert from 'node:assert/strict'
 import { loginWithBrowser, buildStartUrl } from '../../src/core/remote/oidc_login.js'
 
 /**
- * A scripted loopback receiver: captures the start URL the orchestrator built
- * (via the redirectUri it hands back) and yields a fixed code.
+ * A scripted poller: captures the args the orchestrator handed the seam and
+ * yields a fixed code (or a scripted rejection).
  *
  * @param {{ code?: string, reject?: Error }} [opts]
  */
-function scriptedReceiver(opts = {}) {
+function scriptedPoller(opts = {}) {
   let closed = false
-  const startReceiver = /** @type {any} */ (async (/** @type {{ state: string }} */ args) => ({
-    redirectUri: 'http://127.0.0.1:54321/callback',
-    port: 54321,
-    state: args.state,
-    waitForCode: async () => {
-      if (opts.reject) throw opts.reject
-      return { code: opts.code ?? 'the-code' }
-    },
-    close: () => { closed = true },
-  }))
-  return { startReceiver, wasClosed: () => closed }
+  /** @type {any[]} */
+  const startArgs = []
+  const startPoller = /** @type {any} */ ((/** @type {any} */ args) => {
+    startArgs.push(args)
+    return {
+      waitForCode: async () => {
+        if (opts.reject) throw opts.reject
+        return { code: opts.code ?? 'the-code' }
+      },
+      close: () => { closed = true },
+    }
+  })
+  return { startPoller, startArgs, wasClosed: () => closed }
 }
 
-test('drives PKCE -> loopback -> exchange and returns the session', async (t) => {
+test('drives PKCE -> poll -> exchange and returns the session', async () => {
   /** @type {any[]} */
   const tokenCalls = []
   const fetchImpl = /** @type {any} */ (async (/** @type {string} */ url, /** @type {any} */ init) => {
@@ -39,14 +41,14 @@ test('drives PKCE -> loopback -> exchange and returns the session', async (t) =>
   })
   /** @type {string[]} */
   const openedUrls = []
-  const { startReceiver, wasClosed } = scriptedReceiver({ code: 'code-xyz' })
+  const { startPoller, startArgs, wasClosed } = scriptedPoller({ code: 'code-xyz' })
 
   const session = await loginWithBrowser({
     identityBase: 'https://hyp.internal/v1/identity',
     org: 'acme',
     openBrowser: (url) => { openedUrls.push(url); return true },
     fetchImpl,
-    startReceiver,
+    startPoller,
   })
 
   assert.deepEqual(session, { refreshToken: 'rt', accessJwt: 'jwt', expiresAt: '2026-06-29T12:00:00Z', org: 'acme' })
@@ -57,7 +59,11 @@ test('drives PKCE -> loopback -> exchange and returns the session', async (t) =>
   assert.ok(opened.searchParams.get('code_challenge'))
   assert.ok(opened.searchParams.get('state'))
   assert.equal(opened.searchParams.get('org'), 'acme')
-  assert.equal(opened.searchParams.get('redirect_uri'), 'http://127.0.0.1:54321/callback')
+  // No redirect_uri: its absence is what selects poll delivery (LLP 0337 D3).
+  assert.equal(opened.searchParams.get('redirect_uri'), null)
+  // The poller was keyed by the same state the start URL carries.
+  assert.equal(startArgs[0].state, opened.searchParams.get('state'))
+  assert.equal(startArgs[0].identityBase, 'https://hyp.internal/v1/identity')
   // The code was exchanged with the held verifier.
   assert.equal(tokenCalls[0].body.grant_type, 'authorization_code')
   assert.equal(tokenCalls[0].body.code, 'code-xyz')
@@ -65,42 +71,12 @@ test('drives PKCE -> loopback -> exchange and returns the session', async (t) =>
   assert.equal(wasClosed(), true)
 })
 
-test('the loopback receiver gets a contact URL only for a Hyperparam-run target', async () => {
-  /** @type {(string | undefined)[]} */
-  const contactUrls = []
-  const fetchImpl = /** @type {any} */ (async () => ({
-    ok: true, status: 200,
-    text: async () => JSON.stringify({ refresh_token: 'rt', access_jwt: 'jwt', expires_at: '2026-06-29T12:00:00Z', org: 'acme' }),
-  }))
-  const startReceiver = /** @type {any} */ (async (/** @type {any} */ args) => {
-    contactUrls.push(args.contactUrl)
-    return { redirectUri: 'http://127.0.0.1:1/callback', port: 1, waitForCode: async () => ({ code: 'c' }), close: () => {} }
-  })
-
-  await loginWithBrowser({ identityBase: 'https://hypaware.hyperparam.app/v1/identity', noBrowser: true, fetchImpl, startReceiver })
-  // Self-hosting is supported, and its admin is not us: no vendor link there.
-  await loginWithBrowser({ identityBase: 'https://hyp.internal/v1/identity', noBrowser: true, fetchImpl, startReceiver })
-  // Near-misses of the built-in origin, so a future loosening of the compare
-  // to a suffix or substring match fails here instead of shipping: a name that
-  // merely looks like ours must not borrow our contact form.
-  for (const near of [
-    'https://evil-hypaware.hyperparam.app/v1/identity',
-    'https://hypaware.hyperparam.app.evil.com/v1/identity',
-    'https://hypaware.hyperparam.app.attacker.example/v1/identity',
-    'http://hypaware.hyperparam.app/v1/identity',
-  ]) {
-    await loginWithBrowser({ identityBase: near, noBrowser: true, fetchImpl, startReceiver })
-  }
-
-  assert.deepEqual(contactUrls, ['https://hyperparam.app/contact', undefined, undefined, undefined, undefined, undefined])
-})
-
 test('--no-browser prints the URL instead of opening it', async () => {
   const fetchImpl = /** @type {any} */ (async () => ({
     ok: true, status: 200,
     text: async () => JSON.stringify({ refresh_token: 'rt', access_jwt: 'jwt', expires_at: '2026-06-29T12:00:00Z', org: 'acme' }),
   }))
-  const { startReceiver } = scriptedReceiver()
+  const { startPoller } = scriptedPoller()
   /** @type {string[]} */
   const printed = []
   let openCalled = false
@@ -109,7 +85,7 @@ test('--no-browser prints the URL instead of opening it', async () => {
     noBrowser: true,
     openBrowser: () => { openCalled = true; return true },
     fetchImpl,
-    startReceiver,
+    startPoller,
     print: (line) => printed.push(line),
   })
   assert.equal(openCalled, false)
@@ -117,16 +93,17 @@ test('--no-browser prints the URL instead of opening it', async () => {
   assert.match(printed.join('\n'), /\/login\/start/)
 })
 
-test('closes the loopback even when the flow rejects', async () => {
-  const { startReceiver, wasClosed } = scriptedReceiver({ reject: new Error('login failed: access_denied') })
+test('closes the poller even when the flow rejects', async () => {
+  const { startPoller, wasClosed } = scriptedPoller({ reject: new Error('login failed: access_denied') })
   await assert.rejects(
-    () => loginWithBrowser({ identityBase: 'https://h/v1/identity', openBrowser: () => true, startReceiver }),
+    () => loginWithBrowser({ identityBase: 'https://h/v1/identity', openBrowser: () => true, startPoller }),
     /access_denied/,
   )
   assert.equal(wasClosed(), true)
 })
 
-test('buildStartUrl omits org when not given', () => {
-  const url = new URL(buildStartUrl({ identityBase: 'https://h/v1/identity', redirectUri: 'http://127.0.0.1:1/callback', challenge: 'c', state: 's' }))
+test('buildStartUrl omits org when not given, and never carries a redirect_uri', () => {
+  const url = new URL(buildStartUrl({ identityBase: 'https://h/v1/identity', challenge: 'c', state: 's' }))
   assert.equal(url.searchParams.get('org'), null)
+  assert.equal(url.searchParams.get('redirect_uri'), null)
 })

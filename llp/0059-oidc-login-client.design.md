@@ -14,6 +14,12 @@
 > store, origin-derived identity endpoints, and silent refresh on the attach path. This
 > document is the implementation design: the modules and functions to add, the exact
 > wire contract with hypaware-server, and the test plan.
+>
+> **Extended by [LLP 0337](./0337-poll-login-completion.decision.md):** the
+> loopback delivery described here (`redirect_uri`, `loopback.js`, the
+> callback contract) is replaced by poll-based completion; `/login/start`
+> loses `redirect_uri` on the CLI lane and a poll endpoint delivers the code.
+> The PKCE, token-endpoint, credential-store, and refresh design below stands.
 
 ## Summary
 

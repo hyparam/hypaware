@@ -28,8 +28,8 @@ export function openBrowser(url, opts = {}) {
     // A missing opener (e.g. no `xdg-open`) is delivered ASYNCHRONOUSLY as an
     // 'error' event, not a synchronous throw. Without a listener that becomes
     // an uncaught exception that crashes the process. Swallow it: the printed
-    // URL and the loopback timeout are the real backstops (D8). The boolean
-    // return is therefore best-effort, not a guarantee the browser opened.
+    // URL and the poll timeout are the real backstops (LLP 0058 D8). The
+    // boolean return is therefore best-effort, not a guarantee it opened.
     if (child && typeof child.on === 'function') child.on('error', () => {})
     if (child && typeof child.unref === 'function') child.unref()
     return true
@@ -45,12 +45,12 @@ export function openBrowser(url, opts = {}) {
 function openerFor(platform) {
   if (platform === 'darwin') return { command: 'open', args: [] }
   // win32: NOT `cmd /c start <url>`. cmd treats `&` as a command separator, so
-  // an unquoted authorize URL (always multi-param: redirect_uri, code_challenge,
-  // state, ...) is truncated at the first `&`, opening a PKCE-less URL. rundll32
+  // an unquoted authorize URL (always multi-param: code_challenge, state, ...)
+  // is truncated at the first `&`, opening a PKCE-less URL. rundll32
   // is spawned directly (no shell), so the URL reaches the handler verbatim.
   if (platform === 'win32') return { command: 'rundll32', args: ['url.dll,FileProtocolHandler'] }
   // Treat every other Unix as freedesktop (xdg-open). A missing xdg-open
-  // surfaces as an async spawn 'error' event (swallowed above); the caller's
-  // loopback waits and the URL is printed, so login still completes manually.
+  // surfaces as an async spawn 'error' event (swallowed above); the caller
+  // keeps polling and the URL is printed, so login still completes manually.
   return { command: 'xdg-open', args: [] }
 }
