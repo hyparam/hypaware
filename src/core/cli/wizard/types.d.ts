@@ -698,6 +698,12 @@ export interface WizardOutputGuard {
    * run must end as a cancel (LLP 0341 #dead-surface).
    */
   checkpoint(): Promise<boolean>
+  /**
+   * Remove the guard's `error` listeners from the caller's streams. The
+   * run owns them only while it is running; call this when it ends,
+   * however it ends.
+   */
+  detach(): void
 }
 
 /**

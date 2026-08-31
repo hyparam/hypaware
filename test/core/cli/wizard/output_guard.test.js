@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import readline from 'node:readline'
 import { PassThrough } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
@@ -51,6 +52,24 @@ function throwingBuf(failOn) {
     },
     text() { return value },
   }
+}
+
+/**
+ * Run a write that takes a callback and resolve to what the callback got,
+ * bounded: a guard that drops the callback must fail this test rather
+ * than hang the suite on a promise nobody will settle.
+ *
+ * @param {(cb: (err?: Error) => void) => void} start
+ * @returns {Promise<unknown>}
+ */
+function answered(start) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve('never answered'), 1000)
+    start((err) => {
+      clearTimeout(timer)
+      resolve(err)
+    })
+  })
 }
 
 async function tmpHome(prefix) {
@@ -116,6 +135,67 @@ test('guard: isTTY and columns delegate to the wrapped stream', () => {
   const guard = guardWizardOutput({ stdout, stderr: makeBuf() })
   assert.equal(/** @type {any} */ (guard.stdout).isTTY, true)
   assert.equal(/** @type {any} */ (guard.stdout).columns, 120)
+})
+
+// The guard's `error` listeners sit on streams it does not own, and it
+// only owns them for the length of a run: a library entry point that
+// leaves them behind changes its caller's error semantics for good, and
+// a host that drives the wizard repeatedly against one stream piles them
+// up until Node warns. `installStreamErrorHandlers` sets the repo's
+// convention here - install, hand back the detach.
+// @ref LLP 0341#absorb [tests]: the guard's listeners come off the caller's streams when the run ends
+test('guard: detach takes back the error listeners it installed', () => {
+  const stdout = new PassThrough()
+  const stderr = new PassThrough()
+  assert.equal(stdout.listenerCount('error'), 0)
+  const guard = guardWizardOutput({ stdout, stderr })
+  assert.equal(stdout.listenerCount('error'), 1)
+  assert.equal(stderr.listenerCount('error'), 1)
+  guard.detach()
+  assert.equal(stdout.listenerCount('error'), 0)
+  assert.equal(stderr.listenerCount('error'), 0)
+})
+
+// The lanes had the caller's whole stream before the guard existed, and
+// a stand-in with only `write`/`isTTY`/`columns` would quietly take it
+// away: `readline.createInterface({ input, output })` reads `isTTY`,
+// finds a terminal, and then calls `output.on`, which a plain object
+// does not have. Every wizard call site passes `terminal: false` today,
+// so the break would land on the first one that forgets.
+// @ref LLP 0341#absorb [tests]: the wrapper intercepts `write` and keeps everything else the stream had
+test('guard: the wrapper keeps the stream surface it does not intercept', () => {
+  const stdout = /** @type {any} */ (new PassThrough())
+  stdout.isTTY = true
+  stdout.columns = 80
+  stdout.resume()
+  const guard = guardWizardOutput({ stdout, stderr: makeBuf() })
+  const out = /** @type {any} */ (guard.stdout)
+  assert.equal(out.isTTY, true)
+  assert.equal(out.columns, 80)
+  assert.equal(typeof out.on, 'function')
+  // The shape readline takes when nobody says `terminal: false`.
+  const input = new PassThrough()
+  const rl = readline.createInterface({ input, output: out })
+  rl.close()
+  input.destroy()
+  guard.detach()
+})
+
+// A dropped chunk that never answers its callback leaves the caller
+// waiting on a flush that will not come, and answering without the error
+// would be a lie about a chunk the guard swallowed.
+// @ref LLP 0341#absorb [tests]: an absorbed write reports its failure to the callback it was given
+test('guard: an absorbed write answers its callback with the failure', async () => {
+  const throwing = /** @type {any} */ ({ write() { throw new Error('EPIPE: broken pipe') } })
+  const guard = guardWizardOutput({ stdout: throwing, stderr: makeBuf() })
+  const thrown = await answered((cb) => { /** @type {any} */ (guard.stdout).write('gone', cb) })
+  assert.ok(thrown instanceof Error)
+  assert.match(thrown.message, /EPIPE/)
+
+  // The same for the arm that never calls the stream at all: once the
+  // sink is known dead, `write` short-circuits.
+  const closed = await answered((cb) => { /** @type {any} */ (guard.stdout).write('still gone', cb) })
+  assert.ok(closed instanceof Error)
 })
 
 // --- the orchestrator's boundary rule, driven in-process ---
@@ -598,4 +678,22 @@ test('a cancel before the commit point says nothing about a config it never wrot
   await assert.rejects(fs.access(path.join(home, 'config.json')))
   assert.match(stderr.text(), /output closed - cancelled/)
   assert.doesNotMatch(stderr.text(), /was written before the output closed/)
+})
+
+// The whole entry point, not just the guard: a host that runs the wizard
+// more than once against one pair of streams gets its streams back the
+// way it handed them over.
+// @ref LLP 0341#absorb [tests]: the orchestrator detaches the guard however the run ends
+test('the wizard leaves no stream listeners behind when the run ends', async () => {
+  const stdout = new PassThrough()
+  const stderr = new PassThrough()
+  stdout.resume()
+  stderr.resume()
+  for (let i = 0; i < 3; i += 1) {
+    const home = await tmpHome(`hyp-guard-detach-${i}-`)
+    const result = await runInitWizard(drivenOpts(home, { stdout, stderr }))
+    assert.equal(result.cancelled, undefined, `run ${i} cancelled`)
+  }
+  assert.equal(stdout.listenerCount('error'), 0)
+  assert.equal(stderr.listenerCount('error'), 0)
 })

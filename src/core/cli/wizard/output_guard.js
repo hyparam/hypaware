@@ -52,16 +52,32 @@ export function guardWizardOutput({ stdout, stderr }) {
       await out.settle()
       return !out.dead()
     },
+    // The guard's reach ends with the run. Its `error` listeners live on
+    // streams it does not own, so leaving them attached would change the
+    // caller's error semantics for good and, for a host that drives the
+    // wizard more than once against the same stream, pile listeners up
+    // until Node warns. `installStreamErrorHandlers`
+    // (`src/core/cli/stream_errors.js`) already sets that convention for
+    // this repo: install, hand back the detach.
+    detach: () => {
+      out.detach()
+      err.detach()
+    },
   }
 }
 
 /**
- * Wrap one sink. The wrapper delegates `isTTY` and `columns` (the two
- * properties the prompt runtime reads) so TTY detection and layout are
- * unchanged; only `write` is intercepted.
+ * Wrap one sink. The wrapper is a proxy over the caller's stream, so it
+ * keeps every member the real stream has (`on`, `end`, `isTTY`,
+ * `columns`, ...) and only `write` is intercepted. The lanes had the
+ * whole stream before the guard existed, and a three-member stand-in
+ * would have taken it away: `readline.createInterface({ output })`
+ * reads `isTTY` and then, on a real terminal, calls `output.on`, which
+ * a plain object does not have. Delegating rather than re-implementing
+ * keeps that surface honest without listing it.
  *
  * @param {WizardOutputSink} sink
- * @returns {{ sink: WizardOutputSink, dead: () => boolean, settle: () => Promise<void> }}
+ * @returns {{ sink: WizardOutputSink, dead: () => boolean, settle: () => Promise<void>, detach: () => void }}
  */
 function wrapSink(sink) {
   let dead = false
@@ -69,31 +85,73 @@ function wrapSink(sink) {
   // A real stream reports a failed write on its `error` event, often
   // after the write call already returned. Listening is also what stops
   // Node from turning that event into an uncaught exception.
+  const onError = () => { dead = true }
+  /** @type {() => void} */
+  let detach = () => {}
   if (typeof raw.on === 'function') {
-    raw.on('error', () => { dead = true })
+    raw.on('error', onError)
+    const off = raw.off ?? raw.removeListener
+    if (typeof off === 'function') detach = () => { off.call(raw, 'error', onError) }
   }
-  const wrapped = /** @type {WizardOutputSink} */ ({
-    /** @param {any[]} args */
-    write(...args) {
-      if (dead || raw.destroyed === true) {
-        dead = true
-        return false
-      }
-      try {
-        return raw.write(...args)
-      } catch {
-        dead = true
-        return false
-      }
+  /** @param {any[]} args */
+  const write = (...args) => {
+    const done = args.length > 0 && typeof args[args.length - 1] === 'function'
+      ? /** @type {(err?: Error) => void} */ (args[args.length - 1])
+      : undefined
+    if (dead || raw.destroyed === true) {
+      dead = true
+      // The Error is built only when there is a callback to hand it to:
+      // once the sink is dead every remaining narration takes this arm,
+      // and none of them should pay for a stack trace nobody reads.
+      if (done) failWrite(done, new Error('the wizard output stream is closed'))
+      return false
+    }
+    try {
+      return raw.write(...args)
+    } catch (err) {
+      dead = true
+      if (done) failWrite(done, err instanceof Error ? err : new Error(String(err)))
+      return false
+    }
+  }
+  const wrapped = /** @type {WizardOutputSink} */ (/** @type {unknown} */ (new Proxy(raw, {
+    /**
+     * @param {any} target
+     * @param {string | symbol} prop
+     */
+    get(target, prop) {
+      if (prop === 'write') return write
+      const value = Reflect.get(target, prop, target)
+      // Bound to the real stream, so Node's own internals keep operating
+      // on it rather than on the proxy that fronts it.
+      return typeof value === 'function' ? value.bind(target) : value
     },
-    get isTTY() { return raw.isTTY },
-    get columns() { return raw.columns },
-  })
+  })))
   return {
     sink: wrapped,
     dead: () => dead,
     settle: () => settleSink(raw, () => dead, () => { dead = true }),
+    detach,
   }
+}
+
+/**
+ * Answer a `write(chunk, cb)` whose write never reached the stream. Node
+ * calls a write callback asynchronously and with the failure when there
+ * was one, so the guard does the same: reporting nothing would leave a
+ * caller waiting on a flush that will never come, and reporting success
+ * would be a lie about a chunk that was dropped.
+ *
+ * @param {(err?: Error) => void} done
+ * @param {Error} err
+ * @returns {void}
+ */
+function failWrite(done, err) {
+  queueMicrotask(() => {
+    // The guard's contract is that narration cannot crash the run, and
+    // that covers the callback it invents on the caller's behalf.
+    try { done(err) } catch { /* the write already failed; so did its report */ }
+  })
 }
 
 /**

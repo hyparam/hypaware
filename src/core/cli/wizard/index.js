@@ -10,6 +10,7 @@
  *   InitWizardResult,
  *   RunInitWizardOptions,
  *   WizardJoinResult,
+ *   WizardOutputGuard,
  *   WizardPathway,
  *   WizardPickResult,
  *   WizardSyncNowResult,
@@ -88,9 +89,29 @@ export async function runInitWizard(opts) {
   // The stream guard (LLP 0341): wrapped once, before any lane runs, so
   // no narration or warning can crash the run - a dying stream is
   // recorded here and acted on at the boundaries below, never thrown.
+  //
+  // The wrapping lives out here, around the orchestrator body, only so
+  // the guard's `error` listeners come off the caller's streams however
+  // the run ends: return, cancel, or throw. They are the guard's, not
+  // the caller's, and the wizard is a library entry point - a host that
+  // runs it twice against one stream must not accumulate them.
   // @ref LLP 0341#absorb [implements]: the orchestrator wraps both streams once and every lane writes through the guard
   const guard = guardWizardOutput({ stdout: opts.stdout, stderr: opts.stderr })
-  opts = { ...opts, stdout: guard.stdout, stderr: guard.stderr }
+  try {
+    return await runGuardedInitWizard({ ...opts, stdout: guard.stdout, stderr: guard.stderr }, guard)
+  } finally {
+    guard.detach()
+  }
+}
+
+/**
+ * The orchestrator proper, driving already-guarded streams.
+ *
+ * @param {RunInitWizardOptions} opts
+ * @param {WizardOutputGuard} guard
+ * @returns {Promise<InitWizardResult>}
+ */
+async function runGuardedInitWizard(opts, guard) {
   const log = getLogger('wizard')
   const interactive = !opts.picks
   const catalog = opts.catalog ?? (await loadWizardCatalog())
