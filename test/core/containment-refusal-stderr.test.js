@@ -29,7 +29,7 @@ import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
 import { getLogger } from '../../src/core/observability/logger.js'
-import { logs, LoggerProvider } from '../../src/core/observability/runtime.js'
+import { logs, LoggerProvider, TracerProvider } from '../../src/core/observability/runtime.js'
 import { Attr } from '../../src/core/observability/attrs.js'
 
 /**
@@ -653,6 +653,86 @@ test('the export report is one line of exactly the recorded shape', async () => 
     })
     + '\n'
   assert.equal(stderr, expected, 'the export line is unchanged by the operation parameter')
+})
+
+// The `#index#` half of the settled key, which the export path pins for
+// itself two tests above and this path did not. Two exporters of one class is
+// a shape only a third party builds (two OTLP endpoints, say) and it is two
+// things to fix; on a key of `source#operation` the first to break at close
+// consumes the report and the second is undiagnosable for the life of the
+// process, which is the bug LLP 0335#one-line minted the index for.
+//
+// @ref LLP 0335#one-line [tests]: two exporters of one class are two closes to diagnose, not one.
+test('two exporters of the same class that both fail to close are each diagnosed', async () => {
+  class TwinCloseFailure {
+    /** @param {string} label */
+    constructor(label) { this.label = label }
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async shutdown() { throw new Error(`close failed in ${this.label}`) }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new TwinCloseFailure('first'), new TwinCloseFailure('second')]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+  const reports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_threw'))
+  assert.equal(reports.length, 2, 'both siblings are diagnosed, not one consuming the other report')
+  assert.match(stderr, /close failed in first/, 'the first names itself')
+  assert.match(stderr, /close failed in second/, 'and so does the second')
+})
+
+// Every other test on this seam uses the logs channel, so a `'logs'` literal
+// pasted into the tracer or meter provider's flush and shutdown calls would
+// mislabel the report with nothing to catch it. The channel is what tells an
+// operator which substrate is broken.
+//
+// @ref LLP 0335#close-failures [tests]: the report names the channel whose provider is closing.
+test('a close failure on the traces channel is reported as traces, not logs', async () => {
+  class RejectingCloseExporter {
+    /** @param {unknown[]} _spans */
+    exportBatch(_spans) {}
+    async shutdown() { throw new Error('trace exporter will not close') }
+  }
+  const provider = new TracerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new RejectingCloseExporter()]),
+  })
+  const stderr = await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
+  assert.match(stderr, /"telemetry_channel":"traces"/, 'the channel is the one that was closing')
+  assert.match(stderr, /"hyp_operation":"observability\.shutdown_traces"/, 'and the operation names it too')
+})
+
+// The property the whole contract rests on, at the seam this change added.
+// `reportSettledFailures` runs after the await inside `shutdownExporters`, so
+// a report that throws there rejects `provider.shutdown()` into the caller
+// and skips the `globalLoggerProvider = null` teardown on the next line: the
+// escape LLP 0335#never-throws exists to close, reintroduced by the line that
+// reports it. The bound's `reported` set is a public field, which is the
+// cheapest way to make the report itself throw at that exact seam.
+//
+// @ref LLP 0335#never-throws [tests]: a report that throws cannot reject the close it was reporting on.
+test('a report that throws does not reject the shutdown it was diagnosing', async () => {
+  class RejectingCloseExporter {
+    /** @param {unknown[]} _records */
+    exportBatch(_records) {}
+    async shutdown() { throw new Error('close failed') }
+  }
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: /** @type {any} */ ([new RejectingCloseExporter()]),
+  })
+  provider.reportedExporterFailures = /** @type {any} */ ({
+    has() { throw new Error('the report itself is broken') },
+    add() {},
+  })
+  await captureProcessStderr(async () => {
+    await provider.shutdown()
+  })
 })
 
 // And what the diagnosis itself must survive. `String(Object.create(null))`

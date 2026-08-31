@@ -51,6 +51,14 @@ not its own telemetry but the silencing of every containment guard in LLP
 Structural guarding at the seam makes the mirror's "beside" true by
 construction.
 
+What this does not reach, named so the guarantee is not read wider than it
+is: a component that fails asynchronously on a resource it owns rather than
+on the call we made. `JsonlWriter` attaches no `'error'` listener to its
+`fs.WriteStream`, so a write that fails after `stream.write` returned emits
+`'error'` with nobody listening and ends the process, outside every seam
+above. The guard covers every call our code makes into a telemetry
+component, not every way such a component can break.
+
 One consequence for test authors, recorded in the code and repeated here
 because it surprises: an `assert` inside a fake exporter's `exportBatch` is
 swallowed like any other throw. A fake records, and the test asserts.
@@ -101,7 +109,7 @@ name on the report.
 
 `flushExporters` and `shutdownExporters` absorb a synchronous throw as well
 as a rejection, so one broken `forceFlush` cannot strand the sibling
-exporters behind it. Absorbing them silently, though, meant a JSONL writer
+exporters behind it. Absorbing them silently, though, meant an exporter
 that fails to close at daemon shutdown lost its buffered records with no line
 anywhere (hyparam/hypaware#1130 item 2, a gap that predates PR #1125:
 `Promise.allSettled` and the `safe()` wrapper in `installObservability`'s
@@ -109,9 +117,26 @@ shutdown already swallowed these). The settled rejections now route through
 `reportTelemetryFailure` under the same bound, with the operation in the key
 (`source#index#flush`, `source#index#shutdown`) so an exporter that exports
 fine all day and only breaks at close is diagnosable independently of its
-export line. Shutdown noise stays bounded twice over: the one-line bound
-holds across repeated flushes, and the flush and shutdown paths run at most
-once per provider per process in the current tree.
+export line. Noise stays bounded by that key, which holds across the repeated
+flush passes one shutdown makes: under dev telemetry
+`installObservability`'s shutdown calls `forceFlush` and then `shutdown`,
+which flushes again.
+
+Two boundaries the report does not reach, neither of them introduced by it:
+
+- **A close that rejects is diagnosed; a close that hangs is not.**
+  `installObservability`'s shutdown races each provider against
+  `withTimeout`, so an exporter whose `shutdown` never settles loses the
+  race, the process exits, and the settled results are never inspected.
+- **Neither in-tree exporter can produce this line today.** The OTLP
+  exporter's flush is an `allSettled` over posts that already caught their
+  own failure, and `JsonlWriter.close` resolves from `stream.end`'s
+  callback without reading the error that callback is handed, so a JSONL
+  close failure never reaches this seam at all. What the report covers is the
+  case the guard was minted for: an exporter we did not write. Teaching the
+  JSONL writer to reject on its stream error is a change to that exporter,
+  not to this seam, and it is where the buffered-record loss in
+  hyparam/hypaware#1130 item 2 actually has to be fixed.
 
 ## Not a fifth mirror, and not blanket mirroring {#not-a-fifth-mirror}
 
@@ -158,13 +183,17 @@ inherits this sentence.
   after it, that component's records drop silently by design.
 - A fake exporter in a test must record and let the test assert; an assert
   inside `exportBatch`, `forceFlush`, or `shutdown` is swallowed.
-- A failing exporter close at shutdown is now diagnosable from the daemon's
+- An exporter whose close *rejects* is now diagnosable from the daemon's
   log. The records it buffered may still be lost; the line is the difference
-  between a loss someone can investigate and one nobody knows happened.
+  between a loss someone can investigate and one nobody knows happened. A
+  close that hangs past the shutdown timeout, or one that resolves while
+  swallowing its own error the way `JsonlWriter.close` does, is still
+  silent (#close-failures).
 - `test/core/containment-refusal-stderr.test.js` pins every clause: the
-  mirror surviving a throwing and a rejecting exporter, the per-component and
-  per-generation bounds, the exotic thrown values, the flush and close
-  reports, and the silence of every healthy path.
+  mirror surviving a throwing and a rejecting exporter, the per-component,
+  per-index, per-operation and per-generation bounds, the export line byte for
+  byte, the channel the close report names, the exotic thrown values, a report
+  that itself throws, and the silence of every healthy path.
 
 ## References {#references}
 
@@ -178,4 +207,6 @@ inherits this sentence.
   radius that justified a structural guard.
 - hyparam/hypaware#1125: the PR that landed the contract in code.
 - hyparam/hypaware#1130: the follow-up recording that the contract lived
-  only in code comments, and the close-failure gap fixed here.
+  only in code comments, and the close-failure gap this decision closes for
+  exporters we did not write (item 2). The in-tree half of that gap stays
+  open by the boundary in #close-failures.

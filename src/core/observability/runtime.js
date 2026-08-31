@@ -633,8 +633,9 @@ function describeThrown(error) {
  * @param {Set<string>} reported which exporters have already been diagnosed
  */
 async function flushExporters(channel, exporters, reported) {
+  const names = exporters.map(exporterName)
   const results = await Promise.allSettled(exporters.map((exporter) => settled(() => exporter.forceFlush?.())))
-  reportSettledFailures('flush', channel, exporters, results, reported)
+  reportSettledFailures('flush', channel, names, results, reported)
 }
 
 /**
@@ -644,40 +645,59 @@ async function flushExporters(channel, exporters, reported) {
  */
 async function shutdownExporters(channel, exporters, reported) {
   await flushExporters(channel, exporters, reported)
+  const names = exporters.map(exporterName)
   const results = await Promise.allSettled(exporters.map((exporter) => settled(() => exporter.shutdown?.())))
-  reportSettledFailures('shutdown', channel, exporters, results, reported)
+  reportSettledFailures('shutdown', channel, names, results, reported)
 }
 
 /**
  * Say which exporters failed to flush or close, under the usual one-line
  * bound. Absorbing the failure kept a broken `forceFlush`/`shutdown` from
- * stranding its sibling exporters, but absorbing it silently made a JSONL
- * writer that fails to close at daemon shutdown lose its buffered records
+ * stranding its sibling exporters, but absorbing it silently meant an
+ * exporter that fails to close at daemon shutdown lost its buffered records
  * with no line anywhere (hyparam/hypaware#1130 item 2). The key carries the
  * operation, so an exporter that exports fine all day and only breaks at
  * close is still diagnosable after its export line was never needed, and the
  * other way round.
  *
+ * Neither in-tree exporter can reach this today: `JsonlWriter.close` resolves
+ * from `stream.end`'s callback without reading the error it is handed, and
+ * the OTLP flush is an `allSettled` over posts that already caught their own
+ * failure. What this covers is the case the guard was minted for, an exporter
+ * we did not write (LLP 0335#close-failures).
+ *
+ * The names are read before the await that produced `results`, not from the
+ * exporter array afterwards: `provider.exporters` is a public mutable field,
+ * and a name read on the far side of the await could belong to a different
+ * exporter than the result it is about to label.
+ *
  * @ref LLP 0335#close-failures [implements]: a failed flush or close gets the same one-line report as a failed export.
  * @param {'flush'|'shutdown'} operation
  * @param {'traces'|'logs'|'metrics'} channel
- * @param {Array<object>} exporters
+ * @param {string[]} names the exporter names, taken before the await
  * @param {PromiseSettledResult<unknown>[]} results
  * @param {Set<string>} reported
  */
-function reportSettledFailures(operation, channel, exporters, results, reported) {
+function reportSettledFailures(operation, channel, names, results, reported) {
   for (let index = 0; index < results.length; index++) {
     const result = results[index]
     if (result.status !== 'rejected') continue
-    const source = exporterName(exporters[index])
-    reportTelemetryFailure({
-      channel,
-      source,
-      key: `${source}#${index}#${operation}`,
-      error: result.reason,
-      reported,
-      operation,
-    })
+    const source = names[index] ?? 'exporter'
+    // The report is the last thing on this path that could take the caller
+    // down, and `#never-throws` is the one property a future edit here must
+    // not cost. Guarded structurally rather than by discipline, for the
+    // reason that section gives: `shutdown` rejecting would also skip the
+    // `globalXProvider = null` teardown on the line after the await.
+    try {
+      reportTelemetryFailure({
+        channel,
+        source,
+        key: `${source}#${index}#${operation}`,
+        error: result.reason,
+        reported,
+        operation,
+      })
+    } catch { /* nothing left to say it with */ }
   }
 }
 
