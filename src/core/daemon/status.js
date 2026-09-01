@@ -8,6 +8,7 @@ import process from 'node:process'
 import { configRecordsPickAnswer, defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
 import { readClientActionStatus } from '../config/action_reconciler.js'
+import { CLAUDE_SETTINGS_MARKER_SCHEMA } from '../config/client_detach_disk.js'
 import { endpointFromListen } from '../config/gateway_endpoint.js'
 import { readAttachPolicy } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
@@ -2560,6 +2561,32 @@ function markerTelemetryPort(markerObj) {
 }
 
 /**
+ * Whether the marker still records its managed hook entries under the retired
+ * `managed.hooks` name.
+ *
+ * Claude Code 2.1.257 reads `hooks` as a hook declaration wherever it sits in
+ * settings.json, not only at the root, so a marker carrying that field makes
+ * Claude reject the whole file. Attach writes `managed.hook_entries` instead
+ * and re-attach is the migration - but the rename moves no other currency key
+ * (the mode, the gateway port and the asset set are all unchanged by it), so
+ * without a staleness signal `hyp client attach claude` short-circuits as
+ * already-current and the machine the fix exists for stays broken.
+ *
+ * Presence, not type: what Claude refuses is the key, whatever it holds.
+ *
+ * Read here rather than from the adapter for the same reason the core undo
+ * reads both names (`detachClientFromDisk`): the marker is a format core
+ * already knows, and the probe runs with the plugin unloaded.
+ *
+ * @param {Record<string, unknown>} markerObj
+ * @returns {boolean}
+ */
+function markerHasRetiredHookField(markerObj) {
+  const managed = markerObj.managed
+  return isPlainObject(managed) && Object.hasOwn(managed, 'hooks')
+}
+
+/**
  * Probe on-disk client settings using the descriptor's attach_probe
  * definition. Supports JSON (marker key lookup) and TOML (header string
  * search) formats. Returns a probe result without importing any client
@@ -2573,7 +2600,7 @@ function markerTelemetryPort(markerObj) {
  *
  * @ref LLP 0045#settings_file-is-home-relative-and-a-violation-is-loud [implements]: an unresolvable settings_file is an error result, not a silent not-attached
  * @param {{ descriptor: ClientDescriptor, homeDir: string, env?: NodeJS.ProcessEnv }} args
- * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, mode?: string, attachedAt?: string, telemetryPort?: number, error?: string }>}
+ * @returns {Promise<{ attached: boolean, settingsPath?: string, version?: string, port?: string, mode?: string, attachedAt?: string, telemetryPort?: number, markerFormatStale?: boolean, error?: string }>}
  */
 export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env }) {
   if (!homeDir || !descriptor.attachProbe) return { attached: false }
@@ -2615,6 +2642,18 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
         // literally the value the client is using and cannot fall out of step
         // with it.
         ...(telemetryPort !== undefined ? { telemetryPort } : {}),
+        // A marker predating the current settings schema can carry a reserved
+        // `hooks` key in managed entries or malformed-value backups. Claude
+        // Code 2.1.257 refuses that file, and re-attach is the migration, so it
+        // has to read as stale to callers that otherwise treat a marker at the
+        // live port as nothing to do. Keep the retired-field check explicit so
+        // a hand-edited marker cannot claim the current schema while retaining
+        // the known-invalid field.
+        ...(descriptor.name === 'claude' &&
+          (markerHasRetiredHookField(markerObj) ||
+            markerObj.settings_schema !== CLAUDE_SETTINGS_MARKER_SCHEMA)
+          ? { markerFormatStale: true }
+          : {}),
       }
     }
 

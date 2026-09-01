@@ -253,8 +253,9 @@ test('an existing OTEL endpoint is backed up, warned about without the value, an
   assert.equal(result.changed && result.prevValue, 'https://***@collector.corp:4318')
 
   const attached = await r.read()
+  assert.equal(attached._hypaware.prev_env_encoding, 'json')
   assert.equal(
-    attached._hypaware.prev_env.OTEL_EXPORTER_OTLP_ENDPOINT,
+    JSON.parse(attached._hypaware.prev_env).OTEL_EXPORTER_OTLP_ENDPOINT,
     'https://token@collector.corp:4318'
   )
 
@@ -344,7 +345,7 @@ test('a re-attach keeps the original backup rather than backing up our own value
   const second = await otelAttach(r)
 
   const value = await r.read()
-  assert.equal(value._hypaware.prev_env.OTEL_EXPORTER_OTLP_ENDPOINT, 'http://own-collector:4318')
+  assert.equal(JSON.parse(value._hypaware.prev_env).OTEL_EXPORTER_OTLP_ENDPOINT, 'http://own-collector:4318')
   // Nothing new was displaced this run, so nothing new is warned about.
   assert.equal(second.changed && second.warnings, undefined)
 })
