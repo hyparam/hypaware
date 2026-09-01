@@ -2913,13 +2913,22 @@ export const RECENT_ERROR_WINDOW_MS = RECENT_ERROR_WINDOW_HOURS * 3_600_000
  * the install and nothing rotates it (the note on the control-file watcher in
  * `src/core/daemon/control.js` says so in as many words), so it is the one
  * store here that could be arbitrarily large, and `hyp status` is a report
- * that must not grow a cost with the age of the machine. A quarter-megabyte tail holds several
- * thousand of these records, far more than the window can contain at the
- * daemon's one-tick-a-minute cadence.
+ * that must not grow a cost with the age of the machine.
+ *
+ * The bound is sized against the worst case the window has to hold. A daemon
+ * that fails at every tick writes 1,440 records a day, and one
+ * `daemon.tick_failed` line with a real message runs a little over 200 bytes,
+ * so a day of them is around 300 KiB before the info and warn lines
+ * interleaved with them. A quarter-megabyte tail would therefore have cut
+ * inside the stated window on exactly the install that most needs counting; a
+ * megabyte clears it several times over and still reads in a millisecond or
+ * two. The count stays a floor rather than a census: a daemon noisy enough to
+ * overflow even this reports every error the tail holds, which is emphatically
+ * not zero.
  *
  * @ref LLP 0349#bounded-reads [implements]: the daemon log is read from the tail, never whole
  */
-const DAEMON_LOG_TAIL_BYTES = 256 * 1024
+const DAEMON_LOG_TAIL_BYTES = 1024 * 1024
 
 /**
  * The timestamp the sink driver bakes into an outbox filename. `persistOutbox`
@@ -2936,13 +2945,21 @@ const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\
  * {@link RECENT_ERROR_WINDOW_HOURS} hours, across every store that exists on
  * an ordinary install.
  *
- * The three stores are disjoint by construction, so nothing is counted twice:
- * `daemon.log` carries what `fileLog` emits (boot, tick, reload, source and
- * maintenance failures), the sink outbox carries one file per failed export
- * batch and nothing else does, and `dev-telemetry/logs-*.jsonl` carries the
- * OTel logger's records, which reach no file at all unless
- * `HYP_DEV_TELEMETRY=1` is set. That last one is why the counter used to read
- * zero on every real machine.
+ * The two stores a production install keeps are disjoint, so nothing there is
+ * counted twice: `daemon.log` carries what `fileLog` emits (boot, tick,
+ * reload, source and maintenance failures) and the sink driver does not write
+ * to it at all, while the sink outbox carries one file per failed export batch
+ * and nothing else writes one.
+ *
+ * `dev-telemetry/logs-*.jsonl` is the third store, and it does overlap:
+ * `recordFailure` in `src/core/sinks/driver.js` logs
+ * `sink.export_batch.failed` through `getLogger` for the same batch
+ * `persistOutbox` has just written a file for, so with `HYP_DEV_TELEMETRY=1`
+ * set one failed export is counted once here and once there. That directory
+ * exists only when that variable is set, which is why this counter used to
+ * read zero on every real machine and why the overlap cannot reach one. The
+ * diagnostic names both halves of the breakdown, so a developer who does set
+ * it can see where the doubled total came from.
  *
  * @param {string} stateRoot
  * @param {number} [nowMs]
@@ -3084,8 +3101,10 @@ async function countSinkOutboxBatches(sinksDir, sinceMs) {
  * is `ERROR`. Returns 0 when the directory does not exist, which on an
  * ordinary install is always: this is the developer's store, kept as one
  * input among three rather than removed, because under `HYP_DEV_TELEMETRY=1`
- * it holds records (every `getLogger` error, the sink driver's included) that
- * reach no other file.
+ * it holds every `getLogger` error, and all but one of them reach no other
+ * file. The exception is the sink driver's `sink.export_batch.failed`, which
+ * describes a batch the outbox has a file for; `countRecentErrors` records
+ * why that overlap is left alone.
  *
  * @param {string} telemetryDir
  * @param {number} sinceMs

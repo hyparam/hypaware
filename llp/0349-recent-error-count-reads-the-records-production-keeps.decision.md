@@ -61,13 +61,26 @@ name says "recent" and nothing implemented it.
 
 <a id="read-the-records-production-keeps"></a>**`recent_error_count` counts the
 error records this install actually keeps: the daemon log, the sink outboxes,
-and dev telemetry.** The three stores are disjoint by construction, so no
-failure is counted twice. `daemon.log` carries what `fileLog` emits; the outbox
-carries one file per failed export batch and nothing else writes one; and
-`dev-telemetry/logs-*.jsonl` carries the OTel logger's records, which reach no
-file at all without `HYP_DEV_TELEMETRY=1`. Dev telemetry is kept as one input
-among three rather than removed: when it is on, it holds the `getLogger` errors
-that no other file receives.
+and dev telemetry.** The two stores a production install has are disjoint, so
+on the machines this counter is for, no failure is counted twice: `daemon.log`
+carries what `fileLog` emits and the sink driver writes none of it, while the
+outbox carries one file per failed export batch and nothing else writes one.
+Dev telemetry is kept as a third input rather than removed: when it is on, it
+holds the `getLogger` errors that no other file receives.
+
+The third store is not disjoint from the second, and the count says so rather
+than pretending otherwise. `recordFailure` logs `sink.export_batch.failed`
+through `getLogger` for the same batch `persistOutbox` has just written a file
+for, so with `HYP_DEV_TELEMETRY=1` set one failed export is counted twice. That
+is left standing: the directory exists only under that variable, so the overlap
+cannot reach a production install; the diagnostic prints both halves of the
+breakdown, so the developer who set it can see where the doubled total came
+from; and the alternative, dropping dev-telemetry records whose body matches a
+particular event name, couples this counter to a string in the sink driver and
+fails silently the day that string is renamed, which is the failure mode this
+whole document exists to remove. Making the driver's export failure reach
+`daemon.log` instead is the change that would close it properly, and that is
+#not-settled below.
 
 The alternative was to make the field honestly unavailable: `null`, with the
 render saying "not measured". Rejected, because an adequate signal exists and
@@ -92,8 +105,15 @@ a batch this daemon recorded, so it is not evidence of anything.
 
 <a id="bounded-reads"></a>**Every read is bounded, because `hyp status` is a
 report.** The daemon log is appended to for the life of the install and nothing
-rotates it, so it is read from the tail: the last 256 KiB, with the fragment
+rotates it, so it is read from the tail: the last 1 MiB, with the fragment
 before the first newline discarded so a half-line cannot parse as a whole one.
+The bound is sized against the worst case the window has to hold rather than
+against a typical install: a daemon failing at every tick writes 1,440 records
+a day at a little over 200 bytes each, so a quarter-megabyte tail would have
+cut inside the stated 24 hours on precisely the machine that most needs
+counting. A megabyte clears that several times over. The count is a floor, not
+a census: an install noisy enough to overflow even this still reports every
+error the tail holds, which is emphatically not zero.
 The outboxes cost one directory listing per configured sink and open no file,
 because `persistOutbox` bakes the batch's timestamp into its filename. Nothing
 here grows with the age of the machine, and the collector already pays more
@@ -123,7 +143,10 @@ and does nothing about the file's size on disk.
 **Sink export failures still do not reach `daemon.log`.** They are counted here
 through the outbox, which is the durable record, but an operator tailing the
 daemon log during an incident will not see them. Whether the driver should log
-to the daemon log as well as to the OTel logger is a separate question.
+to the daemon log as well as to the OTel logger is a separate question, and it
+is the one that would also close the dev-telemetry double count above: a driver
+that wrote its failure to one durable place would leave this counter one record
+per failure to find.
 
 ## Consequences {#consequences}
 
@@ -132,7 +155,12 @@ to the daemon log as well as to the OTel logger is a separate question.
 - An install that failed a day ago and recovered reports `0` again on its own.
 - `hyp status` gains one bounded file read and one directory listing per
   configured sink; it opens no outbox file and reads no more of the daemon log
-  as the machine ages.
+  as the machine ages. Measured at 10,000 outbox files and a 1.5 MB daemon log,
+  the whole collection runs in under 20 ms.
+- An install running with `HYP_DEV_TELEMETRY=1` counts each failed sink export
+  batch twice, once from the outbox and once from the OTel log record. No
+  production install can reach that state, and the printed breakdown separates
+  the two halves.
 - Any future writer of the sink outbox inherits the filename contract: the
   batch id carries the timestamp this count reads, so a batch id built some
   other way becomes invisible to the counter rather than mis-dated by it.

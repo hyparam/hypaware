@@ -186,3 +186,78 @@ test('failures older than the window are not counted', async () => {
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.equal(report.recentErrorCount, 1, 'only the batch inside the window counts')
 })
+
+// The daemon log is unrotated and grows for the life of the install, so it is
+// read from a tail rather than whole. Two things have to hold at once and
+// neither was pinned: the read must stop at the tail, so an ever-growing file
+// does not make `hyp status` an ever-growing cost, and the record the tail
+// boundary cuts in half must be discarded rather than parsed as a whole one.
+// The fixture places the boundary in the middle of a known `error` line, so a
+// fragment that was miscounted, or that crashed the parse, shows up as a wrong
+// number instead of passing quietly.
+// @ref LLP 0349#bounded-reads [tests]:
+test('only the tail of the daemon log is read, and the record it cuts is discarded', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // Stated independently of the constant that implements it, the same way the
+  // window is: the size of the tail is a promise the report makes to its reader.
+  const tailBytes = 1024 * 1024
+  /**
+   * A parseable daemon-log line of a chosen byte length, padded inside the
+   * message field so the padding cannot be mistaken for structure.
+   *
+   * @param {'info'|'error'} level
+   * @param {number} bytes
+   */
+  const line = (level, bytes) => {
+    const base = JSON.stringify({
+      ts: new Date(Date.now() - 60_000).toISOString(),
+      level,
+      event: 'daemon.tick_failed',
+      pid: 4242,
+      dev_run_id: 'test-run',
+      mode: 'detached',
+      message: '',
+    })
+    return base.slice(0, -2) + 'x'.repeat(Math.max(0, bytes - base.length)) + '"}'
+  }
+
+  // Everything after the boundary line: three errors that must all be counted,
+  // padded out to just under the tail size.
+  const tail = [line('error', 300), line('info', 300), line('error', 300)]
+  let tailLen = tail.reduce((n, l) => n + Buffer.byteLength(l) + 1, 0)
+  while (tailLen < tailBytes - 3000) {
+    const filler = line('info', 300)
+    tail.push(filler)
+    tailLen += Buffer.byteLength(filler) + 1
+  }
+  const lastError = line('error', 300)
+  tail.push(lastError)
+  tailLen += Buffer.byteLength(lastError) + 1
+
+  // The line the boundary falls inside. It is an `error`, so counting the
+  // fragment would be visible; it is long enough that the boundary lands well
+  // inside it rather than at either edge.
+  const boundary = line('error', 4000)
+  // Older still, and so outside the tail: errors that must not be counted no
+  // matter how long the file has been growing.
+  const head = [line('error', 300), line('error', 300)]
+
+  const content = [...head, boundary, ...tail].join('\n') + '\n'
+  const size = Buffer.byteLength(content)
+  const boundaryStart = head.reduce((n, l) => n + Buffer.byteLength(l) + 1, 0)
+  const readFrom = size - tailBytes
+  assert.ok(size > tailBytes, 'the fixture is larger than the tail')
+  assert.ok(
+    readFrom > boundaryStart && readFrom < boundaryStart + Buffer.byteLength(boundary),
+    'the fixture puts the tail boundary inside the boundary line, not at a record edge',
+  )
+  await fs.mkdir(path.join(stateRoot, 'logs'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'logs', 'daemon.log'), content)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(
+    report.recentErrorCount,
+    3,
+    'the three errors inside the tail, not the two before it and not the half-line at the boundary',
+  )
+})
