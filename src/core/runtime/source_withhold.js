@@ -297,8 +297,10 @@ export function datasetOwnedSourceIdsFromCatalog(catalog) {
  * "claude-desktop-3p"` (LLP 0133 #attribution). Keyed on the picker id and
  * tested against `client_name`, that entry could never match a row
  * (LLP 0346). Its own backfilled rows already carry `client_name:
- * "claude-desktop"` (`classifyTranscriptEntrypoint` attributes them to the
- * owner), so only the live route was unenforceable.
+ * "claude-desktop"` by whichever of LLP 0140's two admission rules the
+ * session's location selects (`classifyTranscriptEntrypoint` for the shared
+ * tree, `classifyContainerSession` for the `Claude-3p` container, whose tag
+ * is deliberately unclaimed), so only the live route was unenforceable.
  *
  * Restricted to descriptors whose name is also a PICKER id: only a picker
  * id can appear in the opt-out store, and every extra name here widens the
