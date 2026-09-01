@@ -4,6 +4,7 @@ import nodeFs from 'node:fs'
 
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { createSourceWithholdResolver } from '../cache/source-withhold.js'
+import { resolveEntrypointOwners } from '../backfill/entrypoint_owner.js'
 import {
   clientSyncListPath,
   optedOutClientSourceIds,
@@ -170,6 +171,7 @@ export function buildSourceWithholdResolver({
     withheldSourceIds: readWithheld,
     datasetAttributionColumns: datasetAttributionColumnsFromCatalog(catalog),
     datasetOwnedSourceIds: datasetOwnedSourceIdsFromCatalog(catalog),
+    clientEntrypointOwners: clientEntrypointOwnersFromCatalog(catalog),
   })
 }
 
@@ -280,5 +282,44 @@ export function datasetOwnedSourceIdsFromCatalog(catalog) {
   /** @type {Map<string, string[]>} */
   const out = new Map()
   for (const [name, set] of owners) out.set(name, [...set])
+  return out
+}
+
+/**
+ * Fold the catalog into a transcript-`entrypoint`-keyed map of the picker
+ * source id that owns each value, from every client descriptor's
+ * `contributes.client.transcript_entrypoints` (LLP 0140).
+ *
+ * This is the seam's second attribution axis and it exists for one shipped
+ * asymmetry: `claude-desktop` is a real picker id, so `hyp privacy client
+ * claude-desktop local-only` writes a real opt-out entry, but its live rows
+ * deliberately land under `client_name: "claude"` with `entrypoint:
+ * "claude-desktop-3p"` (LLP 0133 #attribution). Keyed on the picker id and
+ * tested against `client_name`, that entry could never match a row
+ * (LLP 0346). Its own backfilled rows already carry `client_name:
+ * "claude-desktop"` (`classifyTranscriptEntrypoint` attributes them to the
+ * owner), so only the live route was unenforceable.
+ *
+ * Restricted to descriptors whose name is also a PICKER id: only a picker
+ * id can appear in the opt-out store, and every extra name here widens the
+ * set of `client_name` values whose `entrypoint` is read as an ownership
+ * claim (see `entrypointNamespace` in `createSourceWithholdResolver`).
+ * `resolveEntrypointOwners` is reused rather than reimplemented so the
+ * first-declaration-wins arbitration for a value two plugins claim stays in
+ * one place; its `configured` flag is irrelevant here (a source that is not
+ * configured contributes no rows to withhold) so the predicate is constant.
+ *
+ * @ref LLP 0346#entrypoint-refinement [implements]: entrypoint ownership is read off the same manifest declaration the backfill gate reads, never a core table
+ * @param {Pick<PluginCatalog, 'clientDescriptors' | 'pickerDescriptors'>} catalog
+ * @returns {Map<string, string>}
+ */
+export function clientEntrypointOwnersFromCatalog(catalog) {
+  /** @type {Map<string, string>} */
+  const out = new Map()
+  const owners = resolveEntrypointOwners(catalog.clientDescriptors?.values() ?? [], () => true)
+  for (const [entrypoint, owner] of owners) {
+    if (!catalog.pickerDescriptors?.has(owner.client)) continue
+    out.set(entrypoint, owner.client)
+  }
   return out
 }

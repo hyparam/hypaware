@@ -5,6 +5,16 @@
  */
 
 /**
+ * The row column carrying a session's transcript `entrypoint`. Named here
+ * rather than declared per dataset because it is the same field
+ * `PluginClientManifest.transcript_entrypoints` is documented against and
+ * the same one `src/core/backfill/entrypoint_owner.js` reads; a dataset
+ * without the column simply yields `undefined` for it and the refinement
+ * stays inert.
+ */
+const ROW_ENTRYPOINT_COLUMN = 'entrypoint'
+
+/**
  * Build the `readRowsSince` source-scoped withhold resolver (LLP 0188).
  * Pure and catalog-agnostic: the caller has already reduced "which picker
  * source ids are withheld" and "which column attributes a row to a picker
@@ -21,11 +31,19 @@
  * (LLP 0188 #opt-out). A provider's throw (the corrupt-store fail-safe)
  * propagates from `shouldWithhold`/`shouldWithholdDataset` to the caller.
  *
+ * `clientEntrypointOwners` carries the second attribution axis the rows
+ * already have: transcript `entrypoint` value -> the picker source that
+ * declares it (`contributes.client.transcript_entrypoints`, LLP 0140).
+ * It exists because one shipped picker source, `claude-desktop`,
+ * deliberately stamps another's `client_name` (LLP 0133 #attribution), so
+ * its opt-out can never match on `client_name` alone (LLP 0346).
+ *
  * @ref LLP 0188#opt-out [implements]: the resolver `readRowsSince` consults, threaded the same way `usagePolicyResolver` is
  * @param {{
  *   withheldSourceIds: Iterable<string> | (() => ReadonlySet<string>),
  *   datasetAttributionColumns: Map<string, string>,
  *   datasetOwnedSourceIds?: Map<string, string[]>,
+ *   clientEntrypointOwners?: Map<string, string>,
  * }} args
  * @returns {SourceWithholdResolver}
  */
@@ -33,6 +51,7 @@ export function createSourceWithholdResolver({
   withheldSourceIds,
   datasetAttributionColumns,
   datasetOwnedSourceIds,
+  clientEntrypointOwners,
 }) {
   /** @type {() => ReadonlySet<string>} */
   let resolveWithheld
@@ -42,9 +61,23 @@ export function createSourceWithholdResolver({
     const fixed = new Set(withheldSourceIds)
     resolveWithheld = () => fixed
   }
+  // The set of picker sources that participate in entrypoint ownership at
+  // all. It is the map's value side, not its key side, on purpose: the
+  // `entrypoint` vocabulary is per-client, not global (hermes stamps its
+  // channel source, and its interactive value is literally `cli`, which the
+  // claude client also claims). Reinterpreting an entrypoint outside the
+  // clients that declare ownership would withhold a hermes row because
+  // `claude` is opted out - a different broken promise, not a fix.
+  const entrypointNamespace = new Set(clientEntrypointOwners?.values() ?? [])
   return {
     attributionColumnFor(dataset) {
       return datasetAttributionColumns.get(dataset)
+    },
+    // @ref LLP 0346#entrypoint-refinement [implements]: the second column the seam forces in, offered only for datasets already subject to per-row withholding
+    entrypointColumnFor(dataset) {
+      if (entrypointNamespace.size === 0) return undefined
+      if (!datasetAttributionColumns.has(dataset)) return undefined
+      return ROW_ENTRYPOINT_COLUMN
     },
     shouldWithhold(attributionValue) {
       return (
@@ -52,6 +85,22 @@ export function createSourceWithholdResolver({
         attributionValue !== '' &&
         resolveWithheld().has(attributionValue)
       )
+    },
+    // Additive refinement, never a relaxation: a row this returns false for
+    // is still subject to `shouldWithhold` on its own `client_name`, so
+    // opting out `claude` keeps withholding every `client_name: "claude"`
+    // row including Desktop's, exactly as before.
+    // @ref LLP 0346#entrypoint-refinement [implements]: an aliased client's opt-out is enforced through the entrypoint its manifest claims, scoped to the clients that declare entrypoint ownership
+    shouldWithholdEntrypoint(attributionValue, entrypointValue) {
+      if (!clientEntrypointOwners || clientEntrypointOwners.size === 0) return false
+      if (typeof entrypointValue !== 'string' || entrypointValue === '') return false
+      // Scoping, not decoration: only a row already attributed to a client
+      // that declares entrypoint ownership has its entrypoint read as an
+      // ownership claim (see `entrypointNamespace` above).
+      if (typeof attributionValue !== 'string' || !entrypointNamespace.has(attributionValue)) return false
+      const owner = clientEntrypointOwners.get(entrypointValue)
+      if (owner === undefined) return false
+      return resolveWithheld().has(owner)
     },
     // @ref LLP 0188#enforcement-scope [implements]: a dataset with no attribution column is withheld wholesale only when every picker source whose plugin declares it is withheld
     shouldWithholdDataset(dataset) {

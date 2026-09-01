@@ -16,6 +16,7 @@ import os from 'node:os'
 
 import {
   buildSourceWithholdResolver,
+  clientEntrypointOwnersFromCatalog,
   datasetAttributionColumnsFromCatalog,
   datasetOwnedSourceIdsFromCatalog,
   ensureClientSyncMigration,
@@ -409,4 +410,81 @@ test('migration is idempotent: a second boot after materialization changes nothi
   const second = await ensureClientSyncMigration(args)
   assert.equal(second.migrated, false)
   assert.deepEqual(await readClientSyncEntries({ stateDir }), before)
+})
+
+// --- aliased-client entrypoint ownership (LLP 0346) --------------------------
+
+// Binds the refinement's input to the REAL bundled manifests. Two things
+// have to hold for `hyp privacy client claude-desktop local-only` to mean
+// anything: Desktop's entrypoint values must be claimed by a client whose
+// name is the picker id the opt-out store holds, and the map must not grow
+// beyond the clients that actually declare ownership (every extra name
+// widens the set of `client_name` values whose `entrypoint` is read as an
+// ownership claim). If a manifest change moves either, this fails rather
+// than silently under- or over-withholding.
+// @ref LLP 0346#entrypoint-refinement [tests]: the ownership map is folded from the shipped `transcript_entrypoints` declarations, restricted to picker ids
+test('entrypoint ownership matches the real bundled manifests: claude and claude-desktop, nobody else', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  assert.deepEqual(
+    [...clientEntrypointOwnersFromCatalog(catalog).entries()].sort((a, b) => a[0].localeCompare(b[0])),
+    [
+      ['claude-desktop', 'claude-desktop'],
+      ['claude-desktop-3p', 'claude-desktop'],
+      ['cli', 'claude'],
+      ['sdk-cli', 'claude'],
+    ].sort((a, b) => a[0].localeCompare(b[0]))
+  )
+  // Both owners are picker ids, so both can appear in the opt-out store.
+  assert.ok(catalog.pickerDescriptors.has('claude-desktop'))
+  assert.ok(catalog.pickerDescriptors.has('claude'))
+})
+
+// @ref LLP 0346#entrypoint-refinement [tests]: the built resolver enforces an aliased client's opt-out, and reaches no other client's rows
+test('a claude-desktop opt-out on an enrolled machine withholds by entrypoint, not by client_name alone', async () => {
+  const bundled = await discoverBundledPlugins()
+  const catalog = buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+  const stateDir = await makeTmpDir()
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'claude-desktop', class: 'local-only' }] })
+  const resolver = buildSourceWithholdResolver({
+    catalog,
+    layered: makeLayered({ central: ['@hypaware/claude'], local: ['@hypaware/claude-desktop'] }),
+    stateDir,
+  })
+  assert.ok(resolver)
+  assert.equal(resolver.entrypointColumnFor?.('ai_gateway_messages'), 'entrypoint')
+  assert.equal(
+    resolver.shouldWithhold('claude'),
+    false,
+    'the opt-out is on claude-desktop, so Claude Code keeps syncing'
+  )
+  assert.equal(
+    resolver.shouldWithholdEntrypoint?.('claude', 'claude-desktop-3p'),
+    true,
+    "Desktop's live rows are withheld through the entrypoint its manifest claims"
+  )
+  assert.equal(
+    resolver.shouldWithholdEntrypoint?.('claude', 'cli'),
+    false,
+    'Claude Code rows in the same dataset are untouched'
+  )
+  assert.equal(
+    resolver.shouldWithholdEntrypoint?.('hermes', 'cli'),
+    false,
+    "a client that declares no entrypoint ownership keeps its own `cli` vocabulary"
+  )
+  await fs.rm(stateDir, { recursive: true, force: true })
+})
+
+// A dataset that declares no attribution column is not subject to per-row
+// withholding at all, so it is not offered the second column either.
+test('entrypointColumnFor is undefined for a dataset with no attribution column', async () => {
+  const stateDir = await makeTmpDir()
+  const resolver = buildSourceWithholdResolver({
+    catalog: makeCatalog(),
+    layered: makeLayered(ENROLLED),
+    stateDir,
+  })
+  assert.equal(resolver?.entrypointColumnFor?.('signals'), undefined)
+  await fs.rm(stateDir, { recursive: true, force: true })
 })
