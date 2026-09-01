@@ -261,7 +261,18 @@ export function createForwardSink(args) {
         const stats = { rows: 0 }
         try {
           const target = forwardingTarget(query, partition)
-          if ('withheld' in target) continue
+          // A withheld verdict sends nothing, and the preview above already
+          // quoted a row count for this partition. Say so rather than letting
+          // the command report `exported (rows=0)` with no reason anywhere
+          // (LLP 0345 #scope: a replay's failure direction is stated).
+          if ('withheld' in target) {
+            log.info('central.forward.history_replay_withheld', {
+              hyp_sink_source: request.source,
+              hyp_dataset: partition.dataset,
+              reason: target.withheld,
+            })
+            continue
+          }
           bytesWritten += await forwardPartition({
             partition,
             signal: target.ingestName,

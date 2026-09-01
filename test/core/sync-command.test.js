@@ -228,7 +228,7 @@ test('--history previews capable destinations and sends only after confirmation'
   assert.equal(code, 0)
   assert.match(stdout.text, /retained 'claude' history/)
   assert.match(stdout.text, /12 rows retained and eligible/)
-  assert.match(stdout.text, /3 rows withheld by directory policy \(not sent\)/)
+  assert.match(stdout.text, /3 rows withheld by privacy policy \(not sent\)/)
   assert.match(stdout.text, /not replayed.*parquet/)
   assert.deepEqual(central.replayed, [{ source: 'claude' }])
   assert.deepEqual(parquet.exported, [], 'history mode never runs an ordinary tick')
@@ -245,6 +245,23 @@ test('--history --dry-run never calls the replay operation', async () => {
   assert.match(stdout.text, /12 rows retained and eligible/)
   assert.match(stdout.text, /\[dry-run\] nothing was sent/)
   assert.deepEqual(central.replayed, [])
+})
+
+// An empty `--history=` value is falsy, so without an explicit guard the flag
+// vanishes and the run silently becomes an ordinary all-destination sync that
+// also ends the first-sync review window.
+test('--history with an empty value is a usage error, not an ordinary sync', async () => {
+  const hypHome = await makeHome('history-empty-value')
+  const central = fakeHistorySink('central', { url: 'https://hypaware.example.com' })
+  const parquet = fakeSink('parquet', { dir: '/home/u/exports' })
+  const { ctx, stderr } = makeCtx({ hypHome, sinks: [central, parquet], tty: true, answer: 'y' })
+
+  const code = await runSync(['--history=', '--yes'], ctx)
+
+  assert.equal(code, 2)
+  assert.match(stderr.text, /--history needs a client name/)
+  assert.deepEqual(central.replayed, [])
+  assert.deepEqual(parquet.exported, [])
 })
 
 test('--history reports a throwing destination as failed instead of crashing the command', async () => {

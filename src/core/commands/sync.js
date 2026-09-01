@@ -73,6 +73,14 @@ export async function runSync(argv, ctx) {
   }
   const { instance, history, yes, 'dry-run': dryRun } =
     /** @type {{ instance?: string, history?: string, yes: boolean, 'dry-run': boolean }} */ (parsed.params)
+  // `--history=` parses to an empty string, which is falsy: without this the
+  // flag silently disappears and the run becomes an ordinary all-destination
+  // sync that also ends the first-sync review window. A mistyped client name
+  // must never buy the larger action.
+  if (history !== undefined && history === '') {
+    ctx.stderr.write(`hyp sync: --history needs a client name\n${USAGE}\n`)
+    return 2
+  }
 
   const allHandles = /** @type {ExtendedSinkRegistry} */ (ctx.sinks).listHandles?.() ?? []
   const handles = instance ? allHandles.filter((h) => h.instanceName === instance) : allHandles
@@ -407,7 +415,12 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
     lines.push(`  ${destination.instance.padEnd(width)}  ${destination.text}${note}\n`)
     lines.push(`  ${' '.repeat(width)}  ${plural(preview.rows, 'row')} retained and eligible\n`)
     if (preview.withheldRows > 0) {
-      lines.push(`  ${' '.repeat(width)}  ${plural(preview.withheldRows, 'row')} withheld by directory policy (not sent)\n`)
+      // "privacy policy", not "directory policy": the export seam drops a row
+      // for a local-only directory, a client opt-out, or the LLP 0192
+      // unattributed rule, and a dropped entry carries no row, so the preview
+      // cannot tell the three apart. Naming only one of them in a consent
+      // prompt would misreport why the rest stayed here.
+      lines.push(`  ${' '.repeat(width)}  ${plural(preview.withheldRows, 'row')} withheld by privacy policy (not sent)\n`)
     }
   }
   if (unsupported.length > 0) {
