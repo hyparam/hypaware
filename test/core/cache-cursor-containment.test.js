@@ -21,6 +21,7 @@ import { appendRowsToPartition, appendRowsToSourceTable, readCursorSync, tryRead
 import { readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
+import { createQueryStorageService } from '../../src/core/cache/storage.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -998,6 +999,74 @@ test('the legacy epoch append refuses an unreadable cursor too', async () => {
       /present but unreadable/,
       'and an unreadable cursor stops the next one instead of guessing an epoch'
     )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The refusal's blast radius inside one flush. The spool is keyed by dataset,
+// not by partition, so a single chunk fans out into an append per partition it
+// touches, and `drainFlushFiles` checkpoints the chunk only after every one of
+// them has returned. A refusal from the last partition therefore used to leave
+// the earlier ones committed with no checkpoint behind them, and the next
+// flush replayed the chunk over the top: nothing dedupes rows that already
+// carry their native identity, so a healthy sibling grew by its share of the
+// chunk once per flush tick (~1440/day on the sink driver's default schedule)
+// and shipped the duplicates onward. LLP 0347#rows-wait says the rows wait;
+// this is what makes the whole chunk do it.
+
+/** @type {ColumnSpec[]} */
+const CLIENT_COLUMNS = [
+  { name: 'id', type: 'INT32', nullable: false },
+  { name: 'client_name', type: 'STRING', nullable: false },
+]
+
+test('a chunk spanning a refused and a healthy partition commits neither, and loses nothing', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-chunk-spans-refusal-'))
+  try {
+    const cacheRoot = path.join(root, 'cache')
+    const storage = createQueryStorageService({ cacheRoot })
+    // One spool table, two destination partitions: exactly the shape every
+    // real dataset writes in (`aiGatewayTablePath` spools to a single
+    // partition label and the chunk fans out by client).
+    const spoolPath = storage.cacheTablePath('ai_gateway_messages', ['spool_v1'])
+    const healthy = path.join(storage.cacheTablePath('ai_gateway_messages', ['source=good']), 'table')
+    const poisonedDir = storage.cacheTablePath('ai_gateway_messages', ['source=bad'])
+
+    await storage.appendRows(spoolPath, CLIENT_COLUMNS, [
+      { id: 1, client_name: 'good' },
+      { id: 2, client_name: 'bad' },
+    ])
+    await storage.flushTable(spoolPath, { force: true })
+    assert.deepEqual(await idsIn(healthy), [1], 'both partitions exist and hold their first row')
+    const goodCursor = await fs.readFile(path.join(poisonedDir, 'cursor.json'), 'utf8')
+
+    await fs.writeFile(path.join(poisonedDir, 'cursor.json'), '{ not json')
+    await storage.appendRows(spoolPath, CLIENT_COLUMNS, [
+      { id: 3, client_name: 'good' },
+      { id: 4, client_name: 'bad' },
+    ])
+
+    // Four ticks, because the defect this pins is per-tick growth rather
+    // than a single over-commit.
+    for (let tick = 0; tick < 4; tick++) {
+      await assert.rejects(
+        storage.flushTable(spoolPath, { force: true }),
+        /present but unreadable/,
+        'the flush refuses while one partition in the chunk cannot name its live generation'
+      )
+      assert.deepEqual(
+        await idsIn(healthy), [1],
+        'and the healthy partition in the same chunk is not committed to, on this tick or any other'
+      )
+    }
+
+    // The other half: waiting is only the right answer if the rows are still
+    // there to drain. Repair the cursor and the same spool file commits, once.
+    await fs.writeFile(path.join(poisonedDir, 'cursor.json'), goodCursor)
+    await storage.flushTable(spoolPath, { force: true })
+    assert.deepEqual(await idsIn(healthy), [1, 3], 'every row lands exactly once after the repair')
+    assert.deepEqual(await idsIn(path.join(poisonedDir, 'table')), [2, 4], 'in both partitions')
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

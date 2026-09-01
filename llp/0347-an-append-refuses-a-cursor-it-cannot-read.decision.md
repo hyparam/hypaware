@@ -117,12 +117,38 @@ stops accepting rows, and the rows it did not accept are durable on disk
 waiting for a cursor that reads. That machinery is already there for exactly
 this: an append that cannot be completed now.
 
-The cost is that such a partition's spool grows with ingest until something
-repairs the cursor, and `hyp` does not repair one. That is the direction to
-fail in. A stranded spool is bounded by the traffic to one partition, is
-visible as pending bytes and a standing flush failure, and is recoverable by
-hand; the behaviour it replaces destroyed committed rows on a schedule, with
-nothing to look at afterwards.
+Waiting has to be all-or-nothing over a chunk, and it is not free to make
+it so. The spool is keyed by the dataset's spool table, not by destination
+partition (`aiGatewayTablePath` spools every client's rows to one partition
+label), so `appendChunk` fans one chunk out into an append per partition it
+touches, and `drainFlushFiles` writes the flush file's resume offset only
+after the whole chunk returns. A refusal raised partway through that fan-out
+therefore leaves the partitions ahead of it committed under an unwritten
+checkpoint, and the next flush replays the chunk over the top of them.
+Nothing downstream dedupes rows that already carry their native identity, so
+those partitions gain their share of the chunk again on every flush tick for
+as long as the refusal stands, and the duplicates ship onward through the
+sinks. Refusing the whole chunk before any of it commits is what makes "the
+rows wait" true rather than "the rows wait and their neighbours are copied":
+`appendRefusalReason` asks every partition in the chunk first, and the chunk
+either commits entirely or not at all.
+
+The cost is that such a chunk's spool grows with ingest until something
+repairs the cursor, and `hyp` does not repair one. That is still the
+direction to fail in. A stranded spool is visible as pending bytes and a
+standing flush failure, and it is recoverable by hand; the behaviour it
+replaces destroyed committed rows on a schedule, with nothing to look at
+afterwards.
+
+What it is not is contained. Because the spool is dataset-keyed and the
+chunk waits whole, one unreadable cursor stalls the flush of every partition
+that dataset writes to, and `active.jsonl` then grows with the dataset's
+total ingest rather than with the traffic to the one bad partition. That is
+the price of not corrupting the neighbours, and the alternative that would
+buy back containment - holding just the refused group's rows somewhere
+durable while the rest of the chunk commits and checkpoints - needs a place
+on disk to hold them that does not exist, and that is a bigger design than
+this decision. It stays with the repair question below.
 
 ## What this does not decide {#not-decided}
 
@@ -149,6 +175,21 @@ cursor before it retires the old generation, and `writeCursor` is atomic.
 replaced. Nothing here rebuilds one, quarantines the partition, or surfaces
 it anywhere the WARN does not. That is LLP 0344's question and it should get
 one answer for both sides of it, not two.
+
+Refusing makes that question due rather than merely open. The read side has
+always gone quiet on an unreadable cursor - `resolveIcebergDir` resolves
+through `readCursorSync`'s default, so the partition's committed rows read
+back as empty and `purgeCache` reports `rowsDeleted: 0` over rows that are
+still on disk (LLP 0344#unreadable-cursor). Until this decision that state
+ended at the next append, which rewrote the cursor and made the rows visible
+and deletable again, at the cost #1170 names. Withdrawing that heal is
+right, and it also withdraws the only thing that ever cleared the read-side
+blindness on its own: a deletion request against such a partition now
+silently does nothing for as long as the cursor stays broken. Nothing here
+changes the read or delete paths, and nothing here should - a fix that
+guesses the live generation to delete through is the same guess this
+decision refuses. It belongs with LLP 0344's repair answer, and it is the
+reason that answer cannot wait indefinitely.
 
 ## References {#references}
 

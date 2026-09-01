@@ -639,15 +639,46 @@ export async function writeCursor(partitionDir, cursor) {
 function readCursorForAppend(partitionDir) {
   const cursor = tryReadCursorSync(partitionDir)
   if (cursor) return cursor
+  const refusal = appendRefusalReason(partitionDir)
+  // The read itself already reported why, under the standing-refusal window
+  // (LLP 0332#transition-plus-rewarn), so the message says what the refusal
+  // costs and does not re-say the cause.
+  if (refusal) throw new Error(refusal)
   // Missing is the fresh partition, and it gets the concrete default: this
   // is where a first append legitimately publishes its first generation.
-  if (!fs.existsSync(path.join(partitionDir, CURSOR_FILE))) {
-    return { epoch: 0, rowCount: 0, compaction: null }
-  }
-  // The read itself already reported why, under the standing-refusal window
-  // (LLP 0332#transition-plus-rewarn), so this says what it costs and does
-  // not re-say the cause.
-  throw new Error(`cache append refused: cursor.json in ${partitionDir} is present but unreadable, so the live generation is unknown`)
+  return { epoch: 0, rowCount: 0, compaction: null }
+}
+
+/**
+ * Why an append onto this partition would be refused, or `null` when it
+ * would not be: the gate {@link readCursorForAppend} runs, asked without
+ * committing anything, so a caller about to commit several partitions out of
+ * one batch can find out before it commits the first.
+ *
+ * That caller is `appendChunk` in `src/core/cache/storage.js`. One spool
+ * chunk fans out into one append per partition it touches, and the flush
+ * checkpoints the chunk only once every one of them has returned. A refusal
+ * partway through therefore leaves the partitions before it committed and
+ * the checkpoint unwritten, and the next flush replays the whole chunk:
+ * nothing dedupes rows that already carry their native identity, so every
+ * healthy sibling in that chunk grows by its share of it once per flush tick
+ * for as long as the refusal stands. Asked first, the chunk commits nothing
+ * and waits whole, which is the outcome LLP 0347#rows-wait describes.
+ *
+ * The answer can go stale between this call and the append - another writer
+ * can corrupt a cursor in between - and that is the pre-existing hazard of
+ * any append that fails partway, not a new one. The refusal it guards is a
+ * standing condition, so the pass after such a race sees it here and refuses
+ * before committing anything.
+ *
+ * @ref LLP 0347#rows-wait [implements]: a chunk spanning a refused partition waits whole instead of half-committing once per flush.
+ * @param {string} partitionDir
+ * @returns {string | null}
+ */
+export function appendRefusalReason(partitionDir) {
+  if (tryReadCursorSync(partitionDir)) return null
+  if (!fs.existsSync(path.join(partitionDir, CURSOR_FILE))) return null
+  return `cache append refused: cursor.json in ${partitionDir} is present but unreadable, so the live generation is unknown`
 }
 
 /**

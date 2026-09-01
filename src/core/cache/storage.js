@@ -9,6 +9,7 @@ import {
   tableUrl as icebergTableUrl,
 } from './iceberg/store.js'
 import {
+  appendRefusalReason,
   appendRowsToPartition as appendRowsToPartitionImpl,
   appendRowsToSourceTable as appendRowsToSourceTableImpl,
   discoverCachePartitions as discoverCachePartitionsImpl,
@@ -152,6 +153,27 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           groups.set(key, group)
         }
         group.rows.push(row)
+      }
+      // Every partition this chunk touches is asked before any of them is
+      // committed, because the flush checkpoints the chunk as a unit: it
+      // records its resume offset only once `appendChunk` has returned
+      // (`drainFlushFiles` in `src/core/cache/spool.js`). A refusal raised
+      // partway down the loop below would leave the groups ahead of it
+      // committed and no checkpoint written, so the next flush would replay
+      // the chunk and commit them a second time, and a third, once per flush
+      // tick for as long as the refusal stood. Nothing downstream dedupes
+      // rows that already carry their native identity, so those duplicates
+      // are permanent and they ship onward through the sinks.
+      //
+      // Only a chunk that fans out to more than one partition can half-commit
+      // like that: a single-group chunk either commits or does not, and the
+      // unwritten checkpoint then replays rows none of which landed.
+      // @ref LLP 0347#rows-wait [implements]: the whole chunk waits, so a refusal costs no partial commit to replay
+      if (groups.size > 1) {
+        for (const { segments } of groups.values()) {
+          const refusal = appendRefusalReason(cacheTablePath(cacheRoot, dataset, segments))
+          if (refusal) throw new Error(refusal)
+        }
       }
       let totalBytes = 0
       const opts = declaration ? { declaration } : undefined
