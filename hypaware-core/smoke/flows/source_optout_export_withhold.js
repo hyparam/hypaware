@@ -308,9 +308,17 @@ export async function run({ harness, expect }) {
       })
       expect.that('cli: hyp privacy client openclaw sync exited 0', code, (v) => v === 0)
       expect.that(
-        'cli: the flip-back names the no-retroactive-ship property',
+        'cli: the flip-back names the future-only property',
         stdout.text(),
-        (v) => v.includes('rows withheld while local-only are not uploaded')
+        (v) => v.includes('future openclaw rows sync to your server')
+      )
+      // LLP 0345 moved retained history to its own consent-gated command, so the
+      // flip-back no longer promises history is never uploaded: it promises it
+      // does not upload it, and names the command that does.
+      expect.that(
+        'cli: the flip-back points at the separate history replay',
+        stdout.text(),
+        (v) => v.includes('hyp sync --history openclaw')
       )
 
       const before = ingestPosts().length

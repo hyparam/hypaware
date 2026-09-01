@@ -260,6 +260,9 @@ test('--history says so when no retained history is attributed to the client', a
 
   assert.equal(code, 0)
   assert.match(stdout.text, /no retained history is attributed to 'claude-desktop'/)
+  // The fake withholds 3 rows for this source, so the name is not the only
+  // candidate explanation and the output must not pin it on the name alone.
+  assert.match(stdout.text, /withheld by privacy policy \(above\)/)
   assert.doesNotMatch(stdout.text, /exported/)
   assert.deepEqual(central.replayed, [], 'a zero-row replay never prompts or sends')
 })

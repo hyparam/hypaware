@@ -842,9 +842,10 @@ hyp privacy client [<name>] [sync|local-only] [--json]
 ```
 
 Lists or changes per-client export policy. `local-only` withholds future rows
-from remote sync. Returning to `sync` affects future rows only; rows withheld
-while local-only aren't uploaded later. A client required by central
-configuration can't opt out.
+from remote sync. Returning to `sync` affects future rows only: the policy
+flip itself uploads nothing that was withheld. To upload that retained history,
+run the separate, separately confirmed `hyp sync --history <client>`. A client
+required by central configuration can't opt out.
 
 ```sh
 hyp privacy client codex local-only

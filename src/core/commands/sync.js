@@ -353,6 +353,7 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
   // history, so adding their counts would quote double the rows a two-sink
   // machine actually replays.
   const totalRows = previewRows.reduce((most, preview) => Math.max(most, preview.rows), 0)
+  const totalWithheld = previewRows.reduce((most, preview) => Math.max(most, preview.withheldRows), 0)
   log.info('sync.history_preview', {
     [Attr.COMPONENT]: 'cmd-sync',
     [Attr.OPERATION]: 'sync.history_preview',
@@ -360,7 +361,7 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
     hyp_sink_source: source,
     destinations: previews.size,
     hyp_pending_rows: totalRows,
-    hyp_withheld_rows: previewRows.reduce((most, preview) => Math.max(most, preview.withheldRows), 0),
+    hyp_withheld_rows: totalWithheld,
   })
 
   const capableNames = new Set(capable.map((handle) => handle.instanceName))
@@ -375,8 +376,20 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
   // `client_name`, which is not always the picker id (claude-desktop's rows
   // are stamped `claude`). Say that instead of prompting for nothing.
   if (totalRows === 0) {
+    ctx.stdout.write(`\nno retained history is attributed to '${source}'; nothing to replay\n`)
+    // Zero eligible rows beside a non-zero withheld count is a different
+    // diagnosis: rows were found and privacy policy held them back. Sending that
+    // user to check `client_name` spellings points at the wrong thing. The
+    // preview cannot narrow it further, because a dropped entry carries no row
+    // and so no `client_name` to attribute the withholding to.
+    if (totalWithheld > 0) {
+      ctx.stdout.write(
+        '  Retained rows were found and withheld by privacy policy (above); a dropped\n' +
+        '  row carries no client_name, so this cannot say whether they were this\n' +
+        "  client's. Check `hyp privacy list` before assuming the name is wrong.\n"
+      )
+    }
     ctx.stdout.write(
-      `\nno retained history is attributed to '${source}'; nothing to replay\n` +
       '  --history matches the client_name on the rows, which is not always the\n' +
       '  client id: run `hyp query sql "select distinct client_name from ai_gateway_messages"`\n' +
       '  to see the names this machine actually recorded.\n'
