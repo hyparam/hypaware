@@ -9,6 +9,14 @@
 **Extends:** [LLP 0332](./0332-cursor-refusal-warns-on-transition-then-rewarns.decision.md)
 (#transition-plus-rewarn: the per-partition window that decision introduced
 now ends where the partition ends, and announces itself when it ends)
+**Extended-by:** [LLP 0336](./0336-retention-rides-the-maintenance-tick.decision.md)
+(#eviction-clears, #consequences: the retention eviction sites those
+sections lean on had no non-test caller until that wire, so the
+`escapeReportedAt` bound in #consequences holds for a running daemon only
+from there on; and the cursor gate that wire puts in front of them means
+retention no longer removes a partition *while* it is poisoned, so the
+escape strand ends at the refusal rather than at the delete, without
+changing the bound)
 **Related:** LLP 0323, LLP 0326, LLP 0329, hyparam/hypaware#1123
 
 > LLP 0332 rebased the cursor containment refusal from one line per read to

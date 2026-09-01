@@ -474,6 +474,14 @@ export interface RetentionSourceTableResult {
   rowsDeleted: number
   batchCount: number
   candidateFileCount: number
+  /**
+   * True when the pass removed the whole partition directory (the mtime
+   * fallback for a table with no resolvable timestamp column) rather than
+   * position-deleting rows inside it. The two are the same `rowsDeleted`
+   * to a counter and very different things to an operator reading the log
+   * afterwards, and only the pass knows which it did (LLP 0336#durable-line).
+   */
+  evictedPartition?: boolean
 }
 
 export interface RetentionResult {

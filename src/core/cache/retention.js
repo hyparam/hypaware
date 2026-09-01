@@ -14,7 +14,10 @@ import { fetchAvroRecords, fetchDeleteMaps } from 'icebird/src/fetch.js'
 import { findDataFileEntries, loadManifestEntries } from 'icebird/src/write/stage-position-delete.js'
 
 import { Attr, getMeter, withSpan } from '../observability/index.js'
-import { clearEscapeReport, discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
+import { clearEscapeReport, discoverCachePartitions, tryReadCursorSync, withPartitionMutationLock, writeCursor } from './partition.js'
+import { datasetsRoot, isConfirmedSymlink } from './paths.js'
+import { pendingSpoolMtimeSync } from './spool.js'
+import { reportPlantedSweepPath } from './sweep_guard.js'
 import { createLocalIcebergIO, tableUrlForDir } from './iceberg/resolver.js'
 import { physicalProjection, readRowsFromTable, scanRowsFromTable, tableExists } from './iceberg/store.js'
 
@@ -52,13 +55,42 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
       /** @type {RetentionSourceTableResult[]} */
       const sourceTableResults = []
 
+      // @ref LLP 0331#guard-travels-with-the-delete [implements]: this pass
+      // walks `datasets/` and `rm -rf`s directories under it, so the
+      // containment check is written here rather than left to whoever
+      // constructs the enforcer. `datasets/` is the one component the walk
+      // opens without having descended a `Dirent` first - a symlinked child
+      // is already not a directory to `walk` - and nothing the cache writes
+      // mints a symlink at that name, so a confirmed one means this is not a
+      // tree to delete from. Every component above it (a relocated
+      // `query.cache.dir`, a `$HYP_HOME` on another volume) is a path the
+      // cache did not choose and stays legitimate (LLP 0326#positive-evidence).
+      const walkRoot = path.resolve(datasetsRoot(cacheRoot))
+      if (isConfirmedSymlink(walkRoot)) {
+        reportPlantedSweepPath(walkRoot, 'retention.tick', 'datasets')
+        return { evicted, sourceTableResults }
+      }
+
       const partitions = await discoverCachePartitions(cacheRoot)
 
       for (const part of partitions) {
         const retentionDays = cfg.datasets[part.dataset] ?? cfg.default_days
         if (retentionDays <= 0) continue
 
-        const cursor = readCursorSync(part.path)
+        // @ref LLP 0323#one-gate [constrained-by]: a destructive pass reads
+        // the cursor through the gate that can answer "unreadable", never
+        // through the one that answers epoch 0 on its behalf. A partition
+        // whose `cursor.json` exists but does not read is not a partition at
+        // epoch 0: on the synthesized default a source-table or
+        // higher-epoch partition falls through to `evictLegacyPartition`,
+        // which weighs a RETIRED `epoch=0` generation's mtime and then
+        // `rm -rf`s the whole partition directory, live generation and rows
+        // written today included. `part.legacy` is discovery's record that
+        // no cursor file was there at all, which is the legitimate
+        // table-without-a-cursor shape and still gets the epoch-0 default.
+        const readCursor = tryReadCursorSync(part.path)
+        if (readCursor === null && !part.legacy) continue
+        const cursor = readCursor ?? { epoch: 0, rowCount: 0, compaction: null }
 
         if (cursor.layout === 'source-table') {
           const timestampColumns = retentionTimestampColumns(part.dataset)
@@ -211,8 +243,8 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
           [Attr.DATASET]: part.dataset,
           source,
         })
-        await writeCursor(part.path, {
-          ...cursor,
+        await rewriteCursorUnderLock(part.path, cursor, (current) => ({
+          ...current,
           rowCount: newRowCount,
           retention: {
             lastCutoffDate: cutoffDate,
@@ -221,7 +253,7 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
             rowsDeleted: totalDeleted,
             lastSnapshotId: postSnapshotId,
           },
-        })
+        }))
 
         return {
           dataset: part.dataset,
@@ -251,17 +283,17 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
    */
   async function evictSourceTableByMtime(part, cursor, tableDir, cutoffMs, cutoffDate, now, counter) {
     const source = part.partition.source ?? 'unknown'
-    if (partitionMtime(tableDir) > cutoffMs) {
-      await writeCursor(part.path, {
-        ...cursor,
+    if (partitionActivityMtime(part.path, tableDir) > cutoffMs) {
+      await rewriteCursorUnderLock(part.path, cursor, (current) => ({
+        ...current,
         retention: {
-          ...cursor.retention,
+          ...current.retention,
           lastCutoffDate: cutoffDate,
           lastCutoffMs: cutoffMs,
           lastDeletedAt: now.toISOString(),
           rowsDeleted: 0,
         },
-      })
+      }))
       return {
         dataset: part.dataset,
         source,
@@ -285,7 +317,9 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
         status: 'ok',
       },
       async () => {
-        await fs.promises.rm(part.path, { recursive: true, force: true })
+        await withPartitionMutationLock(part.path, () =>
+          fs.promises.rm(part.path, { recursive: true, force: true })
+        )
         // The directory is gone, so no later read of it can clear the
         // standing cursor refusals keyed on this path. Doing it here is free:
         // the path is in hand and the delete just happened
@@ -308,7 +342,43 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
       rowsDeleted: rowCount,
       batchCount: 0,
       candidateFileCount: 0,
+      evictedPartition: true,
     }
+  }
+
+  /**
+   * Rewrite a partition's cursor from the value on disk RIGHT NOW, under the
+   * lock every other cursor mutator in the tree holds.
+   *
+   * A retention pass over one partition spans a metadata load, a parquet scan
+   * of every data file, one commit per delete batch and a full rescan, and
+   * live ingest appends to the same partition throughout. Spreading the
+   * snapshot taken before all that writes stale values back over whatever
+   * landed in between: `rowCount` (cosmetic), and `pendingFallbacks` (not),
+   * whose lost increment strands provisional rows against the settle sweep.
+   * That is the same defect `maintenance.js`'s rebaseline write was brought
+   * under this lock for, and the append path holds it across its own
+   * read-modify-write, so re-reading without taking it only narrows the
+   * window. Retention was the last cursor mutator outside it, harmlessly
+   * while it had no non-test caller and not once LLP 0336 gave it one.
+   *
+   * `fallback` is the snapshot the caller already read, used only when the
+   * cursor has become unreadable under the pass - there is still a retention
+   * stamp to record, and refusing to record it would re-run the whole scan
+   * next tick.
+   *
+   * @ref LLP 0331#guard-travels-with-the-delete [implements]: serialization is
+   *   part of what bounds this mutation, so it travels with it rather than
+   *   being left to whoever constructs the enforcer.
+   * @param {string} partitionDir
+   * @param {PartitionCursor} fallback
+   * @param {(current: PartitionCursor) => PartitionCursor} rewrite
+   * @returns {Promise<void>}
+   */
+  async function rewriteCursorUnderLock(partitionDir, fallback, rewrite) {
+    await withPartitionMutationLock(partitionDir, async () => {
+      await writeCursor(partitionDir, rewrite(tryReadCursorSync(partitionDir) ?? fallback))
+    })
   }
 
   /**
@@ -352,7 +422,7 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
     if (!tableExists(epochDir) && !tableExists(partitionDir)) return null
 
     const targetDir = tableExists(epochDir) ? epochDir : partitionDir
-    const mtime = partitionMtime(targetDir)
+    const mtime = partitionActivityMtime(partitionDir, targetDir)
     if (mtime > cutoff) return null
 
     const rowCount = await countRows(targetDir)
@@ -369,7 +439,9 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
         status: 'ok',
       },
       async () => {
-        fs.rmSync(partitionDir, { recursive: true, force: true })
+        await withPartitionMutationLock(partitionDir, async () => {
+          fs.rmSync(partitionDir, { recursive: true, force: true })
+        })
         // The directory is gone, so no later read of it can clear the
         // standing cursor refusals keyed on this path. Doing it here is free:
         // the path is in hand and the delete just happened
@@ -530,6 +602,34 @@ function normalizeConfig(config) {
       : DEFAULT_RETENTION_DAYS
   const datasets = config?.datasets && typeof config.datasets === 'object' ? config.datasets : {}
   return { default_days, datasets }
+}
+
+/**
+ * The newest write anywhere in a partition the removal below would take:
+ * committed data files AND the capture spool sitting beside them.
+ *
+ * The two whole-directory paths in this file remove `part.path`, and
+ * `<part.path>/_hypaware_spool` is inside it. `partitionMtime` reads only
+ * `<generation>/data`, so on that number alone a partition whose committed
+ * files date to March and whose source resumed this morning is "untouched
+ * since March", and the removal destroys rows captured minutes ago that no
+ * snapshot, manifest or `cursor.rowCount` ever counted - so `rowsDeleted`
+ * does not even report them. Rows past the window are what LLP 0013 says may
+ * go; rows captured today are not, whichever half of the partition they are
+ * still sitting in.
+ *
+ * It is the age decision rather than a refusal because a refusal is the other
+ * failure: a spool stranded behind a failing flush would stop that partition
+ * reclaiming forever. A spool whose newest captured row is itself past the
+ * window is as evictable as the data files beside it.
+ *
+ * @ref LLP 0013#retention-is-the-central-tradeoff [constrained-by]: the window is about how old the rows are, not which half of the partition holds them.
+ * @param {string} partitionDir
+ * @param {string} generationDir
+ * @returns {number}
+ */
+function partitionActivityMtime(partitionDir, generationDir) {
+  return Math.max(partitionMtime(generationDir), pendingSpoolMtimeSync(partitionDir))
 }
 
 /**
