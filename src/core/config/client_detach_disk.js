@@ -483,8 +483,8 @@ function replayPrevMalformed(value, recorded, encoding, warnings) {
  * each backed-up value instead of embedding it as a traversable object.
  *
  * Legacy markers have no encoding field and keep their raw-value behavior.
- * A hand-edited or partially migrated marker can mix raw and encoded entries;
- * those raw entries keep the legacy behavior instead of being discarded.
+ * The short-lived schema-2 object form declared every entry encoded, so its
+ * compatibility read decodes every entry; that format had no per-entry tag.
  *
  * @param {unknown} recorded
  * @param {unknown} encoding
