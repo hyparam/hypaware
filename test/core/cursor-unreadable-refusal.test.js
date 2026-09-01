@@ -265,21 +265,14 @@ test('an escaping cursor that degrades to garbage leaves a refusal standing', as
   }
 })
 
-test('a partition evicted while unreadable warns again when it comes back', async () => {
-  // The strand LLP 0334#eviction-clears closed for the escape report, at
-  // the same sites and for the same reason: the entry is keyed by path, the
-  // eviction deletes the path, and a partition recreated there would
-  // otherwise be throttled against a window armed for a directory that no
-  // longer exists.
+// @ref LLP 0336#a-live-delete-carries-the-gates [tests]: unreadable cursor bytes are a refusal, not an epoch-0 deletion instruction.
+test('retention leaves an unreadable partition in place and keeps the refusal standing', async () => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-unreadable-evict-'))
   try {
     const partition = path.join(cacheRoot, 'datasets', 'logs', 'date=2026-01-01')
-    // `epoch=0/`, not a table directly under the partition: with the cursor
-    // unreadable the tick reads the layout-less epoch-0 default, and
-    // `epoch=0` is the only live generation name that default matches. It is
-    // also the one shape a real cache holds that this site can reach - an
-    // epoch-layout partition never yet compacted - where a bare `metadata/`
-    // beside a `cursor.json` is a shape no writer in the tree mints.
+    // This is the dangerous coincidental-match shape: the synthesized
+    // epoch-0 default names the generation that really exists, so the old
+    // reader could use corrupt cursor bytes as authority to remove it.
     const live = path.join(partition, 'epoch=0')
     await fs.mkdir(path.join(live, 'metadata'), { recursive: true })
     await fs.writeFile(path.join(live, 'metadata', 'v1.metadata.json'), '{}')
@@ -289,16 +282,12 @@ test('a partition evicted while unreadable warns again when it comes back', asyn
     await fs.utimes(partition, old, old)
 
     const enforcer = createRetentionEnforcer({ cacheRoot, config: undefined })
-    const evicting = await linesFrom(() => enforcer.tick(), REFUSAL)
-    assert.equal(evicting.length, 1, 'the evicting tick still says the cursor it read was unreadable')
-    await assert.rejects(() => fs.stat(partition), 'and the eviction really removed the partition')
+    const refusing = await linesFrom(() => enforcer.tick(), REFUSAL)
+    assert.equal(refusing.length, 1, 'the refusing tick says why retention skipped this partition')
+    assert.equal((await fs.stat(live)).isDirectory(), true, 'retention leaves the live generation in place')
 
-    await fs.mkdir(partition, { recursive: true })
-    await writeRawCursor(partition, '{ not json')
-    const reborn = await linesFrom(() => {
-      assert.equal(tryReadCursorSync(partition), null)
-    }, REFUSAL)
-    assert.equal(reborn.length, 1, 'garbage on a partition this process never read is a transition, not a repeat')
+    const repeat = await linesFrom(() => enforcer.tick(), REFUSAL)
+    assert.equal(repeat.length, 0, 'the standing refusal is not repeated by each retention tick')
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
