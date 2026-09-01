@@ -555,6 +555,7 @@ run directly. The common Phase 8 conditions:
 | `client_attach_missing`               | a client plugin is enabled but its settings file shows no HypAware marker          | the printed repair names the client, e.g. `hyp client attach opencode`     |
 | `daemon_binary_missing`               | the daemon installer references a binary that no longer exists on disk             | `hyp daemon install`                                                     |
 | `daemon_loaded_no_pid`                | the daemon service file is installed but launchd / systemd is not loading it       | `hyp daemon restart`                                                     |
+| `daemon_heartbeat_stale`              | the daemon process is alive but its status snapshot has stopped advancing, so its tick is not completing | `hyp daemon restart`                                                     |
 | `recent_errors`                       | the local telemetry directory has recent error log entries                         | inspect `~/.hyp/hypaware/dev-telemetry`, then `hyp daemon restart`       |
 
 Useful follow-on commands when a diagnostic fires:
