@@ -2931,6 +2931,33 @@ export const RECENT_ERROR_WINDOW_MS = RECENT_ERROR_WINDOW_HOURS * 3_600_000
 const DAEMON_LOG_TAIL_BYTES = 1024 * 1024
 
 /**
+ * The same number as the daemon log, applied per dev-telemetry file, but not
+ * the same sizing argument. That store is written only under
+ * `HYP_DEV_TELEMETRY=1`, and nothing rotates it either, so a developer who
+ * leaves the flag on has the same unbounded file the daemon log would be. A
+ * whole-file read of one past V8's maximum string length throws, and the
+ * counter's `catch` turns that into the file contributing 0: the silent zero
+ * this counter exists to remove, arriving by a different door. One tail per
+ * file closes that door.
+ *
+ * What does not carry over is the headroom. LLP 0349 sized the daemon log's
+ * megabyte against ~200-byte records from `fileLog` alone, several times over
+ * the worst case the 24-hour window has to hold. This store takes every
+ * `getLogger` emission at every severity, with the full attribute and
+ * resource bags attached, which measures around 475 bytes a record: roughly
+ * 2,200 records to the megabyte, not the daemon log's five thousand. So on a
+ * busy developer machine this tail can start inside the window rather than
+ * before it, and errors older than the tail go uncounted. That is the floor
+ * this counter already promises rather than a census, and it is bounded on a
+ * store no production install has, which is why the number is left at one
+ * megabyte here. Sizing it against this store's own rate is a separate
+ * question from closing the silent zero.
+ *
+ * @ref LLP 0349#bounded-reads [implements]: every read is bounded, this one included
+ */
+const DEV_TELEMETRY_TAIL_BYTES = 1024 * 1024
+
+/**
  * The timestamp the sink driver bakes into an outbox filename. `persistOutbox`
  * writes `<batchId>.json` where `batchId` is `<instance>-<iso>-<seq>`, so the
  * age of every failed export batch is readable from the directory listing
@@ -2997,6 +3024,53 @@ function recordedWithinWindow(value, sinceMs) {
 }
 
 /**
+ * Read the last `maxBytes` of a line-oriented file, with any partial record at
+ * the front discarded. Returns the empty string for a file that cannot be
+ * opened or read: every caller here is counting, and a store it cannot read
+ * contributes nothing rather than failing the report.
+ *
+ * The read starts one byte before the tail offset, so the newline ending the
+ * previous record always leads the buffer. Without it, a boundary that happens
+ * to be line-aligned looks exactly like a mid-record cut and the discard eats
+ * a whole valid record: on a file whose only error is that record, the count
+ * reads 0, which is the answer these counters exist to stop giving. The
+ * `start > 0` guard is the other half: a file smaller than the cap is read
+ * from byte 0 and has no fragment, so discarding unconditionally would eat its
+ * first record.
+ *
+ * @ref LLP 0349#bounded-reads [implements]: no store is read whole
+ * @param {string} filePath
+ * @param {number} maxBytes
+ * @returns {Promise<string>}
+ */
+async function readFileTail(filePath, maxBytes) {
+  /** @type {FileHandle} */
+  let handle
+  try {
+    handle = await fsp.open(filePath, 'r')
+  } catch {
+    return ''
+  }
+  try {
+    const { size } = await handle.stat()
+    const offset = Math.max(0, size - maxBytes)
+    const start = offset > 0 ? offset - 1 : 0
+    const length = size - start
+    if (length <= 0) return ''
+    const buf = Buffer.allocUnsafe(length)
+    const { bytesRead } = await handle.read(buf, 0, length, start)
+    const text = buf.subarray(0, bytesRead).toString('utf8')
+    if (start === 0) return text
+    const nl = text.indexOf('\n')
+    return nl < 0 ? '' : text.slice(nl + 1)
+  } catch {
+    return ''
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+/**
  * Count `level: "error"` records in the tail of the daemon log. This is the
  * production-side record: `openDaemonLog` runs on every boot, in every mode,
  * with no environment variable to enable it.
@@ -3006,58 +3080,22 @@ function recordedWithinWindow(value, sinceMs) {
  * @returns {Promise<number>}
  */
 async function countDaemonLogErrors(logPath, sinceMs) {
-  /** @type {FileHandle} */
-  let handle
-  try {
-    handle = await fsp.open(logPath, 'r')
-  } catch {
-    return 0
-  }
-  try {
-    const { size } = await handle.stat()
-    // One byte of slack before the tail offset, so that the newline ending the
-    // previous record always leads the buffer. Without it, a boundary that
-    // happens to be line-aligned looks exactly like a mid-record cut and the
-    // discard below eats a whole valid record: on a log whose only error is
-    // that record, the count reads 0, which is the answer this counter exists
-    // to stop giving.
-    const offset = Math.max(0, size - DAEMON_LOG_TAIL_BYTES)
-    const start = offset > 0 ? offset - 1 : 0
-    const length = size - start
-    if (length <= 0) return 0
-    const buf = Buffer.allocUnsafe(length)
-    const { bytesRead } = await handle.read(buf, 0, length, start)
-    let text = buf.subarray(0, bytesRead).toString('utf8')
-    if (start > 0) {
-      // Drop through the first newline rather than let a half-line parse as
-      // something it is not. A line-aligned boundary leaves that newline at
-      // index 0, so only the empty fragment before it goes. The guard is
-      // load-bearing: a file smaller than the tail is read from byte 0 and has
-      // no fragment, so discarding unconditionally would eat its first record.
-      const nl = text.indexOf('\n')
-      text = nl < 0 ? '' : text.slice(nl + 1)
+  let count = 0
+  for (const line of (await readFileTail(logPath, DAEMON_LOG_TAIL_BYTES)).split('\n')) {
+    if (!line) continue
+    /** @type {any} */
+    let parsed
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      continue
     }
-    let count = 0
-    for (const line of text.split('\n')) {
-      if (!line) continue
-      /** @type {any} */
-      let parsed
-      try {
-        parsed = JSON.parse(line)
-      } catch {
-        continue
-      }
-      if (!parsed || typeof parsed !== 'object') continue
-      if (parsed.level !== 'error') continue
-      if (!recordedWithinWindow(parsed.ts, sinceMs)) continue
-      count += 1
-    }
-    return count
-  } catch {
-    return 0
-  } finally {
-    await handle.close().catch(() => {})
+    if (!parsed || typeof parsed !== 'object') continue
+    if (parsed.level !== 'error') continue
+    if (!recordedWithinWindow(parsed.ts, sinceMs)) continue
+    count += 1
   }
+  return count
 }
 
 /**
@@ -3114,7 +3152,8 @@ async function countSinkOutboxBatches(sinksDir, sinceMs) {
  * it holds every `getLogger` error, and all but one of them reach no other
  * file. The exception is the sink driver's `sink.export_batch.failed`, which
  * describes a batch the outbox has a file for; `countRecentErrors` records
- * why that overlap is left alone.
+ * why that overlap is left alone. Each file is read from a tail of
+ * {@link DEV_TELEMETRY_TAIL_BYTES}, never whole.
  *
  * @param {string} telemetryDir
  * @param {number} sinceMs
@@ -3132,13 +3171,7 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
   let count = 0
   for (const entry of entries) {
     if (!entry.startsWith('logs-') || !entry.endsWith('.jsonl')) continue
-    /** @type {string} */
-    let raw
-    try {
-      raw = await fsp.readFile(path.join(telemetryDir, entry), 'utf8')
-    } catch {
-      continue
-    }
+    const raw = await readFileTail(path.join(telemetryDir, entry), DEV_TELEMETRY_TAIL_BYTES)
     for (const line of raw.split('\n')) {
       if (!line) continue
       try {

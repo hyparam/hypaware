@@ -346,3 +346,101 @@ test('a daemon log smaller than the tail is read whole, first record included', 
     'the first line of a short log is a whole record, not a fragment to discard',
   )
 })
+
+// Issue #1187, item 1. LLP 0349 #bounded-reads opens "Every read is bounded,
+// because `hyp status` is a report", but the dev-telemetry store was the one
+// input read whole: `fsp.readFile(..., 'utf8')` per `logs-*.jsonl`, inside a
+// `catch { continue }`. A file past V8's maximum string length makes that read
+// throw, the catch swallows it, and the file contributes 0 - the same silent
+// zero the rest of this counter exists to remove. The store is reachable only
+// under `HYP_DEV_TELEMETRY=1`, but the claim in the doc is unqualified, so the
+// read is bounded per file the same way the daemon log is. The fixture holds
+// four ERROR records: two before the tail, the one the boundary cuts, and one
+// inside the tail. Only the last is in scope, so an unbounded read counts 4
+// where a bounded read counts 1.
+// @ref LLP 0349#bounded-reads [tests]:
+test('each dev-telemetry file is read from a tail, not whole', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // Stated independently of the constant that implements it, the same way the
+  // daemon-log tail is above.
+  const tailBytes = 1024 * 1024
+  /**
+   * An OTel log record of a chosen byte length, padded inside `body` so the
+   * padding cannot be mistaken for structure.
+   *
+   * @param {'INFO'|'ERROR'} severityText
+   * @param {number} bytes
+   */
+  const line = (severityText, bytes) => {
+    const base = JSON.stringify({
+      serviceName: 'hypaware',
+      timestamp: new Date(Date.now() - 60_000).toISOString(),
+      severityNumber: severityText === 'ERROR' ? 17 : 9,
+      severityText,
+      body: '',
+    })
+    return base.slice(0, -2) + 'x'.repeat(Math.max(0, bytes - base.length)) + '"}'
+  }
+
+  // Older than the tail, and so uncounted no matter how long the developer has
+  // been running with dev telemetry on.
+  const head = [line('ERROR', 300), line('ERROR', 300)]
+  // The record the tail boundary falls inside. It is an ERROR, so counting the
+  // fragment would be visible rather than silent.
+  const boundary = line('ERROR', 4000)
+  const tail = [line('INFO', 300)]
+  let tailLen = Buffer.byteLength(tail[0]) + 1
+  while (tailLen < tailBytes - 3000) {
+    const filler = line('INFO', 300)
+    tail.push(filler)
+    tailLen += Buffer.byteLength(filler) + 1
+  }
+  const lastError = line('ERROR', 300)
+  tail.push(lastError)
+  tailLen += Buffer.byteLength(lastError) + 1
+
+  const content = [...head, boundary, ...tail].join('\n') + '\n'
+  const size = Buffer.byteLength(content)
+  const boundaryStart = head.reduce((n, l) => n + Buffer.byteLength(l) + 1, 0)
+  const readFrom = size - tailBytes
+  assert.ok(size > tailBytes, 'the fixture is larger than the tail')
+  assert.ok(
+    readFrom > boundaryStart && readFrom < boundaryStart + Buffer.byteLength(boundary),
+    'the fixture puts the tail boundary inside a record, not at a record edge',
+  )
+  const dir = path.join(stateRoot, 'dev-telemetry')
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(path.join(dir, 'logs-4242.jsonl'), content)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(
+    report.recentErrorCount,
+    1,
+    'the one error inside the tail, not the two before it and not the half-record at the boundary',
+  )
+})
+
+// The ordinary dev-telemetry file is smaller than the tail, so it is read from
+// byte 0 and has no leading fragment to discard. A discard that fires
+// unconditionally eats its first record, and on a file whose only error is
+// that record the count is back to 0.
+// @ref LLP 0349#bounded-reads [tests]:
+test('a dev-telemetry file smaller than the tail keeps its first record', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const dir = path.join(stateRoot, 'dev-telemetry')
+  await fs.mkdir(dir, { recursive: true })
+  const record = (/** @type {'INFO'|'ERROR'} */ severityText) => JSON.stringify({
+    serviceName: 'hypaware',
+    timestamp: new Date().toISOString(),
+    severityNumber: severityText === 'ERROR' ? 17 : 9,
+    severityText,
+    body: 'sink.export_batch.failed',
+  })
+  await fs.writeFile(
+    path.join(dir, 'logs-4242.jsonl'),
+    [record('ERROR'), record('INFO')].join('\n') + '\n',
+  )
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.recentErrorCount, 1, 'the first line of a short file is a whole record')
+})
