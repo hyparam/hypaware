@@ -7,6 +7,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 
+import { compareStrings } from '../../src/core/util/compare_strings.js'
+
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { collect, executeSql } from 'squirreling'
 
@@ -45,7 +47,7 @@ function fakeBlobStore(objects) {
       const wanted = prefix ?? ''
       return {
         async *[Symbol.asyncIterator]() {
-          const entries = [...objects.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+          const entries = [...objects.entries()].sort((a, b) => compareStrings(a[0], b[0]))
           for (const [key, bytes] of entries) {
             if (wanted.length > 0 && !key.startsWith(wanted)) continue
             yield { key, size: bytes.byteLength, lastModified: new Date(0) }
@@ -86,6 +88,33 @@ async function runQuery(dataset, query) {
   })
   return collect(executeSql({ tables: { [dataset.name]: source }, query }))
 }
+
+test('the query-path BlobStore double lists keys in byte order, the way a bucket does', async () => {
+  // Asserted on the double directly rather than through `discoverPartitions`,
+  // which sorts the partitions it built with `compareStrings` of its own and
+  // would answer the same whatever order it was handed. That re-sort is why
+  // reverting this double changed no test result, and it is why the statement
+  // has to be made here or not at all.
+  //
+  // Four keys chosen so byte order and collation disagree twice over, on the
+  // two pairs `compare-strings.test.js` names: the characters put `B` before
+  // `a` and `-` before `_`, and every collation probed (`en-US`, `de-DE`,
+  // `lt-LT`, `az`, `tr-TR`) reverses both. So this listing tells a
+  // byte-ordered double from a collated one on any box with ICU data, which is
+  // the fidelity no assertion in the tree made when the doubles moved to
+  // `compareStrings` (#1148 item 3). A bucket really does answer in this
+  // order: for a general-purpose bucket S3 returns keys sorted by UTF-8 byte
+  // value, and for these keys that is the same as UTF-16 code unit order.
+  const objects = new Map(
+    ['ds/x_1.parquet', 'ds/a.parquet', 'ds/x-1.parquet', 'ds/B.parquet'].map((key) => [
+      key,
+      new Uint8Array([1]),
+    ])
+  )
+  const seen = []
+  for await (const entry of fakeBlobStore(objects).listObjects({ prefix: 'ds/' })) seen.push(entry.key)
+  assert.deepEqual(seen, ['ds/B.parquet', 'ds/a.parquet', 'ds/x-1.parquet', 'ds/x_1.parquet'])
+})
 
 test('parquet query source reads a single object back through SQL', async () => {
   const objects = new Map([

@@ -27,10 +27,10 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
 
 /**
  * Phase 5 V1-milestone smoke. Drives `hyp setup --yes --client claude
- * --client codex --source otel --export local-parquet --retention-days
- * 30 --dry-run --bin <stable-bin>` end-to-end against a tmp HYP_HOME
- * with all six first-party plugins active (ai-gateway, otel, local-fs,
- * format-parquet, claude, codex). Then exercises the resulting
+ * --client codex --client opencode --source otel --export local-parquet
+ * --retention-days 30 --dry-run --bin <stable-bin>` end-to-end against a
+ * tmp HYP_HOME with all seven first-party plugins active (ai-gateway,
+ * otel, local-fs, format-parquet, claude, codex, opencode). Then exercises the resulting
  * install just like Phase 9 did so the `walkthrough_picker_to_first_query`
  * bead's full assertion list lands.
  *
@@ -39,11 +39,11 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  * - Non-interactive picker selections generate a config matching the
  *   expected v2 shape (both AI upstreams, OTEL, Parquet sink), plus the
  *   riders those picks pull in (LLP 0213 #d1): the written config is wider
- *   than the six plugins this smoke activates by injection.
+ *   than the seven plugins this smoke activates by injection.
  * - Dry-run daemon install chooses the stable binary path passed via
  *   `--bin <stable-bin>` and outputs a sensible target path.
- * - Claude + Codex attach dry-runs produce expected file edits *without*
- *   touching the per-client settings/config files under the tmp HOME.
+ * - Claude + Codex + OpenCode attach dry-runs produce expected file edits
+ *   *without* touching the per-client settings/config files under the tmp HOME.
  * - One OTLP log POST + one gateway exchange each round-trip through
  *   the running sources with `dev_run_id` preserved.
  * - SQL count(*) on both `logs` and `ai_gateway_messages` returns 1
@@ -78,6 +78,7 @@ export async function run({ harness, expect }) {
     parquet: path.join(pluginsRoot, 'format-parquet'),
     claude: path.join(pluginsRoot, 'claude'),
     codex: path.join(pluginsRoot, 'codex'),
+    opencode: path.join(pluginsRoot, 'opencode'),
   }
 
   // Same recipe as gateway_claude_capture: a distinct name so the merge
@@ -104,6 +105,14 @@ export async function run({ harness, expect }) {
   await fs.mkdir(path.join(fakeHome, '.codex'), { recursive: true })
   const previousHome = process.env.HOME
   process.env.HOME = fakeHome
+  // Redirecting HOME is not enough to sandbox OpenCode. `resolveClientSettingsPath`
+  // relocates the `.config/opencode` prefix to `$XDG_CONFIG_HOME/opencode` when
+  // that variable is set, and it is an absolute path that HOME does not move, so
+  // an inherited one sends this run's attach at the developer's real config home:
+  // the assertions below then compare against a path the run never touched, and
+  // the smoke reds on a machine where nothing is wrong.
+  const previousXdgConfigHome = process.env.XDG_CONFIG_HOME
+  process.env.XDG_CONFIG_HOME = path.join(fakeHome, '.config')
   // Pin the version the LLP 0258 floor check sees, so the init-driven attach
   // never depends on whatever `claude` binary the machine running it carries.
   const previousClaudeVersion = process.env.HYP_CLAUDE_CODE_VERSION
@@ -121,7 +130,7 @@ export async function run({ harness, expect }) {
   const stableBinPath = path.join(harness.tmpDir, 'stable', 'hypaware-bin', 'hypaware')
 
   /**
-   * Activate the six workspace plugins with the smoke's injected
+   * Activate the seven workspace plugins with the smoke's injected
    * ai-gateway (echo upstream) and otel (ephemeral port) configs.
    * Called once for the init phase and again into a fresh kernel for
    * the capture phase: init's finale boots the bundled plugins from
@@ -144,9 +153,9 @@ export async function run({ harness, expect }) {
       },
       async () => {
         const { loaded } = await loadManifests(Object.values(pluginDirs))
-        if (loaded.length !== 6) {
+        if (loaded.length !== 7) {
           throw new Error(
-            `walkthrough_picker_to_first_query: expected 6 manifests loaded, got ${loaded.length}`
+            `walkthrough_picker_to_first_query: expected 7 manifests loaded, got ${loaded.length}`
           )
         }
         const resolution = await resolveDependencies(loaded.map((l) => l.manifest))
@@ -192,8 +201,10 @@ export async function run({ harness, expect }) {
         '--yes',
         '--client', 'claude',
         '--client', 'codex',
+        '--client', 'opencode',
         '--source', 'claude',
         '--source', 'codex',
+        '--source', 'opencode',
         '--source', 'otel',
         '--export', 'local-parquet',
         '--retention-days', '30',
@@ -241,6 +252,16 @@ export async function run({ harness, expect }) {
         v.includes(codexConfigPath) &&
         v.includes('(dry-run) Would attach Codex')
     )
+    const opencodePluginPath = path.join(fakeHome, '.config', 'opencode', 'plugins', 'hypaware.js')
+    expect.that(
+      'stdout: dry-run opencode attach referenced the shared CLI/Desktop plugin path',
+      initText,
+      (v) =>
+        typeof v === 'string' &&
+        v.includes(opencodePluginPath) &&
+        v.includes('Would install') &&
+        v.includes('Dry run: nothing was written.')
+    )
 
     // ----- 2. Config written matches Phase 5 shape -----
     const configPath = defaultConfigPath(harness.hypHome)
@@ -264,6 +285,11 @@ export async function run({ harness, expect }) {
       'dry-run preserved tmp HOME/.codex/config.toml',
       codexAfter,
       (v) => v === codexBaseline
+    )
+    expect.that(
+      'dry-run did not create the OpenCode managed plugin',
+      await fs.stat(opencodePluginPath).then(() => true, () => false),
+      (v) => v === false
     )
 
     // ----- 4. Start the sources and exercise both ingest paths -----
@@ -489,9 +515,9 @@ export async function run({ harness, expect }) {
       finishSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_picked === 3 &&
+        v.sources_picked === 4 &&
         v.export_picked === 'local-parquet' &&
-        v.clients_picked === 2 &&
+        v.clients_picked === 3 &&
         v.retention_days === 30
     )
 
@@ -517,13 +543,13 @@ export async function run({ harness, expect }) {
       dryRunAttachSpans.map((/** @type {any} */ s) => s.attributes?.client_name).filter(Boolean)
     )
     expect.that(
-      'traces: client.attach span emitted for claude AND codex (dry-run)',
+      'traces: client.attach span emitted for claude, codex, and opencode (dry-run)',
       attachClients,
-      (v) => v instanceof Set && v.has('claude') && v.has('codex')
+      (v) => v instanceof Set && v.has('claude') && v.has('codex') && v.has('opencode')
     )
     expect.that(
-      'traces: client.attach dry_run=true for both clients',
-      dryRunAttachSpans.length >= 2 &&
+      'traces: client.attach dry_run=true for all three clients',
+      dryRunAttachSpans.length >= 3 &&
         dryRunAttachSpans.every((/** @type {any} */ s) => s.attributes?.dry_run === true),
       (v) => v === true
     )
@@ -562,6 +588,8 @@ export async function run({ harness, expect }) {
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
+    if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = previousXdgConfigHome
     if (previousClaudeVersion === undefined) delete process.env.HYP_CLAUDE_CODE_VERSION
     else process.env.HYP_CLAUDE_CODE_VERSION = previousClaudeVersion
     await echo.close()
@@ -654,6 +682,9 @@ async function goldenPickerConfig(hypHome) {
         // @ref LLP 0262#requirements [tests]: R5 - a composed claude install needs no CA and no keychain trust
       },
     },
+    // Ahead of otel: opencode is a first-class client row, and
+    // `PICKER_DISPLAY_ORDER` puts those before the infra receivers.
+    { name: '@hypaware/opencode' },
     {
       name: '@hypaware/otel',
       config: { listen_host: '127.0.0.1', listen_port: 4318 },

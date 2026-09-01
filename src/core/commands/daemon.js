@@ -161,7 +161,16 @@ export async function runDaemonStatus(argv, ctx) {
     ? Math.max(0, Date.now() - Date.parse(status.healthyAt))
     : status.uptimeMs
   if (json) {
-    const payload = { running, ...status, uptimeMs: liveUptimeMs }
+    // `uptimeMs` goes out exactly as the daemon wrote it, not as the live
+    // `liveUptimeMs` the text line below prints. LLP 0348 reads
+    // `healthyAt + uptimeMs` as the moment of the daemon's last status
+    // write, and recomputing `uptimeMs` against `Date.now()` here made that
+    // sum equal "now" for any live pid: a wedged daemon whose file stopped
+    // advancing minutes ago published a permanently fresh heartbeat, and a
+    // reader applying the documented derivation could never see staleness.
+    // The cost is that a JSON reader's uptime lags by up to one tick.
+    // @ref LLP 0348#heartbeat-is-derived [constrained-by]: the pair this payload carries is read as a heartbeat, so it must be the daemon's own
+    const payload = { running, ...status }
     ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
     return 0
   }
@@ -202,7 +211,7 @@ export async function runDaemonStatus(argv, ctx) {
 export async function runDaemonStop(argv, ctx) {
   const parsed = parseCoreCommandArgv('daemon stop', argv, ctx)
   if (!parsed.ok) return parsed.code
-  const { requestDaemonStop } = await import('../daemon/runtime.js')
+  const { requestDaemonStop, DAEMON_STOP_TIMEOUT_MS } = await import('../daemon/runtime.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   // The requester-side control-dir warnings (a chmod it could not apply)
   // land on stderr; they do not change the exit code.
@@ -226,9 +235,15 @@ export async function runDaemonStop(argv, ctx) {
     // The transport differs per platform (win32 writes a stop.request file
     // and deliberately leaves it for the daemon to consume), so the message
     // names the one actually used.
+    //
+    // The wait is rendered from `DAEMON_STOP_TIMEOUT_MS` rather than spelled
+    // out again: that number stopped being an inline literal precisely so
+    // tuning it cannot leave a user-facing message quoting the old one
+    // (LLP 0343#stop-window).
+    const waited = `${DAEMON_STOP_TIMEOUT_MS / 1_000}s`
     const detail = process.platform === 'win32'
-      ? 'stop request written but the daemon did not exit within 5s; the request file is left for it to consume'
-      : 'stop signal sent but the daemon did not exit within 5s'
+      ? `stop request written but the daemon did not exit within ${waited}; the request file is left for it to consume`
+      : `stop signal sent but the daemon did not exit within ${waited}`
     ctx.stderr.write(`hyp daemon stop: ${detail}\n`)
     return 1
   }

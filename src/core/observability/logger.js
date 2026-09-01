@@ -11,13 +11,11 @@ import {
   reportTelemetryFailure,
   SeverityNumber,
 } from './runtime.js'
-import { OtlpLogExporter } from './otlp_exporters.js'
+import { OtlpLogExporter, OTLP_EXPORT_TIMEOUT_MS } from './otlp_exporters.js'
 
 /**
  * @import { ObservabilityEnv } from '../../../src/core/observability/types.js'
  */
-
-const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
 /**
  * Emit seams already diagnosed on stderr, keyed by {@link emitSeam}: see
@@ -47,6 +45,7 @@ const EMIT_FAILURES = new Set()
  * actually failed is then dropped as a duplicate of the newcomer's, which is
  * the undiagnosable provider the generation key exists to prevent.
  *
+ * @ref LLP 0335#generation-rearm [implements]: the emit seam's one-line bound re-arms per installed provider, read at emit time.
  * @returns {{ channel: 'logs', source: string, key: string, reported: Set<string> }}
  */
 function emitSeam() {

@@ -45,7 +45,27 @@ async function* runBackfill(deps) {
   if (deps.exactSessionIds && deps.exactSessionIds.length > 0) {
     selected = deps.exactSessionIds.map((id) => ({ id }))
   } else {
-    const rawList = await deps.runCommand(['session', 'list', '--format', 'json', '--max-count', String(MAX_SESSION_LIST)])
+    // No `opencode` on PATH is the ordinary state of a Desktop-only install,
+    // and Desktop is half of what this adapter attaches. Reading it as a
+    // provider failure made every such setup end on "backfill opencode:
+    // failed", where the file-reading peers (claude, codex) report ok with
+    // zero rows for the same "nothing here to import" fact. ENOENT only: any
+    // other failure of the list command is still a real one and still throws.
+    /** @type {string} */
+    let rawList
+    try {
+      rawList = await deps.runCommand(['session', 'list', '--format', 'json', '--max-count', String(MAX_SESSION_LIST)])
+    } catch (err) {
+      if (!isMissingBinary(err)) throw err
+      deps.ctx.log.info('opencode.backfill.cli_absent', {
+        component: 'plugin.opencode.backfill',
+        operation: 'backfill.select',
+        selected_sessions: 0,
+        status: 'ok',
+        reason: 'opencode_cli_absent',
+      })
+      return
+    }
     const parsed = JSON.parse(rawList)
     if (!Array.isArray(parsed)) throw new Error('opencode session list did not return an array')
     selected = parsed
@@ -146,6 +166,19 @@ async function* runBackfill(deps) {
       native_id: item.id,
     })
   }
+}
+
+/**
+ * Did this command fail because the binary is not there, as opposed to
+ * failing once it ran? `execFile` reports the first as ENOENT on the spawn
+ * itself, which is the one failure that means "this machine has no OpenCode
+ * CLI history to read" rather than "reading it went wrong".
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isMissingBinary(err) {
+  return err instanceof Error && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT'
 }
 
 /** @param {string[]} args */

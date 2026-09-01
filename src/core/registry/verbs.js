@@ -2,6 +2,7 @@
 
 import { isVerbProjection, verbToCommand } from '../cli/verb_command.js'
 import { Attr, getLogger } from '../observability/index.js'
+import { compareStrings } from '../util/compare_strings.js'
 
 /**
  * @import { CommandRegistry, VerbAuthClass, VerbExposure, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
@@ -66,7 +67,7 @@ export function createVerbRegistry(opts = {}) {
       return byTool.get(tool)
     },
     list() {
-      return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name))
+      return Array.from(byName.values()).sort((a, b) => compareStrings(a.name, b.name))
     },
   }
 }

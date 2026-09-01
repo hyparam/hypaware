@@ -728,8 +728,10 @@ test('hyp policy client <name> local-only writes the opt-out; show and list refl
     const unset = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })
     assert.equal(unset.code, 0)
     assert.match(unset.stdout, /openclaw: sync/)
-    // @ref LLP 0188#no-retroactive-ship: the flip-back names the property
-    assert.match(unset.stdout, /rows withheld while local-only are not uploaded/)
+    // @ref LLP 0345#command [tests]: the future-only policy flip points at the
+    // explicit retained-history path instead of silently uploading anything.
+    assert.match(unset.stdout, /future openclaw rows sync/)
+    assert.match(unset.stdout, /hyp sync --history openclaw/)
     assert.deepEqual(await readClientSyncEntries({ stateDir }), [])
 
     const again = await run('policy client', ['openclaw', 'sync'], { cwd: root, hypHome })

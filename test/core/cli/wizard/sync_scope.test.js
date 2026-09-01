@@ -17,11 +17,11 @@ import {
 import { PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 
 // The wizard's sync-scope step (LLP 0188 #never-silent, LLP 0190 #sync-gate):
-// a defaults gate stating what will sync, then on request a multiselect where
-// checked means "syncs" and unchecking keeps a source local-only. Everything
-// is checked by default on a fresh run, locked sources never shown (the
-// candidates list is already locked-filtered), and the write has editor
-// semantics over the shown candidates only.
+// a multiselect where checked means "syncs" and unchecking keeps a source
+// local-only. Everything is checked by default on a fresh run, locked rows
+// lead read-only, and the write has editor semantics over the shown
+// candidates only. The express accept auto-answers the lane and narrates the
+// split instead of prompting (LLP 0201 #narrate).
 // @ref LLP 0188#never-silent [tests]:
 // @ref LLP 0190#sync-gate [tests]:
 
@@ -57,56 +57,33 @@ function capturingPrompt(answer) {
   return { prompt, state }
 }
 
-/**
- * @param {string} answer the gate choice the fake confirm returns
- */
-function capturingConfirm(answer) {
-  /** @type {{ question?: any }} */
-  const state = {}
-  const confirm = async (/** @type {any} */ question) => {
-    state.question = question
-    return answer
-  }
-  return { confirm, state }
-}
-
-test('a fresh enrolled run: the gate states what will sync and accepting opts nothing out', async () => {
+test('a fresh enrolled express run: the accept narrates what will sync and opts nothing out', async () => {
   const { env, stateDir } = await makeHome()
-  const { confirm, state } = capturingConfirm('accept')
-  let menuShown = false
+  const stdout = makeBuf()
 
   const result = await runWizardSyncScope(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env,
+    stdout, stderr: makeBuf(), env,
     candidates: [descriptor('openclaw'), descriptor('hermes')],
-    progress: 'Step 3 of 4 · Choose what syncs',
-    prompt: async () => { menuShown = true; return [] },
-    confirm,
+    autoAccept: true,
+    prompt: async () => { throw new Error('the express path must not prompt') },
   }))
 
   assert.deepEqual(result, { optedOut: [] })
-  assert.equal(state.question.title, 'These will sync to your server:')
-  assert.deepEqual(state.question.items, ['  capture openclaw', '  capture hermes'], 'one source per line, not a crammed title')
-  assert.equal(state.question.progress, 'Step 3 of 4 · Choose what syncs')
-  assert.equal(state.question.default, 'accept')
-  // The gate branches on the option *value*, not the label, and the
-  // customize side has no other anchor: renaming it while the branch still
-  // reads 'customize' would silently turn "Select what to sync" into
-  // accept-the-defaults. Pin the values the branch depends on.
-  assert.deepEqual(state.question.options.map((/** @type {any} */ o) => o.value), ['accept', 'customize'])
-  assert.equal(menuShown, false, 'accepting the defaults never opens the menu')
+  assert.match(stdout.text(), /These will sync to your server:/)
+  assert.match(stdout.text(), /capture openclaw/)
+  assert.match(stdout.text(), /capture hermes/)
   assert.deepEqual(await readClientSyncEntries({ stateDir }), [], 'the store is stamped (empty), not left absent')
 })
 
 test('the menu checks what syncs: everything checked by default on a fresh run', async () => {
   const { env, stateDir } = await makeHome()
-  const { confirm } = capturingConfirm('customize')
   const { prompt, state } = capturingPrompt(['openclaw', 'hermes'])
 
   const result = await runWizardSyncScope(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env,
     candidates: [descriptor('openclaw'), descriptor('hermes')],
     progress: 'Step 3 of 4 · Choose what syncs',
-    prompt, confirm,
+    prompt,
   }))
 
   assert.deepEqual(result, { optedOut: [] })
@@ -118,8 +95,8 @@ test('the menu checks what syncs: everything checked by default on a fresh run',
   assert.deepEqual(await readClientSyncEntries({ stateDir }), [], 'the store is stamped (empty), not left absent')
 })
 
-// The non-TTY fallback path end to end: no prompt seams, the real
-// readline factories driven by scripted answers. A bare enter at the
+// The non-TTY fallback path end to end: no prompt seam, the real
+// readline factory driven by scripted answers. A bare enter at the
 // menu keeps the rendered defaults; the historical enter-selects-none
 // would have opted every candidate out, inverting the TUI default
 // (LLP 0190 #sync-gate).
@@ -148,13 +125,17 @@ function promptDrivenOutput(input, answers) {
 test('non-TTY: opening the menu and pressing enter keeps the defaults, not opt-everything-out', async () => {
   const { env, stateDir } = await makeHome()
   const input = new PassThrough()
-  // Gate: 2 = "Select what to sync"; menu: bare enter.
-  const stdout = promptDrivenOutput(input, ['2\n', '\n'])
+  // The menu is the lane's only screen, answered with a bare enter.
+  const stdout = promptDrivenOutput(input, ['\n'])
 
   const result = await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     stdin: input,
     candidates: [descriptor('openclaw'), descriptor('hermes')],
+    // The orchestrator always offers back here (the pick lane is behind
+    // this one), and the fallback's enter-hint is worded per that flag, so
+    // the realistic screen is the one with it.
+    allowBack: true,
   }))
 
   assert.deepEqual(result, { optedOut: [] })
@@ -168,7 +149,7 @@ test('non-TTY: a bare enter at the menu round-trips a standing opt-out instead o
   const { env, stateDir } = await makeHome()
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'openclaw', class: 'local-only' }] })
   const input = new PassThrough()
-  const stdout = promptDrivenOutput(input, ['2\n', '\n'])
+  const stdout = promptDrivenOutput(input, ['\n'])
 
   const result = await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
@@ -186,7 +167,6 @@ test('non-TTY: a bare enter at the menu round-trips a standing opt-out instead o
 
 test('unchecking a source writes its opt-out and names the follow-up command', async () => {
   const { env, stateDir } = await makeHome()
-  const { confirm } = capturingConfirm('customize')
   // Only hermes stays checked; openclaw was unchecked and goes local-only.
   const { prompt } = capturingPrompt(['hermes'])
   const stdout = makeBuf()
@@ -194,7 +174,7 @@ test('unchecking a source writes its opt-out and names the follow-up command', a
   const result = await runWizardSyncScope(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env,
     candidates: [descriptor('openclaw'), descriptor('hermes')],
-    prompt, confirm,
+    prompt,
   }))
 
   assert.deepEqual(result, { optedOut: ['openclaw'] })
@@ -205,40 +185,38 @@ test('unchecking a source writes its opt-out and names the follow-up command', a
   assert.match(stdout.text(), /hyp privacy client/)
 })
 
-test('a re-entry states the split on the gate and accepting keeps it', async () => {
+test('a re-entry express run narrates both halves of the split and keeps it', async () => {
   const { env, stateDir } = await makeHome()
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'openclaw', class: 'local-only' }] })
-  const { confirm, state } = capturingConfirm('accept')
+  const stdout = makeBuf()
 
   const result = await runWizardSyncScope(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env,
+    stdout, stderr: makeBuf(), env,
     candidates: [descriptor('openclaw'), descriptor('hermes')],
-    prompt: async () => { throw new Error('menu must not open on accept') },
-    confirm,
+    autoAccept: true,
+    prompt: async () => { throw new Error('the express path must not prompt') },
   }))
 
-  assert.equal(state.question.title, 'These will sync to your server:')
-  assert.deepEqual(
-    state.question.items,
-    ['  capture hermes', 'Staying local-only:', '  capture openclaw'],
-    'a re-entry lists both halves of the split'
+  assert.match(
+    stdout.text(),
+    /These will sync to your server:\n  capture hermes\nStaying local-only:\n  capture openclaw\n/,
+    'a re-entry narrates both halves of the split'
   )
   assert.deepEqual(result, { optedOut: ['openclaw'] })
   assert.deepEqual(await readClientSyncEntries({ stateDir }), [
     { source: 'openclaw', class: 'local-only' },
-  ], 'accepting round-trips the store instead of resetting it')
+  ], 'the express accept round-trips the store instead of resetting it')
 })
 
 test('a re-entry renders existing opt-outs unchecked and re-checking removes them', async () => {
   const { env, stateDir } = await makeHome()
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'openclaw', class: 'local-only' }] })
-  const { confirm } = capturingConfirm('customize')
   const { prompt, state } = capturingPrompt(['openclaw'])
 
   const result = await runWizardSyncScope(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env,
     candidates: [descriptor('openclaw')],
-    prompt, confirm,
+    prompt,
   }))
 
   const row = state.question.options.find((/** @type {any} */ o) => o.value === 'openclaw')
@@ -250,14 +228,13 @@ test('a re-entry renders existing opt-outs unchecked and re-checking removes the
 test('editor semantics: an entry for a source not shown this run is kept', async () => {
   const { env, stateDir } = await makeHome()
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'hermes', class: 'local-only' }] })
-  const { confirm } = capturingConfirm('customize')
   // openclaw is unchecked (opted out); hermes is not shown this run.
   const { prompt } = capturingPrompt([])
 
   await runWizardSyncScope(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env,
     candidates: [descriptor('openclaw')],
-    prompt, confirm,
+    prompt,
   }))
 
   assert.deepEqual(await readClientSyncEntries({ stateDir }), [
@@ -267,25 +244,20 @@ test('editor semantics: an entry for a source not shown this run is kept', async
 })
 
 // Locked (org) sources always sync (LLP 0188 #locked); the step shows them
-// read-only so "these will sync" is the whole picture, not the editable
+// read-only so "choose what syncs" is the whole picture, not the editable
 // slice (LLP 0190 #sync-gate).
 
-test('locked sources lead the gate list fleet-suffixed and the menu as read-only rows', async () => {
+test('locked sources lead the menu as read-only fleet-suffixed rows', async () => {
   const { env } = await makeHome()
-  const { confirm, state: gate } = capturingConfirm('customize')
   const { prompt, state: menu } = capturingPrompt(['claude', 'openclaw'])
 
   const result = await runWizardSyncScope(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env,
     candidates: [descriptor('openclaw')],
     locked: [descriptor('claude')],
-    prompt, confirm,
+    prompt,
   }))
 
-  assert.deepEqual(gate.question.items, [
-    '  capture claude · managed by your fleet',
-    '  capture openclaw',
-  ], 'the always-sync org rows are part of "these will sync"')
   const lockedRow = menu.question.options[0]
   assert.equal(lockedRow.value, 'claude')
   assert.equal(lockedRow.checked, true)
@@ -296,7 +268,6 @@ test('locked sources lead the gate list fleet-suffixed and the menu as read-only
 
 test('a locked source never enters the opt-out computation', async () => {
   const { env, stateDir } = await makeHome()
-  const { confirm } = capturingConfirm('customize')
   // Only the locked claude comes back checked; the openclaw candidate was
   // unchecked and opts out - claude must not.
   const { prompt } = capturingPrompt(['claude'])
@@ -305,7 +276,7 @@ test('a locked source never enters the opt-out computation', async () => {
     stdout: makeBuf(), stderr: makeBuf(), env,
     candidates: [descriptor('openclaw')],
     locked: [descriptor('claude')],
-    prompt, confirm,
+    prompt,
   }))
 
   assert.deepEqual(result, { optedOut: ['openclaw'] })
@@ -325,7 +296,6 @@ test('zero candidates with org rows: prints the position and the fleet line, pro
     locked: [descriptor('claude')],
     progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
-    confirm: async () => { prompted = true; return 'accept' },
   }))
 
   // `noQuestion` is the part the orchestrator reads: a lane that only
@@ -355,7 +325,6 @@ test('zero candidates and no org rows: says nothing syncs, never names the fleet
     locked: [],
     progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
-    confirm: async () => { prompted = true; return 'accept' },
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
@@ -384,7 +353,6 @@ test('zero candidates with only hidden org rows: does not claim nothing syncs', 
     lockedHidden: 2,
     progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
-    confirm: async () => { prompted = true; return 'accept' },
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
@@ -415,7 +383,6 @@ test('zero visible candidates with a hidden picked row: does not claim nothing s
     candidatesHiddenIds: ['raw-anthropic'],
     progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
-    confirm: async () => { prompted = true; return 'accept' },
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
@@ -449,7 +416,6 @@ test('zero visible candidates with a hidden picked row already opted out: says n
     candidatesHiddenIds: ['raw-anthropic'],
     progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
-    confirm: async () => { prompted = true; return 'accept' },
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
@@ -480,7 +446,6 @@ test('zero visible candidates with one hidden pick opted out and one standing: d
     lockedHidden: 0,
     candidatesHiddenIds: ['raw-anthropic', 'raw-openai'],
     prompt: async () => [],
-    confirm: async () => 'accept',
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
@@ -505,7 +470,6 @@ test('a stale opt-out for a hidden locked row does not soften the fleet sentence
     lockedHidden: 1,
     candidatesHiddenIds: [],
     prompt: async () => [],
-    confirm: async () => 'accept',
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
@@ -531,7 +495,6 @@ test('zero visible candidates with an org row and a hidden picked row: the fleet
     candidatesHiddenIds: ['raw-anthropic'],
     progress: 'Step 3 of 4 · Choose what syncs',
     prompt: async () => { prompted = true; return [] },
-    confirm: async () => { prompted = true; return 'accept' },
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
@@ -563,7 +526,6 @@ test('zero visible candidates with an org row and no hidden pick: keeps the exha
     lockedHidden: 0,
     candidatesHiddenIds: [],
     prompt: async () => [],
-    confirm: async () => 'accept',
   }))
 
   assert.match(stdout.text(), /Everything you picked is managed by your fleet and always syncs\./)
@@ -589,7 +551,6 @@ test('zero visible candidates with an org row and a hidden pick already opted ou
     lockedHidden: 0,
     candidatesHiddenIds: ['raw-anthropic'],
     prompt: async () => [],
-    confirm: async () => 'accept',
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
@@ -602,22 +563,6 @@ test('zero visible candidates with an org row and a hidden pick already opted ou
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')
 })
 
-test('a cancelled gate returns cancelled and writes nothing', async () => {
-  const { env, stateDir } = await makeHome()
-  const stderr = makeBuf()
-
-  const result = await runWizardSyncScope(/** @type {any} */ ({
-    stdout: makeBuf(), stderr, env,
-    candidates: [descriptor('openclaw')],
-    prompt: async () => [],
-    confirm: async () => { throw new PromptCancelledError() },
-  }))
-
-  assert.equal(result.cancelled, true)
-  assert.match(stderr.text(), /cancelled/)
-  assert.equal(await readClientSyncEntries({ stateDir }), null)
-})
-
 test('a cancelled menu returns cancelled and writes nothing', async () => {
   const { env, stateDir } = await makeHome()
   const stderr = makeBuf()
@@ -626,7 +571,6 @@ test('a cancelled menu returns cancelled and writes nothing', async () => {
     stdout: makeBuf(), stderr, env,
     candidates: [descriptor('openclaw')],
     prompt: async () => { throw new PromptCancelledError() },
-    confirm: async () => 'customize',
   }))
 
   assert.equal(result.cancelled, true)
@@ -646,12 +590,40 @@ test('a corrupt store skips the step with a warning and is never overwritten', a
     stdout: makeBuf(), stderr, env,
     candidates: [descriptor('openclaw')],
     prompt: async () => { prompted = true; return [] },
-    confirm: async () => { prompted = true; return 'accept' },
   }))
 
   // Skipped and unasked: the lane after it must not try to back into it.
   assert.deepEqual(result, { skipped: true, noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
   assert.match(stderr.text(), /unreadable/)
+  assert.equal(await fs.readFile(storePath, 'utf8'), '{ nope')
+})
+
+// The arm's documented contract is to warn and skip rather than fail the
+// run, and the warning write was the one way it could still fail it: a
+// stderr that throws (a stream closed under a run that is shutting down)
+// took the run down from inside the arm that exists to keep it alive.
+// Same shape the folder-ask lane's arms pin (PR #1149), now the corpus
+// rule.
+// @ref LLP 0341#warnings [tests]:
+test('a corrupt store with a dead stderr still skips instead of throwing', async () => {
+  const { env, stateDir } = await makeHome()
+  const storePath = clientSyncListPath(stateDir)
+  await fs.mkdir(path.dirname(storePath), { recursive: true })
+  await fs.writeFile(storePath, '{ nope')
+  let prompted = false
+
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout: makeBuf(),
+    stderr: { write() { throw new Error('EPIPE: broken pipe') } },
+    env,
+    candidates: [descriptor('openclaw')],
+    prompt: async () => { prompted = true; return [] },
+  }))
+
+  // The skip still returns, flags intact: they are what the folder-ask
+  // lane and the back edges read.
+  assert.deepEqual(result, { skipped: true, noQuestion: true, optedOut: [] })
+  assert.equal(prompted, false)
   assert.equal(await fs.readFile(storePath, 'utf8'), '{ nope')
 })

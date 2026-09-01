@@ -56,6 +56,14 @@ const ORG = 'sandbox-org'
 const codes = new Map()
 let codeSeq = 0
 
+/**
+ * Login outcomes parked by client `state` at /login/start and picked up once
+ * at /login/poll: the poll lane the client speaks (LLP 0342 D3). The redirect
+ * lane below is kept for released clients that still send a `redirect_uri`.
+ * @type {Map<string, { code: string }>}
+ */
+const outcomes = new Map()
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
   readBody(req).then((body) => {
@@ -132,17 +140,26 @@ function route(req, res, url, body) {
     return `202 rows=${rows} total=${counts.rows}`
   }
 
-  // The attended `hyp remote login` flow (LLP 0058/0059). The browser is
-  // whatever fetches the start URL: it is answered with a 302 straight to the
-  // client's loopback receiver, so `curl -L <start-url>` completes a sign-in.
+  // The attended `hyp remote login` flow (LLP 0058/0059, poll delivery per
+  // LLP 0342). The browser is whatever fetches the start URL. Absence of
+  // `redirect_uri` selects the poll lane, which is what current clients send:
+  // the outcome is parked by `state` and the client's poller collects it, so a
+  // plain `curl <start-url>` completes a sign-in. A `redirect_uri` still gets
+  // the 302, for released clients that predate the poll lane.
   if (req.method === 'GET' && url.pathname === '/v1/identity/login/start') {
     const redirectUri = url.searchParams.get('redirect_uri')
     const state = url.searchParams.get('state')
-    if (!redirectUri || !state) {
-      return json(res, 400, { error: 'invalid_request' }, 'missing redirect_uri or state')
+    if (!state) {
+      return json(res, 400, { error: 'invalid_request' }, 'missing state')
     }
     const code = `code_${codeSeq += 1}`
     codes.set(code, { challenge: url.searchParams.get('code_challenge') ?? '' })
+    if (!redirectUri) {
+      outcomes.set(state, { code })
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<p>Login complete. You can close this tab and return to the terminal.</p>\n')
+      return `200 parked ${code}`
+    }
     // Built through `URL` rather than string concatenation: a loopback
     // receiver that already carries a query would otherwise get two `?`.
     let location
@@ -157,6 +174,17 @@ function route(req, res, url, body) {
     res.writeHead(302, { location })
     res.end()
     return `302 → ${redirectUri}`
+  }
+
+  // Poll delivery: single pickup, then the state is gone. `unknown_state` (not
+  // the catch-all 404 below) is what a poll-capable server answers before the
+  // browser has landed, and the client keeps polling through it.
+  if (req.method === 'GET' && url.pathname === '/v1/identity/login/poll') {
+    const state = url.searchParams.get('state') ?? ''
+    const outcome = outcomes.get(state)
+    if (!outcome) return json(res, 404, { error: 'unknown_state' }, 'no flight yet')
+    outcomes.delete(state)
+    return json(res, 200, { status: 'complete', code: outcome.code }, `delivered ${outcome.code}`)
   }
 
   if (req.method === 'POST' && url.pathname === '/v1/identity/token') {

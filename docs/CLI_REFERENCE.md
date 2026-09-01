@@ -346,13 +346,19 @@ work so you can confirm the target.
 ### `hyp sync`
 
 ```text
-hyp sync [instance] [--yes] [--dry-run]
+hyp sync [instance] [--history <client>] [--yes] [--dry-run]
 ```
 
 Prints a destination and exclusion plan, confirms it, then forces the selected
 sink or every configured sink to export. `--dry-run` sends nothing. On a newly
 enrolled machine, an interactive all-destination sync can release the
 first-sync review hold early. A single-instance sync can't release that hold.
+
+`--history <client>` is a separate mode: it previews and, after its own
+confirmation, replays that client's locally retained history to the
+destinations that support a replay, leaving the ordinary sink watermarks
+untouched. The client must already be syncing (`hyp privacy client <client>
+sync`), and a replay cannot release the first-sync review hold.
 
 ```sh
 hyp sync --dry-run
@@ -456,7 +462,8 @@ hyp client attach [client] [--client <name>] [--dry-run] [--json]
 Writes only HypAware-managed client settings and installs registered skills and
 subagents. Repeating the command is a no-op. Claude Code uses its OTEL settings
 and requires version 2.1.193 or later. Gateway-backed clients require an active
-gateway configuration. `--dry-run` writes nothing.
+gateway configuration. OpenCode installs a HypAware-owned plugin in its shared
+CLI/Desktop config home and requires no gateway. `--dry-run` writes nothing.
 
 ```sh
 hyp client attach claude --dry-run
@@ -464,6 +471,9 @@ hyp client attach claude --dry-run
 
 Codex attach covers both Codex CLI and Codex Desktop because they share
 `~/.codex/config.toml` and `~/.codex/sessions`.
+
+OpenCode attach likewise covers CLI and Desktop because they share the same
+XDG config home and session store.
 
 ### `hyp client detach`
 
@@ -832,9 +842,10 @@ hyp privacy client [<name>] [sync|local-only] [--json]
 ```
 
 Lists or changes per-client export policy. `local-only` withholds future rows
-from remote sync. Returning to `sync` affects future rows only; rows withheld
-while local-only aren't uploaded later. A client required by central
-configuration can't opt out.
+from remote sync. Returning to `sync` affects future rows only: the policy
+flip itself uploads nothing that was withheld. To upload that retained history,
+run the separate, separately confirmed `hyp sync --history <client>`. A client
+required by central configuration can't opt out.
 
 ```sh
 hyp privacy client codex local-only

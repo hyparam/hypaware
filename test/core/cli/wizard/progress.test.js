@@ -9,6 +9,7 @@ import path from 'node:path'
 import { runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
 import { WIZARD_STEP_LABELS, wizardItinerary, wizardStepProgress } from '../../../../src/core/cli/wizard/steps.js'
+import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { defaultPromptFactory, runPickerFinale } from '../../../../src/core/cli/walkthrough.js'
 import { render } from '../../../../src/core/cli/tui/render.js'
 
@@ -132,6 +133,114 @@ test('wizardStepProgress: a managed machine on the local pathway gains both enro
   assert.equal(wizardStepProgress('local', 'sync', { managed: true }), 'Step 2 of 4 · Choose what syncs')
   assert.equal(wizardStepProgress('local', 'folders', { managed: true }), 'Step 3 of 4 · Choose how new folders are handled')
   assert.equal(wizardStepProgress('local', 'finale', { managed: true }), 'Step 4 of 4 · Finish setup')
+})
+
+// A question lane keeps its place in the total and states its position on
+// the machine where it turns out to have nothing to ask (LLP 0338
+// #counts-anyway). The sync lane on a fully fleet-managed machine is the
+// shipped instance: everything picked is the fleet's, so it states that
+// and asks nothing. Pinned by rendering the real lane, because the
+// alternatives this decision rejected - dropping the lane from the total,
+// or blanking its position line - are both invisible in `steps.js` and
+// only show up on the screen.
+// @ref LLP 0338#counts-anyway [tests]: a lane with no question still prints its position above the statement it makes instead
+test('the sync lane states its position even when it has nothing to ask', async () => {
+  const stdout = makeBuf()
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout,
+    stderr: makeBuf(),
+    env: { HYP_HOME: await tmpHome(), HYP_NO_TUI: '1' },
+    candidates: [],
+    locked: [{ id: 'claude', label: 'Claude Code' }],
+    lockedHidden: 0,
+    candidatesHiddenIds: [],
+    progress: 'Step 3 of 5 · Choose what syncs',
+    // The lane's prompt seam is `prompt`, not `confirm`: a guard on the
+    // wrong field is inert, and a regression in the no-candidates arm
+    // would reach the real stdin instead of failing here.
+    prompt: async () => { throw new Error('a fully fleet-managed machine has nothing to ask') },
+  }))
+
+  assert.equal(result.noQuestion, true, 'the lane asked nothing')
+  const lines = stdout.text().split('\n').filter((l) => l !== '')
+  // The position line, and then the statement that corrects what the
+  // label promised, in the same frame at the first moment it is knowable.
+  assert.deepEqual(lines, [
+    'Step 3 of 5 · Choose what syncs',
+    'Everything you picked is managed by your fleet and always syncs.',
+    '  Claude Code',
+  ], stdout.text())
+})
+
+// The other half of the same decision: the lane keeps its place in the
+// total, not just its line. `wizardItinerary` takes the pathway and
+// `managed` and nothing else, and hands back a list no caller can edit,
+// so there is no seam through which a lane's emptiness could reach the
+// denominator - which is the point, since the sync lane's candidates are
+// the pick lane's result and the pick lane runs after the fork has fixed
+// the total (LLP 0338 #counts-anyway).
+// @ref LLP 0338#counts-anyway [tests]: the denominator is a function of the pathway alone, so an empty lane never leaves it
+test('wizardItinerary: no lane emptiness can reach the denominator', async () => {
+  // Every shape a lane's emptiness could arrive in, offered to the
+  // function at once. A future seam that read any of them - a candidate
+  // list, a `noQuestion` flag, a pick result - would drop `sync` from the
+  // total here, which is what this asserts cannot happen. Asserting only
+  // over `managed` would not: it passes just as well against a function
+  // that grew the seam, because nothing would be passing through it.
+  const emptiness = /** @type {any} */ ({
+    managed: true,
+    syncEmpty: true,
+    noQuestion: true,
+    candidates: [],
+    picked: { descriptors: [] },
+  })
+  const forEveryMachine = [
+    wizardItinerary('team'),
+    wizardItinerary('team', {}),
+    wizardItinerary('team', { managed: true }),
+    wizardItinerary('team', { managed: false }),
+    wizardItinerary('team', emptiness),
+  ]
+  for (const itinerary of forEveryMachine) {
+    assert.deepEqual(itinerary, ['join', 'pick', 'sync', 'folders', 'finale'])
+  }
+  assert.equal(wizardStepProgress('team', 'sync'), 'Step 3 of 5 · Choose what syncs')
+  assert.equal(wizardStepProgress('team', 'folders'), 'Step 4 of 5 · Choose how new folders are handled')
+  assert.equal(wizardStepProgress('team', 'sync', emptiness), 'Step 3 of 5 · Choose what syncs')
+  assert.equal(
+    wizardStepProgress('team', 'folders', emptiness),
+    'Step 4 of 5 · Choose how new folders are handled'
+  )
+
+  // The other pathway that runs the lane, because it reaches it by the
+  // other route: `team` reads the sync lane off the table, a managed
+  // `local` run splices it in beside `pick`. A seam grown on that arm
+  // alone leaves every assertion above green, so the emptiness has to
+  // bounce off both routes and not just the one the shipped instance was
+  // rendered on.
+  for (const itinerary of [
+    wizardItinerary('local', { managed: true }),
+    wizardItinerary('local', emptiness),
+  ]) {
+    assert.deepEqual(itinerary, ['pick', 'sync', 'folders', 'finale'])
+  }
+  assert.equal(wizardStepProgress('local', 'sync', emptiness), 'Step 2 of 4 · Choose what syncs')
+  assert.equal(
+    wizardStepProgress('local', 'folders', emptiness),
+    'Step 3 of 4 · Choose how new folders are handled'
+  )
+
+  // An options bag cannot see the last seam: the returned list itself. It
+  // used to be the module's own array, so a caller that spliced a lane out
+  // of what it was handed moved the total for every lane after it, with
+  // nothing passing through an argument at all.
+  const handed = wizardItinerary('team')
+  handed.splice(2, 1)
+  assert.deepEqual(
+    wizardItinerary('team'),
+    ['join', 'pick', 'sync', 'folders', 'finale'],
+    'the itinerary a caller was handed is not the one the next caller gets'
+  )
 })
 
 test('wizardStepProgress: an uncommitted pathway has no denominator', async () => {

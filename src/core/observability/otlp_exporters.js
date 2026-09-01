@@ -9,6 +9,15 @@ import { hrTimeToUnixNano, SpanStatusCode } from './runtime.js'
 
 const OTLP_AGGREGATION_TEMPORALITY_CUMULATIVE = 2
 
+/**
+ * Per-request timeout for every OTLP HTTP export. Lives here, next to the
+ * abort timer that enforces it, because the shutdown budget in
+ * `installObservability` is derived from it: a budget below this number
+ * abandons confirmations the exporter was about to deliver or give up on
+ * anyway (LLP 0339#budget-derived).
+ */
+export const OTLP_EXPORT_TIMEOUT_MS = 1_000
+
 class OtlpHttpJsonExporter {
   /**
    * @param {object} opts

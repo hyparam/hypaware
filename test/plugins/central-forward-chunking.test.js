@@ -29,8 +29,9 @@ function makeLog() {
  * @param {string} tablePath
  * @param {number | (() => number)} count
  * @param {(i: number) => Record<string, unknown>} [rowFactory]
+ * @param {(i: number) => boolean} [dropRow]
  */
-function makeStorage(tablePath, count, rowFactory) {
+function makeStorage(tablePath, count, rowFactory, dropRow) {
   const factory = rowFactory ?? ((i) => ({ message_id: `m${i}`, content_text: `row ${i}` }))
   const currentCount = () => typeof count === 'function' ? count() : count
   let flushes = 0
@@ -59,6 +60,10 @@ function makeStorage(tablePath, count, rowFactory) {
       for (let i = 0; i < currentCount(); i += 1) {
         const seq = BigInt(i + 1)
         if (seq <= since) continue
+        if (dropRow?.(i)) {
+          yield { dropped: true, after: { v: /** @type {const} */ (1), seq: seq.toString() } }
+          continue
+        }
         yield { row: factory(i), after: { v: 1, seq: seq.toString() } }
       }
     },
@@ -219,6 +224,7 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
  *   count: number | (() => number),
  *   responder?: (c: any) => (number | { status: number, retryAfter?: number } | Promise<number | { status: number, retryAfter?: number }>),
  *   rowFactory?: (i: number) => Record<string, unknown>,
+ *   dropRow?: (i: number) => boolean,
  *   signal?: string | null,
  *   query?: { getDataset: (name: string) => unknown },
  *   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>,
@@ -228,8 +234,8 @@ const TABLE = '/cache/ai_gateway_messages/source=claude'
  *   watermarkFilePath?: string,
  * }} opts
  */
-function buildSink({ count, responder, rowFactory, signal = 'logs', query, sleepFn, watermark, rollout, nowFn, watermarkFilePath }) {
-  const storage = makeStorage(TABLE, count, rowFactory)
+function buildSink({ count, responder, rowFactory, dropRow, signal = 'logs', query, sleepFn, watermark, rollout, nowFn, watermarkFilePath }) {
+  const storage = makeStorage(TABLE, count, rowFactory, dropRow)
   const identityClient = makeIdentity()
   const { calls, fn, drains } = makeFetch(responder)
   const log = makeLog()
@@ -298,6 +304,89 @@ test('a partition that fits in one chunk makes exactly one POST', async () => {
   assert.equal(result.status, 'exported')
   assert.equal(calls.length, 1)
   assert.equal(calls[0].rowCount, 10)
+})
+
+// @ref LLP 0345#central [tests]: retained source history is previewed and
+// replayed without rewinding or advancing the ordinary incremental cursor.
+test('client history replay filters by attribution and leaves the watermark untouched', async () => {
+  const dataset = {
+    name: 'ai_gateway_messages',
+    plugin: '@hypaware/ai-gateway',
+    schema: { columns: [] },
+    sourceSignal: 'proxy',
+    async discoverPartitions() {
+      return [{ dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath: TABLE }]
+    },
+  }
+  const query = {
+    getDataset: (/** @type {string} */ name) => name === 'ai_gateway_messages' ? dataset : undefined,
+  }
+  const initial = {
+    v: /** @type {const} */ (1),
+    continuation: { v: /** @type {const} */ (1), seq: '3' },
+    exportedRowCount: 3,
+    updatedAt: '2026-08-31T00:00:00.000Z',
+  }
+  const { sink, calls, watermarks } = buildSink({
+    count: 4,
+    query: /** @type {any} */ (query),
+    watermark: initial,
+    dropRow: (i) => i === 3,
+    rowFactory: (i) => ({
+      message_id: `m${i}`,
+      part_id: `p${i}`,
+      client_name: i === 1 ? 'codex' : 'claude',
+      content_text: `row ${i}`,
+    }),
+  })
+
+  const preview = await sink.previewSourceHistory?.({ source: 'claude' })
+  assert.deepEqual(preview, { rows: 2, withheldRows: 1 })
+  assert.equal(calls.length, 0, 'preview is read-only')
+
+  const result = await sink.replaySourceHistory?.({ source: 'claude' })
+  assert.equal(result?.status, 'exported')
+  assert.equal(result?.rowsReplayed, 2)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url, 'http://server:8740/v1/ingest/proxy')
+  assert.deepEqual(calls[0].lines.map((line) => JSON.parse(line).client_name), ['claude', 'claude'])
+  assert.deepEqual(watermarks.record, initial)
+  assert.equal(watermarks.writes.length, 0)
+})
+
+test('client history replay reports only chunks acknowledged before a failure', async () => {
+  const dataset = {
+    name: 'ai_gateway_messages',
+    plugin: '@hypaware/ai-gateway',
+    schema: { columns: [] },
+    sourceSignal: 'proxy',
+    async discoverPartitions() {
+      return [{ dataset: 'ai_gateway_messages', partition: { source: 'claude' }, tablePath: TABLE }]
+    },
+  }
+  const query = {
+    getDataset: (/** @type {string} */ name) => name === 'ai_gateway_messages' ? dataset : undefined,
+  }
+  let response = 0
+  const { sink, calls, watermarks } = buildSink({
+    count: 6_000,
+    query: /** @type {any} */ (query),
+    responder: () => (++response === 1 ? 202 : 400),
+    rowFactory: (i) => ({
+      message_id: `m${i}`,
+      part_id: `p${i}`,
+      client_name: 'claude',
+      content_text: `row ${i}`,
+    }),
+  })
+
+  const result = await sink.replaySourceHistory?.({ source: 'claude' })
+
+  assert.equal(result?.status, 'failed')
+  assert.equal(result?.rowsReplayed, 5_000)
+  assert.ok((result?.bytesWritten ?? 0) > 0)
+  assert.deepEqual(calls.map((call) => call.rowCount), [5_000, 1_000])
+  assert.equal(watermarks.writes.length, 0)
 })
 
 test('chunk batch-ids are deterministic across re-exports (idempotent retry)', async () => {

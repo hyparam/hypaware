@@ -3,13 +3,11 @@
 import { JsonlMetricExporter } from './jsonl_exporters.js'
 import { devTelemetryDir } from './env.js'
 import { MeterProvider, metrics } from './runtime.js'
-import { OtlpMetricExporter } from './otlp_exporters.js'
+import { OtlpMetricExporter, OTLP_EXPORT_TIMEOUT_MS } from './otlp_exporters.js'
 
 /**
  * @import { Meter, MetricReader, ObservabilityEnv } from '../../../src/core/observability/types.js'
  */
-
-const OTLP_EXPORT_TIMEOUT_MS = 1_000
 
 /**
  * Install a MeterProvider with the same JSONL/OTLP strategy as the

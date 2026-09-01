@@ -3,6 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { compareStrings } from 'hypaware/core/util'
 import { readRolloutSessionMeta } from '../../../../src/core/codex/rollout_session_meta.js'
 
 // `sessionIdFromPath` predates the thread/container distinction: what it lifts
@@ -181,7 +182,7 @@ function findRolloutFile(sessionsDir, threadId, readdirSync) {
       continue
     }
     // Descending sort => newest date dirs / rollout files first.
-    entries.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0))
+    entries.sort((a, b) => compareStrings(b.name, a.name))
     /** @type {string[]} */
     const subdirs = []
     for (const entry of entries) {

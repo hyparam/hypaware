@@ -215,13 +215,99 @@ function inertSourceRegistry() {
       // A malformed contribution is passed through untouched so the real
       // `register` still rejects it: a source missing `start()` is a finding
       // about the plugin, not something the doctor should paper over.
+      //
+      // The stand-in delegates rather than copying. The guard below reads
+      // `start` through the prototype chain while a spread carries own
+      // enumerable properties and nothing else, so the two disagreed on a
+      // contribution that is a class instance: what reached the real
+      // `register` had lost whatever `name`, `plugin`, or `configSection`
+      // the class supplies from its prototype, and the doctor reported a
+      // fabricated `activate_threw` about a missing name against a plugin
+      // the kernel registers and starts without complaint. Validating one
+      // object and storing another is the same defect
+      // `src/core/registry/commands.js` fixed by copying before it checks;
+      // this registry stores by reference, so the fix here is the opposite
+      // direction: hand it something that reads like the contribution rather
+      // than a flattened copy of it.
       if (contribution && typeof contribution === 'object' && typeof contribution.start === 'function') {
-        registry.register({ ...contribution, start: inertStart })
+        registry.register(neuter(contribution))
         return
       }
       registry.register(contribution)
     },
   }
+}
+
+/**
+ * Wrap a source contribution so the registry stores the contribution it was
+ * handed, minus a live `start()`. Every read but `start` forwards to the
+ * original with the original as the receiver, so inherited fields, accessors,
+ * and private state answer exactly as they do under the real kernel, and
+ * neutering writes nothing to the plugin's own object. It does not make that
+ * object read-only: a write through the stand-in reaches the contribution,
+ * because the real registry hands the contribution out by reference and does
+ * not shield it either.
+ *
+ * @param {SourceContribution} contribution
+ * @returns {SourceContribution}
+ */
+function neuter(contribution) {
+  /**
+   * @param {SourceContribution} _target
+   * @param {string | symbol} prop
+   */
+  function get(_target, prop) {
+    if (prop === 'start') return inertStart
+    // The receiver is the contribution, not the proxy, so an accessor that
+    // reads a private field off `this` still finds it.
+    return Reflect.get(contribution, prop, contribution)
+  }
+
+  // A proxy may not answer a non-writable, non-configurable own property with
+  // anything but the target's real value, so a contribution holding its own
+  // `start` frozen cannot have it shadowed: the read inside `register` throws,
+  // and the doctor reports the fabricated `activate_threw` this stand-in
+  // exists to avoid, against a plugin the real registry accepts. Freezing a
+  // registered object is ordinary defensive style, so in that case proxy an
+  // empty object that inherits from the contribution. Reads resolve off the
+  // contribution itself either way.
+  const own = Object.getOwnPropertyDescriptor(contribution, 'start')
+  const frozenStart = own !== undefined && own.writable === false && own.configurable === false
+  if (!frozenStart) return new Proxy(contribution, { get })
+
+  // That inheriting target has no own properties and a prototype of its own,
+  // so the remaining traps exist to hide it: without them the stored
+  // contribution enumerates as `{}` and reports the wrong prototype, which is
+  // the same store-a-different-shape defect this stand-in exists to close. A
+  // descriptor is reported configurable because the target holds no
+  // non-configurable property to pin one to, and `start` is reported as the
+  // inert function the `get` trap already answers with.
+  // `defineProperty` stays untrapped on purpose: forwarding it would throw on
+  // an explicit `configurable: false` define, which the target cannot be made
+  // to carry, and a fabricated throw is the failure this stand-in exists to
+  // prevent. Nothing reshapes a stored contribution; ordinary writes go
+  // through `set`.
+  return new Proxy(Object.create(contribution), {
+    get,
+    ownKeys: () => Reflect.ownKeys(contribution),
+    /**
+     * @param {object} _target
+     * @param {string | symbol} prop
+     */
+    getOwnPropertyDescriptor(_target, prop) {
+      const desc = Reflect.getOwnPropertyDescriptor(contribution, prop)
+      if (desc === undefined) return undefined
+      if (prop === 'start') return { ...desc, value: inertStart, configurable: true }
+      return { ...desc, configurable: true }
+    },
+    getPrototypeOf: () => Reflect.getPrototypeOf(contribution),
+    /**
+     * @param {object} _target
+     * @param {string | symbol} prop
+     * @param {unknown} value
+     */
+    set: (_target, prop, value) => Reflect.set(contribution, prop, value),
+  })
 }
 
 /**

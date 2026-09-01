@@ -524,6 +524,31 @@ export interface SourceWithholdResolver {
    */
   shouldWithhold(attributionValue: unknown): boolean
   /**
+   * The transcript-`entrypoint` column `readRowsSince` should force into
+   * the scan alongside the attribution column, or `undefined` when no
+   * client declares entrypoint ownership or the dataset is not subject to
+   * per-row withholding at all. Optional so a hand-built test resolver
+   * without the ownership map behaves exactly as before.
+   */
+  entrypointColumnFor?(dataset: string): string | undefined
+  /**
+   * True when a row belongs to a withheld picker source that stamps a
+   * DIFFERENT source's `client_name`, identified through the transcript
+   * `entrypoint` value that source's manifest claims
+   * (`contributes.client.transcript_entrypoints`). `claude-desktop` is the
+   * shipped case: its live rows land as `client_name: "claude"` with
+   * `entrypoint: "claude-desktop-3p"` (LLP 0133 #attribution), so the
+   * `client_name` test alone can never enforce its opt-out (LLP 0346).
+   *
+   * Purely additive to `shouldWithhold`, and scoped to rows whose own
+   * `client_name` names a client that declares entrypoint ownership: the
+   * `entrypoint` vocabulary is per-client, so an unscoped read would
+   * withhold a hermes row (entrypoint `cli`) because `claude` claims
+   * `cli`. Optional for the same hand-built-resolver reason as
+   * `shouldWithholdDataset`.
+   */
+  shouldWithholdEntrypoint?(attributionValue: unknown, entrypointValue: unknown): boolean
+  /**
    * True when `dataset` has no attribution column, has at least one
    * contributing picker source, and every such source is withheld: the
    * whole dataset is then withheld (LLP 0188 #enforcement-scope), covering

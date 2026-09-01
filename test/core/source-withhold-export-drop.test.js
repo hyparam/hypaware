@@ -365,3 +365,153 @@ test('readRowsSince: cwd-based and source-scoped withholding compose independent
 
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
+
+// --- aliased-client opt-out (LLP 0346) ---------------------------------------
+//
+// `claude-desktop` is a real picker id, so `hyp privacy client claude-desktop
+// local-only` writes a real opt-out entry, but Desktop's live rows land under
+// `client_name: "claude"` with a Desktop-owned `entrypoint` (LLP 0133
+// #attribution). Keyed on the picker id and tested against `client_name`, that
+// entry matched nothing and the rows kept shipping. The refinement reads the
+// `entrypoint` a client's manifest claims, scoped to the clients that declare
+// entrypoint ownership so a hermes row (whose own interactive `entrypoint` is
+// literally `cli`, a value the claude client claims) is never reinterpreted.
+
+/** @type {ColumnSpec[]} */
+const ALIAS_COLS = [
+  { name: 'id', type: 'INT64', nullable: false },
+  { name: 'client_name', type: 'STRING', nullable: true },
+  { name: 'entrypoint', type: 'STRING', nullable: true },
+]
+
+/** The shipped `transcript_entrypoints` declarations, as the catalog folds them. */
+const SHIPPED_ENTRYPOINT_OWNERS = new Map([
+  ['cli', 'claude'],
+  ['sdk-cli', 'claude'],
+  ['claude-desktop', 'claude-desktop'],
+  ['claude-desktop-3p', 'claude-desktop'],
+])
+
+/**
+ * Run the export read over `rows` with `withheld` opted out, and report which
+ * ids reached the payload.
+ * @param {{ withheld: string[], rows: Record<string, unknown>[], columns?: string[] }} args
+ * @returns {Promise<{ shipped: number[], dropped: number }>}
+ */
+async function runAliasExport({ withheld, rows, columns }) {
+  const cacheRoot = await makeTmpDir()
+  const svc = createQueryStorageService({
+    cacheRoot,
+    sourceWithholdResolver: createSourceWithholdResolver({
+      withheldSourceIds: withheld,
+      datasetAttributionColumns: new Map([['demo', 'client_name']]),
+      clientEntrypointOwners: SHIPPED_ENTRYPOINT_OWNERS,
+    }),
+  })
+  const spoolPath = svc.cacheTablePath('demo', ['all'])
+  await svc.appendRows(spoolPath, ALIAS_COLS, rows)
+  await svc.flushTable(spoolPath, { reason: 'manual' })
+
+  /** @type {number[]} */
+  const shipped = []
+  let dropped = 0
+  for (const part of await svc.discoverCachePartitions()) {
+    for await (const entry of svc.readRowsSince(part.path, columns ? { columns } : {})) {
+      if (entry.dropped) dropped += 1
+      else shipped.push(Number(entry.row.id))
+    }
+  }
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+  return { shipped: shipped.sort((a, b) => a - b), dropped }
+}
+
+// @ref LLP 0346#entrypoint-refinement [tests]: the opt-out of a client that stamps another client's `client_name` is enforced through the entrypoint its manifest claims, and reaches no other client's rows
+test('readRowsSince: opting out claude-desktop withholds its live rows (client_name "claude") without touching Claude Code rows', async () => {
+  const { shipped, dropped } = await runAliasExport({
+    withheld: ['claude-desktop'],
+    rows: [
+      // Claude Code, the client the user did NOT opt out. Must still ship:
+      // over-withholding here is a different broken promise, not a fix.
+      { id: 1, client_name: 'claude', entrypoint: 'cli' },
+      { id: 2, client_name: 'claude', entrypoint: 'sdk-cli' },
+      // Desktop's live third-party-inference route: the defect. Stamped
+      // `client_name: "claude"` by design (LLP 0133), so the id-keyed opt-out
+      // could never match it.
+      { id: 3, client_name: 'claude', entrypoint: 'claude-desktop-3p' },
+      // Desktop's shared-tree value, same route in an older build.
+      { id: 4, client_name: 'claude', entrypoint: 'claude-desktop' },
+      // Desktop's backfilled rows already carry the owner's name.
+      { id: 5, client_name: 'claude-desktop', entrypoint: 'claude-desktop' },
+      // A client that declares no entrypoint ownership: its own `cli` value
+      // belongs to its vocabulary, not claude's.
+      { id: 6, client_name: 'hermes', entrypoint: 'cli' },
+    ],
+  })
+  assert.deepEqual(shipped, [1, 2, 6], 'only the clients the user kept syncing reach the payload')
+  assert.equal(dropped, 3, 'both live Desktop rows and the backfilled one are withheld')
+})
+
+test('readRowsSince: opting out claude still withholds every claude-attributed row, and reaches no client that merely shares an entrypoint value', async () => {
+  const { shipped, dropped } = await runAliasExport({
+    withheld: ['claude'],
+    rows: [
+      { id: 1, client_name: 'claude', entrypoint: 'cli' },
+      // Unchanged by the refinement: the `client_name` test alone already
+      // withholds this, so nothing that was withheld before ships now.
+      { id: 2, client_name: 'claude', entrypoint: 'claude-desktop-3p' },
+      { id: 3, client_name: 'claude', entrypoint: null },
+      // hermes stamps its session source as the entrypoint, and `cli` is one
+      // of its interactive values. Reading it as claude's claim would withhold
+      // a client the user never opted out.
+      { id: 4, client_name: 'hermes', entrypoint: 'cli' },
+      { id: 5, client_name: 'codex', entrypoint: 'codex_cli' },
+      { id: 6, client_name: 'claude-desktop', entrypoint: 'claude-desktop' },
+    ],
+  })
+  assert.deepEqual(shipped, [4, 5, 6], 'the opt-out stops at the client it names')
+  assert.equal(dropped, 3)
+})
+
+test('readRowsSince: a `columns` projection omitting `entrypoint` still enforces the aliased-client opt-out', async () => {
+  const { shipped, dropped } = await runAliasExport({
+    withheld: ['claude-desktop'],
+    columns: ['id'],
+    rows: [
+      { id: 1, client_name: 'claude', entrypoint: 'cli' },
+      { id: 2, client_name: 'claude', entrypoint: 'claude-desktop-3p' },
+    ],
+  })
+  assert.deepEqual(shipped, [1], 'the guarantee never rides on the caller projecting the column in')
+  assert.equal(dropped, 1)
+})
+
+// The two residuals LLP 0346 #consequences states, pinned so they are
+// retired deliberately rather than discovered. Both are rows the seam
+// cannot tell apart from a Claude Code row: `client_name: "claude"` with
+// an `entrypoint` no manifest claims, or none at all. This pin holds the
+// seam still: it fails if the seam (or `SHIPPED_ENTRYPOINT_OWNERS` above)
+// starts withholding an unclaimed or absent `entrypoint`. It does NOT fail on the
+// capture-side attribution fix LLP 0192 defers, which closes the residuals
+// by changing what capture writes into `client_name`, so retiring them that
+// way means deleting this test rather than watching it break;
+// `test/core/source-withhold-build.test.js` is the pin that fails if a
+// manifest ever claims `local-agent`.
+// @ref LLP 0346#local-agent-residual [tests]: the current attached-Desktop build tags its transcripts with an unclaimed container value, so a claude-desktop-only opt-out does not reach its live rows
+test('readRowsSince: a claude-desktop opt-out does not reach a live row tagged with an unclaimed container entrypoint', async () => {
+  const { shipped, dropped } = await runAliasExport({
+    withheld: ['claude-desktop'],
+    rows: [
+      // Desktop app 1.13576.0 / embedded CLI 2.1.177 (LLP 0133
+      // #attribution). `local-agent` names a CLI mode, not a client, so
+      // Desktop's manifest deliberately does not claim it.
+      { id: 1, client_name: 'claude', entrypoint: 'local-agent' },
+      // The projector could not correlate the exchange to a transcript, so
+      // the row has no second axis to read at all.
+      { id: 2, client_name: 'claude', entrypoint: null },
+      // The claimed value, for contrast: this one is withheld.
+      { id: 3, client_name: 'claude', entrypoint: 'claude-desktop-3p' },
+    ],
+  })
+  assert.deepEqual(shipped, [1, 2], 'the stated residuals: unclaimed and absent entrypoints still ship')
+  assert.equal(dropped, 1)
+})

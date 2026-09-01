@@ -1,6 +1,7 @@
 // @ts-check
 
 import { Attr, getLogger } from '../observability/index.js'
+import { compareStrings } from '../util/compare_strings.js'
 
 /**
  * @import { BackfillContribution, BackfillMaterializerContribution, BackfillMaterializerRegistry, BackfillRegistry } from '../../../hypaware-plugin-kernel-types.js'
@@ -62,7 +63,7 @@ export function createBackfillRegistry() {
   }
 
   function list() {
-    return Array.from(contributions.values()).sort((a, b) => a.name.localeCompare(b.name))
+    return Array.from(contributions.values()).sort((a, b) => compareStrings(a.name, b.name))
   }
 
   return { register, get, list }
@@ -121,7 +122,7 @@ export function createBackfillMaterializerRegistry() {
   }
 
   function list() {
-    return Array.from(contributions.values()).sort((a, b) => a.kind.localeCompare(b.kind))
+    return Array.from(contributions.values()).sort((a, b) => compareStrings(a.kind, b.kind))
   }
 
   return { register, get, list }

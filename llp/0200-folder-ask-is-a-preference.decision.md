@@ -5,7 +5,7 @@
 **Systems:** Onboarding, Usage-Policy, CLI
 **Author:** Brendan / Claude
 **Date:** 2026-08-07
-**Related:** LLP 0106 (the session-start classification hook this makes opt-in), LLP 0103 (the machine-local class store, untouched), LLP 0105 (#unknown: the query-seam backstop, untouched), LLP 0111 (the `policy` verb surface this extends), LLP 0113 (the ask's menu presentation), LLP 0188 (#opt-out: the sibling per-client preference), LLP 0190 (#sync-gate: the neighbouring wizard step), LLP 0201 (the express gate that can answer this step)
+**Related:** LLP 0106 (the session-start classification hook this makes opt-in), LLP 0103 (the machine-local class store, untouched), LLP 0105 (#unknown: the query-seam backstop, untouched), LLP 0111 (the `policy` verb surface this extends), LLP 0113 (the ask's menu presentation), LLP 0188 (#opt-out: the sibling per-client preference), LLP 0190 (#sync-gate: the neighbouring wizard step), LLP 0201 (the express gate that can answer this step), LLP 0341 (the run-level rule when the wizard's output stream dies)
 
 > Extends [LLP 0106](./0106-session-start-classification-hook.decision.md).
 > The hook, its copy, its enrolled-and-interactive gating, and the store its
@@ -104,14 +104,32 @@ itinerary gains a fourth counted lane, `folders`, between `sync` and
 #enrolled-only: nothing forwards from a solo machine, so neither question
 has stakes there).
 
-The step offers two rows, `Sync them all` first and default, and `Ask me
-about each new folder`. The answer is written either way, even when it
+The question's title is a sentence lead-in naming the run's recorded
+tools ("When opening Claude Code or Codex in a new project,"), joined
+with "or" because any one of them opening triggers the moment; the rows
+complete the sentence and are self-explaining
+([LLP 0201 #gate](./0201-express-defaults-gate.decision.md#gate)), with
+nothing riding the items chrome. Two rows: `Sync it automatically` first
+and default, then `Ask me the first time`. The names go through the same
+display filter as the sync lane, so a hidden row (LLP 0202) stays unnamed
+here too; a run with no names to offer falls back to tool-free phrasing.
+The answer is written either way, even when it
 matches the default: the user answered a question, and a recorded answer
 is what `hyp status`, `hyp policy list`, and a later re-run read back. A
 re-run defaults to the standing answer, so re-entering the wizard
-round-trips the preference instead of resetting it. A failed write warns
+round-trips the preference instead of resetting it. That binds the re-run,
+not the prompt: an express accept
+([LLP 0201 #narrate](./0201-express-defaults-gate.decision.md#narrate))
+records the standing answer too, and states it. Hardcoding the default on
+the accepted path would flip a deliberate `ask` to `sync` - the less
+protective value - and then print the new value as though the user had
+answered it, on the one screen they did answer. A failed write warns
 and leaves the previous mode standing; onboarding has done its
-load-bearing work by then and `hyp policy folders` can set it later.
+load-bearing work by then and `hyp policy folders` can set it later. A
+failed *stream* is the other case, and it is settled run-wide rather
+than here: a dead stdout ends the run as a cancel at the next boundary,
+keeping whatever this store recorded before it
+([LLP 0341](./0341-a-dead-consent-surface-ends-the-run-as-a-cancel.decision.md)).
 Escape steps back to the sync lane, cancel ends the run at 130 like any
 other lane, and a non-interactive run never reaches it (LLP 0131
 #attended-only), taking the default.

@@ -116,20 +116,17 @@ export interface RunWizardSyncScopeOptions {
   /** The step's position line, rendered on the prompt like the pick lane's. */
   progress?: string
   /**
-   * Offer back-navigation out of the lane (LLP 0191): escape at the gate
+   * Offer back-navigation out of the lane (LLP 0191): escape at the menu
    * returns `back: true` to the orchestrator (which re-runs the pick
-   * lane). The menu's own back always returns to the gate regardless.
+   * lane).
    */
   allowBack?: boolean
   /** Prompt seam (tests); defaults to the walkthrough prompt factory. */
   prompt?: AsyncPickPrompt
-  /** Defaults-gate seam (tests); defaults to the confirm-select factory. */
-  confirm?: AsyncConfirmSelectPrompt
   /**
-   * Take the gate's stated default without stopping at it (LLP 0201): the
-   * express gate already answered this lane, so it narrates the statement
-   * its gate would have shown and proceeds. Has no effect on a lane with
-   * no default to state, which still asks.
+   * Take the stated default without stopping at it (LLP 0201 #narrate):
+   * the express gate already answered this lane, so it narrates the sync
+   * split the menu would have shown and proceeds.
    */
   autoAccept?: boolean
 }
@@ -168,6 +165,12 @@ export interface RunWizardFolderAskOptions {
   /** The step's position line, rendered like the other lanes'. */
   progress?: string
   /**
+   * Plain tool names for the question's title ("When opening Claude Code
+   * or Codex in a new project,"): the run's picked and locked rows.
+   * Empty or absent falls back to the tool-free phrasing.
+   */
+  names?: string[]
+  /**
    * Offer back-navigation out of the lane (LLP 0191): escape returns
    * `back: true` and the orchestrator re-presents the sync lane.
    */
@@ -195,19 +198,29 @@ export interface RunWizardExpressGateOptions {
   stdin?: NodeJS.ReadableStream
   env: NodeJS.ProcessEnv
   /**
-   * The rows accepting will record, already labelled (locked rows
-   * fleet-suffixed) by `defaultRowLabels`. These are the pick gate's own
-   * rows, so the two screens can never disagree about what "all of these"
-   * means. Never empty: the orchestrator skips the gate when there is
-   * nothing to accept.
+   * The plain names of the tools accepting will record (no fleet or
+   * setup suffixes), joined into the accept row's summary sentence
+   * (LLP 0201 #gate). These are the pick lane's own default rows from
+   * `resolvePickSeeding`, so the gate and the lane can never disagree
+   * about what "everything" means. Never empty: the orchestrator skips
+   * the gate when there is nothing to accept.
    */
   rows: string[]
   /**
-   * Whether this run is enrolled. Gates the two claims the gate can only
-   * honestly make on a machine with a server: that everything syncs, and
-   * that new folders sync without a question.
+   * Whether this run is enrolled. Gates the sync claim the gate can only
+   * honestly make on a machine with a server.
    */
   enrolled?: boolean
+  /**
+   * Does the client-sync store already withhold one of `rows` from the
+   * server? The accept row may only promise sync for what would in fact
+   * sync (LLP 0201 #gate), and an express accept preserves standing
+   * opt-outs verbatim rather than clearing them, so on a reconfigure the
+   * unqualified claim is false. Resolution failure passes `true`: a gate
+   * that cannot prove everything syncs must not say it does. Ignored on
+   * an unenrolled run, which claims no sync at all.
+   */
+  syncWithheld?: boolean
   /** Offer back-navigation to the fork (LLP 0191). */
   allowBack?: boolean
   /** Prompt seam (tests); defaults to the confirm-select factory. */
@@ -494,17 +507,11 @@ export interface RunWizardPickOptions {
   /** Override the source prompt (tests pre-bake answers). */
   prompt?: AsyncPickPrompt
   /**
-   * Override the defaults gate (LLP 0190 #pick-gate) shown before the
-   * source menu when detection or the locked set yields a default;
-   * defaults to the confirm-select factory (tests pre-bake the choice).
-   */
-  confirm?: AsyncConfirmSelectPrompt
-  /**
-   * Take the defaults gate's stated rows without stopping at it
-   * (LLP 0201): the express gate already answered this lane, so it
-   * narrates what the gate would have shown and proceeds. With nothing
-   * detected and nothing locked there is no gate and no default to take,
-   * so the menu still opens - "defaults where there are defaults".
+   * Take the default rows without asking (LLP 0201 #narrate): the express
+   * gate already answered this lane, so it narrates the rows it accepted
+   * and proceeds. With nothing detected and nothing locked there is no
+   * default to take, so the menu still opens - "defaults where there are
+   * defaults".
    */
   autoAccept?: boolean
   /**
@@ -524,9 +531,8 @@ export interface RunWizardPickOptions {
   retentionDefault?: number
   /**
    * Offer back-navigation out of the lane (LLP 0191): escape (or `b`) at
-   * the lane's first screen returns `back: true` to the orchestrator,
-   * which re-presents the fork. The menu's back returns to the defaults
-   * gate whenever the gate was shown, regardless of this flag.
+   * the menu returns `back: true` to the orchestrator, which re-presents
+   * the express gate when it was shown, and the fork otherwise.
    */
   allowBack?: boolean
   /**
@@ -665,6 +671,42 @@ export interface RunWizardFirstAskOptions {
 }
 
 /**
+ * One of the wizard's two output streams, as the stream guard (LLP 0341)
+ * accepts and returns it: the same union every lane option declares,
+ * with the two read-only properties the prompt runtime consults.
+ */
+export type WizardOutputSink = NodeJS.WritableStream | {
+  write(chunk: string): unknown
+  readonly isTTY?: boolean | undefined
+  readonly columns?: number | undefined
+}
+
+/**
+ * The wizard's stream guard (LLP 0341 #absorb): wrapped sinks whose
+ * writes never throw, plus the orchestrator's boundary check.
+ */
+export interface WizardOutputGuard {
+  /** The wrapped consent surface; hand this to every lane. */
+  stdout: WizardOutputSink
+  /** The wrapped qualifier stream; hand this to every lane. */
+  stderr: WizardOutputSink
+  /** Whether stdout is already known dead, without settling. */
+  outputDead(): boolean
+  /**
+   * The boundary check: settle stdout's pending writes (bounded), then
+   * report whether the consent surface is still alive. False means the
+   * run must end as a cancel (LLP 0341 #dead-surface).
+   */
+  checkpoint(): Promise<boolean>
+  /**
+   * Remove the guard's `error` listeners from the caller's streams. The
+   * run owns them only while it is running; call this when it ends,
+   * however it ends.
+   */
+  detach(): void
+}
+
+/**
  * Options for `runInitWizard`, the fork -> join -> pick -> configure ->
  * privacy -> finale orchestrator (LLP 0135 #orchestration). Non-interactive
  * callers (`--yes`, `--dry-run`, presets, `--from-file`) set `picks` and the
@@ -734,11 +776,16 @@ export interface RunInitWizardOptions {
   express?: (opts: RunWizardExpressGateOptions) => Promise<WizardExpressChoice>
   configure?: (picked: ConfigurePhasePicked, opts: RunConfigurePhaseOptions) => Promise<ConfigurePhaseResult>
   finaleRunner?: (args: Record<string, unknown>) => Promise<FinaleSummary>
-  /** Pick-phase prompt seams, threaded through unchanged (tests). */
+  /**
+   * Multiselect seam, threaded unchanged to both menu lanes - pick and
+   * sync (tests). They are told apart by `pickType`.
+   */
   prompt?: AsyncPickPrompt
   /**
-   * Defaults-gate seam, threaded to the pick and sync lanes and used for
-   * the managed-local disconnect question (tests).
+   * Confirm-select seam, threaded to the express gate and the new-folder
+   * question and used for the managed-local disconnect question (tests).
+   * The pick and sync lanes no longer take one: their defaults gates are
+   * retired (LLP 0201 #decline) and they ask through `prompt` alone.
    */
   confirm?: AsyncConfirmSelectPrompt
   /**

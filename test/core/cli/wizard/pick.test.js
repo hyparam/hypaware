@@ -59,23 +59,6 @@ function capturingPrompt(answer) {
 }
 
 /**
- * Record the defaults-gate question (LLP 0190 #pick-gate) and answer it
- * with a fixed choice. `'customize'` opens the full menu, which is what
- * most existing tests exercise.
- * @param {string} answer
- */
-function capturingConfirm(answer) {
-  /** @type {{ question: any }} */
-  const state = { question: null }
-  /** @type {any} */
-  const confirm = async (/** @type {any} */ question) => {
-    state.question = question
-    return answer
-  }
-  return { confirm, state }
-}
-
-/**
  * @param {string} tmp
  * @returns {NodeJS.ProcessEnv}
  */
@@ -158,7 +141,6 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   const { prompt, state } = capturingPrompt(['codex'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(['codex']),
   }))
   // The codex row came pre-checked from detection.
@@ -179,7 +161,6 @@ test('runWizardPick: a detected needs_setup row arrives unchecked, labeled detec
   const { prompt, state } = capturingPrompt(['codex'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(['codex', 'claude-desktop']),
   }))
   const desktopRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude-desktop')
@@ -188,17 +169,17 @@ test('runWizardPick: a detected needs_setup row arrives unchecked, labeled detec
   assert.deepEqual(result.sourcesPicked, ['codex'])
 })
 
-test('runWizardPick: the defaults gate omits a detected needs_setup row, and accept does not pick it', async () => {
+test('runWizardPick: the defaults omit a detected needs_setup row, and autoAccept does not pick it', async () => {
   const tmp = await mkTmp()
   const catalog = await catalogWithVisibleNeedsSetup()
-  const { confirm, state } = capturingConfirm('accept')
+  const stdout = makeBuf()
   const result = await runWizardPick(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
-    prompt: async () => { throw new Error('menu must not open on accept') },
-    confirm,
+    stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    autoAccept: true,
+    prompt: async () => { throw new Error('the express path must not prompt') },
     detect: async () => new Set(['codex', 'claude-desktop']),
   }))
-  assert.ok(!state.question.items.some((/** @type {string} */ i) => /Claude Desktop/.test(i)), 'the gate must not promise a row the user never ticked')
+  assert.doesNotMatch(stdout.text(), /Claude Desktop/, 'the narration must not promise a row the user never ticked')
   assert.deepEqual(result.sourcesPicked, ['codex'])
 })
 
@@ -208,8 +189,7 @@ test('runWizardPick: the defaults gate omits a detected needs_setup row, and acc
 //
 // A Desktop-only config collects nothing the menu can show now that the row
 // is hidden (LLP 0297), so this is also the LLP 0202 no-visible-row shape:
-// no gate is built, the menu opens on an empty seed, and the carried row has
-// to survive both.
+// the menu opens on an empty seed, and the carried row has to survive it.
 test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
@@ -227,7 +207,6 @@ test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     prompt: capturingPrompt([]).prompt,
-    confirm: async () => { throw new Error('a gate with no visible row must not be shown') },
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -238,94 +217,50 @@ test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured
 test('runWizardPick: a fresh pick reports nothing as previously configured', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
-  const { confirm } = capturingConfirm('accept')
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
-    prompt: async () => { throw new Error('menu must not open on accept') },
-    confirm,
+    autoAccept: true,
+    prompt: async () => { throw new Error('the express path must not prompt') },
     detect: async () => new Set(['codex']),
   }))
   assert.deepEqual(result.previouslyConfigured, [])
 })
 
-// A needs_setup row can still reach the gate off a recorded answer (a config
-// already composing it, or this run's own confirmed selection on a re-entry).
-// There the gate keeps it but says the part that is coming: its configure
-// phase walks a sign-in and a sudo prompt when it is newly picked.
-test('runWizardPick: a seeded needs_setup row on the gate carries the needs-extra-setup suffix', async () => {
+// A needs_setup row can still reach the default rows off a recorded answer
+// (a config already composing it, or this run's own confirmed selection on a
+// re-entry). There the narration keeps it but says the part that is coming:
+// its configure phase walks a sign-in and a sudo prompt when it is newly
+// picked.
+test('runWizardPick: a seeded needs_setup row is narrated with the needs-extra-setup suffix', async () => {
   const tmp = await mkTmp()
   const catalog = await catalogWithVisibleNeedsSetup()
-  const { confirm, state } = capturingConfirm('accept')
+  const stdout = makeBuf()
   const result = await runWizardPick(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
-    prompt: async () => { throw new Error('menu must not open on accept') },
-    confirm,
+    stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
+    autoAccept: true,
+    prompt: async () => { throw new Error('the express path must not prompt') },
     detect: async () => new Set(),
     initialSelection: ['codex', 'claude-desktop'],
   }))
-  assert.ok(
-    state.question.items.some((/** @type {string} */ i) => /Claude Desktop · needs extra setup/.test(i)),
-    'the gate names the consent still to come'
+  assert.match(
+    stdout.text(),
+    /Claude Desktop · needs extra setup/,
+    'the narration names the consent still to come'
   )
   assert.deepEqual(result.sourcesPicked.sort(), ['claude-desktop', 'codex'])
 })
 
-// --- the defaults gate (LLP 0190 #pick-gate) ---
-// @ref LLP 0190#pick-gate [tests]: the gate exists only when detection or the
-// org's locked set leaves something worth confirming, and accepting it must
-// reach the finale without ever opening the menu; the accept row's summary is
-// the happy path's only sighting of "accepting configures these tools"
+// --- the lane opens with its menu (LLP 0190 #pick-gate, LLP 0201 #decline) ---
+// @ref LLP 0190#pick-gate [tests]: the lane asks one question, the menu; the
+// defaults are taken only through the express gate's autoAccept, which
+// narrates instead of prompting
 
-test('runWizardPick: accepting the defaults gate picks exactly the detected sources, no menu', async () => {
-  const tmp = await mkTmp()
-  const catalog = await realCatalog()
-  const { confirm, state } = capturingConfirm('accept')
-  let menuShown = false
-  const result = await runWizardPick(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
-    prompt: async () => { menuShown = true; return [] },
-    confirm,
-    detect: async () => new Set(['codex']),
-  }))
-  assert.equal(menuShown, false, 'accepting the defaults never opens the menu')
-  assert.equal(state.question.title, 'HypAware will record:')
-  assert.ok(state.question.items.some((/** @type {string} */ i) => /codex/i.test(i)), 'sources are listed one per line under the title')
-  assert.equal(state.question.default, 'accept')
-  // Rows stay bare, but the accept option carries the disclosure that
-  // accepting changes the machine: the gate is the happy path, so it is
-  // the one place the user is guaranteed to see it (LLP 0190 #pick-gate).
-  assert.deepEqual(state.question.options.map((/** @type {any} */ o) => o.label), ['Record all', 'Select what to record'])
-  const accept = state.question.options.find((/** @type {any} */ o) => o.value === 'accept')
-  assert.match(accept.summary, /configures these tools/i, 'the accept option must disclose the side effects')
-  const customize = state.question.options.find((/** @type {any} */ o) => o.value === 'customize')
-  assert.equal(customize.summary, undefined)
-  assert.deepEqual(result.sourcesPicked, ['codex'])
-})
-
-test('runWizardPick: the gate names locked sources as fleet-managed and accept keeps them', async () => {
-  const tmp = await mkTmp()
-  const catalog = await realCatalog()
-  const { confirm, state } = capturingConfirm('accept')
-  const result = await runWizardPick(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
-    prompt: async () => { throw new Error('menu must not open on accept') },
-    confirm,
-    detect: async () => new Set(['codex']),
-    locked: ['claude'],
-  }))
-  assert.ok(state.question.items.some((/** @type {string} */ i) => /· managed by your fleet/.test(i)), 'a locked row keeps its fleet suffix in the list')
-  // The locked claude is dropped from local-layer composition as always...
-  assert.deepEqual(result.sourcesPicked, ['codex'])
-  // ...but stays a picked client for the finale's local work.
-  assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
-})
-
-// The express path (LLP 0201): the gate's rows are taken without a
+// The express path (LLP 0201): the default rows are taken without a
 // keypress, but the statement is still printed - the never-silent floor
 // binds the statement, not the prompt.
 // @ref LLP 0201#narrate [tests]:
 
-test('runWizardPick: autoAccept takes the gate rows and prints what the gate would have said', async () => {
+test('runWizardPick: autoAccept takes the default rows and prints what it accepted', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   const stdout = makeBuf()
@@ -333,7 +268,6 @@ test('runWizardPick: autoAccept takes the gate rows and prints what the gate wou
     stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     autoAccept: true,
     prompt: async () => { throw new Error('the express path must not prompt') },
-    confirm: async () => { throw new Error('the express path must not prompt') },
     detect: async () => new Set(['codex']),
     locked: ['claude'],
   }))
@@ -352,7 +286,6 @@ test('runWizardPick: autoAccept with no default to take still opens the menu', a
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     autoAccept: true,
-    confirm: async () => { throw new Error('there is no gate to accept') },
     detect: async () => new Set(),
   }))
   // Defaults where there are defaults: with nothing detected and nothing
@@ -360,26 +293,11 @@ test('runWizardPick: autoAccept with no default to take still opens the menu', a
   assert.deepEqual(result.sourcesPicked, ['otel'])
 })
 
-test('runWizardPick: no gate when nothing is detected and nothing is locked', async () => {
-  const tmp = await mkTmp()
-  const catalog = await realCatalog()
-  let gateShown = false
-  const { prompt } = capturingPrompt(['otel'])
-  const result = await runWizardPick(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => { gateShown = true; return 'accept' },
-    detect: async () => new Set(),
-  }))
-  assert.equal(gateShown, false, 'an empty default is nothing to confirm; the menu shows directly')
-  assert.deepEqual(result.sourcesPicked, ['otel'])
-})
-
-// The menu's back arm without a gate (LLP 0191 #lane-loops): when the
-// orchestrator offered back (`opts.allowBack`) but the lane has no gate
-// (nothing detected, nothing locked), the menu IS the lane's first screen,
-// so its back must propagate to the caller. A regression that re-presents
-// the menu instead spins forever with no user-visible progress.
-test('runWizardPick: menu back with allowBack and no gate propagates to the caller, never loops', async () => {
+// The menu's back arm (LLP 0191 #lane-loops): the menu is the lane's only
+// screen, so its back must propagate to the caller when the orchestrator
+// offered back (`opts.allowBack`). A regression that re-presents the menu
+// instead spins forever with no user-visible progress.
+test('runWizardPick: menu back with allowBack propagates to the caller, never loops', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   const { PromptBackRequestedError } = await import('../../../../src/core/cli/tui/runtime.js')
@@ -388,27 +306,10 @@ test('runWizardPick: menu back with allowBack and no gate propagates to the call
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     allowBack: true,
     prompt: async () => { asks += 1; throw new PromptBackRequestedError() },
-    confirm: async () => { throw new Error('no gate exists to show') },
     detect: async () => new Set(),
   }))
   assert.equal(result.back, true)
   assert.equal(asks, 1, 'one presentation, then propagate')
-})
-
-test('runWizardPick: a cancelled gate returns the deterministic cancel result', async () => {
-  const tmp = await mkTmp()
-  const catalog = await realCatalog()
-  const { PromptCancelledError } = await import('../../../../src/core/cli/tui/runtime.js')
-  const stderr = makeBuf()
-  const result = await runWizardPick(/** @type {any} */ ({
-    stdout: makeBuf(), stderr, env: hermeticEnv(tmp), catalog,
-    prompt: async () => [],
-    confirm: async () => { throw new PromptCancelledError() },
-    detect: async () => new Set(['codex']),
-  }))
-  assert.equal(result.cancelled, true)
-  assert.equal(result.exitCode, 130)
-  assert.match(stderr.text(), /hyp setup: cancelled/)
 })
 
 // --- retention defaults (LLP 0137): never asked, pathway-supplied ---
@@ -482,7 +383,6 @@ test('runWizardPick: a locked row renders checked, disabled, and fleet-labeled',
   const { prompt, state } = capturingPrompt(['claude'])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     locked: ['claude'],
   }))
@@ -500,7 +400,6 @@ test('runWizardPick: a locked source is filtered out of the returned picks and c
   const { prompt } = capturingPrompt(['claude', 'codex'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     locked: ['claude'],
   }))
@@ -546,7 +445,6 @@ test('runWizardPick: a fully fleet-managed machine still reports its locked clie
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     retentionPrompt: async (/** @type {string} */ _p, /** @type {number} */ d) => d,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     locked: ['claude', 'codex'],
   }))
@@ -575,7 +473,6 @@ test('runWizardPick: a managed machine no longer labels non-locked rows "stays o
   const { prompt, state } = capturingPrompt([])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(['codex']),
     locked: ['claude'],
     managed: true,
@@ -598,7 +495,6 @@ test('runWizardPick: an unmanaged (solo) machine never shows a local-only suffix
   const { prompt, state } = capturingPrompt([])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(['claude']),
   }))
   for (const row of state.question.options) {
@@ -810,7 +706,6 @@ test('runWizardPick: a reconfigure pre-checks the undetectable otel row it alrea
   const { prompt, state } = capturingPrompt(['otel'])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -832,7 +727,6 @@ test('runWizardPick: a reconfigure leaves a deliberately excluded client uncheck
   const { prompt, state } = capturingPrompt(['otel'])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(['claude']),
     confirmOverwrite: async () => true,
   }))
@@ -857,7 +751,6 @@ test('runWizardPick: a 120-day retention survives a team-path reconfigure', asyn
   const { prompt } = capturingPrompt(['otel'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -872,7 +765,6 @@ test('runWizardPick: a first run still seeds from detection and takes the pathwa
   const { prompt, state } = capturingPrompt(['claude'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(['claude']),
     retentionDefault: 120,
   }))
@@ -904,7 +796,6 @@ test('runWizardPick: a reconfigure carries forward plugins and sink edits the pi
   const { prompt } = capturingPrompt(['otel'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -935,7 +826,6 @@ test('runWizardPick: a reconfigure of a cache-only install does not silently add
   const { prompt } = capturingPrompt(['otel'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -965,7 +855,6 @@ test('runWizardPick: unchecking a row still removes its plugin and its gateway u
   const { prompt } = capturingPrompt(['claude'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -987,7 +876,6 @@ test('runWizardPick: a disabled plugin reads as an off row, and re-picking it tu
   const { prompt, state } = capturingPrompt(['otel'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -1024,7 +912,6 @@ test('runWizardPick: a reconfigure does not add a second export sink beside a re
   const { prompt } = capturingPrompt(['otel'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -1059,7 +946,6 @@ test('runWizardPick: a request sink parked on the composer sink id is not folded
   const { prompt } = capturingPrompt(['otel'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -1109,7 +995,6 @@ test('runWizardPick: a differently written blob sink parked on the composer sink
   const { prompt } = capturingPrompt(['otel'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -1159,11 +1044,11 @@ test('defaultOverwriteConfirmFactory: bare enter proceeds, an explicit no declin
 
 // --- hidden rows (LLP 0202) ---
 
-test('runWizardPick: a hidden row is absent from the defaults gate as well as the menu', async () => {
+test('runWizardPick: a hidden row is absent from the menu', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
-  // A raw-only config: every row it collects is hidden, so the gate has
-  // nothing to list and the menu opens directly.
+  // A raw-only config: every row it collects is hidden, so the menu has
+  // nothing seeded to show.
   await seedLocalConfig(tmp, {
     version: 2,
     plugins: [
@@ -1174,17 +1059,13 @@ test('runWizardPick: a hidden row is absent from the defaults gate as well as th
     query: { cache: { retention: { default_days: 90 } } },
   })
   const { prompt, state } = capturingPrompt([])
-  const confirmCalls = []
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async (/** @type {any} */ q) => { confirmCalls.push(q); return 'customize' },
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
   const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
   assert.ok(!rendered.includes('raw-anthropic'))
-  // No visible row is seeded, so there is no defaults gate to show.
-  assert.deepEqual(confirmCalls, [])
 })
 
 test('runWizardPick: a raw-only config survives a reconfigure that picks nothing new', async () => {
@@ -1202,7 +1083,6 @@ test('runWizardPick: a raw-only config survives a reconfigure that picks nothing
   const { prompt } = capturingPrompt([])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -1236,7 +1116,6 @@ test('runWizardPick: the express path carries a raw-only config and never states
     stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     autoAccept: true,
     prompt: async () => { throw new Error('the express path must not prompt') },
-    confirm: async () => { throw new Error('the express path must not prompt') },
     detect: async () => new Set(),
     locked: ['claude'],
     confirmOverwrite: async () => true,
@@ -1274,7 +1153,6 @@ test('runWizardPick: a hidden row seeded only derivatively does not resurrect an
   const { prompt } = capturingPrompt(['claude'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -1312,7 +1190,6 @@ test('runWizardPick: a hidden row that is merely detected is not carried on a fi
   const { prompt } = capturingPrompt([])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     // No config on disk: the seed is this detection result and nothing else.
     detect: async () => new Set(['raw-anthropic']),
     confirmOverwrite: async () => true,
@@ -1349,20 +1226,18 @@ test('runWizardPick: a carried hidden row survives a re-entry that adds a visibl
   const first = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     prompt: capturingPrompt(['claude']).prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
   assert.deepEqual([...first.sourcesPicked].sort(), ['claude', 'raw-openai'])
 
   // Pass two: the user stepped back, so the wizard re-seeds with that answer
-  // and the defaults gate now has a visible row to offer. Accepting it must
-  // not quietly drop the raw row.
+  // and the menu now has a visible row checked. Confirming it must not
+  // quietly drop the raw row.
   const second = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     initialSelection: first.sourcesPicked,
     prompt: capturingPrompt(['claude']).prompt,
-    confirm: async () => 'accept',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -1395,21 +1270,17 @@ test('runWizardPick: claude-desktop is offered on no screen, even when detected'
   const tmp = await mkTmp()
   const catalog = await realCatalog()
   const { prompt, state } = capturingPrompt([])
-  const confirmCalls = []
+  const stdout = makeBuf()
   const result = await runWizardPick(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async (/** @type {any} */ q) => { confirmCalls.push(q); return 'customize' },
+    stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(['claude-desktop']),
     confirmOverwrite: async () => true,
   }))
   const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
   assert.ok(!rendered.includes('claude-desktop'), 'absent from the menu')
-  // `needs_setup` rows never seed from detection, so there is no gate at all
-  // here; assert it could not have named the row either way.
-  for (const call of confirmCalls) {
-    assert.doesNotMatch(String(call?.title ?? ''), /Desktop/i)
-    assert.doesNotMatch(String(call?.body ?? ''), /Desktop/i)
-  }
+  // `needs_setup` rows never seed from detection, so nothing narrates the
+  // row either.
+  assert.doesNotMatch(stdout.text(), /Desktop/i)
   assert.deepEqual(result.sourcesPicked, [])
   const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
   assert.equal(
@@ -1438,7 +1309,6 @@ test('runWizardPick: a configured claude-desktop survives a reconfigure that kee
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     prompt: capturingPrompt(['claude']).prompt,
-    confirm: async () => 'accept',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -1472,7 +1342,6 @@ test('runWizardPick: widening the carry rule leaves the derivative raw rows alon
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     prompt: capturingPrompt([]).prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(),
     confirmOverwrite: async () => true,
   }))
@@ -1506,9 +1375,8 @@ test('runWizardPick: --source claude-desktop still composes the Desktop dependen
 
 /**
  * A stdout that answers each readline prompt as it is printed, the way a
- * user types one line per screen. Both the gate (`select [1, b back]: `)
- * and the menu (`select (e.g. ...): `) end their prompt with `: `, so the
- * script is consumed in screen order.
+ * user types one line per screen. The menu's prompt (`select (e.g. ...): `)
+ * ends with `: `, so the script is consumed in screen order.
  *
  * @param {PassThrough} input
  * @param {string[]} answers
@@ -1536,9 +1404,9 @@ function scriptedStdout(input, answers) {
 // the config on disk already collects (LLP 0183 #seed-from-config); the
 // numbered fallback renders that state and keeps it only for a question
 // that says so. Without the opt-in the menu printed bare labels and a bare
-// enter returned nothing, so a reconfigure that walked gate -> menu ->
-// enter rewrote the config to collect nothing, with the overwrite confirm
-// defaulting to yes.
+// enter returned nothing, so a reconfigure that reached the menu and
+// pressed enter rewrote the config to collect nothing, with the overwrite
+// confirm defaulting to yes.
 // @ref LLP 0274#pick-menu [tests]:
 test('runWizardPick: the numbered menu keeps the seeded rows on a bare enter', async () => {
   const tmp = await mkTmp()
@@ -1555,9 +1423,8 @@ test('runWizardPick: the numbered menu keeps the seeded rows on a bare enter', a
     query: { cache: { retention: { default_days: 90 } } },
   })
   const input = new PassThrough()
-  // Screen one is the defaults gate: option 2 is "Select what to record".
-  // Screen two is the menu, answered with a bare enter.
-  const stdout = scriptedStdout(input, ['2\n', '\n'])
+  // The menu is the lane's only screen, answered with a bare enter.
+  const stdout = scriptedStdout(input, ['\n'])
 
   const result = await runWizardPick(/** @type {any} */ ({
     stdout, stderr: makeBuf(), stdin: input, env: hermeticEnv(tmp), catalog,
@@ -1594,8 +1461,8 @@ test('runWizardPick: a dropped terminal at a menu with nothing checked still can
   const stdout = makeBuf()
   const stderr = makeBuf()
 
-  // Nothing detected, nothing configured, nothing locked: no gate, so the
-  // menu is the first screen and every box arrives clear.
+  // Nothing detected, nothing configured, nothing locked: every box on the
+  // menu arrives clear.
   const result = await runWizardPick(/** @type {any} */ ({
     stdout, stderr, stdin: input, env: hermeticEnv(tmp), catalog,
     detect: async () => new Set(),
@@ -1620,24 +1487,22 @@ test('runWizardPick: an answer-less config (hyp remote add before init) still se
   // Exactly what `hyp remote add` writes on a machine that never onboarded:
   // a config file with no `plugins` key. Before the fix this classified the
   // run as a reconfigure, and the empty read-back beat the detection seed,
-  // so both detected clients arrived unchecked and no defaults gate showed.
+  // so both detected clients arrived unchecked.
   await seedLocalConfig(tmp, {
     version: 2,
     query: { remotes: { prod: { url: 'https://example.com' } } },
   })
-  const { prompt, state: menuState } = capturingPrompt(['claude'])
-  const { confirm, state: gateState } = capturingConfirm('accept')
+  const { prompt, state } = capturingPrompt(['claude', 'codex'])
   const result = await runWizardPick(/** @type {any} */ ({
-    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt, confirm,
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
     detect: async () => new Set(['claude', 'codex']),
     confirmOverwrite: async () => true,
   }))
-  // The defaults gate rendered from detection and named both rows.
-  assert.ok(gateState.question, 'the defaults gate must show; detection is the seed')
-  assert.ok(gateState.question.items.some((/** @type {string} */ i) => /Claude Code/.test(i)))
-  assert.ok(gateState.question.items.some((/** @type {string} */ i) => /Codex/.test(i)))
-  // Accepting it picked the detected rows without opening the menu.
-  assert.equal(menuState.question, null)
+  // The menu seeded from detection and pre-checked both rows.
+  const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
+  const codexRow = state.question.options.find((/** @type {any} */ o) => o.value === 'codex')
+  assert.equal(claudeRow.checked, true, 'detection is the seed')
+  assert.equal(codexRow.checked, true, 'detection is the seed')
   assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'codex'])
 })
 
@@ -1651,7 +1516,6 @@ test('runWizardPick: an answer-less config carries its keys forward and takes th
   const { prompt } = capturingPrompt(['claude'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'accept',
     detect: async () => new Set(['claude']),
     confirmOverwrite: async () => true,
   }))
@@ -1675,7 +1539,6 @@ test('runWizardPick: plugins: [] is an answer - detection does not re-seed an em
   const { prompt, state } = capturingPrompt(['claude'])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
-    confirm: async () => 'customize',
     detect: async () => new Set(['claude']),
     confirmOverwrite: async () => true,
   }))

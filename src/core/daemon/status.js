@@ -24,6 +24,7 @@ import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { compareStrings } from '../util/compare_strings.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { describeSelfUpdate } from '../update/self_update.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
@@ -41,6 +42,7 @@ import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
+import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
   isLaunchAgentInstalled,
@@ -62,6 +64,7 @@ import {
  * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
+ * @import { FileHandle } from 'node:fs/promises'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  * @import { LocalCaInfo } from '../../../src/core/tls/types.js'
@@ -514,7 +517,7 @@ export function recentEntrypointsFromSources(sources) {
       rows: typeof item.rows === 'number' && Number.isFinite(item.rows) ? item.rows : 0,
     })
   }
-  out.sort((a, b) => (a.lastSeen < b.lastSeen ? 1 : a.lastSeen > b.lastSeen ? -1 : 0))
+  out.sort((a, b) => compareStrings(b.lastSeen, a.lastSeen))
   // Sorted before the cap so the entries kept are the most recently seen ones,
   // which is the same entry a "recent clients" readout would keep anyway.
   return out.slice(0, MAX_RECENT_ENTRYPOINTS)
@@ -889,6 +892,48 @@ function sourceDetails(source) {
     : undefined
 }
 
+/**
+ * How long the daemon's own status snapshot may go unwritten before
+ * `hyp status` stops believing the `state` recorded in it.
+ *
+ * The daemon persists that snapshot at the end of every tick, and the tick
+ * interval is fixed at 60s outside the test harnesses, so this is five
+ * consecutive missed ticks. It is deliberately several ticks wide: one slow
+ * tick is ordinary (the sink export runs inside it), and a status command
+ * that flickered to `degraded` whenever an export ran long would be worse
+ * than the bug it is here to catch. It is also the reason the window is not
+ * tighter: the daemon's timers do not fire while the machine is asleep, so a
+ * host that just woke reads as stale until its next tick lands.
+ *
+ * @ref LLP 0348#the-window [implements]: several missed ticks, not one
+ */
+export const DAEMON_HEARTBEAT_STALE_MS = 5 * 60_000
+
+/**
+ * How long ago the daemon last wrote its status snapshot, derived from the
+ * two fields the snapshot already carries: `persist()` recomputes `uptimeMs`
+ * as `now - healthyAt` immediately before every write, so `healthyAt +
+ * uptimeMs` *is* the moment of that write. Nothing new has to be recorded
+ * for the heartbeat to be readable.
+ *
+ * Returns `null` when the snapshot has never reached `healthy` (a daemon
+ * still booting has no heartbeat to be late for) or when either field is
+ * missing or unusable, which is also how a status file written by an older
+ * build reads.
+ *
+ * @param {DaemonStatus | null | undefined} status
+ * @param {number} nowMs
+ * @returns {number | null}
+ * @ref LLP 0348#heartbeat-is-derived [implements]: healthyAt + uptimeMs is the last persist, so no new status field is minted
+ */
+export function daemonHeartbeatAgeMs(status, nowMs) {
+  const healthyAtMs = parseIsoMs(status?.healthyAt)
+  if (healthyAtMs === undefined) return null
+  const uptimeMs = status?.uptimeMs
+  if (typeof uptimeMs !== 'number' || !Number.isFinite(uptimeMs) || uptimeMs < 0) return null
+  return nowMs - (healthyAtMs + uptimeMs)
+}
+
 /* ---------- Phase 8: top-level status collector ---------- */
 
 /**
@@ -1170,6 +1215,45 @@ export async function collectHypAwareStatus(opts = {}) {
     if (!daemon.runId) daemon.runId = daemonStatusFile.runId
     if (!daemon.mode) daemon.mode = daemonStatusFile.mode
     daemon.state = daemonStatusFile.state
+  }
+
+  // ----- is the process that owns the pid still running its loop? -----
+  // Everything above proves the daemon started and still owns its pid. None
+  // of it proves the event loop can serve: a daemon wedged behind a stalled
+  // sink export still holds its bound listeners, and the kernel completes
+  // handshakes out of the accept backlog, so the gateway and the OTEL
+  // listener answer the connect and then never write a byte (issue #1003).
+  // The status file is the tell, because the tick that writes it is the same
+  // loop that would have served those requests: it stops advancing at exactly
+  // the moment the daemon stops working, while still saying `healthy`.
+  //
+  // Only ever asked of a live process. A snapshot left by a daemon that
+  // exited ages forever and is a record, not a claim about now.
+  // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a live pid with a frozen heartbeat is degraded, not healthy
+  //
+  // Asked only when the snapshot is this process's own. `daemon.running` is
+  // `processIsAlive(pid)`, which proves a pid is taken, not that the daemon
+  // took it: after a hard kill the OS is free to hand that number to an
+  // unrelated process, and without this the leftover pair would be read as
+  // that stranger's frozen heartbeat and raise an `error` on a machine
+  // running no daemon at all. It also covers the restart window, where
+  // launchd already reports the new pid and the file is still the old
+  // daemon's.
+  const snapshotIsThisProcess =
+    typeof daemonStatusFile?.pid !== 'number' || daemonStatusFile.pid === daemon.pid
+  const heartbeatAgeMs = daemon.running && snapshotIsThisProcess
+    ? daemonHeartbeatAgeMs(daemonStatusFile, Date.now())
+    : null
+  if (heartbeatAgeMs !== null && heartbeatAgeMs > DAEMON_HEARTBEAT_STALE_MS) {
+    // The reported state is this collector's verdict, not a transcription of
+    // the file: reporting `healthy` here is the defect.
+    daemon.state = 'degraded'
+    diagnostics.push({
+      severity: 'error',
+      kind: 'daemon_heartbeat_stale',
+      message: `the daemon process is alive but has not updated its status snapshot for ${formatGapDuration(heartbeatAgeMs)} - its tick has not completed in that time, so its bound listeners may accept connections without answering them`,
+      repair: ['hyp daemon restart'],
+    })
   }
 
   if (daemon.installed && !daemon.loaded) {
@@ -1938,13 +2022,23 @@ export async function collectHypAwareStatus(opts = {}) {
       ?? (() => probeLaunchdEnvSet({ timeoutMs: TRUST_PROBE_TIMEOUT_MS })),
   })
 
-  // ----- recent errors -----
-  const recentErrorCount = await countRecentErrors(devTelemetryDir(stateRoot))
+  // ----- recent errors (LLP 0349) -----
+  // Read every store this install actually keeps, not just the one a
+  // developer's install keeps. `dev-telemetry/` alone made this counter
+  // structurally zero on an ordinary machine (issue #1182), which is the one
+  // answer a monitoring field must never give when it has not looked.
+  // @ref LLP 0349#read-the-records-production-keeps [implements]: the count reads the daemon log and the sink outbox, which exist on every install, not only dev telemetry
+  const recentErrors = await countRecentErrors(stateRoot)
+  const recentErrorCount = recentErrors.total
   if (recentErrorCount > 0) {
     diagnostics.push({
       severity: 'warning',
       kind: 'recent_errors',
-      message: `${recentErrorCount} error log entr${recentErrorCount === 1 ? 'y' : 'ies'} in recent telemetry`,
+      // The breakdown is the pointer: "in the daemon log" and "failed sink
+      // export batches" are different places to look and different repairs,
+      // and a bare total sends the operator to the wrong one. It is prose
+      // only - no new report field is minted for it (LLP 0349#one-number).
+      message: `${recentErrorCount} error${recentErrorCount === 1 ? '' : 's'} recorded in the last ${RECENT_ERROR_WINDOW_HOURS}h (${recentErrors.breakdown.join('; ')})`,
       repair: ['hyp daemon restart'],
     })
   }
@@ -2321,7 +2415,7 @@ function inferConfiguredSources(activePlugins) {
       state: 'stopped',
     })
   }
-  return sources.sort((a, b) => a.name.localeCompare(b.name))
+  return sources.sort((a, b) => compareStrings(a.name, b.name))
 }
 
 /**
@@ -2374,7 +2468,7 @@ async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
       stillCoolingDown: nowMs - failure.failedAtMs < QUERY_FLUSH_FAILURE_COOLDOWN_MS,
     })
   }
-  failures.sort((a, b) => (a.failedAt < b.failedAt ? 1 : a.failedAt > b.failedAt ? -1 : a.table.localeCompare(b.table)))
+  failures.sort((a, b) => compareStrings(b.failedAt, a.failedAt) || compareStrings(a.table, b.table))
   return { total: failures.length, failures }
 }
 
@@ -2802,13 +2896,231 @@ export async function probeAttachedClients({ descriptors, homeDir, env }) {
 }
 
 /**
- * Walk the recent telemetry directory and count log entries whose
- * `severityText` is `ERROR`. Returns 0 when the directory does not
- * exist yet (no observability run has captured anything).
+ * The horizon `recent_error_count` reports over. The counter had none: it
+ * returned every ERROR record still on disk, so a machine that failed once in
+ * March carried the warning until someone deleted the file. A day is the
+ * shortest window that still spans an overnight brownout (the #1003 incident
+ * ran for hours while nobody was watching), and it is self-clearing, so an
+ * install that was repaired stops warning on its own.
+ *
+ * @ref LLP 0349#the-window [implements]: a stated 24-hour horizon, so "recent" means something and a fixed install stops warning
+ */
+export const RECENT_ERROR_WINDOW_HOURS = 24
+export const RECENT_ERROR_WINDOW_MS = RECENT_ERROR_WINDOW_HOURS * 3_600_000
+
+/**
+ * How much of `daemon.log` is read. The file is appended to for the life of
+ * the install and nothing rotates it (the note on the control-file watcher in
+ * `src/core/daemon/control.js` says so in as many words), so it is the one
+ * store here that could be arbitrarily large, and `hyp status` is a report
+ * that must not grow a cost with the age of the machine.
+ *
+ * The bound is sized against the worst case the window has to hold. A daemon
+ * that fails at every tick writes 1,440 records a day, and one
+ * `daemon.tick_failed` line with a real message runs a little over 200 bytes,
+ * so a day of them is around 300 KiB before the info and warn lines
+ * interleaved with them. A quarter-megabyte tail would therefore have cut
+ * inside the stated window on exactly the install that most needs counting; a
+ * megabyte clears it several times over and still reads in a millisecond or
+ * two. The count stays a floor rather than a census: a daemon noisy enough to
+ * overflow even this reports every error the tail holds, which is emphatically
+ * not zero.
+ *
+ * @ref LLP 0349#bounded-reads [implements]: the daemon log is read from the tail, never whole
+ */
+const DAEMON_LOG_TAIL_BYTES = 1024 * 1024
+
+/**
+ * The timestamp the sink driver bakes into an outbox filename. `persistOutbox`
+ * writes `<batchId>.json` where `batchId` is `<instance>-<iso>-<seq>`, so the
+ * age of every failed export batch is readable from the directory listing
+ * alone, with no file opened. Anything that does not match is not a batch this
+ * daemon wrote and is not evidence of a failure, so it is skipped rather than
+ * counted.
+ */
+const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\d+\.json$/
+
+/**
+ * Count the failures this install has actually recorded in the last
+ * {@link RECENT_ERROR_WINDOW_HOURS} hours, across every store that exists on
+ * an ordinary install.
+ *
+ * The two stores a production install keeps are disjoint, so nothing there is
+ * counted twice: `daemon.log` carries what `fileLog` emits (boot, tick,
+ * reload, source and maintenance failures) and the sink driver does not write
+ * to it at all, while the sink outbox carries one file per failed export batch
+ * and nothing else writes one.
+ *
+ * `dev-telemetry/logs-*.jsonl` is the third store, and it does overlap:
+ * `recordFailure` in `src/core/sinks/driver.js` logs
+ * `sink.export_batch.failed` through `getLogger` for the same batch
+ * `persistOutbox` has just written a file for, so with `HYP_DEV_TELEMETRY=1`
+ * set one failed export is counted once here and once there. That directory
+ * exists only when that variable is set, which is why this counter used to
+ * read zero on every real machine and why the overlap cannot reach one. The
+ * diagnostic names both halves of the breakdown, so a developer who does set
+ * it can see where the doubled total came from.
+ *
+ * @param {string} stateRoot
+ * @param {number} [nowMs]
+ * @returns {Promise<{ total: number, breakdown: string[] }>}
+ */
+async function countRecentErrors(stateRoot, nowMs = Date.now()) {
+  const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
+  const [daemonLog, sinkOutbox, devTelemetry] = await Promise.all([
+    countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs),
+    countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs),
+    countDevTelemetryErrors(devTelemetryDir(stateRoot), sinceMs),
+  ])
+  /** @type {string[]} */
+  const breakdown = []
+  if (daemonLog > 0) breakdown.push(`${daemonLog} in the daemon log`)
+  if (sinkOutbox > 0) breakdown.push(`${sinkOutbox} failed sink export batch${sinkOutbox === 1 ? '' : 'es'}`)
+  if (devTelemetry > 0) breakdown.push(`${devTelemetry} in dev telemetry`)
+  return { total: daemonLog + sinkOutbox + devTelemetry, breakdown }
+}
+
+/**
+ * Is a recorded instant inside the window? A record whose timestamp is
+ * missing or unreadable counts: this whole defect was a counter that stayed
+ * silent about failures it could not classify, and an unparseable stamp on a
+ * record that says `level: "error"` is still an error someone should see.
+ *
+ * @param {unknown} value
+ * @param {number} sinceMs
+ */
+function recordedWithinWindow(value, sinceMs) {
+  if (typeof value !== 'string') return true
+  const at = Date.parse(value)
+  if (!Number.isFinite(at)) return true
+  return at >= sinceMs
+}
+
+/**
+ * Count `level: "error"` records in the tail of the daemon log. This is the
+ * production-side record: `openDaemonLog` runs on every boot, in every mode,
+ * with no environment variable to enable it.
+ *
+ * @param {string} logPath
+ * @param {number} sinceMs
+ * @returns {Promise<number>}
+ */
+async function countDaemonLogErrors(logPath, sinceMs) {
+  /** @type {FileHandle} */
+  let handle
+  try {
+    handle = await fsp.open(logPath, 'r')
+  } catch {
+    return 0
+  }
+  try {
+    const { size } = await handle.stat()
+    // One byte of slack before the tail offset, so that the newline ending the
+    // previous record always leads the buffer. Without it, a boundary that
+    // happens to be line-aligned looks exactly like a mid-record cut and the
+    // discard below eats a whole valid record: on a log whose only error is
+    // that record, the count reads 0, which is the answer this counter exists
+    // to stop giving.
+    const offset = Math.max(0, size - DAEMON_LOG_TAIL_BYTES)
+    const start = offset > 0 ? offset - 1 : 0
+    const length = size - start
+    if (length <= 0) return 0
+    const buf = Buffer.allocUnsafe(length)
+    const { bytesRead } = await handle.read(buf, 0, length, start)
+    let text = buf.subarray(0, bytesRead).toString('utf8')
+    if (start > 0) {
+      // Drop through the first newline rather than let a half-line parse as
+      // something it is not. A line-aligned boundary leaves that newline at
+      // index 0, so only the empty fragment before it goes. The guard is
+      // load-bearing: a file smaller than the tail is read from byte 0 and has
+      // no fragment, so discarding unconditionally would eat its first record.
+      const nl = text.indexOf('\n')
+      text = nl < 0 ? '' : text.slice(nl + 1)
+    }
+    let count = 0
+    for (const line of text.split('\n')) {
+      if (!line) continue
+      /** @type {any} */
+      let parsed
+      try {
+        parsed = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (!parsed || typeof parsed !== 'object') continue
+      if (parsed.level !== 'error') continue
+      if (!recordedWithinWindow(parsed.ts, sinceMs)) continue
+      count += 1
+    }
+    return count
+  } catch {
+    return 0
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+/**
+ * Count failed export batches still sitting in the sink outboxes. One file is
+ * one batch the sink could not hand over (`persistOutbox`), which is the only
+ * durable trace a sink export failure leaves on an install without dev
+ * telemetry: the driver's own `sink.export_batch.failed` goes to the OTel
+ * logger, which has no exporter configured on an ordinary machine.
+ *
+ * Nothing drains these files, so the directory is a growing ledger and the
+ * window is what makes a count off it mean "now". Costs one directory listing
+ * per configured sink and opens no file: the batch id carries its own
+ * timestamp. The collector already walks the whole cache tree with a `stat`
+ * per file (`measureCacheStats`), so this sits well inside its budget.
+ *
+ * @param {string} sinksDir
+ * @param {number} sinceMs
+ * @returns {Promise<number>}
+ */
+async function countSinkOutboxBatches(sinksDir, sinceMs) {
+  /** @type {Dirent[]} */
+  let instances
+  try {
+    instances = await fsp.readdir(sinksDir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  let count = 0
+  for (const instance of instances) {
+    if (!instance.isDirectory()) continue
+    /** @type {string[]} */
+    let files
+    try {
+      files = await fsp.readdir(path.join(sinksDir, instance.name, 'outbox'))
+    } catch {
+      continue
+    }
+    for (const file of files) {
+      const match = OUTBOX_BATCH_TIMESTAMP.exec(file)
+      if (!match) continue
+      const at = Date.parse(match[1])
+      if (!Number.isFinite(at) || at < sinceMs) continue
+      count += 1
+    }
+  }
+  return count
+}
+
+/**
+ * Walk the dev telemetry directory and count log entries whose `severityText`
+ * is `ERROR`. Returns 0 when the directory does not exist, which on an
+ * ordinary install is always: this is the developer's store, kept as one
+ * input among three rather than removed, because under `HYP_DEV_TELEMETRY=1`
+ * it holds every `getLogger` error, and all but one of them reach no other
+ * file. The exception is the sink driver's `sink.export_batch.failed`, which
+ * describes a batch the outbox has a file for; `countRecentErrors` records
+ * why that overlap is left alone.
  *
  * @param {string} telemetryDir
+ * @param {number} sinceMs
+ * @returns {Promise<number>}
  */
-async function countRecentErrors(telemetryDir) {
+async function countDevTelemetryErrors(telemetryDir, sinceMs) {
   /** @type {string[]} */
   let entries
   try {
@@ -2831,9 +3143,10 @@ async function countRecentErrors(telemetryDir) {
       if (!line) continue
       try {
         const parsed = JSON.parse(line)
-        if (parsed && typeof parsed === 'object' && /** @type {any} */ (parsed).severityText === 'ERROR') {
-          count += 1
-        }
+        if (!parsed || typeof parsed !== 'object') continue
+        if (/** @type {any} */ (parsed).severityText !== 'ERROR') continue
+        if (!recordedWithinWindow(/** @type {any} */ (parsed).timestamp, sinceMs)) continue
+        count += 1
       } catch {
         // skip malformed lines silently
       }

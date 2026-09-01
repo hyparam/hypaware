@@ -5,6 +5,8 @@ import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { Readable } from 'node:stream'
 
+import { compareStrings } from '../../src/core/util/compare_strings.js'
+
 import {
   createS3BlobStore,
   createUnconfiguredS3BlobStore,
@@ -63,7 +65,7 @@ function makeFakeS3Client() {
       const prefix = typeof input.Prefix === 'string' ? input.Prefix : ''
       const contents = Array.from(objects.entries())
         .filter(([k]) => prefix.length === 0 || k.startsWith(prefix))
-        .sort((a, b) => a[0].localeCompare(b[0]))
+        .sort((a, b) => compareStrings(a[0], b[0]))
         .map(([key, { bytes, lastModified }]) => ({ Key: key, Size: bytes.byteLength, LastModified: lastModified }))
       return { Contents: contents }
     },
@@ -106,6 +108,32 @@ test('s3 BlobStore getObject returns null when AWS reports NotFound', async () =
   const store = createS3BlobStore({ bucket: 'my-bucket', client })
   const got = await store.getObject({ key: 'does/not/exist' })
   assert.equal(got, null)
+})
+
+test('the fake S3 client returns keys in byte order, the way ListObjectsV2 does', async () => {
+  // The BlobStore hands its caller whatever order the client answered in, so
+  // every listing test above is only as faithful as this double's sort. Sorted
+  // by the characters it is the service; sorted by the host collation it is
+  // the box the suite ran on, and nothing in the tree could tell the two apart
+  // until this.
+  //
+  // Four keys chosen so byte order and collation disagree twice over, on the
+  // two pairs `compare-strings.test.js` names: the characters put `B` before
+  // `a` and `-` before `_`, and every collation probed (`en-US`, `de-DE`,
+  // `lt-LT`, `az`, `tr-TR`) reverses both. So this listing tells a
+  // byte-ordered double from a collated one on any box with ICU data, which is
+  // the fidelity no assertion in the tree made when the doubles moved to
+  // `compareStrings` (#1148 item 3). A bucket really does answer in this
+  // order: for a general-purpose bucket S3 returns keys sorted by UTF-8 byte
+  // value, and for these keys that is the same as UTF-16 code unit order.
+  const client = makeFakeS3Client()
+  const store = createS3BlobStore({ bucket: 'my-bucket', prefix: 'hyp/exports', client })
+  for (const key of ['ds/x_1.parquet', 'ds/a.parquet', 'ds/x-1.parquet', 'ds/B.parquet']) {
+    await store.putObject({ key, body: new Uint8Array([1]) })
+  }
+  const seen = []
+  for await (const entry of store.listObjects({ prefix: '' })) seen.push(entry.key)
+  assert.deepEqual(seen, ['ds/B.parquet', 'ds/a.parquet', 'ds/x-1.parquet', 'ds/x_1.parquet'])
 })
 
 test('s3 BlobStore listObjects strips the prefix from emitted keys', async () => {

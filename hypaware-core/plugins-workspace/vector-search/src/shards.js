@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { compareStrings } from 'hypaware/core/util'
+
 /**
  * @import { CachePartitionMeta } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { RawShardHit, ShardMeta, ShardState, VectorIndexDeclaration } from './types.js'
@@ -27,7 +29,7 @@ import path from 'node:path'
  * @returns {[string, string][]}
  */
 function sortedEntries(partition) {
-  return Object.entries(partition ?? {}).sort(([a], [b]) => a.localeCompare(b))
+  return Object.entries(partition ?? {}).sort(([a], [b]) => compareStrings(a, b))
 }
 
 /**

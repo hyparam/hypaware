@@ -1422,6 +1422,25 @@ export interface SinkHandle {
  */
 export type DatasetDisposition = 'forwards' | 'skips' | 'starts-from-now'
 
+/** One client's locally retained history, requested for an explicit replay. */
+export interface SourceHistoryReplayRequest {
+  source: string
+}
+
+/** Read-only disclosure produced before a historical replay is confirmed. */
+export interface SourceHistoryReplayPreview {
+  rows: number
+  withheldRows: number
+}
+
+/** Result of one destination's historical replay. */
+export interface SourceHistoryReplayResult {
+  status: 'exported' | 'failed'
+  rowsReplayed: number
+  bytesWritten: number
+  error?: string
+}
+
 export interface Sink {
   /**
    * Called by the sink driver on the configured schedule. The driver
@@ -1451,6 +1470,16 @@ export interface Sink {
    * anyway makes the prompt promise less egress than occurs.
    */
   datasetDisposition?(dataset: DatasetRegistration): DatasetDisposition
+  /**
+   * Optional attended replay capability. Both methods must be implemented as a
+   * pair: the first is read-only disclosure for the consent prompt; the second
+   * sends exactly that class of history after confirmation. A sink without
+   * both is not a historical-replay destination.
+   *
+   * @ref LLP 0345#sink-capability [implements]: preview and execution are separate sink operations
+   */
+  previewSourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayPreview>
+  replaySourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayResult>
 }
 
 export interface ExportBatch {

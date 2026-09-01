@@ -41,7 +41,8 @@ is what the hint, the key, and the fallback all key off.
 
 <a id="back-edges"></a>**Back edges mirror the forward edges, one step
 at a time.** The orchestrator's lanes form a loop rather than a
-fall-through: sync backs to pick, pick backs to the fork, and the fork
+fall-through: sync backs to pick, pick backs to the express gate when it
+was shown and otherwise the fork (LLP 0201 #edges), and the fork
 backs to the returning gate - the last only on a reconfigure run,
 because a first run has no gate screen to return to (the gate then
 falls through without asking anything). The join lane has no back of
@@ -51,14 +52,15 @@ The position lines (LLP 0135 #progress) resolve per pass: a back
 through the fork that lands on the other pathway simply starts that
 pathway's count, exactly as a failed join's retry always has.
 
-<a id="lane-loops"></a>**Inside a lane, the menu backs to its gate.**
-Both gated lanes (pick and sync, LLP 0190) treat gate and menu as two
-screens of one question: escape at the menu returns to the gate
-whenever the gate was shown, and only the lane's *first* screen
-propagates `back` out to the orchestrator - and only when the
-orchestrator said there is a previous step (`allowBack` on the lane's
-options). Toggles made on a menu that is then escaped are discarded,
-like any dialog dismissed without confirming; the gate re-states the
+<a id="lane-loops"></a>**Each lane is one screen.** (Revised by
+[LLP 0201 #decline](./0201-express-defaults-gate.decision.md#decline):
+this section originally looped each lane's menu back to its own defaults
+gate; those gates are retired, so there is no lane-internal loop left.)
+The pick and sync lanes each render a single menu, which propagates
+`back` out to the orchestrator - and only when the orchestrator said
+there is a previous step (`allowBack` on the lane's options). Toggles
+made on a menu that is then escaped are discarded, like any dialog
+dismissed without confirming; the re-presented screen re-states the
 standing answer.
 
 <a id="re-entry-seeding"></a>**Stepping back into pick shows the answer

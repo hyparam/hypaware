@@ -15,6 +15,8 @@
  * @import { OverviewNotice, OverviewRows, OverviewQueryRunner, OverviewWindow } from '../../../src/core/query/types.js'
  */
 
+import { compareStrings } from '../util/compare_strings.js'
+import { groupThousands } from '../util/format_number.js'
 import { escapeForDisplay } from '../util/json_util.js'
 import { AUTO_REFRESH_FAILURE_MESSAGE, REFRESH_FAILURE_REASON_PREFIX, executeQuerySql } from './sql.js'
 import { renderLocalOnlyNotice } from './verb.js'
@@ -412,7 +414,7 @@ export function chooseOverviewWindow(probeRows, opts = {}) {
   const days = [...probeRows]
     .map((r) => ({ date: cell(r.date), rows: toNumber(r.n) }))
     .filter((d) => d.date !== '(none)')
-    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+    .sort((a, b) => compareStrings(b.date, a.date))
   if (days.length === 0) return null
 
   const totalRows = days.reduce((n, d) => n + d.rows, 0)
@@ -1092,8 +1094,10 @@ function toNumber(value) {
 }
 
 /**
- * Thousands separators without `toLocaleString`, whose grouping depends on
- * the host locale and would make the rendered block non-deterministic.
+ * A table cell's count: the empty-value policy this block renders under, over
+ * the shared locale-free grouping. The split is what let `hyp sync` reuse the
+ * grouping without inheriting `(none)`, which is a table's answer to a missing
+ * column and not a consent prompt's (#1121).
  *
  * @param {unknown} value
  * @returns {string}
@@ -1104,5 +1108,5 @@ export function formatCount(value) {
   if (value === null || value === undefined || value === '') return cell(value)
   const n = Number(value)
   if (!Number.isFinite(n)) return cell(value)
-  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return groupThousands(n)
 }

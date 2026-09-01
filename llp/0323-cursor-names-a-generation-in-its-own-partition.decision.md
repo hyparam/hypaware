@@ -7,6 +7,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-29
 **Extended-by:** [LLP 0326](./0326-generation-name-is-the-directory.decision.md) (#contained is checked against the filesystem as well as the string: a bare-name symlink resolves inside the partition and points out of it, so the gate now also refuses a generation name that is a symlink, and a name carrying a NUL)
+**Extended-by:** [LLP 0347](./0347-an-append-refuses-a-cursor-it-cannot-read.decision.md) (#consequences: the healing append, and the loss of a `table-<ms>` generation it accepted, are withdrawn for the unreadable case; the append refuses instead and the rows wait in the spool)
 **Related:** LLP 0013, LLP 0217, LLP 0310, LLP 0316, LLP 0023, LLP 0220
 
 > `cursor.json`'s `tableDir` is a directory NAME, not a path: the readers

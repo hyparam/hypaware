@@ -14,6 +14,7 @@ export {
   readJsonIfExists,
   readJsonIfExistsSync,
 } from './fs_atomic.js'
+export { compareStrings } from './compare_strings.js'
 export { copyDir } from './fs_copy.js'
 export {
   MAX_LABEL_CHARS,

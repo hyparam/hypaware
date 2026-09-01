@@ -4,6 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { mergeConfigLayers, resolveLayeredConfig } from '../../src/core/config/merge.js'
+import { compareStrings } from '../../src/core/util/compare_strings.js'
 
 test('no central layer: effective is the local layer verbatim', () => {
   const local = {
@@ -64,7 +65,7 @@ test('central wins and locks: a colliding local plugin/sink is dropped', () => {
   assert.equal(merged.effective.disambiguate?.['hypaware.encoder'], '@hypaware/format-parquet')
 
   // Every collision is recorded for `hyp status`.
-  assert.deepEqual(merged.drops.sort((a, b) => a.section.localeCompare(b.section)), [
+  assert.deepEqual(merged.drops.sort((a, b) => compareStrings(a.section, b.section)), [
     { section: 'disambiguate', key: 'hypaware.encoder', reason: 'collides_with_central' },
     { section: 'plugins', key: '@hypaware/ai-gateway', reason: 'collides_with_central' },
     { section: 'sinks', key: 'exports', reason: 'collides_with_central' },
@@ -174,7 +175,7 @@ test('resolveLayeredConfig: collisions and invalid additions both surface as dro
     merged.effective.plugins?.find((p) => p.name === '@hypaware/ai-gateway')?.config,
     { listen: 'central' }
   )
-  assert.deepEqual(merged.drops.sort((a, b) => a.key.localeCompare(b.key)), [
+  assert.deepEqual(merged.drops.sort((a, b) => compareStrings(a.key, b.key)), [
     { section: 'plugins', key: '@hypaware/ai-gateway', reason: 'collides_with_central' },
     { section: 'plugins', key: '@hypaware/format-jsonl', reason: 'invalid_merge', detail: 'capability_ambiguous' },
   ])

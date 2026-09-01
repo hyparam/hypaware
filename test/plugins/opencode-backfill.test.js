@@ -200,3 +200,45 @@ test('OpenCode backfill warns past an unreadable session and keeps going', async
   assert.equal(warnings[0].attrs.source_path, 'opencode export ses_throws')
   assert.equal(warnings[0].attrs.status, 'error')
 })
+
+// A Desktop-only install has no `opencode` binary, and Desktop is half of what
+// this adapter attaches. The list command's ENOENT is that machine saying it
+// has no CLI history to read, not a failure: reading it as one made every
+// OpenCode setup close on "backfill opencode: failed", where the file-reading
+// claude and codex providers report ok with zero rows for the same fact.
+test('OpenCode backfill reports no history rather than a failure when the CLI is absent', async () => {
+  const provider = createOpenCodeBackfillProvider({
+    async runCommand() {
+      const err = /** @type {NodeJS.ErrnoException} */ (new Error('spawn opencode ENOENT'))
+      err.code = 'ENOENT'
+      throw err
+    },
+  })
+
+  /** @type {{ event: string, attrs: Record<string, any> }[]} */
+  const logged = []
+  const ctx = runContext()
+  ctx.log = /** @type {any} */ ({
+    debug() {},
+    warn() {},
+    error() {},
+    info(/** @type {string} */ event, /** @type {any} */ attrs) { logged.push({ event, attrs }) },
+  })
+
+  const { items, events } = await collect(provider.run(ctx))
+  assert.deepEqual(items, [])
+  assert.deepEqual(events, [])
+  assert.deepEqual(logged.map((l) => l.event), ['opencode.backfill.cli_absent'])
+  assert.equal(logged[0].attrs.status, 'ok')
+  assert.equal(logged[0].attrs.reason, 'opencode_cli_absent')
+})
+
+// Only the spawn's own ENOENT is "no history here". A list command that ran and
+// then failed is a real failure and must still reach the caller, or a broken
+// OpenCode install silently reports zero sessions forever.
+test('OpenCode backfill still fails when the list command runs and errors', async () => {
+  const provider = createOpenCodeBackfillProvider({
+    async runCommand() { throw new Error('opencode exited with code 1') },
+  })
+  await assert.rejects(collect(provider.run(runContext())), /exited with code 1/)
+})

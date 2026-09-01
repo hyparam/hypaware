@@ -10,6 +10,7 @@ import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 import { writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
 import { SUGGESTED_PROMPTS } from '../../../../src/core/cli/wizard/first_ask.js'
 
@@ -114,9 +115,9 @@ function wizardOpts(home, over = {}) {
     pick: async (/** @type {any} */ o) => { opts._pickOpts = o; return pickResult() },
     syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: [] } },
     folderAsk: async (/** @type {any} */ o) => { opts._folderOpts = o; return { mode: 'sync' } },
-    // The express gate (LLP 0201) fronts the lanes on an enrolled attended
-    // run (LLP 0201 #one-lane-no-gate); these tests exercise the step-by-step
-    // path, so it declines by default.
+    // The express gate (LLP 0201) fronts the lanes on every attended run
+    // with default rows; these tests exercise the step-by-step path, so it
+    // declines by default.
     express: async (/** @type {any} */ o) => { opts._expressOpts = o; return 'choose' },
     configure: async () => ({ results: [] }),
     finaleRunner: async (/** @type {any} */ args) => {
@@ -397,30 +398,29 @@ test('runInitWizard: back at the express gate re-presents the fork', async () =>
   assert.equal(gates, 2)
 })
 
-// The gate exists to collapse several questions into one, and a solo
-// local run has only one: the pick gate, which offers the same rows
-// itself. Showing the express screen there asked the same question
-// twice - declining "Record all of these" landed on "Record all".
-// @ref LLP 0201#one-lane-no-gate [tests]: the solo local pathway opens with the pick gate, not the express gate
-test('runInitWizard: the unenrolled local pathway shows no express gate; the pick gate is the one question', async () => {
+// The gate is the wizard's only accept-or-customize screen, so the solo
+// local pathway shows it too (LLP 0201 #gate): accepting there is the
+// whole run, and declining opens the pick menu directly.
+// @ref LLP 0201#gate [tests]: the unenrolled local pathway shows the express gate and its accept auto-answers the pick lane
+test('runInitWizard: the unenrolled local pathway shows the express gate; accepting narrates the pick lane', async () => {
   let gates = 0
   const { opts } = wizardOpts(await tmpHome(), {
     fork: async () => 'local',
     catalog: detectableCatalog(),
     detect: async () => new Set(['claude']),
-    express: async () => { gates += 1; return 'defaults' },
+    express: async (/** @type {any} */ o) => { gates += 1; opts._expressOpts = o; return 'defaults' },
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
-  assert.equal(gates, 0, 'one gate to collapse is nothing to collapse (LLP 0201 #one-lane-no-gate)')
-  assert.equal(opts._pickOpts.autoAccept, undefined, 'the pick lane keeps its own gate')
-  assert.equal(opts._pickOpts.progress, 'Step 1 of 2 · Choose what to collect')
+  assert.equal(gates, 1, 'the accept question is asked on every pathway')
+  assert.equal(opts._expressOpts.enrolled, false, 'a solo run makes no sync claim')
+  assert.equal(opts._pickOpts.autoAccept, true)
+  assert.equal(opts._pickOpts.progress, undefined, 'an express run states no positions')
 })
 
 // Another enrolled shape: managed without a join this run. Its local
-// itinerary adds the sync and folder lanes (LLP 0188, LLP 0200), so the
-// gate has several questions to collapse and earns its screen.
-// @ref LLP 0201#one-lane-no-gate [tests]: a managed machine's local reconfigure keeps the express gate
+// itinerary adds the sync and folder lanes (LLP 0188, LLP 0200), and the
+// gate's accept answers them all.
 test('runInitWizard: a managed machine reconfiguring down the local pathway still gets the express gate', async () => {
   let gates = 0
   const { opts, calls } = wizardOpts(await tmpHome(), {
@@ -435,9 +435,56 @@ test('runInitWizard: a managed machine reconfiguring down the local pathway stil
   assert.equal(gates, 1)
   assert.equal(opts._pickOpts.autoAccept, true)
   // No `join`: a reconfigure never runs it. The extra lanes (`syncScope`,
-  // `folderAsk`) are what makes this run have several gates for the express
-  // gate to collapse (LLP 0201 #one-lane-no-gate) - the point of this case.
+  // `folderAsk`) still run behind the accept, narrating instead of asking.
   assert.deepEqual(calls, ['gate', 'fork', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
+})
+
+// The accept row's sync claim is read off the store the sync lane reads,
+// because an express accept preserves standing opt-outs rather than
+// clearing them (LLP 0188 #opt-out).
+test('runInitWizard: a standing opt-out on a named row narrows the express gate\'s sync claim', async () => {
+  const home = await tmpHome()
+  const stateDir = readObservabilityEnv({ HYP_HOME: path.join(home, '.hyp') }).stateDir
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'claude', class: 'local-only' }] })
+  const { opts } = wizardOpts(home, {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(opts._expressOpts.enrolled, true)
+  assert.equal(opts._expressOpts.syncWithheld, true, 'the gate may not promise sync for a row the store withholds')
+})
+
+test('runInitWizard: with nothing withheld the express gate keeps its unqualified sync claim', async () => {
+  const { opts } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(opts._expressOpts.enrolled, true)
+  assert.equal(opts._expressOpts.syncWithheld, undefined, 'an empty store withholds nothing')
+})
+
+test('runInitWizard: a solo run never pays for the store read', async () => {
+  const home = await tmpHome()
+  const stateDir = readObservabilityEnv({ HYP_HOME: path.join(home, '.hyp') }).stateDir
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'claude', class: 'local-only' }] })
+  const { opts } = wizardOpts(home, {
+    fork: async () => 'local',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  // Unenrolled the row claims no sync at all, so the store has no say.
+  assert.equal(opts._expressOpts.enrolled, false)
+  assert.equal(opts._expressOpts.syncWithheld, undefined)
 })
 
 test('runInitWizard: the team pathway runs the sync-scope and new-folder steps between pick and configure', async () => {
@@ -462,6 +509,52 @@ test('runInitWizard: the sync-scope step receives the locked descriptors so it c
   })
   await runInitWizard(opts)
   assert.deepEqual(opts._syncOpts.locked, [claudeDescriptor])
+})
+
+// The new-folder question's title names the tools whose sessions raise it
+// (LLP 0200 #wizard). A source the user sent local-only one screen earlier
+// never reaches the server from any folder, so naming it would promise
+// "syncs without asking" for a client that syncs nothing at all. Locked
+// rows always sync (LLP 0188 #locked) and are never filtered.
+// @ref LLP 0200#wizard [tests]: the title names the syncing rows, not the ones the sync menu just opted out
+test('runInitWizard: the new-folder title drops the sources the sync step opted out, and keeps the locked ones', async () => {
+  const catalog = emptyCatalog()
+  const claude = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
+  const codex = { plugin: '@hypaware/codex', id: 'codex', label: 'Codex' }
+  const openclaw = { plugin: '@hypaware/openclaw', id: 'openclaw', label: 'OpenClaw' }
+  catalog.pickerDescriptors.set('claude', claude)
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog,
+    pick: async () => pickResult({ lockedSources: ['claude'], descriptors: [codex, openclaw] }),
+    syncScope: async (/** @type {any} */ o) => { opts._syncOpts = o; return { optedOut: ['codex'] } },
+  })
+  await runInitWizard(opts)
+  assert.deepEqual(opts._folderOpts.names, ['Claude Code', 'OpenClaw'])
+})
+
+// The filter above reads `optedOut`, and a skipped lane returns `[]`
+// because it could not read the store, not because the store withholds
+// nothing (`sync_scope.js` warns and skips on an unreadable client policy
+// store). Naming every picked tool off that empty list promises "syncs
+// without asking" for rows the run has just said it cannot account for.
+// @ref LLP 0200#wizard [tests]: an unreadable sync store leaves the new-folder title with no names it can stand behind
+test('runInitWizard: a skipped sync step leaves the new-folder title tool-free', async () => {
+  const catalog = emptyCatalog()
+  const claude = { plugin: '@hypaware/claude', id: 'claude', label: 'Claude Code' }
+  const codex = { plugin: '@hypaware/codex', id: 'codex', label: 'Codex' }
+  catalog.pickerDescriptors.set('claude', claude)
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => 'team',
+    catalog,
+    pick: async () => pickResult({ lockedSources: ['claude'], descriptors: [codex] }),
+    syncScope: async () => ({ skipped: true, noQuestion: true, optedOut: [] }),
+  })
+  await runInitWizard(opts)
+  assert.deepEqual(opts._folderOpts.names, [], 'no list the run can stand behind, so no names')
+  // The question still runs: the preference is machine-local and worth
+  // recording whatever the client store says.
+  assert.equal(opts._folderOpts.progress !== undefined || opts._folderOpts.allowBack === true, true)
 })
 
 // The whole sync picture is the *visible* whole picture. `raw-anthropic` and
@@ -1106,7 +1199,7 @@ test('runInitWizard: the suggested questions come last, after the privacy narrat
   // Order: rows, then what leaves this machine, then the question.
   assert.ok(text.indexOf('First look') < text.indexOf('Nothing has been uploaded yet'))
   assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Questions worth asking'))
-  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want your AI client \(claude or codex\) to start/)
+  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want an attached AI client to start/)
 })
 
 // @ref LLP 0203#offer [tests]: the sync offer sits between the narration it acts on and the closing question list

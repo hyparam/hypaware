@@ -1,5 +1,7 @@
 // @ts-check
 
+import { compareStrings } from 'hypaware/core/util'
+
 /**
  * @import { Contract } from './types.js'
  * @import { PluginLogger } from '../../../../hypaware-plugin-kernel-types.js'
@@ -166,7 +168,7 @@ export function createContractRegistry(opts = {}) {
    * @returns {Contract[]}
    */
   function list() {
-    return [...contracts.values()].sort((a, b) => a.name.localeCompare(b.name))
+    return [...contracts.values()].sort((a, b) => compareStrings(a.name, b.name))
   }
 
   return { register, list }

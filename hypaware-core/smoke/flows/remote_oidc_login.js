@@ -22,19 +22,20 @@ import { verbToCommand } from '../../../src/core/cli/verb_command.js'
  */
 
 /**
- * Hermetic smoke for the multi-tenant OIDC client login (LLP 0058-0060). One
- * in-process server plays both roles against a single origin:
+ * Hermetic smoke for the multi-tenant OIDC client login (LLP 0058-0060, poll
+ * delivery per LLP 0342). One in-process server plays both roles against a
+ * single origin:
  *
- *  - the identity surface `<origin>/v1/identity/{login/start,token}` (signs
- *    real per-call tokens), and
+ *  - the identity surface `<origin>/v1/identity/{login/start,login/poll,token}`
+ *    (signs real per-call tokens), and
  *  - the MCP endpoint `<origin>/mcp` (accepts only the current access JWT).
  *
  * The flow drives the full chunk-2 path in a temp HYP_HOME:
  *
- *   browser login (scripted opener -> loopback redirect) -> session stored as
- *   kind: 'oidc' -> query attaches the access JWT -> a forced expiry drives a
- *   silent refresh + persist -> a revoked refresh row drives the re-login
- *   message.
+ *   browser login (scripted opener -> outcome parked server-side -> the client
+ *   polls it up) -> session stored as kind: 'oidc' -> query attaches the
+ *   access JWT -> a forced expiry drives a silent refresh + persist -> a
+ *   revoked refresh row drives the re-login message.
  *
  * The same login also mints a gateway credential (LLP 0061): the flow seeds
  * it into a configured central sink and proves the sink's own IdentityClient
@@ -54,23 +55,27 @@ export async function run({ harness, expect }) {
 
   const server = await startStubServer()
   const origin = `http://127.0.0.1:${server.port}`
-  const mcpUrl = `${origin}/mcp`
+  // The registered target URL is the server BASE (LLP 0084): the client
+  // derives `<base>/v1/mcp` from it, so the stub serves MCP there.
+  const mcpUrl = origin
   const identityBase = `${origin}/v1/identity`
   const stateDir = harness.stateDir
 
   try {
     // ----- smoke_step: browser_login -----
     // A scripted opener: instead of launching a browser, GET the start URL.
-    // The stub 302s to the loopback redirect_uri with a code, which the real
-    // loopback receiver catches.
+    // The stub parks the poll outcome keyed by the state (LLP 0325#d1), which
+    // the real poller then picks up - no listener anywhere in the client.
     const openBrowser = (/** @type {string} */ url) => {
       fetch(url).catch(() => {})
       return true
     }
-    const session = await loginWithBrowser({ identityBase, org: 'acme', host: 'smoke-host', openBrowser })
+    const session = await loginWithBrowser({ identityBase, org: 'acme', host: 'smoke-host', openBrowser, pollIntervalMs: 25 })
     await writeSession(stateDir, 'prod', session)
 
     const afterLogin = await readCredentials(stateDir)
+    // @ref LLP 0342#d3 [tests]: the start URL carries no redirect_uri; its absence selects poll delivery
+    expect.that('login: start carried no redirect_uri', server.state.sawRedirectUri, (v) => v === false)
     expect.that('login: session stored as kind oidc', afterLogin.prod?.kind, (v) => v === 'oidc')
     expect.that('login: resolved org is acme', session.org, (v) => v === 'acme')
     expect.that('login: a refresh token was issued', session.refreshToken, (v) => typeof v === 'string' && v.length > 0)
@@ -140,7 +145,8 @@ export async function run({ harness, expect }) {
   expect.that('telemetry: remote-oidc logs were emitted', oidcLogs, (rows) => rows.length > 0)
   const steps = new Set(oidcLogs.map((l) => l.attributes?.smoke_step).filter(Boolean))
   expect.that('telemetry: login_complete step present', steps.has('login_complete'), (v) => v === true)
-  expect.that('telemetry: loopback_bind step present', steps.has('loopback_bind'), (v) => v === true)
+  expect.that('telemetry: login_poll_start step present', steps.has('login_poll_start'), (v) => v === true)
+  expect.that('telemetry: login_poll_complete step present', steps.has('login_poll_complete'), (v) => v === true)
 }
 
 /**
@@ -191,7 +197,14 @@ async function forceExpiry(stateDir, target) {
  * @returns {Promise<{ port: number, state: any, close: (cb: () => void) => void, closeAllConnections: () => void }>}
  */
 function startStubServer() {
-  const state = { jwtSeq: 0, validJwt: '', refreshToken: 'rt-smoke', refreshRevoked: false, refreshCalls: 0, lastHost: '' }
+  const state = {
+    jwtSeq: 0, validJwt: '', refreshToken: 'rt-smoke', refreshRevoked: false, refreshCalls: 0, lastHost: '',
+    // Poll delivery (LLP 0325): outcomes parked by client state at login/start,
+    // consumed once by login/poll. sawRedirectUri pins the client contract.
+    sawRedirectUri: false,
+    /** @type {Map<string, { code: string }>} */
+    outcomes: new Map(),
+  }
   const mint = () => {
     state.jwtSeq += 1
     state.validJwt = `jwt-${state.jwtSeq}`
@@ -208,14 +221,26 @@ function startStubServer() {
       res.end(JSON.stringify(obj))
     }
 
-    // Identity: browser start -> 302 to the loopback redirect with a code.
+    // Identity: browser start -> park the poll outcome (no redirect: the
+    // upstream leg is stubbed away, the "browser" just lands the flight).
     if (req.method === 'GET' && url.pathname === '/v1/identity/login/start') {
-      const redirectUri = url.searchParams.get('redirect_uri') ?? ''
+      if (url.searchParams.has('redirect_uri')) state.sawRedirectUri = true
       const stateParam = url.searchParams.get('state') ?? ''
-      const loc = `${redirectUri}?code=auth-code&state=${encodeURIComponent(stateParam)}`
-      res.writeHead(302, { location: loc })
-      res.end()
+      state.outcomes.set(stateParam, { code: 'auth-code' })
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<p>Login complete. You can close this tab and return to the terminal.</p>')
       return
+    }
+
+    // Identity: the poll endpoint (LLP 0325#d2): single delivery, then 404.
+    if (req.method === 'GET' && url.pathname === '/v1/identity/login/poll') {
+      const stateParam = url.searchParams.get('state') ?? ''
+      const outcome = state.outcomes.get(stateParam)
+      if (outcome) {
+        state.outcomes.delete(stateParam)
+        return json({ status: 'complete', code: outcome.code })
+      }
+      return json({ error: 'unknown_state' }, 404)
     }
 
     // Identity: token endpoint (authorization_code + refresh_token grants).
@@ -242,7 +267,7 @@ function startStubServer() {
     }
 
     // MCP: accept only the current access JWT.
-    if (req.method === 'POST' && url.pathname === '/mcp') {
+    if (req.method === 'POST' && url.pathname === '/v1/mcp') {
       readBody(req).then((rpc) => {
         if (rpc.method === 'initialize') {
           res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'mcp-1' })

@@ -1,6 +1,6 @@
 // @ts-check
 
-import { sanitizeLabel } from 'hypaware/core/util'
+import { compareStrings, sanitizeLabel } from 'hypaware/core/util'
 
 /**
  * How many distinct `entrypoint` values the tracker keeps. The set is
@@ -99,7 +99,7 @@ export function createEntrypointActivity(options = {}) {
           last_seen: new Date(entry.lastSeenMs).toISOString(),
           rows: entry.rows,
         }))
-        .sort((a, b) => (a.last_seen < b.last_seen ? 1 : a.last_seen > b.last_seen ? -1 : 0))
+        .sort((a, b) => compareStrings(b.last_seen, a.last_seen))
     },
 
     /** @returns {number} */

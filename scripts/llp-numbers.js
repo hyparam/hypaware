@@ -20,6 +20,8 @@ import path from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
+import { compareStrings } from '../src/core/util/compare_strings.js'
+
 /** Documents live under this directory, tombstones and subdirectories included. */
 const LLP_DIR = 'llp'
 
@@ -138,7 +140,7 @@ export function collisions(refFiles, only = null) {
     if (byName.size < 2) continue
     if (only !== null && !only.has(number)) continue
     const claimants = [...byName].map(([file, refs]) => ({ file, refs }))
-    found.push({ number, claimants: claimants.sort((a, b) => a.file.localeCompare(b.file)) })
+    found.push({ number, claimants: claimants.sort((a, b) => compareStrings(a.file, b.file)) })
   }
   return found.sort((a, b) => a.number - b.number)
 }

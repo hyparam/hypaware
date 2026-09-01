@@ -5,6 +5,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { compareStrings } from '../util/compare_strings.js'
 import { atomicWriteJson, readJsonIfExists } from '../util/fs_atomic.js'
 import { errCode } from '../util/json_util.js'
 
@@ -255,7 +256,7 @@ export async function inspectClientAsset(dest) {
  */
 async function hashTree(root, dir, hash) {
   const entries = await fs.readdir(dir, { withFileTypes: true })
-  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  entries.sort((a, b) => compareStrings(a.name, b.name))
   for (const entry of entries) {
     const full = path.join(dir, entry.name)
     // The entry's shape leads its path, so a subdirectory named `x` and a file
@@ -273,5 +274,5 @@ async function hashTree(root, dir, hash) {
  * @returns {number}
  */
 function compareRecords(a, b) {
-  return a.dest < b.dest ? -1 : a.dest > b.dest ? 1 : 0
+  return compareStrings(a.dest, b.dest)
 }

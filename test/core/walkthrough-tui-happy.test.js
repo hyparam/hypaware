@@ -84,12 +84,13 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
       },
     })
 
-    // Sources prompt. The rendered rows are claude, codex, otel: the raw
-    // API rows are `hidden` and never render (LLP 0202). Move down twice
-    // to land on otel, toggle, then enter. It is the only prompt: export
-    // defaults to local-parquet and retention is never asked (LLP 0137).
+    // Sources prompt. The rendered rows open claude, codex, opencode,
+    // otel: the raw API rows are `hidden` and never render (LLP 0202).
+    // Move down three times to land on otel, toggle, then enter. It is the
+    // only prompt: export defaults to local-parquet and retention is never
+    // asked (LLP 0137).
     await settle()
-    await feed(io.stdin, ['\x1b[B', '\x1b[B', ' ', '\r'])
+    await feed(io.stdin, ['\x1b[B', '\x1b[B', '\x1b[B', ' ', '\r'])
 
     const result = await promise
     assert.equal(result.exitCode, 0)
@@ -176,10 +177,11 @@ test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO
   const input = new PassThrough()
   // Mark BOTH ends as TTYs so the only signal that flips the router is
   // the HYP_NO_TUI escape. This proves the env override wins over the
-  // TTY probe. One answer: source '3' (otel; the raw API rows are hidden,
-  // LLP 0202). Neither export nor retention is asked.
+  // TTY probe. One answer: source '4' (otel, behind the three client rows;
+  // the raw API rows are hidden, LLP 0202). Neither export nor retention
+  // is asked.
   Object.defineProperty(input, 'isTTY', { value: true })
-  const stdout = answerDrivenOutput(input, ['3\n'], true)
+  const stdout = answerDrivenOutput(input, ['4\n'], true)
   const stderr = makeBuf()
 
   // HYP_NO_TUI flows through opts.env: the same channel real callers
