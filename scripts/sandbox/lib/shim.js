@@ -320,7 +320,7 @@ function acquireStateLock(file) {
       // removal that took something.
       let broke = false
       try {
-        fs.rmSync(lockPath)
+        fs.unlinkSync(lockPath)
         broke = true
       } catch { /* released first, broken by another shim, or not a lock this shim can clear */ }
       if (broke) recordLockEvent(file, stale ? 'broke-stale' : 'broke-budget', started, ageMs)
