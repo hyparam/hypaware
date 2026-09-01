@@ -287,7 +287,7 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
       async () => {
         await fs.promises.rm(part.path, { recursive: true, force: true })
         // The directory is gone, so no later read of it can clear the
-        // cursor-escape report keyed on this path. Doing it here is free:
+        // standing cursor refusals keyed on this path. Doing it here is free:
         // the path is in hand and the delete just happened
         // (LLP 0334#eviction-clears).
         clearEscapeReport(part.path)
@@ -371,7 +371,7 @@ export function createRetentionEnforcer({ cacheRoot, config, getDataset }) {
       async () => {
         fs.rmSync(partitionDir, { recursive: true, force: true })
         // The directory is gone, so no later read of it can clear the
-        // cursor-escape report keyed on this path. Doing it here is free:
+        // standing cursor refusals keyed on this path. Doing it here is free:
         // the path is in hand and the delete just happened
         // (LLP 0334#eviction-clears).
         clearEscapeReport(partitionDir)
