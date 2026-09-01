@@ -69,6 +69,7 @@ test('live projector records normally when the exchange cwd is not ignored', asy
       session_id: 'sess-clean',
       transcript_path: undefined,
       git_branch: undefined,
+      git_remote: 'https://github.com/acme/clean.git',
       cwd: path.join(CLEAN_ROOT, 'src'),
       ts: '2026-05-22T09:59:00.000Z',
     })
@@ -82,6 +83,14 @@ test('live projector records normally when the exchange cwd is not ignored', asy
 
     assert.equal(rows.length, 2, 'a clean cwd must be unaffected: user + assistant rows land')
     assert.deepEqual(rows.map((r) => r.role).sort(), ['assistant', 'user'])
+    // Positive control for the drop test above: the same evidence field the
+    // ignored session carries does reach the row when the session is admitted,
+    // so that test's empty result is a real suppression and not an inert fixture.
+    assert.deepEqual(
+      rows.map((r) => r.git_remote),
+      ['https://github.com/acme/clean.git', 'https://github.com/acme/clean.git'],
+      'an admitted session must carry its GitHub repo evidence onto every row',
+    )
   } finally {
     await env.cleanup()
   }
