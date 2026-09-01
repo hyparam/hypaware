@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-04
 **Related:** LLP 0132 (superseded), LLP 0070 (export seam), LLP 0031 (layered config), LLP 0100/0101 (first-sync review window), LLP 0135 (export-seam design, extended), LLP 0120 (hermes rows), LLP 0147 (CLI-backend attribution), LLP 0175 (live-capture misattribution, open)
-**Extended-by:** [LLP 0190](./0190-wizard-defaults-gate.decision.md) (§never-silent below: the step's prompt shape changes - a defaults gate first, the menu's checkboxes now mark what syncs rather than what stays local, and locked sources appear read-only instead of not at all; the policy, store, and seam enforcement here are unchanged)
+**Extended-by:** [LLP 0190](./0190-wizard-defaults-gate.decision.md) (§never-silent below: the step's prompt shape changes - a defaults gate first, the menu's checkboxes now mark what syncs rather than what stays local, and locked sources appear read-only instead of not at all; the policy, store, and seam enforcement here are unchanged); [LLP 0345](./0345-explicit-client-history-replay.decision.md) (`#no-retroactive-ship`: the standing policy flip remains future-only, and an explicit consent-gated sync mode replays retained history)
 
 > Supersedes [LLP 0132](./0132-managed-local-additions-local-only.decision.md).
 > The org-visibility default flips: sources the user adds beside the org's
