@@ -639,14 +639,36 @@ export async function writeCursor(partitionDir, cursor) {
 function readCursorForAppend(partitionDir) {
   const cursor = tryReadCursorSync(partitionDir)
   if (cursor) return cursor
-  const refusal = appendRefusalReason(partitionDir)
+  // Decided from the read above and one `existsSync`, never by asking the
+  // reader a second time. A second read can succeed where the first did not
+  // (an operator repairing `cursor.json` by hand is not atomic, and the
+  // mutation lock is in-process), and "the first read failed, the second
+  // worked" would fall through to the fresh-partition default over a
+  // partition that is not fresh, which is #1170 again.
+  if (!fs.existsSync(path.join(partitionDir, CURSOR_FILE))) {
+    // Missing is the fresh partition, and it gets the concrete default: this
+    // is where a first append legitimately publishes its first generation.
+    return { epoch: 0, rowCount: 0, compaction: null }
+  }
   // The read itself already reported why, under the standing-refusal window
   // (LLP 0332#transition-plus-rewarn), so the message says what the refusal
   // costs and does not re-say the cause.
-  if (refusal) throw new Error(refusal)
-  // Missing is the fresh partition, and it gets the concrete default: this
-  // is where a first append legitimately publishes its first generation.
-  return { epoch: 0, rowCount: 0, compaction: null }
+  throw new Error(refusedAppendMessage(partitionDir))
+}
+
+/**
+ * What a refused append says. Both causes are named because
+ * {@link tryReadCursorSync} answers null for both and the operator is the
+ * one who has to repair the file: a `cursor.json` that does not parse, and
+ * one that parses but names a generation outside its own partition
+ * (LLP 0323#one-gate), look identical from here and only the second leaves
+ * well-formed JSON on disk to be puzzled by.
+ *
+ * @param {string} partitionDir
+ * @returns {string}
+ */
+function refusedAppendMessage(partitionDir) {
+  return `cache append refused: cursor.json in ${partitionDir} is present but unreadable (it does not parse, or it names a generation outside its partition), so the live generation is unknown`
 }
 
 /**
@@ -655,7 +677,9 @@ function readCursorForAppend(partitionDir) {
  * committing anything, so a caller about to commit several partitions out of
  * one batch can find out before it commits the first.
  *
- * That caller is `appendChunk` in `src/core/cache/storage.js`. One spool
+ * Those callers are `appendChunk` in `src/core/cache/storage.js` and
+ * `migrateLegacyPartitions` in `src/core/cache/migrate.js`, which fan out
+ * the same way. Taking the spool as the example: one
  * chunk fans out into one append per partition it touches, and the flush
  * checkpoints the chunk only once every one of them has returned. A refusal
  * partway through therefore leaves the partitions before it committed and
@@ -678,7 +702,7 @@ function readCursorForAppend(partitionDir) {
 export function appendRefusalReason(partitionDir) {
   if (tryReadCursorSync(partitionDir)) return null
   if (!fs.existsSync(path.join(partitionDir, CURSOR_FILE))) return null
-  return `cache append refused: cursor.json in ${partitionDir} is present but unreadable, so the live generation is unknown`
+  return refusedAppendMessage(partitionDir)
 }
 
 /**

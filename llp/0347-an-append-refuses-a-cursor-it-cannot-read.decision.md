@@ -133,6 +133,19 @@ rows wait" true rather than "the rows wait and their neighbours are copied":
 `appendRefusalReason` asks every partition in the chunk first, and the chunk
 either commits entirely or not at all.
 
+`migrateLegacyPartitions` (`src/core/cache/migrate.js`) fans out the same
+way and gets the same rule for the same reason. It reads one legacy
+partition, groups its rows by source, appends each group, and only then
+retires the legacy directory - so a refusal partway down that loop would
+leave the earlier sources committed with the directory still in place, and
+every later `hyp query maintain --force` would re-read the same rows and
+commit them again. It differs in what it does about it: the migration
+`continue`s to the next legacy partition rather than throwing. Migration is
+per-partition and idempotent, the unmigrated rows stay readable where they
+already are, and the next run retries; throwing would abort the maintain
+tick before `maintainCache` and stop compaction and retention cache-wide
+over one broken cursor.
+
 The cost is that such a chunk's spool grows with ingest until something
 repairs the cursor, and `hyp` does not repair one. That is still the
 direction to fail in. A stranded spool is visible as pending bytes and a

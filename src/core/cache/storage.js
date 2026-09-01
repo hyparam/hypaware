@@ -136,10 +136,6 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
             droppedCount++
             const missingKey = missing.join(',')
             missingFieldCounts.set(missingKey, (missingFieldCounts.get(missingKey) ?? 0) + 1)
-            partitionDropCounter.add(1, {
-              [Attr.DATASET]: dataset,
-              missing_fields: missing.join(','),
-            })
             continue
           }
         }
@@ -180,6 +176,18 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       for (const { segments, rows: groupRows } of groups.values()) {
         const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
         totalBytes += result.bytesWritten
+      }
+      // Counted here rather than in the grouping loop above, because the
+      // refusal at the gate can send this chunk back to the spool to be
+      // replayed on the next flush tick, and a per-attempt count would climb
+      // for the same rows once a minute for as long as a cursor stayed
+      // broken. Past the commit loop the chunk has landed exactly once, so
+      // each dropped row is counted once too.
+      for (const [fields, count] of missingFieldCounts) {
+        partitionDropCounter.add(count, {
+          [Attr.DATASET]: dataset,
+          missing_fields: fields,
+        })
       }
       if (droppedCount > 0) {
         logger.warn('cache.partition_validation_drops', {
