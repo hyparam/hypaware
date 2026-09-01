@@ -139,7 +139,14 @@ export interface DaemonStatus {
   healthyAt?: string
   /** ISO timestamp the daemon transitioned to `stopped`. */
   stoppedAt?: string
-  /** Milliseconds since `healthyAt` (0 when not yet healthy). */
+  /**
+   * Milliseconds since `healthyAt` (0 when not yet healthy), recomputed
+   * immediately before every write. So `healthyAt + uptimeMs` is the moment
+   * of that write, and `hyp status` reads the pair as the daemon heartbeat: a
+   * writer, or a republisher, that refreshes either half against the current
+   * clock reports a liveness it has not proved.
+   * @ref LLP 0348#heartbeat-is-derived [constrained-by]: the pair is read as a heartbeat, so a reader may not recompute either half
+   */
   uptimeMs: number
   /** dev_run_id stamped on telemetry from this daemon. */
   runId: string
