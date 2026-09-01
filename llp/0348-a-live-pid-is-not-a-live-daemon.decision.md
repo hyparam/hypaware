@@ -10,6 +10,7 @@
 (the boot-time health aggregate it settled is unchanged; this adds the
 read-side question boot health cannot answer, which is whether the daemon is
 still running its loop now)
+**Extended-by:** LLP 0349 (#not-settled: `recent_error_count` now counts the errors the install actually recorded, in the daemon log and the sink outboxes, over a stated 24-hour window)
 **Related:** LLP 0164 (#status-reads-it-from-the-status-file: the file this
 reads and why `hyp status` reads no kernel), LLP 0228
 (#status-file-is-the-surface: the same file as a standing operator surface),
@@ -114,7 +115,7 @@ only exists under `HYP_DEV_TELEMETRY=1`, so on a production install the number
 is structurally zero and says nothing. Making it mean something is a separate
 decision about which failures count and over what window, and the daemon log
 under `<stateRoot>/logs/daemon.log` is the production-side record it would have
-to read. Untouched here.
+to read. Untouched here. Settled by [LLP 0349](./0349-recent-error-count-reads-the-records-production-keeps.decision.md).
 
 **The sink and OOM mechanism is #280.** Why the daemon wedged is not this
 document's subject. That it must not claim to be healthy while wedged is.

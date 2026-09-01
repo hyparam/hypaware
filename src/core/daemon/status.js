@@ -42,6 +42,7 @@ import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
+import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
 import {
   isLaunchAgentInstalled,
@@ -63,6 +64,7 @@ import {
  * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
+ * @import { FileHandle } from 'node:fs/promises'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  * @import { LocalCaInfo } from '../../../src/core/tls/types.js'
@@ -2020,13 +2022,23 @@ export async function collectHypAwareStatus(opts = {}) {
       ?? (() => probeLaunchdEnvSet({ timeoutMs: TRUST_PROBE_TIMEOUT_MS })),
   })
 
-  // ----- recent errors -----
-  const recentErrorCount = await countRecentErrors(devTelemetryDir(stateRoot))
+  // ----- recent errors (LLP 0349) -----
+  // Read every store this install actually keeps, not just the one a
+  // developer's install keeps. `dev-telemetry/` alone made this counter
+  // structurally zero on an ordinary machine (issue #1182), which is the one
+  // answer a monitoring field must never give when it has not looked.
+  // @ref LLP 0349#read-the-records-production-keeps [implements]: the count reads the daemon log and the sink outbox, which exist on every install, not only dev telemetry
+  const recentErrors = await countRecentErrors(stateRoot)
+  const recentErrorCount = recentErrors.total
   if (recentErrorCount > 0) {
     diagnostics.push({
       severity: 'warning',
       kind: 'recent_errors',
-      message: `${recentErrorCount} error log entr${recentErrorCount === 1 ? 'y' : 'ies'} in recent telemetry`,
+      // The breakdown is the pointer: "in the daemon log" and "failed sink
+      // export batches" are different places to look and different repairs,
+      // and a bare total sends the operator to the wrong one. It is prose
+      // only - no new report field is minted for it (LLP 0349#one-number).
+      message: `${recentErrorCount} error${recentErrorCount === 1 ? '' : 's'} recorded in the last ${RECENT_ERROR_WINDOW_HOURS}h (${recentErrors.breakdown.join('; ')})`,
       repair: ['hyp daemon restart'],
     })
   }
@@ -2884,13 +2896,202 @@ export async function probeAttachedClients({ descriptors, homeDir, env }) {
 }
 
 /**
- * Walk the recent telemetry directory and count log entries whose
- * `severityText` is `ERROR`. Returns 0 when the directory does not
- * exist yet (no observability run has captured anything).
+ * The horizon `recent_error_count` reports over. The counter had none: it
+ * returned every ERROR record still on disk, so a machine that failed once in
+ * March carried the warning until someone deleted the file. A day is the
+ * shortest window that still spans an overnight brownout (the #1003 incident
+ * ran for hours while nobody was watching), and it is self-clearing, so an
+ * install that was repaired stops warning on its own.
+ *
+ * @ref LLP 0349#the-window [implements]: a stated 24-hour horizon, so "recent" means something and a fixed install stops warning
+ */
+export const RECENT_ERROR_WINDOW_HOURS = 24
+export const RECENT_ERROR_WINDOW_MS = RECENT_ERROR_WINDOW_HOURS * 3_600_000
+
+/**
+ * How much of `daemon.log` is read. The file is appended to for the life of
+ * the install and nothing rotates it (the note on the control-file watcher in
+ * `src/core/daemon/control.js` says so in as many words), so it is the one
+ * store here that could be arbitrarily large, and `hyp status` is a report
+ * that must not grow a cost with the age of the machine. A quarter-megabyte tail holds several
+ * thousand of these records, far more than the window can contain at the
+ * daemon's one-tick-a-minute cadence.
+ *
+ * @ref LLP 0349#bounded-reads [implements]: the daemon log is read from the tail, never whole
+ */
+const DAEMON_LOG_TAIL_BYTES = 256 * 1024
+
+/**
+ * The timestamp the sink driver bakes into an outbox filename. `persistOutbox`
+ * writes `<batchId>.json` where `batchId` is `<instance>-<iso>-<seq>`, so the
+ * age of every failed export batch is readable from the directory listing
+ * alone, with no file opened. Anything that does not match is not a batch this
+ * daemon wrote and is not evidence of a failure, so it is skipped rather than
+ * counted.
+ */
+const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\d+\.json$/
+
+/**
+ * Count the failures this install has actually recorded in the last
+ * {@link RECENT_ERROR_WINDOW_HOURS} hours, across every store that exists on
+ * an ordinary install.
+ *
+ * The three stores are disjoint by construction, so nothing is counted twice:
+ * `daemon.log` carries what `fileLog` emits (boot, tick, reload, source and
+ * maintenance failures), the sink outbox carries one file per failed export
+ * batch and nothing else does, and `dev-telemetry/logs-*.jsonl` carries the
+ * OTel logger's records, which reach no file at all unless
+ * `HYP_DEV_TELEMETRY=1` is set. That last one is why the counter used to read
+ * zero on every real machine.
+ *
+ * @param {string} stateRoot
+ * @param {number} [nowMs]
+ * @returns {Promise<{ total: number, breakdown: string[] }>}
+ */
+async function countRecentErrors(stateRoot, nowMs = Date.now()) {
+  const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
+  const [daemonLog, sinkOutbox, devTelemetry] = await Promise.all([
+    countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs),
+    countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs),
+    countDevTelemetryErrors(devTelemetryDir(stateRoot), sinceMs),
+  ])
+  /** @type {string[]} */
+  const breakdown = []
+  if (daemonLog > 0) breakdown.push(`${daemonLog} in the daemon log`)
+  if (sinkOutbox > 0) breakdown.push(`${sinkOutbox} failed sink export batch${sinkOutbox === 1 ? '' : 'es'}`)
+  if (devTelemetry > 0) breakdown.push(`${devTelemetry} in dev telemetry`)
+  return { total: daemonLog + sinkOutbox + devTelemetry, breakdown }
+}
+
+/**
+ * Is a recorded instant inside the window? A record whose timestamp is
+ * missing or unreadable counts: this whole defect was a counter that stayed
+ * silent about failures it could not classify, and an unparseable stamp on a
+ * record that says `level: "error"` is still an error someone should see.
+ *
+ * @param {unknown} value
+ * @param {number} sinceMs
+ */
+function recordedWithinWindow(value, sinceMs) {
+  if (typeof value !== 'string') return true
+  const at = Date.parse(value)
+  if (!Number.isFinite(at)) return true
+  return at >= sinceMs
+}
+
+/**
+ * Count `level: "error"` records in the tail of the daemon log. This is the
+ * production-side record: `openDaemonLog` runs on every boot, in every mode,
+ * with no environment variable to enable it.
+ *
+ * @param {string} logPath
+ * @param {number} sinceMs
+ * @returns {Promise<number>}
+ */
+async function countDaemonLogErrors(logPath, sinceMs) {
+  /** @type {FileHandle} */
+  let handle
+  try {
+    handle = await fsp.open(logPath, 'r')
+  } catch {
+    return 0
+  }
+  try {
+    const { size } = await handle.stat()
+    const start = Math.max(0, size - DAEMON_LOG_TAIL_BYTES)
+    const length = size - start
+    if (length <= 0) return 0
+    const buf = Buffer.allocUnsafe(length)
+    const { bytesRead } = await handle.read(buf, 0, length, start)
+    let text = buf.subarray(0, bytesRead).toString('utf8')
+    if (start > 0) {
+      // The offset lands mid-record. Drop the fragment rather than let a
+      // half-line parse as something it is not.
+      const nl = text.indexOf('\n')
+      text = nl < 0 ? '' : text.slice(nl + 1)
+    }
+    let count = 0
+    for (const line of text.split('\n')) {
+      if (!line) continue
+      /** @type {any} */
+      let parsed
+      try {
+        parsed = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (!parsed || typeof parsed !== 'object') continue
+      if (parsed.level !== 'error') continue
+      if (!recordedWithinWindow(parsed.ts, sinceMs)) continue
+      count += 1
+    }
+    return count
+  } catch {
+    return 0
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+/**
+ * Count failed export batches still sitting in the sink outboxes. One file is
+ * one batch the sink could not hand over (`persistOutbox`), which is the only
+ * durable trace a sink export failure leaves on an install without dev
+ * telemetry: the driver's own `sink.export_batch.failed` goes to the OTel
+ * logger, which has no exporter configured on an ordinary machine.
+ *
+ * Nothing drains these files, so the directory is a growing ledger and the
+ * window is what makes a count off it mean "now". Costs one directory listing
+ * per configured sink and opens no file: the batch id carries its own
+ * timestamp. The collector already walks the whole cache tree with a `stat`
+ * per file (`measureCacheStats`), so this sits well inside its budget.
+ *
+ * @param {string} sinksDir
+ * @param {number} sinceMs
+ * @returns {Promise<number>}
+ */
+async function countSinkOutboxBatches(sinksDir, sinceMs) {
+  /** @type {Dirent[]} */
+  let instances
+  try {
+    instances = await fsp.readdir(sinksDir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  let count = 0
+  for (const instance of instances) {
+    if (!instance.isDirectory()) continue
+    /** @type {string[]} */
+    let files
+    try {
+      files = await fsp.readdir(path.join(sinksDir, instance.name, 'outbox'))
+    } catch {
+      continue
+    }
+    for (const file of files) {
+      const match = OUTBOX_BATCH_TIMESTAMP.exec(file)
+      if (!match) continue
+      const at = Date.parse(match[1])
+      if (!Number.isFinite(at) || at < sinceMs) continue
+      count += 1
+    }
+  }
+  return count
+}
+
+/**
+ * Walk the dev telemetry directory and count log entries whose `severityText`
+ * is `ERROR`. Returns 0 when the directory does not exist, which on an
+ * ordinary install is always: this is the developer's store, kept as one
+ * input among three rather than removed, because under `HYP_DEV_TELEMETRY=1`
+ * it holds records (every `getLogger` error, the sink driver's included) that
+ * reach no other file.
  *
  * @param {string} telemetryDir
+ * @param {number} sinceMs
+ * @returns {Promise<number>}
  */
-async function countRecentErrors(telemetryDir) {
+async function countDevTelemetryErrors(telemetryDir, sinceMs) {
   /** @type {string[]} */
   let entries
   try {
@@ -2913,9 +3114,10 @@ async function countRecentErrors(telemetryDir) {
       if (!line) continue
       try {
         const parsed = JSON.parse(line)
-        if (parsed && typeof parsed === 'object' && /** @type {any} */ (parsed).severityText === 'ERROR') {
-          count += 1
-        }
+        if (!parsed || typeof parsed !== 'object') continue
+        if (/** @type {any} */ (parsed).severityText !== 'ERROR') continue
+        if (!recordedWithinWindow(/** @type {any} */ (parsed).timestamp, sinceMs)) continue
+        count += 1
       } catch {
         // skip malformed lines silently
       }
