@@ -17,7 +17,7 @@ import { isOwnedProviderEntry } from './provider_entry_ownership.js'
 // Bump when an on-disk Claude marker must be rewritten for Claude Code to
 // accept or correctly interpret settings.json. Both daemon reconciliation and
 // manual attach use this token to force exactly one migration pass.
-export const CLAUDE_SETTINGS_MARKER_SCHEMA = 2
+export const CLAUDE_SETTINGS_MARKER_SCHEMA = 3
 
 /**
  * @import { Dirent } from 'node:fs'
@@ -254,26 +254,22 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, pla
   // Claude Code 2.1.257 reserves `hooks` throughout settings.json, so current
   // markers use `hook_entries`. Keep reading the original field so an upgrade
   // can still detach settings written by every earlier HypAware release.
-  const hookEntries = Array.isArray(managed.hook_entries)
-    ? managed.hook_entries
-    : Array.isArray(managed.hooks)
-      ? managed.hooks
-      : []
+  const hookEntries = collectManagedHookEntries(managed)
   // Presence, not type: the restore half of the attach-side backup. Attach only
   // ever writes this field when there was a prior value to record, so the field
   // being there IS the "restore me" fact and its JSON type says nothing. A type
   // test threw away a backup the marker was holding and fell through to the
   // delete branch below - the one outcome the backup exists to prevent.
-  const prevBaseUrl = Object.hasOwn(marker, 'prev_base_url') ? marker.prev_base_url : undefined
+  const prevBaseUrl = Object.hasOwn(marker, 'prev_base_url')
+    ? decodeBackupValue(marker.prev_base_url, marker.prev_base_url_encoding)
+    : undefined
   // The general form of the same backup, keyed by env name. Proxy-mode attach
   // takes over `HTTPS_PROXY`, which - unlike the add-only keys - routinely
   // already holds a corporate proxy the user needs back. `prev_base_url` stays
   // the special case it always was so markers written before `prev_env` existed
   // still restore.
   // @ref LLP 0232#detach-restores-any-managed-key [implements]: any managed env key can carry a backup, not just the base URL
-  const prevEnv = isPlainObject(marker.prev_env)
-    ? /** @type {Record<string, unknown>} */ (marker.prev_env)
-    : undefined
+  const prevEnv = decodeBackupMap(marker.prev_env, marker.prev_env_encoding)
 
   delete value[markerKey]
   stripManagedHooks(value, hookEntries)
@@ -495,21 +491,59 @@ function replayPrevMalformed(value, recorded, encoding, warnings) {
  * @returns {Record<string, unknown>}
  */
 function decodePrevMalformed(recorded, encoding) {
-  if (!isPlainObject(recorded)) return {}
-  if (encoding !== 'json') return recorded
+  return decodeBackupMap(recorded, encoding) ?? {}
+}
+
+/**
+ * Decode one backup value from the marker. Current markers serialize values
+ * so an arbitrary object containing `hooks` cannot be interpreted as Claude
+ * hook configuration; legacy markers keep their raw-value behavior.
+ *
+ * @param {unknown} recorded
+ * @param {unknown} encoding
+ * @returns {unknown}
+ */
+function decodeBackupValue(recorded, encoding) {
+  if (encoding !== 'json' || typeof recorded !== 'string') return recorded
+  try {
+    return JSON.parse(recorded)
+  } catch {
+    return recorded
+  }
+}
+
+/**
+ * Decode a marker backup map serialized as one scalar JSON value.
+ *
+ * @param {unknown} recorded
+ * @param {unknown} encoding
+ * @returns {Record<string, unknown> | undefined}
+ */
+function decodeBackupMap(recorded, encoding) {
+  if (encoding !== 'json') {
+    return isPlainObject(recorded) ? recorded : undefined
+  }
+
+  // Current markers serialize the whole map so neither a value containing a
+  // nested `hooks` property nor a key literally named `hooks` remains
+  // structural in Claude's settings file.
+  if (typeof recorded === 'string') {
+    try {
+      const decoded = JSON.parse(recorded)
+      return isPlainObject(decoded) ? decoded : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  // Compatibility with the short-lived per-value representation written by
+  // earlier builds carrying this schema token.
+  if (!isPlainObject(recorded)) return undefined
 
   /** @type {Record<string, unknown>} */
   const decoded = {}
   for (const [dotted, serialized] of Object.entries(recorded)) {
-    if (typeof serialized !== 'string') {
-      decoded[dotted] = serialized
-      continue
-    }
-    try {
-      decoded[dotted] = JSON.parse(serialized)
-    } catch {
-      decoded[dotted] = serialized
-    }
+    decoded[dotted] = decodeBackupValue(serialized, encoding)
   }
   return decoded
 }
@@ -539,6 +573,35 @@ function decodePrevMalformed(recorded, encoding) {
  */
 function joinWarnings(warnings) {
   return warnings.length === 0 ? undefined : warnings.join(' | ')
+}
+
+/**
+ * Read both hook-entry field names from a marker and deduplicate valid entries.
+ * A partially migrated marker can contain both; preferring one field would
+ * orphan handlers named only by the other when detach deletes the marker.
+ *
+ * @param {Record<string, unknown>} managed
+ * @returns {unknown[]}
+ */
+function collectManagedHookEntries(managed) {
+  /** @type {unknown[]} */
+  const entries = []
+  const seen = new Set()
+  const sources = [managed.hook_entries, managed.hooks]
+  for (const source of sources) {
+    if (!Array.isArray(source)) continue
+    for (const entry of source) {
+      if (!isPlainObject(entry) || typeof entry.event !== 'string' || typeof entry.command !== 'string') {
+        continue
+      }
+      const matcher = typeof entry.matcher === 'string' ? entry.matcher : undefined
+      const identity = JSON.stringify([entry.event, matcher, entry.command])
+      if (seen.has(identity)) continue
+      seen.add(identity)
+      entries.push(entry)
+    }
+  }
+  return entries
 }
 
 /**
@@ -627,7 +690,15 @@ const LEGACY_CLAUDE_HOOK_PATTERN = /\bclaude-hook\s+(?:session-context|classify-
 // pre-upgrade shape this branch was written for. The reversal below is then
 // knowingly partial - the record that named the managed keys is unreadable - so
 // it says so instead of reporting a clean detach.
-const POST_LEGACY_MARKER_FIELDS = ['managed', 'prev_base_url', 'prev_env', 'prev_malformed', 'mode']
+const POST_LEGACY_MARKER_FIELDS = [
+  'managed',
+  'prev_base_url',
+  'prev_base_url_encoding',
+  'prev_env',
+  'prev_env_encoding',
+  'prev_malformed',
+  'mode',
+]
 
 /**
  * Reverse a pre-upgrade legacy `json` marker: the old Claude marker shape
@@ -678,10 +749,10 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
   // Presence, not type, for the same reason the record-driven branch uses it:
   // attach only writes these when there was something to record.
   // @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup, on every branch that deletes it
-  const prevBaseUrl = Object.hasOwn(marker, 'prev_base_url') ? marker.prev_base_url : undefined
-  const prevEnv = isPlainObject(marker.prev_env)
-    ? /** @type {Record<string, unknown>} */ (marker.prev_env)
+  const prevBaseUrl = Object.hasOwn(marker, 'prev_base_url')
+    ? decodeBackupValue(marker.prev_base_url, marker.prev_base_url_encoding)
     : undefined
+  const prevEnv = decodeBackupMap(marker.prev_env, marker.prev_env_encoding)
   const recordDamaged = POST_LEGACY_MARKER_FIELDS.some((field) => Object.hasOwn(marker, field))
 
   delete value[markerKey]

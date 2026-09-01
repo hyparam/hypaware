@@ -8,6 +8,7 @@ import process from 'node:process'
 import test from 'node:test'
 
 import { runAttach } from '../../src/core/commands/clients.js'
+import { probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
 
 /**
  * Issue #277 Gap 1: on a default ephemeral-port install the gateway binds a
@@ -175,7 +176,7 @@ test('attach reports already-attached (no-op) when the recorded port matches the
     mkdirSync(path.join(home, '.claude'), { recursive: true })
     writeFileSync(
       path.join(home, '.claude', 'settings.json'),
-      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555, mode: 'otel', settings_schema: 2 } })
+      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555, mode: 'otel', settings_schema: 3 } })
     )
     seedDaemonRun(home, 55555)
     /** @type {Array<{ name: string, endpoint: string }>} */
@@ -229,7 +230,7 @@ test('a marker already using managed.hook_entries stays a no-op', async () => {
           version: '2.0.0',
           port: 55555,
           mode: 'otel',
-          settings_schema: 2,
+          settings_schema: 3,
           managed: { env: {}, hook_entries: [{ event: 'SessionStart', command: 'hyp claude-hook session-context' }] },
         },
       })
@@ -245,6 +246,59 @@ test('a marker already using managed.hook_entries stays a no-op', async () => {
   })
 })
 
+test('a schema-2 marker re-attaches into the scalar-safe backup format', async () => {
+  await withTempHome(async (home) => {
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        _hypaware: {
+          version: '2.0.0',
+          port: 55555,
+          mode: 'otel',
+          settings_schema: 2,
+          managed: { env: {}, hook_entries: [] },
+          prev_malformed: { hooks: '"broken"' },
+          prev_malformed_encoding: 'json',
+        },
+      })
+    )
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx, stdout } = makeCtx({ home, attachCalls })
+
+    const code = await runAttach(['claude'], ctx)
+
+    assert.equal(code, 0)
+    assert.equal(attachCalls.length, 1)
+    assert.doesNotMatch(stdout.text(), /already attached/)
+  })
+})
+
+test('schema-less JSON markers are stale only for Claude', async () => {
+  await withTempHome(async (home) => {
+    mkdirSync(path.join(home, '.other'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.other', 'settings.json'),
+      JSON.stringify({ _managed: { version: '1.0.0', port: 55555 } })
+    )
+    const descriptor = /** @type {any} */ ({
+      name: 'other-json-client',
+      attachProbe: {
+        format: 'json',
+        settings_file: '.other/settings.json',
+        marker_key: '_managed',
+      },
+    })
+
+    const probe = await probeClientAttachFromDescriptor({ descriptor, homeDir: home })
+    assert.equal(probe.attached, true)
+    assert.equal(probe.port, '55555')
+    assert.equal('markerFormatStale' in probe, false)
+  })
+})
+
 test('attach installs client assets even when the settings are already attached (LLP 0107 every-attach)', async () => {
   await withTempHome(async (home) => {
     // The daemon-managed install is the shape an operator most often runs
@@ -254,7 +308,7 @@ test('attach installs client assets even when the settings are already attached 
     mkdirSync(path.join(home, '.claude'), { recursive: true })
     writeFileSync(
       path.join(home, '.claude', 'settings.json'),
-      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555, mode: 'otel', settings_schema: 2 } })
+      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555, mode: 'otel', settings_schema: 3 } })
     )
     seedDaemonRun(home, 55555)
     const source = path.join(home, 'contrib', 'helper')

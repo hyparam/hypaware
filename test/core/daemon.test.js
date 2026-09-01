@@ -216,7 +216,7 @@ test('probeClientAttachFromDescriptor reads JSON attach markers', async () => {
   await fs.mkdir(path.dirname(settingsPath), { recursive: true })
   await fs.writeFile(
     settingsPath,
-    JSON.stringify({ _hypaware: { version: '2.0.0', port: 4388, settings_schema: 2 } })
+    JSON.stringify({ _hypaware: { version: '2.0.0', port: 4388, settings_schema: 3 } })
   )
 
   const descriptor = /** @type {ClientDescriptor} */ ({

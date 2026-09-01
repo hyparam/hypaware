@@ -106,7 +106,8 @@ test('attach backs up a pre-existing foreign ANTHROPIC_BASE_URL as prev_base_url
     assert.equal(result.changed && result.prevValue, 'https://foreign.example/api')
 
     const marker = await readMarker(settingsPath)
-    assert.equal(marker.prev_base_url, 'https://foreign.example/api')
+    assert.equal(marker.prev_base_url_encoding, 'json')
+    assert.equal(JSON.parse(marker.prev_base_url), 'https://foreign.example/api')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -289,7 +290,7 @@ test('idempotent re-attach keeps the original prev_base_url, not the gateway URL
     // and record the *original* foreign URL, not the gateway URL.
     assert.equal(second.changed && second.prevValue, 'https://foreign.example/api')
     const marker = await readMarker(settingsPath)
-    assert.equal(marker.prev_base_url, 'https://foreign.example/api')
+    assert.equal(JSON.parse(marker.prev_base_url), 'https://foreign.example/api')
     assert.equal(marker.managed.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:4123')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
@@ -342,7 +343,7 @@ test('re-attach migrates the pre-2.1.257 nested hooks marker field', async () =>
     assert.equal(Object.hasOwn(marker.managed, 'hooks'), false)
     assert.ok(Array.isArray(marker.managed.hook_entries))
     assert.ok(marker.managed.hook_entries.length > 0)
-    assert.equal(marker.settings_schema, 2)
+    assert.equal(marker.settings_schema, 3)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -361,8 +362,8 @@ test('attach serializes malformed-hook backups so reserved hooks keys do not rem
 
     const marker = await readMarker(settingsPath)
     assert.equal(marker.prev_malformed_encoding, 'json')
-    assert.equal(typeof marker.prev_malformed['hooks.SessionStart'], 'string')
-    assert.deepEqual(JSON.parse(marker.prev_malformed['hooks.SessionStart']), prior)
+    assert.equal(typeof marker.prev_malformed, 'string')
+    assert.deepEqual(JSON.parse(marker.prev_malformed), { 'hooks.SessionStart': prior })
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -376,7 +377,7 @@ test('attach serializes malformed-hook backups so reserved hooks keys do not rem
 // values a user writes on purpose - `null`/`false` to switch an override back
 // off. Attach then recorded the key as managed with no prior, and the undo
 // deleted it. Assert the backup is taken whatever the JSON type.
-for (const prior of [8080, false, null, { url: 'x' }]) {
+for (const prior of [8080, false, null, { url: 'x', hooks: [] }]) {
   test(`attach backs up a ${JSON.stringify(prior)} base URL into prev_base_url`, async () => {
     const { dir, settingsPath } = await stage()
     try {
@@ -387,7 +388,8 @@ for (const prior of [8080, false, null, { url: 'x' }]) {
 
       const marker = await readMarker(settingsPath)
       assert.equal('prev_base_url' in marker, true)
-      assert.deepEqual(marker.prev_base_url, prior)
+      assert.equal(marker.prev_base_url_encoding, 'json')
+      assert.deepEqual(JSON.parse(marker.prev_base_url), prior)
       // The display field stays a string; the marker keeps the real value.
       assert.equal(typeof (/** @type {any} */ (result).prevValue), 'string')
     } finally {

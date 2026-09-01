@@ -72,6 +72,8 @@ async function readSettings(settingsPath) {
 function readPrevMalformed(marker) {
   const recorded = marker.prev_malformed ?? {}
   if (marker.prev_malformed_encoding !== 'json') return recorded
+  if (typeof recorded === 'string') return JSON.parse(recorded)
+  // Compatibility assertion helper for the short-lived per-value format.
   return Object.fromEntries(
     Object.entries(recorded).map(([dotted, serialized]) => [
       dotted,
@@ -141,6 +143,7 @@ test('attach backs up a non-object hooks root, and a null block counts as presen
     const result = await attach({ ...ATTACH, settingsPath })
 
     const attached = await readSettings(settingsPath)
+    assert.equal(typeof attached._hypaware.prev_malformed, 'string')
     assert.deepEqual(readPrevMalformed(attached._hypaware), { env: null, hooks: 7 })
     // The rebuilt hooks root still received the managed events, so attach is
     // functional and not merely non-destructive.

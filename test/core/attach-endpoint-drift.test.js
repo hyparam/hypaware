@@ -227,7 +227,7 @@ test('an otherwise-current Claude action marker without the current settings sch
     const first = await reconciler.reconcile(reconcileInput({ endpoint, clients }))
     assert.deepEqual(first.results.map((x) => x.outcome), ['done'])
     assert.deepEqual(attachCalls, [endpoint], 'the pre-2.1.257 marker must reach the settings writer')
-    assert.equal(readMarkerFile(stateRoot).attach.claude.settings_schema, 2)
+    assert.equal(readMarkerFile(stateRoot).attach.claude.settings_schema, 3)
 
     const second = await reconciler.reconcile(reconcileInput({ endpoint, clients }))
     assert.deepEqual(second.results.map((x) => x.outcome), ['skipped'])
