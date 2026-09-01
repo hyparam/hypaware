@@ -193,6 +193,38 @@ test('a heal after an unreadable refusal is retracted exactly once', async () =>
   }
 })
 
+test('a retraction is not counted as a fresh refusal', async () => {
+  // The one control over the exclusion `linesFrom` passes, and the reason
+  // the argument is there: the retraction token is the refusal token plus a
+  // suffix (`cursor_unreadable` inside `cursor_unreadable_recovered`), so a
+  // substring filter for refusals reads a heal as one. Two other tests
+  // ('an escaping cursor that degrades to garbage' and 'a read failure that
+  // is not ENOENT leaves the refusal standing') hand-roll the same predicate
+  // inline over a `CURSOR_READ` capture, but neither read can emit an
+  // unreadable retraction - each one refuses for that condition - so their
+  // guard drops nothing and this is the only capture the overlap is really
+  // in. Without it the argument could be dropped and all three suites would
+  // stay green while a cleared condition counted as a fresh warning: the
+  // exact inversion of the signal these controls count in the direction of.
+  const partition = await makePartition()
+  try {
+    await writeRawCursor(partition, '{ not json')
+    assert.equal((await linesFrom(() => { tryReadCursorSync(partition) }, REFUSAL)).length, 1,
+      'the refusal is armed, so the next healthy read has something to retract')
+
+    await writeGoodCursor(partition)
+    // That read is not silent - 'a heal after an unreadable refusal is
+    // retracted exactly once' counts the line it emits on RECOVERY. What is
+    // counted here is that the same line is not also read as a refusal.
+    const healing = await linesFrom(() => {
+      assert.notEqual(tryReadCursorSync(partition), null, 'the read now returns a cursor')
+    }, REFUSAL)
+    assert.equal(healing.length, 0, 'a heal is a retraction, never a refusal counted a second time')
+  } finally {
+    await fs.rm(path.dirname(partition), { recursive: true, force: true })
+  }
+})
+
 test('an escaping cursor that degrades to garbage leaves a refusal standing', async () => {
   // The retraction on its own was the hole: the escape report is cleared by
   // any read that does not refuse for escape, and a parse failure is one of
