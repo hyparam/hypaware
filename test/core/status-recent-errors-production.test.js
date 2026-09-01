@@ -354,9 +354,10 @@ test('a daemon log smaller than the tail is read whole, first record included', 
 // throw, the catch swallows it, and the file contributes 0 - the same silent
 // zero the rest of this counter exists to remove. The store is reachable only
 // under `HYP_DEV_TELEMETRY=1`, but the claim in the doc is unqualified, so the
-// read is bounded per file the same way the daemon log is. The fixture puts
-// two ERROR records before the tail and one inside it: an unbounded read
-// counts all three.
+// read is bounded per file the same way the daemon log is. The fixture holds
+// four ERROR records: two before the tail, the one the boundary cuts, and one
+// inside the tail. Only the last is in scope, so an unbounded read counts 4
+// where a bounded read counts 1.
 // @ref LLP 0349#bounded-reads [tests]:
 test('each dev-telemetry file is read from a tail, not whole', async () => {
   const { hypHome, stateRoot } = await makeHome()
