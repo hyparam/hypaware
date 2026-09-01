@@ -244,13 +244,25 @@ function inertSourceRegistry() {
  * original with the original as the receiver, so inherited fields, accessors,
  * and private state answer exactly as they do under the real kernel, and
  * neutering writes nothing to the plugin's own object. It does not make that
- * object read-only: there is no `set` trap, because the real registry hands
- * out the contribution by reference and does not either.
+ * object read-only: a write through the stand-in reaches the contribution,
+ * because the real registry hands the contribution out by reference and does
+ * not shield it either.
  *
  * @param {SourceContribution} contribution
  * @returns {SourceContribution}
  */
 function neuter(contribution) {
+  /**
+   * @param {SourceContribution} _target
+   * @param {string | symbol} prop
+   */
+  function get(_target, prop) {
+    if (prop === 'start') return inertStart
+    // The receiver is the contribution, not the proxy, so an accessor that
+    // reads a private field off `this` still finds it.
+    return Reflect.get(contribution, prop, contribution)
+  }
+
   // A proxy may not answer a non-writable, non-configurable own property with
   // anything but the target's real value, so a contribution holding its own
   // `start` frozen cannot have it shadowed: the read inside `register` throws,
@@ -261,13 +273,40 @@ function neuter(contribution) {
   // contribution itself either way.
   const own = Object.getOwnPropertyDescriptor(contribution, 'start')
   const frozenStart = own !== undefined && own.writable === false && own.configurable === false
-  return new Proxy(frozenStart ? Object.create(contribution) : contribution, {
-    get(_target, prop) {
-      if (prop === 'start') return inertStart
-      // The receiver is the contribution, not the proxy, so an accessor that
-      // reads a private field off `this` still finds it.
-      return Reflect.get(contribution, prop, contribution)
+  if (!frozenStart) return new Proxy(contribution, { get })
+
+  // That inheriting target has no own properties and a prototype of its own,
+  // so the remaining traps exist to hide it: without them the stored
+  // contribution enumerates as `{}` and reports the wrong prototype, which is
+  // the same store-a-different-shape defect this stand-in exists to close. A
+  // descriptor is reported configurable because the target holds no
+  // non-configurable property to pin one to, and `start` is reported as the
+  // inert function the `get` trap already answers with.
+  // `defineProperty` stays untrapped on purpose: forwarding it would throw on
+  // an explicit `configurable: false` define, which the target cannot be made
+  // to carry, and a fabricated throw is the failure this stand-in exists to
+  // prevent. Nothing reshapes a stored contribution; ordinary writes go
+  // through `set`.
+  return new Proxy(Object.create(contribution), {
+    get,
+    ownKeys: () => Reflect.ownKeys(contribution),
+    /**
+     * @param {object} _target
+     * @param {string | symbol} prop
+     */
+    getOwnPropertyDescriptor(_target, prop) {
+      const desc = Reflect.getOwnPropertyDescriptor(contribution, prop)
+      if (desc === undefined) return undefined
+      if (prop === 'start') return { ...desc, value: inertStart, configurable: true }
+      return { ...desc, configurable: true }
     },
+    getPrototypeOf: () => Reflect.getPrototypeOf(contribution),
+    /**
+     * @param {object} _target
+     * @param {string | symbol} prop
+     * @param {unknown} value
+     */
+    set: (_target, prop, value) => Reflect.set(contribution, prop, value),
   })
 }
 

@@ -584,6 +584,9 @@ export async function activate(ctx) {
 // on the contribution itself made the read inside `register` throw, and the
 // doctor invented the same `activate_threw` the inert registry exists to
 // avoid.
+// The stand-in the frozen case proxies instead has no own properties, so the
+// enumeration assertions below are what keeps it from storing a contribution
+// that reads back as `{}`.
 test('a frozen source contribution still registers and is still neutered', async () => {
   const root = await fixture({
     manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
@@ -598,6 +601,10 @@ export async function activate(ctx) {
   const stored = ctx.sources.get('demo')
   if (!stored) throw new Error('the frozen object registered under no name')
   if (stored.configSection !== 'demo') throw new Error('the stored contribution lost configSection')
+  const keys = Object.keys(stored).sort().join(',')
+  if (keys !== 'configSection,name,plugin,start') throw new Error('the stored contribution enumerates as [' + keys + ']')
+  const copy = { ...stored }
+  if (copy.name !== 'demo' || typeof copy.start !== 'function') throw new Error('a spread of the stored contribution lost fields')
   await ctx.sources.start('demo', ctx)
   if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
 }
