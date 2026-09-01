@@ -556,7 +556,7 @@ run directly. The common Phase 8 conditions:
 | `daemon_binary_missing`               | the daemon installer references a binary that no longer exists on disk             | `hyp daemon install`                                                     |
 | `daemon_loaded_no_pid`                | the daemon service file is installed but launchd / systemd is not loading it       | `hyp daemon restart`                                                     |
 | `daemon_heartbeat_stale`              | the daemon process is alive but its status snapshot has stopped advancing, so its tick is not completing | `hyp daemon restart`                                                     |
-| `recent_errors`                       | the local telemetry directory has recent error log entries                         | inspect `~/.hyp/hypaware/dev-telemetry`, then `hyp daemon restart`       |
+| `recent_errors`                       | failures recorded in the last 24h: `error` lines in the daemon log, failed sink export batches in an outbox, and dev-telemetry error records | inspect `~/.hyp/hypaware/logs/daemon.log` and `~/.hyp/hypaware/sinks/*/outbox`, then `hyp daemon restart` |
 
 Useful follow-on commands when a diagnostic fires:
 
