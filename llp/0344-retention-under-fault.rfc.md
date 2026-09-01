@@ -8,7 +8,7 @@
 **Date:** 2026-08-31
 **Related:** LLP 0013, LLP 0220, LLP 0323, LLP 0331, LLP 0332, LLP 0334;
 hyparam/hypaware#1138, hyparam/hypaware#1131, hyparam/hypaware#1166,
-PR #1135, PR #1162
+hyparam/hypaware#1170, PR #1135, PR #1162
 
 > Four deferred findings from the review of PR #1135 (the retention
 > enforcement wire) share one property that kept every one of them out of
@@ -318,26 +318,37 @@ something rewrites the bytes. One thing does: an append to that same
 partition writes a fresh cursor over them, restarting `rowCount` from the
 rows it just appended and dropping the `retention` block.
 
-That append is not a repair, and it should not be read as one. It reaches
-the same unreadable cursor through the same defaulting fallback, so it takes
-`tableDir` to be the default `table` and writes that name down. On a
-partition already compacted to a `table-<ms>` generation the append therefore
-mints a second, empty `table/`, publishes it as live, and leaves the real
-generation unreferenced; the orphan sweep reclaims it once past the grace
-window, and the partition's rows are gone. That is the precise failure
+That append is not a repair, and it should not be read as one.
+`appendRowsToSourceTable` does read through `tryReadCursorSync`, and then
+spells out the same epoch-0 default `readCursorSync` is defined as, so the
+refusal is erased there too: it takes `tableDir` to be the default `table`
+and writes that name down. On a partition already compacted to a
+`table-<ms>` generation the append therefore mints a second `table/` holding
+only the rows it just appended, publishes it as live, and leaves the real
+generation unreferenced; the orphan sweep reclaims that generation once past
+the grace window, and every row the partition held before the append is
+gone. That is the precise failure
 `tryReadCursorSync` refuses a non-string `tableDir` to prevent rather than
 dropping the field (LLP 0323#whole-cursor), arriving instead through the
-write path. So the append ends the suspension only on a partition whose live
-generation is the bare `table` the default happens to guess right, and where
-it guesses wrong it is Option 4's re-derivation with none of Option 4's care.
+write path; it is a defect of the write path, not of retention, and it is
+filed as #1170 rather than answered by any option below. So the append ends
+the suspension only on a partition whose live generation is the bare `table`
+the default happens to guess right, and where it guesses wrong it is
+Option 4's re-derivation with none of Option 4's care.
 
 In any case the partitions this question is about are the ones aging out of
 the window, and a partition keyed by a date that has passed is exactly the
 one nothing appends to any more. Compaction and the orphan sweep supply no
-bound either: both reach the refusing gate (`sweepLiveGeneration` and
-`walkForRetired` read through `tryReadCursorSync`, LLP 0323#one-gate) and
-neither rewrites the cursor for a shape the synthesized default does not
-name. So for the partitions retention is coming for, the suspension has no
+bound either, and not for the same reason. Compaction reads the partition
+through the same defaulting `readCursorSync`, so it plans against a
+synthesized `epoch=0/` that is not there, counts no data files, and rewrites
+nothing. The orphan sweep is the one that reaches the refusing gate:
+`walkForRetired` reads through `tryReadCursorSync` (LLP 0323#one-gate), so
+the live generation stays unknown and the sweep declines to call any sibling
+an orphan, which is what keeps it from deleting the real one. A maintenance
+tick over a compacted partition with a corrupt cursor leaves both the
+`cursor.json` bytes and the `table-<ms>` generation exactly as it found
+them. So for the partitions retention is coming for, the suspension has no
 end.
 
 This is LLP 0331#guard-travels-with-the-delete reached through a different
