@@ -263,6 +263,62 @@ test('claude undo strips marker + managed keys/hooks from a hand-written fixture
   }
 })
 
+test('claude undo still reads the pre-2.1.257 managed.hooks field', async () => {
+  const home = await stageHome()
+  try {
+    const command = "hyp claude-hook session-context --state-file '/abs/session-context.jsonl'"
+    const fixture = {
+      hooks: { SessionStart: [{ hooks: [{ type: 'command', command }] }] },
+      _hypaware: {
+        attached_at: '2026-08-31T00:00:00.000Z',
+        version: '1.29.0',
+        port: 4123,
+        mode: 'otel',
+        managed: {
+          env: {},
+          hooks: [{ event: 'SessionStart', command }],
+        },
+      },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal('_hypaware' in parsed, false)
+    assert.equal('hooks' in parsed, false)
+    assert.equal((await fs.readFile(settingsPath, 'utf8')).includes('claude-hook'), false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('claude undo decodes and restores a malformed hook backup without leaving nested marker hooks', async () => {
+  const home = await stageHome()
+  try {
+    const prior = { hooks: [{ type: 'command', command: 'echo old' }] }
+    const settingsPath = await writeClaudeSettings(
+      home,
+      JSON.stringify({ hooks: { SessionStart: prior } }, null, 2) + '\n'
+    )
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached._hypaware.prev_malformed_encoding, 'json')
+    assert.equal(typeof attached._hypaware.prev_malformed['hooks.SessionStart'], 'string')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.deepEqual(result.restoredPaths, ['hooks.SessionStart'])
+    assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, 'utf8')), {
+      hooks: { SessionStart: prior },
+    })
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('claude undo of a LEGACY pre-upgrade marker (no managed record) detaches fully', async () => {
   const home = await stageHome()
   try {

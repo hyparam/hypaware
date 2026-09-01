@@ -12,6 +12,7 @@ import {
   redactUrlUserinfo,
 } from 'hypaware/core/util'
 import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
+import { CLAUDE_SETTINGS_MARKER_SCHEMA } from '../../../../src/core/config/client_detach_disk.js'
 import {
   isOtlpHeadersOverride,
   otlpOverrideSignal,
@@ -388,8 +389,8 @@ export async function attach(opts) {
   // `Object.hasOwn`, not `in`: these keys come off disk.
   // @ref LLP 0163#prev_malformed-is-path-keyed-not-one-field-per-block [constrained-by]: the earliest backup wins, so a later displacement at the same path is discarded, not recorded
   /** @type {Record<string, unknown>} */
-  const priorMalformed = priorMarker && isPlainObject(priorMarker.prev_malformed)
-    ? priorMarker.prev_malformed
+  const priorMalformed = priorMarker
+    ? decodePrevMalformed(priorMarker.prev_malformed, priorMarker.prev_malformed_encoding)
     : {}
 
   // The backup half of back-up-then-repair. Every block attach has to rebuild
@@ -636,6 +637,7 @@ export async function attach(opts) {
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),
     version,
+    settings_schema: CLAUDE_SETTINGS_MARKER_SCHEMA,
     port,
     state_file: stateFile,
     mode,
@@ -659,7 +661,12 @@ export async function attach(opts) {
     // @ref LLP 0258#marker-and-spool [implements]: the marker records the spool directory
     ...(mode === MODE_OTEL ? { spool_dir: spoolDir } : {}),
     ...(Object.keys(prevEnv).length > 0 ? { prev_env: prevEnv } : {}),
-    ...(Object.keys(prevMalformed).length > 0 ? { prev_malformed: prevMalformed } : {}),
+    ...(Object.keys(prevMalformed).length > 0
+      ? {
+          prev_malformed: encodePrevMalformed(prevMalformed),
+          prev_malformed_encoding: 'json',
+        }
+      : {}),
   }
 
   await writeAtomic(settingsPath, value, mtimeMs)
@@ -835,6 +842,53 @@ async function writeAtomic(filePath, value, expectedMtimeMs) {
     }
     throw err
   }
+}
+
+/**
+ * Read both legacy raw-value backups and the current serialized-value form.
+ * The latter keeps a displaced object containing a `hooks` key from being
+ * interpreted by Claude Code as nested hook configuration while it sits in
+ * HypAware's undo marker.
+ *
+ * @param {unknown} recorded
+ * @param {unknown} encoding
+ * @returns {Record<string, unknown>}
+ */
+function decodePrevMalformed(recorded, encoding) {
+  if (!isPlainObject(recorded)) return {}
+  if (encoding !== 'json') return recorded
+
+  /** @type {Record<string, unknown>} */
+  const decoded = {}
+  for (const [dotted, serialized] of Object.entries(recorded)) {
+    // Be tolerant of a hand-edited or partially migrated marker that mixes
+    // legacy raw entries with encoded ones. Re-attach will serialize either
+    // form into the current safe representation below.
+    if (typeof serialized !== 'string') {
+      decoded[dotted] = serialized
+      continue
+    }
+    try {
+      decoded[dotted] = JSON.parse(serialized)
+    } catch {
+      decoded[dotted] = serialized
+    }
+  }
+  return decoded
+}
+
+/**
+ * @param {Record<string, unknown>} values
+ * @returns {Record<string, string>}
+ */
+function encodePrevMalformed(values) {
+  /** @type {Record<string, string>} */
+  const encoded = {}
+  for (const [dotted, value] of Object.entries(values)) {
+    const serialized = JSON.stringify(value)
+    if (serialized !== undefined) encoded[dotted] = serialized
+  }
+  return encoded
 }
 
 /**

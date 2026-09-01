@@ -8,6 +8,7 @@ import process from 'node:process'
 import { configRecordsPickAnswer, defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { readConfigControlStatus, resolveCentralLayerPath } from '../config/apply.js'
 import { readClientActionStatus } from '../config/action_reconciler.js'
+import { CLAUDE_SETTINGS_MARKER_SCHEMA } from '../config/client_detach_disk.js'
 import { endpointFromListen } from '../config/gateway_endpoint.js'
 import { readAttachPolicy } from '../config/attach_policy.js'
 import { readBackfillPolicy } from '../config/backfill_policy.js'
@@ -2641,11 +2642,18 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
         // literally the value the client is using and cannot fall out of step
         // with it.
         ...(telemetryPort !== undefined ? { telemetryPort } : {}),
-        // A marker whose undo record predates the `managed.hook_entries`
-        // rename. It is the file Claude Code 2.1.257 refuses, and re-attach is
-        // the migration, so it has to read as stale to the callers that
-        // otherwise treat a marker at the live port as nothing to do.
-        ...(markerHasRetiredHookField(markerObj) ? { markerFormatStale: true } : {}),
+        // A marker predating the current settings schema can carry a reserved
+        // `hooks` key in managed entries or malformed-value backups. Claude
+        // Code 2.1.257 refuses that file, and re-attach is the migration, so it
+        // has to read as stale to callers that otherwise treat a marker at the
+        // live port as nothing to do. Keep the retired-field check explicit so
+        // a hand-edited marker cannot claim the current schema while retaining
+        // the known-invalid field.
+        ...(descriptor.name === 'claude' &&
+          (markerHasRetiredHookField(markerObj) ||
+            markerObj.settings_schema !== CLAUDE_SETTINGS_MARKER_SCHEMA)
+          ? { markerFormatStale: true }
+          : {}),
       }
     }
 

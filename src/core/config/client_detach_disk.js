@@ -14,6 +14,11 @@ import { ConcurrentEditError, atomicWriteFile } from '../util/fs_atomic.js'
 import { errCode, getAtDottedPath, isPlainObject, redactUrlUserinfo } from '../util/json_util.js'
 import { isOwnedProviderEntry } from './provider_entry_ownership.js'
 
+// Bump when an on-disk Claude marker must be rewritten for Claude Code to
+// accept or correctly interpret settings.json. Both daemon reconciliation and
+// manual attach use this token to force exactly one migration pass.
+export const CLAUDE_SETTINGS_MARKER_SCHEMA = 2
+
 /**
  * @import { Dirent } from 'node:fs'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
@@ -351,7 +356,12 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, pla
     if (Object.keys(envObj).length === 0) delete value.env
   }
 
-  const restoredPaths = replayPrevMalformed(value, marker.prev_malformed, warnings)
+  const restoredPaths = replayPrevMalformed(
+    value,
+    marker.prev_malformed,
+    marker.prev_malformed_encoding,
+    warnings
+  )
 
   await writeJsonAtomic(settingsPath, value, read.mtimeMs, fs)
 
@@ -416,12 +426,12 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, pla
  * @ref LLP 0163#detach-restores-the-backup [implements]: replay prev_malformed shallowest-first, restoring only into a slot the strip emptied, and report both halves by path
  * @param {Record<string, unknown>} value
  * @param {unknown} recorded the marker's `prev_malformed` field, whatever type it is on disk
+ * @param {unknown} encoding the marker's value encoding, absent on legacy raw-value records
  * @param {string[]} warnings accumulator for the per-path failure notices
  * @returns {string[]}
  */
-function replayPrevMalformed(value, recorded, warnings) {
-  /** @type {Record<string, unknown>} */
-  const prevMalformed = isPlainObject(recorded) ? recorded : {}
+function replayPrevMalformed(value, recorded, encoding, warnings) {
+  const prevMalformed = decodePrevMalformed(recorded, encoding)
   /** @type {string[]} */
   const restoredPaths = []
   // Shallowest first, so a `hooks` backup is considered before any
@@ -468,6 +478,40 @@ function replayPrevMalformed(value, recorded, warnings) {
     }
   }
   return restoredPaths
+}
+
+/**
+ * Decode malformed-block backups written as JSON strings. Claude Code 2.1.257
+ * treats every structural `hooks` key in settings.json as hook configuration,
+ * including keys inside HypAware's undo marker, so current markers serialize
+ * each backed-up value instead of embedding it as a traversable object.
+ *
+ * Legacy markers have no encoding field and keep their raw-value behavior.
+ * A hand-edited or partially migrated marker can mix raw and encoded entries;
+ * those raw entries keep the legacy behavior instead of being discarded.
+ *
+ * @param {unknown} recorded
+ * @param {unknown} encoding
+ * @returns {Record<string, unknown>}
+ */
+function decodePrevMalformed(recorded, encoding) {
+  if (!isPlainObject(recorded)) return {}
+  if (encoding !== 'json') return recorded
+
+  /** @type {Record<string, unknown>} */
+  const decoded = {}
+  for (const [dotted, serialized] of Object.entries(recorded)) {
+    if (typeof serialized !== 'string') {
+      decoded[dotted] = serialized
+      continue
+    }
+    try {
+      decoded[dotted] = JSON.parse(serialized)
+    } catch {
+      decoded[dotted] = serialized
+    }
+  }
+  return decoded
 }
 
 /**
@@ -728,7 +772,12 @@ async function detachLegacyJsonMarker({ settingsPath, markerKey, value, marker, 
   // Same replay, same words, as the record-driven branch. It runs after the
   // strip above for the same reason it does there: the strip is what empties
   // the slot a backup can go back into.
-  const restoredPaths = replayPrevMalformed(value, marker.prev_malformed, warnings)
+  const restoredPaths = replayPrevMalformed(
+    value,
+    marker.prev_malformed,
+    marker.prev_malformed_encoding,
+    warnings
+  )
 
   await writeJsonAtomic(settingsPath, value, mtimeMs, fs)
 

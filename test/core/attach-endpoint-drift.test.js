@@ -199,6 +199,44 @@ test('a proxy-mode marker at the current endpoint re-attaches into otel mode', a
   }
 })
 
+test('an otherwise-current Claude action marker without the current settings schema re-attaches once', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    const endpoint = 'http://127.0.0.1:55555'
+    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.writeFileSync(
+      markerPath(stateRoot),
+      JSON.stringify({
+        attach: {
+          claude: {
+            status: 'done',
+            request_key: 'claude',
+            at: '2026-08-31T00:00:00.000Z',
+            endpoint,
+            mode: 'otel',
+          },
+        },
+      }, null, 2) + '\n'
+    )
+
+    /** @type {string[]} */
+    const attachCalls = []
+    const clients = clientsWith({ attachCalls })
+    const reconciler = createActionReconciler({ stateRoot, handlers: [createAttachHandler()], log: NOOP_LOG })
+
+    const first = await reconciler.reconcile(reconcileInput({ endpoint, clients }))
+    assert.deepEqual(first.results.map((x) => x.outcome), ['done'])
+    assert.deepEqual(attachCalls, [endpoint], 'the pre-2.1.257 marker must reach the settings writer')
+    assert.equal(readMarkerFile(stateRoot).attach.claude.settings_schema, 2)
+
+    const second = await reconciler.reconcile(reconcileInput({ endpoint, clients }))
+    assert.deepEqual(second.results.map((x) => x.outcome), ['skipped'])
+    assert.equal(attachCalls.length, 1, 'the schema migration settles after one successful attach')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
 test('a changed asset set re-attaches at an unchanged endpoint (LLP 0107 currency)', async () => {
   const { tmp, stateRoot } = await makeFixture()
   try {

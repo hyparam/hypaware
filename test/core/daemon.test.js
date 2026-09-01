@@ -214,7 +214,10 @@ test('probeClientAttachFromDescriptor reads JSON attach markers', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-attach-json-'))
   const settingsPath = path.join(tmp, '.claude', 'settings.json')
   await fs.mkdir(path.dirname(settingsPath), { recursive: true })
-  await fs.writeFile(settingsPath, JSON.stringify({ _hypaware: { version: '2.0.0', port: 4388 } }))
+  await fs.writeFile(
+    settingsPath,
+    JSON.stringify({ _hypaware: { version: '2.0.0', port: 4388, settings_schema: 2 } })
+  )
 
   const descriptor = /** @type {ClientDescriptor} */ ({
     plugin: '@hypaware/claude',

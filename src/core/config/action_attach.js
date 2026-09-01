@@ -13,7 +13,10 @@ import {
 import { readInstalledAssets } from './action_reconciler.js'
 import { isActionRefused } from './action_refusal.js'
 import { readAttachPolicy } from './attach_policy.js'
-import { detachClientFromDisk } from './client_detach_disk.js'
+import {
+  CLAUDE_SETTINGS_MARKER_SCHEMA,
+  detachClientFromDisk,
+} from './client_detach_disk.js'
 
 /**
  * @import {
@@ -211,7 +214,10 @@ export function createAttachHandler(opts = {}) {
       // invariant from the requested client, not from best-effort stdout, so a
       // parse miss cannot leave the new marker stale and re-run attach forever.
       // @ref LLP 0262#migration [implements]: a successful Claude attach settles the proxy-to-OTEL migration even when its report payload is unavailable
-      if (client === 'claude') detail.mode = 'otel'
+      if (client === 'claude') {
+        detail.mode = 'otel'
+        detail.settings_schema = CLAUDE_SETTINGS_MARKER_SCHEMA
+      }
       if (parsed) {
         if (typeof parsed.settings_path === 'string') detail.settings_path = parsed.settings_path
         if (typeof parsed.prev_value === 'string') detail.prev_value = parsed.prev_value
@@ -313,6 +319,14 @@ export function createAttachHandler(opts = {}) {
       // migration that releases the proxy settings and writes the OTEL block.
       // @ref LLP 0262#migration [implements]: attachment mode drift is a forward gap even when the gateway port did not move
       if (client === 'claude' && marker.mode !== 'otel') return false
+      // Claude Code 2.1.257 rejects the legacy `_hypaware.managed.hooks`
+      // marker even though endpoint, mode, and assets are otherwise current.
+      // A missing schema token is therefore a forward gap that reaches the
+      // adapter's settings migration exactly once.
+      if (
+        client === 'claude' &&
+        marker.settings_schema !== CLAUDE_SETTINGS_MARKER_SCHEMA
+      ) return false
       const assetsKey = attachedAssetsKey(client, ctx)
       if (assetsKey === undefined) return true
       return marker.assets_key === assetsKey

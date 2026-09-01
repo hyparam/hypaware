@@ -175,7 +175,7 @@ test('attach reports already-attached (no-op) when the recorded port matches the
     mkdirSync(path.join(home, '.claude'), { recursive: true })
     writeFileSync(
       path.join(home, '.claude', 'settings.json'),
-      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555, mode: 'otel' } })
+      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555, mode: 'otel', settings_schema: 2 } })
     )
     seedDaemonRun(home, 55555)
     /** @type {Array<{ name: string, endpoint: string }>} */
@@ -229,6 +229,7 @@ test('a marker already using managed.hook_entries stays a no-op', async () => {
           version: '2.0.0',
           port: 55555,
           mode: 'otel',
+          settings_schema: 2,
           managed: { env: {}, hook_entries: [{ event: 'SessionStart', command: 'hyp claude-hook session-context' }] },
         },
       })
@@ -253,7 +254,7 @@ test('attach installs client assets even when the settings are already attached 
     mkdirSync(path.join(home, '.claude'), { recursive: true })
     writeFileSync(
       path.join(home, '.claude', 'settings.json'),
-      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555, mode: 'otel' } })
+      JSON.stringify({ _hypaware: { version: '2.0.0', port: 55555, mode: 'otel', settings_schema: 2 } })
     )
     seedDaemonRun(home, 55555)
     const source = path.join(home, 'contrib', 'helper')

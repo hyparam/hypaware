@@ -397,14 +397,14 @@ async function runClientLifecycle(action, argv, ctx) {
             // running) keep the pre-#277 behavior for every mode: a present
             // marker is a no-op success, an absent one the actionable error.
             //
-            // The marker format is the same shape of drift as the mode: a
-            // marker still recording its hook undo entries under the retired
-            // `managed.hooks` name is the file Claude Code 2.1.257 refuses, and
-            // it sits at the live port in the right mode with the right assets,
-            // so nothing else here can see it. Re-attach rewrites the marker,
-            // which is the whole migration, and it is gated on a live endpoint
-            // for the same reason the mode check is: with no endpoint to attach
-            // at, failing is worse than the no-op this branch already gives.
+            // The marker format is the same shape of drift as the mode. A
+            // pre-schema marker can carry a reserved `hooks` key in managed
+            // entries or malformed-value backups while still sitting at the
+            // live port with the right mode and assets, so nothing else here
+            // can see it. Re-attach rewrites the marker, which is the whole
+            // migration, and it is gated on a live endpoint for the same reason
+            // the mode check is: with no endpoint to attach at, failing is worse
+            // than the no-op this branch already gives.
             // @ref LLP 0086#already-attached-validates-the-live-port [implements]: the already-attached branch compares recorded vs live port; a stale-port marker re-attaches
             // @ref LLP 0262#migration [implements]: a proxy-attached Claude is stale even when its gateway port is current
             const livePort = portFromEndpoint(liveEndpoint)

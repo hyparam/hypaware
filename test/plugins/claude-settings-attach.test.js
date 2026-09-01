@@ -342,6 +342,27 @@ test('re-attach migrates the pre-2.1.257 nested hooks marker field', async () =>
     assert.equal(Object.hasOwn(marker.managed, 'hooks'), false)
     assert.ok(Array.isArray(marker.managed.hook_entries))
     assert.ok(marker.managed.hook_entries.length > 0)
+    assert.equal(marker.settings_schema, 2)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('attach serializes malformed-hook backups so reserved hooks keys do not remain nested in settings', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    const prior = { hooks: [{ type: 'command', command: 'echo old' }] }
+    await fs.writeFile(
+      settingsPath,
+      JSON.stringify({ hooks: { SessionStart: prior } }, null, 2) + '\n'
+    )
+
+    await attach({ ...ATTACH, settingsPath })
+
+    const marker = await readMarker(settingsPath)
+    assert.equal(marker.prev_malformed_encoding, 'json')
+    assert.equal(typeof marker.prev_malformed['hooks.SessionStart'], 'string')
+    assert.deepEqual(JSON.parse(marker.prev_malformed['hooks.SessionStart']), prior)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
