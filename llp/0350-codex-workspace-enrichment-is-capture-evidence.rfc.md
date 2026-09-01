@@ -6,7 +6,8 @@
 **Generated-by:** neutral
 **Author:** Phil / Claude
 **Date:** 2026-09-01
-**Related:** LLP 0032, LLP 0049, LLP 0050, LLP 0083, LLP 0160;
+**Related:** LLP 0032, LLP 0049, LLP 0050, LLP 0069, LLP 0083, LLP 0151,
+LLP 0160;
 hyparam/hypaware#1189, hyparam/hypaware#492, hyparam/hypaware#481,
 hyparam/hypaware#476, PR #477, PR #1076;
 hyparam/hypaware-server#413 (server LLP 0327, out of tree)
@@ -18,12 +19,13 @@ hyparam/hypaware-server#413 (server LLP 0327, out of tree)
 > "ignored tree's identity on a clean row" case is named there and filed as
 > hyparam/hypaware#492, still open and still awaiting a human call.
 >
-> What has changed since is not the projector but the **meaning of the field**.
-> PR #1076 documents `inventory = "session_repos"`: local GitHub capture takes
-> every repository appearing as `git_remote` on an admitted
-> `ai_gateway_messages` row. That promotes `git_remote` from decoration to a
-> capture-authorizing signal, so a guessed value now authorizes fetching a
-> repository the user marked `ignore`.
+> What is changing is not the projector but the **proposed meaning of the
+> field**. PR #1076 (open, unmerged, docs and tests only) would document
+> `inventory = "session_repos"`: GitHub capture takes every repository
+> appearing as `git_remote` on an admitted `ai_gateway_messages` row. That
+> would promote `git_remote` from decoration to a capture-authorizing signal,
+> under which a guessed value authorizes fetching a repository the user marked
+> `ignore`.
 >
 > This document states the case, the verified evidence, the design tension, and
 > the options. It decides nothing. Deciding it means changing what LLP 0083
@@ -68,9 +70,18 @@ narrowed which substitutions get *logged*, and explicitly "leaves the enrichment
 question open under #492". #492 is open, labelled `neutral:stuck`, and says of
 itself that it "is a decision rather than a defect and needs a human call".
 
-## What changed: `git_remote` is now capture-authorizing {#evidence-contract}
+## What is changing: `git_remote` as capture-authorizing {#evidence-contract}
 
-PR #1076 documents the default local inventory for the optional
+**Status of the premise.** PR #1076 is **open and unmerged**, and it is docs and
+tests only: `session_repos` appears nowhere on `master`, and no
+`@hypaware/github` source exists in this repository at all. It is standalone
+([LLP 0121](./0121-hermes-plugin-bundled.decision.md)) and the shipped query
+skills describe its nodes as "server-only and opt-in", so the repricing below is
+**proposed, not shipped**. If #1076 lands, this document's motivation is live;
+if it is closed unmerged, the question falls back to the price #492 has carried
+since PR #477, and this document should be re-read for that.
+
+With that caveat, PR #1076 would document the default inventory for the
 `@hypaware/github` source:
 
 > Local `inventory = "session_repos"` captures every repository that appears as
@@ -79,12 +90,12 @@ PR #1076 documents the default local inventory for the optional
 That is a different job for the field. When LLP 0083 traded the leak away,
 `git_remote` was **identity on a row the user could already see**: it named a
 repository, it did not reach out and fetch one. Under `session_repos` the same
-byte string is the evidence that authorizes capturing that repository's commits,
-pull requests, issues, and reviews, on this machine and, via
-hyparam/hypaware-server#413, on the server that consumes the evidence.
+byte string becomes the evidence that authorizes capturing that repository's
+commits, pull requests, issues, and reviews, on whichever host runs the source
+and, via hyparam/hypaware-server#413, on the server that consumes the evidence.
 
 So the trade LLP 0083 recorded was priced when the leak was decoration. Nothing
-about the projector has drifted; the buyer changed.
+about the projector has drifted; the buyer is changing.
 
 ## Verified behaviour {#evidence}
 
@@ -150,8 +161,8 @@ gap is the whole of this document.
 
 ## Options {#options}
 
-Not exclusive: (B) or (C) and (E) compose, and (D) is available to the server
-half independently.
+Not exclusive: (F) narrows the case every other option then has to price, (B)
+or (C) and (E) compose, and (D) is available to the server half independently.
 
 **A. Accept and document.** Keep the projector as it is; say plainly, where
 users read about `.hypignore` and about GitHub capture, that a repository named
@@ -164,11 +175,17 @@ mental model is "I marked that tree ignore", and the row does not say the remote
 came from somewhere else.
 
 **B. Suppress enrichment from a key that did not cover the resolved `cwd`.**
-When `workspaceCoversCwd` fails, drop `git_remote`, `head_sha`, `has_changes`,
-and the `attributes.codex.*` mirrors, keeping the row and its `cwd`. Small,
-local, uses a predicate that already exists, and fails in the safe direction.
-Costs enrichment on every genuinely multi-workspace turn, including the common
-benign one where the first key is simply a sibling of a clean tree. To cover the
+When `workspaceCoversCwd` fails, drop `git_remote` and `head_sha` and their
+`attributes.codex.*` mirrors: `workspace`, `git_origin_url`, `git_commit`, and
+`has_changes`. Only those four; the rest of the `codex` namespace
+(`thread_id`, `session_id`, `parent_thread_id`, `turn_id`, `lineage_source`,
+`lineage_conflict`, `sandbox`) is conversation identity and lineage, not
+enrichment, and dropping it would break
+[LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md).
+The row and its `cwd` stay. Small, local, uses a predicate that already
+exists, and fails in the safe direction. On top of (F) it costs enrichment only
+on turns where **no** key covers the resolved `cwd`; without (F) it also costs
+the common benign turn whose covering key merely sorts second. To cover the
 subscription route it must also run the predicate against the rollout `cwd`,
 which LLP 0083 currently leaves silent by choice.
 
@@ -196,6 +213,27 @@ every consumer choose. Adds a field, which
 nothing by itself. Its merit is that it makes (A) survivable: an accepted leak
 that is *labelled* is a different thing from a silent one.
 
+**F. Select a key that covers the `cwd` before falling back to the first.**
+Selection and refusal do not use the same path test. `selectCodexWorkspace`
+matches on **equality** (`pathsEqual`), while `workspaceCoversCwd` refuses on
+**equal-or-descendant** (`isEqualOrDescendant`, the one shared rule of
+[LLP 0069 R8](./0069-local-only-dir-selection.spec.md#requirements)).
+So a key that genuinely covers the `cwd` can still lose to the first key in
+the object: in the reproduction above, `/work/clean` covers `/work/clean/sub`
+and is passed over for `/work/ignored/secret-proj` purely because the
+comparison is a byte match. Preferring a covering key changes one line, reuses
+0160's predicate, costs no second policy resolution, and loses no enrichment.
+
+It is the narrowest option and it is not a substitute for the others: it
+removes the reproduction in this document and the whole class where a covering
+key exists, and leaves untouched the case LLP 0083 actually priced, where no
+key covers the `cwd` at all and the first is still substituted. Nor does it
+disturb what LLP 0083 settled, which is the **rank** of the sources for the
+`cwd` (in-band, rollout, key), not which key the last of them picks. It is
+therefore plausibly a defect fix rather than a design change, and the human
+answering this document should say whether it is: if it is, it can land ahead
+of the choice among (A)-(E) and shrink what that choice has to cover.
+
 ## What this document decides {#decides}
 
 Nothing. It exists so the question is asked once, in the corpus, with the
@@ -210,17 +248,24 @@ unaffected either way.
 
 ## Consequences {#consequences}
 
-- Whichever option is taken, LLP 0083 is **not** edited: it recorded the trade
-  correctly for the price at the time. The decision that replaces its enrichment
-  clause is a new Decision document carrying an
-  `Extended-by:` forward-ref back to
-  [§workspace-key-ranks-last](./0083-codex-live-cwd-from-rollout.decision.md#workspace-key-ranks-last).
-  This RFC claims no such extension, because it extends nothing yet: it adds
-  `LLP 0350` to that document's `Related:` line and no more, so the corpus
-  reaches the open question from the record it questions.
-- Options (B), (C), and (E) change what rows carry and are therefore pinned by
-  tests in `test/plugins/codex-exchange-projector.test.js`, beside the existing
-  #476 cases, over the real shared matcher rather than a stub.
+- Whichever option is taken, what LLP 0083 **settled** is not edited: it
+  recorded the trade correctly for the price at the time. The decision that
+  replaces its enrichment clause is a new Decision document, and the forward-ref
+  goes on the **old** doc: an
+  `Extended-by: LLP NNNN` line appended to
+  [§workspace-key-ranks-last](./0083-codex-live-cwd-from-rollout.decision.md#workspace-key-ranks-last),
+  pointing at the new one, the way
+  [LLP 0160](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md) is
+  already recorded there. This RFC claims no such extension, because it extends
+  nothing yet: it adds `LLP 0350` to that document's `Related:` line and no
+  more, so the corpus reaches the open question from the record it questions.
+- Options (B), (C), (E), and (F) change what rows carry and are therefore
+  pinned by tests in `test/plugins/codex-exchange-projector.test.js`, over the
+  real shared matcher rather than a stub. (F) lands beside the existing #476
+  cases. (B) does **not**: "a refused workspace substitution still enriches the
+  row from the workspace key (#476)" asserts precisely the `git_remote` and
+  `head_sha` that (B) drops, so (B) overturns an accepted, currently-passing
+  case and whoever implements it must rewrite that test and say why.
 - Option (D) is a change to the `@hypaware/github` source and to the server that
   consumes the same evidence, so it cannot land in this repository alone.
 - No option changes a cache schema, a partition declaration, or an export
