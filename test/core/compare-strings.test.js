@@ -430,7 +430,8 @@ test('blob keys are the one migrated corpus whose order does change, and it chan
 
 /**
  * The inline shape of this comparator, written out at a call site instead of
- * called: `x < y ? -1 : x > y ? 1 : 0`.
+ * called: `x < y ? -1 : x > y ? 1 : 0`, and its descending twin
+ * `x < y ? 1 : x > y ? -1 : ...`.
  *
  * Thirteen of these were in the tree when `compareStrings` landed, all of them
  * already correct and locale-free, which is exactly why they were left alone at
@@ -454,15 +455,17 @@ test('blob keys are the one migrated corpus whose order does change, and it chan
  * `context-graph/src/maintenance.js`, because it sat two lines from one this
  * rule did catch; the rule did not ask for it and would not have.
  *
- * The descending spelling `x < y ? 1 : x > y ? -1 : 0` is out of scope as
- * well, and that one is a boundary rather than a judgement: shipped modules
- * still write it out, over values that are strings by the time they are
- * sorted, and every one of them would read `compareStrings(b, a)`. They are
- * left alone because #1148 enumerated the thirteen ascending ones and a
- * comparator is not a thing to rewrite in a file nobody asked about. So the
- * name below says `ascending`, and the sites the needle steps over are held
- * as a list by the last rule in this file rather than described here: a
- * count in a comment is the shape of claim this file exists to stop making.
+ * The descending spelling was out of scope when this rule landed, and that was
+ * a boundary rather than a judgement: #1148 enumerated the thirteen ascending
+ * ones, and a comparator is not a thing to rewrite in a file nobody asked
+ * about. Rather than describe the exclusion, this file held the five shipped
+ * descending sites as a list, so that the scope note was checked rather than
+ * asserted: a count in a comment is the shape of claim this file exists to
+ * stop making. #1156 migrated all five to `compareStrings(b, a)`, over values
+ * that are strings by the time they are sorted, and an inventory of nothing is
+ * not an inventory. So the descending pair joined the needle below and the
+ * list left with the sites it named. What still separates the two spellings is
+ * the `: 0` tail, for the reason the limits paragraph gives.
  *
  * A number legitimately written this way reds here as a false positive, and
  * that is any number, not only the BigInt pair where `a - b` is a BigInt
@@ -479,24 +482,25 @@ test('blob keys are the one migrated corpus whose order does change, and it chan
  * entry has to be re-read when the file changes shape, because nothing else
  * will notice.
  *
- * Both operand orders are matched, because `a > b ? 1 : a < b ? -1 : 0` is the
- * same comparator with the arms swapped and a rule that caught only one of the
- * two spellings would be a rule about punctuation rather than about the
- * comparison. There is no site in either spelling today; the second alternative
- * is here so that the cheapest way past this gate is not to type the operands
- * the other way round.
+ * Both operand orders are matched, in both directions, because
+ * `a > b ? 1 : a < b ? -1 : 0` is the same comparator with the arms swapped and
+ * a rule that caught only one of the two spellings would be a rule about
+ * punctuation rather than about the comparison. There is no site in either
+ * operand order today; the swapped alternatives are here so that the cheapest
+ * way past this gate is not to type the operands the other way round.
  *
  * Two limits are left standing, and both are stated rather than fixed because
  * closing either needs a tokenizer and this file has already declined to be
  * one. A comparator wrapped across physical lines by a formatter evades the
- * per-line scan below; and the ascending needle requires the `: 0` tail, so an
- * ascending chain that ends in a tiebreak rather than a tie
+ * per-line scan below; and the ascending alternatives require the `: 0` tail,
+ * so an ascending chain that ends in a tiebreak rather than a tie
  * (`a < b ? -1 : a > b ? 1 : compareStrings(x, y)`) is not caught, where the
- * descending needle does not require it. Neither shape exists in the tree
- * today, which is what makes them limits rather than misses.
+ * descending alternatives do not require it and do catch their tiebreak form.
+ * Neither shape exists in the tree today, which is what makes them limits
+ * rather than misses.
  */
 const INLINE_CODE_UNIT_COMPARATOR =
-  /<[^?]*\?\s*-1\s*:[^?]*>[^?]*\?\s*1\s*:\s*0|>[^?]*\?\s*1\s*:[^?]*<[^?]*\?\s*-1\s*:\s*0/
+  /<[^?]*\?\s*-1\s*:[^?]*>[^?]*\?\s*1\s*:\s*0|>[^?]*\?\s*1\s*:[^?]*<[^?]*\?\s*-1\s*:\s*0|<[^?]*\?\s*1\s*:[^?]*>[^?]*\?\s*-1\s*:|>[^?]*\?\s*-1\s*:[^?]*<[^?]*\?\s*1\s*:/
 
 /**
  * The shipped modules allowed to spell the comparison out, and why.
@@ -510,7 +514,7 @@ const INLINE_COMPARATOR_ALLOWED = {
     'the definition, which is the one place the comparison is written out',
 }
 
-test('no shipped module writes the ascending comparison out instead of calling it', () => {
+test('no shipped module writes the comparison out instead of calling it', () => {
   // Scanned raw rather than through a comment-blanking pass. The sibling gate
   // in `format-number.test.js` needs one because the names it forbids are the
   // names a module explaining itself would naturally write; this needle is a
@@ -566,76 +570,4 @@ test('the allowlist above names only modules that exist and still spell it out',
       `${rel} is allowlisted but no longer writes the comparison out; drop the entry`
     )
   }
-})
-
-/**
- * The descending spelling of the same comparison, which the rule above steps
- * over: `x < y ? 1 : x > y ? -1 : ...`.
- *
- * Written out separately rather than folded into the needle above, because the
- * two are not the same statement. The ascending shape is one this repo has
- * decided about and migrated; this one is a residue, and a needle that caught
- * both would red files no issue asked about and offer them a remedy that
- * is a rewrite rather than a fix.
- *
- * Both operand orders again, for the reason the ascending needle gives: an
- * inventory that enumerates one spelling of an open set is not an inventory.
- */
-const INLINE_DESCENDING_COMPARATOR =
-  /<[^?]*\?\s*1\s*:[^?]*>[^?]*\?\s*-1\s*:|>[^?]*\?\s*-1\s*:[^?]*<[^?]*\?\s*1\s*:/
-
-/**
- * Every shipped site still spelling the descending comparison out, held as a
- * list so the scope note on `INLINE_CODE_UNIT_COMPARATOR` is checked rather
- * than asserted.
- *
- * Keyed by module and matched line rather than by `file:line`. A line number
- * pins the one property of these sites that nothing here has an opinion about:
- * two of the five live in `src/core/daemon/status.js`, which took 65 of the
- * last 200 commits, so any unrelated edit that inserts a line above them reds
- * this rule and offers the reader the two explanations below, neither of which
- * is what happened. The matched text is what a reader needs to find the site
- * anyway, and it moves only when the comparator itself does, which is the only
- * move this rule is making a statement about.
- */
-const INLINE_DESCENDING_SITES = [
-  'hypaware-core/plugins-workspace/ai-gateway/src/entrypoint_activity.js: .sort((a, b) => (a.last_seen < b.last_seen ? 1 : a.last_seen > b.last_seen ? -1 : 0))',
-  'hypaware-core/plugins-workspace/codex/src/rollout-cwd.js: entries.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0))',
-  'src/core/daemon/status.js: out.sort((a, b) => (a.lastSeen < b.lastSeen ? 1 : a.lastSeen > b.lastSeen ? -1 : 0))',
-  'src/core/daemon/status.js: failures.sort((a, b) => (a.failedAt < b.failedAt ? 1 : a.failedAt > b.failedAt ? -1 : compareStrings(a.table, b.table)))',
-  'src/core/query/overview.js: .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))',
-]
-
-test('the descending spelling the rule steps over is a known list, not an open set', () => {
-  // The rule above says the descending sites are out of scope. Left as prose
-  // that would be a count in a comment, which is the claim shape item 4 of
-  // #1148 was about: nothing checks it, so it drifts. Held as a list it says
-  // two things instead. A new one appearing is a site that skipped the
-  // decision the ascending rule records, and one disappearing is a migration
-  // that should take its entry with it.
-  //
-  // Each of these sorts a value that is a string by the time it reaches the
-  // comparison - an ISO timestamp, a readdir name, a coerced date cell - so
-  // each would read `compareStrings(b, a)` and none is blocked on anything.
-  const paths = trackedFiles(REPO_ROOT, new Set(['.js', '.mjs', '.cjs'])).filter(
-    (rel) => !rel.startsWith('test/')
-  )
-  assert.ok(paths.length > 100, `expected the shipped tree, got ${paths.length} modules`)
-  const found = []
-  for (const rel of paths) {
-    const lines = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8').split('\n')
-    lines.forEach((line) => {
-      const trimmed = line.trim()
-      if (trimmed.startsWith('//') || trimmed.startsWith('*')) return
-      if (INLINE_DESCENDING_COMPARATOR.test(line)) found.push(`${rel}: ${trimmed}`)
-    })
-  }
-  assert.deepEqual(
-    found,
-    INLINE_DESCENDING_SITES,
-    'the descending inline comparators moved. If one was migrated to ' +
-      'compareStrings(b, a), drop its entry; if a new one landed, it is a ' +
-      'comparator that answers for itself what a non-string sorts as, so ' +
-      'call the helper instead of adding it here'
-  )
 })

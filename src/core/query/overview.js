@@ -15,6 +15,7 @@
  * @import { OverviewNotice, OverviewRows, OverviewQueryRunner, OverviewWindow } from '../../../src/core/query/types.js'
  */
 
+import { compareStrings } from '../util/compare_strings.js'
 import { groupThousands } from '../util/format_number.js'
 import { escapeForDisplay } from '../util/json_util.js'
 import { AUTO_REFRESH_FAILURE_MESSAGE, REFRESH_FAILURE_REASON_PREFIX, executeQuerySql } from './sql.js'
@@ -413,7 +414,7 @@ export function chooseOverviewWindow(probeRows, opts = {}) {
   const days = [...probeRows]
     .map((r) => ({ date: cell(r.date), rows: toNumber(r.n) }))
     .filter((d) => d.date !== '(none)')
-    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+    .sort((a, b) => compareStrings(b.date, a.date))
   if (days.length === 0) return null
 
   const totalRows = days.reduce((n, d) => n + d.rows, 0)
