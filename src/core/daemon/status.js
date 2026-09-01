@@ -2931,14 +2931,27 @@ export const RECENT_ERROR_WINDOW_MS = RECENT_ERROR_WINDOW_HOURS * 3_600_000
 const DAEMON_LOG_TAIL_BYTES = 1024 * 1024
 
 /**
- * The same cap, applied per dev-telemetry file. That store is written only
- * under `HYP_DEV_TELEMETRY=1`, but every `getLogger` call in the process
- * appends to it and nothing rotates it either, so a developer who leaves the
- * flag on has the same unbounded file the daemon log would be. A whole-file
- * read of one past V8's maximum string length throws, and the counter's
- * `catch` turns that into the file contributing 0: the silent zero this
- * counter exists to remove, arriving by a different door. One tail per file
- * bounds the read the same way, and the count stays a floor, not a census.
+ * The same number as the daemon log, applied per dev-telemetry file, but not
+ * the same sizing argument. That store is written only under
+ * `HYP_DEV_TELEMETRY=1`, and nothing rotates it either, so a developer who
+ * leaves the flag on has the same unbounded file the daemon log would be. A
+ * whole-file read of one past V8's maximum string length throws, and the
+ * counter's `catch` turns that into the file contributing 0: the silent zero
+ * this counter exists to remove, arriving by a different door. One tail per
+ * file closes that door.
+ *
+ * What does not carry over is the headroom. LLP 0349 sized the daemon log's
+ * megabyte against ~200-byte records from `fileLog` alone, several times over
+ * the worst case the 24-hour window has to hold. This store takes every
+ * `getLogger` emission at every severity, with the full attribute and
+ * resource bags attached, which measures around 475 bytes a record: roughly
+ * 2,200 records to the megabyte, not the daemon log's five thousand. So on a
+ * busy developer machine this tail can start inside the window rather than
+ * before it, and errors older than the tail go uncounted. That is the floor
+ * this counter already promises rather than a census, and it is bounded on a
+ * store no production install has, which is why the number is left at one
+ * megabyte here. Sizing it against this store's own rate is a separate
+ * question from closing the silent zero.
  *
  * @ref LLP 0349#bounded-reads [implements]: every read is bounded, this one included
  */

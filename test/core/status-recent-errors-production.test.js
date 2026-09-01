@@ -429,10 +429,10 @@ test('a dev-telemetry file smaller than the tail keeps its first record', async 
   const { hypHome, stateRoot } = await makeHome()
   const dir = path.join(stateRoot, 'dev-telemetry')
   await fs.mkdir(dir, { recursive: true })
-  const record = (/** @type {string} */ severityText) => JSON.stringify({
+  const record = (/** @type {'INFO'|'ERROR'} */ severityText) => JSON.stringify({
     serviceName: 'hypaware',
     timestamp: new Date().toISOString(),
-    severityNumber: 17,
+    severityNumber: severityText === 'ERROR' ? 17 : 9,
     severityText,
     body: 'sink.export_batch.failed',
   })
