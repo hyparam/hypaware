@@ -9,6 +9,7 @@ import {
   tableUrl as icebergTableUrl,
 } from './iceberg/store.js'
 import {
+  appendRefusalReason,
   appendRowsToPartition as appendRowsToPartitionImpl,
   appendRowsToSourceTable as appendRowsToSourceTableImpl,
   discoverCachePartitions as discoverCachePartitionsImpl,
@@ -135,10 +136,6 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
             droppedCount++
             const missingKey = missing.join(',')
             missingFieldCounts.set(missingKey, (missingFieldCounts.get(missingKey) ?? 0) + 1)
-            partitionDropCounter.add(1, {
-              [Attr.DATASET]: dataset,
-              missing_fields: missing.join(','),
-            })
             continue
           }
         }
@@ -153,11 +150,44 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         }
         group.rows.push(row)
       }
+      // Every partition this chunk touches is asked before any of them is
+      // committed, because the flush checkpoints the chunk as a unit: it
+      // records its resume offset only once `appendChunk` has returned
+      // (`drainFlushFiles` in `src/core/cache/spool.js`). A refusal raised
+      // partway down the loop below would leave the groups ahead of it
+      // committed and no checkpoint written, so the next flush would replay
+      // the chunk and commit them a second time, and a third, once per flush
+      // tick for as long as the refusal stood. Nothing downstream dedupes
+      // rows that already carry their native identity, so those duplicates
+      // are permanent and they ship onward through the sinks.
+      //
+      // Only a chunk that fans out to more than one partition can half-commit
+      // like that: a single-group chunk either commits or does not, and the
+      // unwritten checkpoint then replays rows none of which landed.
+      // @ref LLP 0347#rows-wait [implements]: the whole chunk waits, so a refusal costs no partial commit to replay
+      if (groups.size > 1) {
+        for (const { segments } of groups.values()) {
+          const refusal = appendRefusalReason(cacheTablePath(cacheRoot, dataset, segments))
+          if (refusal) throw new Error(refusal)
+        }
+      }
       let totalBytes = 0
       const opts = declaration ? { declaration } : undefined
       for (const { segments, rows: groupRows } of groups.values()) {
         const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
         totalBytes += result.bytesWritten
+      }
+      // Counted here rather than in the grouping loop above, because the
+      // refusal at the gate can send this chunk back to the spool to be
+      // replayed on the next flush tick, and a per-attempt count would climb
+      // for the same rows once a minute for as long as a cursor stayed
+      // broken. Past the commit loop the chunk has landed exactly once, so
+      // each dropped row is counted once too.
+      for (const [fields, count] of missingFieldCounts) {
+        partitionDropCounter.add(count, {
+          [Attr.DATASET]: dataset,
+          missing_fields: fields,
+        })
       }
       if (droppedCount > 0) {
         logger.warn('cache.partition_validation_drops', {

@@ -190,3 +190,41 @@ test('migrateLegacyPartitions retires only after successful append', async () =>
     await fs.rm(cacheRoot, { recursive: true, force: true })
   }
 })
+
+// A legacy partition fans out into one append per source, and `retirePartition`
+// is the only thing that stops the legacy directory being read again. So a
+// refusal partway through the fan-out (LLP 0347#file-not-reader) would leave
+// the sources ahead of it committed with the legacy directory still in place,
+// and every later `hyp query maintain --force` would re-read the same rows and
+// commit them again. The migration is asked before it commits anything, and a
+// partition it cannot finish is left whole for the next run.
+test('a legacy partition whose destination refuses is left whole, not migrated in part', async () => {
+  const cacheRoot = await makeTmpDir('refused-destination')
+  try {
+    const partDir = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'proxy_messages_v4')
+    await fs.mkdir(partDir, { recursive: true })
+    await appendRowsToTable(partDir, TEST_COLUMNS, [
+      { id: 1, value: 'a', client_name: 'claude', timestamp: '2026-05-26T12:00:00Z' },
+      { id: 2, value: 'b', client_name: 'codex', timestamp: '2026-05-25T08:00:00Z' },
+    ])
+    // One of the two destinations already exists with a cursor that does not
+    // read, so an append onto it is refused.
+    const codexDir = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=codex')
+    await appendRowsToSourceTable(cacheRoot, 'ai_gateway_messages', ['source=codex'], TEST_COLUMNS, [
+      { id: 99, value: 'already here', client_name: 'codex', timestamp: '2026-05-01T00:00:00Z' },
+    ])
+    await fs.writeFile(path.join(codexDir, 'cursor.json'), '{ not json')
+
+    for (let run = 0; run < 3; run++) {
+      const result = await migrateLegacyPartitions({ cacheRoot, force: true })
+      assert.equal(result.migrated, 0, 'the migration does not report a partition it could not finish')
+      assert.ok(fsSync.existsSync(partDir), 'the legacy directory stays, so the rows are still readable where they are')
+      assert.equal(
+        fsSync.existsSync(path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude')), false,
+        'and the healthy destination in the same partition is never written to, on this run or any other'
+      )
+    }
+  } finally {
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+  }
+})
