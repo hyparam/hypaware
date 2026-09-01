@@ -346,13 +346,19 @@ work so you can confirm the target.
 ### `hyp sync`
 
 ```text
-hyp sync [instance] [--yes] [--dry-run]
+hyp sync [instance] [--history <client>] [--yes] [--dry-run]
 ```
 
 Prints a destination and exclusion plan, confirms it, then forces the selected
 sink or every configured sink to export. `--dry-run` sends nothing. On a newly
 enrolled machine, an interactive all-destination sync can release the
 first-sync review hold early. A single-instance sync can't release that hold.
+
+`--history <client>` is a separate mode: it previews and, after its own
+confirmation, replays that client's locally retained history to the
+destinations that support a replay, leaving the ordinary sink watermarks
+untouched. The client must already be syncing (`hyp privacy client <client>
+sync`), and a replay cannot release the first-sync review hold.
 
 ```sh
 hyp sync --dry-run
