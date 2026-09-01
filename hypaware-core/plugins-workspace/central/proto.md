@@ -214,6 +214,16 @@ Headers (request):
   genuinely distinct chunk that merely shares bytes is never dropped
   (server LLP 0001).
 
+Row-level dedup complements that ledger for `ai_gateway_messages`: the
+server holds a uniqueness guarantee on `part_id`, keyed by `(org, dataset)`
+rather than by gateway, so it spans the whole org's ingest and survives
+gateway identity churn. A row whose `part_id` the org has already stored is
+dropped before spooling, as is a repeat within the same batch, and a newly
+accepted identity is persisted with fsync before the `202` and rebuilt at
+boot, so it holds across a restart. This is an ingest-time guarantee, not a
+database `UNIQUE` constraint: the duplicate is dropped and the batch is
+still accepted (server LLP 0152 `#org-scope`).
+
 Response 202: batch accepted for processing. Body is empty.
 
 Response 401: see "Refresh window".
