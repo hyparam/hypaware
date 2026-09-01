@@ -239,6 +239,14 @@ applies ([LLP 0049 §scope](./0049-hypignore-usage-policy.spec.md#scope),
 `matchDepth` in `src/core/usage-policy/matcher.js`), so this reuses that rule
 rather than inventing a tie-break.
 
+One implementation trap, since this is the option most likely to be written
+quickly: `pathsEqual` guards its argument (`if (!wanted) return false`) and
+`workspaceCoversCwd` does not, so the covering test must be reached behind a
+`cwd &&`. `selectCodexWorkspace` is called with the in-band `cwd`, which is
+absent on the whole subscription route, and an unguarded call would throw
+inside the projector on every one of those turns that carries a `workspaces`
+map.
+
 It is the narrowest option and it is not a substitute for the others: it
 removes the reproduction in this document and the whole class where a covering
 key exists, and leaves untouched the case LLP 0083 actually priced, where no
