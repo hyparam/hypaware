@@ -242,8 +242,10 @@ function inertSourceRegistry() {
  * Wrap a source contribution so the registry stores the contribution it was
  * handed, minus a live `start()`. Every read but `start` forwards to the
  * original with the original as the receiver, so inherited fields, accessors,
- * and private state answer exactly as they do under the real kernel, and the
- * plugin's own object is never mutated.
+ * and private state answer exactly as they do under the real kernel, and
+ * neutering writes nothing to the plugin's own object. It does not make that
+ * object read-only: there is no `set` trap, because the real registry hands
+ * out the contribution by reference and does not either.
  *
  * @param {SourceContribution} contribution
  * @returns {SourceContribution}
