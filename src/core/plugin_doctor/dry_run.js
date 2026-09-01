@@ -215,13 +215,48 @@ function inertSourceRegistry() {
       // A malformed contribution is passed through untouched so the real
       // `register` still rejects it: a source missing `start()` is a finding
       // about the plugin, not something the doctor should paper over.
+      //
+      // The stand-in delegates rather than copying. The guard below reads
+      // `start` through the prototype chain while a spread carries own
+      // enumerable properties and nothing else, so the two disagreed on a
+      // contribution that is a class instance: what reached the real
+      // `register` had lost whatever `name`, `plugin`, or `configSection`
+      // the class supplies from its prototype, and the doctor reported a
+      // fabricated `activate_threw` about a missing name against a plugin
+      // the kernel registers and starts without complaint. Validating one
+      // object and storing another is the same defect
+      // `src/core/registry/commands.js` fixed by copying before it checks;
+      // this registry stores by reference, so the fix here is the opposite
+      // direction: hand it something that reads like the contribution rather
+      // than a flattened copy of it.
       if (contribution && typeof contribution === 'object' && typeof contribution.start === 'function') {
-        registry.register({ ...contribution, start: inertStart })
+        registry.register(neuter(contribution))
         return
       }
       registry.register(contribution)
     },
   }
+}
+
+/**
+ * Wrap a source contribution so the registry stores the contribution it was
+ * handed, minus a live `start()`. Every read but `start` forwards to the
+ * original with the original as the receiver, so inherited fields, accessors,
+ * and private state answer exactly as they do under the real kernel, and the
+ * plugin's own object is never mutated.
+ *
+ * @param {SourceContribution} contribution
+ * @returns {SourceContribution}
+ */
+function neuter(contribution) {
+  return new Proxy(contribution, {
+    get(target, prop) {
+      if (prop === 'start') return inertStart
+      // The receiver is the contribution, not the proxy, so an accessor that
+      // reads a private field off `this` still finds it.
+      return Reflect.get(target, prop, target)
+    },
+  })
 }
 
 /**

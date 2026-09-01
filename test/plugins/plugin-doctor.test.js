@@ -510,3 +510,70 @@ test('a source started during a dry run can be reloaded and inspected', async ()
   const report = await diagnosePlugin(root)
   assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
 })
+
+// A source contribution is not always an object literal. A plugin may hand
+// `ctx.sources.register` a class instance, and the doctor's inert registry
+// read `start` through the prototype chain but stored a spread, which carries
+// own enumerable properties and nothing else. The two disagreed: the object
+// the real `register` went on to validate had lost every field the class
+// supplies from its prototype, so the doctor invented an `activate_threw`
+// about a missing `name` against a plugin the kernel registers and starts
+// without complaint.
+test('a class-instance source contribution keeps what its prototype supplies', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+class DemoSource {
+  get name() { return 'demo' }
+  get plugin() { return '@test/example' }
+  get configSection() { return 'demo' }
+  async start() { throw new Error('start() must not run during a dry run') }
+}
+
+export async function activate(ctx) {
+  const contribution = new DemoSource()
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the class instance registered under no name')
+  if (stored.plugin !== '@test/example') throw new Error('the stored contribution lost plugin')
+  if (stored.configSection !== 'demo') throw new Error('the stored contribution lost configSection')
+  if (typeof stored.start !== 'function') throw new Error('the stored contribution has no start()')
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// The over-fixing control. Whatever the inert registry hands the real one, an
+// ordinary object-literal contribution still registers under its declared
+// name, still gets its `start()` neutered, and comes back out of `activate()`
+// exactly as the plugin wrote it.
+test('a plain-object source contribution still registers and is still neutered', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const contribution = {
+    name: 'demo',
+    plugin: '@test/example',
+    configSection: 'demo',
+    async start() { throw new Error('start() must not run during a dry run') },
+  }
+  const own = contribution.start
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the plain object registered under no name')
+  if (stored.plugin !== '@test/example') throw new Error('the stored contribution lost plugin')
+  if (stored.configSection !== 'demo') throw new Error('the stored contribution lost configSection')
+  if (contribution.start !== own) throw new Error('the doctor mutated the caller\\'s contribution')
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
