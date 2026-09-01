@@ -484,3 +484,29 @@ test('readRowsSince: a `columns` projection omitting `entrypoint` still enforces
   assert.deepEqual(shipped, [1], 'the guarantee never rides on the caller projecting the column in')
   assert.equal(dropped, 1)
 })
+
+// The two residuals LLP 0346 #consequences states, pinned so they are
+// retired deliberately rather than discovered. Both are rows the seam
+// cannot tell apart from a Claude Code row: `client_name: "claude"` with
+// an `entrypoint` no manifest claims, or none at all. Only the
+// capture-side attribution fix LLP 0192 defers can close them, and when it
+// lands these expectations flip.
+// @ref LLP 0346#local-agent-residual [tests]: the current attached-Desktop build tags its transcripts with an unclaimed container value, so a claude-desktop-only opt-out does not reach its live rows
+test('readRowsSince: a claude-desktop opt-out does not reach a live row tagged with an unclaimed container entrypoint', async () => {
+  const { shipped, dropped } = await runAliasExport({
+    withheld: ['claude-desktop'],
+    rows: [
+      // Desktop app 1.13576.0 / embedded CLI 2.1.177 (LLP 0133
+      // #attribution). `local-agent` names a CLI mode, not a client, so
+      // Desktop's manifest deliberately does not claim it.
+      { id: 1, client_name: 'claude', entrypoint: 'local-agent' },
+      // The projector could not correlate the exchange to a transcript, so
+      // the row has no second axis to read at all.
+      { id: 2, client_name: 'claude', entrypoint: null },
+      // The claimed value, for contrast: this one is withheld.
+      { id: 3, client_name: 'claude', entrypoint: 'claude-desktop-3p' },
+    ],
+  })
+  assert.deepEqual(shipped, [1, 2], 'the stated residuals: unclaimed and absent entrypoints still ship')
+  assert.equal(dropped, 1)
+})

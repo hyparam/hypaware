@@ -46,10 +46,15 @@ the org server while the machine owner believes the client is local-only,
 and the failure is silent on both sides.
 
 Only the **live** route was unenforceable. Desktop's *backfilled* rows
-already carry `client_name: "claude-desktop"`, because
-`classifyTranscriptEntrypoint` attributes a session to the client whose
-manifest claims its entrypoint (LLP 0140), so the existing `client_name`
-test already withheld those.
+already carry `client_name: "claude-desktop"`, by whichever of LLP 0140's
+two admission rules applies to where the session was found: a session in
+the shared `~/.claude/projects` tree is attributed by
+`classifyTranscriptEntrypoint` to the client whose manifest claims its
+entrypoint (LLP 0140 #manifest-declares-ownership), and a session inside
+the `Claude-3p` container is attributed by `classifyContainerSession` to
+the container's root whatever its tag says (LLP 0140
+#container-root-owns, `DESKTOP_3P_CONTAINER_OWNER`). Either way the
+existing `client_name` test already withheld those.
 
 ## The decision {#entrypoint-refinement}
 
@@ -102,9 +107,38 @@ would be a third thing to keep in agreement with the other two.
 
 ## Consequences {#consequences}
 
-- `hyp privacy client claude-desktop local-only` now withholds Desktop's
-  live rows. `hyp privacy client claude local-only` withholds what it
-  withheld before, no more and no less.
+- `hyp privacy client claude-desktop local-only` now withholds the live
+  rows whose `entrypoint` is one Desktop's manifest claims
+  (`claude-desktop`, `claude-desktop-3p`). `hyp privacy client claude
+  local-only` withholds everything it withheld before; the
+  container-drift note below is the one case where it can now withhold
+  more.
+- <a id="local-agent-residual"></a>**The refinement does not reach the
+  current attached-Desktop build.** Desktop app 1.13576.0 / embedded CLI
+  2.1.177 runs each conversation in a per-session sandbox home inside its
+  `Claude-3p` container and tags the transcript
+  `entrypoint: "local-agent"` (LLP 0133 #attribution); the live gateway
+  route copies that value onto the row (`assignTranscriptIdentity`).
+  Desktop's manifest deliberately does not claim `local-agent`: it names
+  a CLI mode, not a client, it drifted to `local-agent-v2` within a week,
+  and LLP 0140 #container-root-owns rules that a container value cannot
+  carry consent. So on that build a `claude-desktop`-only opt-out still
+  ships the live rows, for the same reason the no-`entrypoint` residual
+  below does, and only the capture-side attribution fix LLP 0192 defers
+  retires it. The values this issue does enforce are
+  `claude-desktop-3p` (LLP 0133's first live test) and `claude-desktop`
+  (un-attached Desktop, shared tree). Pinned in
+  `test/core/source-withhold-export-drop.test.js` so that when capture
+  attributes the live route to Desktop, the pin fails and the residual is
+  retired deliberately rather than drifting.
+- The scoping set is `{claude, claude-desktop}`, so a row carrying
+  `client_name: "claude-desktop"` also has its `entrypoint` read as an
+  ownership claim. A container session whose tag drifts to a value the
+  `claude` client claims (`cli`, `sdk-cli`) would then be withheld by a
+  `claude`-only opt-out even though the row is Desktop's. That is
+  over-withholding, the safe direction, and it is the price of deriving
+  the scope from the manifests instead of hardcoding the one aliasing
+  direction LLP 0133 documents.
 - A Desktop row that reached the cache with **no** `entrypoint` (an
   exchange the projector could not correlate to a transcript) still
   ships under a `claude-desktop`-only opt-out. It is indistinguishable
