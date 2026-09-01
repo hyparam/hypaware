@@ -246,7 +246,14 @@ async function detachJsonMarker({ settingsPath, markerKey, fs, env, homeDir, pla
 
   const managed = isPlainObject(marker.managed) ? marker.managed : {}
   const managedEnv = isPlainObject(managed.env) ? managed.env : {}
-  const hookEntries = Array.isArray(managed.hooks) ? managed.hooks : []
+  // Claude Code 2.1.257 reserves `hooks` throughout settings.json, so current
+  // markers use `hook_entries`. Keep reading the original field so an upgrade
+  // can still detach settings written by every earlier HypAware release.
+  const hookEntries = Array.isArray(managed.hook_entries)
+    ? managed.hook_entries
+    : Array.isArray(managed.hooks)
+      ? managed.hooks
+      : []
   // Presence, not type: the restore half of the attach-side backup. Attach only
   // ever writes this field when there was a prior value to record, so the field
   // being there IS the "restore me" fact and its JSON type says nothing. A type

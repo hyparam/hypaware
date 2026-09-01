@@ -641,7 +641,10 @@ export async function attach(opts) {
     mode,
     managed: {
       env: managedEnv,
-      hooks: managedHookEntries(commands),
+      // Claude Code 2.1.257 reserves `hooks` throughout settings.json, not
+      // only at the root. A nested `managed.hooks` undo field makes Claude
+      // reject the whole file as a misplaced permission-hook declaration.
+      hook_entries: managedHookEntries(commands),
     },
     // `prev_base_url` stays its own field rather than folding into `prev_env`:
     // markers written by earlier versions carry it, and the core undo still

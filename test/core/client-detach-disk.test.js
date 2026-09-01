@@ -235,7 +235,7 @@ test('claude undo strips marker + managed keys/hooks from a hand-written fixture
         state_file: '/abs/session-context.jsonl',
         managed: {
           env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123' },
-          hooks: [
+          hook_entries: [
             { event: 'SessionStart', command },
             { event: 'CwdChanged', command },
             { event: 'UserPromptSubmit', command },
