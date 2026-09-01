@@ -606,6 +606,50 @@ export async function writeCursor(partitionDir, cursor) {
 }
 
 /**
+ * Read the cursor an append is about to build its next cursor from, or
+ * refuse the append.
+ *
+ * Both append paths used to spell out the `readCursorSync` default inline,
+ * which erased the very refusal {@link tryReadCursorSync} exists to raise:
+ * null means "missing OR unreadable", and the two are not alike here. A
+ * partition with no `cursor.json` is provably fresh, and the default is the
+ * truth about it. A partition whose `cursor.json` is present but does not
+ * read has a live generation the default only guesses at, and on one already
+ * compacted onto a `table-<ms>` the guess is wrong: the append publishes
+ * `table` as live, the real generation becomes unreferenced, and the orphan
+ * sweep reclaims it once past its grace window. Every row the partition held
+ * before that append is then gone (issue #1170).
+ *
+ * So the same distinction {@link partitionHasCommittedRows} already draws for
+ * the pending-fallback tally decides whether the append may run at all, and
+ * it is drawn on the same evidence: the file's presence, not the reader's
+ * answer.
+ *
+ * Refusing is not a dead end for the rows. Appends arrive from a spool flush,
+ * and a flush whose append throws leaves its file undrained under a failure
+ * stamp for the next pass to coalesce (LLP 0322#coalesce-the-retry), so the
+ * rows wait for a readable cursor instead of being written somewhere that
+ * costs the partition its history.
+ *
+ * @ref LLP 0323#whole-cursor [implements]: the write path may not re-derive the guess the reader refuses to make.
+ * @param {string} partitionDir
+ * @returns {PartitionCursor}
+ */
+function readCursorForAppend(partitionDir) {
+  const cursor = tryReadCursorSync(partitionDir)
+  if (cursor) return cursor
+  // Missing is the fresh partition, and it gets the concrete default: this
+  // is where a first append legitimately publishes its first generation.
+  if (!fs.existsSync(path.join(partitionDir, CURSOR_FILE))) {
+    return { epoch: 0, rowCount: 0, compaction: null }
+  }
+  // The read itself already reported why, under the standing-refusal window
+  // (LLP 0332#transition-plus-rewarn), so this says what it costs and does
+  // not re-say the cause.
+  throw new Error(`cache append refused: cursor.json in ${partitionDir} is present but unreadable, so the live generation is unknown`)
+}
+
+/**
  * Append rows into the source-table layout for the resolved
  * partition.  Creates the partition directory, Iceberg table
  * subdirectory, and cursor on first write.
@@ -635,8 +679,7 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
   // present is a genuinely unsettled row.
   const fallbackAppended = countGatewayFallbackRows(rows)
   return withPartitionMutationLock(partitionDir, async () => {
-    const cursorOnDisk = tryReadCursorSync(partitionDir)
-    const cursor = cursorOnDisk ?? { epoch: 0, rowCount: 0, compaction: null }
+    const cursor = readCursorForAppend(partitionDir)
     const tableDir = cursor.tableDir ?? 'table'
     const icebergDir = path.join(partitionDir, tableDir)
     // Asked BEFORE the append, which creates the table on first use: after
@@ -679,8 +722,7 @@ export async function appendRowsToPartition(cacheRoot, dataset, partitionSegment
   // only one of two write paths is a count that drifts the day it is.
   const fallbackAppended = countGatewayFallbackRows(rows)
   return withPartitionMutationLock(partitionDir, async () => {
-    const cursorOnDisk = tryReadCursorSync(partitionDir)
-    const cursor = cursorOnDisk ?? { epoch: 0, rowCount: 0, compaction: null }
+    const cursor = readCursorForAppend(partitionDir)
     const epochDir = path.join(partitionDir, `epoch=${cursor.epoch}`)
     // As above: asked before the append creates the epoch's table.
     const mayHoldUncountedRows = partitionHasCommittedRows(partitionDir, epochDir)
