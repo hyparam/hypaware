@@ -1238,7 +1238,7 @@ export async function collectHypAwareStatus(opts = {}) {
     diagnostics.push({
       severity: 'error',
       kind: 'daemon_heartbeat_stale',
-      message: `the daemon process is alive but has not updated its status snapshot for ${formatGapDuration(heartbeatAgeMs)} - its event loop is not running the tick, so its bound listeners accept connections without answering them`,
+      message: `the daemon process is alive but has not updated its status snapshot for ${formatGapDuration(heartbeatAgeMs)} - its tick has not completed in that time, so its bound listeners may accept connections without answering them`,
       repair: ['hyp daemon restart'],
     })
   }

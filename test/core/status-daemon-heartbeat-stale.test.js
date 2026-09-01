@@ -132,6 +132,14 @@ function startStalledListener(blockMs) {
       resolve({ pid: /** @type {number} */ (child.pid), port, kill: () => child.kill('SIGKILL') })
     })
     child.on('error', reject)
+    // A child that dies before it prints its port would otherwise leave this
+    // promise unsettled forever, and the runner sets no per-test timeout, so
+    // the whole suite would hang with nothing said. A reject after a resolve
+    // is a no-op, so the normal exit (the block elapses, or the kill below)
+    // is unaffected.
+    child.on('exit', (code, signal) => {
+      reject(new Error(`the stalled-listener child exited before it bound a port (code ${code}, signal ${signal})`))
+    })
   })
 }
 
