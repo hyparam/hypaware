@@ -275,6 +275,14 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const attributionColumn = sourceWithholdResolver?.attributionColumnFor(dataset)
       const forceAttribution =
         attributionColumn !== undefined && projected !== undefined && !projected.includes(attributionColumn)
+      // @ref LLP 0346#entrypoint-refinement [implements]: the second
+      // attribution axis, forced in on the same not-bypassable-by-projection
+      // terms as the first. A dataset without the column costs one ignored
+      // name in the projection (icebird intersects the wanted set with the
+      // table schema) and the refinement then never fires.
+      const entrypointColumn = sourceWithholdResolver?.entrypointColumnFor?.(dataset)
+      const forceEntrypoint =
+        entrypointColumn !== undefined && projected !== undefined && !projected.includes(entrypointColumn)
       // @ref LLP 0188#enforcement-scope [implements]: a dataset with no
       // attribution column, all of whose contributing sources are opted out,
       // is withheld wholesale; per-row filtering can never fire for it, so
@@ -285,10 +293,11 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const withholdDataset = sourceWithholdResolver?.shouldWithholdDataset?.(dataset) === true
       /** @type {string[] | undefined} */
       let scanColumns = projected
-      if (forceCwd || forceAttribution) {
+      if (forceCwd || forceAttribution || forceEntrypoint) {
         scanColumns = [...(/** @type {string[]} */ (projected))]
         if (forceCwd) scanColumns.push('cwd')
         if (forceAttribution) scanColumns.push(/** @type {string} */ (attributionColumn))
+        if (forceEntrypoint) scanColumns.push(/** @type {string} */ (entrypointColumn))
       }
       // Running high-water of REAL (non-null) seqs seen so far, seeded with the
       // incoming watermark. `after` is this monotonic max, so a null-seq legacy
@@ -342,8 +351,18 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           // only an opt-out on a raw gateway row (`raw-anthropic`/
           // `raw-openai`) arms it.
           const attributed = typeof attributionValue === 'string' && attributionValue !== ''
+          // @ref LLP 0346#entrypoint-refinement [implements]: a row whose
+          // `client_name` belongs to one client but whose `entrypoint` is
+          // claimed by another (`claude-desktop` stamping `client_name:
+          // "claude"`) is withheld when EITHER source is opted out; the
+          // `client_name` test is unchanged, so nothing that was withheld
+          // before is shipped now.
           const withholdRow = attributed
-            ? sourceWithholdResolver.shouldWithhold(attributionValue)
+            ? sourceWithholdResolver.shouldWithhold(attributionValue) ||
+              sourceWithholdResolver.shouldWithholdEntrypoint?.(
+                attributionValue,
+                entrypointColumn === undefined ? undefined : row[entrypointColumn]
+              ) === true
             : sourceWithholdResolver.shouldWithholdUnattributed?.(dataset) === true
           if (withholdRow) {
             droppedRowCount += 1
@@ -353,11 +372,12 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
             continue
           }
         }
-        // We forced `cwd`/the attribution column in for the filters only;
-        // don't leak either into a payload the caller's projection didn't ask
-        // for.
+        // We forced `cwd`/the attribution column/the entrypoint column in for
+        // the filters only; don't leak any of them into a payload the caller's
+        // projection didn't ask for.
         if (forceCwd) delete row.cwd
         if (forceAttribution) delete row[/** @type {string} */ (attributionColumn)]
+        if (forceEntrypoint) delete row[/** @type {string} */ (entrypointColumn)]
         yield { row, after }
       }
       // Per-partition aggregate on the export read; cwds are hashed, never raw

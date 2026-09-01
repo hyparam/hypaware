@@ -45,6 +45,13 @@ not the picker, enforces. The withheld set is read lazily (TTL-cached) so
 an opt-out takes effect in a running daemon without restart. A corrupt
 store fails the export closed, exactly as the directory list does.
 
+> **Extended-by: [LLP 0346](./0346-aliased-client-optout-enforced-by-entrypoint.issue.md).**
+> One shipped picker id, `claude-desktop`, stamps another client's
+> `client_name` by design (LLP 0133 #attribution), so its store entry could
+> never match a row at the seam. LLP 0346 adds an entrypoint-keyed
+> enforcement path for that case; the store, its keying, and the rules
+> above are unchanged.
+
 <a id="locked"></a>**Central sources always sync.** A source classified
 `'central'` (present in the org's config document) cannot be opted out:
 the CLI refuses to write such an entry, and any stale entry for a source
