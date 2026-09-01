@@ -145,7 +145,11 @@ function startStalledListener(blockMs) {
 
 test('a live daemon whose listener accepts TCP but never answers is not reported healthy', async () => {
   const { hypHome, stateRoot } = await makeHome()
-  const stalled = await startStalledListener(4000)
+  // Long enough that the child is still blocked for the whole test. The
+  // `finally` below kills it, so the number is a ceiling on a leak, not a
+  // budget the assertions have to finish inside: at 4s a loaded runner could
+  // let the child exit mid-collect and fail on `daemon.running` instead.
+  const stalled = await startStalledListener(60_000)
   try {
     // Ground truth for the fault: the connect succeeds and zero bytes come back.
     const probe = await probeHttp(stalled.port, 700)
@@ -214,4 +218,30 @@ test('a status file left behind by a dead daemon raises no heartbeat diagnostic'
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.equal(report.daemon.running, false)
   assert.equal(report.diagnostics.find((d) => d.kind === 'daemon_heartbeat_stale'), undefined)
+})
+
+// Pid reuse. `processIsAlive` proves a pid is taken, not that the daemon took
+// it, so a leftover snapshot whose pid the OS has since handed to an unrelated
+// process must not be read as that process's frozen heartbeat.
+test('a leftover snapshot is not read as the heartbeat of whatever now holds its pid', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const healthyAtMs = Date.now() - 90 * 60_000
+  // The pid file names this live process; the snapshot names a different one.
+  writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'test-run', mode: 'detached' }))
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'healthy',
+    pid: process.pid + 1,
+    startedAt: new Date(healthyAtMs).toISOString(),
+    healthyAt: new Date(healthyAtMs).toISOString(),
+    uptimeMs: 60_000,
+    runId: 'other-run',
+    mode: 'detached',
+    sources: [],
+    sinks: [],
+  }))
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.daemon.running, true)
+  assert.equal(report.diagnostics.find((d) => d.kind === 'daemon_heartbeat_stale'), undefined)
+  assert.equal(report.overall, 'healthy')
 })

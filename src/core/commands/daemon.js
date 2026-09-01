@@ -161,7 +161,16 @@ export async function runDaemonStatus(argv, ctx) {
     ? Math.max(0, Date.now() - Date.parse(status.healthyAt))
     : status.uptimeMs
   if (json) {
-    const payload = { running, ...status, uptimeMs: liveUptimeMs }
+    // `uptimeMs` goes out exactly as the daemon wrote it, not as the live
+    // `liveUptimeMs` the text line below prints. LLP 0348 reads
+    // `healthyAt + uptimeMs` as the moment of the daemon's last status
+    // write, and recomputing `uptimeMs` against `Date.now()` here made that
+    // sum equal "now" for any live pid: a wedged daemon whose file stopped
+    // advancing minutes ago published a permanently fresh heartbeat, and a
+    // reader applying the documented derivation could never see staleness.
+    // The cost is that a JSON reader's uptime lags by up to one tick.
+    // @ref LLP 0348#heartbeat-is-derived [constrained-by]: the pair this payload carries is read as a heartbeat, so it must be the daemon's own
+    const payload = { running, ...status }
     ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
     return 0
   }

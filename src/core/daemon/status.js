@@ -1228,7 +1228,18 @@ export async function collectHypAwareStatus(opts = {}) {
   // Only ever asked of a live process. A snapshot left by a daemon that
   // exited ages forever and is a record, not a claim about now.
   // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a live pid with a frozen heartbeat is degraded, not healthy
-  const heartbeatAgeMs = daemon.running
+  //
+  // Asked only when the snapshot is this process's own. `daemon.running` is
+  // `processIsAlive(pid)`, which proves a pid is taken, not that the daemon
+  // took it: after a hard kill the OS is free to hand that number to an
+  // unrelated process, and without this the leftover pair would be read as
+  // that stranger's frozen heartbeat and raise an `error` on a machine
+  // running no daemon at all. It also covers the restart window, where
+  // launchd already reports the new pid and the file is still the old
+  // daemon's.
+  const snapshotIsThisProcess =
+    typeof daemonStatusFile?.pid !== 'number' || daemonStatusFile.pid === daemon.pid
+  const heartbeatAgeMs = daemon.running && snapshotIsThisProcess
     ? daemonHeartbeatAgeMs(daemonStatusFile, Date.now())
     : null
   if (heartbeatAgeMs !== null && heartbeatAgeMs > DAEMON_HEARTBEAT_STALE_MS) {
