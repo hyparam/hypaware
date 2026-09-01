@@ -60,12 +60,21 @@ function governsNothingResolver() {
 
 // @ref LLP 0050 [tests]: capture-seam drop: an ignored cwd yields no rows so
 // the gateway write guard persists nothing; a clean cwd is unaffected (R1/R2).
-test('project() returns no projection when the exchange cwd is .hypignore-ignored', () => {
+test('project() emits no GitHub repo evidence when the exchange cwd is .hypignore-ignored', () => {
   const projector = createCodexExchangeProjector({
     resolver: ignoringResolver('/work/ignored'),
   })
   const projection = projector.project(exchange({
     path: '/v1/chat/completions',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        workspaces: {
+          '/work/ignored/sub': {
+            associated_remote_urls: { origin: 'https://github.com/acme/ignored.git' },
+          },
+        },
+      }),
+    }),
     request_body: JSON.stringify({
       cwd: '/work/ignored/sub',
       messages: [{ role: 'user', content: 'secret' }],
@@ -74,7 +83,8 @@ test('project() returns no projection when the exchange cwd is .hypignore-ignore
   }), context())
   // The drop returns the terminal USAGE_POLICY_DROP sentinel (not a bare
   // `undefined` decline), so the dispatcher stops the projector walk and logs
-  // it as a drop. Either way the gateway write guard persists nothing.
+  // it as a drop. The GitHub remote in turn metadata therefore never becomes
+  // an ai_gateway_messages row or evidence for central GitHub enrichment.
   assert.equal(projection, USAGE_POLICY_DROP)
 })
 
