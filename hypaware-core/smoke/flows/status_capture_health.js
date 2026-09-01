@@ -131,7 +131,7 @@ export async function run({ harness, expect }) {
         port: 8787,
         mode: 'otel',
         spool_dir: path.join(harness.hypHome, 'spool', 'claude-bodies'),
-        managed: { env: {}, hooks: [] },
+        managed: { env: {}, hook_entries: [] },
       },
       env: {},
     })

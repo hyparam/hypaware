@@ -188,6 +188,62 @@ test('attach reports already-attached (no-op) when the recorded port matches the
   })
 })
 
+test('attach re-attaches a marker still recording managed.hooks, so the retired field migrates', async () => {
+  await withTempHome(async (home) => {
+    // Everything the already-attached branch normally looks at is current: the
+    // live port, the OTEL mode, the asset set. Only the undo record's field
+    // name is stale, and that is the field Claude Code 2.1.257 refuses the
+    // whole settings file over, so the documented repair has to actually run
+    // attach rather than report there was nothing to do.
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        _hypaware: {
+          version: '2.0.0',
+          port: 55555,
+          mode: 'otel',
+          managed: { env: {}, hooks: [{ event: 'SessionStart', command: 'hyp claude-hook session-context' }] },
+        },
+      })
+    )
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx, stdout, stderr } = makeCtx({ home, attachCalls })
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 0, stderr.text())
+    assert.equal(attachCalls.length, 1, 'a retired-field marker must re-attach, not no-op')
+    assert.equal(attachCalls[0].endpoint, 'http://127.0.0.1:55555')
+    assert.doesNotMatch(stdout.text(), /already attached/)
+  })
+})
+
+test('a marker already using managed.hook_entries stays a no-op', async () => {
+  await withTempHome(async (home) => {
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        _hypaware: {
+          version: '2.0.0',
+          port: 55555,
+          mode: 'otel',
+          managed: { env: {}, hook_entries: [{ event: 'SessionStart', command: 'hyp claude-hook session-context' }] },
+        },
+      })
+    )
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx, stdout } = makeCtx({ home, attachCalls })
+    const code = await runAttach(['claude'], ctx)
+    assert.equal(code, 0)
+    assert.deepEqual(attachCalls, [], 'the current marker format is not drift')
+    assert.match(stdout.text(), /already attached/)
+  })
+})
+
 test('attach installs client assets even when the settings are already attached (LLP 0107 every-attach)', async () => {
   await withTempHome(async (home) => {
     // The daemon-managed install is the shape an operator most often runs
