@@ -165,6 +165,7 @@ export type StatusDiagnosticKind =
   | 'config_local_unreadable'
   | 'daemon_binary_missing'
   | 'daemon_loaded_no_pid'
+  | 'daemon_heartbeat_stale'
   | 'client_attach_missing'
   | 'client_attach_stale'
   | 'client_telemetry_stale'
@@ -386,7 +387,12 @@ export interface ServiceState {
   running: boolean
   /** PID, if running. */
   pid?: number
-  /** Last reported daemon state, when a status file exists. */
+  /**
+   * The collector's verdict on the daemon's state, when a status file
+   * exists. Normally the state the daemon last wrote, but a live process
+   * whose heartbeat has gone stale is reported `degraded` whatever its
+   * snapshot claims (LLP 0348).
+   */
   state?: DaemonState
   /** dev_run_id of the active daemon process. */
   runId?: string

@@ -890,6 +890,48 @@ function sourceDetails(source) {
     : undefined
 }
 
+/**
+ * How long the daemon's own status snapshot may go unwritten before
+ * `hyp status` stops believing the `state` recorded in it.
+ *
+ * The daemon persists that snapshot at the end of every tick, and the tick
+ * interval is fixed at 60s outside the test harnesses, so this is five
+ * consecutive missed ticks. It is deliberately several ticks wide: one slow
+ * tick is ordinary (the sink export runs inside it), and a status command
+ * that flickered to `degraded` whenever an export ran long would be worse
+ * than the bug it is here to catch. It is also the reason the window is not
+ * tighter: the daemon's timers do not fire while the machine is asleep, so a
+ * host that just woke reads as stale until its next tick lands.
+ *
+ * @ref LLP 0348#the-window [implements]: several missed ticks, not one
+ */
+export const DAEMON_HEARTBEAT_STALE_MS = 5 * 60_000
+
+/**
+ * How long ago the daemon last wrote its status snapshot, derived from the
+ * two fields the snapshot already carries: `persist()` recomputes `uptimeMs`
+ * as `now - healthyAt` immediately before every write, so `healthyAt +
+ * uptimeMs` *is* the moment of that write. Nothing new has to be recorded
+ * for the heartbeat to be readable.
+ *
+ * Returns `null` when the snapshot has never reached `healthy` (a daemon
+ * still booting has no heartbeat to be late for) or when either field is
+ * missing or unusable, which is also how a status file written by an older
+ * build reads.
+ *
+ * @param {DaemonStatus | null | undefined} status
+ * @param {number} nowMs
+ * @returns {number | null}
+ * @ref LLP 0348#heartbeat-is-derived [implements]: healthyAt + uptimeMs is the last persist, so no new status field is minted
+ */
+export function daemonHeartbeatAgeMs(status, nowMs) {
+  const healthyAtMs = parseIsoMs(status?.healthyAt)
+  if (healthyAtMs === undefined) return null
+  const uptimeMs = status?.uptimeMs
+  if (typeof uptimeMs !== 'number' || !Number.isFinite(uptimeMs) || uptimeMs < 0) return null
+  return nowMs - (healthyAtMs + uptimeMs)
+}
+
 /* ---------- Phase 8: top-level status collector ---------- */
 
 /**
@@ -1171,6 +1213,34 @@ export async function collectHypAwareStatus(opts = {}) {
     if (!daemon.runId) daemon.runId = daemonStatusFile.runId
     if (!daemon.mode) daemon.mode = daemonStatusFile.mode
     daemon.state = daemonStatusFile.state
+  }
+
+  // ----- is the process that owns the pid still running its loop? -----
+  // Everything above proves the daemon started and still owns its pid. None
+  // of it proves the event loop can serve: a daemon wedged behind a stalled
+  // sink export still holds its bound listeners, and the kernel completes
+  // handshakes out of the accept backlog, so the gateway and the OTEL
+  // listener answer the connect and then never write a byte (issue #1003).
+  // The status file is the tell, because the tick that writes it is the same
+  // loop that would have served those requests: it stops advancing at exactly
+  // the moment the daemon stops working, while still saying `healthy`.
+  //
+  // Only ever asked of a live process. A snapshot left by a daemon that
+  // exited ages forever and is a record, not a claim about now.
+  // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a live pid with a frozen heartbeat is degraded, not healthy
+  const heartbeatAgeMs = daemon.running
+    ? daemonHeartbeatAgeMs(daemonStatusFile, Date.now())
+    : null
+  if (heartbeatAgeMs !== null && heartbeatAgeMs > DAEMON_HEARTBEAT_STALE_MS) {
+    // The reported state is this collector's verdict, not a transcription of
+    // the file: reporting `healthy` here is the defect.
+    daemon.state = 'degraded'
+    diagnostics.push({
+      severity: 'error',
+      kind: 'daemon_heartbeat_stale',
+      message: `the daemon process is alive but has not updated its status snapshot for ${formatGapDuration(heartbeatAgeMs)} - its event loop is not running the tick, so its bound listeners accept connections without answering them`,
+      repair: ['hyp daemon restart'],
+    })
   }
 
   if (daemon.installed && !daemon.loaded) {
