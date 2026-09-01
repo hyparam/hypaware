@@ -275,11 +275,19 @@ acceptable turns on whether it is visible.
 `tick()` reads every partition through `readCursorSync`, which is
 `tryReadCursorSync(...) ?? { epoch: 0, rowCount: 0, compaction: null }`. The
 refusal that reader raises for a `cursor.json` that does not parse is
-therefore erased at the call site: a partition whose cursor is corrupt
+therefore erased where the pass reads it: a partition whose cursor is corrupt
 arrives in the loop as a layout-less epoch-0 cursor, spelled exactly like a
 real one. Its `layout` is not `source-table`, so it routes to
-`evictLegacyPartition`, which acts only when `epoch=0/` or a table directly
-under the partition exists and returns null for every other shape.
+`evictLegacyPartition`, which acts only when `epoch=<part.epoch>/` or a table
+directly under the partition exists and returns null for every other shape.
+
+The erasure happens twice over, which matters to any option scoped at a call
+site. `discoverCachePartitions` reads the same `cursor.json` through the same
+defaulting `readCursorSync` before `tick()` ever sees the partition, and that
+is where `part.epoch` comes from. So an unreadable cursor is synthesized into
+an epoch-0 cursor once for the loop's own read and once for the epoch
+`evictLegacyPartition` joins onto the partition path, and the second read is
+shared with `maintenance.js`, `purge.js`, and `cacheStatus`.
 
 Four partitions, each carrying `cursor.json = '{ not json'` and a 400-day-old
 mtime under a 90-day window, against the same four with a healthy cursor
@@ -292,25 +300,45 @@ naming the shape that is really there:
 | epoch layout at `epoch=3/` | skipped, no result | evicted whole |
 | bare `metadata/` under the partition | evicted whole | evicted whole |
 
-The two columns together are the finding. Corruption adds no deletion: the
-shapes evicted under a broken cursor are evicted identically under a healthy
-one, on the same directory mtime, because `evictLegacyPartition` never
-consulted the cursor for that decision. What corruption changes is the other
-two cells. A real source table holding three rows, two of them 400 days old,
-keeps all three under a broken cursor and loses the two under a healthy one,
-with the pass returning `sourceTableResults: []` and no error.
+The two columns together are the finding. Corruption adds no deletion: on the
+two shapes that are evicted, the synthesized epoch-0 default names the same
+live generation the healthy cursor names, so the eviction turns on a
+directory mtime past the cutoff and nothing else, and it lands either way.
+Not because the cursor is unconsulted (the `epoch=3/` row is what a
+synthesized epoch costs a partition), but because on those two shapes the
+guess and the truth agree. What corruption changes is the other two cells. A
+real source table holding three rows, two of them 400 days old, keeps all
+three under a broken cursor and loses the two under a healthy one, with the
+pass returning `sourceTableResults: []` and no error.
 
 So the delta is under-deletion, and it is not the disk-space bug that
 direction usually is. A retention window is a privacy promise, and a
 partition whose cursor stopped parsing keeps every row past it until
 something rewrites the bytes. One thing does: an append to that same
 partition writes a fresh cursor over them, restarting `rowCount` from the
-rows it just appended and dropping the `retention` block. But the partitions
-this question is about are the ones aging out of the window, and a partition
-keyed by a date that has passed is exactly the one nothing appends to any
-more. Compaction and the orphan sweep supply no bound either: they read the
-same refusing gate and skip (LLP 0323#one-gate). So for the partitions
-retention is coming for, the suspension has no end.
+rows it just appended and dropping the `retention` block.
+
+That append is not a repair, and it should not be read as one. It reaches
+the same unreadable cursor through the same defaulting fallback, so it takes
+`tableDir` to be the default `table` and writes that name down. On a
+partition already compacted to a `table-<ms>` generation the append therefore
+mints a second, empty `table/`, publishes it as live, and leaves the real
+generation unreferenced; the orphan sweep reclaims it once past the grace
+window, and the partition's rows are gone. That is the precise failure
+`tryReadCursorSync` refuses a non-string `tableDir` to prevent rather than
+dropping the field (LLP 0323#whole-cursor), arriving instead through the
+write path. So the append ends the suspension only on a partition whose live
+generation is the bare `table` the default happens to guess right, and where
+it guesses wrong it is Option 4's re-derivation with none of Option 4's care.
+
+In any case the partitions this question is about are the ones aging out of
+the window, and a partition keyed by a date that has passed is exactly the
+one nothing appends to any more. Compaction and the orphan sweep supply no
+bound either: both reach the refusing gate (`sweepLiveGeneration` and
+`walkForRetired` read through `tryReadCursorSync`, LLP 0323#one-gate) and
+neither rewrites the cursor for a shape the synthesized default does not
+name. So for the partitions retention is coming for, the suspension has no
+end.
 
 This is LLP 0331#guard-travels-with-the-delete reached through a different
 property. The pass takes "the cursor was read" from a reader that answers a
