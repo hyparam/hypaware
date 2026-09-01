@@ -107,6 +107,11 @@ a batch this daemon recorded, so it is not evidence of anything.
 report.** The daemon log is appended to for the life of the install and nothing
 rotates it, so it is read from the tail: the last 1 MiB, with the fragment
 before the first newline discarded so a half-line cannot parse as a whole one.
+The read starts one byte earlier than the tail so that newline is always
+present: a boundary that happens to fall on a record edge is otherwise
+indistinguishable from a mid-record cut, and the discard would eat a whole
+valid line, which on a log holding one error is the zero this document exists
+to remove.
 The bound is sized against the worst case the window has to hold rather than
 against a typical install: a daemon failing at every tick writes 1,440 records
 a day at a little over 200 bytes each, so a quarter-megabyte tail would have
@@ -115,9 +120,14 @@ counting. A megabyte clears that several times over. The count is a floor, not
 a census: an install noisy enough to overflow even this still reports every
 error the tail holds, which is emphatically not zero.
 The outboxes cost one directory listing per configured sink and open no file,
-because `persistOutbox` bakes the batch's timestamp into its filename. Nothing
-here grows with the age of the machine, and the collector already pays more
-than this for `measureCacheStats`, which stats every file in the cache tree.
+because `persistOutbox` bakes the batch's timestamp into its filename. That
+listing is the one cost here that does grow with the machine, and the window
+does not bound it: nothing drains those files, so a sink failing at the default
+one-minute schedule leaves about 1,440 names a day for the listing to walk past
+in order to count the handful inside 24 hours. Measured, 10,000 files cost the
+whole collection under 20 ms, and the collector already pays more than that for
+`measureCacheStats`, which stats every file in the cache tree. Bounding it
+properly means draining the outbox, which is #not-settled below.
 
 <a id="one-number"></a>**The report still carries one number.** The diagnostic
 message names the breakdown ("3 in the daemon log; 2 failed sink export

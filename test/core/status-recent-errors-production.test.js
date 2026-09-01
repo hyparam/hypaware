@@ -261,3 +261,65 @@ test('only the tail of the daemon log is read, and the record it cuts is discard
     'the three errors inside the tail, not the two before it and not the half-line at the boundary',
   )
 })
+
+// The other half of the boundary. When the tail offset happens to land exactly
+// on the start of a record, the tail already begins at a record edge and there
+// is no fragment to discard - but a discard that fires unconditionally eats a
+// whole valid line. On a log whose only error is that line, the count reads 0
+// again, which is the one answer this counter exists to stop giving.
+// @ref LLP 0349#bounded-reads [tests]:
+test('a tail boundary that lands on a record edge keeps that record', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const tailBytes = 1024 * 1024
+  /**
+   * @param {'info'|'error'} level
+   * @param {number} bytes
+   */
+  const line = (level, bytes) => {
+    const base = JSON.stringify({
+      ts: new Date(Date.now() - 60_000).toISOString(),
+      level,
+      event: 'daemon.tick_failed',
+      pid: 4242,
+      dev_run_id: 'test-run',
+      mode: 'detached',
+      message: '',
+    })
+    return base.slice(0, -2) + 'x'.repeat(Math.max(0, bytes - base.length)) + '"}'
+  }
+
+  // Build a suffix of exactly `tailBytes`, beginning with the error whose
+  // first byte the boundary lands on.
+  const boundary = line('error', 300)
+  const suffix = [boundary, line('info', 300), line('error', 300)]
+  let suffixLen = suffix.reduce((n, l) => n + Buffer.byteLength(l) + 1, 0)
+  while (suffixLen < tailBytes - 2000) {
+    const filler = line('info', 300)
+    suffix.push(filler)
+    suffixLen += Buffer.byteLength(filler) + 1
+  }
+  // Pad one last line so the suffix is exactly the tail, to the byte.
+  const pad = line('info', tailBytes - suffixLen - 1)
+  suffix.push(pad)
+  suffixLen += Buffer.byteLength(pad) + 1
+  assert.equal(suffixLen, tailBytes, 'the suffix is exactly one tail long')
+
+  // Anything before it is out of the tail and must not be counted.
+  const head = [line('error', 300), line('error', 300)]
+  const content = [...head, ...suffix].join('\n') + '\n'
+  const headLen = head.reduce((n, l) => n + Buffer.byteLength(l) + 1, 0)
+  assert.equal(
+    Buffer.byteLength(content) - tailBytes,
+    headLen,
+    'the fixture puts the tail boundary exactly on the first byte of a record',
+  )
+  await fs.mkdir(path.join(stateRoot, 'logs'), { recursive: true })
+  await fs.writeFile(path.join(stateRoot, 'logs', 'daemon.log'), content)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(
+    report.recentErrorCount,
+    2,
+    'the record the boundary lands on is kept, not discarded as a fragment',
+  )
+})

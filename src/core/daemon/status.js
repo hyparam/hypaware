@@ -3015,15 +3015,23 @@ async function countDaemonLogErrors(logPath, sinceMs) {
   }
   try {
     const { size } = await handle.stat()
-    const start = Math.max(0, size - DAEMON_LOG_TAIL_BYTES)
+    // One byte of slack before the tail offset, so that the newline ending the
+    // previous record always leads the buffer. Without it, a boundary that
+    // happens to be line-aligned looks exactly like a mid-record cut and the
+    // discard below eats a whole valid record: on a log whose only error is
+    // that record, the count reads 0, which is the answer this counter exists
+    // to stop giving.
+    const offset = Math.max(0, size - DAEMON_LOG_TAIL_BYTES)
+    const start = offset > 0 ? offset - 1 : 0
     const length = size - start
     if (length <= 0) return 0
     const buf = Buffer.allocUnsafe(length)
     const { bytesRead } = await handle.read(buf, 0, length, start)
     let text = buf.subarray(0, bytesRead).toString('utf8')
     if (start > 0) {
-      // The offset lands mid-record. Drop the fragment rather than let a
-      // half-line parse as something it is not.
+      // Drop through the first newline rather than let a half-line parse as
+      // something it is not. A line-aligned boundary leaves that newline at
+      // index 0, so only the empty fragment before it goes.
       const nl = text.indexOf('\n')
       text = nl < 0 ? '' : text.slice(nl + 1)
     }
