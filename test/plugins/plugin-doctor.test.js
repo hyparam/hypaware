@@ -577,3 +577,32 @@ export async function activate(ctx) {
   const report = await diagnosePlugin(root)
   assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
 })
+
+// Freezing the object you register is ordinary defensive style, and the real
+// registry takes it. A proxy may not answer a non-writable, non-configurable
+// own property with anything but the target's real value, so shadowing `start`
+// on the contribution itself made the read inside `register` throw, and the
+// doctor invented the same `activate_threw` the inert registry exists to
+// avoid.
+test('a frozen source contribution still registers and is still neutered', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  ctx.sources.register(Object.freeze({
+    name: 'demo',
+    plugin: '@test/example',
+    configSection: 'demo',
+    async start() { throw new Error('start() must not run during a dry run') },
+  }))
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the frozen object registered under no name')
+  if (stored.configSection !== 'demo') throw new Error('the stored contribution lost configSection')
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})

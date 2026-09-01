@@ -249,12 +249,22 @@ function inertSourceRegistry() {
  * @returns {SourceContribution}
  */
 function neuter(contribution) {
-  return new Proxy(contribution, {
-    get(target, prop) {
+  // A proxy may not answer a non-writable, non-configurable own property with
+  // anything but the target's real value, so a contribution holding its own
+  // `start` frozen cannot have it shadowed: the read inside `register` throws,
+  // and the doctor reports the fabricated `activate_threw` this stand-in
+  // exists to avoid, against a plugin the real registry accepts. Freezing a
+  // registered object is ordinary defensive style, so in that case proxy an
+  // empty object that inherits from the contribution. Reads resolve off the
+  // contribution itself either way.
+  const own = Object.getOwnPropertyDescriptor(contribution, 'start')
+  const frozenStart = own !== undefined && own.writable === false && own.configurable === false
+  return new Proxy(frozenStart ? Object.create(contribution) : contribution, {
+    get(_target, prop) {
       if (prop === 'start') return inertStart
       // The receiver is the contribution, not the proxy, so an accessor that
       // reads a private field off `this` still finds it.
-      return Reflect.get(target, prop, target)
+      return Reflect.get(contribution, prop, contribution)
     },
   })
 }
