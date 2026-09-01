@@ -6,8 +6,8 @@
 **Generated-by:** neutral
 **Author:** Phil / Claude
 **Date:** 2026-09-01
-**Related:** LLP 0032, LLP 0049, LLP 0050, LLP 0069, LLP 0083, LLP 0151,
-LLP 0160;
+**Related:** LLP 0032, LLP 0049, LLP 0050, LLP 0069, LLP 0083, LLP 0121,
+LLP 0151, LLP 0160;
 hyparam/hypaware#1189, hyparam/hypaware#492, hyparam/hypaware#481,
 hyparam/hypaware#476, PR #477, PR #1076;
 hyparam/hypaware-server#413 (server LLP 0327, out of tree)
@@ -66,9 +66,12 @@ and named this exact consequence, in the same bullet:
 > source (#481).
 
 [LLP 0160](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md) later
-narrowed which substitutions get *logged*, and explicitly "leaves the enrichment
-question open under #492". #492 is open, labelled `neutral:stuck`, and says of
-itself that it "is a decision rather than a defect and needs a human call".
+narrowed which substitutions get *logged* and left enrichment alone: whether to
+suppress enrichment from a key that resolves to `ignore` "is a privacy-relevant
+default that this document does not take", and it "stays open under #492"
+([§0160 not-decided](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#not-decided)).
+#492 is open, labelled `neutral:stuck`, and says of itself that it "is a
+decision rather than a defect and needs a human call".
 
 ## What is changing: `git_remote` as capture-authorizing {#evidence-contract}
 
@@ -178,9 +181,10 @@ came from somewhere else.
 When `workspaceCoversCwd` fails, drop `git_remote` and `head_sha` and their
 `attributes.codex.*` mirrors: `workspace`, `git_origin_url`, `git_commit`, and
 `has_changes`. Only those four; the rest of the `codex` namespace
-(`thread_id`, `session_id`, `parent_thread_id`, `turn_id`, `lineage_source`,
-`lineage_conflict`, `sandbox`) is conversation identity and lineage, not
-enrichment, and dropping it would break
+(`thread_id`, `session_id`, `parent_thread_id`, `turn_id`, `thread_source`,
+`originator`, `window_id`, `sandbox`, `lineage_source`, `lineage_conflict`,
+`turn_started_at_unix_ms`) is conversation identity, client provenance, and
+lineage, not enrichment, and dropping the lineage members would break
 [LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md).
 The row and its `cwd` stay. Small, local, uses a predicate that already
 exists, and fails in the safe direction. On top of (F) it costs enrichment only
@@ -213,16 +217,27 @@ every consumer choose. Adds a field, which
 nothing by itself. Its merit is that it makes (A) survivable: an accepted leak
 that is *labelled* is a different thing from a silent one.
 
-**F. Select a key that covers the `cwd` before falling back to the first.**
-Selection and refusal do not use the same path test. `selectCodexWorkspace`
-matches on **equality** (`pathsEqual`), while `workspaceCoversCwd` refuses on
+**F. Prefer the nearest key that covers the `cwd`.** Selection and refusal do
+not use the same path test. `selectCodexWorkspace` matches on **equality**
+(`pathsEqual`), while `workspaceCoversCwd` refuses on
 **equal-or-descendant** (`isEqualOrDescendant`, the one shared rule of
 [LLP 0069 R8](./0069-local-only-dir-selection.spec.md#requirements)).
 So a key that genuinely covers the `cwd` can still lose to the first key in
 the object: in the reproduction above, `/work/clean` covers `/work/clean/sub`
 and is passed over for `/work/ignored/secret-proj` purely because the
-comparison is a byte match. Preferring a covering key changes one line, reuses
-0160's predicate, costs no second policy resolution, and loses no enrichment.
+comparison is a byte match. Preferring a covering key changes one expression in
+`selectCodexWorkspace`, reuses 0160's predicate, costs no second policy
+resolution, and loses no enrichment.
+
+It must prefer the **nearest** covering key, not merely the first one the
+object happens to list. A `workspaces` declaring both `/work` and `/work/clean`
+for a `cwd` of `/work/clean/sub` has two covering keys, and taking `/work`
+would enrich from the wrong remote and, because `/work` does cover the `cwd`,
+also silence `refused_workspace_cwd`, removing the only signal that anything
+was substituted at all. Nearest-governs is already the rule the gate itself
+applies ([LLP 0049 §scope](./0049-hypignore-usage-policy.spec.md#scope),
+`matchDepth` in `src/core/usage-policy/matcher.js`), so this reuses that rule
+rather than inventing a tie-break.
 
 It is the narrowest option and it is not a substitute for the others: it
 removes the reproduction in this document and the whole class where a covering
