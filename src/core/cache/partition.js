@@ -631,7 +631,8 @@ export async function writeCursor(partitionDir, cursor) {
  * rows wait for a readable cursor instead of being written somewhere that
  * costs the partition its history.
  *
- * @ref LLP 0323#whole-cursor [implements]: the write path may not re-derive the guess the reader refuses to make.
+ * @ref LLP 0347#file-not-reader [implements]: the append is gated on the cursor file's presence, not the reader's answer.
+ * @ref LLP 0323#whole-cursor [constrained-by]: the write path may not re-derive the guess the reader refuses to make.
  * @param {string} partitionDir
  * @returns {PartitionCursor}
  */
