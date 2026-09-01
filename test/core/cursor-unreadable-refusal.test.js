@@ -197,13 +197,15 @@ test('a retraction is not counted as a fresh refusal', async () => {
   // The one control over the exclusion `linesFrom` passes, and the reason
   // the argument is there: the retraction token is the refusal token plus a
   // suffix (`cursor_unreadable` inside `cursor_unreadable_recovered`), so a
-  // substring filter for refusals reads a heal as one. The one other test
-  // that meets that overlap ('an escaping cursor that degrades to garbage')
-  // hand-rolls the same predicate inline over a `CURSOR_READ` capture, so
-  // nothing but this routes the overlap through the argument. Without it the
-  // argument could be dropped and all three suites would stay green while a
-  // cleared condition counted as a fresh warning: the exact inversion of the
-  // signal these controls count in the direction of.
+  // substring filter for refusals reads a heal as one. Two other tests
+  // ('an escaping cursor that degrades to garbage' and 'a read failure that
+  // is not ENOENT leaves the refusal standing') hand-roll the same predicate
+  // inline over a `CURSOR_READ` capture, but neither read can emit an
+  // unreadable retraction - each one refuses for that condition - so their
+  // guard drops nothing and this is the only capture the overlap is really
+  // in. Without it the argument could be dropped and all three suites would
+  // stay green while a cleared condition counted as a fresh warning: the
+  // exact inversion of the signal these controls count in the direction of.
   const partition = await makePartition()
   try {
     await writeRawCursor(partition, '{ not json')
