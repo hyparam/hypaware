@@ -110,6 +110,7 @@ export async function runSync(argv, ctx) {
       yes,
       dryRun,
       ctx,
+      log,
     })
   }
 
@@ -288,10 +289,11 @@ export async function runSync(argv, ctx) {
  *   yes: boolean,
  *   dryRun: boolean,
  *   ctx: CommandRunContext,
+ *   log: ReturnType<typeof getLogger>,
  * }} args
  * @returns {Promise<number>}
  */
-async function runHistorySync({ source, handles, destinations, stateDir, deadline, yes, dryRun, ctx }) {
+async function runHistorySync({ source, handles, destinations, stateDir, deadline, yes, dryRun, ctx, log }) {
   let clientEntries
   try {
     clientEntries = (await readClientSyncEntries({ stateDir })) ?? []
@@ -327,6 +329,7 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
 
   /** @type {Map<string, SourceHistoryReplayPreview>} */
   const previews = new Map()
+  const previewStartedAt = Date.now()
   for (const handle of capable) {
     try {
       const preview = await handle.sink.previewSourceHistory?.({ source })
@@ -341,17 +344,51 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
     }
   }
 
+  // The preview is a full scan of the client's retained history, once per
+  // capable destination, and it sits between the keystroke and the prompt.
+  // Same reason the ordinary plan logs its own elapsed time: if this ever
+  // feels hung, the log should say whether the count was why.
+  const previewRows = [...previews.values()]
+  // `max`, not `sum`: every capable destination replays the same retained
+  // history, so adding their counts would quote double the rows a two-sink
+  // machine actually replays.
+  const totalRows = previewRows.reduce((most, preview) => Math.max(most, preview.rows), 0)
+  log.info('sync.history_preview', {
+    [Attr.COMPONENT]: 'cmd-sync',
+    [Attr.OPERATION]: 'sync.history_preview',
+    hyp_elapsed_ms: Date.now() - previewStartedAt,
+    hyp_sink_source: source,
+    destinations: previews.size,
+    hyp_pending_rows: totalRows,
+    hyp_withheld_rows: previewRows.reduce((most, preview) => Math.max(most, preview.withheldRows), 0),
+  })
+
   const capableNames = new Set(capable.map((handle) => handle.instanceName))
   const selectedDestinations = destinations.filter((destination) => capableNames.has(destination.instance))
   const unsupported = destinations.filter((destination) => !capableNames.has(destination.instance))
   ctx.stdout.write(renderHistoryPlan({ source, destinations: selectedDestinations, previews, unsupported }))
+
+  // A zero-row replay is a success (LLP 0345 #scope), but reporting it as
+  // `exported (rows=0)` after a confirmation prompt reads as "your history
+  // was contributed" to someone who ran this to contribute history. The
+  // usual cause is a name that is not the one on the rows: `--history` matches
+  // `client_name`, which is not always the picker id (claude-desktop's rows
+  // are stamped `claude`). Say that instead of prompting for nothing.
+  if (totalRows === 0) {
+    ctx.stdout.write(
+      `\nno retained history is attributed to '${source}'; nothing to replay\n` +
+      '  --history matches the client_name on the rows, which is not always the\n' +
+      '  client id: run `hyp query sql "select distinct client_name from ai_gateway_messages"`\n' +
+      '  to see the names this machine actually recorded.\n'
+    )
+    return 0
+  }
 
   if (dryRun) {
     ctx.stdout.write('\n[dry-run] nothing was sent\n')
     return 0
   }
 
-  const totalRows = [...previews.values()].reduce((sum, preview) => sum + preview.rows, 0)
   const outcome = await requireConfirmation({
     ctx,
     yes,

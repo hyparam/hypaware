@@ -247,6 +247,41 @@ test('--history --dry-run never calls the replay operation', async () => {
   assert.deepEqual(central.replayed, [])
 })
 
+// `--history` matches `client_name`, which is not always the picker id, so a
+// name that resolves to nothing is the likely outcome of a normal mistake.
+// Reporting it as `exported (rows=0)` after a confirmation prompt reads as
+// "your history was contributed".
+test('--history says so when no retained history is attributed to the client', async () => {
+  const hypHome = await makeHome('history-zero-rows')
+  const central = fakeHistorySink('central', { url: 'https://hypaware.example.com' })
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [central], tty: true, answer: 'y' })
+
+  const code = await runSync(['--history', 'claude-desktop'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /no retained history is attributed to 'claude-desktop'/)
+  assert.doesNotMatch(stdout.text, /exported/)
+  assert.deepEqual(central.replayed, [], 'a zero-row replay never prompts or sends')
+})
+
+// Every capable destination replays the same retained history, so summing
+// their previews would quote double the rows a two-sink machine replays.
+test('--history quotes the rows once when two destinations can replay', async () => {
+  const hypHome = await makeHome('history-two-destinations')
+  const one = fakeHistorySink('central', { url: 'https://hypaware.example.com' })
+  const two = fakeHistorySink('backup', { url: 'https://backup.example.com' })
+  const { ctx, stderr } = makeCtx({ hypHome, sinks: [one, two], tty: true, answer: 'y' })
+
+  const code = await runSync(['--history', 'claude'], ctx)
+
+  assert.equal(code, 0)
+  // The prompt goes to stderr (src/core/cli/confirm.js).
+  assert.match(stderr.text, /Replay 12 retained rows/)
+  assert.doesNotMatch(stderr.text, /24 retained rows/)
+  assert.deepEqual(one.replayed, [{ source: 'claude' }])
+  assert.deepEqual(two.replayed, [{ source: 'claude' }])
+})
+
 // An empty `--history=` value is falsy, so without an explicit guard the flag
 // vanishes and the run silently becomes an ordinary all-destination sync that
 // also ends the first-sync review window.

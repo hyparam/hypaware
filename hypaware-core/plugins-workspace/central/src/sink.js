@@ -258,7 +258,7 @@ export function createForwardSink(args) {
       let rowsReplayed = 0
       let bytesWritten = 0
       for (const partition of partitions) {
-        const stats = { rows: 0 }
+        const stats = { rows: 0, bytes: 0 }
         try {
           const target = forwardingTarget(query, partition)
           // A withheld verdict sends nothing, and the preview above already
@@ -298,11 +298,14 @@ export function createForwardSink(args) {
           })
           rowsReplayed += stats.rows
         } catch (err) {
-          const transfer = err && typeof err === 'object'
-            ? /** @type {{ hyp_bytes_written?: number }} */ (err)
-            : {}
+          // Both counts come from `stats`, which `flushChunk` updates as each
+          // chunk is acked. Reading bytes off the error instead would report
+          // `bytes=0` beside a non-zero row count for any throw raised outside
+          // `flushChunk` (a corrupt privacy list failing the scan closed
+          // mid-partition, say), which is the one thing a partial-transfer
+          // report must not get wrong.
           rowsReplayed += stats.rows
-          bytesWritten += transfer.hyp_bytes_written ?? 0
+          bytesWritten += stats.bytes
           const message = err instanceof Error ? err.message : String(err)
           log.warn('central.forward.history_replay_failed', {
             hyp_sink_source: request.source,
@@ -708,7 +711,7 @@ function withDatasetRolloutLock(dataset, locks, fn) {
  *   includeLegacyOverride?: boolean,
  *   persistWatermark?: boolean,
  *   rowFilter?: (row: Record<string, unknown>) => boolean,
- *   replayStats?: { rows: number },
+ *   replayStats?: { rows: number, bytes: number },
  * }} args
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
@@ -843,7 +846,10 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     bytesWritten += bytes
     chunkIndex += 1
     shippedRowCount += rows
-    if (replayStats) replayStats.rows += rows
+    if (replayStats) {
+      replayStats.rows += rows
+      replayStats.bytes += bytes
+    }
     // The next chunk starts after this chunk's last row, so its batch id keys
     // off this chunk's `after`: keeping ids stable whether a tick streams the
     // whole partition or a respool replays only the un-acked suffix.
