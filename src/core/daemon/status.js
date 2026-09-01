@@ -3031,7 +3031,9 @@ async function countDaemonLogErrors(logPath, sinceMs) {
     if (start > 0) {
       // Drop through the first newline rather than let a half-line parse as
       // something it is not. A line-aligned boundary leaves that newline at
-      // index 0, so only the empty fragment before it goes.
+      // index 0, so only the empty fragment before it goes. The guard is
+      // load-bearing: a file smaller than the tail is read from byte 0 and has
+      // no fragment, so discarding unconditionally would eat its first record.
       const nl = text.indexOf('\n')
       text = nl < 0 ? '' : text.slice(nl + 1)
     }

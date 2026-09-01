@@ -323,3 +323,26 @@ test('a tail boundary that lands on a record edge keeps that record', async () =
     'the record the boundary lands on is kept, not discarded as a fragment',
   )
 })
+
+// The third boundary case, and the ordinary one: on every install whose log is
+// still smaller than the tail, the read starts at byte 0 and there is no
+// fragment at all, so the discard must not fire. That is what the `start > 0`
+// guard is for, and nothing pinned it: a discard that runs unconditionally
+// eats the first record of the file, and on a log whose only error is that
+// record the count is back to 0. The fixture opens with the error so that
+// dropping the guard is visible rather than silent.
+// @ref LLP 0349#bounded-reads [tests]:
+test('a daemon log smaller than the tail is read whole, first record included', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  await writeDaemonLog(stateRoot, [
+    { level: 'error', event: 'daemon.boot_failed', agoMs: 60 * 60_000 },
+    { level: 'info', event: 'daemon.starting', agoMs: 50 * 60_000 },
+  ])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(
+    report.recentErrorCount,
+    1,
+    'the first line of a short log is a whole record, not a fragment to discard',
+  )
+})
