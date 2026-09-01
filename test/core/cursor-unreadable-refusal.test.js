@@ -24,6 +24,7 @@ import path from 'node:path'
 
 import { tryReadCursorSync } from '../../src/core/cache/partition.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
+import { stderrLinesFrom } from '../helpers/stderr_lines.js'
 
 // Kept equal to ESCAPE_REWARN_MS in src/core/cache/partition.js, which is
 // deliberately not exported: the window is a reporting detail, not API.
@@ -38,33 +39,21 @@ const ESCAPE_RECOVERY = 'cursor_escape_recovered'
 const CURSOR_READ = 'cache.cursor_read'
 
 /**
- * Capture what `fn` writes to the real `process.stderr`, where the mirror
- * deliberately writes (LLP 0329#consequences), and return the lines that
- * carry `token`.
+ * The shared stderr capture, with this suite's one scoped exclusion.
+ *
+ * The recovery line carries the refusal token as a substring
+ * (`cursor_unreadable_recovered`), so a count of refusals has to exclude it
+ * or a heal would read as a fresh warning. Only that token needs the
+ * exclusion: a capture of every line one read emitted (`CURSOR_READ`) wants
+ * the retractions in it, and dropping them silently would let an assertion
+ * that none went out pass without looking.
  *
  * @param {() => unknown} fn
  * @param {string} token
  * @returns {Promise<string[]>}
  */
-async function linesFrom(fn, token) {
-  const realWrite = process.stderr.write.bind(process.stderr)
-  let captured = ''
-  process.stderr.write = /** @type {typeof process.stderr.write} */ ((chunk) => {
-    captured += typeof chunk === 'string' ? chunk : String(chunk)
-    return true
-  })
-  try {
-    await fn()
-  } finally {
-    process.stderr.write = realWrite
-  }
-  // The recovery line carries the refusal token as a substring
-  // (`cursor_unreadable_recovered`), so a count of refusals has to exclude
-  // it or a heal would read as a fresh warning. Only that token needs the
-  // exclusion: a capture of every line one read emitted (`CURSOR_READ`)
-  // wants the retractions in it, and dropping them silently would let an
-  // assertion that none went out pass without looking.
-  return captured.split('\n').filter((line) => line.includes(token) && (token !== REFUSAL || !line.includes(RECOVERY)))
+function linesFrom(fn, token) {
+  return stderrLinesFrom(fn, token, token === REFUSAL ? RECOVERY : undefined)
 }
 
 /** @returns {Promise<string>} */
@@ -104,7 +93,7 @@ test('a cursor.json that does not parse is refused out loud, once per condition'
     const first = await linesFrom(() => {
       assert.equal(tryReadCursorSync(partition), null, 'the partition is still skipped')
     }, REFUSAL)
-    assert.equal(first.length, 1, 'the refusal that skips this partition forever is said at least once')
+    assert.equal(first.length, 1, 'the refusal that skips this partition forever is said exactly once')
     assert.ok(first[0].includes(partition), 'and it names the partition, which is the only way to act on it')
 
     // The gate is shared, so one poisoned cursor is read by many callers in

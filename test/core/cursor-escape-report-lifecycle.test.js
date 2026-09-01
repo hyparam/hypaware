@@ -23,6 +23,7 @@ import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 import { migrateLegacyPartitions } from '../../src/core/cache/migrate.js'
 import { tryReadCursorSync } from '../../src/core/cache/partition.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
+import { stderrLinesFrom as linesFrom } from '../helpers/stderr_lines.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -51,30 +52,6 @@ async function writePoisonedCursor(partitionDir, tableDir) {
     path.join(partitionDir, 'cursor.json'),
     JSON.stringify({ epoch: 1, rowCount: 3, compaction: null, layout: 'source-table', tableDir })
   )
-}
-
-/**
- * Capture what `fn` writes to the real `process.stderr`, where the mirror
- * deliberately writes (LLP 0329#consequences), and return the lines that
- * carry `token`.
- *
- * @param {() => unknown} fn
- * @param {string} token
- * @returns {Promise<string[]>}
- */
-async function linesFrom(fn, token) {
-  const realWrite = process.stderr.write.bind(process.stderr)
-  let captured = ''
-  process.stderr.write = /** @type {typeof process.stderr.write} */ ((chunk) => {
-    captured += typeof chunk === 'string' ? chunk : String(chunk)
-    return true
-  })
-  try {
-    await fn()
-  } finally {
-    process.stderr.write = realWrite
-  }
-  return captured.split('\n').filter((line) => line.includes(token))
 }
 
 const REFUSAL = 'cursor_table_dir_escapes_partition'

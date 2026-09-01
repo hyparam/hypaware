@@ -7,7 +7,8 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-31
 **Related:** LLP 0013, LLP 0220, LLP 0323, LLP 0331, LLP 0332, LLP 0334;
-hyparam/hypaware#1138, hyparam/hypaware#1131, PR #1135
+hyparam/hypaware#1138, hyparam/hypaware#1131, hyparam/hypaware#1166,
+hyparam/hypaware#1170, PR #1135, PR #1162
 
 > Four deferred findings from the review of PR #1135 (the retention
 > enforcement wire) share one property that kept every one of them out of
@@ -16,8 +17,13 @@ hyparam/hypaware#1138, hyparam/hypaware#1131, PR #1135
 > delete less; a registry miss and a bare-number timestamp each decide
 > whether a partition is evicted whole, purged by row, or left alone. None
 > of those is a fix that a reviewer can wave through in the margin of the
-> PR that exposed it. This document states the four, states what is already
+> PR that exposed it. This document states them, states what is already
 > known about each, and puts the options up. It decides nothing.
+>
+> A fifth question arrived the same way, out of the review of the PR that
+> carries this document: what a retention window means for a partition
+> whose cursor cannot be read (#unreadable-cursor). It has the same
+> property, so it is stated here on the same terms.
 
 ## Context {#context}
 
@@ -33,7 +39,9 @@ Two review rounds and a triage pass at head
 non-blocking: each one either under-deletes, degrades observability, or
 needs a dataset shape nothing in this repo ships, and none deletes data the
 configured window does not name. Two of the six are settled elsewhere and
-are recorded at the end of this document. The four here are open.
+are recorded at the end of this document. The four here are open, and
+#unreadable-cursor, which the review of the PR that carries this document
+added later, is open beside them.
 
 The reader should hold one asymmetry throughout. Retention is the only
 subsystem in the tree whose ordinary successful operation destroys data
@@ -253,14 +261,149 @@ over-deletion, which is why it is here despite being the narrowest.
    say as unparseable. The most work, and the only option that is not a
    guess.
 
-Whatever is chosen, the count of rows a pass could not date is worth having
-on the pass result: options 3 and 4 both fail toward retaining data forever,
-and that is only acceptable if it is visible.
-
 ### What a decision needs to say
 
 Which units a bare number may mean, what happens to one whose unit cannot be
-established, and whether the rows a pass could not date are reported.
+established, and whether the rows a pass could not date are reported: options
+3 and 4 both fail toward retaining data forever, so whether that is
+acceptable turns on whether it is visible.
+
+## A cursor that cannot be read suspends the window {#unreadable-cursor}
+
+### What is there
+
+`tick()` reads every partition through `readCursorSync`, which is
+`tryReadCursorSync(...) ?? { epoch: 0, rowCount: 0, compaction: null }`. The
+refusal that reader raises for a `cursor.json` that does not parse is
+therefore erased where the pass reads it: a partition whose cursor is corrupt
+arrives in the loop as a layout-less epoch-0 cursor, spelled exactly like a
+real one. Its `layout` is not `source-table`, so it routes to
+`evictLegacyPartition`, which acts only when `epoch=<part.epoch>/` or a table
+directly under the partition exists and returns null for every other shape.
+
+The erasure happens twice over, which matters to any option scoped at a call
+site. `discoverCachePartitions` reads the same `cursor.json` through the same
+defaulting `readCursorSync` before `tick()` ever sees the partition, and that
+is where `part.epoch` comes from. So an unreadable cursor is synthesized into
+an epoch-0 cursor once for the loop's own read and once for the epoch
+`evictLegacyPartition` joins onto the partition path, and the second read is
+shared with `maintenance.js`, `purge.js`, and `cacheStatus`.
+
+Four partitions, each carrying `cursor.json = '{ not json'` and a 400-day-old
+mtime under a 90-day window, against the same four with a healthy cursor
+naming the shape that is really there:
+
+| partition shape | corrupt cursor | healthy cursor |
+| --- | --- | --- |
+| source-table (`table/metadata/`) | skipped, no result | row-level purge |
+| epoch layout at `epoch=0/` | evicted whole | evicted whole |
+| epoch layout at `epoch=3/` | skipped, no result | evicted whole |
+| bare `metadata/` under the partition | evicted whole | evicted whole |
+
+The two columns together are the finding. Corruption adds no deletion: on the
+two shapes that are evicted, the synthesized epoch-0 default names the same
+live generation the healthy cursor names, so the eviction turns on a
+directory mtime past the cutoff and nothing else, and it lands either way.
+Not because the cursor is unconsulted (the `epoch=3/` row is what a
+synthesized epoch costs a partition), but because on those two shapes the
+guess and the truth agree. What corruption changes is the other two cells. A
+real source table holding three rows, two of them 400 days old, keeps all
+three under a broken cursor and loses the two under a healthy one, with the
+pass returning `sourceTableResults: []` and no error.
+
+So the delta is under-deletion, and it is not the disk-space bug that
+direction usually is. A retention window is a privacy promise, and a
+partition whose cursor stopped parsing keeps every row past it until
+something rewrites the bytes. One thing does: an append to that same
+partition writes a fresh cursor over them, restarting `rowCount` from the
+rows it just appended and dropping the `retention` block.
+
+That append is not a repair, and it should not be read as one.
+`appendRowsToSourceTable` does read through `tryReadCursorSync`, and then
+spells out the same epoch-0 default `readCursorSync` is defined as, so the
+refusal is erased there too: it takes `tableDir` to be the default `table`
+and writes that name down. On a partition already compacted to a
+`table-<ms>` generation the append therefore mints a second `table/` holding
+only the rows it just appended, publishes it as live, and leaves the real
+generation unreferenced; the orphan sweep reclaims that generation once past
+the grace window, and every row the partition held before the append is
+gone. That is the precise failure
+`tryReadCursorSync` refuses a non-string `tableDir` to prevent rather than
+dropping the field (LLP 0323#whole-cursor), arriving instead through the
+write path; it is a defect of the write path, not of retention, and it is
+filed as #1170 rather than answered by any option below. So the append ends
+the suspension only on a partition whose live generation is the bare `table`
+the default happens to guess right, and where it guesses wrong it is
+Option 4's re-derivation with none of Option 4's care.
+
+In any case the partitions this question is about are the ones aging out of
+the window, and a partition keyed by a date that has passed is exactly the
+one nothing appends to any more. Compaction and the orphan sweep supply no
+bound either, and not for the same reason. Compaction reads the partition
+through the same defaulting `readCursorSync`, so it plans against a
+synthesized `epoch=0/` that is not there, counts no data files, and rewrites
+nothing. The orphan sweep is the one that reaches the refusing gate:
+`walkForRetired` reads through `tryReadCursorSync` (LLP 0323#one-gate), so
+the live generation stays unknown and the sweep declines to call any sibling
+an orphan, which is what keeps it from deleting the real one. A maintenance
+tick over a compacted partition with a corrupt cursor leaves both the
+`cursor.json` bytes and the `table-<ms>` generation exactly as it found
+them. So for the partitions retention is coming for, the suspension has no
+end.
+
+This is LLP 0331#guard-travels-with-the-delete reached through a different
+property. The pass takes "the cursor was read" from a reader that answers a
+default when it was not, so the two readers over one `cursor.json` disagree:
+`tryReadCursorSync` refuses the partition and `readCursorSync` hands the
+same bytes to a pass that may delete on them.
+
+Since the PR that carries this document the refusal itself is audible: one
+WARN naming the partition, at most once per condition per rewarn window
+(LLP 0332#transition-plus-rewarn), retracted when a read stops refusing
+(LLP 0334#recovery-is-announced). The consequence is not. `RetentionResult`
+carries `evicted` and `sourceTableResults`, and a partition the pass could
+not characterise appears in neither, so nothing that reports the window
+reports that the window went unenforced. That is issue #1131's gap again,
+entered through the cursor instead of through the missing wire.
+
+### Options {#unreadable-cursor-options}
+
+1. **Leave it.** The refusal names the partition on the log channel and
+   retention stays lenient. Fails toward under-deletion on most shapes,
+   which is the safe direction. Costs: the window is unenforced for an
+   unbounded time on a partition an operator can only find by reading WARN
+   lines, and the shapes that are still deleted are deleted on a cursor the
+   shared reader had already refused, so the deleting pass and the gate in
+   front of it disagree about what is known.
+2. **Read the cursor through `tryReadCursorSync` and refuse the partition.**
+   The skip becomes deliberate rather than the side effect of a synthesized
+   default, and nothing is deleted on a cursor nobody could read. Fails
+   toward under-deletion on every shape. Costs: it removes a delete a live
+   daemon performs today (the `epoch=0` and bare shapes), so it is a change
+   to what is deleted rather than a tidy; and a deliberate refusal that
+   still appears nowhere on the pass result trades an accidental silence for
+   a designed one.
+3. **Refuse and report.** Option 2, plus the refused partitions on
+   `RetentionResult` and on whatever surface states the configured window,
+   so "reported" and "enforced" cannot drift the way #1131 describes. Costs
+   a field on the pass result and a surface to carry it, and it is the same
+   question #failing-partition asks about naming the partitions a pass could
+   not enforce, which argues for one answer rather than two.
+4. **Re-derive or quarantine.** Rebuild a usable cursor from what the
+   directory shows, or hold the partition aside until something clears it.
+   Only this option ends the suspension rather than choosing a direction for
+   it. Costs the most, and re-derivation is the guess LLP 0323#whole-cursor
+   already refused to make at read time: a partition that has been compacted
+   has a live generation the directory alone cannot identify, and guessing
+   it wrong turns an unenforced window into local data loss.
+
+### What a decision needs to say
+
+Whether a partition whose cursor cannot be read may be deleted at all, and
+whether the shapes deleted today keep being deleted; whether the suspension
+of the window is reported anywhere other than a WARN line, and on what
+surface; and whether a suspension may be indefinite or has to end in a
+repair, a quarantine, or an alarm.
 
 ## Not decided here {#not-decided}
 
@@ -281,7 +424,13 @@ Two of the six findings from the same triage are not open questions:
   settled that an unproven condition may not throttle, and the escape
   condition is genuinely unproven once the bytes stop parsing. What made
   that a defect was the silence after the retraction, and the new refusal
-  fills it. The clearing itself stands as decided.
+  fills it. The clearing itself was settled by LLP 0334 and is not reopened
+  here.
+
+  The report is the whole of what that fix is. What the silence was hiding,
+  a partition that keeps every row past the configured window for as long as
+  its cursor stays broken, is a deletion-behaviour question, and it is
+  #unreadable-cursor above.
 
 - **The per-pass enforcer rebuild has no test seam.** PR #1135 builds the
   enforcer per pass so a SIGHUP reload changes the enforced window, and no
@@ -294,13 +443,17 @@ Two of the six findings from the same triage are not open questions:
 ## References {#references}
 
 - [LLP 0013](./0013-local-query-cache.decision.md):
-  #retention-is-the-central-tradeoff, the window whose enforcement all four
-  findings are about, and the home of any new on-disk cache state.
+  #retention-is-the-central-tradeoff, the window whose enforcement every
+  finding here is about, and the home of any new on-disk cache state.
 - [LLP 0220](./0220-maintenance-walk-survives-a-partition.decision.md):
   #walk-survives-a-partition, the rule the maintenance walk follows and the
   retention loop does not.
+- [LLP 0323](./0323-cursor-names-a-generation-in-its-own-partition.decision.md):
+  #one-gate, the reader every destructive path shares, and #whole-cursor, the
+  re-derivation it refuses to make at read time.
 - [LLP 0331](./0331-a-deleting-pass-carries-its-own-check.decision.md): a
-  deleting pass checks its own preconditions rather than inheriting them.
+  deleting pass checks its own preconditions rather than inheriting them,
+  which #unreadable-cursor reads through the cursor.
 - [LLP 0332](./0332-cursor-refusal-warns-on-transition-then-rewarns.decision.md)
   and [LLP 0334](./0334-the-escape-report-tracks-the-partition-it-names.decision.md):
   the standing-refusal report the fixed finding above extends.
