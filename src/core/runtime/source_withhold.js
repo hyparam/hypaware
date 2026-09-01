@@ -306,6 +306,14 @@ export function datasetOwnedSourceIdsFromCatalog(catalog) {
  * id can appear in the opt-out store, and every extra name here widens the
  * set of `client_name` values whose `entrypoint` is read as an ownership
  * claim (see `entrypointNamespace` in `createSourceWithholdResolver`).
+ * The restriction is applied to the descriptors BEFORE arbitration, not to
+ * the winner after it. Filtering the winner reads the same but fails open:
+ * a non-picker client descriptor declaring one of Desktop's values ahead of
+ * Desktop would win `resolveEntrypointOwners`' first-declaration-wins race,
+ * and the filter would then drop that value from the map entirely instead
+ * of falling through to the picker that also declares it, silently
+ * restoring the very defect this map exists to fix. Arbitrating within the
+ * picker-named set cannot lose a picker's claim to a non-picker.
  * `resolveEntrypointOwners` is reused rather than reimplemented so the
  * first-declaration-wins arbitration for a value two plugins claim stays in
  * one place; its `configured` flag is irrelevant here (a source that is not
@@ -318,10 +326,10 @@ export function datasetOwnedSourceIdsFromCatalog(catalog) {
 export function clientEntrypointOwnersFromCatalog(catalog) {
   /** @type {Map<string, string>} */
   const out = new Map()
-  const owners = resolveEntrypointOwners(catalog.clientDescriptors?.values() ?? [], () => true)
-  for (const [entrypoint, owner] of owners) {
-    if (!catalog.pickerDescriptors?.has(owner.client)) continue
-    out.set(entrypoint, owner.client)
-  }
+  const pickerNamed = [...(catalog.clientDescriptors?.values() ?? [])].filter((descriptor) =>
+    catalog.pickerDescriptors?.has(descriptor.name)
+  )
+  const owners = resolveEntrypointOwners(pickerNamed, () => true)
+  for (const [entrypoint, owner] of owners) out.set(entrypoint, owner.client)
   return out
 }

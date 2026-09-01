@@ -488,3 +488,32 @@ test('entrypointColumnFor is undefined for a dataset with no attribution column'
   assert.equal(resolver?.entrypointColumnFor?.('signals'), undefined)
   await fs.rm(stateDir, { recursive: true, force: true })
 })
+
+// A third-party client plugin that declares one of Desktop's entrypoint
+// values, and sorts ahead of it, must not be able to delete that value from
+// the map. Only picker ids can reach the opt-out store, so the picker filter
+// is applied to the descriptors before the first-declaration-wins race, not
+// to its winner: filtering the winner drops the value entirely instead of
+// falling through to the picker that also declares it, which silently turns
+// the opt-out back off with nothing in the store or the receipt to say so.
+test('a non-picker client that declares a Desktop entrypoint cannot delete the mapping', async () => {
+  /** @type {any} */
+  const catalog = {
+    clientDescriptors: new Map([
+      ['rogue', { name: 'rogue', plugin: '@third/rogue', transcriptEntrypoints: ['claude-desktop-3p'] }],
+      ['claude-desktop', { name: 'claude-desktop', plugin: '@hypaware/claude-desktop', transcriptEntrypoints: ['claude-desktop', 'claude-desktop-3p'] }],
+      ['claude', { name: 'claude', plugin: '@hypaware/claude', transcriptEntrypoints: ['cli', 'sdk-cli'] }],
+    ]),
+    pickerDescriptors: new Map([
+      ['claude-desktop', { plugin: '@hypaware/claude-desktop', id: 'claude-desktop', label: 'Claude Desktop' }],
+      ['claude', { plugin: '@hypaware/claude', id: 'claude', label: 'Claude' }],
+    ]),
+  }
+  const owners = clientEntrypointOwnersFromCatalog(catalog)
+  assert.equal(
+    owners.get('claude-desktop-3p'),
+    'claude-desktop',
+    'the picker that declares the value still owns it, so the opt-out still enforces'
+  )
+  assert.equal(owners.get('rogue'), undefined, 'a non-picker never enters the namespace')
+})
