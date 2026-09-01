@@ -632,8 +632,8 @@ async function persistStaticToken(name, token, ctx) {
 
 /**
  * The browser authorization-code path (LLP 0058 D1/D6/D7). Derives the
- * identity base from the configured target URL's origin, runs the loopback
- * flow, and stores the resulting OIDC session. When the server also mints a
+ * identity base from the configured target URL's origin, runs the poll-based
+ * browser flow (LLP 0342), and stores the resulting OIDC session. When the server also mints a
  * login gateway (LLP 0061), the returned credential is seeded into the
  * matching `central` forward sinks' persisted identity. On a fresh box with
  * no such sink, an enrolling login *provisions* one (LLP 0063) so logs forward
@@ -923,7 +923,7 @@ const LOGIN_ORG_SELECTION_MESSAGE = 'this account has more than one org - re-run
 
 /**
  * The reason code behind a failed sign-in: the server-surfaced callback error
- * (LLP 0058 D7) when there was one, otherwise a local failure - a loopback
+ * (LLP 0058 D7) when there was one, otherwise a local failure - a poll
  * timeout, a network error, an abandoned browser flow - which is retriable and
  * so is not one of the definitive refusals.
  *
