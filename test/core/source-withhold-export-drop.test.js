@@ -488,9 +488,14 @@ test('readRowsSince: a `columns` projection omitting `entrypoint` still enforces
 // The two residuals LLP 0346 #consequences states, pinned so they are
 // retired deliberately rather than discovered. Both are rows the seam
 // cannot tell apart from a Claude Code row: `client_name: "claude"` with
-// an `entrypoint` no manifest claims, or none at all. Only the
-// capture-side attribution fix LLP 0192 defers can close them, and when it
-// lands these expectations flip.
+// an `entrypoint` no manifest claims, or none at all. This pin holds the
+// seam still: it fails if the seam (or `SHIPPED_ENTRYPOINT_OWNERS` above)
+// starts withholding an unclaimed or absent `entrypoint`. It does NOT fail on the
+// capture-side attribution fix LLP 0192 defers, which closes the residuals
+// by changing what capture writes into `client_name`, so retiring them that
+// way means deleting this test rather than watching it break;
+// `test/core/source-withhold-build.test.js` is the pin that fails if a
+// manifest ever claims `local-agent`.
 // @ref LLP 0346#local-agent-residual [tests]: the current attached-Desktop build tags its transcripts with an unclaimed container value, so a claude-desktop-only opt-out does not reach its live rows
 test('readRowsSince: a claude-desktop opt-out does not reach a live row tagged with an unclaimed container entrypoint', async () => {
   const { shipped, dropped } = await runAliasExport({

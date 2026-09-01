@@ -127,10 +127,14 @@ would be a third thing to keep in agreement with the other two.
   below does, and only the capture-side attribution fix LLP 0192 defers
   retires it. The values this issue does enforce are
   `claude-desktop-3p` (LLP 0133's first live test) and `claude-desktop`
-  (un-attached Desktop, shared tree). Pinned in
-  `test/core/source-withhold-export-drop.test.js` so that when capture
-  attributes the live route to Desktop, the pin fails and the residual is
-  retired deliberately rather than drifting.
+  (un-attached Desktop, shared tree). What the pins actually catch:
+  `test/core/source-withhold-export-drop.test.js` fails if the seam
+  starts withholding an unclaimed or absent `entrypoint`, and the
+  catalog pin in `test/core/source-withhold-build.test.js` fails if a
+  manifest ever claims `local-agent`. Neither fails on the capture-side
+  fix itself, which changes what capture writes into `client_name`
+  rather than anything the seam reads, so retiring the residual that way
+  means deleting these pins deliberately.
 - The scoping set is `{claude, claude-desktop}`, so a row carrying
   `client_name: "claude-desktop"` also has its `entrypoint` read as an
   ownership claim. A container session whose tag drifts to a value the
