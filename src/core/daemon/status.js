@@ -515,7 +515,7 @@ export function recentEntrypointsFromSources(sources) {
       rows: typeof item.rows === 'number' && Number.isFinite(item.rows) ? item.rows : 0,
     })
   }
-  out.sort((a, b) => (a.lastSeen < b.lastSeen ? 1 : a.lastSeen > b.lastSeen ? -1 : 0))
+  out.sort((a, b) => compareStrings(b.lastSeen, a.lastSeen))
   // Sorted before the cap so the entries kept are the most recently seen ones,
   // which is the same entry a "recent clients" readout would keep anyway.
   return out.slice(0, MAX_RECENT_ENTRYPOINTS)
@@ -2375,7 +2375,7 @@ async function collectCacheFlushFailures(cacheRoot, nowMs = Date.now()) {
       stillCoolingDown: nowMs - failure.failedAtMs < QUERY_FLUSH_FAILURE_COOLDOWN_MS,
     })
   }
-  failures.sort((a, b) => (a.failedAt < b.failedAt ? 1 : a.failedAt > b.failedAt ? -1 : compareStrings(a.table, b.table)))
+  failures.sort((a, b) => compareStrings(b.failedAt, a.failedAt) || compareStrings(a.table, b.table))
   return { total: failures.length, failures }
 }
 
