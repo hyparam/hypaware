@@ -116,13 +116,23 @@ test('readRowsSince pairs each row with a monotonic after token and strips the s
 
   /** @type {Record<string, unknown>[]} */
   const fresh = []
-  for await (const { row, after } of svc.readRowsSince(tablePath, { since: watermark, includeLegacy: false })) {
+  for await (const { row, after } of svc.readRowsSince(tablePath, { since: watermark })) {
     assert.ok(row, 'no usage-policy resolver ⇒ no drops')
     fresh.push(row)
     assert.ok(BigInt(after.seq) > BigInt(watermark.seq))
   }
   assert.equal(fresh.length, 2)
   assert.deepEqual(fresh.map((r) => Number(r.id)).sort((a, b) => a - b), [4, 5])
+
+  // The same read the way a sink that already HAS a durable watermark issues
+  // it. That is the only policy the seq predicate is pushed into the scan on,
+  // so it has to land on exactly the rows the default policy above yielded.
+  /** @type {number[]} */
+  const freshPushed = []
+  for await (const { row } of svc.readRowsSince(tablePath, { since: watermark, includeLegacy: false })) {
+    if (row) freshPushed.push(Number(row.id))
+  }
+  assert.deepEqual(freshPushed.sort((a, b) => a - b), [4, 5])
 
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
@@ -237,37 +247,25 @@ test('a watermark prunes data files below it: an idle tick opens no data file', 
   await svc.appendRows(spoolPath, COLS, [{ id: 3, msg: 'c' }])
   await svc.flushTable(spoolPath, { reason: 'manual' })
 
-  // The local resolver reads every file through `fs.readFileSync`; record the
-  // data files it opens during each scan.
-  const fsSync = await import('node:fs')
-  const realRead = fsSync.default.readFileSync
-  /** @type {string[]} */
-  const opened = []
-  fsSync.default.readFileSync = /** @type {typeof realRead} */ ((...args) => {
-    const target = String(args[0])
-    if (target.endsWith('.parquet')) opened.push(path.basename(target))
-    return realRead.apply(fsSync.default, /** @type {any} */ (args))
-  })
-  try {
-    /** @type {number[]} */
-    const fresh = []
+  /** @type {number[]} */
+  const fresh = []
+  let tip = watermark
+  const opened = await parquetOpens(async () => {
     for await (const pair of svc.readRowsSince(tablePath, { since: watermark, includeLegacy: false })) {
       if (pair.row) fresh.push(Number(pair.row.id))
+      tip = pair.after
     }
-    assert.deepEqual(fresh, [3])
-    assert.equal(opened.length, 1, `only the file above the watermark is opened, got ${opened.join(', ')}`)
+  })
+  assert.deepEqual(fresh, [3])
+  assert.equal(opened.length, 1, `only the file above the watermark is opened, got ${opened.join(', ')}`)
 
-    let tip = watermark
-    for await (const pair of svc.readRowsSince(tablePath, { since: watermark, includeLegacy: false })) tip = pair.after
-    opened.length = 0
-    /** @type {unknown[]} */
-    const none = []
+  /** @type {unknown[]} */
+  const none = []
+  const openedIdle = await parquetOpens(async () => {
     for await (const pair of svc.readRowsSince(tablePath, { since: tip, includeLegacy: false })) none.push(pair)
-    assert.equal(none.length, 0)
-    assert.deepEqual(opened, [], 'an idle tick opens no data file at all')
-  } finally {
-    fsSync.default.readFileSync = realRead
-  }
+  })
+  assert.equal(none.length, 0)
+  assert.deepEqual(openedIdle, [], 'an idle tick opens no data file at all')
 
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
@@ -401,6 +399,40 @@ test('with includeLegacy false the pushed predicate drops null seqs and no real 
   const withLegacy = []
   for await (const row of scanRowsFromTable(dir, undefined, { since: 5n })) withLegacy.push(Number(row.id))
   assert.deepEqual(withLegacy.sort((a, b) => a - b), [1, 3, 4, 5, 6])
+
+  await fs.rm(root, { recursive: true, force: true })
+})
+
+// icebird's `remapFilterColumns` drops the WHOLE filter for a data file that
+// is missing any column the filter names, and `whereIn` is a predicate callers
+// rely on that `scanRowsFromTable` does not re-check on yielded rows (`since`
+// it does). Conjoining the two would therefore let a pre-seq-column file lose
+// its lookup clause silently, so the seq predicate is not pushed at all when a
+// `whereIn` is present. Asserted by the files opened: with the push the seq-12
+// file would be the only one read.
+test('the seq predicate is not pushed alongside a whereIn lookup', async () => {
+  const root = await makeTmpDir()
+  const dir = path.join(root, 'lookup')
+  /** @type {ColumnSpec[]} */
+  const cols = [
+    { name: 'id', type: 'INT64', nullable: false },
+    // Constant across every file, so this lookup prunes nothing by its own
+    // bounds and the opened-file count reports only the seq predicate.
+    { name: 'tag', type: 'STRING', nullable: false },
+    INGEST_SEQ_COLUMN,
+  ]
+  await appendRowsToTable(dir, cols, [{ id: 10, tag: 'k', [INGEST_SEQ_COLUMN.name]: 10n }])
+  await appendRowsToTable(dir, cols, [{ id: 11, tag: 'k', [INGEST_SEQ_COLUMN.name]: 11n }])
+  await appendRowsToTable(dir, cols, [{ id: 12, tag: 'k', [INGEST_SEQ_COLUMN.name]: 12n }])
+
+  /** @type {number[]} */
+  const kept = []
+  const opened = await parquetOpens(async () => {
+    const opts = { since: 11n, includeLegacy: false, whereIn: { tag: ['k'] } }
+    for await (const row of scanRowsFromTable(dir, undefined, opts)) kept.push(Number(row.id))
+  })
+  assert.deepEqual(kept, [12], 'the row filter still resolves the watermark')
+  assert.equal(opened.length, 3, `every file is read so the lookup clause survives, got ${opened.join(', ')}`)
 
   await fs.rm(root, { recursive: true, force: true })
 })

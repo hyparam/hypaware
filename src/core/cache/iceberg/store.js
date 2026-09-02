@@ -601,7 +601,8 @@ export async function listLiveDataFiles(tablePath) {
  * set; `QueryStorageService` strips it from the row afterwards.
  *
  * The yielded-row filter below is always the authority on what comes out. On
- * top of it, and only when `includeLegacy` is false, the same predicate is
+ * top of it, and only when `includeLegacy` is false and no `whereIn`
+ * accompanies it, the same predicate is
  * ALSO pushed into icebird's `scan({ where })` so whole data files whose
  * manifest bound on the seq column sits at or below the watermark are never
  * opened (LLP 0040 §2's file-skip). The push is confined to that case because
@@ -644,7 +645,15 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   // the section asks for, gated as the header explains. Without it an idle
   // sink tick decoded every column of every file just to discard each row at
   // the check below.
-  const pushSince = filtering && hasSeqColumn && !includeLegacy
+  //
+  // Never conjoined with a `whereIn`. icebird's `remapFilterColumns` drops the
+  // WHOLE filter for a data file missing any column the filter names, so on a
+  // file written before the seq column existed the lookup clause would be
+  // dropped along with the seq clause. `since` is re-checked on every yielded
+  // row below and survives that; `whereIn` is not re-checked, and its contract
+  // is a predicate callers rely on rather than a pruning hint. No caller passes
+  // both today, and this gate means none can start to without noticing.
+  const pushSince = filtering && hasSeqColumn && !includeLegacy && opts?.whereIn === undefined
   const scan = source.scan({
     columns: projected,
     where: andExpr(
