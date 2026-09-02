@@ -23,6 +23,15 @@ or observations that are adequately captured in the PR description.
 - **Stop when tests pass.** Note unasked-for docs, cleanups, or adjacent fixes
   in the PR description; do not land them.
 
+## Performance
+
+Performance is a product requirement. Keep CPU work and memory use economical
+and bounded, especially in hot paths, per-record work, and long-running
+processes. Every code review must include an explicit CPU and memory pass over
+the changed code and affected paths. Call out avoidable allocation, repeated
+work, unbounded growth, busy loops, and behavior that worsens with data volume
+or uptime; state explicitly when the review finds no CPU or memory concern.
+
 ## Design docs (LLP)
 
 Design rationale lives in numbered **LLP documents** under `llp/`, following
