@@ -742,8 +742,9 @@ test('preventExtensions and seal on the stored contribution reach the contributi
     index: `
 export async function activate(ctx) {
   const contribution = { name: 'demo', plugin: '@test/example' }
-  // Own, non-writable and non-configurable, so the stand-in cannot shadow
-  // start() on the contribution itself and proxies a target of its own.
+  // Own, non-writable and non-configurable: the shape whose read through
+  // the stand-in threw the proxy invariant this whole stand-in exists to
+  // avoid, and the one the branch that survives hardening had to cover.
   Object.defineProperty(contribution, 'start', {
     value: async () => { throw new Error('start() must not run during a dry run') },
     enumerable: true,
@@ -807,6 +808,169 @@ export async function activate(ctx) {
   if (Object.isExtensible(stored)) throw new Error('the stored contribution still reports extensible')
   const desc = Object.getOwnPropertyDescriptor(stored, 'name')
   if (!desc || desc.configurable !== false) throw new Error('the frozen contribution reports name configurable')
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// `setPrototypeOf` went untrapped, so it reparented the stand-in target and
+// left the contribution where it was. That is the one direction a dry run
+// must not take: on a contribution the plugin had hardened, the kernel
+// refuses the reparent outright and the stand-in accepted it quietly, passing
+// a plugin the kernel throws at.
+test('setPrototypeOf on the stored contribution reaches the contribution', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const contribution = {
+    name: 'demo',
+    plugin: '@test/example',
+    async start() { throw new Error('start() must not run during a dry run') },
+  }
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  const proto = { tag: 'p' }
+  Object.setPrototypeOf(stored, proto)
+  if (Object.getPrototypeOf(contribution) !== proto) throw new Error('the reparent never reached the contribution')
+  if (Object.getPrototypeOf(stored) !== proto) throw new Error('the stored contribution reports the wrong prototype')
+  if (stored.tag !== 'p') throw new Error('the new prototype does not read through')
+
+  Object.freeze(contribution)
+  let refused = false
+  try { Object.setPrototypeOf(stored, null) } catch { refused = true }
+  if (!refused) throw new Error('a reparent the kernel refuses was accepted')
+  if (Object.getPrototypeOf(contribution) !== proto) throw new Error('the refused reparent still moved the contribution')
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// Reporting an own accessor `start` as a data property changed the kind
+// `Object.freeze` reads back before it redefines: told the property was data,
+// freeze sent `writable: false`, the contribution's accessor refused it, and
+// the doctor invented an `activate_threw` for the freeze the kernel completes.
+// The substitute getter keeps the kind without making the real start()
+// reachable through it.
+test('a contribution whose own start is an accessor still freezes', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const real = async () => { throw new Error('start() must not run during a dry run') }
+  const contribution = { name: 'demo', plugin: '@test/example' }
+  Object.defineProperty(contribution, 'start', { get: () => real, enumerable: true, configurable: false })
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  Object.freeze(stored)
+
+  if (!Object.isFrozen(contribution)) throw new Error('the freeze never reached the contribution')
+  if (!Object.isFrozen(stored)) throw new Error('the frozen contribution reports unfrozen')
+  if (stored.start === real) throw new Error('the real start() reads back off the stand-in')
+  if (typeof stored.start !== 'function') throw new Error('start() stopped reading back after the freeze')
+  const desc = Object.getOwnPropertyDescriptor(stored, 'start')
+  if (!desc || typeof desc.get !== 'function') throw new Error('an accessor start was reported as a data property')
+  if (desc.get() === real) throw new Error('the reported getter hands back the real start()')
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// Mirroring the contribution's shape onto the stand-in target is a snapshot,
+// and a plugin holding its own reference can move the shape afterwards: a
+// `preventExtensions` leaves properties configurable, so a later delete left
+// `ownKeys` under-reporting what the hardened target still held, and a later
+// freeze left the descriptor trap reporting non-writable against a writable
+// target. Both threw a proxy invariant at a plugin the kernel is fine with.
+test('a contribution reshaped after the stand-in hardened still reads back', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const contribution = {
+    name: 'demo',
+    plugin: '@test/example',
+    configSection: 'demo',
+    async start() { throw new Error('start() must not run during a dry run') },
+  }
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  // Two keys the stand-in mirrors onto its target from a define, one of
+  // them dropped through the plugin's own reference before anything hardens
+  // the mirror.
+  Object.defineProperty(stored, 'dropped', { value: 1, writable: true, enumerable: true, configurable: true })
+  Object.defineProperty(stored, 'kept', { value: 2, writable: true, enumerable: true, configurable: true })
+  if (contribution.dropped !== 1 || contribution.kept !== 2) throw new Error('a define never reached the contribution')
+  delete contribution.dropped
+
+  Object.preventExtensions(stored)
+  delete contribution.configSection
+  const keys = Object.keys(stored).sort().join(',')
+  if (keys !== 'kept,name,plugin,start') throw new Error('the reshaped contribution enumerates as [' + keys + ']')
+
+  Object.freeze(contribution)
+  const desc = Object.getOwnPropertyDescriptor(stored, 'name')
+  if (!desc || desc.writable !== false) throw new Error('the frozen contribution reports name writable')
+  if (!Object.isFrozen(stored)) throw new Error('the frozen contribution reports unfrozen')
+  if (typeof stored.start !== 'function') throw new Error('start() stopped reading back')
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// A `start` descriptor read back off the stand-in names the inert function,
+// and the trap forwarded it to the contribution verbatim, so the ordinary
+// no-op round-trip left the plugin's own object holding this module's
+// function instead of its own `start()`. The stand-in is a read-through,
+// not a rewrite: it writes nothing to the object the plugin handed over.
+test('a start descriptor read back off the stand-in is not written into the contribution', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const real = async function pluginStart() { throw new Error('start() must not run during a dry run') }
+  const contribution = { name: 'demo', plugin: '@test/example', start: real }
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  Object.defineProperty(stored, 'start', Object.getOwnPropertyDescriptor(stored, 'start'))
+  if (contribution.start !== real) throw new Error("the round-trip overwrote the plugin's own start()")
+  if (stored.start === real) throw new Error('the real start() reads back off the stand-in')
+
+  // Again once the freeze has pinned start() onto the stand-in's target,
+  // which is where a define-then-read has to keep holding every invariant.
+  Object.freeze(stored)
+  Object.defineProperty(stored, 'start', Object.getOwnPropertyDescriptor(stored, 'start'))
+  if (contribution.start !== real) throw new Error('the pinned round-trip overwrote start()')
+  if (typeof stored.start !== 'function') throw new Error('start() stopped reading back')
+  if (!Object.isFrozen(stored)) throw new Error('the frozen contribution reports unfrozen')
 
   await ctx.sources.start('demo', ctx)
   if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
