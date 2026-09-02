@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 import { daemonRunDir } from '../daemon/pid.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
+import { isLoopbackHost } from '../util/loopback.js'
 
 /**
  * @import { CommandRunner } from '../../../src/core/cli/types.js'
@@ -211,6 +212,30 @@ function parseSemver(value) {
  * all), and echoing those back verbatim builds a probe URL that can only
  * fail.
  *
+ * "On this machine" is decided from the name alone: only the literal
+ * `localhost` and the loopback IP literals count. A `*.localhost`
+ * subdomain does not, even though RFC 6761 says resolvers must send it to
+ * loopback: glibc without systemd-resolved does not, it asks DNS, so a
+ * hostile search domain plus someone on the path turns an operator's
+ * `http://npm.localhost` into an off-box registry that decides whether
+ * this install ever updates again. Resolving the name here and requiring
+ * the answer to be loopback would close that, at the cost of putting DNS
+ * inside a trust check (a second lookup npm never has to agree with, in an
+ * import-light module, on the pre-boot path). Refusing the suffix is the
+ * smaller answer, and it fails closed: the override degrades to the public
+ * registry with the `registry_untrusted` surface, and `http://localhost`
+ * is right there.
+ *
+ * The rooted spelling `localhost.` does not count either, for the same
+ * reason and not merely by omission. A trailing dot is what stops glibc
+ * satisfying the name from `/etc/hosts` at all: `nss_files` compares the
+ * name literally, misses, and `nss_dns` then queries the absolute name, so
+ * `getent hosts localhost.` comes back empty on a box where
+ * `getent hosts localhost` answers `::1`. Accepting it would hand back
+ * exactly the DNS-decided plain-http trust the `*.localhost` refusal above
+ * exists to remove, and buy nothing for it: on that same box the probe
+ * cannot reach a rooted `localhost.` anyway (`ENOTFOUND`).
+ *
  * @param {string} raw
  * @returns {URL | null}
  */
@@ -229,54 +254,11 @@ function trustedRegistryUrl(raw) {
   // the quieting below that failure no longer reaches the status line.
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
   if (url.protocol === 'https:') return url
-  return isLoopbackHost(url.hostname) ? url : null
-}
-
-/**
- * Does this hostname name *this machine*, decided from the name alone?
- *
- * Only the literal `localhost` and the loopback IP literals count. A
- * `*.localhost` subdomain does not, even though RFC 6761 says resolvers
- * must send it to loopback: glibc without systemd-resolved does not, it
- * asks DNS, so a hostile search domain plus someone on the path turns an
- * operator's `http://npm.localhost` into an off-box registry that decides
- * whether this install ever updates again. Resolving the name here and
- * requiring the answer to be loopback would close that, at the cost of
- * putting DNS inside a trust check (a second lookup npm never has to
- * agree with, in an import-light module, on the pre-boot path). Refusing
- * the suffix is the smaller answer, and it fails closed: the override
- * degrades to the public registry with the `registry_untrusted` surface,
- * and `http://localhost` is right there.
- *
- * The rooted spelling `localhost.` does not count either, for the same
- * reason and not merely by omission. A trailing dot is what stops glibc
- * satisfying the name from `/etc/hosts` at all: `nss_files` compares the
- * name literally, misses, and `nss_dns` then queries the absolute name,
- * so `getent hosts localhost.` comes back empty on a box where
- * `getent hosts localhost` answers `::1`. Accepting it would hand back
- * exactly the DNS-decided plain-http trust the `*.localhost` refusal
- * above exists to remove, and buy nothing for it: on that same box the
- * probe cannot reach a rooted `localhost.` anyway (`ENOTFOUND`).
- *
- * What is matched in the form `URL` leaves it in is the IPv4-mapped
- * literal, which is re-serialized in hex (`[::ffff:127.0.0.1]` becomes
- * `[::ffff:7f00:1]`), so a spelling check on the raw text would refuse a
- * mapped-loopback Verdaccio that is plainly on this machine. That one is
- * safe to accept because the address decides its own destination: no
- * resolver is consulted, and only 127.0.0.0/8 in a v6 coat matches.
- *
- * @param {string} hostname
- * @returns {boolean}
- */
-function isLoopbackHost(hostname) {
-  // `hostname` keeps the brackets on an IPv6 literal.
-  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
-  if (host === 'localhost' || host === '::1') return true
-  if (/^127(?:\.\d{1,3}){3}$/.test(host)) return true
-  // `::ffff:7f00:1` and friends: an IPv4-mapped address whose first
-  // 16-bit group starts with 127 is 127.0.0.0/8 wearing an IPv6 coat.
-  const mapped = /^::ffff:([0-9a-f]{1,4}):[0-9a-f]{1,4}$/.exec(host)
-  return mapped ? Number.parseInt(mapped[1], 16) >>> 8 === 127 : false
+  // `URL` has re-serialized an IPv4-mapped literal into hex by the time it
+  // reaches `hostname` (`[::ffff:127.0.0.1]` becomes `[::ffff:7f00:1]`), so
+  // refusing that form would turn away a mapped-loopback Verdaccio that is
+  // plainly on this machine.
+  return isLoopbackHost(url.hostname, { hexMappedIpv4: true }) ? url : null
 }
 
 /**

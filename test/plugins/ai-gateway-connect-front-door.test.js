@@ -12,7 +12,6 @@ import tls from 'node:tls'
 import {
   CONNECT_HOST,
   attachConnectFrontDoor,
-  isLoopbackAddress,
   parseAuthority,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/connect.js'
 import {
@@ -209,19 +208,6 @@ test('parseAuthority handles ports, defaults, and IPv6 literals', () => {
   assert.equal(parseAuthority('example.com:0'), undefined)
   assert.equal(parseAuthority('example.com:notaport'), undefined)
   assert.equal(parseAuthority(''), undefined)
-})
-
-test('isLoopbackAddress accepts the whole loopback block and nothing else', () => {
-  assert.equal(isLoopbackAddress('127.0.0.1'), true)
-  assert.equal(isLoopbackAddress('127.8.9.10'), true)
-  assert.equal(isLoopbackAddress('::1'), true)
-  assert.equal(isLoopbackAddress('::ffff:127.0.0.1'), true)
-  assert.equal(isLoopbackAddress('192.168.1.50'), false)
-  assert.equal(isLoopbackAddress('::ffff:192.168.1.50'), false)
-  assert.equal(isLoopbackAddress('10.0.0.1'), false)
-  assert.equal(isLoopbackAddress('1270.0.0.1'), false)
-  assert.equal(isLoopbackAddress(undefined), false)
-  assert.equal(isLoopbackAddress(''), false)
 })
 
 // A non-loopback bind must not turn the daemon into an open relay: the check
