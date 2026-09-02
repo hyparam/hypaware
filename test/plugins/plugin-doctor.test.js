@@ -654,9 +654,20 @@ export async function activate(ctx) {
   const copy = { ...stored }
   if (copy.name !== 'demo' || typeof copy.start !== 'function') throw new Error('a spread of the stored contribution lost fields')
 
+  // The mirrored property is non-configurable on the contribution, so the
+  // kernel refuses the delete. The stand-in has to refuse it too: mirroring a
+  // define onto a target of its own must not turn a refusal into a success.
+  let removed = true
+  try { delete stored.meta } catch { removed = false }
+  if (removed) throw new Error('a delete of a non-configurable property was accepted')
+  if (stored.meta !== 1) throw new Error('the refused delete lost the property')
+
   delete stored.configSection
   if ('configSection' in contribution) throw new Error('the delete never reached the contribution')
   if (stored.configSection !== undefined) throw new Error('the deleted property still reads back')
+  // And a define after that delete lands on the contribution again.
+  Object.defineProperty(stored, 'configSection', { value: 'other', enumerable: true })
+  if (stored.configSection !== 'other' || contribution.configSection !== 'other') throw new Error('a define after a delete did not reach the contribution')
 
   // The kernel takes a redefine of the frozen start() to its own value as the
   // no-op it is. A stand-in that pinned start() onto a target of its own could

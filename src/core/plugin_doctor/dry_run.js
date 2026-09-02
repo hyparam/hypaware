@@ -246,7 +246,12 @@ function inertSourceRegistry() {
  * neutering writes nothing to the plugin's own object. It does not make that
  * object read-only: a write, a define, and a delete through the stand-in all
  * reach the contribution, because the real registry hands the contribution out
- * by reference and does not shield it either.
+ * by reference and does not shield it either. Extensibility is the exception:
+ * `preventExtensions`, and the `freeze` and `seal` built on it, stay untrapped
+ * and land on the stand-in's own target rather than the contribution. That
+ * predates the write traps below, and closing it means forwarding
+ * extensibility and copying every key across first, which is wider than the
+ * define/delete fix this stand-in needed.
  *
  * @param {SourceContribution} contribution
  * @returns {SourceContribution}
@@ -319,12 +324,23 @@ function neuter(contribution) {
       // the target carries that property too. `start` is the exception and
       // stays off the target: the only value it could be pinned to is the
       // inert one the `get` trap answers with, so a define naming the real
-      // `start` as its value would be judged incompatible with the target and
+      // `start` as its value would be judged incompatible with that pin and
       // throw, which is the same fabricated `activate_threw` this trap exists
       // to prevent, against the ordinary no-op redefine the kernel accepts.
-      // Leaving it unpinned is safe: a define of a frozen `start` only ever
-      // succeeds as a no-op, and the descriptor trap keeps reporting `start`
-      // configurable for as long as nothing pins it.
+      // Unpinned, that redefine goes through, and the descriptor trap keeps
+      // reporting `start` configurable for as long as nothing pins it.
+      //
+      // One shape stays divergent and no pin recovers it: a descriptor that
+      // spells `configurable: false` out, which is what re-applying a
+      // descriptor read back off the contribution produces. A non-configurable
+      // define the target does not carry throws whatever the trap returns, so
+      // that no-op redefine still fabricates the throw. Every pin that would
+      // carry it trips a different invariant instead: a non-writable pin holds
+      // the inert value, so the real `start` is an incompatible value; a
+      // writable pin cannot take the `writable: false` a full descriptor also
+      // carries; an accessor pin is the wrong descriptor kind. Closing it
+      // needs the target to be the contribution itself, which is exactly what
+      // this branch exists to avoid.
       if (prop !== 'start') {
         const applied = /** @type {PropertyDescriptor} */ (Reflect.getOwnPropertyDescriptor(contribution, prop))
         Reflect.defineProperty(target, prop, applied)
