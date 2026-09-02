@@ -13,7 +13,8 @@ seam-side half that shipped and the residual it recorded), LLP 0133
 "claude"`), LLP 0140 (#container-root-owns, #manifest-declares-ownership,
 #fail-open-on-unknown), LLP 0192 (#fail-closed, #deferred: the sibling
 deferral this one is repeatedly pointed at), LLP 0115
-(#desktop-rows-are-distinguishable); hyparam/hypaware#1168,
+(#desktop-rows-are-distinguishable), LLP 0190 (#sync-gate: the menu that
+shows `client_name` to users as a client checkbox); hyparam/hypaware#1168,
 hyparam/hypaware#1172, PR #1169
 
 > `hyp privacy client claude-desktop local-only` prints "future
@@ -175,6 +176,20 @@ backfill already does for the same session. Reuses
   (the finalize race): those rows have no provenance to key on and keep
   shipping, which is the same residual LLP 0346 #consequences already records
   for a Desktop row with no `entrypoint`.
+- **Cost, and it is the sharp one:** the relabel moves these rows *out* of
+  `claude`'s opt-out scope as well as into `claude-desktop`'s. Today
+  `client_name: "claude"` with `entrypoint: "local-agent"` is withheld by
+  `hyp privacy client claude local-only` on the `client_name` axis alone;
+  relabelled to `client_name: "claude-desktop"` it matches neither axis,
+  because no manifest claims `local-agent`, and it ships. Reproduced against
+  the same catalog as #evidence-seam with `claude` the opted-out source.
+  That follows from answering question 2 the second way rather than being a
+  flaw in this option, but it is a standing opt-out flipping silently from
+  withheld to shipped, and LLP 0346 #consequences states the opposite
+  invariant for its own change ("`hyp privacy client claude local-only`
+  withholds everything it withheld before"). It is therefore the sharpest
+  form of question 3: an existing `claude` opt-out has to be carried across
+  the relabel, or the user warned, before this lands.
 
 ### B. Claim the container values in Desktop's manifest {#option-b}
 
@@ -214,9 +229,9 @@ and every future drift are covered at once.
   withholding is drop-but-advance, so that data is never exported. The trigger
   is upstream and invisible to the user. It also contradicts the pin LLP 0346
   placed deliberately ("fails if the seam starts withholding an unclaimed or
-  absent `entrypoint`"). Confining it to *present* values keeps the no-
-  `entrypoint` fallback rows syncing, which narrows the blast radius but does
-  not remove it.
+  absent `entrypoint`"). Confining it to *present* values keeps the
+  no-`entrypoint` fallback rows syncing, which narrows the blast radius but
+  does not remove it.
 
 ### D. Stop printing the guarantee {#option-d}
 
