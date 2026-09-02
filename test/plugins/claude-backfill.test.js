@@ -230,6 +230,36 @@ test('provider uses the configured scheduled-backfill cadence', () => {
   assert.deepEqual(provider.sweep, { cron: '*/15 * * * *' })
 })
 
+// @ref LLP 0041#consent-gating [tests]: the operator opt-out that suppresses
+// automatic history import suppresses the scheduled lane too, by contributing
+// no `sweep` field for the driver to tick.
+test('backfill.on_join false withholds the scheduled contribution entirely', () => {
+  const off = createClaudeBackfillProvider({
+    homeDir: '/tmp/nope',
+    stateFile: '/tmp/nope/sc.jsonl',
+    config: { backfill: { on_join: false, sweep_cron: '*/15 * * * *' } },
+  })
+  assert.equal(off.sweep, undefined)
+  assert.equal(typeof off.run, 'function')
+
+  // A malformed opt-out reads as an opt-out too (readBackfillPolicy), so a
+  // typo cannot fail open into a five-minute import.
+  const typo = createClaudeBackfillProvider({
+    homeDir: '/tmp/nope',
+    stateFile: '/tmp/nope/sc.jsonl',
+    config: { backfill: { on_join: 'false' } },
+  })
+  assert.equal(typo.sweep, undefined)
+
+  // An explicit true, and a block that only sets the window, still schedule.
+  const on = createClaudeBackfillProvider({
+    homeDir: '/tmp/nope',
+    stateFile: '/tmp/nope/sc.jsonl',
+    config: { backfill: { on_join: true, window_days: 14 } },
+  })
+  assert.deepEqual(on.sweep, { cron: '*/5 * * * *' })
+})
+
 // @ref LLP 0359#file-fingerprints [tests]: an unchanged scheduled pass reads
 // no transcript bodies; appending to one file makes only that file eligible.
 test('scheduled passes skip unchanged transcript files and revisit an append', async () => {

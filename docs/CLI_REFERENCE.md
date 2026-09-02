@@ -651,6 +651,17 @@ Tune the timer in the Claude plugin config if needed:
 } }
 ```
 
+To turn the schedule off, set the same block's `on_join` to false. That is the
+existing opt-out from automatic history import, and it now withholds the
+scheduled rerun as well as the join-time one; `sweep_cron` chooses a cadence
+and has no "never" value.
+
+```json
+{ "name": "@hypaware/claude", "config": {
+  "backfill": { "on_join": false }
+} }
+```
+
 The subcommands below operate the older managed third-party-inference route.
 They are optional experiments, not prerequisites for transcript capture. They
 require `@hypaware/claude-account`; without that capability they return a

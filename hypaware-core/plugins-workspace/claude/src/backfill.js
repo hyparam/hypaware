@@ -28,6 +28,7 @@ import {
   classifyTranscriptEntrypoint,
   sessionEntrypoint,
 } from '../../../../src/core/backfill/entrypoint_owner.js'
+import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
@@ -110,7 +111,12 @@ export function createClaudeBackfillProvider(opts) {
     // @ref LLP 0358#scheduled-sweep [implements]: the existing Claude
     // transcript provider opts into the daemon sweep, with a plugin-owned
     // cadence and no second parser or capture lane
-    sweep: { cron: resolveSweepCron(config) },
+    // @ref LLP 0041#consent-gating [constrained-by]: `backfill.on_join: false` is
+    // the operator's suppression of automatic history import, and the sweep is
+    // automatic history import. Contributing no `sweep` field is what the sweep
+    // driver reads as 'never tick this provider', so the opt-out keeps meaning
+    // what it meant before there was a schedule.
+    ...(sweepEnabled(config) ? { sweep: { cron: resolveSweepCron(config) } } : {}),
     async *run(ctx) {
       // Resolved per run, not at activation: attached-Desktop sessions
       // accumulate new sandbox homes under the 3p container between runs
@@ -129,6 +135,19 @@ export function createClaudeBackfillProvider(opts) {
       })
     },
   }
+}
+
+/**
+ * Whether this plugin entry wants the daemon to rerun its import on a
+ * schedule. Reuses the kernel's single reader of the `backfill` policy block
+ * rather than re-parsing `on_join` here, so the scheduled lane and the
+ * join-time reconciler can never disagree about what an opt-out means.
+ *
+ * @param {JsonObject | undefined} config
+ * @returns {boolean}
+ */
+function sweepEnabled(config) {
+  return readBackfillPolicy({ name: DEFAULT_PLUGIN_NAME, config }).onJoin !== false
 }
 
 /**

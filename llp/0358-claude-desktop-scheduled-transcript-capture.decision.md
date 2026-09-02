@@ -5,7 +5,7 @@
 **Systems:** Plugins, Backfill, Sources, Onboarding
 **Author:** Phil / Codex
 **Date:** 2026-08-31
-**Related:** LLP 0012, LLP 0115, LLP 0133, LLP 0140, LLP 0170, LLP 0224 (#repair-surface: the incomplete-setup prompt this retires for Desktop), LLP 0229 (#diagnostic-is-out-of-scope: the exception this closes), LLP 0297
+**Related:** LLP 0012, LLP 0041 (#consent-gating: the automatic-import opt-out the schedule honors), LLP 0115, LLP 0133, LLP 0140, LLP 0170, LLP 0224 (#repair-surface: the incomplete-setup prompt this retires for Desktop), LLP 0229 (#diagnostic-is-out-of-scope: the exception this closes), LLP 0297
 **Extended-by:** LLP 0359 (scheduled passes are serialized, retention-bounded,
 and skip unchanged transcript bodies with candidate-scoped cache dedupe)
 
@@ -54,6 +54,14 @@ The Claude contribution opts into the existing daemon sweep with a default
 cron of `*/5 * * * *`. Operators may change it with
 `claude.backfill.sweep_cron`; validation uses the same five-field cron grammar
 as sinks and the OpenClaw sweep.
+
+The schedule is withheld entirely when the same block sets
+`claude.backfill.on_join: false`. That flag is LLP 0041 §Consent gating's
+operator suppression of automatic history import, and a five-minute rerun is
+automatic history import; honoring it here is also what keeps an install that
+already set it on exactly the behavior it had before this decision. It is
+therefore the off switch as well: `sweep_cron` selects a cadence, it does not
+spell "never".
 
 Each tick reruns the normal provider and materializer. Native `part_id` dedupe,
 including the materializer's scan of rows still waiting in the spool, makes an
