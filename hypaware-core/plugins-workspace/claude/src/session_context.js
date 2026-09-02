@@ -259,6 +259,17 @@ function compactBody(records, { maxBytes, maxRecords }) {
 }
 
 /**
+ * Read the last `maxBytes` of the channel, with the partial record the cut
+ * leaves at the front discarded.
+ *
+ * The read starts one byte before the tail offset, so the newline ending the
+ * previous record always leads the buffer. Without that byte a boundary that
+ * happens to land on a record edge is indistinguishable from a mid-record cut,
+ * and the discard eats a whole intact record: silently, because this reader is
+ * best-effort, so the projector simply loses that session's `cwd` /
+ * `git_branch`. The `start === 0` return is the other half: a file shorter
+ * than the window is read from byte 0 and has no fragment in front of it.
+ *
  * @param {string} filePath
  * @param {number} maxBytes
  */
@@ -267,16 +278,16 @@ async function readTail(filePath, maxBytes) {
   try {
     handle = await fsp.open(filePath, 'r')
     const stat = await handle.stat()
-    const length = Math.min(stat.size, maxBytes)
-    const start = Math.max(0, stat.size - length)
+    const offset = Math.max(0, stat.size - maxBytes)
+    const start = offset > 0 ? offset - 1 : 0
+    const length = stat.size - start
+    if (length <= 0) return ''
     const buffer = Buffer.alloc(length)
-    await handle.read(buffer, 0, length, start)
-    let text = buffer.toString('utf8')
-    if (start > 0) {
-      const newline = text.indexOf('\n')
-      text = newline === -1 ? '' : text.slice(newline + 1)
-    }
-    return text
+    const { bytesRead } = await handle.read(buffer, 0, length, start)
+    const text = buffer.subarray(0, bytesRead).toString('utf8')
+    if (start === 0) return text
+    const newline = text.indexOf('\n')
+    return newline === -1 ? '' : text.slice(newline + 1)
   } catch {
     return ''
   } finally {
