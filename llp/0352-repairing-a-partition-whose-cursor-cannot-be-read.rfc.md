@@ -115,10 +115,16 @@ bytes that do not parse, and a `tableDir` that parses but escapes its own
 partition (LLP 0323#one-gate). What the operator does not have is the one
 fact a correct cursor needs, which live generation the partition's rows are
 in, on a partition that has been compacted onto a `table-<ms>`. The
-directory listing shows every generation that has not yet aged out of
-`ORPHAN_GRACE_MS`, and the newest is not reliably the live one: compaction
-writes the cursor before retiring the old generation, so a crash between
-those two steps leaves a newer directory that was never published.
+directory listing is not much help either way. On a refused partition
+nothing ages out as an orphan at all: the orphan branch of `walkForRetired`
+runs only when the cursor named a live generation
+(`src/core/cache/maintenance.js:2800`), so `ORPHAN_GRACE_MS` never applies
+here and only a generation already carrying a `.retired` marker is reclaimed,
+after `GRACE_PERIOD_MS`. And the newest directory is not reliably the live
+one: a generation swap writes the new generation's data files, then the
+cursor, then the old generation's `.retired` marker, so a crash before the
+cursor write leaves a newer directory that was never published, and on this
+partition it is never swept away.
 
 ### Options {#repair-options}
 
@@ -237,11 +243,14 @@ The sequence, every step of it observed in #evidence above:
 1. The cursor stops reading. The partition's rows are invisible to every
    reader, and unshipped rows stay unshipped: a sink's watermark advances
    over rows it read, and it read none.
-2. The user runs `hyp purge --subtree /home/u/secret`. It reports 0 rows
-   from 0 partitions and exits 0. Nothing on that output says a partition
-   was skipped, and after LLP 0347 nothing will later rewrite the cursor on
-   its own.
-3. Someone repairs the cursor, by any of Question 1's options.
+2. The user runs `hyp purge /home/u/secret`. It reports 0 rows from 0
+   partitions and exits 0. Nothing on that output says a partition was
+   skipped, and after LLP 0347 nothing will later rewrite the cursor on its
+   own.
+3. Someone republishes a live generation for the partition, by any of
+   Question 1's repairing options. Option 3 quarantines instead of
+   repairing, so it does not reach step 4 at all: the rows stay out of
+   every reader, which is the one thing that option buys here.
 4. The rows are readable again, still carrying their original
    `_hyp_ingest_seq`, still newer than the sink watermark, and the next sink
    pass ships them onward.
