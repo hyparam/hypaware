@@ -606,7 +606,10 @@ test('every registered claude-desktop command summary matches its manifest entry
     paths: { stateDir },
     log: { info() {}, warn() {}, error() {}, debug() {} },
     configRegistry: { registerSection() {} },
-    commands: { register: (/** @type {any} */ cmd) => { registered.set(cmd.name, cmd) } },
+    commands: {
+      register: (/** @type {any} */ cmd) => { registered.set(cmd.name, cmd) },
+      registerGroup() {},
+    },
     requireCapability: (/** @type {string} */ name) => (
       name === 'hypaware.anthropic-credential'
         ? { mode: 'org_key', helperCommandArgs: ['claude-account', 'credential'] }
