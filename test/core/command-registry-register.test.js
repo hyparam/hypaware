@@ -226,8 +226,11 @@ test('the copy diagnosis does not run a prototype accessor to make its case', ()
   )
   assert.equal(reads, 0, 'the rejection path must not invoke the getter')
 
-  // A Proxy is the same argument through a different door.
-  const trapped = new Proxy(
+  // A Proxy is the same argument through two more doors, and they are
+  // different doors: the spread consults `get`, while `in` consults `has`
+  // and never `get`. Both assertions are anchored, so a clause appended
+  // where none belongs fails them too.
+  const getTrapped = new Proxy(
     /** @type {any} */ ({ name: 'trapped', summary: 's', usage: 'hyp trapped' }),
     {
       get(target, key) {
@@ -236,5 +239,18 @@ test('the copy diagnosis does not run a prototype accessor to make its case', ()
       }
     }
   )
-  assert.throws(() => commands.register(trapped), /'trapped' missing run\(\)/)
+  assert.throws(() => commands.register(getTrapped), /'trapped' missing run\(\)$/)
+
+  // `has` is the one trap `in` does reach, so it is the one thing left that
+  // can object. It must not get to replace the boundary error either: the
+  // diagnosis goes quiet and the registry still says what it refused.
+  const hasTrapped = new Proxy(
+    /** @type {any} */ ({ name: 'has-trapped', summary: 's', usage: 'hyp has-trapped' }),
+    {
+      has() {
+        throw new Error('has boom')
+      }
+    }
+  )
+  assert.throws(() => commands.register(hasTrapped), /'has-trapped' missing run\(\)$/)
 })
