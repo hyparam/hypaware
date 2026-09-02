@@ -432,7 +432,7 @@ separate from Claude Code.
 
 ```sh
 hyp init
-hyp query sql "select max(event_time) from ai_gateway_messages where client_name = 'claude-desktop'"
+hyp query sql "select max(message_created_at) from ai_gateway_messages where client_name = 'claude-desktop'"
 ```
 
 The legacy managed-profile commands remain available as an optional live-route

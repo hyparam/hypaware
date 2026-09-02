@@ -1482,8 +1482,9 @@ export async function collectHypAwareStatus(opts = {}) {
     // "not applicable", so the two surfaces that report attach *state* (the
     // clients row, and the attach action in `buildClientActionsReport`) read
     // this flag rather than a probe result that was never taken. The
-    // `client_attach_missing` follows the same gate: LLP 0358 made Desktop's
-    // probe-less transcript lane complete without any setup marker.
+    // `client_attach_missing` diagnostic just below now follows the same gate:
+    // LLP 0358 made Desktop's probe-less transcript lane complete without any
+    // setup marker.
     // @ref LLP 0229#status-derives-by-the-same-gate [implements]: a probe-less client is unattachable, not unattached
     const attachable = !!descriptor.attachProbe
     const probe = attachable

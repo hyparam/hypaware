@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-14
 **Related:** [LLP 0139](./0139-desktop-picker-consent.decision.md) (the consent design this amends), [LLP 0011](./0011-setup-and-onboarding.decision.md) (§autodetect-vs-default: the seeding rule this narrows), [LLP 0131](./0131-configure-phase.decision.md) (the configure phase whose re-run this scopes), [LLP 0190](./0190-wizard-defaults-gate.decision.md) (the defaults gates that now label these rows)
+**Extended-by:** LLP 0358 (#repair-surface no longer applies to Claude Desktop: transcript capture is complete with no attach marker, so no incomplete-setup prompt is due for it)
 
 > Amends [LLP 0139 §informed-consent](./0139-desktop-picker-consent.decision.md#informed-consent)
 > and supersedes [LLP 0139 §default-no](./0139-desktop-picker-consent.decision.md#default-no).

@@ -5,7 +5,7 @@
 **Systems:** Plugins, Backfill, Sources, Onboarding
 **Author:** Phil / Codex
 **Date:** 2026-08-31
-**Related:** LLP 0012, LLP 0115, LLP 0133, LLP 0140, LLP 0170, LLP 0297
+**Related:** LLP 0012, LLP 0115, LLP 0133, LLP 0140, LLP 0170, LLP 0224 (#repair-surface: the incomplete-setup prompt this retires for Desktop), LLP 0229 (#diagnostic-is-out-of-scope: the exception this closes), LLP 0297
 **Extended-by:** LLP 0359 (scheduled passes are serialized, retention-bounded,
 and skip unchanged transcript bodies with candidate-scoped cache dedupe)
 
