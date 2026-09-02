@@ -14,7 +14,11 @@ unconditional stderr write that 0329's per-call-site opt-in does not predict)
 (#never-throws' resource-owned failure and both boundaries in #close-failures
 are closed for the exporters this tree ships: the JSONL writer listens to its
 own stream, rejects the close that lost records, and a provider close that
-outruns the shutdown budget is reported instead of abandoned)
+outruns the shutdown budget is reported instead of abandoned), and
+[LLP 0362](./0362-an-absence-only-degradation-opts-into-the-stderr-mirror.decision.md)
+(#not-a-fifth-mirror: the census of four mirrored lines is a head count and
+not a closed set, and the fifth call site to opt in is the first that is not
+a refusal)
 **Related:** LLP 0021 (#shutdown-and-flush and the exporter strategy this
 leaves unchanged), hyparam/hypaware#1122, hyparam/hypaware#1125,
 hyparam/hypaware#1130

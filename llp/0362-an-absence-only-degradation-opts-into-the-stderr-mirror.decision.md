@@ -9,10 +9,12 @@
 **Extends:** [LLP 0329](./0329-a-containment-refusal-reaches-stderr.decision.md)
 (#stderr-mirror: the per-call-site opt-in, stated there for containment
 refusals, admits one report on a registration that succeeded, because the
-property the rule turns on is the absence and not the refusal)
-**Related:** LLP 0332, LLP 0335 (#not-a-fifth-mirror, whose census this
-extends), LLP 0248, LLP 0268, hyparam/hypaware#1226, hyparam/hypaware#1227,
-hyparam/hypaware#1232
+property the rule turns on is the absence and not the refusal), and
+[LLP 0335](./0335-a-telemetry-failure-is-said-once-never-thrown.decision.md)
+(#not-a-fifth-mirror: its census of four mirrored lines becomes five, and the
+one this admits is the first of them that is not a refusal)
+**Related:** LLP 0332, LLP 0248, LLP 0268, hyparam/hypaware#1226,
+hyparam/hypaware#1227, hyparam/hypaware#1232
 
 > LLP 0329 settled a per-call-site `mirrorStderr` opt-in and wrote its rule
 > for the four containment refusals it was minted over, where refusing and

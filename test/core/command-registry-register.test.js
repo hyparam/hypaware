@@ -420,7 +420,7 @@ function declaredOptionalMembers() {
   const start = types.indexOf('export interface CommandRegistration {')
   assert.notEqual(start, -1, 'interface CommandRegistration is not where the test looks for it')
   const body = types.slice(start, types.indexOf('\n}', start))
-  return [...body.matchAll(/^[ \t]*([A-Za-z_$][\w$]*)\?:/gm)].map((match) => match[1])
+  return [...body.matchAll(/^[ \t]*(?:readonly[ \t]+)?([A-Za-z_$][\w$]*)\?:/gm)].map((match) => match[1])
 }
 
 // `OPTIONAL_MEMBERS` is a hand-written copy of the optional keys of
