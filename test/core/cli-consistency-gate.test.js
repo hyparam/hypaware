@@ -135,14 +135,30 @@ async function bundledRegistry() {
   }
   for (const { dir, manifest } of plugins) {
     const dry = await dryRunActivate(manifest, dir, { knownCapabilities })
-    assert.ok(dry.ok, `${manifest.name}: activate() did not complete, so it contributes no group to sweep`)
+    assert.ok(
+      dry.ok,
+      `${manifest.name}: activate() did not complete, so it contributes no group to sweep` +
+        ` (${dry.error?.kind}: ${dry.error?.message})`
+    )
     for (const group of dry.registered.commandGroups) registry.registerGroup(group)
     for (const command of dry.registered.commandDetails) {
       // Two bundled plugins register the same `session` commands and each
       // guards with `if (ctx.commands.get(name)) return`. A per-plugin dry run
       // cannot see the other's registry, so first-wins here is what the real
-      // loader does with them.
-      if ([command.name, ...command.aliases].some((name) => registry.get(name))) continue
+      // loader does with them. An ALIAS collision is not that case: the real
+      // registry throws on one, the loader records `activate_failed` and drops
+      // every later registration from that plugin, so swallowing it here would
+      // leave this sweep green over a CLI half of which never registered.
+      const claimed = [command.name, ...command.aliases].filter((name) => registry.get(name))
+      if (claimed.length > 0) {
+        assert.deepEqual(
+          claimed,
+          [command.name],
+          `${manifest.name}: '${command.name}' claims a name already registered (${claimed.join(', ')}); ` +
+            'the real loader aborts the rest of this plugin\'s activate() on an alias collision'
+        )
+        continue
+      }
       registry.register({
         ...command,
         plugin: manifest.name,

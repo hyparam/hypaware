@@ -89,7 +89,7 @@ export async function activate(ctx) {
   ctx.commands.registerGroup({
     name: 'client claude-desktop',
     plugin: PLUGIN_NAME,
-    summary: 'Set up Claude Desktop capture on this Mac',
+    summary: 'Set up Claude Desktop capture on macOS',
     help: [
       'Claude Desktop delegates inference to its embedded CLI, so it is',
       'captured by pointing it at the local gateway through the org-managed',
