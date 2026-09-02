@@ -539,13 +539,12 @@ export function backfillConsentTitle(providers, retentionDays) {
  * their manifest marks them `hidden` (LLP 0202). Keep the ids in this
  * array and their descriptors in the catalog - see
  * {@link visiblePickerDescriptors} for what still depends on them.
- * `claude-desktop` is hidden too (LLP 0297) and, like every id absent from
- * this array, sorts after the known ones; nothing needs to change here if
- * it is ever unhidden.
+ * Claude Desktop follows Claude Code because LLP 0358 makes it a regular,
+ * transcript-only client choice with no privileged configure phase.
  *
  * @type {string[]}
  */
-const PICKER_DISPLAY_ORDER = ['claude', 'codex', 'raw-anthropic', 'raw-openai', 'otel']
+const PICKER_DISPLAY_ORDER = ['claude', 'claude-desktop', 'codex', 'raw-anthropic', 'raw-openai', 'otel']
 
 /**
  * Phase 5 export options.
@@ -903,9 +902,10 @@ export function writeWalkthroughRunSummary({ stdout, configPath, finaleSummary }
  *     subscription upstream, matching the retired switch's fixed order).
  *   - Each picked descriptor's `plugin` (the adapter plugin instance, e.g.
  *     `@hypaware/claude`, `@hypaware/otel`) is included, followed by any
- *     `plugins[]` it composes beside it (the Claude Desktop row composes
- *     `@hypaware/claude-account` beside its own adapter, whose manifest
- *     requires the credential capability only that plugin provides). A
+ *     `plugins[]` it composes beside it (the Claude Desktop row composes the
+ *     scheduled Claude reader beside its ownership adapter). Repeated plugin
+ *     names are folded once, so selecting Claude Code and Desktop shares the
+ *     reader. A
  *     gateway-requiring plugin lands after the export sink plugins; a
  *     gateway-independent one before them, preserving the retired switch's
  *     plugin order.
@@ -973,8 +973,8 @@ export function composePickerConfig(args) {
     // forever).
     // @ref LLP 0139#compose-the-whole-dependency-set [implements]: a picker row composes every plugin its configure_command needs, not just its own adapter
     for (const plugin of contributedPlugins(compose)) {
-      if (compose.requires_gateway) postExportPlugins.push(plugin)
-      else preExportPlugins.push(plugin)
+      const destination = compose.requires_gateway ? postExportPlugins : preExportPlugins
+      if (!destination.some((existing) => existing.name === plugin.name)) destination.push(plugin)
     }
   }
 
@@ -1753,9 +1753,8 @@ export async function runPickerFinale(args) {
       if (!adapter) {
         // Not attachable, not failed: `contributes.client` also covers plugins
         // that own skill/agent dirs but deliberately register no runtime
-        // adapter (Claude Desktop, LLP 0115#no-attach-on-join); their setup
-        // path is their picker row's configure_command, which the wizard's
-        // configure phase runs.
+        // adapter (Claude Desktop, LLP 0115#no-attach-on-join). Desktop's
+        // scheduled transcript lane needs no attach or configure phase.
         // @ref LLP 0180#decision [implements]: an adapterless client contribution skips the attach lane as not applicable
         summary.attach.push({ client, dryRun, ok: true, noAdapter: true })
         continue
@@ -2294,9 +2293,7 @@ export function ridersInDefaultSet(composeWith) {
 
 /**
  * The descriptors the interactive picker menu renders: everything except
- * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`,
- * widened by `@ref LLP 0297#claude-desktop` to a row that is hidden because
- * its setup does not belong in a checkbox).
+ * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`).
  *
  * Display is the ONLY thing this filters. A hidden row keeps every other
  * property of a picker source, and each one is load-bearing somewhere:

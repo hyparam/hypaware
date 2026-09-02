@@ -157,7 +157,7 @@ export async function resolveOnPath(bin, env, platform = process.platform) {
  * session the user never consented to capture. An eligible client with no
  * binary on `$PATH` cannot be started at all - which is the ordinary
  * state of Claude Desktop, a client that is detectable, pickable, and
- * attachable but carries no `launch` block because it has no prompt
+ * capture-enabled but carries no `launch` block because it has no prompt
  * argument to carry one for.
  *
  * @ref LLP 0198#path-probe [implements]: offer only what is attached and resolves

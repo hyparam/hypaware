@@ -22,7 +22,7 @@ import { renderStatusJson, renderStatusText } from '../../src/core/commands/stat
 // that can never resolve: a permanent `pending` attach action and a
 // `not attached` client row (#544).
 // @ref LLP 0229#decision [tests]: attach-on-join stays inert for a probe-less client, and status says so
-// @ref LLP 0229#diagnostic-is-out-of-scope [tests]: the gate stops at attach state, so the incomplete-setup prompt still fires
+// @ref LLP 0358#transcript-primary [tests]: Desktop needs no attach-missing diagnostic
 
 async function makeHome() {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-probeless-'))
@@ -103,19 +103,13 @@ test('a probe-less client on a joined host renders attach n/a, never a permanent
   assert.match(text, /attach openclaw\s+\[pending\]/)
 })
 
-test('the gate stops at attach state: client_attach_missing still fires for a probe-less client (#544)', async () => {
+test('client_attach_missing skips the probe-less Desktop transcript client', async () => {
   const hypHome = await makeHome()
   const report = await joinedWithDesktop(hypHome)
 
   const missing = report.diagnostics.filter((d) => d.kind === 'client_attach_missing')
-  // Deliberately NOT gated. LLP 0224 #repair-surface made this the standing
-  // incomplete-setup prompt and stopped the wizard re-offering setup because
-  // it exists, so gating it here would leave a declined Desktop setup with no
-  // surface at all. Pinned so the exception cannot be closed by accident along
-  // with the two state surfaces above.
   const desktop = missing.find((d) => d.message.includes('claude-desktop'))
-  assert.ok(desktop, `expected client_attach_missing for claude-desktop, got: ${missing.map((d) => d.message).join(' | ')}`)
-  assert.deepEqual(desktop.repair, ['hyp client claude-desktop install'])
+  assert.equal(desktop, undefined)
   // The probed clients are unaffected in the other direction.
   assert.ok(missing.some((d) => d.message.includes("'@hypaware/claude'")))
   assert.ok(missing.some((d) => d.message.includes("'@hypaware/openclaw'")))

@@ -106,7 +106,39 @@ test('tick fires nothing when no contribution is due, and both when both are', a
 
   // :00 satisfies both schedules.
   assert.deepEqual((await driver.tick({ now: at('2026-08-01T11:00:00.000Z') })).fired, ['openclaw', 'hourly'])
+  await new Promise((resolve) => { setImmediate(resolve) })
   assert.deepEqual(fired, ['openclaw', 'hourly'])
+})
+
+// @ref LLP 0359#serialized-providers [tests]: providers due on the same tick
+// are queued in registry order, never run concurrently through shared
+// materializer and spool state.
+test('providers due together run serially without blocking the tick', async () => {
+  /** @type {string[]} */
+  const started = []
+  let releaseFirst = () => {}
+  const firstPending = new Promise((resolve) => { releaseFirst = () => resolve(OK) })
+  const driver = driverFor({
+    contributions: [
+      contribution({ name: 'openclaw', sweep: { cron: '*/5 * * * *' } }),
+      contribution({ name: 'claude', plugin: '@hypaware/claude', sweep: { cron: '*/5 * * * *' } }),
+    ],
+    runBackfill: async (args) => {
+      started.push(args.provider)
+      if (args.provider === 'openclaw') return firstPending
+      return OK
+    },
+  })
+
+  const report = await driver.tick({ now: at('2026-08-01T10:05:00.000Z') })
+  assert.deepEqual(report.fired, ['openclaw', 'claude'])
+  await new Promise((resolve) => { setImmediate(resolve) })
+  assert.deepEqual(started, ['openclaw'])
+
+  releaseFirst()
+  await firstPending
+  await new Promise((resolve) => { setImmediate(resolve) })
+  assert.deepEqual(started, ['openclaw', 'claude'])
 })
 
 test('the fired run gets the narrowed runner context, built from the daemon runtime fields', async () => {
@@ -137,6 +169,28 @@ test('the fired run gets the narrowed runner context, built from the daemon runt
   assert.equal(seen.config, config)
   assert.equal(seen.backfills, backfills)
   assert.equal(seen.backfillMaterializers, backfillMaterializers)
+})
+
+// @ref LLP 0359#sweep-context [tests]: scheduled imports carry the effective
+// retention window and identify themselves to providers.
+test('scheduled runs receive plugin window_days and the sweep marker', async () => {
+  /** @type {any} */
+  let seen = null
+  const config = {
+    version: 2,
+    query: { cache: { retention: { default_days: 90 } } },
+    plugins: [{ name: '@hypaware/claude', config: { backfill: { window_days: 14 } } }],
+  }
+  const driver = driverFor({
+    contributions: [contribution({ name: 'claude', plugin: '@hypaware/claude', sweep: { cron: '* * * * *' } })],
+    config,
+    runBackfill: async (args) => { seen = args; return OK },
+  })
+
+  await driver.tick({ now: at('2026-08-01T10:00:00.000Z') })
+  await new Promise((resolve) => { setImmediate(resolve) })
+  assert.equal(seen.retentionDays, 14)
+  assert.equal(seen.sweep, true)
 })
 
 test('a rejected sweep run neither throws out of tick nor becomes an unhandled rejection', async () => {
@@ -218,6 +272,7 @@ test('a second tick fires nothing while the first run is still in flight', async
   // Skipped for that tick only: once the run settles, the next due tick fires.
   settle()
   await pending
+  await new Promise((resolve) => { setImmediate(resolve) })
   const third = await driver.tick({ now: at('2026-08-01T10:02:00.000Z') })
   assert.deepEqual(third.fired, ['openclaw'])
   assert.deepEqual(started, ['openclaw', 'openclaw'])

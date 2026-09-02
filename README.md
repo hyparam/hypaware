@@ -422,25 +422,22 @@ history it backfills (`~/.codex/sessions/**`). Rows from either surface land
 in `ai_gateway_messages`; the `entrypoint` column carries Codex's
 `originator`, which is what tells a Desktop session from a terminal one.
 
-**Claude Desktop does need its own setup** (`hyp client claude-desktop install`),
-and `hyp init` will not offer it: Claude Desktop is the one client whose setup
-takes a browser sign-in and a `sudo` prompt to place a root-owned
-managed-preferences plist, which is not something a first-run checklist should
-ask for (LLP 0297). It is opt-in, macOS-only, and always explicit: enable the
-plugins in `~/.hyp/hypaware-config.json`, then run the install. See
-[the CLI reference](./docs/CLI_REFERENCE.md#claude-desktop-commands) for the
-exact `plugins[]` entries.
+**Claude Desktop needs no attach.** Select it in `hyp init` and HypAware imports
+its local JSONL transcripts on the daemon's five-minute schedule (LLP 0358).
+The picker makes no changes to Claude Desktop, opens no browser, writes no
+managed preferences, and needs no admin approval. Desktop rows land as
+`client_name = 'claude-desktop'`; entrypoint and container ownership keep them
+separate from Claude Code.
 
 ```sh
-hyp client claude-desktop install
-hyp client claude-desktop verify
+hyp init
+hyp query sql "select max(event_time) from ai_gateway_messages where client_name = 'claude-desktop'"
 ```
 
-The vendor difference is why the shape is different, not a gap in Codex
-support: Claude Desktop exposes no user-writable settings file to amend, so
-HypAware configures it through that plist, and it delegates inference to its
-embedded CLI (rows arrive as `client_name = 'claude'` with
-`entrypoint = 'claude-desktop-3p'`).
+The legacy managed-profile commands remain available as an optional live-route
+experiment when `@hypaware/claude-account` is explicitly configured. They are
+not part of normal Desktop capture. See
+[the CLI reference](./docs/CLI_REFERENCE.md#claude-desktop-commands).
 
 What HypAware does **not** do for Codex Desktop: it never parses the app's
 own container at `~/Library/Application Support/Codex`. That store is

@@ -43,10 +43,9 @@ doing at each one:
 3. **Complete any additional setup.** A tool whose adapter needs one more
    step asks for it here, and you may defer any of them; the remaining setup
    continues. No tool shipped today asks for one, so on a stock install this
-   step passes silently. Claude Desktop used to appear here and no longer
-   does: its setup needs a browser sign-in and your password for a
-   system-level file, so it is opt-in only, outside the wizard, via
-   `hyp client claude-desktop install`.
+   step passes silently. Claude Desktop is now a regular collection choice:
+   selecting it schedules transcript imports and performs no additional app
+   setup.
 
 ### If you choose Customize
 

@@ -78,7 +78,7 @@
     "config_sections": [
       {
         "section": "claude",
-        "summary": "Claude adapter config: the optional backfill-on-join policy { on_join, window_days }, the attach-on-join policy { on_join }, and the telemetry listener address { listen_host, listen_port }."
+        "summary": "Claude adapter config: backfill policy { on_join, window_days, sweep_cron }, attach-on-join policy { on_join }, and telemetry listener address { listen_host, listen_port }."
       }
     ]
   }

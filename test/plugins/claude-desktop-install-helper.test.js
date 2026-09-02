@@ -16,7 +16,7 @@ import {
  * Minimal activation context: capture registered commands and provide
  * the two required capabilities.
  *
- * @param {{ stateDir: string, mode: 'org_key' | 'subscription' }} opts
+ * @param {{ stateDir: string, mode: 'org_key' | 'subscription', credential?: boolean }} opts
  */
 function fakeCtx(opts) {
   /** @type {Map<string, any>} */
@@ -27,6 +27,12 @@ function fakeCtx(opts) {
     log: { info() {}, warn() {}, error() {}, debug() {} },
     configRegistry: { registerSection() {} },
     commands: { register(/** @type {any} */ cmd) { commands.set(cmd.name, cmd) } },
+    capabilities: {
+      has(/** @type {string} */ name) {
+        if (name === 'hypaware.anthropic-credential') return opts.credential !== false
+        return name === 'hypaware.ai-gateway'
+      },
+    },
     requireCapability(/** @type {string} */ name) {
       if (name === 'hypaware.ai-gateway') return {}
       if (name === 'hypaware.anthropic-credential') {
@@ -117,4 +123,18 @@ test('status reports the helper as not installed until install-helper runs', asy
   const after = await invoke(status.run, [])
   assert.equal(after.code, 0)
   assert.ok(/installed/.test(after.out))
+})
+
+// @ref LLP 0358#onboarding [tests]: missing credentials disable only the
+// optional profile commands, never plugin activation or transcript ownership.
+test('activation succeeds without a credential and legacy commands explain the optional dependency', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-'))
+  const { ctx, commands } = fakeCtx({ stateDir, mode: 'subscription', credential: false })
+  await activate(ctx)
+
+  assert.ok(commands.has('client claude-desktop install'))
+  const result = await invoke(commands.get('client claude-desktop install').run, [])
+  assert.equal(result.code, 1)
+  assert.match(result.err, /managed-profile commands require @hypaware\/claude-account/)
+  assert.match(result.err, /scheduled transcript capture does not/)
 })

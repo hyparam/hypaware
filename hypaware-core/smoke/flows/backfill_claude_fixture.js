@@ -12,23 +12,23 @@ import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { loadManifests } from '../../../src/core/manifest.js'
 import { resolveDependencies } from '../../../src/core/dep_graph.js'
+import { createBackfillSweepDriver } from '../../../src/core/daemon/backfill_sweep.js'
+import { runBackfillProvider } from '../../../src/core/commands/backfill.js'
 
 /**
- * Phase 7 smoke: Claude transcript backfill → query → idempotent rerun.
+ * Claude scheduled transcript backfill -> query -> idempotent rerun.
  *
  * Boots `@hypaware/ai-gateway` + `@hypaware/claude` against a tmp
  * HYP_HOME with a staged Claude transcript fixture under the fake HOME,
- * then drives `hyp backfill claude` directly (no daemon: backfill is a
- * local file import) and asserts the bead-6 contract end to end:
+ * then drives the Claude contribution through the daemon's real backfill
+ * sweep driver and asserts LLP 0358's contract end to end:
  *
  *  - **User-visible query result**: `ai_gateway_messages` holds the two
  *    projected rows with native uuid identity and the exact transcript
  *    content/provider/source.
- *  - **Internal telemetry**: a `backfill.provider_finish` span and a
- *    `backfill.finish` log carrying the run's `dev_run_id`, `provider`,
- *    and matching row counts, plus a `backfill.write` / `cache.append`
- *    span for `ai_gateway_messages`.
- *  - **Idempotency (phase 8)**: a second `hyp backfill claude` (a fresh
+ *  - **Internal telemetry**: `backfill.sweep_due` and
+ *    `backfill.sweep_finished` logs around the provider spans and cache write.
+ *  - **Idempotency**: a second scheduled tick (a fresh
  *    run id, so the materializer re-scans committed partitions) writes
  *    ZERO new rows and the query still returns exactly two rows. The
  *    rerun did not duplicate.
@@ -61,6 +61,8 @@ export async function run({ harness, expect }) {
   const projectsDir = path.join(fakeHome, '.claude', 'projects', 'some-repo')
   await fs.mkdir(projectsDir, { recursive: true })
   const sessionId = `cl-${harness.devRunId}`
+  const userTs = new Date(Date.now() - 60_000)
+  const assistantTs = new Date(userTs.getTime() + 5_000)
   await fs.writeFile(
     path.join(projectsDir, `${sessionId}.jsonl`),
     [
@@ -69,17 +71,19 @@ export async function run({ harness, expect }) {
         uuid: 'u-user-1',
         parentUuid: null,
         type: 'user',
+        entrypoint: 'claude-desktop',
         version: '1.2.3',
         message: { role: 'user', content: 'list the files' },
-        timestamp: '2026-05-20T10:00:00.000Z',
+        timestamp: userTs.toISOString(),
       }),
       JSON.stringify({
         sessionId,
         uuid: 'u-asst-1',
         parentUuid: 'u-user-1',
         type: 'assistant',
+        entrypoint: 'claude-desktop',
         message: { role: 'assistant', content: [{ type: 'text', text: 'here they are' }] },
-        timestamp: '2026-05-20T10:00:05.000Z',
+        timestamp: assistantTs.toISOString(),
       }),
     ].join('\n') + '\n',
     'utf8'
@@ -128,33 +132,54 @@ export async function run({ harness, expect }) {
     )
 
     const env = { ...process.env, HYP_HOME: harness.hypHome }
-    // An explicit open-ended `--since` keeps the import window deterministic
-    // regardless of when the smoke runs (a pre-built kernel carries no
-    // retention config, so the default window would otherwise depend on
-    // today's date relative to the fixed fixture timestamps).
-    const since = '2000-01-01T00:00:00.000Z'
+    const config = {
+      version: 2,
+      plugins: [
+        { name: '@hypaware/ai-gateway', config: { upstreams: [] } },
+        { name: '@hypaware/claude' },
+        { name: '@hypaware/claude-desktop' },
+      ],
+    }
+    /** @type {Array<Promise<any>>} */
+    const pendingRuns = []
+    const sweep = createBackfillSweepDriver({
+      backfills: kernel.backfills,
+      backfillMaterializers: kernel.backfillMaterializers,
+      storage: kernel.storage,
+      query: kernel.query,
+      env,
+      config: /** @type {any} */ (config),
+      runBackfill: (/** @type {any} */ args) => {
+        const pending = runBackfillProvider(args)
+        pendingRuns.push(pending)
+        return pending
+      },
+    })
 
-    // ----- 1. First backfill run -----
-    const bf1out = makeBuf()
-    const bf1err = makeBuf()
-    const bf1code = await dispatch(
-      ['backfill', 'claude', '--since', since, '--json'],
-      { stdout: bf1out, stderr: bf1err, kernel, registry, env }
-    )
-    expect.that('dispatch: backfill claude (run 1) exited 0', bf1code, (v) => v === 0)
-    expect.that('stderr: backfill run 1 had no errors', bf1err.text(), (v) => typeof v === 'string' && v.length === 0)
+    /** @param {Date} now */
+    async function tickAndAwait(now) {
+      pendingRuns.length = 0
+      const report = await sweep.tick({ now })
+      const results = await Promise.all(pendingRuns)
+      return { report, result: results[0] }
+    }
 
-    const run1 = JSON.parse(bf1out.text())
-    const claude1 = run1.providers.find((/** @type {any} */ p) => p.provider === 'claude')
+    const tick1Now = new Date(Date.UTC(2026, 0, 1, 0, 0, 0))
+    const tick2Now = new Date(tick1Now.getTime() + 5 * 60 * 1000)
+    const tick1RunId = `sweep-claude-${tick1Now.getTime()}`
+
+    // ----- 1. First scheduled backfill tick -----
+    const tick1 = await tickAndAwait(tick1Now)
+    expect.that('tick 1: claude provider fired', tick1.report.fired, (v) => Array.isArray(v) && v.includes('claude'))
     expect.that(
-      'backfill run 1: claude provider ok and wrote both rows',
-      claude1,
-      (v) => v !== undefined && v.status === 'ok' && v.rows_written >= 2,
+      'tick 1: claude provider ok and wrote both rows',
+      tick1.result,
+      (v) => v !== undefined && v.ok === true && v.rowsWritten >= 2,
     )
     expect.that(
-      'backfill run 1: at least one session scanned',
-      claude1,
-      (v) => v !== undefined && v.sessions_seen >= 1,
+      'tick 1: at least one session scanned',
+      tick1.result,
+      (v) => v !== undefined && v.scanned >= 1,
     )
 
     // ----- 2. Query the projected rows -----
@@ -181,26 +206,19 @@ export async function run({ harness, expect }) {
       (v) => v !== undefined && v.message_id === 'u-asst-1' && v.content_text === 'here they are',
     )
     expect.that(
-      'query: every row tagged provider=anthropic, source=client_name=claude',
+      'query: every row is attributed to Claude Desktop',
       rows1,
-      (v) => Array.isArray(v) && v.every((r) => r.provider === 'anthropic' && r.conversation_source === 'claude' && r.client_name === 'claude'),
+      (v) => Array.isArray(v) && v.every((r) => r.provider === 'anthropic' && r.conversation_source === 'claude-desktop' && r.client_name === 'claude-desktop'),
     )
 
-    // ----- 3. Idempotent rerun: a fresh run id forces a committed-partition
-    //          re-scan, so every re-materialized row is recognized and skipped.
-    const bf2out = makeBuf()
-    const bf2err = makeBuf()
-    const bf2code = await dispatch(
-      ['backfill', 'claude', '--since', since, '--json'],
-      { stdout: bf2out, stderr: bf2err, kernel, registry, env: { ...env, DEV_RUN_ID: `${harness.devRunId}-rerun` } }
-    )
-    expect.that('dispatch: backfill claude (run 2) exited 0', bf2code, (v) => v === 0)
-    const run2 = JSON.parse(bf2out.text())
-    const claude2 = run2.providers.find((/** @type {any} */ p) => p.provider === 'claude')
+    // ----- 3. Idempotent scheduled rerun: the process-local fingerprint
+    //          recognizes the unchanged transcript before body read or dedupe.
+    const tick2 = await tickAndAwait(tick2Now)
+    expect.that('tick 2: claude provider fired again', tick2.report.fired, (v) => Array.isArray(v) && v.includes('claude'))
     expect.that(
-      'backfill run 2: rerun wrote ZERO new rows (all part_ids already present)',
-      claude2,
-      (v) => v !== undefined && v.status === 'ok' && v.rows_written === 0,
+      'tick 2: unchanged transcript scanned and wrote ZERO items',
+      tick2.result,
+      (v) => v !== undefined && v.ok === true && v.scanned === 0 && v.rowsWritten === 0,
     )
 
     const rows2 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 2' })
@@ -214,7 +232,7 @@ export async function run({ harness, expect }) {
       (/** @type {any} */ t) =>
         t.name === 'backfill.provider_finish' &&
         t.attributes?.provider === 'claude' &&
-        t.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
+        t.attributes?.[Attr.DEV_RUN_ID] === tick1RunId,
     )
     expect.that(
       'traces: backfill.provider_finish for claude under the run dev_run_id with rows_written>=2',
@@ -227,7 +245,7 @@ export async function run({ harness, expect }) {
         t.name === 'backfill.write' &&
         t.attributes?.[Attr.DATASET] === 'ai_gateway_messages' &&
         t.attributes?.provider === 'claude' &&
-        t.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
+        t.attributes?.[Attr.DEV_RUN_ID] === tick1RunId,
     )
     expect.that(
       'traces: backfill.write span for ai_gateway_messages with row_count>=2',
@@ -245,13 +263,32 @@ export async function run({ harness, expect }) {
     )
 
     const logs = await expect.logs()
-    const finishLogs = logs.filter(
-      (/** @type {any} */ l) => l.body === 'backfill.finish' && l.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId,
+    const dueLogs = logs.filter(
+      (/** @type {any} */ l) => l.body === 'backfill.sweep_due' && l.attributes?.provider === 'claude',
     )
     expect.that(
-      'logs: backfill.finish carries the run dev_run_id and total_rows_written>=2',
-      finishLogs[0]?.attributes,
-      (v) => v !== undefined && Number(v.total_rows_written) >= 2,
+      'logs: backfill.sweep_due fired once per tick',
+      dueLogs,
+      (v) => Array.isArray(v) && v.length === 2,
+    )
+    const finishedLogs = logs.filter(
+      (/** @type {any} */ l) => l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'claude',
+    )
+    expect.that(
+      'logs: scheduled runs report first-write and zero-write outcomes',
+      finishedLogs,
+      (v) => Array.isArray(v) && v.some((l) => l.attributes?.rows_written >= 2) &&
+        v.some((l) => l.attributes?.rows_written === 0),
+    )
+    const scanLogs = logs.filter(
+      (/** @type {any} */ l) => l.body === 'claude.backfill.scan_complete',
+    )
+    expect.that(
+      'logs: first tick reads the transcript and second tick skips its unchanged body',
+      scanLogs,
+      (v) => Array.isArray(v) &&
+        v.some((l) => l.attributes?.files_read === 1 && l.attributes?.files_unchanged === 0) &&
+        v.some((l) => l.attributes?.files_read === 0 && l.attributes?.files_unchanged === 1),
     )
   } finally {
     if (previousHome === undefined) delete process.env.HOME

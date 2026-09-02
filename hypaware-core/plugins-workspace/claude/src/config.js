@@ -3,7 +3,8 @@
 /**
  * Config validation for the `@hypaware/claude` plugin's own `config`
  * block. It validates the optional `backfill` sub-object that drives
- * backfill-on-join (`{ on_join, window_days }`), the optional `attach`
+ * backfill-on-join and the daemon transcript sweep
+ * (`{ on_join, window_days, sweep_cron }`), the optional `attach`
  * sub-object that drives attach-on-join (`{ on_join }`), and the
  * optional `telemetry` sub-object that places the Claude telemetry
  * listener (`{ listen_host, listen_port }`). Every
@@ -18,6 +19,8 @@
  * @import { ValidationError, ValidationResult } from '../../../../hypaware-plugin-kernel-types.js'
  */
 
+import { isCronExpression } from '../../../../src/core/config/validate.js'
+
 /** Manifest `config_sections[].section` name this validator backs. */
 export const CLAUDE_CONFIG_SECTION = 'claude'
 
@@ -28,7 +31,7 @@ export const CLAUDE_CONFIG_SECTION = 'claude'
  * surface.
  *
  * @ref LLP 0037#per-plugin-config-kernel-generic-reconciler [implements]:
- *   backfill policy ({ on_join, window_days }) lives in and is validated
+ *   backfill policy ({ on_join, window_days, sweep_cron }) lives in and is validated
  *   by the source plugin's own config section; the kernel reconciler adds
  *   no top-level schema.
  *
@@ -53,10 +56,14 @@ export function validateClaudeConfig(value) {
 /**
  * Validate the optional `backfill` policy block shared by every
  * backfill-capable source plugin: `on_join` (whether to import on join,
- * boolean) and `window_days` (how far back, positive integer). Both are
+ * boolean), `window_days` (how far back, positive integer), and `sweep_cron`
+ * (the scheduled transcript cadence, a five-field cron expression). All are
  * optional; unknown keys are rejected so a typo (`window_day`) surfaces
  * instead of being silently ignored. Pure: the caller chooses where the
  * returned pointers mount.
+ *
+ * @ref LLP 0358#scheduled-sweep [implements]: Claude owns and validates its
+ *   scheduled backfill cadence using the kernel's existing cron grammar
  *
  * @param {unknown} value
  * @param {string} pointer  JSON-pointer prefix for the `backfill` object
@@ -83,8 +90,17 @@ export function validateBackfillSection(value, pointer) {
       })
     }
   }
+  if (raw.sweep_cron !== undefined) {
+    const cron = raw.sweep_cron
+    if (typeof cron !== 'string' || !isCronExpression(cron)) {
+      errors.push({
+        pointer: `${pointer}/sweep_cron`,
+        message: 'backfill.sweep_cron must be a valid 5-field cron expression',
+      })
+    }
+  }
   for (const key of Object.keys(raw)) {
-    if (key !== 'on_join' && key !== 'window_days') {
+    if (key !== 'on_join' && key !== 'window_days' && key !== 'sweep_cron') {
       errors.push({ pointer: `${pointer}/${key}`, message: `unknown backfill key '${key}'` })
     }
   }

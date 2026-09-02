@@ -112,7 +112,7 @@ function captureLog() {
 }
 
 /**
- * @param {{ since?: string, until?: string, retentionDays?: number, log?: any }} [overrides]
+ * @param {{ since?: string, until?: string, retentionDays?: number, log?: any, sweep?: boolean }} [overrides]
  * @returns {{ ctx: BackfillRunContext, entries: any[] }}
  */
 function runContext(overrides = {}) {
@@ -127,6 +127,7 @@ function runContext(overrides = {}) {
     ...(overrides.since !== undefined ? { since: overrides.since } : {}),
     ...(overrides.until !== undefined ? { until: overrides.until } : {}),
     ...(overrides.retentionDays !== undefined ? { retentionDays: overrides.retentionDays } : {}),
+    ...(overrides.sweep !== undefined ? { sweep: overrides.sweep } : {}),
   }
   return { ctx, entries }
 }
@@ -214,7 +215,60 @@ test('provider advertises a stable contribution shape', async () => {
   assert.equal(provider.name, 'claude')
   assert.equal(provider.plugin, '@hypaware/claude')
   assert.deepEqual(provider.datasets, ['ai_gateway_messages'])
+  assert.deepEqual(provider.sweep, { cron: '*/5 * * * *' })
   assert.equal(typeof provider.run, 'function')
+})
+
+// @ref LLP 0358#scheduled-sweep [tests]: the daemon cadence is plugin-owned,
+// defaults to five minutes, and honors the validated config override.
+test('provider uses the configured scheduled-backfill cadence', () => {
+  const provider = createClaudeBackfillProvider({
+    homeDir: '/tmp/nope',
+    stateFile: '/tmp/nope/sc.jsonl',
+    config: { backfill: { sweep_cron: '*/15 * * * *' } },
+  })
+  assert.deepEqual(provider.sweep, { cron: '*/15 * * * *' })
+})
+
+// @ref LLP 0359#file-fingerprints [tests]: an unchanged scheduled pass reads
+// no transcript bodies; appending to one file makes only that file eligible.
+test('scheduled passes skip unchanged transcript files and revisit an append', async () => {
+  const env = await stageEnv()
+  try {
+    const filePath = await writeTranscript(env, 'repo-a', 'sess-1', conversationRows('sess-1'))
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    const first = runContext({ sweep: true })
+    assert.equal((await collectItems(provider.run(first.ctx))).length, 1)
+    const firstDone = first.entries.find((entry) => entry.message === 'claude.backfill.scan_complete')
+    assert.equal(firstDone?.fields?.files_read, 1)
+    assert.equal(firstDone?.fields?.files_unchanged, 0)
+
+    const second = runContext({ sweep: true })
+    assert.equal((await collectItems(provider.run(second.ctx))).length, 0)
+    const secondDone = second.entries.find((entry) => entry.message === 'claude.backfill.scan_complete')
+    assert.equal(secondDone?.fields?.files_read, 0)
+    assert.equal(secondDone?.fields?.files_unchanged, 1)
+
+    await fs.appendFile(filePath, JSON.stringify({
+      sessionId: 'sess-1',
+      uuid: 'u-asst-2',
+      parentUuid: 'u-asst-1',
+      type: 'assistant',
+      message: { role: 'assistant', content: 'one more' },
+      timestamp: '2026-05-20T10:00:10.000Z',
+    }) + '\n', 'utf8')
+
+    const third = runContext({ sweep: true })
+    const thirdItems = await collectItems(provider.run(third.ctx))
+    assert.equal(thirdItems.length, 1)
+    assert.equal(value(thirdItems[0]).messages.length, 3)
+    const thirdDone = third.entries.find((entry) => entry.message === 'claude.backfill.scan_complete')
+    assert.equal(thirdDone?.fields?.files_read, 1)
+    assert.equal(thirdDone?.fields?.files_unchanged, 0)
+  } finally {
+    await env.cleanup()
+  }
 })
 
 test('fixture transcript projects into canonical ai_gateway_messages rows', async () => {

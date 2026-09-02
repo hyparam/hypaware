@@ -43,31 +43,31 @@ export function defaultClaudeProjectsDir(homeDir) {
 }
 
 /**
- * Claude Desktop 3p session roots, most recent layout first. Under the
- * managed third-party-inference profile Desktop does not write into the
- * shared `~/.claude/projects`: it boots a separate "Claude-3p" identity
- * and runs each conversation's embedded CLI in a per-session sandbox
- * home (`local-agent-mode-sessions/<...>/local_<id>/`), so the
- * transcript lands in a `.claude/projects` tree nested inside that
- * sandbox, tagged `entrypoint: "local-agent"`. The container location
- * has already drifted once between Desktop builds (sibling
- * `Claude-3p` observed on app 1.13576.0 / CLI 2.1.177; LLP 0133's
- * live test recorded it nested inside `Claude/`), so both layouts are
- * scanned and a missing directory is a cheap no-op.
+ * Claude Desktop sandbox session roots, most recent layout first. Desktop
+ * runs Cowork conversations in per-session sandbox homes under
+ * `local-agent-mode-sessions/<...>/local_<id>/`, so their transcripts land
+ * in nested `.claude/projects` trees tagged `entrypoint: "local-agent"`.
+ * App 1.40609.1 writes these directly under the first-party `Claude`
+ * container. Older managed third-party-inference builds used a sibling
+ * `Claude-3p` container (app 1.13576.0 / CLI 2.1.177) or nested it inside
+ * `Claude/` (LLP 0133). All observed layouts are scanned, and a missing
+ * directory is a cheap no-op.
  *
  * @ref LLP 0133#attribution [implements]: attached-Desktop transcripts live in the 3p container's sandbox homes, not ~/.claude/projects; these are the roots the claude adapter scans to keep Desktop rows enriched and attributable
+ * @ref LLP 0140#container-root-owns [implements]: hardcoded Desktop sandbox roots are attributed to Desktop regardless of their local-agent entrypoint
  * @param {string} homeDir
  * @returns {string[]}
  */
 export function claudeDesktop3pSessionRoots(homeDir) {
   return [
+    path.join(homeDir, 'Library', 'Application Support', 'Claude', 'local-agent-mode-sessions'),
     path.join(homeDir, 'Library', 'Application Support', 'Claude-3p', 'local-agent-mode-sessions'),
     path.join(homeDir, 'Library', 'Application Support', 'Claude', 'Claude-3p', 'local-agent-mode-sessions'),
   ]
 }
 
 /**
- * The client whose container {@link claudeDesktop3pSessionRoots} names.
+ * The client whose sandbox roots {@link claudeDesktop3pSessionRoots} names.
  * Sessions found under those roots belong to Claude Desktop whatever
  * entrypoint value they carry: the value has already drifted between
  * Desktop builds, so admission keys on this owner, not on the tag
@@ -75,7 +75,7 @@ export function claudeDesktop3pSessionRoots(homeDir) {
  * two facts are one piece of knowledge: where Desktop's container is,
  * and that it is Desktop's.
  *
- * @ref LLP 0140#container-root-owns [implements]: the 3p container's owner is fixed at the site that hardcodes its paths
+ * @ref LLP 0140#container-root-owns [implements]: the Desktop sandbox owner is fixed at the site that hardcodes its paths
  */
 export const DESKTOP_3P_CONTAINER_OWNER = Object.freeze({
   client: 'claude-desktop',
@@ -90,7 +90,7 @@ export const DESKTOP_3P_CONTAINER_OWNER = Object.freeze({
 const DESKTOP_3P_SCAN_DEPTH = 6
 
 /**
- * Find every `.claude/projects` directory nested under the Desktop 3p
+ * Find every `.claude/projects` directory nested under the known Desktop
  * session roots. Best-effort and bounded: a missing root yields
  * nothing, recursion stops at `.claude` (the projects tree is walked by
  * the caller) and at {@link DESKTOP_3P_SCAN_DEPTH}.
@@ -776,4 +776,3 @@ function timestampMs(value) {
   }
   return undefined
 }
-

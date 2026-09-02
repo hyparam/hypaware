@@ -150,9 +150,9 @@ export async function resolvePickSeeding(opts) {
     }
   }
 
-  // A `needs_setup` row never seeds from detection: its configure phase
-  // runs a sign-in and a sudo write later (Claude Desktop), and checking
-  // the row is the opt-in those steps rest on - so it must be the user's
+  // A `needs_setup` row never seeds from detection: its configure phase can
+  // perform consequential setup later, and checking
+  // the row is the opt-in those steps rest on, so it must be the user's
   // deliberate tick, never a probe's guess pre-checked on their behalf.
   // Detection still labels the row `· detected`; it arrives unchecked.
   // The other seed tiers are a user's recorded answer, so they keep it.
@@ -210,10 +210,9 @@ export async function resolvePickSeeding(opts) {
   //     result, and carrying off that would compose a source the user was
   //     never shown and cannot uncheck, purely because a probe found it -
   //     exactly what LLP 0011 #autodetect-vs-default forbids. `hidden` and
-  //     `detect` do co-occur (`claude-desktop` keeps its `/Applications`
-  //     probe), and today `detectedSeed` also drops every `needs_setup` row
-  //     before the seed is built, so nothing reaches this tier twice over -
-  //     the gate is stated rather than left resting on that coincidence.
+  //     `detect` may co-occur in future, and `detectedSeed` drops every
+  //     `needs_setup` row before the seed is built. The gate is stated rather
+  //     than left resting on the current bundled descriptors.
   //   - `selection` always carries, without the "nothing visible seeded"
   //     test. A re-entry's seed is the selection a previous pass already
   //     confirmed, and nothing derives a hidden id into it: read-back never
@@ -224,17 +223,11 @@ export async function resolvePickSeeding(opts) {
   //     the very upstream the carry exists to preserve.
   //
   // The "nothing visible seeded" test is the derivative-read-back rule's
-  // proxy, and it is only sound for a row whose read-back IS derivative.
-  // `claude-desktop` is hidden too (LLP 0297) and is not: it reads back off
-  // `@hypaware/claude-account` + `@hypaware/claude-desktop`, which nothing
-  // else composes, so a config naming them recorded a real decision - the
-  // sudo'd plist write `hyp client claude-desktop install` performs. Under
-  // the bare test it would be dropped by any reconfigure that also seeded a
-  // visible row (every install that captures anything else), silently
-  // un-composing a working Desktop setup and leaving no route back: the
-  // command that would repair it is contributed by the plugin the rewrite
-  // just removed from `plugins[]`. So a config-seeded hidden row also
-  // carries when it reads back off plugins of its own.
+  // proxy, and it is only sound for a row whose read-back IS derivative. A
+  // hidden plugin may instead read back from plugins only it composes, which
+  // records a real choice. Such a row carries even when visible rows are
+  // seeded too. Claude Desktop established this general case in LLP 0297;
+  // LLP 0358 made Desktop visible, but the kernel contract remains.
   // @ref LLP 0191#re-entry-seeding [implements]: a re-entry starts from the answer previously confirmed, carried rows included
   // @ref LLP 0202#carry-through [implements]: it rides through the selection when the config collects nothing the menu can show, and stays there across a back-and-forward
   // @ref LLP 0297#carry-through [implements]: a hidden row with a non-derivative read-back carries off the config seed whatever else is checked

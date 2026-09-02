@@ -892,6 +892,8 @@ export interface BackfillSweepRunner {
     provider: string
     dryRun: boolean
     devRunId?: string
+    retentionDays?: number
+    sweep?: boolean
   }): Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>
 }
 

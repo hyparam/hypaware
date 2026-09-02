@@ -62,14 +62,14 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * capabilities (which no default-activated plugin provides) and spends on
  * model calls, so it too activates only via explicit config.
  *
- * The Claude Desktop pair follows it too: `@hypaware/claude-account`
- * holds a real credential (an org API key or a subscription token
- * store), so enabling it is a deliberate fleet-policy decision, and
- * `@hypaware/claude-desktop` requires the credential capability that
- * only that opt-in provides.
+ * `@hypaware/claude-account` remains excluded because it holds a real
+ * credential. `@hypaware/claude-desktop` remains explicit because naming it
+ * is the consent gate that lets the scheduled Claude reader import Desktop's
+ * local transcript trees (LLP 0358); selecting its picker row names it.
  *
  * @type {ReadonlySet<PluginName>}
  * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by]: the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
+ * @ref LLP 0358#onboarding [constrained-by]: Desktop is selectable but its transcript ownership plugin activates only when the user selects it
  */
 export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/central',

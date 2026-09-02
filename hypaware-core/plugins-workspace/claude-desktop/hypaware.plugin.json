@@ -2,15 +2,14 @@
   "schema_version": 1,
   "name": "@hypaware/claude-desktop",
   "version": "1.0.0",
-  "description": "Claude Desktop adapter for HypAware. Desktop delegates inference to its embedded CLI, so gateway usage lands under the claude client with entrypoint 'claude-desktop-3p' (LLP 0133#attribution). This plugin renders and places the org-managed third-party-inference profile as the managed-preferences plist (/Library/Managed Preferences/com.anthropic.claudefordesktop.plist), via an inline sudo prompt solo or an MDM push on a centrally managed deployment. Its picker row is hidden (LLP 0297): Claude Desktop is never offered during onboarding, and is set up only by explicitly running 'hyp client claude-desktop install'.",
+  "description": "Claude Desktop transcript adapter for HypAware. Desktop sessions are imported from their local JSONL transcripts by the Claude provider's scheduled five-minute backfill and attributed through this plugin's entrypoint ownership. The managed third-party-inference profile commands remain optional experiments and are not part of onboarding or transcript capture.",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
   "node_engine": ">=20",
   "entrypoint": "./src/index.js",
   "requires": {
     "capabilities": {
-      "hypaware.ai-gateway": "^2.0.0",
-      "hypaware.anthropic-credential": "^1.0.0"
+      "hypaware.ai-gateway": "^2.0.0"
     }
   },
   "contributes": {
@@ -24,21 +23,12 @@
       {
         "name": "claude-desktop",
         "label": "Claude Desktop",
-        "summary": "Records Claude Desktop conversations and starts a local gateway listener. Needs Claude sign-in and admin approval; setup asks before changing anything.",
+        "summary": "Imports local Claude Desktop transcripts on a five-minute daemon schedule and starts a local gateway listener for projection. Makes no changes to Claude Desktop and needs no sign-in or admin approval.",
         "detect": { "app_bundle": "/Applications/Claude.app" },
-        "hidden": true,
-        "needs_setup": true,
-        "configure_command": "client claude-desktop install",
         "compose": {
           "requires_gateway": true,
-          "gateway_upstream": {
-            "name": "anthropic",
-            "base_url": "https://api.anthropic.com",
-            "path_prefix": "/v1/messages",
-            "provider": "anthropic"
-          },
           "plugins": [
-            { "name": "@hypaware/claude-account", "config": { "mode": "subscription" } },
+            { "name": "@hypaware/claude" },
             { "name": "@hypaware/claude-desktop" }
           ]
         }

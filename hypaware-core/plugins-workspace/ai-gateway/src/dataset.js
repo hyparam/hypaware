@@ -626,9 +626,9 @@ function safeParseJson(value) {
  * @returns {BackfillMaterializerContribution}
  */
 export function aiGatewayBackfillMaterializer() {
-  // The materializer instance is created once at plugin activation and
-  // reused for every `hyp backfill` invocation in the process, so the
-  // dedupe state is scoped per run id (see createBackfillDedupe).
+  // The materializer instance is created once at plugin activation and reused
+  // for every invocation. The dedupe state is isolated by the runner's opaque
+  // run token and becomes collectible with that token.
   const dedupe = createBackfillDedupe()
   return {
     kind: AI_GATEWAY_PROJECTED_EXCHANGE_KIND,
@@ -653,14 +653,12 @@ export function aiGatewayBackfillMaterializer() {
 /**
  * Build the per-run pre-write dedupe used by the backfill materializer.
  *
- * The seen-`part_id` set is rebuilt whenever `ctx.devRunId` changes: all
- * items in one backfill run share a single scan of the already-committed
- * partitions, and every emitted batch folds its own keys back in so two
- * items in the same run that resolve to the same `part_id` (transitional
- * fixtures, fallback-id collisions, a re-yielded conversation) also
- * dedupe against each other. A later run carries a fresh run id, so it
- * re-scans and observes the prior run's now-committed rows, which is
- * what makes a clean rerun write zero new rows.
+ * Every item probes committed and spooled storage only for its own candidate
+ * part ids and session ids. Emitted keys are also folded into an in-run set so
+ * a re-yielded item is skipped before it reaches the writer. That set is keyed
+ * by the runner's opaque token in a WeakMap, not by a process-wide current run
+ * id, so concurrent callers cannot replace each other and completed runs are
+ * not retained.
  *
  * The seen-set is seeded from two sources: the committed (flushed)
  * Iceberg partitions AND the rows still pending in the spool (captured
@@ -673,8 +671,13 @@ export function aiGatewayBackfillMaterializer() {
  * @returns {{ skipExisting(rows: Record<string, unknown>[], ctx: BackfillMaterializeContext | undefined): Promise<Record<string, unknown>[]> }}
  */
 function createBackfillDedupe() {
-  /** @type {{ runId: string | undefined, seen: Set<string> } | undefined} */
-  let memo
+  /** @type {WeakMap<object, Set<string>>} */
+  const seenByRun = new WeakMap()
+  // Compatibility for direct/older callers that do not supply a token. Keep
+  // only the current diagnostic run so this path cannot retain historical
+  // candidate sets. Production runners always take the WeakMap path.
+  /** @type {{ runId: string, seen: Set<string> } | undefined} */
+  let legacyMemo
 
   return {
     async skipExisting(rows, ctx) {
@@ -684,16 +687,15 @@ function createBackfillDedupe() {
       // method, so dedupe is skipped and every row passes through.
       if (rows.length === 0 || !canScanExistingRows(storage)) return rows
 
-      const runId = ctx?.devRunId
-      if (!memo || memo.runId !== runId) {
-        const seen = await scanExistingPartIds(storage)
-        // Fold in part_ids pending in the spool so backfill does not
-        // re-materialize a row that was captured live and is still waiting
-        // to flush. Opt-in to the backfill path only (see scanSpooledPartIds).
-        await scanSpooledPartIds(storage, seen)
-        memo = { runId, seen }
-      }
-      const seen = memo.seen
+      const batchKeys = partIdKeys(rows)
+      const stored = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
+      // Fold in only candidate ids pending in the spool. A full spool scan may
+      // still be required by the storage surface, but unrelated ids never
+      // inflate the materializer's heap.
+      await scanSpooledPartIds(storage, stored, batchKeys)
+      const runState = runSeen(ctx, seenByRun, legacyMemo)
+      legacyMemo = runState.legacyMemo
+      const seen = runState.seen
 
       /** @type {Record<string, unknown>[]} */
       const fresh = []
@@ -704,13 +706,46 @@ function createBackfillDedupe() {
           fresh.push(row)
           continue
         }
-        if (seen.has(key)) continue
+        if (stored.has(key) || seen.has(key)) continue
         seen.add(key)
         fresh.push(row)
       }
       return fresh
     },
   }
+}
+
+/**
+ * @param {Record<string, unknown>[]} rows
+ * @returns {Set<string>}
+ */
+function partIdKeys(rows) {
+  const keys = new Set()
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key !== undefined) keys.add(key)
+  }
+  return keys
+}
+
+/**
+ * @param {BackfillMaterializeContext | undefined} ctx
+ * @param {WeakMap<object, Set<string>>} seenByRun
+ * @param {{ runId: string, seen: Set<string> } | undefined} legacyMemo
+ * @returns {{ seen: Set<string>, legacyMemo: { runId: string, seen: Set<string> } | undefined }}
+ */
+function runSeen(ctx, seenByRun, legacyMemo) {
+  if (ctx?.runToken) {
+    let seen = seenByRun.get(ctx.runToken)
+    if (!seen) {
+      seen = new Set()
+      seenByRun.set(ctx.runToken, seen)
+    }
+    return { seen, legacyMemo }
+  }
+  const runId = ctx?.devRunId ?? 'legacy'
+  if (!legacyMemo || legacyMemo.runId !== runId) legacyMemo = { runId, seen: new Set() }
+  return { seen: legacyMemo.seen, legacyMemo }
 }
 
 /**
@@ -770,8 +805,9 @@ const MAX_SCOPED_SESSION_IDS = 200
  * `restrictTo` bounds the result: only keys in that set are collected,
  * and the scan stops early once all of them have been found. The
  * flush-time settle passes its batch keys here so a steady-state flush
- * holds O(batch) memory; backfill omits it because its per-run memo
- * legitimately needs the full committed set (see createBackfillDedupe).
+ * holds O(batch) memory. Backfill now passes the same candidate restriction;
+ * its in-run emitted-id set is separate and never needs the full committed
+ * identity set (LLP 0359).
  *
  * `sessionIds` scopes hot-path reads to the batch's exact sessions. The cache
  * is sorted by `session_id`, so Iceberg can prune unrelated files while the
@@ -890,9 +926,9 @@ async function collectPartIds(storage, tablePath, sessionIds, seen, restrictTo) 
  *   "backfill-vs-spool same-id duplicates" residue by scanning spooled
  *   rows in the materializer (not the settle path).
  *
- * `restrictTo`, when supplied, keeps only the keys of the batch in hand
- * (the live-producer caller, `dedupeStoredPartIds`); backfill omits it
- * because its per-run memo legitimately needs every spooled key.
+ * `restrictTo`, when supplied, keeps only the keys of the batch in hand.
+ * Backfill supplies it too, so even though the storage surface streams the
+ * spool, unrelated identities do not accumulate in the materializer heap.
  *
  * @param {QueryStorageService} storage
  * @param {Set<string>} seen

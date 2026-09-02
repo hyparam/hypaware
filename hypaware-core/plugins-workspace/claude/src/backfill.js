@@ -1,5 +1,7 @@
 // @ts-check
 
+import fsp from 'node:fs/promises'
+
 import {
   assignTranscriptIdentity,
   defaultClaudeProjectsDir,
@@ -28,7 +30,7 @@ import {
 } from '../../../../src/core/backfill/entrypoint_owner.js'
 
 /**
- * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillRunContext } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, BackfillContribution, BackfillItem, BackfillRunContext, JsonObject } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SessionContextRecord, TranscriptEntry } from './types.js'
  * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
@@ -59,6 +61,7 @@ import {
 
 const DEFAULT_CLIENT_NAME = 'claude'
 const DEFAULT_PLUGIN_NAME = '@hypaware/claude'
+export const DEFAULT_SWEEP_CRON = '*/5 * * * *'
 
 /**
  * Build the Claude backfill provider. Registered at plugin activation
@@ -75,6 +78,7 @@ const DEFAULT_PLUGIN_NAME = '@hypaware/claude'
  *   deriveRepo?: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
+ *   config?: JsonObject,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -83,6 +87,9 @@ export function createClaudeBackfillProvider(opts) {
   const pluginName = opts.pluginName ?? DEFAULT_PLUGIN_NAME
   const projectsDir = opts.projectsDir ?? defaultClaudeProjectsDir(opts.homeDir)
   const stateFile = opts.stateFile
+  const config = opts.config
+  /** @type {Map<string, { ino: number, size: number, mtimeMs: number }>} */
+  const sweepFingerprints = new Map()
   // @ref LLP 0032#capture: pre-0032 Claude sessions carry no captured remote;
   // recover it by running git in the session's cwd at backfill time. Injectable
   // so tests stub the git lookup and stay hermetic.
@@ -99,16 +106,42 @@ export function createClaudeBackfillProvider(opts) {
     name: clientName,
     plugin: pluginName,
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
-    summary: 'Import local Claude Code transcripts into ai_gateway_messages',
+    summary: 'Import local Claude Code and Claude Desktop transcripts into ai_gateway_messages',
+    // @ref LLP 0358#scheduled-sweep [implements]: the existing Claude
+    // transcript provider opts into the daemon sweep, with a plugin-owned
+    // cadence and no second parser or capture lane
+    sweep: { cron: resolveSweepCron(config) },
     async *run(ctx) {
       // Resolved per run, not at activation: attached-Desktop sessions
       // accumulate new sandbox homes under the 3p container between runs
       // (see findDesktop3pProjectsDirs), and each holds its own nested
       // `.claude/projects` tree outside the primary projectsDir.
       const desktop3pDirs = findDesktop3pProjectsDirs(opts.homeDir)
-      yield* runClaudeBackfill({ ctx, projectsDir, extraProjectsDirs: desktop3pDirs, stateFile, clientName, deriveRepo, resolver })
+      yield* runClaudeBackfill({
+        ctx,
+        projectsDir,
+        extraProjectsDirs: desktop3pDirs,
+        stateFile,
+        clientName,
+        deriveRepo,
+        resolver,
+        sweepFingerprints,
+      })
     },
   }
+}
+
+/**
+ * @param {JsonObject | undefined} config
+ * @returns {string}
+ */
+function resolveSweepCron(config) {
+  const backfill = config?.backfill
+  if (!backfill || typeof backfill !== 'object' || Array.isArray(backfill)) {
+    return DEFAULT_SWEEP_CRON
+  }
+  const cron = backfill.sweep_cron
+  return typeof cron === 'string' ? cron : DEFAULT_SWEEP_CRON
 }
 
 /**
@@ -126,11 +159,12 @@ export function createClaudeBackfillProvider(opts) {
  *   clientName: string,
  *   deriveRepo: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
  *   resolver: UsagePolicyResolver,
+ *   sweepFingerprints: Map<string, { ino: number, size: number, mtimeMs: number }>,
  * }} args
  * @returns {AsyncGenerator<BackfillItem>}
  */
 async function* runClaudeBackfill(args) {
-  const { ctx, projectsDir, extraProjectsDirs, stateFile, clientName, deriveRepo, resolver } = args
+  const { ctx, projectsDir, extraProjectsDirs, stateFile, clientName, deriveRepo, resolver, sweepFingerprints } = args
   const log = ctx.log
   const window = resolveWindow(ctx)
   // Many sessions share a cwd (the same repo, often the same checkout), and
@@ -154,15 +188,50 @@ async function* runClaudeBackfill(args) {
     operation: 'backfill.scan',
     projects_dir: projectsDir,
     desktop_3p_dirs: extraProjectsDirs?.length ?? 0,
+    sweep: ctx.sweep === true,
     ...(window.sinceMs !== undefined ? { since: new Date(window.sinceMs).toISOString() } : {}),
     ...(window.untilMs !== undefined ? { until: new Date(window.untilMs).toISOString() } : {}),
     status: 'ok',
   })
 
+  let filesSeen = 0
+  let filesRead = 0
+  let filesUnchanged = 0
+  let filesFailed = 0
+  /** @type {Array<{ filePath: string, inContainer: boolean, fingerprint?: { ino: number, size: number, mtimeMs: number } }>} */
+  const candidates = []
+  const presentPaths = new Set()
+  for (const found of walkRootsWithOrigin(projectsDir, extraProjectsDirs)) {
+    if (presentPaths.has(found.filePath)) continue
+    presentPaths.add(found.filePath)
+    filesSeen += 1
+    if (!ctx.sweep) {
+      candidates.push(found)
+      continue
+    }
+    let fingerprint
+    try {
+      fingerprint = await transcriptFingerprint(found.filePath)
+    } catch {
+      filesFailed += 1
+      continue
+    }
+    if (sameFingerprint(sweepFingerprints.get(found.filePath), fingerprint)) {
+      filesUnchanged += 1
+      continue
+    }
+    candidates.push({ ...found, fingerprint })
+  }
+  if (ctx.sweep) {
+    for (const filePath of sweepFingerprints.keys()) {
+      if (!presentPaths.has(filePath)) sweepFingerprints.delete(filePath)
+    }
+  }
+
   // Degrades to [] on error so a missing or unreadable channel never
   // aborts the backfill: the join is best-effort and `cwd` /
   // `git_branch` are nullable columns.
-  const sessionRecords = await createSessionContextReader(stateFile, (err) => {
+  const sessionRecords = candidates.length === 0 ? [] : await createSessionContextReader(stateFile, (err) => {
     log.warn('claude.backfill.session_context_read_failed', {
       component: 'plugin.claude.backfill',
       operation: 'backfill.scan',
@@ -180,23 +249,25 @@ async function* runClaudeBackfill(args) {
   // container session's subagent rows deserve the same provenance as any
   // other backfilled session. Agent ids are unique, so a plain merge is
   // safe; the primary tree wins a collision.
-  const agentMeta = loadAgentMeta({ projectsDir })
-  for (const extraDir of extraProjectsDirs ?? []) {
-    for (const [agentId, meta] of loadAgentMeta({ projectsDir: extraDir })) {
-      if (!agentMeta.has(agentId)) agentMeta.set(agentId, meta)
+  const agentMeta = new Map()
+  if (candidates.length > 0) {
+    for (const [agentId, meta] of loadAgentMeta({ projectsDir })) agentMeta.set(agentId, meta)
+    for (const extraDir of extraProjectsDirs ?? []) {
+      for (const [agentId, meta] of loadAgentMeta({ projectsDir: extraDir })) {
+        if (!agentMeta.has(agentId)) agentMeta.set(agentId, meta)
+      }
     }
   }
 
-  let filesSeen = 0
   let sessionsProjected = 0
   let messagesProjected = 0
   let sessionsGated = 0
   /** @type {Map<string, number>} */
   const unclaimedEntrypoints = new Map()
 
-  for (const { filePath, inContainer } of walkRootsWithOrigin(projectsDir, extraProjectsDirs)) {
+  for (const { filePath, inContainer, fingerprint } of candidates) {
     if (ctx.signal?.aborted) break
-    filesSeen += 1
+    filesRead += 1
     /** @type {TranscriptEntry[]} */
     let entries
     try {
@@ -210,6 +281,7 @@ async function* runClaudeBackfill(args) {
         error_kind: 'transcript_read_failed',
         error: errMessage(err),
       })
+      filesFailed += 1
       continue
     }
 
@@ -306,12 +378,19 @@ async function* runClaudeBackfill(args) {
         native_id: sessionId,
       })
     }
+    // The generator resumes here only after the runner has consumed every
+    // session yielded from this file. A file that changed while it was read
+    // retains the pre-read size/mtime and is therefore eligible next tick.
+    if (ctx.sweep && fingerprint) sweepFingerprints.set(filePath, fingerprint)
   }
 
   log.info('claude.backfill.scan_complete', {
     component: 'plugin.claude.backfill',
     operation: 'backfill.scan',
     files_seen: filesSeen,
+    files_read: filesRead,
+    files_unchanged: filesUnchanged,
+    files_failed: filesFailed,
     sessions_projected: sessionsProjected,
     messages_projected: messagesProjected,
     // How many sessions the entrypoint gate held back, so a run that imports
@@ -327,6 +406,20 @@ async function* runClaudeBackfill(args) {
       : {}),
     status: 'ok',
   })
+}
+
+/** @param {string} filePath */
+async function transcriptFingerprint(filePath) {
+  const stat = await fsp.stat(filePath)
+  return { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs }
+}
+
+/**
+ * @param {{ ino: number, size: number, mtimeMs: number } | undefined} a
+ * @param {{ ino: number, size: number, mtimeMs: number }} b
+ */
+function sameFingerprint(a, b) {
+  return !!a && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs
 }
 
 /**

@@ -1084,14 +1084,11 @@ test('ctx.commands.run dispatches a registered command with the same exit code a
   assert.equal(seamErr.text(), 'seamtarget err\n')
 })
 
-test('ctx.commands.run activates a config-enabled plugin the boot profile skipped, so its command dispatches', async () => {
-  // Reproduces the wizard's configure phase (LLP 0139#seam-fresh-activation):
-  // `hyp init` boots `all-available`, which never activates V1-excluded
-  // plugins, and the picker writes the composed config after boot. The seam
-  // must activate the configure command's plugins from a fresh config read
-  // in dependency order (claude-account provides the credential capability
-  // claude-desktop requires at activation), or `claude-desktop install`
-  // misses dispatch and the consent gate is unreachable from the wizard.
+test('ctx.commands.run activates the config-enabled Desktop plugin without making its optional credential implicit', async () => {
+  // LLP 0358 removed the credential capability from Desktop's activation
+  // requirements. The seam still activates the command owner from a fresh
+  // config read, but it does not widen that request to an unrelated optional
+  // plugin merely because both are listed in config.
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-seam-activate-'))
   await fs.writeFile(
     path.join(hypHome, 'hypaware-config.json'),
@@ -1126,12 +1123,13 @@ test('ctx.commands.run activates a config-enabled plugin the boot profile skippe
     kernel,
   })
 
-  // `--print-commands` applies nothing, so a clean exit proves the command
-  // dispatched and every step printed instead of exit 2 on a registry miss.
-  assert.equal(code, 0)
-  const out = stdout.text()
-  assert.match(out, /hyp client claude-desktop install-helper/)
-  assert.match(out, /claude-desktop install: done\./)
+  // Exit 1 is the command's own optional-dependency result, not a registry
+  // miss. That proves the excluded plugin was activated and dispatched while
+  // transcript capture remained credential-free.
+  assert.equal(code, 1)
+  assert.equal(stdout.text(), '')
+  assert.match(stderr.text(), /managed-profile commands require @hypaware\/claude-account/)
+  assert.match(stderr.text(), /scheduled transcript capture does not/)
   assert.equal(stderr.text().includes('not in the active config'), false)
 })
 

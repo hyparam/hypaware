@@ -1398,7 +1398,8 @@ export async function collectHypAwareStatus(opts = {}) {
     // "not applicable", so the two surfaces that report attach *state* (the
     // clients row, and the attach action in `buildClientActionsReport`) read
     // this flag rather than a probe result that was never taken. The
-    // `client_attach_missing` diagnostic just below deliberately does not.
+    // `client_attach_missing` follows the same gate: LLP 0358 made Desktop's
+    // probe-less transcript lane complete without any setup marker.
     // @ref LLP 0229#status-derives-by-the-same-gate [implements]: a probe-less client is unattachable, not unattached
     const attachable = !!descriptor.attachProbe
     const probe = attachable
@@ -1420,16 +1421,12 @@ export async function collectHypAwareStatus(opts = {}) {
       ...(probe.telemetryPort !== undefined ? { telemetryPort: probe.telemetryPort } : {}),
       ...(probe.error !== undefined ? { error: probe.error } : {}),
     })
-    // Deliberately ungated by `attachable`, unlike the two derived-state
-    // surfaces above and below. This is not attach state: it is the standing
-    // incomplete-setup prompt LLP 0224 #repair-surface leans on after it
-    // stopped the wizard re-offering setup on every reconfigure. For a
-    // probe-less client it cannot be cleared by observation, which LLP 0224
-    // records as a known limitation with its own named follow-up (give Desktop
-    // a plist-reading probe); until that lands, an unclearable prompt beats the
-    // only alternative, which is no surface at all.
-    // @ref LLP 0229#diagnostic-is-out-of-scope [constrained-by]: the gate governs derived attach state, not the setup-completeness prompt
-    if (configured && !probe.attached) {
+    // A probe-less client has no attach contract to satisfy. LLP 0358 makes
+    // Desktop's scheduled transcript lane complete without a plist, so an
+    // attach-missing warning would point at work capture does not need.
+    // @ref LLP 0358#transcript-primary [implements]: Desktop capture health is
+    //   independent of the optional managed-profile experiment
+    if (configured && attachable && !probe.attached) {
       // The repair is `hyp client attach` only for a client whose plugin registers a
       // runtime adapter the generic reconciler can drive. A client that
       // declares `contributes.client` for probe/status plumbing but no
