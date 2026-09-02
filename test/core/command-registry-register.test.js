@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { isVerbProjection, verbToCommand } from '../../src/core/cli/verb_command.js'
+import { stderrTextFrom } from '../helpers/stderr_lines.js'
 
 /** @param {object} [over] @returns {any} */
 function makeCommand(over = {}) {
@@ -253,4 +254,77 @@ test('the copy diagnosis does not run a prototype accessor to make its case', ()
     }
   )
   assert.throws(() => commands.register(hasTrapped), /'has-trapped' missing run\(\)$/)
+})
+
+// The same blind spot with nothing to refuse. An *optional* member the spread
+// left behind fails no shape check, so registration succeeds and the command
+// runs without it: the alias index gets nothing (a dead alias), a command that
+// asked to be `hidden` lists in `hyp --help`, and a lost `plugin` re-derives
+// `category` from the command's own name and `audience` from that. Every
+// symptom is an absence, which is the case LLP 0329 settled has to reach a
+// channel that exists on a default install.
+//
+// @ref LLP 0329#stderr-mirror [tests]: a degradation observable only as an absence opts into the mirror, so both an operator and a test can see it
+test('a dropped optional member is warned about at register time', async () => {
+  const commands = createCommandRegistry()
+  let reads = 0
+  class Prototyped {
+    constructor() {
+      this.name = 'proto'
+      this.summary = 'the optional members live on the prototype'
+      this.usage = 'hyp proto'
+      this.run = async () => 0
+    }
+    get plugin() {
+      reads += 1
+      return '@hypaware/demo'
+    }
+    get aliases() {
+      reads += 1
+      return ['pr']
+    }
+    get hidden() {
+      reads += 1
+      return true
+    }
+  }
+  const text = await stderrTextFrom(() => commands.register(/** @type {any} */ (new Prototyped())))
+  assert.match(text, /WARN.*CommandRegistry\.register: 'proto' registered without/)
+  assert.match(text, /'plugin', 'aliases', 'hidden'/)
+  assert.match(text, /not an own enumerable property/)
+  // The warning is a presence probe, exactly like the refusal clause: naming a
+  // member must not run the accessor that provides it.
+  assert.equal(reads, 0, 'the warning path must not invoke the getters it names')
+  // And it is a warning, not a refusal: the command is registered, degraded.
+  assert.equal(commands.get('proto')?.name, 'proto')
+})
+
+// The other direction, because the dangerous failure of any new warning is
+// firing on the healthy path: an ordinary registration that simply does not
+// carry the optional members says nothing at all.
+test('a registration with no optional members warns about nothing', async () => {
+  const commands = createCommandRegistry()
+  const text = await stderrTextFrom(() => {
+    commands.register(makeCommand())
+    commands.register(makeCommand({ name: 'full', plugin: '@hypaware/demo', aliases: ['f'], hidden: true }))
+  })
+  assert.equal(text, '')
+})
+
+// `in` is the one trap the probe reaches, and on this path the registration is
+// otherwise valid: a throwing `has` must cost the warning, never the
+// registration it was only commenting on.
+test('a throwing has trap costs the warning, not the registration', async () => {
+  const commands = createCommandRegistry()
+  const hasTrapped = new Proxy(
+    /** @type {any} */ (makeCommand({ name: 'has-trapped' })),
+    {
+      has() {
+        throw new Error('has boom')
+      }
+    }
+  )
+  const text = await stderrTextFrom(() => commands.register(hasTrapped))
+  assert.equal(text, '')
+  assert.equal(commands.get('has-trapped')?.name, 'has-trapped')
 })

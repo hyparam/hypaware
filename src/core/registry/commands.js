@@ -1,5 +1,6 @@
 // @ts-check
 
+import { Attr, getLogger } from '../observability/index.js'
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
@@ -79,6 +80,7 @@ export function createCommandRegistry() {
         `CommandRegistry.register: '${record.name}' missing run()${copyMiss(command, record, 'run')}`
       )
     }
+    warnDroppedOptionals(command, record)
     // Fill the common metadata at the registry boundary so third-party
     // commands participate without boilerplate. Canonical registrations can
     // override every field; aliases always inherit this one semantic record.
@@ -236,6 +238,65 @@ export function createCommandRegistry() {
   }
 
   return { register, registerGroup, unregister, get, getGroup, listGroups, list, has, size, match }
+}
+
+/**
+ * Every optional member of `CommandRegistration`. The four required ones are
+ * refused above by name; these are the ones a silent drop can reach.
+ *
+ * @type {readonly string[]}
+ */
+const OPTIONAL_MEMBERS = Object.freeze([
+  'plugin',
+  'category',
+  'audience',
+  'bootProfile',
+  'group',
+  'help',
+  'aliases',
+  'hidden',
+])
+
+/**
+ * Say that the copy dropped an optional member the registration still
+ * declares.
+ *
+ * {@link copyMiss} explains the same loss where a required member makes it a
+ * refusal. An optional one fails no shape check, so there is no refusal to
+ * hang the diagnosis on: registration succeeds and the command runs without
+ * it. Every symptom is an absence - the alias index gets nothing, a command
+ * that asked to be `hidden` lists in `hyp --help`, and a lost `plugin`
+ * re-derives `category` from the command's own name and `audience` from
+ * that - which is exactly the shape LLP 0329 settled must reach a channel
+ * that exists with no telemetry configured, so the warning takes the stderr
+ * mirror. It fires only on a registration that lost something, so an ordinary
+ * one stays as quiet as it was.
+ *
+ * Said before the defaulting below, so a dropped `category` is named rather
+ * than papered over by the value derived to replace it. Presence-only, by
+ * reusing the same probe: naming a member must not run the accessor that
+ * provides it, which is the whole reason {@link copyMiss} reads `in`.
+ *
+ * @param {CommandRegistration} command the registration as passed
+ * @param {CommandRegistration} record the own-enumerable copy the checks read
+ * @ref LLP 0329#stderr-mirror [implements]: a degradation observable only as an absence opts into the mirror
+ */
+function warnDroppedOptionals(command, record) {
+  const dropped = OPTIONAL_MEMBERS.filter((key) => copyMiss(command, record, key) !== '')
+  if (dropped.length === 0) return
+  const named = dropped.map((key) => `'${key}'`).join(', ')
+  getLogger('command-registry', { mirrorStderr: true }).warn(
+    `CommandRegistry.register: '${record.name}' registered without ${named} - ` +
+      'reachable on the registration but not an own enumerable property, so the ' +
+      "registry's copy did not carry it (a prototype member, or one defined non-enumerable)",
+    {
+      [Attr.OPERATION]: 'command.register',
+      [Attr.STATUS]: 'degraded',
+      [Attr.ERROR_KIND]: 'optional_member_not_copied',
+      command_name: record.name,
+      dropped_members: dropped.join(','),
+    }
+  )
 }
 
 /**
