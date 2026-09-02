@@ -62,44 +62,50 @@ export async function activate(ctx) {
   // that advertises the route (the claude telemetry listener, LLP 0256), so
   // one verb reaches them all. Deliberately NOT `hyp ignore --session`:
   // LLP 0110 diagnosed that shape.
-  if (!ctx.commands.get('session ignore')) ctx.commands.register({
-    name: 'session ignore',
-    plugin: PLUGIN_NAME,
-    category: 'capture-movement',
-    audience: 'everyday',
-    summary: 'Stop recording this AI session on every local recorder (in-memory, until the daemon restarts)',
-    usage: 'hyp session ignore [session-id] [--json]',
-    run: runSessionIgnore,
-  })
+  if (!ctx.commands.get('session ignore')) {
+    ctx.commands.register({
+      name: 'session ignore',
+      plugin: PLUGIN_NAME,
+      category: 'capture-movement',
+      audience: 'everyday',
+      summary: 'Stop recording this AI session on every local recorder (in-memory, until the daemon restarts)',
+      usage: 'hyp session ignore [session-id] [--json]',
+      run: runSessionIgnore,
+    })
+  }
 
-  if (!ctx.commands.get('session unignore')) ctx.commands.register({
-    name: 'session unignore',
-    plugin: PLUGIN_NAME,
-    category: 'capture-movement',
-    audience: 'everyday',
-    summary: 'Resume recording this AI session',
-    usage: 'hyp session unignore [session-id] [--json]',
-    run: runSessionUnignore,
-  })
+  if (!ctx.commands.get('session unignore')) {
+    ctx.commands.register({
+      name: 'session unignore',
+      plugin: PLUGIN_NAME,
+      category: 'capture-movement',
+      audience: 'everyday',
+      summary: 'Resume recording this AI session',
+      usage: 'hyp session unignore [session-id] [--json]',
+      run: runSessionUnignore,
+    })
+  }
 
-  if (!ctx.commands.get('session status')) ctx.commands.register({
-    name: 'session status',
-    plugin: PLUGIN_NAME,
-    category: 'capture-movement',
-    audience: 'everyday',
-    summary: 'Report whether this AI session is being dropped right now (fails closed)',
-    usage: 'hyp session status [session-id] [--json]',
-    help: [
-      'Reads every live recorder advertising the shared in-memory session set. Exit codes:',
-      '  0  confirmed ignored - every advertised recorder holds this session',
-      '  1  confirmed NOT ignored - at least one recorder is recording it',
-      '  3  unknown - the check could not be completed; assume you ARE recorded',
-      '',
-      'This verb reports the session set only. The folder governor (.hypignore)',
-      'is independent and either match suppresses: see `hyp privacy show`.',
-    ].join('\n'),
-    run: runSessionStatus,
-  })
+  if (!ctx.commands.get('session status')) {
+    ctx.commands.register({
+      name: 'session status',
+      plugin: PLUGIN_NAME,
+      category: 'capture-movement',
+      audience: 'everyday',
+      summary: 'Report whether this AI session is being dropped right now (fails closed)',
+      usage: 'hyp session status [session-id] [--json]',
+      help: [
+        'Reads every live recorder advertising the shared in-memory session set. Exit codes:',
+        '  0  confirmed ignored - every advertised recorder holds this session',
+        '  1  confirmed NOT ignored - at least one recorder is recording it',
+        '  3  unknown - the check could not be completed; assume you ARE recorded',
+        '',
+        'This verb reports the session set only. The folder governor (.hypignore)',
+        'is independent and either match suppresses: see `hyp privacy show`.',
+      ].join('\n'),
+      run: runSessionStatus,
+    })
+  }
 
   setAiGatewayRuntime({
     ctx,

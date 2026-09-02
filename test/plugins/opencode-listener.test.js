@@ -325,3 +325,72 @@ test('OpenCode listener stop() does not wait on a connected client socket', asyn
     await fs.rm(listener.root, { recursive: true, force: true })
   }
 })
+
+// A browser page cannot preflight its way onto this listener, but it can fire a
+// preflight-free "simple request" at it: `text/plain`,
+// `application/x-www-form-urlencoded` and `multipart/form-data` all go out
+// without asking. `/snapshot` used to parse whatever arrived, so any page the
+// user had open could inject fabricated rows into `ai_gateway_messages`. The
+// shared OTLP listener already closes this by requiring `application/json`
+// (`src/core/otlp/server.js`), which is a content-type no browser can send
+// cross-origin without a preflight this server never answers.
+test('OpenCode listener rejects a snapshot whose content-type a browser could send cross-origin', async () => {
+  const listener = await startListener()
+  const cwd = path.join(listener.root, 'work')
+  await fs.mkdir(cwd, { recursive: true })
+  try {
+    const simpleRequestTypes = [
+      'text/plain;charset=UTF-8',
+      'application/x-www-form-urlencoded',
+      'multipart/form-data; boundary=x',
+      '',
+    ]
+    for (const contentType of simpleRequestTypes) {
+      // A string body makes fetch stamp on 'text/plain;charset=UTF-8' of its
+      // own accord, which would silently turn the header-absent case into a
+      // repeat of the first one. A BufferSource body carries no implied type,
+      // so this is the only shape that reaches the `|| ''` branch.
+      const res = await fetch(`${listener.endpoint}/snapshot`, {
+        method: 'POST',
+        ...(contentType ? { headers: { 'content-type': contentType } } : {}),
+        body: new TextEncoder().encode(JSON.stringify(snapshot('ses_simple_request', cwd))),
+      })
+      assert.equal(res.status, 415, `content-type '${contentType || 'none'}' was accepted`)
+      assert.match(
+        String(/** @type {any} */ (await res.json()).error),
+        contentType ? /unsupported content-type/ : /got 'none'/,
+        `content-type '${contentType || 'none'}' was misreported`
+      )
+    }
+    assert.deepEqual(listener.storage.appended, [], 'a rejected snapshot must write no rows')
+
+    // Every rejection is countable: a header regression in the managed asset
+    // must not read as "OpenCode is not running".
+    const rejected = await listener.source.status?.()
+    assert.equal(rejected?.details?.unsupported_content_types, simpleRequestTypes.length)
+
+    // The log line is throttled, though. This route is unauthenticated and
+    // reachable by the same browser page the gate refuses, so one line per
+    // rejection would swap blocked row injection for unbounded growth in
+    // `logs`. The first rejection names itself in the log; the rest of a burst
+    // is left to the counter above, and to the running total the next line
+    // past the interval carries.
+    const warned = listener.logs.filter((entry) => entry.event === 'opencode.snapshot.unsupported_content_type')
+    assert.equal(warned.length, 1, 'a rejection burst must not write a log line per request')
+    assert.equal(warned[0].fields.content_type, 'text/plain')
+    assert.equal(warned[0].fields.rejected_total, 1)
+
+    // The real plugin asset sends `application/json`, with or without a charset
+    // parameter, and must keep working.
+    const ok = await fetch(`${listener.endpoint}/snapshot`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+      body: JSON.stringify(snapshot('ses_json_ok', cwd)),
+    })
+    assert.equal(ok.status, 200)
+    await ok.json()
+    assert.ok(listener.storage.appended.length > 0, 'an application/json snapshot still records')
+  } finally {
+    await listener.cleanup()
+  }
+})
