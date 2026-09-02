@@ -484,6 +484,27 @@ test('loopback Hosts keep passing, with any port and in every spelling', async (
   }
 })
 
+// The shared predicate this check now calls can be asked to accept the hex
+// form `URL` re-serializes an IPv4-mapped literal into, and the self-updater
+// does ask for it. This listener must not, and the flag is one argument away,
+// so the refusal is pinned at the call site and not only at the predicate: a
+// `Host` is caller-chosen, so the mapped spelling proves nothing about where
+// the request came from, and admitting it would hand a rebound page a
+// spelling that walks straight past this guard.
+test('a Host in the hex-serialized IPv4-mapped spelling is refused', async () => {
+  const s = await startServer()
+  try {
+    const hosts = ['[::ffff:7f00:1]', `[::ffff:7f00:1]:${s.bound.port}`, '[::FFFF:7F00:1]']
+    for (const host of hosts) {
+      const res = await requestWithHost(s.bound.port, { path: '/v1/logs', host })
+      assert.equal(res.status, 421, `Host: ${host} is refused`)
+    }
+    assert.equal(s.seen.length, 0, 'no export reached the handler')
+  } finally {
+    await s.close()
+  }
+})
+
 // A `Host` no hostname can be read out of is refused with the foreign ones.
 // Sent over a raw socket because an HTTP client will not put a space in a
 // header value.
