@@ -18,7 +18,8 @@ hyparam/hypaware#1165, PR #1152, hyparam/hypaware-server#402
 
 > The poll login lane reports two outcomes that are not what happened. A
 > server too old to have the poll endpoint is reported as a retriable local
-> failure, so the wizard offers a retry that fails identically forever. A
+> failure, so the wizard invites a retry that fails identically forever and the
+> CLI advises a static token against a server-version fault. A
 > sign-in that *succeeded* but whose delivery the client could not read is
 > reported as a timeout, because the single delivery is already spent. Both
 > were found reviewing PR #1152, both reproduce on `origin/master` today, and
@@ -41,9 +42,13 @@ turns that into the [LLP 0179](./0179-login-lane-returns-its-outcome.decision.md
 outcome: `loginFailureReason(callbackError)` maps the D7 refusal codes to
 their own reasons and everything else to `'login_failed'`. One frame further,
 `classifyLoginFailure` (`src/core/cli/wizard/join.js`) maps exactly the three
-definitive refusals to `'failed'` and everything else to `'abandoned'`, which
-is what returns the wizard to its fork with a retry on offer
-([LLP 0129](./0129-init-wizard-fork.decision.md#failed-join-returns-to-fork)).
+definitive refusals to `'failed'` and everything else to `'abandoned'`. Both
+re-present the fork: `wizard/index.js:451` is
+`if (join.status !== 'ok') { printJoinFailure(opts, join); continue }`, and
+[LLP 0129](./0129-init-wizard-fork.decision.md#failed-join-returns-to-fork)
+opens "A failed or abandoned join returns to the fork." What the
+classification selects is the sentence `printJoinFailure` prints and the span
+`ERROR_KIND` (`join.js:93`), not whether a retry is on offer.
 
 That chain has exactly one channel for "terminal, but not a server refusal",
 and it is the one LLP 0179 deliberately closed: `callbackError` is the D7 code,
@@ -77,10 +82,13 @@ stderr:
 
 Two things are wrong in that transcript, and they are separable:
 
-1. `'abandoned'` returns the wizard to the fork offering a retry. Retrying
-   polls the same stale server and lands on the same 404. The user can loop
-   until they read the message and leave, which is a real thing to do, but the
-   tool is offering an action it knows cannot work.
+1. `'abandoned'` selects the wizard's retriable sentence, "Sign-in did not
+   complete. You can try again, or set up locally for now."
+   (`wizard/index.js:1050`). Retrying polls the same stale server and
+   lands on the same 404, so the wizard is inviting an action it could know
+   cannot work. Note what this is *not*: the fork itself is re-presented for
+   `'failed'` too (LLP 0129#failed-join-returns-to-fork), so the retry never
+   disappears from the menu. The defect is the sentence, not the menu.
 2. The headless hint prints because `remote_commands.js:736` gates it on
    `!callbackError`, reading "no server code" as "local failure, most likely a
    timeout on a box with no browser" (LLP 0058 D8). Here it advises a
@@ -114,16 +122,25 @@ joins the LLP 0179 vocabulary; the poller tags its error so
 becomes "server refusals plus one client-side judgment". It also needs a
 channel from the poller that is not `callbackError`, since `callbackError`'s
 whole meaning is "this is a D7 code" (a distinct error property, or an error
-subclass). Buys: the wizard stops offering an action it knows fails, and the
-`!callbackError` gate stops covering two unrelated cases.
+subclass). And it needs a third branch in `printJoinFailure`
+(`wizard/index.js:1048-1058`), which today has only `org_selection_required`
+and the fallback "Joining failed: an admin needs to grant this account access
+before this machine can enroll." Without that branch, classifying
+`'no_poll_endpoint'` as `'failed'` sends a stale-server user to an admin for
+access they already have, which is worse than the text it replaces. Buys: the
+wizard says what actually happened instead of inviting a retry, and the
+`!callbackError` gate stops covering two unrelated cases. It does not remove
+the retry from the fork; nothing in the wizard's control flow can, because
+LLP 0129 re-presents the fork on both statuses.
 
 **B. Reframe the definitive set as "retrying this cannot help", not "D7".**
 Same code change as A, but the decision being made is about the *predicate*
 rather than about one new member: `classifyLoginFailure` asks whether a bare
 retry has any chance, and the three D7 refusals are simply its current members.
 Costs: a wider rule invites future arguments about membership that the current
-narrow rule settles by construction. Buys: the invariant that gets superseded
-is replaced by one that generalizes, so the next terminal non-D7 outcome (a
+narrow rule settles by construction, and it inherits A's `printJoinFailure`
+branch and its plumbing unchanged. Buys: the invariant that gets superseded is
+replaced by one that generalizes, so the next terminal non-D7 outcome (a
 server that removes the endpoint, say) needs no third decision.
 
 **C. Fix only the misleading hint.** Leave the vocabulary and the
@@ -131,8 +148,10 @@ classification alone; make the headless hint conditional on something narrower
 than `!callbackError`, so a stale server does not get told to try a static
 token. Costs: still needs a channel from the poller for "not a browser
 problem", so it pays most of A's plumbing for half the fix, and the wizard
-keeps offering the futile retry. Buys: the smallest change that removes the
-actively wrong advice, and it touches no Accepted decision's settled text,
+keeps printing its retriable sentence over a fault that is not retriable.
+Buys: the smallest change that removes the actively wrong advice on the CLI
+surface where it is loudest, it needs no `printJoinFailure` branch, and it
+touches no Accepted decision's settled text,
 since LLP 0179#no-prose-control-flow puts messages explicitly outside the
 contract.
 
@@ -179,22 +198,28 @@ and re-running `hyp remote login` with a fresh flight works.
 ### The window is wider than "a tiny JSON body takes 10 seconds" {#deadline-clamp}
 
 The per-poll budget is not `POLL_REQUEST_TIMEOUT_MS`; it is clamped to what is
-left of the overall deadline (`:135`), so through the final ten seconds of the
-five-minute budget the abort fires progressively sooner, and the last polls get
-milliseconds. A poll issued with less budget than a round trip still reaches
-the server, and the server still consumes the flight to answer it. Reproduced
-with a stub that hands the code over on arrival and takes 40ms on the wire,
-against a poller with 15ms of budget left:
+left of the overall deadline (`:135`), so the abort fires progressively sooner
+as the five-minute budget runs out. A poll issued with less budget than a
+round trip still reaches the server, and the server still consumes the flight
+to answer it. Reproduced with a stub that hands the code over on arrival and
+takes 40ms on the wire, against a poller with 15ms of budget left:
 
 ```
 server deliveries consumed: 1
 client outcome           : timed out waiting for the browser login to complete
 ```
 
-So the client's own deadline arithmetic manufactures the condition, and it
-does so precisely in the window where a human who took nearly five minutes to
-finish signing in lands. Whatever this document's readers decide about the
-race in general, that clamp is evidence that it is not only a wire fluke.
+**How wide, exactly.** Instrumenting `perPollMs` across a full run at the
+shipped 2s cadence gives 151 polls, the last six budgeted
+`10000, 8000, 6000, 4000, 2000, 1` ms. So exactly one poll per login falls
+below a plausible round trip: the final one, the 1ms poll #1165 recorded as
+harmless residue. It covers the last ~2s of the 300s budget, which is the
+window a human must finish signing in inside for this to fire, so the rate is
+low; what the clamp establishes is that the condition is not only a wire
+fluke, because the client's own deadline arithmetic manufactures it on every
+run that reaches the deadline. Readers weighing the client-only option against
+the server-side ones should price it as a narrow but systematic window, not a
+common one.
 
 **Why it is not a patch.** The code is gone from the client's reach the moment
 the server answers; no client-side retry can recover it, because the flight is
@@ -230,9 +255,11 @@ change.
 is shorter than a plausible round trip (skip straight to the timeout instead),
 and stop letting the deadline clamp shrink a poll that may already have
 consumed a delivery. Costs: does not fix the race, only the amplifier in
-#deadline-clamp; picks a "plausible round trip" number out of the air. Buys:
-client-only, needs no server deploy, and removes the systematic end-of-budget
-case that the reproduction above shows is not rare at all.
+#deadline-clamp; picks a "plausible round trip" number out of the air; and the
+window it closes is narrow (#deadline-clamp measures one sub-round-trip poll
+per login). Buys: client-only, needs no server deploy, and removes the one
+end-of-budget case the client creates for itself on every run that reaches the
+deadline.
 
 **D. Report it honestly.** Remember that a `200` was received and unreadable,
 and end the wait with a message saying the sign-in may have completed and to
@@ -250,9 +277,11 @@ failure is safe in every respect that matters.
 **The two residues review round 2 recorded as non-findings.** The last loop
 iteration can issue one 1ms-budget poll that aborts immediately before the
 `remaining <= 0` throw, and `defaultSleep`'s timer survives a `close()`
-mid-sleep through the `Promise.race`. Both are noted at #1165; neither changes
-behavior, and no production caller closes mid-sleep. The first is adjacent to
-#deadline-clamp, and an answer there may absorb it.
+mid-sleep through the `Promise.race`. Both are noted at #1165, and the second
+changes nothing (no production caller closes mid-sleep). The first is the poll
+#deadline-clamp measures: harmless on its own, but it is the one poll per login
+that can consume a delivery it cannot read, so it is not a separate residue and
+an answer at #deadline-clamp absorbs it.
 
 **The D7 taxonomy.** Untouched. Both problems are about outcomes that are not
 D7 refusals, and the question is whether the chain that carries D7 codes should
