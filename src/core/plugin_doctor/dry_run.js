@@ -244,21 +244,17 @@ function inertSourceRegistry() {
  * original with the original as the receiver, so inherited fields, accessors,
  * and private state answer exactly as they do under the real kernel, and
  * neutering writes nothing to the plugin's own object. It does not make that
- * object read-only: a write, a define, and a delete through the stand-in all
- * reach the contribution, because the real registry hands the contribution out
- * by reference and does not shield it either. Extensibility is the exception:
- * `preventExtensions`, and the `freeze` and `seal` built on it, stay untrapped
- * and land on the stand-in's own target rather than the contribution. That
- * predates the write traps below, and closing it means forwarding
- * extensibility and copying every key across first, which is wider than the
- * define/delete fix this stand-in needed.
+ * object read-only: a write, a define, a delete, and the extensibility
+ * operations (`preventExtensions`, and the `seal` and `freeze` built on it)
+ * all reach the contribution, because the real registry hands the
+ * contribution out by reference and does not shield it either.
  *
  * @param {SourceContribution} contribution
  * @returns {SourceContribution}
  */
 function neuter(contribution) {
   /**
-   * @param {SourceContribution} _target
+   * @param {object} _target
    * @param {string | symbol} prop
    */
   function get(_target, prop) {
@@ -268,26 +264,72 @@ function neuter(contribution) {
     return Reflect.get(contribution, prop, contribution)
   }
 
+  /**
+   * The descriptor `start` is reported and pinned with. Its value is the inert
+   * function every read answers with, because a descriptor disagreeing with
+   * the read trips a proxy invariant the moment anything compares the two. An
+   * own accessor `start` is reported as a data property of that function: a
+   * descriptor carrying both `get` and `value` is not a descriptor at all, and
+   * reporting the real getter hands back the live `start()` this stand-in
+   * exists to keep unreachable.
+   *
+   * @param {PropertyDescriptor} desc The contribution's own descriptor.
+   * @returns {PropertyDescriptor}
+   */
+  function startDescriptor(desc) {
+    if (desc.get === undefined && desc.set === undefined) return { ...desc, value: inertStart }
+    return { value: inertStart, writable: false, enumerable: desc.enumerable, configurable: desc.configurable }
+  }
+
+  /**
+   * Bring the target up to the contribution's own keys, prototype, and
+   * extensibility. A non-extensible target stops tolerating one that holds
+   * nothing: `ownKeys` may then report only the keys the target itself
+   * carries, `getOwnPropertyDescriptor` only the properties it carries, and
+   * `getPrototypeOf` only its real prototype, which is the contribution until
+   * this reparents it. Copying first is what lets the extensibility
+   * operations forward to the contribution at all, so `Object.freeze(stored)`
+   * freezes the object the kernel would have frozen rather than throwing
+   * `ownKeys` at the plugin, and `Object.isFrozen(stored)` afterwards answers
+   * from the same object the kernel would answer from.
+   *
+   * @param {object} target
+   */
+  function matchExtensibility(target) {
+    if (Reflect.isExtensible(contribution) || !Reflect.isExtensible(target)) return
+    for (const prop of Reflect.ownKeys(contribution)) {
+      if (Reflect.getOwnPropertyDescriptor(target, prop) !== undefined) continue
+      const desc = /** @type {PropertyDescriptor} */ (Reflect.getOwnPropertyDescriptor(contribution, prop))
+      // Copied verbatim, so a frozen contribution reports frozen properties
+      // and `Object.isFrozen(stored)` answers as the kernel would. `start`
+      // carries the inert value reads answer with in place of the real one,
+      // the single thing about the contribution this target may not repeat.
+      Reflect.defineProperty(target, prop, prop === 'start' ? startDescriptor(desc) : desc)
+    }
+    Reflect.setPrototypeOf(target, Reflect.getPrototypeOf(contribution))
+    Reflect.preventExtensions(target)
+  }
+
   // A proxy may not answer a non-writable, non-configurable own property with
   // anything but the target's real value, so a contribution holding its own
   // `start` frozen cannot have it shadowed: the read inside `register` throws,
   // and the doctor reports the fabricated `activate_threw` this stand-in
   // exists to avoid, against a plugin the real registry accepts. Freezing a
-  // registered object is ordinary defensive style, so in that case proxy an
-  // empty object that inherits from the contribution. Reads resolve off the
-  // contribution itself either way.
-  const own = Object.getOwnPropertyDescriptor(contribution, 'start')
-  const frozenStart = own !== undefined && own.writable === false && own.configurable === false
-  if (!frozenStart) return new Proxy(contribution, { get })
-
-  // That inheriting target has no own properties and a prototype of its own,
-  // so the remaining traps exist to hide it: without them the stored
-  // contribution enumerates as `{}` and reports the wrong prototype, which is
-  // the same store-a-different-shape defect this stand-in exists to close.
-  // `start` is reported as the inert function the `get` trap already answers
-  // with, and a descriptor is reported configurable unless `defineProperty`
-  // pinned that property onto the target, because otherwise the target holds
-  // no non-configurable property to pin one to.
+  // registered object is ordinary defensive style, and nothing makes a plugin
+  // do it before `register()`: freezing afterwards hardens the very object a
+  // direct proxy would be targeting, and there is no re-deciding the target
+  // once the proxy exists. So the target is always an empty object that
+  // inherits from the contribution, never the contribution itself. Reads
+  // resolve off the contribution either way.
+  //
+  // That target has no own properties and a prototype of its own, so the traps
+  // below exist to hide it: without them the stored contribution enumerates as
+  // `{}` and reports the wrong prototype, which is the same
+  // store-a-different-shape defect this stand-in exists to close. `start` is
+  // reported as the inert function the `get` trap already answers with, and a
+  // descriptor is reported configurable unless something pinned that property
+  // onto the target, because otherwise the target holds no non-configurable
+  // property to pin one to.
   return new Proxy(Object.create(contribution), {
     get,
     ownKeys: () => Reflect.ownKeys(contribution),
@@ -298,7 +340,7 @@ function neuter(contribution) {
     getOwnPropertyDescriptor(target, prop) {
       const desc = Reflect.getOwnPropertyDescriptor(contribution, prop)
       if (desc === undefined) return undefined
-      const shown = prop === 'start' ? { ...desc, value: inertStart } : desc
+      const shown = prop === 'start' ? startDescriptor(desc) : desc
       const pinned = Reflect.getOwnPropertyDescriptor(target, prop)
       if (pinned !== undefined && pinned.configurable === false) return shown
       return { ...shown, configurable: true }
@@ -321,8 +363,14 @@ function neuter(contribution) {
       if (!Reflect.defineProperty(contribution, prop, desc)) return false
       // Then mirror what the contribution ended up with, because a
       // non-configurable define may only be reported as having succeeded when
-      // the target carries that property too. `start` is the exception and
-      // stays off the target: the only value it could be pinned to is the
+      // the target carries that property too.
+      if (prop !== 'start') {
+        const applied = /** @type {PropertyDescriptor} */ (Reflect.getOwnPropertyDescriptor(contribution, prop))
+        Reflect.defineProperty(target, prop, applied)
+        return true
+      }
+      // `start` stays off the target while it can (`matchExtensibility` is the
+      // other thing that puts it there). The only value a pin may carry is the
       // inert one the `get` trap answers with, so a define naming the real
       // `start` as its value would be judged incompatible with that pin and
       // throw, which is the same fabricated `activate_threw` this trap exists
@@ -330,20 +378,20 @@ function neuter(contribution) {
       // Unpinned, that redefine goes through, and the descriptor trap keeps
       // reporting `start` configurable for as long as nothing pins it.
       //
-      // One shape stays divergent and no pin recovers it: a descriptor that
-      // spells `configurable: false` out, which is what re-applying a
-      // descriptor read back off the contribution produces. A non-configurable
-      // define the target does not carry throws whatever the trap returns, so
-      // that no-op redefine still fabricates the throw. Every pin that would
-      // carry it trips a different invariant instead: a non-writable pin holds
-      // the inert value, so the real `start` is an incompatible value; a
-      // writable pin cannot take the `writable: false` a full descriptor also
-      // carries; an accessor pin is the wrong descriptor kind. Closing it
-      // needs the target to be the contribution itself, which is exactly what
-      // this branch exists to avoid.
-      if (prop !== 'start') {
+      // A define that spells `configurable: false` out is the exception and
+      // has no way out: the engine throws whatever the trap returns unless the
+      // target carries the property non-configurable too, so `start` has to be
+      // pinned there or `Object.freeze(stored)` cannot complete. That is the
+      // shape the kernel takes as a no-op and this stand-in still cannot: once
+      // pinned non-configurable to the inert value, a later redefine naming
+      // the real `start` is value-incompatible and throws. No pin closes both
+      // (a non-writable pin holds the inert value; a writable pin cannot take
+      // the `writable: false` a full descriptor also carries; an accessor pin
+      // is the wrong descriptor kind), and closing it needs the target to be
+      // the contribution itself, which is exactly what this design avoids.
+      if (desc.configurable === false) {
         const applied = /** @type {PropertyDescriptor} */ (Reflect.getOwnPropertyDescriptor(contribution, prop))
-        Reflect.defineProperty(target, prop, applied)
+        Reflect.defineProperty(target, prop, startDescriptor(applied))
       }
       return true
     },
@@ -365,6 +413,24 @@ function neuter(contribution) {
      * @param {unknown} value
      */
     set: (_target, prop, value) => Reflect.set(contribution, prop, value),
+    /**
+     * @param {object} target
+     */
+    isExtensible(target) {
+      // A plugin may harden the contribution through its own reference, so the
+      // two are reconciled on read rather than only when the hardening comes
+      // through this proxy. The trap may not disagree with the target.
+      matchExtensibility(target)
+      return Reflect.isExtensible(target)
+    },
+    /**
+     * @param {object} target
+     */
+    preventExtensions(target) {
+      if (!Reflect.preventExtensions(contribution)) return false
+      matchExtensibility(target)
+      return true
+    },
   })
 }
 

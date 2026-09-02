@@ -684,3 +684,135 @@ export async function activate(ctx) {
   const report = await diagnosePlugin(root)
   assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
 })
+
+// `Object.freeze`/`Object.seal` run `[[PreventExtensions]]` before
+// `[[OwnPropertyKeys]]`, so a stand-in whose `ownKeys` trap answers from the
+// contribution while its own target holds nothing threw `trap returned extra
+// keys but proxy target is non-extensible` the moment a plugin hardened what
+// it had registered. `Object.isFrozen(stored)` answered from that empty target
+// too, so the ordinary `if (!Object.isFrozen(x)) Object.freeze(x)` guard walked
+// straight into the throw, and the doctor invented an `activate_threw` against
+// a plugin the kernel freezes without complaint.
+test('a plugin that freezes the contribution it registered is not failed for it', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const contribution = {
+    name: 'demo',
+    plugin: '@test/example',
+    configSection: 'demo',
+    async start() { throw new Error('start() must not run during a dry run') },
+  }
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+  if (Object.isFrozen(stored)) throw new Error('an unfrozen contribution reported frozen')
+  if (!Object.isExtensible(stored)) throw new Error('an extensible contribution reported non-extensible')
+
+  if (!Object.isFrozen(stored)) Object.freeze(stored)
+
+  if (!Object.isFrozen(contribution)) throw new Error('the freeze never reached the contribution')
+  if (!Object.isFrozen(stored)) throw new Error('the frozen contribution reports unfrozen')
+  if (Object.isExtensible(stored)) throw new Error('the frozen contribution reports extensible')
+  if (typeof stored.start !== 'function') throw new Error('start() stopped reading back after the freeze')
+  if (stored.configSection !== 'demo') throw new Error('the frozen contribution lost configSection')
+  const keys = Object.keys(stored).sort().join(',')
+  if (keys !== 'configSection,name,plugin,start') throw new Error('the frozen contribution enumerates as [' + keys + ']')
+  if (Object.getPrototypeOf(stored) !== Object.prototype) throw new Error('the frozen contribution reports the wrong prototype')
+  if (!('name' in stored)) throw new Error('the frozen contribution lost a key from \`in\`')
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// The same defect one rung down the integrity ladder, on the branch that
+// proxies a stand-in target rather than the contribution: `preventExtensions`
+// hardened that target and left the contribution extensible, so the kernel and
+// the doctor disagreed about the object the plugin still holds, and `seal`
+// threw the same `ownKeys` invariant `freeze` did.
+test('preventExtensions and seal on the stored contribution reach the contribution', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const contribution = { name: 'demo', plugin: '@test/example' }
+  // Own, non-writable and non-configurable, so the stand-in cannot shadow
+  // start() on the contribution itself and proxies a target of its own.
+  Object.defineProperty(contribution, 'start', {
+    value: async () => { throw new Error('start() must not run during a dry run') },
+    enumerable: true,
+  })
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  Object.preventExtensions(stored)
+  if (Object.isExtensible(contribution)) throw new Error('preventExtensions never reached the contribution')
+  if (Object.isExtensible(stored)) throw new Error('the stored contribution still reports extensible')
+
+  Object.seal(stored)
+  if (!Object.isSealed(contribution)) throw new Error('the seal never reached the contribution')
+  if (!Object.isSealed(stored)) throw new Error('the sealed contribution reports unsealed')
+  // Sealed, not frozen: the kernel still lets a write through, and so must
+  // the stand-in.
+  stored.name = 'demo'
+  const keys = Object.keys(stored).sort().join(',')
+  if (keys !== 'name,plugin,start') throw new Error('the sealed contribution enumerates as [' + keys + ']')
+  if (typeof stored.start !== 'function') throw new Error('start() stopped reading back after the seal')
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// The stand-in sampled `start()`'s descriptor once, at registration, and took
+// the direct-proxy branch for a contribution that was still soft. A plugin
+// that hardens its own reference afterwards, the defensive style the comment
+// above endorses, left that proxy targeting an object whose `start` had since
+// become read-only and non-configurable, so the next read of it threw the
+// `get` invariant: a fabricated `activate_threw` against a plugin the kernel
+// accepts. Nothing re-decides the target once the proxy exists, so the branch
+// that survives hardening has to be the only branch.
+test('a contribution frozen after register() still reads back', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const contribution = {
+    name: 'demo',
+    plugin: '@test/example',
+    configSection: 'demo',
+    async start() { throw new Error('start() must not run during a dry run') },
+  }
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  Object.freeze(contribution)
+
+  if (typeof stored.start !== 'function') throw new Error('start() stopped reading back after the contribution froze')
+  if (stored.configSection !== 'demo') throw new Error('the frozen contribution lost configSection')
+  const copy = { ...stored }
+  if (copy.name !== 'demo' || typeof copy.start !== 'function') throw new Error('a spread of the frozen contribution lost fields')
+  if (Object.isExtensible(stored)) throw new Error('the stored contribution still reports extensible')
+  const desc = Object.getOwnPropertyDescriptor(stored, 'name')
+  if (!desc || desc.configurable !== false) throw new Error('the frozen contribution reports name configurable')
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
