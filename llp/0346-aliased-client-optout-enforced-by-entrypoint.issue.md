@@ -2,6 +2,7 @@
 
 **Type:** Issue
 **Status:** Draft
+**Extended-by:** LLP 0356 (#local-agent-residual: the request for the capture-side decision that retires it)
 **Systems:** Sinks, Usage-Policy, Cache
 **Author:** Phil / Claude
 **Date:** 2026-09-01
