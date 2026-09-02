@@ -119,12 +119,17 @@ directory listing is not much help either way. On a refused partition
 nothing ages out as an orphan at all: the orphan branch of `walkForRetired`
 runs only when the cursor named a live generation
 (`src/core/cache/maintenance.js:2800`), so `ORPHAN_GRACE_MS` never applies
-here and only a generation already carrying a `.retired` marker is reclaimed,
-after `GRACE_PERIOD_MS`. And the newest directory is not reliably the live
-one: a generation swap writes the new generation's data files, then the
-cursor, then the old generation's `.retired` marker, so a crash before the
-cursor write leaves a newer directory that was never published, and on this
-partition it is never swept away.
+here. Its one other use, the unreferenced-file sweep's `removeStale`
+(`maintenance.js:1930`), carries no cursor gate of its own but is not reached
+either: `sweepLiveGeneration` returns before it unless the cursor it re-reads
+resolves to source-table layout (`maintenance.js:949`), and a refused cursor
+resolves to the layout-less default. Only a generation already carrying a
+`.retired` marker is reclaimed, after `GRACE_PERIOD_MS`. And the newest
+directory is not reliably the live one: a generation swap writes the new
+generation's data files, then the cursor, then the old generation's
+`.retired` marker, so a crash before the cursor write leaves a newer
+directory that was never published, and on this partition it is never swept
+away.
 
 ### Options {#repair-options}
 
@@ -248,9 +253,12 @@ The sequence, every step of it observed in #evidence above:
    skipped, and after LLP 0347 nothing will later rewrite the cursor on its
    own.
 3. Someone republishes a live generation for the partition, by any of
-   Question 1's repairing options. Option 3 quarantines instead of
-   repairing, so it does not reach step 4 at all: the rows stay out of
-   every reader, which is the one thing that option buys here.
+   Question 1's repairing options. Not every option gets here: option 3
+   quarantines instead of repairing, option 4 declines the ambiguous
+   partition, and option 2's costs concede that a defensible version of it
+   has to decline the same case. For as long as a partition is declined
+   rather than republished the rows stay out of every reader, which is the
+   one thing those branches buy here.
 4. The rows are readable again, still carrying their original
    `_hyp_ingest_seq`, still newer than the sink watermark, and the next sink
    pass ships them onward.
@@ -340,8 +348,11 @@ design and neither can be addressed without the repair answer above.
 by the dataset's spool table, not by destination partition, and every client
 writing `ai_gateway_messages` spools to one table
 (`hypaware-core/plugins-workspace/ai-gateway/src/dataset.js:57`). The
-pre-flight in `appendChunk` asks every partition in a chunk before
-committing any of them, so a chunk touching one refused partition waits
+pre-flight in `appendChunk` asks every partition in a chunk before committing
+any of them whenever the chunk fans out to more than one
+(`src/core/cache/storage.js:168`); a chunk that lands in a single partition
+skips the pre-flight and refuses at the append itself, which is the case that
+cannot half-commit. Either way a chunk touching one refused partition waits
 whole and `active.jsonl` grows with the dataset's total ingest rather than
 with traffic to the bad partition. LLP 0347#rows-wait accepted this
 deliberately and said why the alternative was deferred: buying back
