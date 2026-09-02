@@ -301,6 +301,21 @@ function droppedOptionals(command, record) {
  * duplicate name, a colliding alias, or an invalid `audience` still stands
  * between the probe and here.
  *
+ * Which is exactly why the say is contained the way {@link copyMiss} contains
+ * the probe. There the rule is that a throwing `has` trap costs the warning
+ * and never the registration it was only commenting on; here the same rule
+ * has to hold from the other side, because this line runs *after* `byName`
+ * and the alias index were written. The mirror's `process.stderr.write` is
+ * the one step of the emit not already guarded, and a throw escaping it would
+ * take `register` down over a command it had just registered: the caller sees
+ * a failure, `activatePlugins` files a `plugin.activate_failed`, and the
+ * command stays live and dispatchable under a plugin reported as not loaded.
+ * A diagnostic may cost itself. It may not cost the thing it describes.
+ *
+ * The members are named as *declared*, not as stored: `category`, `audience`
+ * and `bootProfile` are defaulted a few lines above the probe, so the record
+ * does carry a value for them, just not the one the registration declared.
+ *
  * @param {string} name the registered command's name
  * @param {string[]} dropped what {@link droppedOptionals} found, possibly none
  * @ref LLP 0329#stderr-mirror [implements]: a degradation observable only as an absence opts into the mirror
@@ -308,18 +323,23 @@ function droppedOptionals(command, record) {
 function warnDroppedOptionals(name, dropped) {
   if (dropped.length === 0) return
   const named = dropped.map((key) => `'${key}'`).join(', ')
-  getLogger('command-registry', { mirrorStderr: true }).warn(
-    `CommandRegistry.register: '${name}' registered without ${named} - ` +
-      'reachable on the registration but not an own enumerable property, so the ' +
-      "registry's copy did not carry it (a prototype member, or one defined non-enumerable)",
-    {
-      [Attr.OPERATION]: 'command.register',
-      [Attr.STATUS]: 'degraded',
-      [Attr.ERROR_KIND]: 'optional_member_not_copied',
-      command_name: name,
-      dropped_members: dropped.join(','),
-    }
-  )
+  try {
+    getLogger('command-registry', { mirrorStderr: true }).warn(
+      `CommandRegistry.register: '${name}' registered without the declared ${named} - ` +
+        'reachable on the registration but not an own enumerable property, so the ' +
+        "registry's copy did not carry it (a prototype member, or one defined non-enumerable)",
+      {
+        [Attr.OPERATION]: 'command.register',
+        [Attr.STATUS]: 'degraded',
+        [Attr.ERROR_KIND]: 'optional_member_not_copied',
+        command_name: name,
+        dropped_members: dropped.join(','),
+      }
+    )
+  } catch {
+    // Nothing to say it on: the channel that would carry the report is the
+    // thing that just failed. The registration stands either way.
+  }
 }
 
 /**

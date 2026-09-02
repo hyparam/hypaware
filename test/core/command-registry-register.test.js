@@ -289,7 +289,11 @@ test('a dropped optional member is warned about at register time', async () => {
     }
   }
   const text = await stderrTextFrom(() => commands.register(/** @type {any} */ (new Prototyped())))
-  assert.match(text, /WARN.*CommandRegistry\.register: 'proto' registered without/)
+  // "the declared", because the three defaulted members (`category`,
+  // `audience`, `bootProfile`) do reach the stored record with a value, just
+  // not the declared one, and a bare "registered without 'category'" would be
+  // false about the record the operator can go and read.
+  assert.match(text, /WARN.*CommandRegistry\.register: 'proto' registered without the declared/)
   assert.match(text, /'plugin', 'aliases', 'hidden'/)
   assert.match(text, /not an own enumerable property/)
   // The warning is a presence probe, exactly like the refusal clause: naming a
@@ -367,4 +371,39 @@ test('a refused registration is not warned about as a degraded one', async () =>
     )
   })
   assert.equal(text, '', 'a registration that was refused must not be reported as registered')
+})
+
+// The say now runs after `byName.set` and the alias-index loop, which is what
+// makes it true, and is also what makes containment load-bearing from the
+// other side. `copyMiss` already rules that a throwing `has` trap costs the
+// warning and never the registration; a mirror write that throws must cost
+// the same. Unguarded, the throw escapes `register` over a command that is
+// already live in both indexes, so the caller records a `plugin.activate_failed`
+// while the command stays dispatchable under a plugin reported as not loaded.
+test('a throwing mirror write costs the warning, not the registration', () => {
+  const commands = createCommandRegistry()
+  class Prototyped {
+    constructor() {
+      this.name = 'proto'
+      this.summary = 'the optional member lives on the prototype'
+      this.usage = 'hyp proto'
+      this.run = async () => 0
+      this.aliases = ['pr']
+    }
+    get plugin() {
+      return '@hypaware/demo'
+    }
+  }
+  const realWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = () => {
+    throw new Error('the mirror descriptor is gone')
+  }
+  try {
+    assert.doesNotThrow(() => commands.register(/** @type {any} */ (new Prototyped())))
+  } finally {
+    process.stderr.write = realWrite
+  }
+  // And the registration is whole, not half-applied: both indexes carry it.
+  assert.equal(commands.get('proto')?.name, 'proto')
+  assert.equal(commands.get('pr')?.name, 'proto')
 })
