@@ -18,6 +18,15 @@ import { projectOpenCodeSnapshot } from './projector.js'
 const PLUGIN_NAME = '@hypaware/opencode'
 const HOST = '127.0.0.1'
 const MAX_BODY_BYTES = 16 * 1024 * 1024
+// A rejected snapshot is always counted, but logged at most this often. The
+// route is unauthenticated and reachable by the same browser page the
+// content-type gate exists to refuse, so a line per rejection would trade
+// blocked row injection in `ai_gateway_messages` for unbounded row growth in
+// `logs`. The neighbouring 404 branch logs nothing at all for that reason.
+const UNSUPPORTED_CONTENT_TYPE_LOG_INTERVAL_MS = 60 * 1000
+// The logged content-type is attacker-chosen and bounded only by Node header
+// budget; a real one is short.
+const LOGGED_CONTENT_TYPE_MAX_CHARS = 128
 
 /**
  * @param {{ localOnlyListPath?: string, ignoredSessions?: Set<string> }} deps
@@ -40,6 +49,7 @@ export function createStartOpenCodeSource(deps) {
       unknownEntrypoints: 0,
       storeActivityGaps: 0,
       unsupportedContentTypes: 0,
+      unsupportedContentTypeLoggedAt: 0,
       lastEventAt: undefined,
       reconciliationCursor: undefined,
       lastError: undefined,
@@ -84,14 +94,21 @@ export function createStartOpenCodeSource(deps) {
         // running": snapshots_received 0, no error, nothing naming
         // content-type.
         state.unsupportedContentTypes += 1
-        ctx.log.warn('opencode.snapshot.unsupported_content_type', {
-          [Attr.PLUGIN]: PLUGIN_NAME,
-          [Attr.COMPONENT]: 'sources',
-          [Attr.OPERATION]: 'snapshot.receive',
-          error_kind: 'unsupported_content_type',
-          content_type: contentType || null,
-          status: 'rejected',
-        })
+        const now = Date.now()
+        if (now - state.unsupportedContentTypeLoggedAt >= UNSUPPORTED_CONTENT_TYPE_LOG_INTERVAL_MS) {
+          state.unsupportedContentTypeLoggedAt = now
+          ctx.log.warn('opencode.snapshot.unsupported_content_type', {
+            [Attr.PLUGIN]: PLUGIN_NAME,
+            [Attr.COMPONENT]: 'sources',
+            [Attr.OPERATION]: 'snapshot.receive',
+            error_kind: 'unsupported_content_type',
+            content_type: contentType ? contentType.slice(0, LOGGED_CONTENT_TYPE_MAX_CHARS) : null,
+            // Every rejection since the listener started, so a burst the
+            // interval above swallowed is still legible from one line.
+            rejected_total: state.unsupportedContentTypes,
+            status: 'rejected',
+          })
+        }
         req.resume()
         sendJson(res, 415, {
           error: `unsupported content-type: expected application/json, got '${contentType || 'none'}'`,

@@ -364,14 +364,21 @@ test('OpenCode listener rejects a snapshot whose content-type a browser could se
     }
     assert.deepEqual(listener.storage.appended, [], 'a rejected snapshot must write no rows')
 
-    // The rejection is countable: a header regression in the managed asset
+    // Every rejection is countable: a header regression in the managed asset
     // must not read as "OpenCode is not running".
     const rejected = await listener.source.status?.()
     assert.equal(rejected?.details?.unsupported_content_types, simpleRequestTypes.length)
-    assert.equal(
-      listener.logs.filter((entry) => entry.event === 'opencode.snapshot.unsupported_content_type').length,
-      simpleRequestTypes.length
-    )
+
+    // The log line is throttled, though. This route is unauthenticated and
+    // reachable by the same browser page the gate refuses, so one line per
+    // rejection would swap blocked row injection for unbounded growth in
+    // `logs`. The first rejection names itself in the log; the rest of a burst
+    // is left to the counter above, and to the running total the next line
+    // past the interval carries.
+    const warned = listener.logs.filter((entry) => entry.event === 'opencode.snapshot.unsupported_content_type')
+    assert.equal(warned.length, 1, 'a rejection burst must not write a log line per request')
+    assert.equal(warned[0].fields.content_type, 'text/plain')
+    assert.equal(warned[0].fields.rejected_total, 1)
 
     // The real plugin asset sends `application/json`, with or without a charset
     // parameter, and must keep working.
