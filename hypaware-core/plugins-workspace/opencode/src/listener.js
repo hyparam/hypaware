@@ -39,6 +39,7 @@ export function createStartOpenCodeSource(deps) {
       missingCwd: 0,
       unknownEntrypoints: 0,
       storeActivityGaps: 0,
+      unsupportedContentTypes: 0,
       lastEventAt: undefined,
       reconciliationCursor: undefined,
       lastError: undefined,
@@ -77,6 +78,20 @@ export function createStartOpenCodeSource(deps) {
       // already sends this header, so nothing legitimate is turned away.
       const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
       if (contentType !== 'application/json') {
+        // Count and name the rejection. The managed asset wraps its post in a
+        // bare try/catch and never reads the status, so a header regression
+        // there would otherwise be indistinguishable from "OpenCode is not
+        // running": snapshots_received 0, no error, nothing naming
+        // content-type.
+        state.unsupportedContentTypes += 1
+        ctx.log.warn('opencode.snapshot.unsupported_content_type', {
+          [Attr.PLUGIN]: PLUGIN_NAME,
+          [Attr.COMPONENT]: 'sources',
+          [Attr.OPERATION]: 'snapshot.receive',
+          error_kind: 'unsupported_content_type',
+          content_type: contentType || null,
+          status: 'rejected',
+        })
         req.resume()
         sendJson(res, 415, {
           error: `unsupported content-type: expected application/json, got '${contentType || 'none'}'`,
@@ -106,6 +121,7 @@ export function createStartOpenCodeSource(deps) {
             missing_cwd: state.missingCwd,
             unknown_entrypoints: state.unknownEntrypoints,
             store_activity_gaps: state.storeActivityGaps,
+            unsupported_content_types: state.unsupportedContentTypes,
             ignored_sessions: ignoredSessions.size,
             last_event_at: state.lastEventAt ?? null,
             listener_started_at: startedAt,

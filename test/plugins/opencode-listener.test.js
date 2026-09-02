@@ -339,16 +339,39 @@ test('OpenCode listener rejects a snapshot whose content-type a browser could se
   const cwd = path.join(listener.root, 'work')
   await fs.mkdir(cwd, { recursive: true })
   try {
-    for (const contentType of ['text/plain;charset=UTF-8', 'application/x-www-form-urlencoded', '']) {
+    const simpleRequestTypes = [
+      'text/plain;charset=UTF-8',
+      'application/x-www-form-urlencoded',
+      'multipart/form-data; boundary=x',
+      '',
+    ]
+    for (const contentType of simpleRequestTypes) {
+      // A string body makes fetch stamp on 'text/plain;charset=UTF-8' of its
+      // own accord, which would silently turn the header-absent case into a
+      // repeat of the first one. A BufferSource body carries no implied type,
+      // so this is the only shape that reaches the `|| ''` branch.
       const res = await fetch(`${listener.endpoint}/snapshot`, {
         method: 'POST',
         ...(contentType ? { headers: { 'content-type': contentType } } : {}),
-        body: JSON.stringify(snapshot('ses_simple_request', cwd)),
+        body: new TextEncoder().encode(JSON.stringify(snapshot('ses_simple_request', cwd))),
       })
       assert.equal(res.status, 415, `content-type '${contentType || 'none'}' was accepted`)
-      await res.json()
+      assert.match(
+        String(/** @type {any} */ (await res.json()).error),
+        contentType ? /unsupported content-type/ : /got 'none'/,
+        `content-type '${contentType || 'none'}' was misreported`
+      )
     }
     assert.deepEqual(listener.storage.appended, [], 'a rejected snapshot must write no rows')
+
+    // The rejection is countable: a header regression in the managed asset
+    // must not read as "OpenCode is not running".
+    const rejected = await listener.source.status?.()
+    assert.equal(rejected?.details?.unsupported_content_types, simpleRequestTypes.length)
+    assert.equal(
+      listener.logs.filter((entry) => entry.event === 'opencode.snapshot.unsupported_content_type').length,
+      simpleRequestTypes.length
+    )
 
     // The real plugin asset sends `application/json`, with or without a charset
     // parameter, and must keep working.
