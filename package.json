@@ -1,6 +1,6 @@
 {
   "name": "hypaware",
-  "version": "1.29.0",
+  "version": "1.30.0",
   "type": "module",
   "description": "HypAware: AI agent observability with a plugin kernel. Records Claude Code, Codex, OTEL, and raw AI gateway traffic into one queryable history, kept on your machine or shared across machines and teams.",
   "bin": {
