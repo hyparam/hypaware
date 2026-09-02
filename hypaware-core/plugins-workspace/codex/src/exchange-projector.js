@@ -1324,7 +1324,9 @@ function resolveRequestId(input) {
  * an ancestor of it, i.e. whether the key was ever a *guess about where the
  * session ran* rather than a less specific name for the same tree.
  *
- * This is the predicate behind `refused_workspace_cwd`, and it is deliberately
+ * This is the predicate behind `refused_workspace_cwd` and, since #1189, behind
+ * *selection* as well (`nearestCoveringWorkspace`), which is what stops the two
+ * sides disagreeing about what "matches" means. It is deliberately
  * not byte-equality. When the key is an ancestor of the in-band `cwd` it names
  * the same tree, less specifically, and the `cwd` is strictly the better answer
  * to the question the key stood in for; under the resolver's nearest-governs
@@ -1355,8 +1357,13 @@ function resolveRequestId(input) {
  * with `realpath` syscalls this per-exchange seam must not spend (LLP 0049 R6).
  * So this compares paths, not directories, in both directions: a symlinked
  * spelling of one tree reads as a refusal, and a lexical descendant that is
- * really a symlink out of the key's tree reads as covered. Reporting-only, and
- * the gate itself still resolves over every spelling.
+ * really a symlink out of the key's tree reads as covered. The gate itself
+ * still resolves over every spelling, so no verdict turns on this. Selection
+ * now does, which is new since #1189 and is the reason this paragraph no longer
+ * says "reporting-only": where the `cwd` and a key spell one tree differently,
+ * nothing covers, selection falls back to the first key, and the #1189 leak
+ * survives at that spelling. Knowingly retained, for the hot-path reason above
+ * (LLP 0160#decision retains it here; #479 is closed only at the gate).
  *
  * @ref LLP 0069#requirements [implements]: R8, the one shared equal-or-descendant
  * test, never a second copy of the path rule
@@ -1384,7 +1391,34 @@ function workspaceCoversCwd(workspacePath, cwd) {
  * refused. When the first-listed key named a `.hypignore`-ignored tree, an
  * admitted row carried the ignored repository's remote although a covering key
  * was sitting in the same map (#1189). Running the one equal-or-descendant rule
- * on both sides removes that whole class.
+ * on both sides removes every case where a covering key existed and lost.
+ *
+ * It does not remove every ignored-tree remote, and the residue is worth
+ * stating rather than reading "whole class" for it. Two cases survive, and
+ * neither is created here.
+ *
+ * The larger one is the whole **subscription route**. The `cwd` passed in is the
+ * in-band one, which that route never states, so the guard below returns
+ * `undefined` and the first key is selected even when a covering key is sitting
+ * in the map: the row is admitted on the *rollout* `cwd` and still carries the
+ * first key's remote, and, because `refused_workspace_cwd` is also computed from
+ * the in-band value, with no warn either. This fix therefore covers the in-band
+ * half of #1189 only. Reaching the other half means running the predicate
+ * against the rollout `cwd`, which LLP 0350#evidence names as the open half of
+ * every option and LLP 0083#workspace-key-ranks-last leaves silent on purpose,
+ * so it is not a selection defect to fix here.
+ *
+ * The smaller one: a covering key is an ancestor of the `cwd`, and
+ * nearest-governs is not monotone down that chain (`LLP 0160#decision`), so an
+ * ancestor that itself resolves `ignore` under a nested loosening still enriches
+ * the admitted row, and, because it does cover, does so with no
+ * `refused_workspace_cwd`. On `master` the same row appeared whenever that
+ * ancestor happened to sort first, so what changes here is only that it no
+ * longer depends on JSON key order.
+ *
+ * Both are the enrichment question LLP 0350 (B)/(C) is open on, so both are
+ * deliberately left unpinned by a test: pinning them would be the accepted-test
+ * problem LLP 0350#consequences already warns (B) about.
  *
  * Longest-wins rather than first-covering, because `workspaces` may declare
  * nested trees: for a `cwd` of `/work/proj/sub` with both `/work` and
