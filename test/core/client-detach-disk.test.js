@@ -235,7 +235,7 @@ test('claude undo strips marker + managed keys/hooks from a hand-written fixture
         state_file: '/abs/session-context.jsonl',
         managed: {
           env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4123' },
-          hooks: [
+          hook_entries: [
             { event: 'SessionStart', command },
             { event: 'CwdChanged', command },
             { event: 'UserPromptSubmit', command },
@@ -258,6 +258,101 @@ test('claude undo strips marker + managed keys/hooks from a hand-written fixture
     assert.equal(parsed.env.ANTHROPIC_BASE_URL, 'https://foreign.example/api')
     assert.equal(parsed.env.ANTHROPIC_API_KEY, 'sk-x')
     assert.equal(raw.includes('claude-hook'), false) // no orphaned hyp hooks
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('claude undo still reads the pre-2.1.257 managed.hooks field', async () => {
+  const home = await stageHome()
+  try {
+    const command = "hyp claude-hook session-context --state-file '/abs/session-context.jsonl'"
+    const fixture = {
+      hooks: { SessionStart: [{ hooks: [{ type: 'command', command }] }] },
+      _hypaware: {
+        attached_at: '2026-08-31T00:00:00.000Z',
+        version: '1.29.0',
+        port: 4123,
+        mode: 'otel',
+        managed: {
+          env: {},
+          hooks: [{ event: 'SessionStart', command }],
+        },
+      },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal('_hypaware' in parsed, false)
+    assert.equal('hooks' in parsed, false)
+    assert.equal((await fs.readFile(settingsPath, 'utf8')).includes('claude-hook'), false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('claude undo merges hook_entries with legacy hooks in a partially migrated marker', async () => {
+  const home = await stageHome()
+  try {
+    const oldCommand = "hyp claude-hook session-context --state-file '/abs/old.jsonl'"
+    const nextCommand = "hyp claude-hook classify-cwd --state-file '/abs/new.jsonl'"
+    const fixture = {
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: 'command', command: oldCommand }] },
+          { hooks: [{ type: 'command', command: nextCommand }] },
+        ],
+      },
+      _hypaware: {
+        port: 4123,
+        managed: {
+          env: {},
+          hook_entries: [{ event: 'SessionStart', command: nextCommand }],
+          hooks: [
+            { event: 'SessionStart', command: oldCommand },
+            { event: 'SessionStart', command: nextCommand },
+          ],
+        },
+      },
+    }
+    const settingsPath = await writeClaudeSettings(home, JSON.stringify(fixture, null, 2) + '\n')
+
+    await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+
+    const parsed = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(Object.hasOwn(parsed, '_hypaware'), false)
+    assert.equal(Object.hasOwn(parsed, 'hooks'), false)
+  } finally {
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('claude undo decodes and restores a malformed hook backup without leaving nested marker hooks', async () => {
+  const home = await stageHome()
+  try {
+    const prior = { hooks: [{ type: 'command', command: 'echo old' }] }
+    const settingsPath = await writeClaudeSettings(
+      home,
+      JSON.stringify({ hooks: { SessionStart: prior } }, null, 2) + '\n'
+    )
+    await claudeAttach({ ...ATTACH, settingsPath })
+
+    const attached = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    assert.equal(attached._hypaware.prev_malformed_encoding, 'json')
+    assert.equal(typeof attached._hypaware.prev_malformed, 'string')
+    assert.deepEqual(JSON.parse(attached._hypaware.prev_malformed), {
+      'hooks.SessionStart': prior,
+    })
+
+    const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
+    assert.equal(result.changed, true)
+    assert.deepEqual(result.restoredPaths, ['hooks.SessionStart'])
+    assert.deepEqual(JSON.parse(await fs.readFile(settingsPath, 'utf8')), {
+      hooks: { SessionStart: prior },
+    })
   } finally {
     await fs.rm(home, { recursive: true, force: true })
   }
@@ -815,7 +910,7 @@ test('claude undo does not report an Object.prototype-named managed key that is 
 // together to destroy the value. Attach skipped the backup on JSON type, so the
 // undo met a managed key with no prior and deleted a setting the user wrote.
 // Byte-for-byte equality of the file is the strongest statement of the fix.
-for (const prior of [8080, false, null]) {
+for (const prior of [8080, false, null, { hooks: [], url: 'https://foreign.example' }]) {
   test(`claude attach + undo restore a ${JSON.stringify(prior)} base URL byte-for-byte`, async () => {
     const home = await stageHome()
     try {
@@ -859,7 +954,8 @@ test('claude re-attach carries a non-string base URL backup forward, and undo re
     // The second attach must not have backed up its own gateway URL over the
     // user's value, nor dropped the record.
     const marker = JSON.parse(await fs.readFile(settingsPath, 'utf8'))._hypaware
-    assert.equal(marker.prev_base_url, false)
+    assert.equal(marker.prev_base_url_encoding, 'json')
+    assert.equal(JSON.parse(marker.prev_base_url), false)
 
     const result = await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
     assert.equal(result.changed, true)

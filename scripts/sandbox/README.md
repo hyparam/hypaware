@@ -229,16 +229,17 @@ Two things the mocks had to grow for this to work, both worth knowing:
 
 ### Testing `hyp remote login`
 
-The fake server also speaks the attended sign-in flow (`/v1/identity/login/start`
-and `/v1/identity/token`), so an enrolling login is testable without a real
-identity provider. The "browser" is anything that fetches the start URL - the
-server answers with a 302 straight to the client's loopback receiver, so `curl`
-completes a sign-in:
+The fake server also speaks the attended sign-in flow
+(`/v1/identity/login/start`, `/v1/identity/login/poll`, and
+`/v1/identity/token`), so an enrolling login is testable without a real
+identity provider. The "browser" is anything that fetches the start URL: the
+server parks the outcome under the client's `state` and the client's poller
+collects it (LLP 0342), so a plain `curl` completes a sign-in:
 
 ```sh
 hyp-sandbox --root ~/.hyp-sandbox-upgrade --spawn run hyp remote login sandbox --no-browser > login.log 2>&1 &
 sleep 4
-curl -sL "$(grep -o 'http://127.0.0.1:18700/v1/identity/login/start[^ ]*' login.log | head -1)"
+curl -s "$(grep -o 'http://127.0.0.1:18700/v1/identity/login/start[^ ]*' login.log | head -1)"
 ```
 
 What that surfaced: **login recovers a machine that ran `hyp leave`, and does

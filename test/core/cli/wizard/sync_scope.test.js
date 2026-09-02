@@ -598,3 +598,32 @@ test('a corrupt store skips the step with a warning and is never overwritten', a
   assert.match(stderr.text(), /unreadable/)
   assert.equal(await fs.readFile(storePath, 'utf8'), '{ nope')
 })
+
+// The arm's documented contract is to warn and skip rather than fail the
+// run, and the warning write was the one way it could still fail it: a
+// stderr that throws (a stream closed under a run that is shutting down)
+// took the run down from inside the arm that exists to keep it alive.
+// Same shape the folder-ask lane's arms pin (PR #1149), now the corpus
+// rule.
+// @ref LLP 0341#warnings [tests]:
+test('a corrupt store with a dead stderr still skips instead of throwing', async () => {
+  const { env, stateDir } = await makeHome()
+  const storePath = clientSyncListPath(stateDir)
+  await fs.mkdir(path.dirname(storePath), { recursive: true })
+  await fs.writeFile(storePath, '{ nope')
+  let prompted = false
+
+  const result = await runWizardSyncScope(/** @type {any} */ ({
+    stdout: makeBuf(),
+    stderr: { write() { throw new Error('EPIPE: broken pipe') } },
+    env,
+    candidates: [descriptor('openclaw')],
+    prompt: async () => { prompted = true; return [] },
+  }))
+
+  // The skip still returns, flags intact: they are what the folder-ask
+  // lane and the back edges read.
+  assert.deepEqual(result, { skipped: true, noQuestion: true, optedOut: [] })
+  assert.equal(prompted, false)
+  assert.equal(await fs.readFile(storePath, 'utf8'), '{ nope')
+})

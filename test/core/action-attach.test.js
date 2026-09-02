@@ -318,7 +318,7 @@ test('perform() attaches via the registry (endpoint + json mode) and records set
   )
   assert.deepEqual(outcome, {
     status: 'done',
-    detail: { endpoint: ENDPOINT, mode: 'otel', settings_path: '/home/u/.claude/settings.json', prev_value: 'https://foreign.example/api' },
+    detail: { endpoint: ENDPOINT, mode: 'otel', settings_schema: 3, settings_path: '/home/u/.claude/settings.json', prev_value: 'https://foreign.example/api' },
   })
   // The adapter was invoked with the gateway endpoint, an empty config, and
   // the machine-readable json flag.
@@ -339,7 +339,7 @@ test('perform() records Claude OTEL mode with settings_path when the attach had 
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel', settings_path: '/home/u/.claude/settings.json' } })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel', settings_schema: 3, settings_path: '/home/u/.claude/settings.json' } })
 })
 
 test('perform() records Claude OTEL mode on an idempotent re-attach (changed:false)', async () => {
@@ -351,7 +351,7 @@ test('perform() records Claude OTEL mode on an idempotent re-attach (changed:fal
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel' } })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel', settings_schema: 3 } })
 })
 
 test('perform() records Claude OTEL mode when the adapter emits an unparseable payload', async () => {
@@ -361,7 +361,7 @@ test('perform() records Claude OTEL mode when the adapter emits an unparseable p
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel' } })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel', settings_schema: 3 } })
 })
 
 test('perform() parses the last non-empty line when prose precedes the JSON', async () => {
@@ -377,7 +377,7 @@ test('perform() parses the last non-empty line when prose precedes the JSON', as
     { requestKey: 'claude', params: { client: 'claude' } },
     makeCtx({ clients: clientsWith({ claude: registration }) }),
   )
-  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel', settings_path: '/p' } })
+  assert.deepEqual(outcome, { status: 'done', detail: { endpoint: ENDPOINT, mode: 'otel', settings_schema: 3, settings_path: '/p' } })
 })
 
 test('perform() returns failed when the adapter throws (file not writable)', async () => {

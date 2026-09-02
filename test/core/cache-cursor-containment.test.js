@@ -17,9 +17,11 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { maintainCache } from '../../src/core/cache/maintenance.js'
-import { appendRowsToSourceTable, readCursorSync, tryReadCursorSync, writeCursor } from '../../src/core/cache/partition.js'
+import { appendRowsToPartition, appendRowsToSourceTable, readCursorSync, tryReadCursorSync, writeCursor } from '../../src/core/cache/partition.js'
+import { readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
 import { createCacheSpool, SPOOL_DIR } from '../../src/core/cache/spool.js'
+import { createQueryStorageService } from '../../src/core/cache/storage.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -210,21 +212,30 @@ test('a tableDir that aliases the live generation does not cost the live generat
   }
 })
 
-test('the next append heals a rejected cursor into a contained one', async () => {
+// LLP 0347#file-not-reader withdrew the heal this used to pin. A rejected
+// cursor is an unreadable one, so the append no longer rewrites it at the
+// default generation: on a partition compacted onto a `table-<ms>` that
+// default is a guess, and publishing it costs the real generation to the
+// orphan sweep (issue #1170). What the append still may not do is write
+// where the rejected value pointed, which is the property LLP 0323 is about
+// and the half of this test that has not moved.
+test('the next append refuses a rejected cursor rather than healing it to a guess', async () => {
   const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
   try {
     const dir = partitionDir(cacheRoot)
     await aimCursorAt(dir, path.relative(dir, outside))
     assert.equal(tryReadCursorSync(dir), null, 'the tampered cursor reads as unreadable')
 
-    await appendRowsToSourceTable(
-      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
-      [{ id: 2, session_id: 's-2' }]
+    await assert.rejects(
+      appendRowsToSourceTable(
+        cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
+        [{ id: 2, session_id: 's-2' }]
+      ),
+      /present but unreadable/,
+      'the append refuses a cursor whose live generation it cannot name'
     )
-
-    const healed = tryReadCursorSync(dir)
-    assert.equal(healed?.tableDir, 'table', 'the append rewrites the cursor at the default generation')
-    assert.equal(await pathExists(path.join(outside, 'table')), false, 'and wrote nothing outside the partition')
+    assert.equal(tryReadCursorSync(dir), null, 'and leaves the tampered bytes for a repair to look at')
+    assert.equal(await pathExists(path.join(outside, 'table')), false, 'having written nothing outside the partition')
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
@@ -787,6 +798,275 @@ test('and a spool reached through a symlinked ancestor drains like any other', a
 
     assert.equal(result.flushed, true, 'the shape of the path the cache lives at is not the flush\'s business')
     assert.equal(ingested.length, 1, 'and the row still lands')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The write-path half of the same gate (issue #1170). LLP 0323#whole-cursor
+// refuses a non-string `tableDir` rather than dropping the field precisely so
+// nothing publishes the default `table` over a partition compacted onto a
+// `table-<ms>`. The append path re-derived that guess anyway: it read through
+// `tryReadCursorSync` and then spelled out `readCursorSync`'s default, so an
+// unreadable cursor was indistinguishable from a missing one, and the orphan
+// sweep took the real generation once past its grace window.
+
+/**
+ * A partition carried to the state the defect needs: compacted onto a
+ * `table-<ms>` generation, with the pre-compaction `table/` already reclaimed
+ * the way the sweep reclaims it once its `.retired` marker ages past the 24h
+ * grace. `expireOnly` runs the sweep without a second compaction, so exactly
+ * one generation is live when the cursor is corrupted.
+ *
+ * @param {string} cacheRoot
+ * @param {number} rows
+ * @returns {Promise<{ dir: string, generation: string }>}
+ */
+async function compactedPartitionWithOneGeneration(cacheRoot, rows) {
+  for (let id = 1; id <= rows; id++) {
+    await appendRowsToSourceTable(
+      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
+      [{ id, session_id: `s-${id}` }]
+    )
+  }
+  const dir = partitionDir(cacheRoot)
+  const compaction = await maintainCache({ cacheRoot, force: true, compactOnly: true })
+  assert.equal(compaction.totalCompacted, 1, 'the fixture partition really was compacted')
+  const generation = String(tryReadCursorSync(dir)?.tableDir)
+  assert.notEqual(generation, 'table', 'so the live generation is no longer the default name')
+
+  await fs.writeFile(
+    path.join(dir, 'table', '.retired'),
+    new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
+  )
+  await maintainCache({ cacheRoot, force: true, expireOnly: true })
+  assert.deepEqual(
+    (await fs.readdir(dir)).sort(), ['cursor.json', generation],
+    'and the retired default generation is gone, so only the real one holds the rows'
+  )
+  return { dir, generation }
+}
+
+/** @param {string} dir @returns {Promise<number[]>} */
+async function idsIn(dir) {
+  return (await readRowsFromTable(dir)).map((row) => Number(row.id)).sort((a, b) => a - b)
+}
+
+test('an append onto an unreadable cursor does not cost a compacted partition its generation', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-append-unreadable-cursor-'))
+  try {
+    const cacheRoot = path.join(root, 'cache')
+    const { dir, generation } = await compactedPartitionWithOneGeneration(cacheRoot, 6)
+    assert.deepEqual(await idsIn(path.join(dir, generation)), [1, 2, 3, 4, 5, 6])
+
+    await fs.writeFile(path.join(dir, 'cursor.json'), '{ not json')
+
+    // Caught rather than asserted on here, so the assertions below are the
+    // ones that fail when this regresses: the loss is the finding, and a
+    // rejection assertion in front of it would hide the loss behind
+    // "missing expected rejection".
+    /** @type {unknown} */
+    let refusal
+    try {
+      await appendRowsToSourceTable(
+        cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
+        [{ id: 7, session_id: 's-7' }]
+      )
+    } catch (err) {
+      refusal = err
+    }
+
+    // Age every generation past ORPHAN_GRACE_MS and run the sweep that
+    // reclaimed the real one before this was fixed.
+    for (const name of await fs.readdir(dir)) {
+      const full = path.join(dir, name)
+      if ((await fs.stat(full)).isDirectory()) await fs.utimes(full, STALE, STALE)
+    }
+    await maintainCache({ cacheRoot, force: true, expireOnly: true })
+
+    assert.equal(
+      await pathExists(path.join(dir, generation)), true,
+      'the sweep still cannot name a live generation, so it calls nothing an orphan'
+    )
+    assert.deepEqual(
+      await idsIn(path.join(dir, generation)), [1, 2, 3, 4, 5, 6],
+      'and every row the partition held before the refused append is still readable'
+    )
+
+    // Said last, because it is the mechanism rather than the finding.
+    assert.match(
+      String(refusal), /present but unreadable/,
+      'which it is because the append refused instead of publishing a generation it guessed'
+    )
+    assert.equal(
+      await fs.readFile(path.join(dir, 'cursor.json'), 'utf8'), '{ not json',
+      'leaving the unreadable bytes for a repair to look at, not overwritten'
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The control for the over-tightening the refusal could cause. A brand-new
+// partition has no `cursor.json` at all, and there the epoch-0 default is not
+// a guess: it is the truth about a partition that has never been written to.
+// It has to keep publishing `table` as its first live generation, or the
+// refusal has broken every first write in the cache.
+
+test('a partition with no cursor still publishes its first generation', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-append-fresh-partition-'))
+  try {
+    const cacheRoot = path.join(root, 'cache')
+    const dir = partitionDir(cacheRoot)
+
+    await appendRowsToSourceTable(
+      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
+      [{ id: 1, session_id: 's-1' }]
+    )
+    assert.equal(tryReadCursorSync(dir)?.tableDir, 'table', 'the first append names the default generation')
+    assert.deepEqual(await idsIn(path.join(dir, 'table')), [1], 'and the row is in it')
+
+    // The whole lifecycle, not just the first write: a second append, a
+    // compaction that swaps the generation, and an append after the swap.
+    await appendRowsToSourceTable(
+      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
+      [{ id: 2, session_id: 's-2' }]
+    )
+    await maintainCache({ cacheRoot, force: true, compactOnly: true })
+    const swapped = String(tryReadCursorSync(dir)?.tableDir)
+    assert.notEqual(swapped, 'table', 'the swap moved the live generation off the default')
+    await appendRowsToSourceTable(
+      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
+      [{ id: 3, session_id: 's-3' }]
+    )
+    assert.equal(tryReadCursorSync(dir)?.tableDir, swapped, 'and the append after it still lands in the swapped one')
+    assert.deepEqual(await idsIn(path.join(dir, swapped)), [1, 2, 3])
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The third shape at the same call site, and the reason the gate asks the
+// filesystem rather than the reader: a cursor that is GONE, over a table that
+// is not. That is what a crash between an append and its cursor write leaves
+// (the case `partitionHasCommittedRows` already reasons about), and it stays
+// appendable, because a missing cursor names no other generation to lose.
+
+test('an append still heals a partition whose cursor was lost but whose table was not', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-append-lost-cursor-'))
+  try {
+    const cacheRoot = path.join(root, 'cache')
+    const dir = partitionDir(cacheRoot)
+    await appendRowsToSourceTable(
+      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
+      [{ id: 1, session_id: 's-1' }]
+    )
+    await fs.rm(path.join(dir, 'cursor.json'))
+
+    await appendRowsToSourceTable(
+      cacheRoot, 'ai_gateway_messages', ['source=claude'], SESSION_COLUMNS,
+      [{ id: 2, session_id: 's-2' }]
+    )
+    assert.equal(tryReadCursorSync(dir)?.tableDir, 'table', 'the cursor is restored over the table that was already there')
+    assert.deepEqual(await idsIn(path.join(dir, 'table')), [1, 2], 'and both rows are readable')
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The epoch layout reaches the same default through `cursor.epoch`, so it
+// carries the same defect: an unreadable cursor over a partition at
+// `epoch=3/` would republish epoch 0 and orphan the real one.
+
+test('the legacy epoch append refuses an unreadable cursor too', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-append-epoch-unreadable-'))
+  try {
+    const cacheRoot = path.join(root, 'cache')
+    const dir = path.join(cacheRoot, 'datasets', 'traces', 'client=claude', 'date=2026-01-01')
+
+    await appendRowsToPartition(
+      cacheRoot, 'traces', ['client=claude', 'date=2026-01-01'], SESSION_COLUMNS,
+      [{ id: 1, session_id: 's-1' }]
+    )
+    assert.deepEqual(await idsIn(path.join(dir, 'epoch=0')), [1], 'the first append publishes epoch 0 as it always did')
+
+    await fs.writeFile(path.join(dir, 'cursor.json'), '{ not json')
+    await assert.rejects(
+      appendRowsToPartition(
+        cacheRoot, 'traces', ['client=claude', 'date=2026-01-01'], SESSION_COLUMNS,
+        [{ id: 2, session_id: 's-2' }]
+      ),
+      /present but unreadable/,
+      'and an unreadable cursor stops the next one instead of guessing an epoch'
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The refusal's blast radius inside one flush. The spool is keyed by dataset,
+// not by partition, so a single chunk fans out into an append per partition it
+// touches, and `drainFlushFiles` checkpoints the chunk only after every one of
+// them has returned. A refusal from the last partition therefore used to leave
+// the earlier ones committed with no checkpoint behind them, and the next
+// flush replayed the chunk over the top: nothing dedupes rows that already
+// carry their native identity, so a healthy sibling grew by its share of the
+// chunk once per flush tick (~1440/day on the sink driver's default schedule)
+// and shipped the duplicates onward. LLP 0347#rows-wait says the rows wait;
+// this is what makes the whole chunk do it.
+
+/** @type {ColumnSpec[]} */
+const CLIENT_COLUMNS = [
+  { name: 'id', type: 'INT32', nullable: false },
+  { name: 'client_name', type: 'STRING', nullable: false },
+]
+
+test('a chunk spanning a refused and a healthy partition commits neither, and loses nothing', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-chunk-spans-refusal-'))
+  try {
+    const cacheRoot = path.join(root, 'cache')
+    const storage = createQueryStorageService({ cacheRoot })
+    // One spool table, two destination partitions: exactly the shape every
+    // real dataset writes in (`aiGatewayTablePath` spools to a single
+    // partition label and the chunk fans out by client).
+    const spoolPath = storage.cacheTablePath('ai_gateway_messages', ['spool_v1'])
+    const healthy = path.join(storage.cacheTablePath('ai_gateway_messages', ['source=good']), 'table')
+    const poisonedDir = storage.cacheTablePath('ai_gateway_messages', ['source=bad'])
+
+    await storage.appendRows(spoolPath, CLIENT_COLUMNS, [
+      { id: 1, client_name: 'good' },
+      { id: 2, client_name: 'bad' },
+    ])
+    await storage.flushTable(spoolPath, { force: true })
+    assert.deepEqual(await idsIn(healthy), [1], 'both partitions exist and hold their first row')
+    const goodCursor = await fs.readFile(path.join(poisonedDir, 'cursor.json'), 'utf8')
+
+    await fs.writeFile(path.join(poisonedDir, 'cursor.json'), '{ not json')
+    await storage.appendRows(spoolPath, CLIENT_COLUMNS, [
+      { id: 3, client_name: 'good' },
+      { id: 4, client_name: 'bad' },
+    ])
+
+    // Four ticks, because the defect this pins is per-tick growth rather
+    // than a single over-commit.
+    for (let tick = 0; tick < 4; tick++) {
+      await assert.rejects(
+        storage.flushTable(spoolPath, { force: true }),
+        /present but unreadable/,
+        'the flush refuses while one partition in the chunk cannot name its live generation'
+      )
+      assert.deepEqual(
+        await idsIn(healthy), [1],
+        'and the healthy partition in the same chunk is not committed to, on this tick or any other'
+      )
+    }
+
+    // The other half: waiting is only the right answer if the rows are still
+    // there to drain. Repair the cursor and the same spool file commits, once.
+    await fs.writeFile(path.join(poisonedDir, 'cursor.json'), goodCursor)
+    await storage.flushTable(spoolPath, { force: true })
+    assert.deepEqual(await idsIn(healthy), [1, 3], 'every row lands exactly once after the repair')
+    assert.deepEqual(await idsIn(path.join(poisonedDir, 'table')), [2, 4], 'in both partitions')
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

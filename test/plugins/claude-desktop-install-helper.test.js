@@ -26,7 +26,10 @@ function fakeCtx(opts) {
     paths: { stateDir: opts.stateDir },
     log: { info() {}, warn() {}, error() {}, debug() {} },
     configRegistry: { registerSection() {} },
-    commands: { register(/** @type {any} */ cmd) { commands.set(cmd.name, cmd) } },
+    commands: {
+      register(/** @type {any} */ cmd) { commands.set(cmd.name, cmd) },
+      registerGroup() {},
+    },
     capabilities: {
       has(/** @type {string} */ name) {
         if (name === 'hypaware.anthropic-credential') return opts.credential !== false

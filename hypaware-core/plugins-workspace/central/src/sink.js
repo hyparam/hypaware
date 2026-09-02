@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { RETRY_BACKOFF_SECONDS, parseRetryAfter, abortableSleep } from './backoff.js'
 
 /**
- * @import { DatasetDisposition, DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetDisposition, DatasetRegistration, ExportBatch, ExportOptions, ExportResult, HypAwareV2Config, PluginLogger, QueryPartition, QueryRegistry, QueryStorageService, Sink, SinkContinuation, SourceHistoryReplayPreview, SourceHistoryReplayResult } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { SinkWatermarkKey, SinkWatermarkStore } from '../../../../src/core/sinks/types.js'
  * @import { IdentityClient } from './identity_client.js'
  * @import { CentralSinkConfig, DatasetRolloutRecord, DatasetRolloutStore } from './types.js'
@@ -215,6 +215,115 @@ export function createForwardSink(args) {
     },
 
     /**
+     * Count the retained AI-gateway rows this sink can explicitly replay for
+     * one client. The scan uses the export seam, so directory-level
+     * local-only policy remains in force and is disclosed separately.
+     *
+     * @ref LLP 0345#central [implements]: preview retained attributed rows without touching the incremental watermark
+     * @param {{ source: string }} request
+     * @returns {Promise<SourceHistoryReplayPreview>}
+     */
+    async previewSourceHistory(request) {
+      const partitions = await sourceHistoryPartitions({ query, storage, source: request.source })
+      let rows = 0
+      let withheldRows = 0
+      for (const partition of partitions) {
+        if (!partition.tablePath || !storage.tableExists(partition.tablePath)) continue
+        await flushPartition(storage, partition.tablePath, 'central_history_preview')
+        for await (const entry of storage.readRowsSince(partition.tablePath, {
+          since: { v: 1, seq: '0' },
+          includeLegacy: true,
+        })) {
+          if (entry.dropped) {
+            withheldRows += 1
+            continue
+          }
+          if (entry.row.client_name === request.source) rows += 1
+        }
+      }
+      return { rows, withheldRows }
+    },
+
+    /**
+     * Replay one client's retained AI-gateway history without changing the
+     * ordinary incremental cursor. Central's org-scoped part-id index makes a
+     * retry, or overlap with a scheduled tick, row-idempotent.
+     *
+     * @ref LLP 0345#central [implements]: central replays attributed history through its normal wire path while leaving incremental progress intact
+     * @param {{ source: string }} request
+     * @returns {Promise<SourceHistoryReplayResult>}
+     */
+    async replaySourceHistory(request) {
+      const partitions = await sourceHistoryPartitions({ query, storage, source: request.source })
+      let rowsReplayed = 0
+      let bytesWritten = 0
+      for (const partition of partitions) {
+        const stats = { rows: 0, bytes: 0 }
+        try {
+          const target = forwardingTarget(query, partition)
+          // A withheld verdict sends nothing, and the preview above already
+          // quoted a row count for this partition. Say so rather than letting
+          // the command report `exported (rows=0)` with no reason anywhere
+          // (LLP 0345 #scope: a replay's failure direction is stated).
+          if ('withheld' in target) {
+            log.info('central.forward.history_replay_withheld', {
+              hyp_sink_source: request.source,
+              hyp_dataset: partition.dataset,
+              reason: target.withheld,
+            })
+            continue
+          }
+          bytesWritten += await forwardPartition({
+            partition,
+            signal: target.ingestName,
+            config,
+            identityClient,
+            storage,
+            watermarks,
+            fetchFn,
+            log,
+            abortSignal: abortController.signal,
+            sleepFn,
+            registration: target.registration,
+            registeredDatasets,
+            datasetRegistrations,
+            unsupportedDatasetsUntil,
+            nowFn,
+            requireWatermark: false,
+            sinceOverride: { v: 1, seq: '0' },
+            includeLegacyOverride: true,
+            persistWatermark: false,
+            rowFilter: (row) => row.client_name === request.source,
+            replayStats: stats,
+          })
+          rowsReplayed += stats.rows
+        } catch (err) {
+          // Both counts come from `stats`, which `flushChunk` updates as each
+          // chunk is acked. Reading bytes off the error instead would report
+          // `bytes=0` beside a non-zero row count for any throw raised outside
+          // `flushChunk` (a corrupt privacy list failing the scan closed
+          // mid-partition, say), which is the one thing a partial-transfer
+          // report must not get wrong.
+          rowsReplayed += stats.rows
+          bytesWritten += stats.bytes
+          const message = err instanceof Error ? err.message : String(err)
+          log.warn('central.forward.history_replay_failed', {
+            hyp_sink_source: request.source,
+            hyp_rows_replayed: rowsReplayed,
+            message,
+          })
+          return { status: 'failed', rowsReplayed, bytesWritten, error: message }
+        }
+      }
+      log.info('central.forward.history_replay_finished', {
+        hyp_sink_source: request.source,
+        hyp_rows_replayed: rowsReplayed,
+        hyp_bytes_written: bytesWritten,
+      })
+      return { status: 'exported', rowsReplayed, bytesWritten }
+    },
+
+    /**
      * The same verdict `exportBatch` acts on, stated instead of acted on, so
      * `hyp sync`'s consent prompt does not quote rows this sink will refuse to
      * send. It shares `datasetForwardingVerdict` with the export path rather
@@ -255,6 +364,23 @@ export function createForwardSink(args) {
       abortController.abort(new Error('central.forward sink closed'))
     },
   }
+}
+
+/**
+ * Discover the AI-gateway source partition that belongs to one client. The
+ * dataset's source partition chooses `client_name` first, so a named partition
+ * is attribution proof; payload rows are checked again before sending.
+ *
+ * @ref LLP 0345#scope [constrained-by]: the first replay surface is limited to attributed ai_gateway_messages rows
+ * @param {{ query: QueryRegistry, storage: QueryStorageService, source: string }} args
+ * @returns {Promise<QueryPartition[]>}
+ */
+async function sourceHistoryPartitions({ query, storage, source }) {
+  if (typeof source !== 'string' || source.length === 0) return []
+  const dataset = query.getDataset('ai_gateway_messages')
+  if (!dataset || typeof dataset.discoverPartitions !== 'function') return []
+  const partitions = await discoverRolloutPartitions(dataset, storage)
+  return partitions.filter((partition) => partition.partition?.source === source)
 }
 
 /**
@@ -581,10 +707,15 @@ function withDatasetRolloutLock(dataset, locks, fn) {
  *   unsupportedDatasetsUntil: Map<string, number>,
  *   nowFn: () => number,
  *   requireWatermark: boolean,
+ *   sinceOverride?: SinkContinuation,
+ *   includeLegacyOverride?: boolean,
+ *   persistWatermark?: boolean,
+ *   rowFilter?: (row: Record<string, unknown>) => boolean,
+ *   replayStats?: { rows: number, bytes: number },
  * }} args
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
-async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, requireWatermark }) {
+async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, requireWatermark, sinceOverride, includeLegacyOverride, persistWatermark = true, rowFilter, replayStats }) {
   if (!partition.tablePath || !storage.tableExists(partition.tablePath)) {
     log.warn('central.forward.skip_missing_partition', { hyp_dataset: partition.dataset })
     return 0
@@ -599,38 +730,42 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   /** @type {SinkWatermarkKey | undefined} */
   let watermarkKey
   let exportedRowCount = 0
-  try {
-    watermarkKey = watermarks.keyFor(storage.cacheRoot, tablePath)
-    const record = await watermarks.read(watermarkKey)
-    if (record) {
-      since = record.continuation
-      exportedRowCount = record.exportedRowCount
-    } else if (requireWatermark) {
-      throw new Error(
-        `central.forward: rollout progress for '${partition.dataset}' partition '${watermarkKey.partitionKey}' is missing or invalid`
-      )
-    }
-  } catch (err) {
-    // An initialized open-dataset partition must never turn missing or corrupt
-    // progress into either a full replay or a new baseline. Keep it retryable
-    // until an operator repairs the state.
-    if (requireWatermark) {
-      log.warn('central.forward.rollout_progress_failed', {
+  if (sinceOverride) {
+    since = sinceOverride
+  } else {
+    try {
+      watermarkKey = watermarks.keyFor(storage.cacheRoot, tablePath)
+      const record = await watermarks.read(watermarkKey)
+      if (record) {
+        since = record.continuation
+        exportedRowCount = record.exportedRowCount
+      } else if (requireWatermark) {
+        throw new Error(
+          `central.forward: rollout progress for '${partition.dataset}' partition '${watermarkKey.partitionKey}' is missing or invalid`
+        )
+      }
+    } catch (err) {
+      // An initialized open-dataset partition must never turn missing or corrupt
+      // progress into either a full replay or a new baseline. Keep it retryable
+      // until an operator repairs the state.
+      if (requireWatermark) {
+        log.warn('central.forward.rollout_progress_failed', {
+          hyp_dataset: partition.dataset,
+          message: err instanceof Error ? err.message : String(err),
+        })
+        throw err
+      }
+      // An underivable key or unreadable watermark must not wedge the sink:
+      // fall back to a full scan (the server ledger dedupes the redelivery)
+      // and skip watermark writes for this partition this tick.
+      watermarkKey = undefined
+      since = undefined
+      exportedRowCount = 0
+      log.warn('central.forward.watermark_read_failed', {
         hyp_dataset: partition.dataset,
         message: err instanceof Error ? err.message : String(err),
       })
-      throw err
     }
-    // An underivable key or unreadable watermark must not wedge the sink:
-    // fall back to a full scan (the server ledger dedupes the redelivery)
-    // and skip watermark writes for this partition this tick.
-    watermarkKey = undefined
-    since = undefined
-    exportedRowCount = 0
-    log.warn('central.forward.watermark_read_failed', {
-      hyp_dataset: partition.dataset,
-      message: err instanceof Error ? err.message : String(err),
-    })
   }
 
   // The rollout boundary is durable before the remote capability handshake.
@@ -693,9 +828,10 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       // name the failing chunk and how many already landed: the new
       // chunk loop is otherwise invisible against the server ledger.
       if (err && typeof err === 'object') {
-        const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number }} */ (err)
+        const e = /** @type {{ hyp_batch_id?: string, hyp_chunks_sent?: number, hyp_bytes_written?: number }} */ (err)
         e.hyp_batch_id = batchId
         e.hyp_chunks_sent = chunkIndex
+        e.hyp_bytes_written = bytesWritten
       }
       throw err
     }
@@ -710,6 +846,10 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     bytesWritten += bytes
     chunkIndex += 1
     shippedRowCount += rows
+    if (replayStats) {
+      replayStats.rows += rows
+      replayStats.bytes += bytes
+    }
     // The next chunk starts after this chunk's last row, so its batch id keys
     // off this chunk's `after`: keeping ids stable whether a tick streams the
     // whole partition or a respool replays only the un-acked suffix.
@@ -722,7 +862,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // are "new" only on a sink with no durable watermark (export the backlog once);
   // once a watermark exists they are already shipped, so exclude them and the
   // legacy backlog never re-exports every tick (LLP 0040 §6 risk #1).
-  const includeLegacy = since === undefined
+  const includeLegacy = includeLegacyOverride ?? since === undefined
   // Rows the export seam withheld as `local-only` (LLP 0070): never buffered,
   // never shipped, but each still advances `lastAfter` so the watermark moves
   // across them.
@@ -738,6 +878,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
       droppedRowCount += 1
       continue
     }
+    if (rowFilter && !rowFilter(entry.row)) continue
     const line = JSON.stringify(serializeRow(entry.row))
     lines.push(line)
     // Count UTF-8 bytes (not UTF-16 code units) so the budget bounds the
@@ -763,7 +904,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
   // ending in a run of local-only rows would never advance past them and every
   // tick would re-scan-and-re-drop the same tail forever. `exportedRowCount`
   // still counts only rows actually shipped: a dropped row was never exported.
-  if (watermarkKey && lastAfter && (shippedRowCount > 0 || droppedRowCount > 0)) {
+  if (persistWatermark && watermarkKey && lastAfter && (shippedRowCount > 0 || droppedRowCount > 0)) {
     await watermarks.write(watermarkKey, {
       continuation: lastAfter,
       exportedRowCount: exportedRowCount + shippedRowCount,

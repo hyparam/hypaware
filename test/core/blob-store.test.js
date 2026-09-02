@@ -308,6 +308,30 @@ async function drain(body) {
   return Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)))
 }
 
+test('the in-memory BlobStore double lists keys in byte order, the way a bucket does', async () => {
+  // This double stands in for S3 everywhere a test needs a BlobStore without
+  // one, so its listing order is part of what it stands for: a test that
+  // passes here because the double sorted the way the host collates would be
+  // a test about the box it ran on.
+  //
+  // Four keys chosen so byte order and collation disagree twice over, on the
+  // two pairs `compare-strings.test.js` names: the characters put `B` before
+  // `a` and `-` before `_`, and every collation probed (`en-US`, `de-DE`,
+  // `lt-LT`, `az`, `tr-TR`) reverses both. So this listing tells a
+  // byte-ordered double from a collated one on any box with ICU data, which is
+  // the fidelity no assertion in the tree made when the doubles moved to
+  // `compareStrings` (#1148 item 3). A bucket really does answer in this
+  // order: for a general-purpose bucket S3 returns keys sorted by UTF-8 byte
+  // value, and for these keys that is the same as UTF-16 code unit order.
+  const store = createInMemoryBlobStore()
+  for (const key of ['ds/x_1.parquet', 'ds/a.parquet', 'ds/x-1.parquet', 'ds/B.parquet']) {
+    await store.putObject({ key, body: new Uint8Array([1]) })
+  }
+  const seen = []
+  for await (const entry of store.listObjects({ prefix: 'ds/' })) seen.push(entry.key)
+  assert.deepEqual(seen, ['ds/B.parquet', 'ds/a.parquet', 'ds/x-1.parquet', 'ds/x_1.parquet'])
+})
+
 test('in-memory BlobStore satisfies the BlobStore contract end-to-end', async () => {
   const store = createInMemoryBlobStore()
   assert.equal(store.kind, 'memory')

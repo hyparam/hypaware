@@ -10,6 +10,10 @@
  * a stale usage line, an orphaned group, an unrenderable help page, or a
  * subcommand table that disagrees with the registry.
  *
+ * The group-header sweep runs twice: once over core alone, and once over core
+ * plus every bundled plugin's contributions, because a group with no voice can
+ * arrive from either side and only the reader can tell the difference.
+ *
  * Everything runs against an isolated `HYP_HOME` and an injected kernel, so
  * no boot happens, no listener is bound, no real user state is read or
  * written, and no command body executes: `--help` is intercepted by dispatch
@@ -30,6 +34,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import url from 'node:url'
 
 import { CORE_VERBS } from '../../src/core/cli/core_verbs.js'
 import { decideBootProfile, dispatch } from '../../src/core/cli/dispatch.js'
@@ -37,8 +42,14 @@ import { listGroupChildren } from '../../src/core/cli/group_help.js'
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { dryRunActivate } from '../../src/core/plugin_doctor/dry_run.js'
+import { loadManifest } from '../../src/core/manifest.js'
 import { usageForVerb } from '../../src/core/cli/verb_codec.js'
 import { verbToCommand } from '../../src/core/cli/verb_command.js'
+
+/**
+ * @import { PluginManifest } from '../../hypaware-plugin-kernel-types.js'
+ */
 
 /** A long option (`--dry-run`) or a single-letter short option (`-y`). */
 const LONG_OPTION = /^--[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -82,6 +93,80 @@ function buffer() {
 function coreRegistry() {
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
+  return registry
+}
+
+const bundledWorkspace = path.resolve(
+  path.dirname(url.fileURLToPath(import.meta.url)),
+  '../../hypaware-core/plugins-workspace'
+)
+
+/**
+ * The core registry plus every bundled plugin's contributions, the way an
+ * install that activates the whole workspace assembles them.
+ *
+ * The plugin half comes from the doctor's own dry run, which imports each
+ * entrypoint against throwaway paths and an inert source registry, so nothing
+ * listens and no real state is touched. `test/plugins/bundled-command-manifest-agreement`
+ * already runs that same pass over this workspace and owns the finding when a
+ * plugin fails to activate; this one only needs what group help reads, so the
+ * replay carries the registration's names, aliases, and summaries and
+ * synthesizes a usage line the group sweep never looks at.
+ */
+async function bundledRegistry() {
+  const registry = coreRegistry()
+  const dirs = (await fs.readdir(bundledWorkspace, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(bundledWorkspace, entry.name))
+    .sort()
+  assert.ok(dirs.length > 0, `no plugin directories under ${bundledWorkspace}`)
+  /** @type {Map<string, string[]>} */
+  const knownCapabilities = new Map()
+  /** @type {{ dir: string, manifest: PluginManifest }[]} */
+  const plugins = []
+  for (const dir of dirs) {
+    const loaded = await loadManifest(dir)
+    assert.ok(loaded.ok, `${dir}: manifest does not load`)
+    if (!loaded.ok) continue
+    plugins.push({ dir, manifest: loaded.manifest })
+    for (const [name, version] of Object.entries(loaded.manifest.provides?.capabilities ?? {})) {
+      knownCapabilities.set(name, [...(knownCapabilities.get(name) ?? []), version])
+    }
+  }
+  for (const { dir, manifest } of plugins) {
+    const dry = await dryRunActivate(manifest, dir, { knownCapabilities })
+    assert.ok(
+      dry.ok,
+      `${manifest.name}: activate() did not complete, so it contributes no group to sweep` +
+        ` (${dry.error?.kind}: ${dry.error?.message})`
+    )
+    for (const group of dry.registered.commandGroups) registry.registerGroup(group)
+    for (const command of dry.registered.commandDetails) {
+      // Two bundled plugins register the same `session` commands and each
+      // guards with `if (ctx.commands.get(name)) return`. A per-plugin dry run
+      // cannot see the other's registry, so first-wins here is what the real
+      // loader does with them. An ALIAS collision is not that case: the real
+      // registry throws on one, the loader records `activate_failed` and drops
+      // every later registration from that plugin, so swallowing it here would
+      // leave this sweep green over a CLI half of which never registered.
+      const claimed = [command.name, ...command.aliases].filter((name) => registry.get(name))
+      if (claimed.length > 0) {
+        assert.deepEqual(
+          claimed,
+          [command.name],
+          `${manifest.name}: '${command.name}' claims a name already registered (${claimed.join(', ')}); ` +
+            'the real loader aborts the rest of this plugin\'s activate() on an alias collision'
+        )
+        continue
+      }
+      registry.register({
+        ...command,
+        plugin: manifest.name,
+        usage: `hyp ${command.name}`,
+        run: async () => 0,
+      })
+    }
+  }
   return registry
 }
 
@@ -368,15 +453,18 @@ test('every visible group renders its registry-backed subcommand table', { timeo
   }
 })
 
-// A group with a bare command speaks through that command; a group that is
-// only a shared prefix speaks through the description core registered for it.
-// Neither is optional: a group with no voice opens its help on a naked
-// 'usage:' line and never says what it is for, which is what 'hyp cache
-// --help' and 'hyp client history --help' did before core registered theirs.
-// @ref LLP 0214#d2 [tests]: a group with no bare command still renders a header and paragraph, core groups included
-test('every reachable core group renders a header line, bare command or not', { timeout: SWEEP_TIMEOUT_MS }, async () => {
-  const registry = coreRegistry()
-  const { run } = await harness(registry)
+/**
+ * A group with a bare command speaks through that command; a group that is
+ * only a shared prefix speaks through the description registered for it.
+ * Neither is optional: a group with no voice opens its help on a naked
+ * `usage:` line and never says what it is for, which is what `hyp cache
+ * --help` and `hyp client history --help` did before core registered theirs,
+ * and what `hyp client claude-desktop --help` did before its plugin did.
+ *
+ * @param {ReturnType<typeof coreRegistry>} registry
+ * @param {(argv: string[]) => Promise<{ code: number, out: string, err: string }>} run
+ */
+async function assertGroupHeaders(registry, run) {
   /** @type {Set<string>} */
   const prefixes = new Set()
   for (const command of registry.list()) {
@@ -387,8 +475,9 @@ test('every reachable core group renders a header line, bare command or not', { 
   assert.ok(prefixes.size > 0, 'expected at least one group prefix')
   for (const prefix of [...prefixes].sort()) {
     // A prefix that resolves to a command renders under that command's
-    // canonical name (`mcp` is an alias of `mcp serve`); one that resolves to
-    // nothing renders under the prefix and needs a registered description.
+    // canonical name (`mcp` is an alias of `mcp serve`, `vector` of `query
+    // vector`); one that resolves to nothing renders under the prefix and
+    // needs a registered description.
     const owner = registry.get(prefix)
     const header = owner
       ? `hyp ${owner.name} - ${owner.summary}`
@@ -403,6 +492,25 @@ test('every reachable core group renders a header line, bare command or not', { 
     assert.equal(err, '', `${prefix} --help wrote to stderr`)
     assert.ok(out.startsWith(`${header}\n`), `${prefix} --help omits its header line`)
   }
+}
+
+// @ref LLP 0214#d2 [tests]: a group with no bare command still renders a header and paragraph, core groups included
+test('every reachable core group renders a header line, bare command or not', { timeout: SWEEP_TIMEOUT_MS }, async () => {
+  const registry = coreRegistry()
+  const { run } = await harness(registry)
+  await assertGroupHeaders(registry, run)
+})
+
+// The same rule, over the groups a plugin contributes. Core registering its
+// own descriptions leaves the next plugin free to repeat the defect from the
+// other side: `client claude-desktop` and `client claude-account` are groups
+// no core registration knows about, and they opened on a naked 'usage:' line
+// while the core sweep above was green (#1005).
+// @ref LLP 0214#d2 [tests]: the rule is the group registry's, not core's, so bundled plugin groups are held to it too
+test('every reachable bundled-plugin group renders a header line too', { timeout: SWEEP_TIMEOUT_MS }, async () => {
+  const registry = await bundledRegistry()
+  const { run } = await harness(registry)
+  await assertGroupHeaders(registry, run)
 })
 
 test('every visible leaf renders its own summary, usage, and nothing on stderr', { timeout: SWEEP_TIMEOUT_MS }, async () => {

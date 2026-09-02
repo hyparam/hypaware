@@ -194,6 +194,26 @@ ctx.commands.register({
 })
 ```
 
+Register a plain object. The registry stores a shallow copy of what you pass
+and runs its shape checks on that copy, so only *own enumerable* properties
+survive: a class instance whose `run()` lives on its prototype, or a member
+defined non-enumerable, is refused with `missing run()` even though the
+registration visibly declares it. TypeScript cannot warn you here, because it
+has no notion of property ownership, so the error arrives at runtime as a
+`plugin.activate_failed` log line and the plugin does not load.
+
+Only the four required members are checked, so only they are refused. An
+optional member the copy leaves behind (`plugin`, `aliases`, `hidden`,
+`audience`, a `help` string) is dropped with no error at all: registration
+succeeds and the command runs with that member simply absent, so a
+prototype-resident `aliases` is a dead alias and a prototype-resident
+`hidden` still lists in `hyp --help`. `plugin` is worth naming separately,
+because the registry derives `category` and `audience` from it: losing it
+does not leave a field blank, it files the command under a category named
+after the first word of its own name and gives it the `everyday` audience
+instead of `operator`. Assign optional members onto the instance too, or
+register a plain object.
+
 Every declared command is public CLI surface: it appears in `hyp --help` and
 in its group's subcommand table, and a visible diagnostic should carry a
 `help` string explaining what its output means. A command whose caller is a

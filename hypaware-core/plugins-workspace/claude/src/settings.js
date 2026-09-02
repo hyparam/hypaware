@@ -12,6 +12,7 @@ import {
   redactUrlUserinfo,
 } from 'hypaware/core/util'
 import { markActionRefused } from '../../../../src/core/config/action_refusal.js'
+import { CLAUDE_SETTINGS_MARKER_SCHEMA } from '../../../../src/core/config/client_detach_disk.js'
 import {
   isOtlpHeadersOverride,
   otlpOverrideSignal,
@@ -388,8 +389,8 @@ export async function attach(opts) {
   // `Object.hasOwn`, not `in`: these keys come off disk.
   // @ref LLP 0163#prev_malformed-is-path-keyed-not-one-field-per-block [constrained-by]: the earliest backup wins, so a later displacement at the same path is discarded, not recorded
   /** @type {Record<string, unknown>} */
-  const priorMalformed = priorMarker && isPlainObject(priorMarker.prev_malformed)
-    ? priorMarker.prev_malformed
+  const priorMalformed = priorMarker
+    ? decodePrevMalformed(priorMarker.prev_malformed, priorMarker.prev_malformed_encoding)
     : {}
 
   // The backup half of back-up-then-repair. Every block attach has to rebuild
@@ -449,8 +450,8 @@ export async function attach(opts) {
   const priorManagedEnv = priorMarker && isPlainObject(priorMarker.managed) && isPlainObject(priorMarker.managed.env)
     ? /** @type {Record<string, unknown>} */ (priorMarker.managed.env)
     : undefined
-  const priorPrevEnv = priorMarker && isPlainObject(priorMarker.prev_env)
-    ? /** @type {Record<string, unknown>} */ (priorMarker.prev_env)
+  const priorPrevEnv = priorMarker
+    ? decodeBackupMap(priorMarker.prev_env, priorMarker.prev_env_encoding)
     : undefined
 
   /**
@@ -505,7 +506,7 @@ export async function attach(opts) {
   // instead of silently discarding it.
   // @ref LLP 0044#conflict-back-up--override-restore-on-leave [constrained-by]: the marker IS the backup restored on leave
   const prevBaseUrl = priorMarker && Object.hasOwn(priorMarker, 'prev_base_url')
-    ? priorMarker.prev_base_url
+    ? decodeBackupValue(priorMarker.prev_base_url, priorMarker.prev_base_url_encoding)
     : priorValueFor('ANTHROPIC_BASE_URL').value
 
   if (mode === MODE_PROXY) {
@@ -636,18 +637,25 @@ export async function attach(opts) {
   value[MARKER_KEY] = {
     attached_at: new Date().toISOString(),
     version,
+    settings_schema: CLAUDE_SETTINGS_MARKER_SCHEMA,
     port,
     state_file: stateFile,
     mode,
     managed: {
       env: managedEnv,
-      hooks: managedHookEntries(commands),
+      // Claude Code 2.1.257 reserves `hooks` throughout settings.json, not
+      // only at the root. A nested `managed.hooks` undo field makes Claude
+      // reject the whole file as a misplaced permission-hook declaration.
+      hook_entries: managedHookEntries(commands),
     },
     // `prev_base_url` stays its own field rather than folding into `prev_env`:
     // markers written by earlier versions carry it, and the core undo still
     // reads it, so moving it would strand every settings file already on disk.
     ...(mode === MODE_BASE_URL && prevBaseUrl !== undefined
-      ? { prev_base_url: prevBaseUrl }
+      ? {
+          prev_base_url: encodeBackupValue(prevBaseUrl),
+          prev_base_url_encoding: 'json',
+        }
       : {}),
     // The one thing about an `otel` attach that is not derivable from the
     // managed keys: detach and `hyp purge` have to empty a directory neither
@@ -655,8 +663,18 @@ export async function attach(opts) {
     // they run.
     // @ref LLP 0258#marker-and-spool [implements]: the marker records the spool directory
     ...(mode === MODE_OTEL ? { spool_dir: spoolDir } : {}),
-    ...(Object.keys(prevEnv).length > 0 ? { prev_env: prevEnv } : {}),
-    ...(Object.keys(prevMalformed).length > 0 ? { prev_malformed: prevMalformed } : {}),
+    ...(Object.keys(prevEnv).length > 0
+      ? {
+          prev_env: encodeBackupMap(prevEnv),
+          prev_env_encoding: 'json',
+        }
+      : {}),
+    ...(Object.keys(prevMalformed).length > 0
+      ? {
+          prev_malformed: encodePrevMalformed(prevMalformed),
+          prev_malformed_encoding: 'json',
+        }
+      : {}),
   }
 
   await writeAtomic(settingsPath, value, mtimeMs)
@@ -723,7 +741,7 @@ function releaseUnmanagedKeys({ env, priorManagedEnv, managedEnv, priorPrevEnv, 
     if (priorPrevEnv && Object.hasOwn(priorPrevEnv, key)) {
       restore = priorPrevEnv[key]
     } else if (key === 'ANTHROPIC_BASE_URL' && priorMarker && Object.hasOwn(priorMarker, 'prev_base_url')) {
-      restore = priorMarker.prev_base_url
+      restore = decodeBackupValue(priorMarker.prev_base_url, priorMarker.prev_base_url_encoding)
     }
     if (restore !== undefined) env[key] = restore
     else delete env[key]
@@ -832,6 +850,95 @@ async function writeAtomic(filePath, value, expectedMtimeMs) {
     }
     throw err
   }
+}
+
+/**
+ * Read both legacy raw-value backups and the current serialized-value form.
+ * The latter keeps a displaced object containing a `hooks` key from being
+ * interpreted by Claude Code as nested hook configuration while it sits in
+ * HypAware's undo marker.
+ *
+ * @param {unknown} recorded
+ * @param {unknown} encoding
+ * @returns {Record<string, unknown>}
+ */
+function decodePrevMalformed(recorded, encoding) {
+  return decodeBackupMap(recorded, encoding) ?? {}
+}
+
+/**
+ * Decode one marker backup value, accepting legacy raw values.
+ *
+ * @param {unknown} recorded
+ * @param {unknown} encoding
+ * @returns {unknown}
+ */
+function decodeBackupValue(recorded, encoding) {
+  if (encoding !== 'json' || typeof recorded !== 'string') return recorded
+  try {
+    return JSON.parse(recorded)
+  } catch {
+    return recorded
+  }
+}
+
+/**
+ * Decode a marker backup map serialized as one scalar JSON value.
+ *
+ * @param {unknown} recorded
+ * @param {unknown} encoding
+ * @returns {Record<string, unknown> | undefined}
+ */
+function decodeBackupMap(recorded, encoding) {
+  if (encoding !== 'json') {
+    return isPlainObject(recorded) ? recorded : undefined
+  }
+
+  // Current markers serialize the whole map, hiding both a `hooks` value and
+  // a path/key literally named `hooks` from Claude Code's settings walker.
+  if (typeof recorded === 'string') {
+    try {
+      const decoded = JSON.parse(recorded)
+      return isPlainObject(decoded) ? decoded : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  // Compatibility with the short-lived per-value format written by earlier
+  // builds carrying the same schema token.
+  if (!isPlainObject(recorded)) return undefined
+
+  /** @type {Record<string, unknown>} */
+  const decoded = {}
+  for (const [dotted, serialized] of Object.entries(recorded)) {
+    decoded[dotted] = decodeBackupValue(serialized, encoding)
+  }
+  return decoded
+}
+
+/**
+ * @param {Record<string, unknown>} values
+ * @returns {string}
+ */
+function encodePrevMalformed(values) {
+  return encodeBackupMap(values)
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function encodeBackupValue(value) {
+  return JSON.stringify(value)
+}
+
+/**
+ * @param {Record<string, unknown>} values
+ * @returns {string}
+ */
+function encodeBackupMap(values) {
+  return JSON.stringify(values)
 }
 
 /**

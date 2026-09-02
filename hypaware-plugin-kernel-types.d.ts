@@ -14,6 +14,7 @@
 import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'
 import type { CachePartitioningDeclaration } from './src/core/iceberg/types.d.ts'
 import type { UsagePolicyDrop } from './src/core/usage-policy/types.d.ts'
+import type { GrepSearchBackend } from './src/core/search/types.d.ts'
 
 export type { AsyncDataSource, ScanOptions, ScanResults }
 
@@ -948,6 +949,12 @@ export interface CommandRegistry {
    * The copy is own enumerable properties only, and the shape checks run
    * on it, so a registration whose members live on a prototype (a class
    * instance) is rejected here rather than stored half-formed.
+   *
+   * This declaration cannot express that rule: TypeScript has no notion of
+   * property ownership or enumerability, so a class whose `run()` sits on
+   * its prototype satisfies `CommandRegistration` under `--strict` and then
+   * throws at this call. Register a plain object, or assign the members onto
+   * the instance itself.
    */
   register(command: CommandRegistration): void
   /**
@@ -1422,6 +1429,25 @@ export interface SinkHandle {
  */
 export type DatasetDisposition = 'forwards' | 'skips' | 'starts-from-now'
 
+/** One client's locally retained history, requested for an explicit replay. */
+export interface SourceHistoryReplayRequest {
+  source: string
+}
+
+/** Read-only disclosure produced before a historical replay is confirmed. */
+export interface SourceHistoryReplayPreview {
+  rows: number
+  withheldRows: number
+}
+
+/** Result of one destination's historical replay. */
+export interface SourceHistoryReplayResult {
+  status: 'exported' | 'failed'
+  rowsReplayed: number
+  bytesWritten: number
+  error?: string
+}
+
 export interface Sink {
   /**
    * Called by the sink driver on the configured schedule. The driver
@@ -1451,6 +1477,16 @@ export interface Sink {
    * anyway makes the prompt promise less egress than occurs.
    */
   datasetDisposition?(dataset: DatasetRegistration): DatasetDisposition
+  /**
+   * Optional attended replay capability. Both methods must be implemented as a
+   * pair: the first is read-only disclosure for the consent prompt; the second
+   * sends exactly that class of history after confirmation. A sink without
+   * both is not a historical-replay destination.
+   *
+   * @ref LLP 0345#sink-capability [implements]: preview and execution are separate sink operations
+   */
+  previewSourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayPreview>
+  replaySourceHistory?(request: SourceHistoryReplayRequest): Promise<SourceHistoryReplayResult>
 }
 
 export interface ExportBatch {
@@ -1794,6 +1830,18 @@ export interface VerbOperationContext {
    * to `executeQuerySql` as `callerCwd`.
    */
   callerCwd: string | null
+  /**
+   * Host-supplied grep-search data plane (LLP 0314). When present,
+   * queryGrepVerb calls it instead of the local cache service, so a host
+   * owning a different data plane answers grep_search without registering
+   * a second verb. Absent on every in-tree host: buildOperationContext
+   * never sets it, and the verb then runs executeGrepSearch over
+   * ctx.storage as before.
+   *
+   * @ref LLP 0353#seam [implements]: host-supplied grep-search data plane,
+   * absent on every in-tree host
+   */
+  search?: GrepSearchBackend
 }
 
 /** CLI render controls parsed by the kernel and passed to `render`. */

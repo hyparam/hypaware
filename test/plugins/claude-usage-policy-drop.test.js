@@ -36,7 +36,7 @@ const CLEAN_ROOT = '/work/clean-repo'
 // Live projector
 // ---------------------------------------------------------------------------
 
-test('live projector returns no rows when the exchange cwd is governed by .hypignore', async () => {
+test('live projector emits no GitHub repo evidence when the exchange cwd is governed by .hypignore', async () => {
   const env = await stageEnv()
   try {
     await writeTranscript(env, 'sess-ign', transcriptPair('sess-ign'))
@@ -45,6 +45,7 @@ test('live projector returns no rows when the exchange cwd is governed by .hypig
       session_id: 'sess-ign',
       transcript_path: undefined,
       git_branch: undefined,
+      git_remote: 'https://github.com/acme/ignored.git',
       cwd: path.join(IGNORED_ROOT, 'src'),
       ts: '2026-05-22T09:59:00.000Z',
     })
@@ -54,7 +55,7 @@ test('live projector returns no rows when the exchange cwd is governed by .hypig
       resolver: resolverIgnoring(IGNORED_ROOT),
     })
 
-    assert.equal(rows.length, 0, 'an ignored cwd must drop every row at the capture seam')
+    assert.equal(rows.length, 0, 'an ignored cwd must drop every row and its GitHub repo evidence at the capture seam')
   } finally {
     await env.cleanup()
   }
@@ -68,6 +69,7 @@ test('live projector records normally when the exchange cwd is not ignored', asy
       session_id: 'sess-clean',
       transcript_path: undefined,
       git_branch: undefined,
+      git_remote: 'https://github.com/acme/clean.git',
       cwd: path.join(CLEAN_ROOT, 'src'),
       ts: '2026-05-22T09:59:00.000Z',
     })
@@ -81,6 +83,14 @@ test('live projector records normally when the exchange cwd is not ignored', asy
 
     assert.equal(rows.length, 2, 'a clean cwd must be unaffected: user + assistant rows land')
     assert.deepEqual(rows.map((r) => r.role).sort(), ['assistant', 'user'])
+    // Positive control for the drop test above: the same evidence field the
+    // ignored session carries does reach the row when the session is admitted,
+    // so that test's empty result is a real suppression and not an inert fixture.
+    assert.deepEqual(
+      rows.map((r) => r.git_remote),
+      ['https://github.com/acme/clean.git', 'https://github.com/acme/clean.git'],
+      'an admitted session must carry its GitHub repo evidence onto every row',
+    )
   } finally {
     await env.cleanup()
   }

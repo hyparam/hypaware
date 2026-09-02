@@ -67,23 +67,27 @@ test('attach records the managed env + hook entries into the marker undo record'
     // what was installed. session-context rides all four events; the
     // classify-cwd hook (LLP 0106) rides the two session-start events
     // (SessionStart, CwdChanged), so those events carry two entries each.
-    const events = marker.managed.hooks.map((/** @type {any} */ h) => h.event).sort()
+    // Claude Code 2.1.257 rejects any `hooks` key outside the root hooks block,
+    // including undo metadata under `_hypaware.managed`. Keep the recorded
+    // entries under a non-reserved name so the whole settings file still loads.
+    assert.equal(Object.hasOwn(marker.managed, 'hooks'), false)
+    const events = marker.managed.hook_entries.map((/** @type {any} */ h) => h.event).sort()
     assert.deepEqual(events, [
       'CwdChanged', 'CwdChanged', 'PostToolUse', 'SessionStart', 'SessionStart', 'UserPromptSubmit',
     ])
-    for (const hook of marker.managed.hooks) {
+    for (const hook of marker.managed.hook_entries) {
       assert.match(hook.command, /claude-hook (session-context --state-file |classify-cwd)/)
     }
     // classify-cwd is installed exactly on SessionStart and CwdChanged.
-    const classifyEvents = marker.managed.hooks
+    const classifyEvents = marker.managed.hook_entries
       .filter((/** @type {any} */ h) => /claude-hook classify-cwd\b/.test(h.command))
       .map((/** @type {any} */ h) => h.event)
       .sort()
     assert.deepEqual(classifyEvents, ['CwdChanged', 'SessionStart'])
-    const postToolUse = marker.managed.hooks.find((/** @type {any} */ h) => h.event === 'PostToolUse')
+    const postToolUse = marker.managed.hook_entries.find((/** @type {any} */ h) => h.event === 'PostToolUse')
     assert.equal(postToolUse.matcher, 'Bash')
     assert.match(postToolUse.command, /claude-hook session-context --state-file /)
-    const sessionStartHooks = marker.managed.hooks.filter((/** @type {any} */ h) => h.event === 'SessionStart')
+    const sessionStartHooks = marker.managed.hook_entries.filter((/** @type {any} */ h) => h.event === 'SessionStart')
     for (const hook of sessionStartHooks) assert.equal(hook.matcher, undefined)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
@@ -102,7 +106,8 @@ test('attach backs up a pre-existing foreign ANTHROPIC_BASE_URL as prev_base_url
     assert.equal(result.changed && result.prevValue, 'https://foreign.example/api')
 
     const marker = await readMarker(settingsPath)
-    assert.equal(marker.prev_base_url, 'https://foreign.example/api')
+    assert.equal(marker.prev_base_url_encoding, 'json')
+    assert.equal(JSON.parse(marker.prev_base_url), 'https://foreign.example/api')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -285,7 +290,7 @@ test('idempotent re-attach keeps the original prev_base_url, not the gateway URL
     // and record the *original* foreign URL, not the gateway URL.
     assert.equal(second.changed && second.prevValue, 'https://foreign.example/api')
     const marker = await readMarker(settingsPath)
-    assert.equal(marker.prev_base_url, 'https://foreign.example/api')
+    assert.equal(JSON.parse(marker.prev_base_url), 'https://foreign.example/api')
     assert.equal(marker.managed.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:4123')
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
@@ -322,6 +327,48 @@ test('the marker undo record is stable across re-attach (modulo attached_at)', a
   }
 })
 
+test('re-attach migrates the pre-2.1.257 nested hooks marker field', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    await attach({ ...ATTACH, settingsPath })
+    const value = JSON.parse(await fs.readFile(settingsPath, 'utf8'))
+    const managed = value._hypaware.managed
+    managed.hooks = managed.hook_entries ?? managed.hooks
+    delete managed.hook_entries
+    await fs.writeFile(settingsPath, JSON.stringify(value, null, 2) + '\n')
+
+    await attach({ ...ATTACH, settingsPath })
+
+    const marker = await readMarker(settingsPath)
+    assert.equal(Object.hasOwn(marker.managed, 'hooks'), false)
+    assert.ok(Array.isArray(marker.managed.hook_entries))
+    assert.ok(marker.managed.hook_entries.length > 0)
+    assert.equal(marker.settings_schema, 3)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('attach serializes malformed-hook backups so reserved hooks keys do not remain nested in settings', async () => {
+  const { dir, settingsPath } = await stage()
+  try {
+    const prior = { hooks: [{ type: 'command', command: 'echo old' }] }
+    await fs.writeFile(
+      settingsPath,
+      JSON.stringify({ hooks: { SessionStart: prior } }, null, 2) + '\n'
+    )
+
+    await attach({ ...ATTACH, settingsPath })
+
+    const marker = await readMarker(settingsPath)
+    assert.equal(marker.prev_malformed_encoding, 'json')
+    assert.equal(typeof marker.prev_malformed, 'string')
+    assert.deepEqual(JSON.parse(marker.prev_malformed), { 'hooks.SessionStart': prior })
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
 // Round 2, issue #448's bug class on the key it never swept: the base URL. The
 // managed additions have an ownership guard to fall through, so a type test
 // there cost a value that was still on disk. Attach *always* repoints
@@ -330,7 +377,7 @@ test('the marker undo record is stable across re-attach (modulo attached_at)', a
 // values a user writes on purpose - `null`/`false` to switch an override back
 // off. Attach then recorded the key as managed with no prior, and the undo
 // deleted it. Assert the backup is taken whatever the JSON type.
-for (const prior of [8080, false, null, { url: 'x' }]) {
+for (const prior of [8080, false, null, { url: 'x', hooks: [] }]) {
   test(`attach backs up a ${JSON.stringify(prior)} base URL into prev_base_url`, async () => {
     const { dir, settingsPath } = await stage()
     try {
@@ -341,7 +388,8 @@ for (const prior of [8080, false, null, { url: 'x' }]) {
 
       const marker = await readMarker(settingsPath)
       assert.equal('prev_base_url' in marker, true)
-      assert.deepEqual(marker.prev_base_url, prior)
+      assert.equal(marker.prev_base_url_encoding, 'json')
+      assert.deepEqual(JSON.parse(marker.prev_base_url), prior)
       // The display field stays a string; the marker keeps the real value.
       assert.equal(typeof (/** @type {any} */ (result).prevValue), 'string')
     } finally {

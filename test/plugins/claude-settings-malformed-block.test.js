@@ -62,6 +62,26 @@ async function readSettings(settingsPath) {
   return JSON.parse(await fs.readFile(settingsPath, 'utf8'))
 }
 
+/**
+ * Read the semantic backup values while keeping the on-disk serialization an
+ * explicit part of the marker contract.
+ *
+ * @param {Record<string, any>} marker
+ * @returns {Record<string, unknown>}
+ */
+function readPrevMalformed(marker) {
+  const recorded = marker.prev_malformed ?? {}
+  if (marker.prev_malformed_encoding !== 'json') return recorded
+  if (typeof recorded === 'string') return JSON.parse(recorded)
+  // Compatibility assertion helper for the short-lived per-value format.
+  return Object.fromEntries(
+    Object.entries(recorded).map(([dotted, serialized]) => [
+      dotted,
+      typeof serialized === 'string' ? JSON.parse(serialized) : serialized,
+    ])
+  )
+}
+
 /* -------------------- malformed: back up, repair, report ------------------- */
 
 test('attach backs a non-object env up into the marker instead of discarding it', async () => {
@@ -77,7 +97,8 @@ test('attach backs a non-object env up into the marker instead of discarding it'
     assert.equal(attached.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:4123')
 
     // The user's content survives, verbatim, on the marker.
-    assert.deepEqual(attached._hypaware.prev_malformed, { env: 'ANTHROPIC_API_KEY=sk-x' })
+    assert.deepEqual(readPrevMalformed(attached._hypaware), { env: 'ANTHROPIC_API_KEY=sk-x' })
+    assert.equal(attached._hypaware.prev_malformed_encoding, 'json')
 
     // ...and the user is told, naming the path.
     const warnings = result.changed ? result.warnings ?? [] : []
@@ -97,7 +118,7 @@ test('attach backs a non-array hooks.<event> up into the marker instead of disca
     const result = await attach({ ...ATTACH, settingsPath })
 
     const attached = await readSettings(settingsPath)
-    assert.deepEqual(attached._hypaware.prev_malformed, { 'hooks.SessionStart': 'echo mine' })
+    assert.deepEqual(readPrevMalformed(attached._hypaware), { 'hooks.SessionStart': 'echo mine' })
     // The managed hooks were still installed on the rebuilt event.
     assert.ok(Array.isArray(attached.hooks.SessionStart))
     assert.ok(attached.hooks.SessionStart.length > 0)
@@ -122,7 +143,8 @@ test('attach backs up a non-object hooks root, and a null block counts as presen
     const result = await attach({ ...ATTACH, settingsPath })
 
     const attached = await readSettings(settingsPath)
-    assert.deepEqual(attached._hypaware.prev_malformed, { env: null, hooks: 7 })
+    assert.equal(typeof attached._hypaware.prev_malformed, 'string')
+    assert.deepEqual(readPrevMalformed(attached._hypaware), { env: null, hooks: 7 })
     // The rebuilt hooks root still received the managed events, so attach is
     // functional and not merely non-destructive.
     assert.ok(Array.isArray(attached.hooks.SessionStart))
@@ -144,7 +166,7 @@ test('a re-attach keeps the first attach backup and stops warning about it', asy
     const second = await attach({ ...ATTACH, settingsPath })
 
     const attached = await readSettings(settingsPath)
-    assert.deepEqual(attached._hypaware.prev_malformed, { env: 'ANTHROPIC_API_KEY=sk-x' })
+    assert.deepEqual(readPrevMalformed(attached._hypaware), { env: 'ANTHROPIC_API_KEY=sk-x' })
     assert.equal('warnings' in second, false)
   } finally {
     await fs.rm(home, { recursive: true, force: true })
@@ -167,7 +189,7 @@ test('a second displacement at an already-backed-up path is reported as discarde
 
     const second = await attach({ ...ATTACH, settingsPath })
     const attached = await readSettings(settingsPath)
-    assert.deepEqual(attached._hypaware.prev_malformed, { env: 'FIRST-ORIGINAL' })
+    assert.deepEqual(readPrevMalformed(attached._hypaware), { env: 'FIRST-ORIGINAL' })
 
     const warnings = second.changed ? second.warnings ?? [] : []
     assert.equal(warnings.length, 1)
@@ -205,7 +227,7 @@ test('a backed-up null still outranks a later displacement: the collision test i
     const warnings = second.changed ? second.warnings ?? [] : []
     assert.equal(warnings.length, 1)
     assert.match(warnings[0], /already holds an earlier backup/)
-    assert.deepEqual((await readSettings(settingsPath))._hypaware.prev_malformed, { env: null })
+    assert.deepEqual(readPrevMalformed((await readSettings(settingsPath))._hypaware), { env: null })
 
     await detachClientFromDisk({ descriptor: CLAUDE_DESCRIPTOR, homeDir: home })
     assert.deepEqual(await readSettings(settingsPath), { env: null })
@@ -235,7 +257,7 @@ test('a hooks root and a hooks.<event> backup cannot both go back; the shallower
     await attach({ ...ATTACH, settingsPath })
 
     const attached = await readSettings(settingsPath)
-    assert.deepEqual(attached._hypaware.prev_malformed, {
+    assert.deepEqual(readPrevMalformed(attached._hypaware), {
       hooks: 'broken-by-hand',
       'hooks.SessionStart': 'echo mine',
     })
@@ -272,7 +294,7 @@ test('the same shallowest-first order keeps the older value when the older break
     await fs.writeFile(settingsPath, JSON.stringify(between, null, 2) + '\n')
     await attach({ ...ATTACH, settingsPath })
 
-    assert.deepEqual((await readSettings(settingsPath))._hypaware.prev_malformed, {
+    assert.deepEqual(readPrevMalformed((await readSettings(settingsPath))._hypaware), {
       'hooks.SessionStart': 'later-hand-edit',
       hooks: 'broken-before-hypaware',
     })

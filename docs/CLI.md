@@ -45,6 +45,10 @@ hyp setup --yes \
     --retention-days 90
 ```
 
+OpenCode is available in both guided and unattended setup. To configure its
+CLI and Desktop capture without the gateway, use `--source opencode` (or the
+equivalent `--client opencode`).
+
 Use `--dry-run` first if you want to inspect the configuration and planned
 actions. If a configuration already exists, add `--force` to replace it.
 HypAware backs up the existing configuration before replacement.

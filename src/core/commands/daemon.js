@@ -128,7 +128,7 @@ export async function runDaemonStatus(argv, ctx) {
   const parsed = parseCoreCommandArgv('daemon status', argv, ctx)
   if (!parsed.ok) return parsed.code
   const json = parsed.params.json === true
-  const { readStatusFile } = await import('../daemon/status.js')
+  const { readStatusFile, daemonHeartbeatAgeMs, DAEMON_HEARTBEAT_STALE_MS, formatGapDuration } = await import('../daemon/status.js')
   const { readPidFile, processIsAlive } = await import('../daemon/pid.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   /** @type {ReturnType<typeof readStatusFile>} */
@@ -157,21 +157,61 @@ export async function runDaemonStatus(argv, ctx) {
     ctx.stdout.write('daemon: not started (no status file)\n')
     return 0
   }
-  const liveUptimeMs = running && status.healthyAt
-    ? Math.max(0, Date.now() - Date.parse(status.healthyAt))
-    : status.uptimeMs
+  // The heartbeat `hyp status` reads, read here too. `healthyAt + uptimeMs`
+  // is the moment of the daemon's last status write, so a live process whose
+  // last write is older than the window is not running its loop whatever the
+  // file's `state` says. This surface transcribed that claim, so during the
+  // #1003 wedge `hyp status` said `degraded` while `hyp daemon status` said
+  // `healthy` with a climbing uptime: one operator, two answers.
+  //
+  // Same pid guard as the collector: `processIsAlive` proves a pid is taken,
+  // not that the daemon took it, so a leftover snapshot whose pid the OS has
+  // since reissued is nobody's frozen heartbeat.
+  // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: the state printed for a live pid is this command's verdict, not a transcription of the file
+  const snapshotIsThisProcess =
+    typeof status.pid !== 'number' || status.pid === pidEntry?.pid
+  const heartbeatAgeMs = running && snapshotIsThisProcess
+    ? daemonHeartbeatAgeMs(status, Date.now())
+    : null
+  const staleNote = heartbeatAgeMs !== null && heartbeatAgeMs > DAEMON_HEARTBEAT_STALE_MS
+    ? ` (no status write for ${formatGapDuration(heartbeatAgeMs)})`
+    : ''
   if (json) {
-    const payload = { running, ...status, uptimeMs: liveUptimeMs }
+    // `uptimeMs` goes out exactly as the daemon wrote it, not as the live
+    // `liveUptimeMs` the text line below prints. LLP 0348 reads
+    // `healthyAt + uptimeMs` as the moment of the daemon's last status
+    // write, and recomputing `uptimeMs` against `Date.now()` here made that
+    // sum equal "now" for any live pid: a wedged daemon whose file stopped
+    // advancing minutes ago published a permanently fresh heartbeat, and a
+    // reader applying the documented derivation could never see staleness.
+    // The cost is that a JSON reader's uptime lags by up to one tick.
+    // @ref LLP 0348#heartbeat-is-derived [constrained-by]: the pair this payload carries is read as a heartbeat, so it must be the daemon's own
+    const payload = { running, ...status }
     ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
     return 0
   }
   // Everything below this line came out of the file and is going to a
   // terminal, so everything below this line is cleaned on the way.
-  ctx.stdout.write(`daemon: ${printable(status.state)}${running ? '' : ' (no live process)'}\n`)
+  const stateText = staleNote ? 'degraded' : printable(status.state)
+  ctx.stdout.write(`daemon: ${stateText}${running ? '' : ' (no live process)'}${staleNote}\n`)
   ctx.stdout.write(`  pid:        ${printableNumber(status.pid)}\n`)
   ctx.stdout.write(`  startedAt:  ${printable(status.startedAt)}\n`)
   if (status.healthyAt) ctx.stdout.write(`  healthyAt:  ${printable(status.healthyAt)}\n`)
   if (status.stoppedAt) ctx.stdout.write(`  stoppedAt:  ${printable(status.stoppedAt)}\n`)
+  // A frozen loop's uptime stops at its last write. `now - healthyAt` is the
+  // right reading only while the ticks that fill the gap are still landing,
+  // and only while the pair being read is this process's own: a leftover
+  // snapshot whose pid the OS has since reissued ages forever and is a record
+  // of what happened, not a claim about now, so its recorded `uptimeMs` is
+  // what goes out rather than a number climbing against a stranger's clock.
+  //
+  // Derived below the `--json` return because it is this text line's number
+  // alone: the payload above carries the daemon's own recorded `uptimeMs`, so
+  // computing it before that return spent a clock read the machine surface
+  // never spends, and read as though the payload might use it.
+  const liveUptimeMs = running && snapshotIsThisProcess && !staleNote && status.healthyAt
+    ? Math.max(0, Date.now() - Date.parse(status.healthyAt))
+    : status.uptimeMs
   ctx.stdout.write(`  uptime_ms:  ${printableNumber(liveUptimeMs)}\n`)
   const sources = entryList(status.sources)
   const sinks = entryList(status.sinks)
@@ -202,7 +242,7 @@ export async function runDaemonStatus(argv, ctx) {
 export async function runDaemonStop(argv, ctx) {
   const parsed = parseCoreCommandArgv('daemon stop', argv, ctx)
   if (!parsed.ok) return parsed.code
-  const { requestDaemonStop } = await import('../daemon/runtime.js')
+  const { requestDaemonStop, DAEMON_STOP_TIMEOUT_MS } = await import('../daemon/runtime.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   // The requester-side control-dir warnings (a chmod it could not apply)
   // land on stderr; they do not change the exit code.
@@ -226,9 +266,15 @@ export async function runDaemonStop(argv, ctx) {
     // The transport differs per platform (win32 writes a stop.request file
     // and deliberately leaves it for the daemon to consume), so the message
     // names the one actually used.
+    //
+    // The wait is rendered from `DAEMON_STOP_TIMEOUT_MS` rather than spelled
+    // out again: that number stopped being an inline literal precisely so
+    // tuning it cannot leave a user-facing message quoting the old one
+    // (LLP 0343#stop-window).
+    const waited = `${DAEMON_STOP_TIMEOUT_MS / 1_000}s`
     const detail = process.platform === 'win32'
-      ? 'stop request written but the daemon did not exit within 5s; the request file is left for it to consume'
-      : 'stop signal sent but the daemon did not exit within 5s'
+      ? `stop request written but the daemon did not exit within ${waited}; the request file is left for it to consume`
+      : `stop signal sent but the daemon did not exit within ${waited}`
     ctx.stderr.write(`hyp daemon stop: ${detail}\n`)
     return 1
   }

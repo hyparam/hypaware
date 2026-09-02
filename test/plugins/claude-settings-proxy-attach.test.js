@@ -153,7 +153,8 @@ test('an existing HTTPS_PROXY is backed up, reported, and restored on detach', a
 
   const attached = await r.read()
   assert.equal(attached.env.HTTPS_PROXY, `http://127.0.0.1:${PORT}`)
-  assert.equal(attached._hypaware.prev_env.HTTPS_PROXY, 'http://proxy.corp:8080')
+  assert.equal(attached._hypaware.prev_env_encoding, 'json')
+  assert.equal(JSON.parse(attached._hypaware.prev_env).HTTPS_PROXY, 'http://proxy.corp:8080')
 
   await detachClientFromDisk({
     descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
@@ -164,6 +165,24 @@ test('an existing HTTPS_PROXY is backed up, reported, and restored on detach', a
   assert.equal(detached.env.HTTPS_PROXY, 'http://proxy.corp:8080')
   assert.equal(Object.hasOwn(detached.env, 'NODE_EXTRA_CA_CERTS'), false)
   assert.equal(Object.hasOwn(detached, '_hypaware'), false)
+})
+
+test('a structural env backup containing hooks stays scalar in the marker and round-trips', async (t) => {
+  const prior = { hooks: [{ command: 'not Claude hook config' }], url: 'http://proxy.corp:8080' }
+  const r = await rig({ env: { HTTPS_PROXY: prior } })
+  t.after(() => r.cleanup())
+
+  await proxyAttach(r)
+  const attached = await r.read()
+  assert.equal(typeof attached._hypaware.prev_env, 'string')
+  assert.deepEqual(JSON.parse(attached._hypaware.prev_env), { HTTPS_PROXY: prior })
+
+  await detachClientFromDisk({
+    descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
+    homeDir: r.root,
+    env: r.env,
+  })
+  assert.deepEqual((await r.read()).env.HTTPS_PROXY, prior)
 })
 
 test('detach removes both managed keys when there was nothing to restore', async (t) => {
@@ -318,7 +337,7 @@ test('a re-attach keeps the original backup rather than backing up our own value
   const second = await proxyAttach(r)
 
   const value = await r.read()
-  assert.equal(value._hypaware.prev_env.HTTPS_PROXY, 'http://proxy.corp:8080')
+  assert.equal(JSON.parse(value._hypaware.prev_env).HTTPS_PROXY, 'http://proxy.corp:8080')
   // Nothing new was displaced this run, so nothing new is warned about.
   assert.equal(second.changed && second.warnings, undefined)
 })
@@ -364,7 +383,7 @@ test('base-URL attach over a proxy marker still backs up the user base URL', asy
   })
   const attached = await r.read()
   assert.equal(attached.env.ANTHROPIC_BASE_URL, `http://127.0.0.1:${PORT}`)
-  assert.equal(attached._hypaware.prev_base_url, 'https://corp.example')
+  assert.equal(JSON.parse(attached._hypaware.prev_base_url), 'https://corp.example')
 
   await detachClientFromDisk({
     descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
@@ -414,7 +433,7 @@ test('a hand-edited HTTPS_PROXY between attaches is backed up, not swallowed', a
   assert.equal(second.changed && second.prevValue, 'http://corp.proxy:8080')
 
   const value = await r.read()
-  assert.equal(value._hypaware.prev_env.HTTPS_PROXY, 'http://corp.proxy:8080')
+  assert.equal(JSON.parse(value._hypaware.prev_env).HTTPS_PROXY, 'http://corp.proxy:8080')
 
   await detachClientFromDisk({
     descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),
@@ -583,7 +602,7 @@ test('a credential-bearing HTTPS_PROXY is redacted in every report but restored 
 
   // The backup is the restore's only copy, so it stays exactly as it was.
   const attached = await r.read()
-  assert.equal(attached._hypaware.prev_env.HTTPS_PROXY, secret)
+  assert.equal(JSON.parse(attached._hypaware.prev_env).HTTPS_PROXY, secret)
 
   const detached = await detachClientFromDisk({
     descriptor: /** @type {never} */ (CLAUDE_DESCRIPTOR),

@@ -622,6 +622,59 @@ function listFlushFiles(tablePath, saidRefusal) {
 /**
  * @param {string} tablePath
  */
+/**
+ * Newest mtime, in ms, among the files in a table's spool that hold captured
+ * rows: `active.jsonl` and any rotated `flush-*.jsonl`. Zero when there are
+ * none.
+ *
+ * For callers deciding whether a partition is old enough to remove. The
+ * committed Iceberg data files are only half of what a partition directory
+ * holds; the other half is rows this process captured and has not committed
+ * yet, and they are the half no snapshot, no manifest and no cursor count
+ * knows about. A pass that weighs `<generation>/data` alone reads a partition
+ * whose source went quiet in March and came back this morning as untouched
+ * since March.
+ *
+ * The stamps are deliberately not weighed. `last-flush.json` is rewritten by
+ * a flush that committed nothing, so a partition that merely gets
+ * flush-ATTEMPTED would look perpetually fresh and never reclaim - the
+ * silent-non-reclamation failure, arrived at from the other side.
+ *
+ * A spool directory that is absent answers 0: there are no captured rows to
+ * weigh, which is the ordinary case. One that exists and cannot be read
+ * answers `Date.now()`, because the caller is about to do something
+ * irreversible and "I could not look" is not evidence that there is nothing
+ * there (LLP 0326#positive-evidence, in the direction that protects data).
+ *
+ * @param {string} tablePath
+ * @returns {number}
+ */
+export function pendingSpoolMtimeSync(tablePath) {
+  const dir = spoolDir(tablePath)
+  /** @type {import('node:fs').Dirent[]} */
+  let entries
+  try {
+    entries = fsSync.readdirSync(dir, { withFileTypes: true })
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code
+    return code === 'ENOENT' || code === 'ENOTDIR' ? 0 : Date.now()
+  }
+  let newest = 0
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    if (entry.name !== ACTIVE_FILE && !(entry.name.startsWith(FLUSH_PREFIX) && entry.name.endsWith(FLUSH_SUFFIX))) continue
+    try {
+      const mtime = fsSync.statSync(path.join(dir, entry.name)).mtimeMs
+      if (mtime > newest) newest = mtime
+    } catch {
+      // The file was rotated or drained under the read. Something is writing
+      // here right now, which is the answer this function was asked for.
+      return Date.now()
+    }
+  }
+  return newest
+}
+
 function hasPendingSync(tablePath) {
   return pendingBytesSync(tablePath) > 0
 }

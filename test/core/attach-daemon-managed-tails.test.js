@@ -131,7 +131,7 @@ function seedDaemonManagedAttach(home, port, mode = 'otel') {
   mkdirSync(path.join(home, '.claude'), { recursive: true })
   writeFileSync(
     path.join(home, '.claude', 'settings.json'),
-    JSON.stringify({ _hypaware: { version: '2.0.0', port, mode } })
+    JSON.stringify({ _hypaware: { version: '2.0.0', port, mode, settings_schema: 3 } })
   )
 }
 

@@ -1,5 +1,7 @@
 // @ts-check
 
+import { compareStrings } from 'hypaware/core/util'
+
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 
 import { columnsFor, enrichTablePath, PROSPECTS_DATASET, prospectId } from './datasets.js'
@@ -174,7 +176,7 @@ export async function selectSessions(runtime, { regime, nowMs, marks }) {
   }
   // Oldest-settled first, so the longest-waiting sessions are enriched soonest;
   // a stable tiebreak on the id keeps selection deterministic.
-  eligible.sort((a, b) => a.lastTs - b.lastTs || (a.sid < b.sid ? -1 : a.sid > b.sid ? 1 : 0))
+  eligible.sort((a, b) => a.lastTs - b.lastTs || compareStrings(a.sid, b.sid))
   const ids = eligible.map((e) => e.sid)
   return regime === 'ongoing' ? ids.slice(0, p.max_sessions_per_tick) : ids
 }
@@ -249,7 +251,7 @@ export function orderSessionParts(rows, cfg) {
     if (ta !== tb) return ta - tb
     const ia = strField(a[cfg.tiebreak_column])
     const ib = strField(b[cfg.tiebreak_column])
-    return ia < ib ? -1 : ia > ib ? 1 : 0
+    return compareStrings(ia, ib)
   })
 }
 

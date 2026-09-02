@@ -440,9 +440,9 @@ async function resolveClientPolicyContext(ctx) {
  * token it writes (`local-only` opts out, `sync` removes the opt-out,
  * idempotent both ways). A source the central config carries always syncs
  * and cannot be opted out (LLP 0188 #locked). Flipping back to `sync`
- * ships only future rows: withholding is drop-but-advance, so rows dropped
- * while opted out are never retroactively uploaded
- * (LLP 0188 #no-retroactive-ship) - the confirmation says so.
+ * ships only future rows by itself: withholding is drop-but-advance, so the
+ * standing-policy mutation does not retroactively upload anything. The
+ * confirmation points at the separate, consent-gated history replay.
  *
  * @ref LLP 0188#opt-out [implements]: the post-onboarding CLI surface over the client-sync store
  * @ref LLP 0188#locked [implements]: a central-classified source is refused with the managed-by-your-fleet wording
@@ -542,8 +542,10 @@ export async function runPolicyClient(argv, ctx) {
     return reportUnreadableClientStore(ctx, err)
   }
   ctx.stdout.write(`${name}: sync\n`)
-  // @ref LLP 0188#no-retroactive-ship [implements]: the flip-back confirmation states the no-history-upload property so it reads as designed, not as a bug
-  ctx.stdout.write(`  future ${name} rows sync to your server; rows withheld while local-only are not uploaded\n`)
+  // @ref LLP 0188#no-retroactive-ship [implements]: changing standing policy remains future-only
+  // @ref LLP 0345#command [implements]: the policy transition points at the separate attended history replay
+  ctx.stdout.write(`  future ${name} rows sync to your server\n`)
+  ctx.stdout.write(`  to upload retained history too: hyp sync --history ${name}\n`)
   return 0
 }
 

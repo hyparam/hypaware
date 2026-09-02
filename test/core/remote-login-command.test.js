@@ -893,8 +893,8 @@ test('a callback error maps to a clear org-selection message', async () => {
 test('a browser login timeout points at the headless escape hatches', async () => {
   const hypHome = await tmpHome()
   const { ctx, err } = await makeCtx({ hypHome })
-  // A local failure with no server callbackError (e.g. the loopback timeout a
-  // headless box hits when the opener silently fails).
+  // A local failure with no server callbackError (e.g. the poll timeout an
+  // abandoned browser flow hits).
   const login = /** @type {any} */ (async () => {
     throw new Error('timed out waiting for the browser login to complete')
   })

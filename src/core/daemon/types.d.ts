@@ -139,7 +139,14 @@ export interface DaemonStatus {
   healthyAt?: string
   /** ISO timestamp the daemon transitioned to `stopped`. */
   stoppedAt?: string
-  /** Milliseconds since `healthyAt` (0 when not yet healthy). */
+  /**
+   * Milliseconds since `healthyAt` (0 when not yet healthy), recomputed
+   * immediately before every write. So `healthyAt + uptimeMs` is the moment
+   * of that write, and `hyp status` reads the pair as the daemon heartbeat: a
+   * writer, or a republisher, that refreshes either half against the current
+   * clock reports a liveness it has not proved.
+   * @ref LLP 0348#heartbeat-is-derived [constrained-by]: the pair is read as a heartbeat, so a reader may not recompute either half
+   */
   uptimeMs: number
   /** dev_run_id stamped on telemetry from this daemon. */
   runId: string
@@ -165,6 +172,7 @@ export type StatusDiagnosticKind =
   | 'config_local_unreadable'
   | 'daemon_binary_missing'
   | 'daemon_loaded_no_pid'
+  | 'daemon_heartbeat_stale'
   | 'client_attach_missing'
   | 'client_attach_stale'
   | 'client_telemetry_stale'
@@ -386,7 +394,12 @@ export interface ServiceState {
   running: boolean
   /** PID, if running. */
   pid?: number
-  /** Last reported daemon state, when a status file exists. */
+  /**
+   * The collector's verdict on the daemon's state, when a status file
+   * exists. Normally the state the daemon last wrote, but a live process
+   * whose heartbeat has gone stale is reported `degraded` whatever its
+   * snapshot claims (LLP 0348).
+   */
   state?: DaemonState
   /** dev_run_id of the active daemon process. */
   runId?: string

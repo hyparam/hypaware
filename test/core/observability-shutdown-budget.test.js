@@ -29,8 +29,9 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
-import { installObservability, readObservabilityEnv, getLogger } from '../../src/core/observability/index.js'
+import { installObservability, readObservabilityEnv, getLogger, SHUTDOWN_BUDGET_MS } from '../../src/core/observability/index.js'
 import { OTLP_EXPORT_TIMEOUT_MS } from '../../src/core/observability/otlp_exporters.js'
+import { DAEMON_STOP_TIMEOUT_MS } from '../../src/core/daemon/runtime.js'
 
 /**
  * Capture everything written to `process.stderr` while `fn` runs. The
@@ -270,3 +271,71 @@ function runNode(entry) {
     child.on('close', (code) => resolve({ code, stderr }))
   })
 }
+
+// The budget above is per channel, and until hyparam/hypaware#1153 the three
+// channels closed one after another, so a hang on every one of them cost three
+// budgets (about 3.75s) inside a `requestDaemonStop` window of 5s. Closing
+// them concurrently makes the per-channel budget the ceiling for the whole
+// shutdown. Nothing about the closes was ordered: metrics, logs, and traces
+// each hold their own exporters, their own pending posts, and their own global
+// registration, and the timed-out report writes straight to stderr rather than
+// back through any of them.
+//
+// @ref LLP 0343#one-budget [tests]: a hang on all three channels costs one budget, not one per channel.
+test('a hang on every channel costs one budget, not one per channel', async () => {
+  const { server, url } = await listen((req, res) => {
+    req.on('data', () => {})
+    req.on('end', () => {
+      res.writeHead(200)
+      res.end('{}')
+    })
+  })
+  const { handle, home } = await installAgainst(url)
+  /** @type {Array<() => Promise<void>>} */
+  const releaseHungProviders = []
+  try {
+    const providers = [handle.meter.provider, handle.logger.provider, handle.tracer.provider]
+    for (const provider of providers) {
+      assert.ok(provider, 'the configured endpoint installed a provider on every channel')
+      // Same hang as the single-channel test above, and held for the same
+      // reason: the patched close never reaches the line that clears the
+      // global registration, so the `finally` has to run the real one.
+      const realShutdown = provider.shutdown.bind(provider)
+      releaseHungProviders.push(async () => {
+        provider.shutdown = realShutdown
+        await realShutdown()
+      })
+      provider.shutdown = () => new Promise(() => {})
+    }
+    const started = Date.now()
+    const stderr = await captureProcessStderr(async () => {
+      await handle.shutdown()
+    })
+    const elapsed = Date.now() - started
+    // One budget with room for scheduling jitter, and well under the two the
+    // serial close would already have spent by here.
+    assert.ok(elapsed < 2 * SHUTDOWN_BUDGET_MS,
+      `three hung closes cost about one budget, not three (elapsed=${elapsed}ms, budget=${SHUTDOWN_BUDGET_MS}ms)`)
+    // Concurrent, not merged: every hung channel still gets its own line.
+    for (const channel of ['metrics', 'logs', 'traces']) {
+      assert.ok(stderr.includes(`"telemetry_channel":"${channel}"`),
+        `the ${channel} hang is reported too:\n${stderr}`)
+    }
+  } finally {
+    for (const release of releaseHungProviders) await release()
+    server.close()
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+// The other half of item 1: the telemetry ceiling and the window it has to fit
+// inside were two adjacent numbers nobody derived from anything, which is the
+// arrangement LLP 0339#budget-derived removed from the observability side. No
+// wall clock here on purpose - the ceiling is a fact about the constants, and
+// the trip wire is for whoever tunes `OTLP_EXPORT_TIMEOUT_MS` next.
+//
+// @ref LLP 0343#stop-window [tests]: the telemetry shutdown ceiling stays a fraction of the daemon stop window.
+test('the telemetry shutdown ceiling leaves the daemon stop window room for the rest of the stop', () => {
+  assert.ok(SHUTDOWN_BUDGET_MS * 2 <= DAEMON_STOP_TIMEOUT_MS,
+    `telemetry may spend at most half the stop window (ceiling=${SHUTDOWN_BUDGET_MS}ms, window=${DAEMON_STOP_TIMEOUT_MS}ms)`)
+})

@@ -5,7 +5,7 @@
 **Systems:** Onboarding, Usage-Policy, CLI
 **Author:** Brendan / Claude
 **Date:** 2026-08-07
-**Related:** LLP 0106 (the session-start classification hook this makes opt-in), LLP 0103 (the machine-local class store, untouched), LLP 0105 (#unknown: the query-seam backstop, untouched), LLP 0111 (the `policy` verb surface this extends), LLP 0113 (the ask's menu presentation), LLP 0188 (#opt-out: the sibling per-client preference), LLP 0190 (#sync-gate: the neighbouring wizard step), LLP 0201 (the express gate that can answer this step)
+**Related:** LLP 0106 (the session-start classification hook this makes opt-in), LLP 0103 (the machine-local class store, untouched), LLP 0105 (#unknown: the query-seam backstop, untouched), LLP 0111 (the `policy` verb surface this extends), LLP 0113 (the ask's menu presentation), LLP 0188 (#opt-out: the sibling per-client preference), LLP 0190 (#sync-gate: the neighbouring wizard step), LLP 0201 (the express gate that can answer this step), LLP 0341 (the run-level rule when the wizard's output stream dies)
 
 > Extends [LLP 0106](./0106-session-start-classification-hook.decision.md).
 > The hook, its copy, its enrolled-and-interactive gating, and the store its
@@ -125,7 +125,11 @@ the accepted path would flip a deliberate `ask` to `sync` - the less
 protective value - and then print the new value as though the user had
 answered it, on the one screen they did answer. A failed write warns
 and leaves the previous mode standing; onboarding has done its
-load-bearing work by then and `hyp policy folders` can set it later.
+load-bearing work by then and `hyp policy folders` can set it later. A
+failed *stream* is the other case, and it is settled run-wide rather
+than here: a dead stdout ends the run as a cancel at the next boundary,
+keeping whatever this store recorded before it
+([LLP 0341](./0341-a-dead-consent-surface-ends-the-run-as-a-cancel.decision.md)).
 Escape steps back to the sync lane, cancel ends the run at 130 like any
 other lane, and a non-interactive run never reaches it (LLP 0131
 #attended-only), taking the default.

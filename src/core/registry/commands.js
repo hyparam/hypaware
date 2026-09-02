@@ -1,5 +1,7 @@
 // @ts-check
 
+import { compareStrings } from '../util/compare_strings.js'
+
 /**
  * @import { CommandGroupRegistration, CommandRegistration, CommandRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
@@ -58,16 +60,24 @@ export function createCommandRegistry() {
     /** @type {CommandRegistration} */
     const record = { ...command }
     if (typeof record.name !== 'string' || record.name.length === 0) {
-      throw new TypeError('CommandRegistry.register: command.name must be a non-empty string')
+      throw new TypeError(
+        `CommandRegistry.register: command.name must be a non-empty string${copyMiss(command, record, 'name')}`
+      )
     }
     if (typeof record.summary !== 'string') {
-      throw new TypeError(`CommandRegistry.register: '${record.name}' missing summary`)
+      throw new TypeError(
+        `CommandRegistry.register: '${record.name}' missing summary${copyMiss(command, record, 'summary')}`
+      )
     }
     if (typeof record.usage !== 'string') {
-      throw new TypeError(`CommandRegistry.register: '${record.name}' missing usage`)
+      throw new TypeError(
+        `CommandRegistry.register: '${record.name}' missing usage${copyMiss(command, record, 'usage')}`
+      )
     }
     if (typeof record.run !== 'function') {
-      throw new TypeError(`CommandRegistry.register: '${record.name}' missing run()`)
+      throw new TypeError(
+        `CommandRegistry.register: '${record.name}' missing run()${copyMiss(command, record, 'run')}`
+      )
     }
     // Fill the common metadata at the registry boundary so third-party
     // commands participate without boilerplate. Canonical registrations can
@@ -179,11 +189,11 @@ export function createCommandRegistry() {
    * not a lookup.
    */
   function listGroups() {
-    return Array.from(groups.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    return Array.from(groups.values()).sort((a, b) => compareStrings(a.name, b.name))
   }
 
   function list() {
-    return Array.from(byName.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    return Array.from(byName.values()).sort((a, b) => compareStrings(a.name, b.name))
   }
 
   /** @param {string} name */
@@ -226,4 +236,48 @@ export function createCommandRegistry() {
   }
 
   return { register, registerGroup, unregister, get, getGroup, listGroups, list, has, size, match }
+}
+
+/**
+ * Explain a shape check the stored record failed but the registration as
+ * passed would have satisfied. The record is `{ ...command }`, which carries
+ * own enumerable properties and nothing else, so a member living on a
+ * prototype (a class instance, an `Object.create` registration) or defined
+ * non-enumerable is simply not in what the checks read.
+ *
+ * The published `CommandRegistration` type cannot warn about it up front:
+ * TypeScript has no notion of property ownership or enumerability, so a class
+ * whose `run()` sits on the prototype compiles clean under `--strict`. And a
+ * plugin whose `activate()` throws is caught per plugin and logged as
+ * `plugin.activate_failed`, so the plugin simply does not load. That leaves
+ * this clause as the whole diagnosis its author gets, and a bare
+ * `missing run()` about a registration that visibly declares `run()` sends
+ * them looking in the wrong place.
+ *
+ * @param {CommandRegistration} command the registration as passed
+ * @param {CommandRegistration} record the own-enumerable copy the checks read
+ * @param {string} key the member the check rejected
+ * @returns {string} a clause to append, or '' when the member is genuinely
+ *   absent and there is nothing to explain
+ */
+function copyMiss(command, record, key) {
+  if (key in record) return ''
+  // Presence, not value. Reading `command[key]` would run a prototype
+  // accessor, and a class instance is one of the shapes this clause exists to
+  // diagnose: a lazily-initializing getter would fire on a path that rejects,
+  // against the promise above that a rejected registration comes back exactly
+  // as it arrived, and a throwing one would replace this boundary error with
+  // its own, which is the opposite of what this function is for. `in` walks
+  // the chain without invoking anything, and the `has` trap of a Proxy
+  // registration, the one thing left that can object, does not get to break
+  // the error either.
+  try {
+    if (!(key in /** @type {any} */ (command))) return ''
+  } catch {
+    return ''
+  }
+  return (
+    ` - '${key}' is reachable on the registration but is not an own enumerable property, ` +
+    "so the registry's copy did not carry it (a prototype member, or one defined non-enumerable)"
+  )
 }

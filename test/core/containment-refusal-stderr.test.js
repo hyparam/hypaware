@@ -34,6 +34,9 @@ import { getLogger } from '../../src/core/observability/logger.js'
 import { installObservability, readObservabilityEnv } from '../../src/core/observability/index.js'
 import { logs, trace, LoggerProvider, TracerProvider } from '../../src/core/observability/runtime.js'
 import { Attr } from '../../src/core/observability/attrs.js'
+// The mirror writes to the real `process.stderr` (LLP 0329#consequences), so
+// the capture that stands in front of that descriptor is the shared one.
+import { stderrTextFrom as captureProcessStderr } from '../helpers/stderr_lines.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -132,28 +135,6 @@ test('the same verb over a healthy cache writes no WARN to stderr at all', async
     await fs.rm(root, { recursive: true, force: true })
   }
 })
-
-/**
- * Capture what `fn` writes to the real `process.stderr`, which is where the
- * mirror deliberately writes (LLP 0329#consequences).
- *
- * @param {() => Promise<void>} fn
- * @returns {Promise<string>}
- */
-async function captureProcessStderr(fn) {
-  const realWrite = process.stderr.write.bind(process.stderr)
-  let captured = ''
-  process.stderr.write = /** @type {typeof process.stderr.write} */ ((chunk) => {
-    captured += typeof chunk === 'string' ? chunk : String(chunk)
-    return true
-  })
-  try {
-    await fn()
-  } finally {
-    process.stderr.write = realWrite
-  }
-  return captured
-}
 
 test('the flush\'s refusal of a symlinked spool directory reaches process stderr', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-refusal-spool-'))

@@ -90,6 +90,24 @@ export async function activate(ctx) {
   const sectionConfig = /** @type {Record<string, unknown>} */ (ctx.config ?? {})
   const stateDir = ctx.paths.stateDir
 
+  // The group has no bare command, so without this its `--help` opens on a
+  // naked `usage:` line and never says what the subcommands are for (#1005).
+  // @ref LLP 0214#d2 [implements]: a plugin group with no bare command keeps its voice in the group registry
+  ctx.commands.registerGroup({
+    name: 'client claude-desktop',
+    plugin: PLUGIN_NAME,
+    summary: 'Set up Claude Desktop capture on macOS',
+    help: [
+      'Claude Desktop delegates inference to its embedded CLI, so it is',
+      'captured by pointing it at the local gateway through the org-managed',
+      'third-party-inference profile. These subcommands render that profile,',
+      'write the credential helper it names, install it, and verify it.',
+      '',
+      'Start with install, which walks the whole sequence; the rest exist for',
+      'MDM distribution and for checking what a machine ended up with.',
+    ].join('\n'),
+  })
+
   ctx.commands.register({
     name: 'client claude-desktop profile',
     aliases: ['claude-desktop profile'],

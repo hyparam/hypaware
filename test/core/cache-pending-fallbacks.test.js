@@ -240,12 +240,21 @@ test('an unreadable cursor is unknown, not a fresh partition claiming zero', asy
     // one. The table underneath still holds the marker row, so an append
     // that treated this as a brand-new partition would write a concrete
     // zero over it and strand the row: the seeding scan never runs again.
+    // Since LLP 0347#file-not-reader the append does not get that far: the
+    // file is there and does not read, so the live generation is unknown and
+    // the flush refuses rather than publishing a guessed one. Unknown
+    // survives either way, and now the bytes do too.
     await fs.writeFile(path.join(part.path, 'cursor.json'), '{ not json', 'utf8')
     await storage.appendRows(tablePath, COLUMNS, [nativeRow()])
-    await storage.flushTable(tablePath, { force: true })
+    await assert.rejects(
+      storage.flushTable(tablePath, { force: true }),
+      /present but unreadable/,
+      'the flush refuses the partition instead of writing a cursor over it')
 
     assert.equal(readCursorSync(part.path).pendingFallbacks, undefined,
       'unknown survives the append; maintenance still owes this partition its one scan')
+    assert.equal(await fs.readFile(path.join(part.path, 'cursor.json'), 'utf8'), '{ not json',
+      'and no concrete zero was written over the unreadable bytes')
   } finally {
     await env.cleanup()
   }

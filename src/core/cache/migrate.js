@@ -4,12 +4,14 @@ import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 
 import {
+  appendRefusalReason,
   appendRowsToSourceTable,
   clearEscapeReport,
   discoverCachePartitions,
   resolveClientName,
   sanitizePathSegment,
 } from './partition.js'
+import { cacheTablePath } from './paths.js'
 import { readRowsFromTable } from './iceberg/store.js'
 
 /**
@@ -62,6 +64,24 @@ export async function migrateLegacyPartitions({ cacheRoot, force }) {
         }
         group.rows.push(row)
       }
+      // The same all-or-nothing rule the spool flush follows, for the same
+      // reason: this loop commits one destination partition at a time and
+      // `retirePartition` below is the only thing that stops the legacy
+      // directory being read again. An append that refuses partway through
+      // would leave the earlier destinations committed and the legacy
+      // directory in place, and the next `hyp query maintain --force` would
+      // re-read the same rows and commit them a second time. Nothing dedupes
+      // rows that already carry their native identity.
+      //
+      // Skipped rather than thrown: migration is per-partition and
+      // idempotent, the rows stay readable where they already are, and the
+      // next run retries. Throwing would abort the whole maintain tick and
+      // stop compaction and retention cache-wide over one broken cursor.
+      // @ref LLP 0347#rows-wait [implements]: a migration that cannot finish leaves its rows where they are instead of half-committing them
+      const refused = [...groups.values()].some(({ segments }) =>
+        appendRefusalReason(cacheTablePath(cacheRoot, partition.dataset, segments)) !== null
+      )
+      if (refused) continue
       for (const { segments, rows: groupRows } of groups.values()) {
         await appendRowsToSourceTable(cacheRoot, partition.dataset, segments, columns, groupRows)
       }
@@ -105,14 +125,14 @@ function resolveIcebergDirForLegacy(partition) {
  * longer discovered.
  *
  * The scan above this read every legacy cursor, so a poisoned one has
- * already armed an escape report keyed on this path; the rename then leaves
+ * already armed a standing cursor refusal keyed on this path; the rename leaves
  * that path with nothing behind it to ever clear the entry. It is the third
  * site where a whole partition directory stops existing, and it clears for
  * the same reason the two in `retention.js` do (LLP 0334#eviction-clears):
  * a partition later recreated at this path must warn as the transition it
  * is, not be throttled against a window armed for a directory that is gone.
  *
- * @ref LLP 0334#eviction-clears [implements]: no escape report outlives the partition directory it is keyed on.
+ * @ref LLP 0334#eviction-clears [implements]: no standing cursor refusal outlives the partition directory it is keyed on.
  * @param {string} partitionPath
  */
 async function retirePartition(partitionPath) {

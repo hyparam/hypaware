@@ -600,13 +600,22 @@ export async function listLiveDataFiles(tablePath) {
  * so the predicate can be evaluated even when the caller asked for a narrower
  * set; `QueryStorageService` strips it from the row afterwards.
  *
- * The predicate is applied as a yielded-row filter rather than pushed into
- * icebird's `scan({ where })`. icebird couples file/row-group pruning with a
- * per-row match that DROPS nulls (`null > since` is false in both hyparquet's
- * matcher and JS), which would skip exactly the legacy null-seq rows the
- * migration must preserve. The design (LLP 0040 §2) names this yielded-row
- * filter as the fallback; a future null-aware icebird filter can layer the
- * file-skip optimization on top without changing this contract.
+ * The yielded-row filter below is always the authority on what comes out. On
+ * top of it, and only when `includeLegacy` is false and no `whereIn`
+ * accompanies it, the same predicate is
+ * ALSO pushed into icebird's `scan({ where })` so whole data files whose
+ * manifest bound on the seq column sits at or below the watermark are never
+ * opened (LLP 0040 §2's file-skip). The push is confined to that case because
+ * icebird couples file/row-group pruning with a per-row match that DROPS nulls
+ * (`null > since` is false in both hyparquet's matcher and JS): under
+ * `includeLegacy` false a null-seq row is skipped anyway, so the push removes
+ * only rows the filter would have removed, but under `includeLegacy` true it
+ * would skip exactly the legacy null-seq rows the migration must preserve.
+ *
+ * The push can never subtract a row the filter would have yielded. Pruning is
+ * an inclusive projection on both sides: a file with no recorded bound for the
+ * seq column is kept, and a file that predates the column entirely has no such
+ * bound, so it is read and its rows are decided by the filter below.
  *
  * @ref LLP 0040#storage-api-extension [implements]: since-filtered incremental scan; null-seq new on first export, then excluded
  * @param {string} tablePath
@@ -632,7 +641,26 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   if (filtering && hasSeqColumn && !projected.includes(INGEST_SEQ_COLUMN.name)) {
     projected = [...projected, INGEST_SEQ_COLUMN.name]
   }
-  const scan = source.scan({ columns: projected, where: whereInExpr(source, opts?.whereIn) })
+  // @ref LLP 0040#storage-api-extension [implements]: the `seq > x` file skip
+  // the section asks for, gated as the header explains. Without it an idle
+  // sink tick decoded every column of every file just to discard each row at
+  // the check below.
+  //
+  // Never conjoined with a `whereIn`. icebird's `remapFilterColumns` drops the
+  // WHOLE filter for a data file missing any column the filter names, so on a
+  // file written before the seq column existed the lookup clause would be
+  // dropped along with the seq clause. `since` is re-checked on every yielded
+  // row below and survives that; `whereIn` is not re-checked, and its contract
+  // is a predicate callers rely on rather than a pruning hint. No caller passes
+  // both today, and this gate means none can start to without noticing.
+  const pushSince = filtering && hasSeqColumn && !includeLegacy && opts?.whereIn === undefined
+  const scan = source.scan({
+    columns: projected,
+    where: andExpr(
+      whereInExpr(source, opts?.whereIn),
+      pushSince ? seqAfterExpr(/** @type {bigint} */ (since)) : undefined,
+    ),
+  })
   for await (const row of scan.rows()) {
     const resolved = await resolveAsyncRow(row, projected)
     if (filtering) {
@@ -681,6 +709,38 @@ function whereInExpr(source, whereIn) {
     expr = expr ? { ...at, type: 'binary', op: 'AND', left: expr, right: node } : node
   }
   return expr
+}
+
+/**
+ * `_hyp_ingest_seq > since` as an icebird expression. The literal stays a
+ * bigint: the column is int64 and icebird compares manifest bounds and row
+ * cells against it without narrowing.
+ *
+ * @param {bigint} since
+ * @returns {ExprNode}
+ */
+function seqAfterExpr(since) {
+  const at = { positionStart: 0, positionEnd: 0 }
+  return {
+    ...at,
+    type: 'binary',
+    op: '>',
+    left: { ...at, type: 'identifier', name: INGEST_SEQ_COLUMN.name },
+    right: { ...at, type: 'literal', value: since },
+  }
+}
+
+/**
+ * Conjoin two optional expressions; either side absent yields the other.
+ *
+ * @param {ExprNode | undefined} left
+ * @param {ExprNode | undefined} right
+ * @returns {ExprNode | undefined}
+ */
+function andExpr(left, right) {
+  if (!left) return right
+  if (!right) return left
+  return { positionStart: 0, positionEnd: 0, type: 'binary', op: 'AND', left, right }
 }
 
 /**

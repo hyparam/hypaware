@@ -19,7 +19,7 @@ test('picker prompt prints context under source options and defaults export to l
   const input = new PassThrough()
   // Only the source question is asked; export defaults to local-parquet
   // and retention takes its default without a prompt (LLP 0137).
-  const stdout = answerDrivenOutput(input, ['4\n'])
+  const stdout = answerDrivenOutput(input, ['5\n'])
   const stderr = makeBuf()
 
   const result = await runPickerWalkthrough({
@@ -34,13 +34,14 @@ test('picker prompt prints context under source options and defaults export to l
   })
 
   assert.equal(result.exitCode, 0)
-  // Row 4 is otel: Claude Desktop now follows Claude Code, while the raw API
-  // rows remain hidden (LLP 0202).
+  // Row 5 is otel: the client rows come first in PICKER_DISPLAY_ORDER
+  // (claude, claude-desktop, codex, opencode), and the raw API rows sort
+  // between them and otel but are `hidden`, so they never render (LLP 0202).
   assert.deepEqual(result.sourcesPicked, ['otel'])
   assert.equal(result.exportPicked, 'local-parquet')
 
   const text = stdout.text()
-  assert.match(text, /4\) OpenTelemetry\n     Records logs, traces, and metrics your tools send over local OTLP HTTP/)
+  assert.match(text, /5\) OpenTelemetry\n     Records logs, traces, and metrics your tools send over local OTLP HTTP/)
   assert.doesNotMatch(text, /Anthropic API/)
   assert.doesNotMatch(text, /OpenAI API/)
   // The export question is no longer rendered.

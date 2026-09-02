@@ -21,8 +21,9 @@ import path from 'node:path'
 
 import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
 import { migrateLegacyPartitions } from '../../src/core/cache/migrate.js'
-import { tryReadCursorSync } from '../../src/core/cache/partition.js'
+import { clearEscapeReport, tryReadCursorSync } from '../../src/core/cache/partition.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
+import { stderrLinesFrom as linesFrom } from '../helpers/stderr_lines.js'
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
@@ -53,40 +54,18 @@ async function writePoisonedCursor(partitionDir, tableDir) {
   )
 }
 
-/**
- * Capture what `fn` writes to the real `process.stderr`, where the mirror
- * deliberately writes (LLP 0329#consequences), and return the lines that
- * carry `token`.
- *
- * @param {() => unknown} fn
- * @param {string} token
- * @returns {Promise<string[]>}
- */
-async function linesFrom(fn, token) {
-  const realWrite = process.stderr.write.bind(process.stderr)
-  let captured = ''
-  process.stderr.write = /** @type {typeof process.stderr.write} */ ((chunk) => {
-    captured += typeof chunk === 'string' ? chunk : String(chunk)
-    return true
-  })
-  try {
-    await fn()
-  } finally {
-    process.stderr.write = realWrite
-  }
-  return captured.split('\n').filter((line) => line.includes(token))
-}
-
 const REFUSAL = 'cursor_table_dir_escapes_partition'
 const RECOVERY = 'cursor_escape_recovered'
 
-test('a partition retention evicted while poisoned warns again when it comes back', async () => {
-  // The strand LLP 0332#transition-plus-rewarn accepted: the entry is keyed
-  // by path, the eviction deletes the path, and nothing left reads that
-  // partition to clear it. A partition recreated at the same path then
-  // reuses the stale key and its refusal is throttled against a window
-  // armed for a directory that no longer exists - silence over a live
-  // poison, for up to the rewarn interval.
+test('retention refuses a poisoned partition instead of evicting it, and keeps saying so', async () => {
+  // LLP 0332#transition-plus-rewarn and LLP 0334#eviction-clears both reason
+  // about a partition retention removes WHILE it is poisoned. Once the
+  // enforcer reads its cursor through the gate that can answer "unreadable"
+  // (LLP 0323#one-gate, LLP 0336#a-live-delete-carries-the-gates) that state
+  // is unreachable through retention: a partition whose cursor does not read
+  // is skipped, not deleted, because the epoch-0 default the other reader
+  // hands back is a deletion instruction here. So the entry cannot strand
+  // this way, and the standing refusal is what an operator sees instead.
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-escape-evict-'))
   try {
     const partition = path.join(cacheRoot, 'datasets', 'logs', 'date=2026-01-01')
@@ -98,10 +77,18 @@ test('a partition retention evicted while poisoned warns again when it comes bac
 
     const enforcer = createRetentionEnforcer({ cacheRoot, config: undefined })
     const evicting = await linesFrom(() => enforcer.tick(), REFUSAL)
-    assert.equal(evicting.length, 1, 'the evicting tick still says the partition it read was poisoned')
-    await assert.rejects(() => fs.stat(partition), 'and the eviction really removed the partition')
+    assert.equal(evicting.length, 1, 'the tick still says the partition it read was poisoned')
+    assert.ok(
+      (await fs.stat(partition)).isDirectory(),
+      'and it did not delete a partition whose cursor it could not read'
+    )
 
-    // The same path, poisoned the same way, well inside the rewarn window.
+    // The strand itself is still real for every other way a partition
+    // leaves: `hyp purge`, a cache reset, an operator's own `rm -rf`.
+    // Nothing reads a path that is gone, so the entry outlives it, and the
+    // clear has to be the removal's own job (LLP 0334#eviction-clears).
+    await fs.rm(partition, { recursive: true, force: true })
+    clearEscapeReport(partition)
     await fs.mkdir(partition, { recursive: true })
     await writePoisonedCursor(partition, '../out')
     const reborn = await linesFrom(() => { assert.equal(tryReadCursorSync(partition), null) }, REFUSAL)

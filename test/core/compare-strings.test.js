@@ -34,6 +34,61 @@ test('compareStrings orders by the characters, and reports a sign', () => {
   assert.equal(compareStrings('cache', 'cache status'), -1)
 })
 
+test('compareStrings refuses a non-string rather than ordering from one', () => {
+  // The one answer this comparator may not give is a plausible one. Without
+  // the guard `<` and `>` are both false for a non-string, so
+  // `compareStrings(undefined, 'x')` came back `0`: a stable tie that sorts a
+  // mis-shaped row into an arbitrary place and reports nothing, which is the
+  // failure class the migration to this comparator existed to remove. Every
+  // other `@param {string}` helper on the published barrel already refuses the
+  // same input, out of what its body happens to do rather than by choice; a
+  // comparison raises nothing on its own, so this one says so out loud
+  // (LLP 0340 #refuse).
+  for (const bad of [undefined, null, 10, {}, ['a'], Symbol('a')]) {
+    assert.throws(() => compareStrings(/** @type {any} */ (bad), 'x'), TypeError)
+    assert.throws(() => compareStrings('x', /** @type {any} */ (bad)), TypeError)
+  }
+  // The types, never the values. These comparators sort blob keys, file paths
+  // and session ids, and an error message is a string that reaches a log.
+  assert.throws(
+    () => compareStrings(/** @type {any} */ ('s3://bucket/secret-key'.length), 'x'),
+    (/** @type {Error} */ err) => {
+      assert.match(err.message, /got number and string/)
+      return true
+    }
+  )
+  assert.throws(
+    () => compareStrings('x', /** @type {any} */ ({ key: 'do-not-print-me' })),
+    (/** @type {Error} */ err) => {
+      assert.equal(err.message.includes('do-not-print-me'), false)
+      return true
+    }
+  )
+  // A String object is not a string. It compares correctly through `<`, so
+  // letting it past would be harmless here and would still be the barrel
+  // answering a question it was not asked; `typeof` is the line every other
+  // guard in `json_util.js` draws too.
+  assert.throws(() => compareStrings(/** @type {any} */ (new String('a')), 'b'), TypeError)
+})
+
+test('sort() never hands the guard a hole or an undefined, so a sparse list is not a way in', () => {
+  // The reason the guard costs nothing at the 19 sites the migration touched
+  // is not only that their names are validated. `Array.prototype.sort` moves
+  // `undefined` elements and holes to the end without ever calling the
+  // comparator, so the commonest shape of "a list with a gap in it" cannot
+  // reach the throw at all.
+  assert.deepEqual(['b', undefined, 'a'].sort(compareStrings), ['a', 'b', undefined])
+  // A hole is not the same thing as an `undefined` element and gets its own
+  // case: `sort` moves holes past even the undefineds, still without asking.
+  // Built by assignment rather than as an array literal, because spreading a
+  // sparse array fills its holes with `undefined` and would quietly turn this
+  // into the assertion above.
+  const holey = new Array(3)
+  holey[0] = 'b'
+  holey[2] = 'a'
+  assert.deepEqual(holey.sort(compareStrings).slice(0, 2), ['a', 'b'])
+})
+
 test('compareStrings sorts a list the way a bare sort() would', () => {
   const names = ['traces', 'ai_gateway_messages', 'metrics', 'logs']
   assert.deepEqual(
@@ -129,13 +184,17 @@ function commandNames() {
  * The name corpora this repo can harvest, bucketed the way the comparators
  * sort.
  *
- * `llp/` paths stand for `scripts/llp-numbers.js`, and they are a proxy rather
- * than that script's own list: `claimsByNumber` keys on `basename(file)`, so
- * what `collisions` actually sorts is the bare `NNNN-slug.type.md` names of the
- * documents claiming one number. The tracked paths carry the same alphabet plus
- * `/` and the directory prefixes, and the two lists sort identically here, so
- * the wider corpus is the safe side of the approximation. Blob keys are
- * deliberately absent and the last rule in this file says why.
+ * `llp/` stands for `scripts/llp-numbers.js`, and it is harvested twice
+ * because the script sorts one of the two lists and the other one is what this
+ * file can see. `claimsByNumber` keys on `basename(file)`, so what
+ * `collisions` actually sorts is the bare `NNNN-slug.type.md` names; the
+ * tracked paths carry the same alphabet plus `/` and the directory prefixes.
+ * Both buckets are here rather than one standing in for the other: the
+ * basenames are the corpus the migrated comparator really orders, the paths are
+ * the wider alphabet, and holding them separately means the claim that the two
+ * agree is checked by the rule below rather than asserted in this comment
+ * (#1148 item 4). Blob keys are deliberately absent and the last rule in this
+ * file says why.
  *
  * Not a one-to-one map onto the migrated sites, in either direction, and
  * saying so is what keeps the failure message below honest.
@@ -174,7 +233,9 @@ function commandNames() {
 function sortedCorpora() {
   const corpora = new Map(manifestNames())
   corpora.set('commands', commandNames())
-  corpora.set('llp paths', trackedFiles(REPO_ROOT).filter((rel) => rel.startsWith('llp/')))
+  const llpPaths = trackedFiles(REPO_ROOT).filter((rel) => rel.startsWith('llp/'))
+  corpora.set('llp paths', llpPaths)
+  corpora.set('llp basenames', llpPaths.map((rel) => path.basename(rel)))
   return corpora
 }
 
@@ -190,6 +251,13 @@ test('the corpora these comparators sort are big enough to be corpora', () => {
   assert.ok(commands.includes('session ignore'), 'the plugin command list stopped being read')
   const datasets = /** @type {string[]} */ (corpora.get('datasets'))
   assert.ok(datasets.includes('ai_gateway_messages'), 'the manifest datasets stopped being read')
+  // The two `llp/` buckets are one harvest read two ways, so a filter that
+  // stopped matching empties both at once and neither would say so.
+  const llpPaths = /** @type {string[]} */ (corpora.get('llp paths'))
+  const llpBasenames = /** @type {string[]} */ (corpora.get('llp basenames'))
+  assert.ok(llpPaths.length > 100, `expected the llp corpus, got ${llpPaths.length} documents`)
+  assert.equal(llpBasenames.length, llpPaths.length)
+  assert.ok(llpBasenames.includes('0000-hypaware.explainer.md'), 'the llp basenames stopped being read')
 })
 
 test('moving these lists off the host collation did not reorder any of them', () => {
@@ -306,6 +374,38 @@ test('the collation these lists came off really does move with the machine', () 
   assert.ok(collator.compare('sink', 'sync') > 0)
 })
 
+test('the second disagreement the corpora hold is real too, and it is not Lithuanian', () => {
+  // The rule two tests up pins the corpora against `en-US`, so it is silent
+  // about every locale that is not that one. Two of the harvested buckets
+  // disagree with the characters under some locale, and only one of them was
+  // written down as an assertion: `commands` under Lithuanian, above. This is
+  // the other one, so the prose about it stops being the only record (#1148
+  // item 4).
+  //
+  // Azerbaijani orders `q` before `p`, which swaps the two skill names below;
+  // the characters put `hypaware-privacy` first. Nothing sorts the `skills`
+  // bucket today (see `sortedCorpora`), so this is not a shipped symptom, and
+  // that is the point of pinning it: the day a registry starts sorting its
+  // skills is a two-line change nobody would come here for, and this is what
+  // says the pair was already known to move.
+  //
+  // Guarded in the same two-predicate shape as the Lithuanian pin, and for the
+  // same reason: `typeof Intl` first because it is the only spelling that
+  // survives a `--without-intl` build, then the resolved tag, because a
+  // `small-icu` build answers `az` with English data and would show no
+  // disagreement at all.
+  if (typeof Intl === 'undefined' || typeof Intl.Collator !== 'function') return
+  const collator = new Intl.Collator('az')
+  const resolved = collator.resolvedOptions().locale
+  if (resolved !== 'az' && !resolved.startsWith('az-')) return
+  assert.ok(compareStrings('hypaware-privacy', 'hypaware-query') < 0)
+  assert.ok(collator.compare('hypaware-privacy', 'hypaware-query') > 0)
+  // Both names are really in the bucket, so this stays a statement about the
+  // corpus rather than about two strings that happen to differ.
+  const skills = sortedCorpora().get('skills') ?? []
+  assert.ok(skills.includes('hypaware-privacy') && skills.includes('hypaware-query'))
+})
+
 test('blob keys are the one migrated corpus whose order does change, and it changes toward S3', () => {
   // `local-fs`'s `listObjects`, the S3 dataset's partition discovery, the
   // two S3 fixtures under `hypaware-core/smoke/flows` and the three
@@ -326,4 +426,148 @@ test('blob keys are the one migrated corpus whose order does change, and it chan
   if (typeof Intl === 'undefined' || typeof Intl.Collator !== 'function') return
   const reference = new Intl.Collator('en-US').compare
   assert.ok(reference('CLAUDE.md', 'bin/hypaware.js') > 0)
+})
+
+/**
+ * The inline shape of this comparator, written out at a call site instead of
+ * called: `x < y ? -1 : x > y ? 1 : 0`, and its descending twin
+ * `x < y ? 1 : x > y ? -1 : ...`.
+ *
+ * Thirteen of these were in the tree when `compareStrings` landed, all of them
+ * already correct and locale-free, which is exactly why they were left alone at
+ * the time: #1145 was about taking nineteen comparators *off* the host, and a
+ * mechanical rewrite of thirteen that were never on it would have buried that
+ * in noise (#1148 item 2).
+ *
+ * They are worth collecting anyway, and not for tidiness. Every one of them is
+ * a comparator that no longer passes through the one function this repo pins,
+ * documents and now guards, so each is its own small answer to "what happens
+ * when this gets a non-string" and each is a place the next reader has to
+ * re-derive that the ordering is code-unit rather than collated. Written out
+ * inline the shape also has a cheap wrong neighbour: drop the `> ` arm and
+ * `x < y ? -1 : 1` is a comparator that never returns 0 and is not a total
+ * order, which is a one-character edit away and reads fine.
+ *
+ * Both `-1` and `1` are required, so the two-way `x < y ? -1 : 1` spellings
+ * that sit under an explicit `!==` guard are out of scope: under their guard
+ * those are correct, they are not this shape, and reddening on them would be a
+ * rule about something else. One of them moved to the helper anyway, in
+ * `context-graph/src/maintenance.js`, because it sat two lines from one this
+ * rule did catch; the rule did not ask for it and would not have.
+ *
+ * The descending spelling was out of scope when this rule landed, and that was
+ * a boundary rather than a judgement: #1148 enumerated the thirteen ascending
+ * ones, and a comparator is not a thing to rewrite in a file nobody asked
+ * about. Rather than describe the exclusion, this file held the five shipped
+ * descending sites as a list, so that the scope note was checked rather than
+ * asserted: a count in a comment is the shape of claim this file exists to
+ * stop making. #1156 migrated all five to `compareStrings(b, a)`, over values
+ * that are strings by the time they are sorted, and an inventory of nothing is
+ * not an inventory. So the descending pair joined the needle below and the
+ * list left with the sites it named. What still separates the two spellings is
+ * the `: 0` tail, for the reason the limits paragraph gives.
+ *
+ * A number legitimately written this way reds here as a false positive, and
+ * that is any number, not only the BigInt pair where `a - b` is a BigInt
+ * rather than a sort result: `bytesA < bytesB ? -1 : bytesA > bytesB ? 1 : 0`
+ * is the same punctuation. There is none in the tree today. The remedy when
+ * one lands is the allowlist below with its reason, not a looser needle: no
+ * regex can tell a string comparison from a numeric one, and a needle that
+ * tried would stop catching the case this rule is for.
+ *
+ * That remedy is module-scoped, and the cost of it should be visible rather
+ * than discovered: allowlisting a module for one numeric comparator exempts
+ * every later string comparator in the same file too. It is the sibling gate's
+ * bargain as well, and it is why the reason is written next to the entry - the
+ * entry has to be re-read when the file changes shape, because nothing else
+ * will notice.
+ *
+ * Both operand orders are matched, in both directions, because
+ * `a > b ? 1 : a < b ? -1 : 0` is the same comparator with the arms swapped and
+ * a rule that caught only one of the two spellings would be a rule about
+ * punctuation rather than about the comparison. There is no site in either
+ * operand order today; the swapped alternatives are here so that the cheapest
+ * way past this gate is not to type the operands the other way round.
+ *
+ * Two limits are left standing, and both are stated rather than fixed because
+ * closing either needs a tokenizer and this file has already declined to be
+ * one. A comparator wrapped across physical lines by a formatter evades the
+ * per-line scan below; and the ascending alternatives require the `: 0` tail,
+ * so an ascending chain that ends in a tiebreak rather than a tie
+ * (`a < b ? -1 : a > b ? 1 : compareStrings(x, y)`) is not caught, where the
+ * descending alternatives do not require it and do catch their tiebreak form.
+ * Neither shape exists in the tree today, which is what makes them limits
+ * rather than misses.
+ */
+const INLINE_CODE_UNIT_COMPARATOR =
+  /<[^?]*\?\s*-1\s*:[^?]*>[^?]*\?\s*1\s*:\s*0|>[^?]*\?\s*1\s*:[^?]*<[^?]*\?\s*-1\s*:\s*0|<[^?]*\?\s*1\s*:[^?]*>[^?]*\?\s*-1\s*:|>[^?]*\?\s*-1\s*:[^?]*<[^?]*\?\s*1\s*:/
+
+/**
+ * The shipped modules allowed to spell the comparison out, and why.
+ *
+ * Held to equality rather than containment, the way the sibling gate in
+ * `format-number.test.js` holds its own exemption list: a stale entry cannot
+ * outlive the line it excuses.
+ */
+const INLINE_COMPARATOR_ALLOWED = {
+  'src/core/util/compare_strings.js':
+    'the definition, which is the one place the comparison is written out',
+}
+
+test('no shipped module writes the comparison out instead of calling it', () => {
+  // Scanned raw rather than through a comment-blanking pass. The sibling gate
+  // in `format-number.test.js` needs one because the names it forbids are the
+  // names a module explaining itself would naturally write; this needle is a
+  // punctuation shape nobody types in prose, and the only comment in the tree
+  // that could carry it is one quoting the definition. The `*` and `//` skip
+  // below covers that much without pretending to be a tokenizer, and anything
+  // it misses over-reports with a file and a line to look at.
+  const paths = trackedFiles(REPO_ROOT, new Set(['.js', '.mjs', '.cjs'])).filter(
+    (rel) => !rel.startsWith('test/')
+  )
+  // A pathspec that stopped matching would leave this passing over an empty
+  // tree and say nothing, which is the one failure a lint cannot afford.
+  assert.ok(paths.length > 100, `expected the shipped tree, got ${paths.length} modules`)
+  const offenders = []
+  for (const rel of paths) {
+    if (Object.hasOwn(INLINE_COMPARATOR_ALLOWED, rel)) continue
+    const lines = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8').split('\n')
+    lines.forEach((line, i) => {
+      const trimmed = line.trim()
+      if (trimmed.startsWith('//') || trimmed.startsWith('*')) return
+      if (INLINE_CODE_UNIT_COMPARATOR.test(line)) offenders.push(`${rel}:${i + 1}: ${trimmed}`)
+    })
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    'these comparators write out the code-unit comparison instead of calling ' +
+      'compareStrings, so each one answers for itself what a non-string sorts ' +
+      'as and each one re-states an ordering the repo pins in one place; call ' +
+      'compareStrings, or add the module to INLINE_COMPARATOR_ALLOWED with the ' +
+      'reason it cannot'
+  )
+})
+
+test('the allowlist above names only modules that exist and still spell it out', () => {
+  // The equality the exemption list is held to runs the other way as well: an
+  // entry for a file that no longer carries the shape is an exemption for
+  // nothing, and it would go on excusing a line the next edit puts back.
+  // "Exist" is checked before "still spells it out", and separately, because
+  // a renamed or deleted allowlisted module read straight through
+  // `readFileSync` dies as a raw ENOENT rather than as this rule: the exact
+  // failure `trackedFiles` was written to keep out of the sibling gate above.
+  // An allowlist key is a hand-written path, so it is the likeliest one here.
+  const present = new Set(trackedFiles(REPO_ROOT, new Set(['.js', '.mjs', '.cjs'])))
+  for (const rel of Object.keys(INLINE_COMPARATOR_ALLOWED)) {
+    assert.ok(
+      present.has(rel),
+      `${rel} is allowlisted but is not a readable tracked module; the file moved, so move the entry`
+    )
+    const source = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')
+    assert.ok(
+      INLINE_CODE_UNIT_COMPARATOR.test(source),
+      `${rel} is allowlisted but no longer writes the comparison out; drop the entry`
+    )
+  }
 })

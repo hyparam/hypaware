@@ -26,40 +26,6 @@ export const BUILTIN_REMOTES = {
 export const BUILTIN_DEFAULT_REMOTE = 'hyperparam'
 
 /**
- * Where a refused user can ask for access when the target is a server we run.
- */
-export const MANAGED_CONTACT_URL = 'https://hyperparam.app/contact'
-
-/**
- * `MANAGED_CONTACT_URL` when `identityBase` is one of the servers Hyperparam
- * runs, `undefined` otherwise. Self-hosting is supported (LLP 0058
- * Consequences), and on a self-hosted server the admin who can grant access is
- * the reader's own colleague: sending those users to our contact form points
- * them at people who cannot help. Deliberately matched against the shipped
- * `BUILTIN_REMOTES` URLs rather than `effectiveRemotes`, because a user who
- * repoints the `hyperparam` name at their own server is self-hosting and must
- * not inherit the vendor link with the name.
- *
- * @param {string | undefined} identityBase the remote server being logged into
- * @returns {string | undefined}
- */
-export function managedContactUrl(identityBase) {
-  if (!identityBase) return undefined
-  let origin
-  try {
-    origin = new URL(identityBase).origin
-  } catch {
-    return undefined
-  }
-  for (const target of Object.values(BUILTIN_REMOTES)) {
-    try {
-      if (new URL(target.url).origin === origin) return MANAGED_CONTACT_URL
-    } catch { /* a malformed built-in simply never matches */ }
-  }
-  return undefined
-}
-
-/**
  * The effective target registry: shipped built-ins with the user's
  * `query.remotes` layered on top, so a user entry of the same name repoints
  * (or shadows) a built-in.

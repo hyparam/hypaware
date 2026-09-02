@@ -15,6 +15,7 @@ import {
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ClientDescriptor } from '../../../src/core/types.js'
  */
 
 /**
@@ -60,7 +61,7 @@ export async function runAsk(argv, ctx) {
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
     if (launchers.length === 0) {
       ctx.stderr.write('hyp ask: no attached client can be started here.\n')
-      ctx.stderr.write('  Attach one with `hyp client attach claude` (or `codex`), and make sure its CLI is on your PATH.\n')
+      ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
       return 1
     }
     ctx.stdout.write(`\nStarting ${launchers[0].label}...\n\n`)
@@ -155,6 +156,36 @@ export async function askableClients(ctx, { collectStatus = collectHypAwareStatu
   }
   const descriptors = await buildWalkthroughClientDescriptorMap()
   return [...descriptors.values()].filter((d) => d.launch).map((d) => d.name)
+}
+
+/**
+ * The repair line printed when nothing here can be launched.
+ *
+ * The client names come from the descriptors rather than a literal, on
+ * the same grounds the printed footers went generic: launchability is
+ * manifest-contributed, so a new adapter must not need a second hardcoded
+ * list here. But the line still has to *name* one. A hint reading
+ * `hyp client attach <client>` is not a command a reader can run: pasted
+ * into a shell it is an input redirection from a file called `client`, and
+ * typed literally it answers `unknown client`.
+ *
+ * The first name carries the runnable command and the rest follow as
+ * alternatives, so the sentence stays one line however many adapters
+ * declare a `launch` block.
+ *
+ * @ref LLP 0139#repair-must-be-runnable [implements]: the repair we print is a command that runs
+ * @ref LLP 0198#split [constrained-by]: the launchable set is whatever declares `contributes.client.launch`
+ * @param {Map<string, ClientDescriptor>} descriptors
+ * @returns {string}
+ */
+function attachHint(descriptors) {
+  const launchable = [...descriptors.values()].filter((d) => d.launch).map((d) => d.name).sort()
+  if (launchable.length === 0) {
+    return 'Attach a client with `hyp client attach`, and make sure its CLI is on your PATH.'
+  }
+  const [first, ...rest] = launchable
+  const alternatives = rest.length > 0 ? ` (or ${rest.join(', ')})` : ''
+  return `Attach one with \`hyp client attach ${first}\`${alternatives}, and make sure its CLI is on your PATH.`
 }
 
 export { SUGGESTED_PROMPTS }
