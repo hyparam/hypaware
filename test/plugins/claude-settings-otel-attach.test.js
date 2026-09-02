@@ -701,3 +701,79 @@ test('a below-floor machine attaches on the first pass after the client is upgra
   assert.equal(doneMarker.status, 'done')
   assert.equal(doneMarker.mode, MODE_OTEL)
 })
+
+// The limit of the reclassification, made executable: it decides how the NEXT
+// floor refusal is classified and migrates nothing already on disk. A host
+// that recorded `refused` under v1.24.0-v1.30.0 keeps short-circuiting however
+// new its client becomes, because the marker is consulted before `isCurrent`
+// and no error code is persisted to tell a floor refusal from a JSONC one.
+// When the automatic re-arm #999 asks for lands, this test is what fails.
+// @ref LLP 0363#markers-already-refused-are-not-migrated [tests]: a refused marker an earlier release wrote is not migrated, so only an explicit re-run clears it
+test('a marker an earlier release refused is not migrated by the reclassification', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+
+  // The marker a below-floor host wrote when the throw was still marked.
+  await fsp.mkdir(path.join(r.stateRoot, 'config-control'), { recursive: true })
+  await fsp.writeFile(
+    path.join(r.stateRoot, 'config-control', 'client-actions.json'),
+    JSON.stringify({
+      attach: {
+        claude: {
+          status: 'refused',
+          request_key: 'claude',
+          at: '2026-08-20T10:00:00.000Z',
+          reason: "Claude Code 2.1.150 is older than the floor; run 'claude update' and attach again",
+        },
+      },
+    })
+  )
+
+  /** @type {any} */
+  const registration = {
+    name: 'claude',
+    defaultUpstream: 'anthropic',
+    /** @param {any} attachCtx */
+    async attach(attachCtx) {
+      // The client is well past the floor by now, so nothing here refuses.
+      preflightOtelAttach({
+        claudeVersion: '2.1.233',
+        telemetryPort: TELEMETRY_PORT,
+        spoolDir: r.spoolDir,
+      })
+      attachCtx.stdout.write(JSON.stringify({
+        status: 'attached',
+        action: 'attach',
+        client: 'claude',
+        dry_run: false,
+        changed: true,
+        settings_path: r.settingsPath,
+      }))
+    },
+  }
+  const reconciler = createActionReconciler({
+    stateRoot: r.stateRoot,
+    handlers: [createAttachHandler()],
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+  })
+  const report = await reconciler.reconcile({
+    config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/claude', enabled: true }] }),
+    backfills: /** @type {any} */ ({ register() {}, get() { return undefined }, list() { return [] } }),
+    env: process.env,
+    clientDescriptors: new Map([['claude', /** @type {any} */ (CLAUDE_DESCRIPTOR)]]),
+    clients: /** @type {any} */ ({
+      getClient(/** @type {string} */ name) { return name === 'claude' ? registration : undefined },
+    }),
+    endpoint: `http://127.0.0.1:${PORT}`,
+  })
+
+  assert.deepEqual(
+    report.results.map((entry) => entry.outcome),
+    ['skipped'],
+    'the pre-existing refused marker still short-circuits before the handler is asked'
+  )
+  assert.equal(
+    readClientActionStatus({ stateRoot: r.stateRoot }).byKind.attach.claude.status,
+    'refused'
+  )
+})

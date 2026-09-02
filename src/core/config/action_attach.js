@@ -290,7 +290,10 @@ export function createAttachHandler(opts = {}) {
      * leaving the existing attach untouched. That refusal is recorded as a
      * retryable `failed` marker rather than a terminal `refused` one, so the
      * first pass after the client is upgraded performs the migration with no
-     * manual `hyp client attach claude` (LLP 0363).
+     * manual `hyp client attach claude` (LLP 0363). A `refused` marker an
+     * earlier release already wrote is not migrated: it still short-circuits
+     * above, and only an explicit re-run clears it (LLP 0363
+     * `#markers-already-refused-are-not-migrated`).
      *
      * **A client that declares `requiresEndpoint: false`** attaches by writing
      * a managed file rather than by pointing at a bound port, so the endpoint

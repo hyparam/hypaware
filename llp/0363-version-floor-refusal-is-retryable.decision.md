@@ -81,6 +81,26 @@ marker state, no new marker field, no new per-handler contract, no bounded
 retry counter, and no change to what `refused` means or to how it
 short-circuits.
 
+<a id="markers-already-refused-are-not-migrated"></a>
+
+### A marker an earlier release already wrote is not migrated
+
+**This reaches no machine that already recorded the refusal.** The marked throw
+shipped in v1.24.0 through v1.30.0. A joined host that ran one reconcile pass
+on any of them with an old client wrote a `refused` marker into
+`<stateRoot>/config-control/client-actions.json`, that file survives a package
+upgrade (the store carries no schema version and nothing invalidates it), and
+`refused` short-circuits before `isCurrent` or `perform()` is consulted. Such a
+host stays skipped on every boot however new its Claude Code becomes. It still
+reports `attach claude [refused]` with the `run 'hyp client attach claude'`
+repair line, and that command is still what clears it. Migrating those markers
+is the automatic re-arm [#999](https://github.com/hyparam/hypaware/issues/999)
+asks for and LLP 0186 `#follow-up-candidate-not-built-here` names: it is not
+built here, and it cannot be improvised, because no error code is persisted on
+a marker, so nothing on disk tells a floor refusal from a JSONC one. What this
+document settles is how the *next* floor refusal is classified. Residual 2 of
+#999 is closed for new occurrences and stays open for markers already written.
+
 <a id="what-a-retry-costs"></a>
 
 ### What the retry costs
@@ -127,9 +147,11 @@ keeps them there.
   `claude update` hint rather than `[refused]`, and the hint stays true: the
   status line is the same actionable signal, and the marker no longer promises
   that only a manual command can clear it.
-- The first daemon boot (or config confirmation) after the client is upgraded
-  performs the proxy-to-OTEL migration LLP 0262 designed, with no manual
-  `hyp client attach claude`.
+- On a machine whose refusal this build recorded, the first daemon boot (or
+  config confirmation) after the client is upgraded performs the proxy-to-OTEL
+  migration LLP 0262 designed, with no manual `hyp client attach claude`. A
+  marker written by an earlier release is not migrated
+  (`#markers-already-refused-are-not-migrated`).
 - `attempts` on such a marker grows one per pass. LLP 0186 left
   `attempts`-bounding on transient `failed` markers explicitly out of scope,
   and this document does not reopen it.
@@ -145,6 +167,10 @@ floor tests:
   below the floor records a retryable `failed` marker, and the next pass with
   the client upgraded attaches and writes `done`, with no re-arm call in
   between.
+- The limit, executable: a store seeded with the `refused` marker an earlier
+  release wrote still short-circuits with the client upgraded, so the day the
+  automatic re-arm lands, that test is what fails
+  (`#markers-already-refused-are-not-migrated`).
 
 ## References
 
