@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { SseParser } from '../../hypaware-core/plugins-workspace/ai-gateway/src/sse.js'
+import { SseParser, findSeparator } from '../../hypaware-core/plugins-workspace/ai-gateway/src/sse.js'
 
 /** @param {string} text */
 function feedWhole(text) {
@@ -102,7 +102,7 @@ function blocksOriginal(text) {
   return { blocks: out, rest: buf }
 }
 
-test('the single-pass scan splits blocks exactly where the two-probe scan did', () => {
+test('chunked feeds consume the same bytes the two-probe scan consumed', () => {
   // Random soups of the bytes that matter (CR, LF, text), whole and chunked.
   // Parity is on the split, so the oracle compares raw blocks, not parsed
   // events; a block that is only CRs or empty is still a block to both.
@@ -133,4 +133,32 @@ test('the single-pass scan splits blocks exactly where the two-probe scan did', 
     assert.deepEqual(got, expected, JSON.stringify({ text, size }))
     assert.equal(parser.buffer, oracleBuf, JSON.stringify({ text, size }))
   }
+})
+
+test('the single-pass scan splits blocks exactly where the two-probe scan did', () => {
+  // The parity that matters is the split *point*, not the byte count: an
+  // off-by-one in the CRLF branch (`{ idx: i, len: 3 }`) consumes exactly as
+  // many bytes and leaves the same remainder, yet hands `parseBlock` a block
+  // with a stray \r glued to its first field name. So compare the returned
+  // offset and length directly, and do it exhaustively rather than randomly:
+  // every string over {CR, LF, text} up to length 8, at every resume offset.
+  // That covers the overlaps the two terminators can form - \r\n\n, \n\r\n,
+  // \r\r\n\n, \n\n\r\n - and a trailing \r with no room to complete.
+  const alphabet = ['\r', '\n', 'x']
+  let checked = 0
+  /** @param {string} buf */
+  function walk(buf) {
+    for (let from = 0; from <= buf.length; from++) {
+      // The old search always ran from the front of a freshly sliced buffer,
+      // so the oracle for a resume at `from` is that search over the tail.
+      const tail = findSeparatorOriginal(buf.slice(from))
+      const want = tail === -1 ? -1 : { idx: tail.idx + from, len: tail.len }
+      assert.deepEqual(findSeparator(buf, from), want, JSON.stringify({ buf, from }))
+      checked++
+    }
+    if (buf.length === 8) return
+    for (const c of alphabet) walk(buf + c)
+  }
+  walk('')
+  assert.ok(checked > 80000, `only ${checked} split points compared`)
 })

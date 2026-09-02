@@ -85,11 +85,14 @@ export function isSseHeaders(headers) {
  * `\r\n\r\n` starting at `b` has its first newline at `b + 1`, and `\n\n`
  * cannot start there because the byte after it is `\r`.
  *
+ * Exported only so the parser tests can check every split point against the
+ * two-probe search this replaced; `feed` is the sole runtime caller.
+ *
  * @param {string} buf
  * @param {number} from
  * @returns {{ idx: number, len: number } | -1}
  */
-function findSeparator(buf, from) {
+export function findSeparator(buf, from) {
   let i = buf.indexOf('\n', from)
   while (i !== -1) {
     if (buf.charCodeAt(i + 1) === 10) return { idx: i, len: 2 }
