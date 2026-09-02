@@ -18,17 +18,17 @@ hyparam/hypaware#1165, PR #1152, hyparam/hypaware-server#402
 
 > The poll login lane reports two outcomes that are not what happened. A
 > server too old to have the poll endpoint is reported as a retriable local
-> failure, so the wizard invites a retry that fails identically forever and the
-> CLI advises a static token against a server-version fault. A
-> sign-in that *succeeded* but whose delivery the client could not read is
-> reported as a timeout, because the single delivery is already spent. Both
-> were found reviewing PR #1152, both reproduce on `origin/master` today, and
-> neither has a fix inside the decisions that produced them: the first is
-> foreclosed by LLP 0179's classification rule and LLP 0342 D3's promise that
-> the outcome codes are untouched, the second by LLP 0342 D3's single delivery,
-> which LLP 0342 D4 leans on for its security argument. This document states
-> both gaps, carries the reproductions, and lays out the option space. It
-> decides nothing.
+> failure, so the wizard prints its try-again sentence over a fault no retry
+> can clear and the CLI advises a static token against a server-version fault.
+> A settled flight whose delivery the client could not read is reported as a
+> timeout, because the single delivery is already spent: that loses a
+> successful sign-in, and loses a real D7 refusal the same way. Both were found
+> reviewing PR #1152, both reproduce on `origin/master` today, and neither has
+> a fix inside the decisions that produced them: the first is foreclosed by
+> LLP 0179's outcome vocabulary and LLP 0342 D3's promise that those codes are
+> untouched, the second by LLP 0342 D3's single delivery, which LLP 0342 D4
+> leans on for its security argument. This document states both gaps, carries
+> the reproductions, and lays out the option space. It decides nothing.
 
 ## Context {#context}
 
@@ -94,7 +94,11 @@ Two things are wrong in that transcript, and they are separable:
    timeout on a box with no browser" (LLP 0058 D8). Here it advises a
    `--token-file` static token as the way around a server that is too old,
    which is unrelated to the fault and is the loudest actionable line on
-   screen.
+   screen. LLP 0342 already retired the premise underneath that gate: its
+   forward-ref on D8 says "The 'no reachable loopback' premise is retired
+   along with the loopback itself" (`0058:190-194`). So the hint is stale on
+   *every* poll-lane failure, not only this one; the stale server is just
+   where it reads most absurdly.
 
 Nothing is lost or unsafe: no state is written, no code is minted, and the
 correct message prints on every attempt. This is interactive UX fidelity.
@@ -125,10 +129,14 @@ joins the LLP 0179 vocabulary; the poller tags its error so
 `loginFailureReason` can see it; `classifyLoginFailure` adds it to the
 `'failed'` set. Costs: it breaks the "definitive means D7" invariant, so the
 `@ref` and LLP 0179's closed-set sentence both need superseding, and the split
-becomes "server refusals plus one client-side judgment". It also needs a
-channel from the poller that is not `callbackError`, since `callbackError`'s
-whole meaning is "this is a D7 code" (a distinct error property, or an error
-subclass). And it needs a third branch in `printJoinFailure`
+becomes "server refusals plus one client-side judgment". It needs a channel
+from the poller that is not `callbackError`, since `callbackError`'s whole
+meaning is "this is a D7 code" - though that channel is nearly free: `fail()`
+(`:100-112`) already takes the value as its `kind` argument and `:183` already
+passes `'no_poll_endpoint'`, so it is one `Object.assign` beside the
+`callbackError` one at `:110`, and the reason name this option proposes is the
+string the poller already uses for this error. The real cost is the third
+branch it needs in `printJoinFailure`
 (`wizard/index.js:1048-1058`), which today has only `org_selection_required`
 and the fallback "Joining failed: an admin needs to grant this account access
 before this machine can enroll." Without that branch, classifying
@@ -157,9 +165,10 @@ instead of printing one sentence for every retriable failure. The wiring is
 already there: `join.js:94` returns `reason` on both statuses, and
 `WizardJoinResult.reason` is documented as "the login lane's reason code, which
 is what `printJoinFailure` branches on to name the wizard-level consequence"
-(`wizard/types.d.ts:415-418`). Costs: it still needs A's channel out of the
-poller, and it still reopens LLP 0179#outcome's enumeration and LLP 0342 D3's
-"untouched" promise, so it is not a patch either; the span `ERROR_KIND`
+(`wizard/types.d.ts:415-418`). Costs: it still needs A's (nearly free)
+channel out of the poller, and it still reopens LLP 0179#outcome's enumeration
+and LLP 0342 D3's "untouched" promise, so it is not a patch either; the span
+`ERROR_KIND`
 (`join.js:93`) keeps saying `login_abandoned` for a fault nobody abandoned;
 and the definitive/retriable split stays a name that no longer describes what
 the wizard does with it, since the fork returns either way. Buys: the same
@@ -172,14 +181,16 @@ directly.
 **D. Fix only the misleading hint.** Leave the vocabulary and the
 classification alone; make the headless hint conditional on something narrower
 than `!callbackError`, so a stale server does not get told to try a static
-token. Costs: still needs a channel from the poller for "not a browser
-problem", so it pays most of A's plumbing for half the fix, and the wizard
-keeps printing its retriable sentence over a fault that is not retriable.
-Buys: the smallest change that removes the actively wrong advice on the CLI
-surface where it is loudest, it needs no `printJoinFailure` branch, and it
-touches no Accepted decision's settled text,
-since LLP 0179#no-prose-control-flow puts messages explicitly outside the
-contract.
+token. Costs: still needs the poller channel (A's `kind`), and the wizard keeps
+printing its retriable sentence over a fault that is not retriable, so it fixes
+the CLI surface and leaves the wizard one alone. It also has to be weighed
+against LLP 0342's Implementation surface line, which lists
+`remote_commands.js` messages as unchanged (`0342:178`). Buys: the smallest
+change that removes the actively wrong advice where it is loudest, it needs no
+`printJoinFailure` branch, it touches no Accepted decision's settled text (both
+LLP 0179#no-prose-control-flow and LLP 0342's own retirement note on LLP 0058
+D8 put this text outside the contract), and it is the one option that also
+helps the timeout case, where the same stale hint prints.
 
 **E. Nothing.** Costs: the deployment where this fires is exactly the one
 LLP 0342 D2 anticipated and wrote a message for, so the tool is at its least
@@ -187,7 +198,7 @@ helpful in the case its design predicted. Buys: no decision is reopened, and
 there is exactly one deployed hypaware-server (D2), which we upgrade, so the
 window in which this can fire is bounded by our own deploy order.
 
-## Problem 2: an unreadable `200 complete` strands a successful login {#lost-delivery}
+## Problem 2: an unreadable settled response strands the login {#lost-delivery}
 
 `login_poll.js:142` reads the body inside the `try`:
 
@@ -197,10 +208,11 @@ body = JSON.parse(await response.text())
 ```
 
 The `catch` treats everything in that block as transient, which is right for a
-network error and wrong for exactly one case: the response the server has
-already committed to. The server's delivery is single-shot
-(LLP 0342 D3: "success; **single delivery**, the flight is consumed"), so once
-the `200 complete` leaves the server the code is spent whether or not the
+network error and wrong for the two responses the server has already committed
+to. LLP 0342 D3's table consumes the flight on both:
+`200 { "status": "complete" }` is "success; **single delivery**, the flight is
+consumed", and `200 { "status": "failed" }` is "a D7 refusal ...; also
+consumed". So once either leaves the server it is spent whether or not the
 client read it. The per-poll abort (`:136`) or a dropped socket during the body
 rejects `text()`, the poller keeps polling, every later poll answers
 `404 unknown_state`, and the wait ends at `:199-200` with "timed out waiting
@@ -220,6 +232,17 @@ remoteLogin outcome : {"exitCode":1,"reason":"login_failed"}   (the sign-in actu
 Nothing is leaked or corrupted: the one-time code goes unredeemed, the PKCE
 verifier never leaves client memory, no token is minted, no session is written,
 and re-running `hyp remote login` with a fresh flight works.
+
+**The refusal body has the same fault, and it lands harder.** The `try` does
+not distinguish the two consumed shapes, so an aborted or dropped body on a
+`200 failed` loses a real D7 refusal the same way. A genuine `no_membership`
+or `org_not_permitted` then reaches the wizard as "timed out waiting for the
+browser login to complete", so `login_failed`, so `'abandoned'`, so "Sign-in
+did not complete. You can try again." That is Problem 1's defect arriving by
+Problem 2's mechanism, and it lands harder: this outcome really is definitive
+under LLP 0179, and re-running cannot fix a membership the server refused. It
+also constrains the options below, since A keeps a *code* redeemable and a
+refusal carries no code.
 
 ### The window is wider than "a tiny JSON body takes 10 seconds" {#deadline-clamp}
 
@@ -282,26 +305,39 @@ is already in client memory and the login proceeds, which is the fault
 disappearing rather than moving. Server and client work, plus a contract
 change.
 
-**C. Bound the client's own contribution.** Stop issuing a poll whose budget
+**C. Stop the client aborting a body the server has committed to.** The
+per-poll timer is cleared in the `finally` (`:149`), so it stays armed across
+`await response.text()` and can cut a body whose headers already arrived.
+Clearing it the moment `doFetch` resolves closes that half outright, with no
+invented constant and no server work. Costs: half a fix, since a dropped socket
+mid-body and an abort before the headers both remain; and it leaves the body
+read unbounded unless it gets a bound of its own. Buys: the cheapest change on
+the list, it covers the refusal half as well as the success half, and it
+removes the amplifier in #deadline-clamp without having to know what a round
+trip costs.
+
+**D. Bound the client's own contribution.** Stop issuing a poll whose budget
 is shorter than a plausible round trip (skip straight to the timeout instead),
 and stop letting the deadline clamp shrink a poll that may already have
 consumed a delivery. Costs: does not fix the race, only the amplifier in
-#deadline-clamp; picks a "plausible round trip" number out of the air; and the
+#deadline-clamp; picks a "plausible round trip" number out of the air; the
 window it closes is narrow (#deadline-clamp measures one sub-round-trip poll
-per login, occasionally two). Buys: client-only, needs no server deploy, and
-removes the one end-of-budget case the client creates for itself on every run
-that reaches the deadline.
+per login, occasionally two); and C reaches the same amplifier more cheaply.
+Buys: client-only, needs no server deploy, and unlike C it also covers a poll
+whose budget expires before the headers arrive.
 
-**D. Report it honestly.** Remember that a `200` was received and unreadable,
+**E. Report it honestly.** Remember that a `200` was received and unreadable,
 and end the wait with a message saying the sign-in may have completed and to
 re-run, rather than a flat timeout. Costs: cosmetic in the sense that the login
 still fails; a new reason code would drag in Problem 1's whole question. Buys:
 the user stops being told something false about what happened, for a few lines
 in one file.
 
-**E. Nothing.** Costs: a successful sign-in occasionally reports as a failure,
-most likely for the slowest users. Buys: recourse already works, and the
-failure is safe in every respect that matters.
+**F. Nothing.** Costs: a successful sign-in occasionally reports as a failure,
+and a real refusal occasionally reports as a timeout, most likely for the
+slowest users. Buys: re-running recovers both (a fresh flight, and the refusal
+stated properly the second time), and the failure is safe in every respect that
+matters.
 
 ## What this does not cover {#not-covered}
 
@@ -314,6 +350,8 @@ changes nothing (no production caller closes mid-sleep). The first is the poll
 that can consume a delivery it cannot read, so it is not a separate residue and
 an answer at #deadline-clamp absorbs it.
 
-**The D7 taxonomy.** Untouched. Both problems are about outcomes that are not
-D7 refusals, and the question is whether the chain that carries D7 codes should
-also carry something else.
+**The D7 taxonomy.** Untouched. Problem 1 is about an outcome that is not a D7
+refusal, and the question there is whether the chain that carries D7 codes
+should also carry something else. Problem 2 does reach D7 refusals, but by
+losing one in transit rather than by disputing the vocabulary: what a recovered
+refusal would say is exactly what LLP 0058 D7 says today.
