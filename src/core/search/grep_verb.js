@@ -162,6 +162,18 @@ export const queryGrepVerb = {
       if (err instanceof GrepQueryError) throw new VerbUsageError(err.message)
       throw err
     }
+    // A backend that answered with the wrong shape must not read as an
+    // empty archive. The render falls back field by field, so a missing or
+    // misnamed `hits` renders as a clean zero-row table with neither
+    // completeness notice and exit 0, and the one guard that would have
+    // caught it (the zero-files line below) cannot fire for a
+    // server-shaped result: its counters are the local service's own and
+    // are undefined, not 0. That is the forged "nothing is stored" the
+    // summary's coverage clause exists to prevent, so a malformed answer
+    // is a failed search rather than an honest zero.
+    if (!Array.isArray(result?.hits)) {
+      throw new Error('the grep_search backend returned no hits array')
+    }
     // The clamp's own promise, carried through to the render: at the
     // ceiling there is no larger `--limit` left to ask for, so the
     // truncation notice must not send the caller back to a flag that

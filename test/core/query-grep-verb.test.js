@@ -9,6 +9,12 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
+// A namespace import, not a named one: `registerHooks` is absent below
+// Node 22.15 and a named import of a missing builtin export is a load-time
+// SyntaxError, which would take the whole file down instead of skipping the
+// one test that needs it.
+import * as nodeModule from 'node:module'
 
 import { verbToCommand } from '../../src/core/cli/verb_command.js'
 import { argvToParams } from '../../src/core/cli/verb_codec.js'
@@ -503,8 +509,9 @@ test('the argument refusals run before the seam, so a typo never reaches the bac
 
 test('with a backend supplied the local plane is never consulted', async () => {
   // `injectedCtx` makes storage/refresh/callerCwd throw on any access, so
-  // this fails loudly if the operation still reaches for the cache service
-  // (or eagerly imports the module that would).
+  // this fails loudly if the operation still reaches for the cache service.
+  // Merely LOADING that service touches no context field, so the proxy
+  // cannot see it; the child probe below is what pins the import's place.
   const ctx = injectedCtx(async () => ({
     hits: [{
       date: '2026-08-12', sessionId: 'srv-s', agentId: null, conversationId: null,
@@ -563,4 +570,74 @@ test("a backend's own refusal is the caller's usage error; anything else is a fa
       return true
     },
   )
+})
+
+test('a backend answering with the wrong shape is a failed search, not an empty archive', async () => {
+  // The render falls back field by field, so a misnamed or missing `hits`
+  // would otherwise reach the caller as a clean zero-row table with exit 0,
+  // and the zero-files line that guards against a forged "nothing is
+  // stored" cannot fire for a server-shaped result. Exit 1 keeps a broken
+  // backend distinguishable from an archive with nothing in it.
+  const misnamed = injectedCtx(async () => ({ results: [], truncated: false, exhausted: true }))
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle' }, misnamed) },
+    (err) => {
+      assert.ok(!(err instanceof VerbUsageError))
+      assert.match(/** @type {Error} */ (err).message, /no hits array/)
+      return true
+    },
+  )
+  const nothing = injectedCtx(async () => undefined)
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle' }, nothing) },
+    /no hits array/,
+  )
+})
+
+/**
+ * The child probe for the load-order pin below. Records every module the
+ * injected path pulls in, then fails if the local search stack is among
+ * them. `--input-type=module` so the top-level `await` and the load hook
+ * both work; the verb's specifier arrives by env so the source stays a
+ * plain string.
+ */
+const NO_LOCAL_LOAD_PROBE = `
+  import assert from 'node:assert/strict'
+  import { registerHooks } from 'node:module'
+  const loaded = []
+  registerHooks({ load(url, context, next) { loaded.push(url); return next(url, context) } })
+  const { queryGrepVerb } = await import(process.env.HYP_TEST_GREP_VERB_MODULE)
+  await queryGrepVerb.operation(
+    { query: 'needle' },
+    { search: async () => ({ hits: [], truncated: false, exhausted: true }) },
+  )
+  assert.ok(
+    !loaded.some((url) => url.endsWith('/search/grep_service.js')),
+    'grep_service.js was loaded on the injected path: the dynamic import escaped buildLocalBackend',
+  )
+`
+
+test('an injecting host never loads the local search stack', (t) => {
+  // The throwing proxy above catches a local plane that is CONSULTED; it
+  // cannot catch one that is merely LOADED, because importing a module
+  // touches no context field. Hoisting the `await import` back out of
+  // `buildLocalBackend` leaves every case above green while costing an
+  // injecting host the load-time win LLP 0353#default-resolution buys, and
+  // that win is half the reason the import sits in the fallback branch.
+  //
+  // Which modules a process has loaded is a property of the whole process,
+  // and the suite above has already pulled in `grep_service.js` through the
+  // projected command, so the probe needs a process of its own.
+  if (typeof nodeModule.registerHooks !== 'function') {
+    // Node's synchronous load hook lands in 22.15; the package floor is
+    // 22.12, so an older supported runtime skips rather than fails. Both CI
+    // matrix legs are well past it.
+    return t.skip('node:module registerHooks is unavailable on this runtime')
+  }
+  const verbModule = new URL('../../src/core/search/grep_verb.js', import.meta.url).href
+  const run = spawnSync(process.execPath, ['--input-type=module', '--eval', NO_LOCAL_LOAD_PROBE], {
+    encoding: 'utf8',
+    env: { ...process.env, HYP_TEST_GREP_VERB_MODULE: verbModule },
+  })
+  assert.equal(run.status, 0, run.stderr)
 })

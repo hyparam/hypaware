@@ -51,6 +51,10 @@ test('src/ and types/ are both in the published file set', () => {
 test('the entry point resolves and carries the shared surface', async () => {
   const mod = await import('hypaware/core/search')
   assert.deepEqual(Object.keys(mod).sort(), [
+    // The refusal kind an injected grep_search backend must throw for the
+    // verb to read it as a usage error (LLP 0353#refusals): part of the
+    // shared surface, not an internal of the matcher.
+    'GrepQueryError',
     'MAX_MATCH_COLUMNS',
     'MAX_QUERY_LENGTH',
     'SCAN_COLUMNS',
