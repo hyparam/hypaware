@@ -128,7 +128,7 @@ export async function runDaemonStatus(argv, ctx) {
   const parsed = parseCoreCommandArgv('daemon status', argv, ctx)
   if (!parsed.ok) return parsed.code
   const json = parsed.params.json === true
-  const { readStatusFile } = await import('../daemon/status.js')
+  const { readStatusFile, daemonHeartbeatAgeMs, DAEMON_HEARTBEAT_STALE_MS, formatGapDuration } = await import('../daemon/status.js')
   const { readPidFile, processIsAlive } = await import('../daemon/pid.js')
   const stateDir = readObservabilityEnv(ctx.env).stateDir
   /** @type {ReturnType<typeof readStatusFile>} */
@@ -157,7 +157,28 @@ export async function runDaemonStatus(argv, ctx) {
     ctx.stdout.write('daemon: not started (no status file)\n')
     return 0
   }
-  const liveUptimeMs = running && status.healthyAt
+  // The heartbeat `hyp status` reads, read here too. `healthyAt + uptimeMs`
+  // is the moment of the daemon's last status write, so a live process whose
+  // last write is older than the window is not running its loop whatever the
+  // file's `state` says. This surface transcribed that claim, so during the
+  // #1003 wedge `hyp status` said `degraded` while `hyp daemon status` said
+  // `healthy` with a climbing uptime: one operator, two answers.
+  //
+  // Same pid guard as the collector: `processIsAlive` proves a pid is taken,
+  // not that the daemon took it, so a leftover snapshot whose pid the OS has
+  // since reissued is nobody's frozen heartbeat.
+  // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: the state printed for a live pid is this command's verdict, not a transcription of the file
+  const snapshotIsThisProcess =
+    typeof status.pid !== 'number' || status.pid === pidEntry?.pid
+  const heartbeatAgeMs = running && snapshotIsThisProcess
+    ? daemonHeartbeatAgeMs(status, Date.now())
+    : null
+  const staleNote = heartbeatAgeMs !== null && heartbeatAgeMs > DAEMON_HEARTBEAT_STALE_MS
+    ? ` (no status write for ${formatGapDuration(heartbeatAgeMs)})`
+    : ''
+  // A frozen loop's uptime stops at its last write. `now - healthyAt` is the
+  // right reading only while the ticks that fill the gap are still landing.
+  const liveUptimeMs = running && !staleNote && status.healthyAt
     ? Math.max(0, Date.now() - Date.parse(status.healthyAt))
     : status.uptimeMs
   if (json) {
@@ -176,7 +197,8 @@ export async function runDaemonStatus(argv, ctx) {
   }
   // Everything below this line came out of the file and is going to a
   // terminal, so everything below this line is cleaned on the way.
-  ctx.stdout.write(`daemon: ${printable(status.state)}${running ? '' : ' (no live process)'}\n`)
+  const stateText = staleNote ? 'degraded' : printable(status.state)
+  ctx.stdout.write(`daemon: ${stateText}${running ? '' : ' (no live process)'}${staleNote}\n`)
   ctx.stdout.write(`  pid:        ${printableNumber(status.pid)}\n`)
   ctx.stdout.write(`  startedAt:  ${printable(status.startedAt)}\n`)
   if (status.healthyAt) ctx.stdout.write(`  healthyAt:  ${printable(status.healthyAt)}\n`)

@@ -9,6 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { runDaemonStatus } from '../../src/core/commands/daemon.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
@@ -56,8 +57,7 @@ function collectOpts(hypHome) {
  */
 function writeDaemonSnapshot(stateRoot, { pid, lastPersistAgoMs, port, otelPort }) {
   const healthyAtMs = Date.now() - lastPersistAgoMs - 60_000
-  writePidFile(stateRoot, /** @type {any} */ ({ pid, runId: 'test-run', mode: 'detached' }))
-  writeStatusFile(stateRoot, /** @type {any} */ ({
+  const snapshot = {
     state: 'healthy',
     pid,
     startedAt: new Date(healthyAtMs - 1000).toISOString(),
@@ -70,7 +70,10 @@ function writeDaemonSnapshot(stateRoot, { pid, lastPersistAgoMs, port, otelPort 
       { name: 'claude-otel', plugin: '@hypaware/otel', state: 'started', details: { host: '127.0.0.1', port: otelPort } },
     ],
     sinks: [],
-  }))
+  }
+  writePidFile(stateRoot, /** @type {any} */ ({ pid, runId: 'test-run', mode: 'detached' }))
+  writeStatusFile(stateRoot, /** @type {any} */ (snapshot))
+  return snapshot
 }
 
 /**
@@ -244,4 +247,128 @@ test('a leftover snapshot is not read as the heartbeat of whatever now holds its
   assert.equal(report.daemon.running, true)
   assert.equal(report.diagnostics.find((d) => d.kind === 'daemon_heartbeat_stale'), undefined)
   assert.equal(report.overall, 'healthy')
+})
+
+// The same wedge, read from the other command. `hyp status` reports the
+// collector's verdict, but `hyp daemon status` transcribed `state` straight
+// out of the file and recomputed `uptime_ms` against `Date.now()`, so during
+// the wedge the two commands gave an operator contradictory answers and the
+// uptime counter went on climbing for a loop that had stopped running
+// (issue #1183, deferred from PR #1181).
+// @ref LLP 0348#stale-heartbeat-is-unresponsive [tests]: the state reported for a live pid is a verdict on every surface that prints it, not a transcription
+
+/**
+ * @param {string} hypHome
+ * @param {string[]} [argv]
+ * @returns {Promise<{ code: number, out: string }>}
+ */
+async function runDaemonStatusText(hypHome, argv = []) {
+  let out = ''
+  const ctx = /** @type {any} */ ({
+    env: { ...process.env, HYP_HOME: hypHome },
+    stdout: { write: (/** @type {string} */ chunk) => { out += String(chunk); return true } },
+    stderr: { write: () => true },
+    argv,
+  })
+  const code = await runDaemonStatus(argv, ctx)
+  return { code, out }
+}
+
+test('hyp daemon status does not repeat a wedged daemon\'s recorded healthy state', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const snapshot = writeDaemonSnapshot(stateRoot, {
+    pid: process.pid,
+    lastPersistAgoMs: 11 * 60_000,
+    port: 18521,
+    otelPort: 4319,
+  })
+
+  const { out } = await runDaemonStatusText(hypHome)
+  assert.match(out, /^daemon: degraded/, 'a daemon that cannot serve must not print healthy here either')
+  assert.match(out, /no status write for 11m/, 'and says how long the snapshot has been frozen')
+  // The uptime counter stops at the last write. `now - healthyAt` would keep
+  // advancing it for a loop that is not running.
+  assert.match(out, new RegExp(`uptime_ms:\\s+${snapshot.uptimeMs}\\n`))
+})
+
+// The machine copy is unchanged: `--json` stays a byte-exact copy of the file
+// (LLP 0225), including the `uptimeMs` the heartbeat derivation reads.
+test('hyp daemon status --json still copies the wedged snapshot verbatim', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const snapshot = writeDaemonSnapshot(stateRoot, {
+    pid: process.pid,
+    lastPersistAgoMs: 11 * 60_000,
+    port: 18521,
+    otelPort: 4319,
+  })
+
+  const { out } = await runDaemonStatusText(hypHome, ['--json'])
+  const payload = JSON.parse(out)
+  assert.equal(payload.running, true)
+  assert.equal(payload.state, 'healthy')
+  assert.equal(payload.uptimeMs, snapshot.uptimeMs)
+})
+
+// The over-fixing guard. A daemon that is ticking normally prints exactly what
+// it printed before: its own state, no annotation, and the live uptime.
+test('hyp daemon status still prints the recorded state and live uptime for a ticking daemon', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const snapshot = writeDaemonSnapshot(stateRoot, {
+    pid: process.pid,
+    lastPersistAgoMs: 5_000,
+    port: 18521,
+    otelPort: 4319,
+  })
+
+  const { out } = await runDaemonStatusText(hypHome)
+  assert.match(out, /^daemon: healthy\n/)
+  assert.doesNotMatch(out, /status write/)
+  const uptime = Number(/uptime_ms:\s+(\d+)/.exec(out)?.[1])
+  assert.ok(uptime >= snapshot.uptimeMs, 'a live daemon keeps the up-to-date uptime')
+})
+
+// A leftover snapshot ages forever and is a record, not a claim about now, so
+// it must not be annotated as stale.
+test('hyp daemon status leaves a dead daemon\'s leftover snapshot alone', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const healthyAtMs = Date.now() - 24 * 3_600_000
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'healthy',
+    pid: 999_999,
+    startedAt: new Date(healthyAtMs).toISOString(),
+    healthyAt: new Date(healthyAtMs).toISOString(),
+    uptimeMs: 60_000,
+    runId: 'test-run',
+    mode: 'detached',
+    sources: [],
+    sinks: [],
+  }))
+
+  const { out } = await runDaemonStatusText(hypHome)
+  assert.match(out, /^daemon: healthy \(no live process\)\n/)
+  assert.doesNotMatch(out, /status write/)
+})
+
+// Pid reuse, on this surface too: the pid file names a live process, the
+// snapshot names a different one, so the frozen pair is not that stranger's
+// heartbeat and must not be reported as one.
+test('hyp daemon status does not read a leftover snapshot as the heartbeat of whatever now holds its pid', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const healthyAtMs = Date.now() - 90 * 60_000
+  writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'test-run', mode: 'detached' }))
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'healthy',
+    pid: process.pid + 1,
+    startedAt: new Date(healthyAtMs).toISOString(),
+    healthyAt: new Date(healthyAtMs).toISOString(),
+    uptimeMs: 60_000,
+    runId: 'other-run',
+    mode: 'detached',
+    sources: [],
+    sinks: [],
+  }))
+
+  const { out } = await runDaemonStatusText(hypHome)
+  assert.match(out, /^daemon: healthy\n/)
+  assert.doesNotMatch(out, /status write/)
 })
