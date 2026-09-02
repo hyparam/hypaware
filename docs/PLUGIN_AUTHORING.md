@@ -204,10 +204,12 @@ has no notion of property ownership, so the error arrives at runtime as a
 
 Only the four required members are checked, so only they are refused. An
 optional member the copy leaves behind (`plugin`, `aliases`, `hidden`,
-`audience`, a `help` string) is dropped with no error at all: registration
-succeeds and the command runs with that member simply absent, so a
-prototype-resident `aliases` is a dead alias and a prototype-resident
-`hidden` still lists in `hyp --help`. `plugin` is worth naming separately,
+`audience`, a `help` string) is not refused: registration succeeds and the
+command runs with that member simply absent, so a prototype-resident
+`aliases` is a dead alias and a prototype-resident `hidden` still lists in
+`hyp --help`. Nothing fails, so the only sign is a WARN the registry writes
+at register time, on stderr and into the structured log, naming the command
+and the members its copy did not carry. `plugin` is worth naming separately,
 because the registry derives `category` and `audience` from it: losing it
 does not leave a field blank, it files the command under a category named
 after the first word of its own name and gives it the `everyday` audience

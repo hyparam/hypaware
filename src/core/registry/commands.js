@@ -1,5 +1,6 @@
 // @ts-check
 
+import { Attr, getLogger } from '../observability/index.js'
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
@@ -79,6 +80,13 @@ export function createCommandRegistry() {
         `CommandRegistry.register: '${record.name}' missing run()${copyMiss(command, record, 'run')}`
       )
     }
+    // Probed here, said below. The probe has to read the copy before the
+    // defaulting, or a dropped `category` is papered over by the value
+    // derived to replace it; the saying has to wait until the registration
+    // has actually landed, because four refusals still stand between here
+    // and that, and a WARN that says a command was registered degraded is
+    // false about a command the next line refuses outright.
+    const dropped = droppedOptionals(command, record)
     // Fill the common metadata at the registry boundary so third-party
     // commands participate without boilerplate. Canonical registrations can
     // override every field; aliases always inherit this one semantic record.
@@ -112,6 +120,7 @@ export function createCommandRegistry() {
     for (const alias of record.aliases ?? []) {
       aliasIndex.set(alias, record.name)
     }
+    warnDroppedOptionals(record.name, dropped)
   }
 
   /** @param {string} name */
@@ -236,6 +245,101 @@ export function createCommandRegistry() {
   }
 
   return { register, registerGroup, unregister, get, getGroup, listGroups, list, has, size, match }
+}
+
+/**
+ * Every optional member of `CommandRegistration`. The four required ones are
+ * refused above by name; these are the ones a silent drop can reach.
+ *
+ * @type {readonly string[]}
+ */
+const OPTIONAL_MEMBERS = Object.freeze([
+  'plugin',
+  'category',
+  'audience',
+  'bootProfile',
+  'group',
+  'help',
+  'aliases',
+  'hidden',
+])
+
+/**
+ * Which optional members the copy dropped, of those the registration still
+ * declares.
+ *
+ * Read before the defaulting, so a dropped `category` is reported rather than
+ * papered over by the value derived to replace it. Presence-only, by reusing
+ * the same probe: naming a member must not run the accessor that provides it,
+ * which is the whole reason {@link copyMiss} reads `in`.
+ *
+ * @param {CommandRegistration} command the registration as passed
+ * @param {CommandRegistration} record the own-enumerable copy the checks read
+ * @returns {string[]} the dropped member names, in declaration order
+ */
+function droppedOptionals(command, record) {
+  return OPTIONAL_MEMBERS.filter((key) => copyMiss(command, record, key) !== '')
+}
+
+/**
+ * Say that the copy dropped an optional member the registration still
+ * declares.
+ *
+ * {@link copyMiss} explains the same loss where a required member makes it a
+ * refusal. An optional one fails no shape check, so there is no refusal to
+ * hang the diagnosis on: registration succeeds and the command runs without
+ * it. Every symptom is an absence - the alias index gets nothing, a command
+ * that asked to be `hidden` lists in `hyp --help`, and a lost `plugin`
+ * re-derives `category` from the command's own name and `audience` from
+ * that - which is exactly the shape LLP 0329 settled must reach a channel
+ * that exists with no telemetry configured, so the warning takes the stderr
+ * mirror. It fires only on a registration that lost something, so an ordinary
+ * one stays as quiet as it was.
+ *
+ * Said once the command is in both indexes, never before: everything this
+ * line asserts is about a registration that happened, and a refusal for a
+ * duplicate name, a colliding alias, or an invalid `audience` still stands
+ * between the probe and here.
+ *
+ * Which is exactly why the say is contained the way {@link copyMiss} contains
+ * the probe. There the rule is that a throwing `has` trap costs the warning
+ * and never the registration it was only commenting on; here the same rule
+ * has to hold from the other side, because this line runs *after* `byName`
+ * and the alias index were written. The mirror's `process.stderr.write` is
+ * the one step of the emit not already guarded, and a throw escaping it would
+ * take `register` down over a command it had just registered: the caller sees
+ * a failure, `activatePlugins` files a `plugin.activate_failed`, and the
+ * command stays live and dispatchable under a plugin reported as not loaded.
+ * A diagnostic may cost itself. It may not cost the thing it describes.
+ *
+ * The members are named as *declared*, not as stored: `category`, `audience`
+ * and `bootProfile` are defaulted a few lines above the probe, so the record
+ * does carry a value for them, just not the one the registration declared.
+ *
+ * @param {string} name the registered command's name
+ * @param {string[]} dropped what {@link droppedOptionals} found, possibly none
+ * @ref LLP 0329#stderr-mirror [implements]: a degradation observable only as an absence opts into the mirror
+ */
+function warnDroppedOptionals(name, dropped) {
+  if (dropped.length === 0) return
+  const named = dropped.map((key) => `'${key}'`).join(', ')
+  try {
+    getLogger('command-registry', { mirrorStderr: true }).warn(
+      `CommandRegistry.register: '${name}' registered without the declared ${named} - ` +
+        'reachable on the registration but not an own enumerable property, so the ' +
+        "registry's copy did not carry it (a prototype member, or one defined non-enumerable)",
+      {
+        [Attr.OPERATION]: 'command.register',
+        [Attr.STATUS]: 'degraded',
+        [Attr.ERROR_KIND]: 'optional_member_not_copied',
+        command_name: name,
+        dropped_members: dropped.join(','),
+      }
+    )
+  } catch {
+    // Nothing to say it on: the channel that would carry the report is the
+    // thing that just failed. The registration stands either way.
+  }
 }
 
 /**
