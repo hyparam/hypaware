@@ -91,6 +91,24 @@ export async function activate(ctx) {
     run: async (argv, cmdCtx) => runCredential(cmdCtx, config, stateDir),
   })
 
+  // The group has no bare command, so without this its `--help` opens on a
+  // naked `usage:` line and never says what the subcommands are for (#1005).
+  // @ref LLP 0214#d2 [implements]: a plugin group with no bare command keeps its voice in the group registry
+  ctx.commands.registerGroup({
+    name: 'client claude-account',
+    plugin: PLUGIN_NAME,
+    summary: 'Hold the Anthropic credential for clients that cannot hold their own',
+    help: [
+      'Claude Desktop delegates inference to a gateway that has to present an',
+      'Anthropic credential on its behalf. These subcommands manage that one',
+      'credential: sign in, sign out, and report which mode is in force.',
+      '',
+      'Fleet policy picks the mode. Under a static org API key there is nothing',
+      'to sign in to and login refuses; under subscription mode login stores a',
+      'per-user Claude sign-in on this machine only.',
+    ].join('\n'),
+  })
+
   ctx.commands.register({
     name: 'client claude-account login',
     aliases: ['claude-account login'],

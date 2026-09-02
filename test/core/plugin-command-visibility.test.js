@@ -68,7 +68,10 @@ async function collectRegisteredCommands(activate) {
     log: { info() {}, warn() {}, error() {}, debug() {} },
     configRegistry: { registerSection() {} },
     provideCapability() {},
-    commands: { register: (/** @type {any} */ cmd) => { registered.set(cmd.name, cmd) } },
+    commands: {
+      register: (/** @type {any} */ cmd) => { registered.set(cmd.name, cmd) },
+      registerGroup() {},
+    },
     sources: { register() {} },
     sinks: { register() {} },
     backfills: { register() {} },

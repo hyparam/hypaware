@@ -172,7 +172,12 @@ function snapshotRegistry(runtime, commandRegistry) {
     sinks: sinks.listContributions().map((e) => e.contribution.name),
     datasets: runtime.query.listDatasets().map((d) => d.name),
     commands: commands.map((c) => c.name),
-    commandDetails: commands.map((c) => ({ name: c.name, summary: c.summary, hidden: c.hidden === true })),
+    commandDetails: commands.map((c) => ({
+      name: c.name,
+      summary: c.summary,
+      aliases: [...(c.aliases ?? [])],
+      hidden: c.hidden === true,
+    })),
     commandGroups: groups.map((g) => ({ name: g.name, ...(g.summary !== undefined ? { summary: g.summary } : {}) })),
     skills: runtime.skills.list().map((s) => s.name),
     agents: runtime.agents.list().map((a) => a.name),

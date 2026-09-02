@@ -57,6 +57,8 @@ export interface DoctorReport {
 export interface RegisteredCommand {
   name: string
   summary: string
+  /** Alternate spellings the registration claims; empty when it claims none. */
+  aliases: string[]
   /** True when the registration sets `hidden`, keeping it out of every help listing. */
   hidden: boolean
 }
