@@ -8,11 +8,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import net from 'node:net'
 import zlib from 'node:zlib'
 
-import { createOtlpJsonServer, listenAndResolve } from '../../src/core/otlp/server.js'
+import { createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../../src/core/otlp/server.js'
 
 /**
+ * @import { PluginLogger } from '../../hypaware-plugin-kernel-types.js'
  * @import { OtlpJsonServerOptions, OtlpRequest, OtlpSignal } from '../../src/core/otlp/types.js'
  */
 
@@ -74,6 +76,37 @@ function postWithoutContentType(port, path) {
         resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
       )
     })
+    req.on('error', reject)
+    req.end('{}')
+  })
+}
+
+/**
+ * Send a request with an explicit `Host` header, which `fetch` forbids.
+ *
+ * @param {number} port
+ * @param {{ path: string, host: string, method?: string }} options
+ * @returns {Promise<{ status: number, body: string }>}
+ */
+function requestWithHost(port, options) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: options.path,
+        method: options.method ?? 'POST',
+        headers: { host: options.host, 'content-type': 'application/json' },
+      },
+      (res) => {
+        /** @type {Buffer[]} */
+        const chunks = []
+        res.on('data', (chunk) => chunks.push(chunk))
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+        )
+      }
+    )
     req.on('error', reject)
     req.end('{}')
   })
@@ -360,6 +393,111 @@ test('without a control handler, control paths fall through as unknown OTLP rout
   } finally {
     await s.close()
   }
+})
+
+// A page whose domain re-resolves to 127.0.0.1 is same-origin with this
+// listener, so it needs no preflight and the content-type gate above lets it
+// through; the attacker's name in `Host` is the one signal that separates it
+// from a local exporter.
+test('a Host naming anything but loopback is refused on every route, control surface included', async () => {
+  /** @type {string[]} */
+  const controlPaths = []
+  const s = await startServer({
+    onControlRequest(req, res, url) {
+      controlPaths.push(url.pathname)
+      req.resume()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    },
+  })
+  try {
+    for (const path of ['/v1/logs', '/v1/traces', '/v1/metrics', '/_hypaware/ignore/session']) {
+      const res = await requestWithHost(s.bound.port, { path, host: 'attacker.example' })
+      assert.equal(res.status, 421, `${path} refuses a rebound Host`)
+      assert.match(JSON.parse(res.body).message, /Host/)
+    }
+    assert.equal(s.seen.length, 0, 'no export reached the handler')
+    assert.deepEqual(controlPaths, [], 'no control request reached the handler')
+
+    // A GET of the banner is refused too: rebinding reads as easily as it writes.
+    const banner = await requestWithHost(s.bound.port, { path: '/', host: 'attacker.example', method: 'GET' })
+    assert.equal(banner.status, 421)
+  } finally {
+    await s.close()
+  }
+})
+
+test('loopback Hosts keep passing, with any port and in every spelling', async () => {
+  const s = await startServer()
+  try {
+    const hosts = [
+      `127.0.0.1:${s.bound.port}`,
+      '127.0.0.1',
+      '127.0.0.2:9999',
+      `localhost:${s.bound.port}`,
+      'LocalHost',
+      `[::1]:${s.bound.port}`,
+      '[::1]',
+    ]
+    for (const host of hosts) {
+      const res = await requestWithHost(s.bound.port, { path: '/v1/logs', host })
+      assert.equal(res.status, 200, `Host: ${host} still exports`)
+    }
+    assert.equal(s.seen.length, hosts.length)
+  } finally {
+    await s.close()
+  }
+})
+
+// A `Host` no hostname can be read out of is refused with the foreign ones,
+// which is also what keeps it away from `new URL()`: it throws there, out of
+// the request handler, and takes the process with it. Sent over a raw socket
+// because an HTTP client will not put a space in a header value.
+test('a malformed Host is refused rather than parsed', async () => {
+  const s = await startServer()
+  try {
+    const socket = net.connect(s.bound.port, '127.0.0.1')
+    const statusLine = await new Promise((resolve, reject) => {
+      let received = ''
+      socket.on('connect', () => {
+        socket.write(
+          'POST /v1/logs HTTP/1.1\r\nHost: attacker example\r\n' +
+            'Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}'
+        )
+      })
+      socket.on('data', (chunk) => {
+        received += chunk.toString('utf8')
+        if (received.includes('\r\n')) resolve(received.split('\r\n')[0])
+      })
+      socket.on('error', reject)
+    })
+    socket.destroy()
+    assert.equal(statusLine, 'HTTP/1.1 421 Misdirected Request')
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('the Host check judges loopback connections only, and needs a Host to judge', () => {
+  /** @type {PluginLogger} */
+  const log = { debug() {}, info() {}, warn() {}, error() {} }
+  /** @param {string} localAddress @param {string} [host] */
+  const misdirected = (localAddress, host) =>
+    isMisdirectedHost(
+      /** @type {any} */ ({ socket: { localAddress }, headers: host === undefined ? {} : { host } }),
+      { name: 'hypaware/test', log }
+    )
+
+  assert.equal(misdirected('127.0.0.1', 'attacker.example'), true)
+  // How a dual-stack bind reports an IPv4 loopback peer. Still loopback.
+  assert.equal(misdirected('::ffff:127.0.0.1', 'attacker.example'), true)
+  assert.equal(misdirected('::1', 'attacker.example'), true)
+  // Bound to a routable address, the listener is meant to answer to whatever
+  // name resolves there, and a rebound request never lands on that address.
+  assert.equal(misdirected('203.0.113.5', 'collector.example'), false)
+  // No Host at all: HTTP/1.0 clients omit it and a browser never does.
+  assert.equal(misdirected('127.0.0.1'), false)
 })
 
 test('a listener can serve a subset of the signals', async () => {
