@@ -120,16 +120,18 @@ nothing ages out as an orphan at all: the orphan branch of `walkForRetired`
 runs only when the cursor named a live generation
 (`src/core/cache/maintenance.js:2800`), so `ORPHAN_GRACE_MS` never applies
 here. Its one other use, the unreferenced-file sweep's `removeStale`
-(`maintenance.js:1930`), carries no cursor gate of its own but is not reached
-either: `sweepLiveGeneration` returns before it unless the cursor it re-reads
-resolves to source-table layout (`maintenance.js:949`), and a refused cursor
-resolves to the layout-less default. Only a generation already carrying a
-`.retired` marker is reclaimed, after `GRACE_PERIOD_MS`. And the newest
-directory is not reliably the live one: a generation swap writes the new
-generation's data files, then the cursor, then the old generation's
-`.retired` marker, so a crash before the cursor write leaves a newer
-directory that was never published, and on this partition it is never swept
-away.
+(`maintenance.js:1930`), carries no cursor gate of its own but is not
+reached either: `sweepLiveGeneration` returns before it unless the cursor it
+works from resolves to source-table layout (`maintenance.js:949`), and on a
+refused partition that cursor is the layout-less default. Its own strict
+re-read answers null there, so it falls back to the caller's, which
+`readCursorSync` already defaulted (`maintenance.js:947`, `:304`). Only a
+generation already carrying a `.retired` marker is reclaimed, after
+`GRACE_PERIOD_MS`. And the newest directory is not reliably the live one: a
+generation swap writes the new generation's data files, then the cursor,
+then the old generation's `.retired` marker, so a crash before the cursor
+write leaves a newer directory that was never published, and on this
+partition it is never swept away.
 
 ### Options {#repair-options}
 
