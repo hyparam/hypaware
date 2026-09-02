@@ -296,13 +296,23 @@ all three are inside the (A)-(E) question rather than beside it:
   ([LLP 0160 §decision](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#decision)),
   so an ancestor marked `ignore` with a nested loosening at or under the `cwd`
   still enriches the admitted row with its remote, and, because it covers, does
-  so with **no** `refused_workspace_cwd` at all. (F) did not create this case:
-  on `master` the same row appeared whenever the ignored ancestor happened to
-  sort first. What (F) changed is that it no longer depends on JSON key order.
+  so with **no** `refused_workspace_cwd` at all. This is the one shape in which
+  (F) **widens** the leak rather than only de-randomising it. Where the ignored
+  ancestor already sorted first, `master` produced the identical row; where a
+  **non**-covering key sorted first, `master` enriched from that key and
+  warned. Verified both ways (`ignore` at `/work/outer`, `local-only` at
+  `/work/outer/proj`, `cwd = /work/outer/proj/sub`): with `/work/clean` listed
+  first, `master` stamps `acme/clean` plus a `refused_workspace_cwd` warn and
+  (F) stamps `acme/SECRET` with none. Withholding it is option (C), which costs
+  the second usage-policy resolution
+  ([LLP 0049 R6](./0049-hypignore-usage-policy.spec.md#requirements)) does not
+  budget for, so (F) records the case and leaves it to this document rather
+  than taking (C) by the back door.
 
 So (F) removes the **in-band** half of the class where a covering key exists,
-not the class, and what (A)-(E) must price is "a **guessed or `ignore`-resolving**
-key enriches, on a route where the covering test may never have run". This
+not the class, and in the third case above it moves one narrow shape the other
+way. What (A)-(E) must price is "a **guessed or `ignore`-resolving** key
+enriches, on a route where the covering test may never have run". This
 paragraph records verified behaviour of the code and takes none of the options.
 
 ## What this document decides {#decides}

@@ -1413,9 +1413,17 @@ function workspaceCoversCwd(workspacePath, cwd) {
  * nearest-governs is not monotone down that chain (`LLP 0160#decision`), so an
  * ancestor that itself resolves `ignore` under a nested loosening still enriches
  * the admitted row, and, because it does cover, does so with no
- * `refused_workspace_cwd`. On `master` the same row appeared whenever that
- * ancestor happened to sort first, so what changes here is only that it no
- * longer depends on JSON key order.
+ * `refused_workspace_cwd`. This one is NOT merely de-randomised, and calling it
+ * that understates it: where the ignored ancestor already sorted first,
+ * `master` produced the identical row, but where a NON-covering key sorted
+ * first `master` enriched from that key and warned, so in those orderings the
+ * row is new here and the warn is gone with it. Verified both ways (`ignore`
+ * at `/work/outer`, `local-only` at `/work/outer/proj`, cwd
+ * `/work/outer/proj/sub`): with `/work/clean` listed first, `master` stamps
+ * `acme/clean` and warns, this stamps `acme/SECRET` and does not. Accepted
+ * rather than overlooked: withholding it is LLP 0350 (C), which costs a second
+ * usage-policy resolution per exchange that LLP 0049 R6 does not budget for,
+ * and the remote it now names is at least the tree the session ran in.
  *
  * Both are the enrichment question LLP 0350 (B)/(C) is open on, so both are
  * deliberately left unpinned by a test: pinning them would be the accepted-test
@@ -1439,6 +1447,15 @@ function workspaceCoversCwd(workspacePath, cwd) {
  * every subscription turn carrying a `workspaces` map would throw here. With
  * it, that route falls through to the first key exactly as before, which is
  * what keeps the key's last-resort `cwd` role intact.
+ *
+ * The guard tests presence, not usability. `inBandCwd` is any non-empty
+ * string, and absoluteness is checked later and elsewhere, at the gate
+ * (`usableInBandCwd`), so a relative `cwd` reaches the ancestor test and a
+ * relative key can cover it: selection moves, and `refused_workspace_cwd` is
+ * silenced, on a value this same projector goes on to refuse as a directory.
+ * Byte equality could not do that. Left as is because Codex states absolute
+ * paths and because the answer is to validate once at one seam, not to grow a
+ * second usability rule here.
  *
  * @ref LLP 0069#requirements [implements]: R8, the one shared
  * equal-or-descendant test, never a second copy of the path rule
