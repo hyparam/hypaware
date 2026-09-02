@@ -68,6 +68,11 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * `@hypaware/claude-desktop` requires the credential capability that
  * only that opt-in provides.
  *
+ * The GitHub source is bundled so its session-evidence contract evolves with
+ * `ai_gateway_messages`, but activation remains explicit because it performs
+ * credentialed outbound API capture. Once activated, its own inventory and
+ * cadence defaults apply.
+ *
  * @type {ReadonlySet<PluginName>}
  * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by]: the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
  */
@@ -81,6 +86,7 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/context-graph-enrich',
   '@hypaware/claude-account',
   '@hypaware/claude-desktop',
+  '@hypaware/github',
 ]))
 
 /**

@@ -84,6 +84,7 @@ plugin that registers a dataset gets query and formatting for free.
 | MCP hosting intrinsic (verbs → tools) | [0034](./0034-mcp-host-intrinsic.decision.md) | Decision |
 | Remote attach (client consumer half) | [0033](./0033-remote-query-attach.spec.md) | Spec |
 | Token-usage normalization (net input) | [0035](./0035-token-usage-normalization.decision.md) | Decision |
+| Bundled GitHub source | [0360](./0360-github-source-is-bundled.decision.md) | Decision |
 
 ## Where to start
 
