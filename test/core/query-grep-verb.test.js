@@ -592,6 +592,21 @@ test('a backend answering with the wrong shape is a failed search, not an empty 
     async () => { await queryGrepVerb.operation({ query: 'needle' }, nothing) },
     /no hits array/,
   )
+  // Hits alone are not the whole answer. `truncated` and `exhausted` are
+  // required booleans, and the render tests each with a strict comparison,
+  // so a backend that stopped at its deadline and omitted `exhausted`
+  // would hand the caller a partial answer with no notice and exit 0 -
+  // the same forgery as a missing `hits`, reached one field along.
+  const noFacts = injectedCtx(async () => ({ hits: [], truncated: false }))
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle' }, noFacts) },
+    /truncated\/exhausted/,
+  )
+  const notBooleans = injectedCtx(async () => ({ hits: [], truncated: 'no', exhausted: 1 }))
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle' }, notBooleans) },
+    /truncated\/exhausted/,
+  )
 })
 
 /**
@@ -637,7 +652,16 @@ test('an injecting host never loads the local search stack', (t) => {
   const verbModule = new URL('../../src/core/search/grep_verb.js', import.meta.url).href
   const run = spawnSync(process.execPath, ['--input-type=module', '--eval', NO_LOCAL_LOAD_PROBE], {
     encoding: 'utf8',
+    // A wedged child (a loader inherited through NODE_OPTIONS, a future
+    // registerHooks regression) must fail this one test, not sit until the
+    // CI job's own 5-minute timeout kills the whole run. The probe costs
+    // tens of milliseconds, so this is pure headroom.
+    timeout: 30000,
     env: { ...process.env, HYP_TEST_GREP_VERB_MODULE: verbModule },
   })
+  // A spawn that never ran, or one the timeout killed, leaves `status` and
+  // `stderr` both null, so the assertion below would fail with an empty
+  // message and `run.error` - the only value naming the cause - discarded.
+  assert.ifError(run.error)
   assert.equal(run.status, 0, run.stderr)
 })

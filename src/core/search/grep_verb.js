@@ -174,6 +174,17 @@ export const queryGrepVerb = {
     if (!Array.isArray(result?.hits)) {
       throw new Error('the grep_search backend returned no hits array')
     }
+    // The same argument reaches the two completeness facts, which are
+    // required booleans on `GrepSearchResult`, not local extras a
+    // server-shaped result is entitled to omit. The render reads each with
+    // a strict comparison, so a backend that stopped at its own deadline
+    // and left `exhausted` off prints no "stopped before covering every
+    // file" line and its partial answer reads as a complete one; an
+    // omitted `truncated` hides the beyond-the-limit notice the same way.
+    // @ref LLP 0303#completeness-signals [constrained-by]: a consumer told only one of the two facts is told the wrong half, so a backend reporting neither is the same forgery as one reporting no hits
+    if (typeof result.truncated !== 'boolean' || typeof result.exhausted !== 'boolean') {
+      throw new Error('the grep_search backend returned no truncated/exhausted booleans')
+    }
     // The clamp's own promise, carried through to the render: at the
     // ceiling there is no larger `--limit` left to ask for, so the
     // truncation notice must not send the caller back to a flag that
