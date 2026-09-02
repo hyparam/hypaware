@@ -13,6 +13,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { isVerbProjection, verbToCommand } from '../../src/core/cli/verb_command.js'
@@ -261,10 +262,10 @@ test('the copy diagnosis does not run a prototype accessor to make its case', ()
 // runs without it: the alias index gets nothing (a dead alias), a command that
 // asked to be `hidden` lists in `hyp --help`, and a lost `plugin` re-derives
 // `category` from the command's own name and `audience` from that. Every
-// symptom is an absence, which is the case LLP 0329 settled has to reach a
-// channel that exists on a default install.
+// symptom is an absence, which is the case LLP 0362 admitted to the mirror
+// LLP 0329 settled, so it reaches a channel that exists on a default install.
 //
-// @ref LLP 0329#stderr-mirror [tests]: a degradation observable only as an absence opts into the mirror, so both an operator and a test can see it
+// @ref LLP 0362#absence-not-refusal [tests]: a report on a registration that succeeded takes the mirror, so both an operator and a test can see it
 test('a dropped optional member is warned about at register time', async () => {
   const commands = createCommandRegistry()
   let reads = 0
@@ -406,4 +407,48 @@ test('a throwing mirror write costs the warning, not the registration', () => {
   // And the registration is whole, not half-applied: both indexes carry it.
   assert.equal(commands.get('proto')?.name, 'proto')
   assert.equal(commands.get('pr')?.name, 'proto')
+})
+
+/**
+ * The optional members of `CommandRegistration`, read out of the published
+ * declaration file rather than restated here.
+ *
+ * @returns {string[]} the optional keys
+ */
+function declaredOptionalMembers() {
+  const types = readFileSync(new URL('../../hypaware-plugin-kernel-types.d.ts', import.meta.url), 'utf8')
+  const start = types.indexOf('export interface CommandRegistration {')
+  assert.notEqual(start, -1, 'interface CommandRegistration is not where the test looks for it')
+  const body = types.slice(start, types.indexOf('\n}', start))
+  return [...body.matchAll(/^[ \t]*([A-Za-z_$][\w$]*)\?:/gm)].map((match) => match[1])
+}
+
+// `OPTIONAL_MEMBERS` is a hand-written copy of the optional keys of
+// `CommandRegistration`, and nothing keeps the two in step: `tsc` cannot see
+// the list, so a member added to the published interface would go back to
+// being an absence with no sign at all, which is the state the warning exists
+// to end. Asked of the warning rather than of the list, so the guard holds
+// however the coverage is spelled.
+test('the warning covers every optional member CommandRegistration declares', async () => {
+  const declared = declaredOptionalMembers()
+  assert.ok(declared.length > 0, 'the interface parse found no optional members')
+
+  // Every declared optional on the prototype, so the copy drops all of them
+  // at once. The probe invokes no getter, so what they return does not matter.
+  const proto = {}
+  for (const key of declared) {
+    Object.defineProperty(proto, key, { get: () => undefined })
+  }
+  const registration = Object.create(proto)
+  registration.name = 'every-optional'
+  registration.summary = 'every optional member lives on the prototype'
+  registration.usage = 'hyp every-optional'
+  registration.run = async () => 0
+
+  const commands = createCommandRegistry()
+  const text = await stderrTextFrom(() => commands.register(registration))
+  const said = text.slice(text.indexOf('registered without the declared '), text.indexOf(' - reachable'))
+  const named = [...said.matchAll(/'([A-Za-z_$][\w$]*)'/g)].map((match) => match[1])
+  assert.deepEqual(named.sort(), declared.sort())
+  assert.equal(commands.get('every-optional')?.name, 'every-optional')
 })

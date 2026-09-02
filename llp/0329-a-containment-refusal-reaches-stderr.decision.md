@@ -18,7 +18,11 @@ stderr), and
 [LLP 0335](./0335-a-telemetry-failure-is-said-once-never-thrown.decision.md)
 (#stderr-mirror: the mirror's "beside the emit" is made structural by a guard
 whose own one-line diagnostic is a fifth unconditional stderr write, beyond
-the four opt-in refusal lines settled here)
+the four opt-in refusal lines settled here), and
+[LLP 0362](./0362-an-absence-only-degradation-opts-into-the-stderr-mirror.decision.md)
+(#stderr-mirror: the opt-in set is restated by the property it always turned
+on, so a report whose subject is observable only as an absence takes the
+mirror whether or not the site reporting it refused)
 **Related:** LLP 0021, LLP 0189, LLP 0323, LLP 0326
 
 > Every containment guard in the symlink series says its refusal out loud at

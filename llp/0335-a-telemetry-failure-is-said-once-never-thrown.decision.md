@@ -180,6 +180,14 @@ component, zero on every healthy install, and the bypass of the
 dispatch-bound `ctx.stderr` is confined to a line that only exists when
 telemetry, the thing `ctx.stderr` cannot diagnose, is broken.
 
+**Extended-by
+[LLP 0362](./0362-an-absence-only-degradation-opts-into-the-stderr-mirror.decision.md)**:
+"four" is a census at this head, not a closed set. A fifth call site opts in,
+`CommandRegistry.register`'s report of an optional member its copy dropped,
+and it is the first that is not a refusal. What this section draws stays
+drawn: the guard's own line is still not a mirror, because no call site asked
+for it.
+
 ## The meter emit seam is knowingly unguarded {#meter-seam}
 
 `Instrument._record` calls the global meter provider without a guard, unlike
