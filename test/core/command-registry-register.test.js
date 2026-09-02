@@ -146,3 +146,57 @@ test('the run() the checks accepted is the run() the registry stores', () => {
   commands.register(/** @type {any} */ (shifty))
   assert.equal(commands.get('shifty')?.run, accepted)
 })
+
+// The compiler cannot warn about any of this. A class instance whose `run()`
+// lives on the prototype satisfies `CommandRegistration` under `tsc --strict`,
+// because TypeScript's type system has no notion of own or enumerable
+// properties, and `hypaware-plugin-kernel-types.d.ts` is published, so
+// `register` is a third-party API. That leaves the boundary error as the whole
+// diagnosis, read out of a `plugin.activate_failed` log line after the plugin
+// quietly failed to load - and "missing run()" about a registration that
+// visibly declares `run()` sends the author looking in the wrong place.
+test('the boundary error says why a member did not survive the copy', () => {
+  const commands = createCommandRegistry()
+  class Prototyped {
+    constructor() {
+      this.name = 'prototyped'
+      this.summary = 'run() lives on the prototype'
+      this.usage = 'hyp prototyped'
+    }
+    async run() {
+      return 0
+    }
+  }
+  assert.throws(
+    () => commands.register(/** @type {any} */ (new Prototyped())),
+    /'prototyped' missing run\(\).*'run' is reachable on the registration but is not an own enumerable property/s
+  )
+
+  // Same cause, a different member, and reached through `Object.create`
+  // rather than through a class.
+  const inherited = Object.create({ summary: 'inherited', usage: 'hyp inherited', run: async () => 0 })
+  inherited.name = 'inherited'
+  assert.throws(
+    () => commands.register(inherited),
+    /'inherited' missing summary.*'summary' is reachable on the registration but is not an own enumerable property/s
+  )
+
+  // Own, but not enumerable, so the spread does not carry it either.
+  const hidden = makeCommand({ name: 'hidden' })
+  delete hidden.run
+  Object.defineProperty(hidden, 'run', { value: async () => 0, enumerable: false })
+  assert.throws(
+    () => commands.register(hidden),
+    /'hidden' missing run\(\).*is not an own enumerable property/s
+  )
+})
+
+// The diagnosis has to stay off a registration that really is incomplete,
+// or it would send the next author hunting a prototype that is not there.
+test('a genuinely absent member is reported without the copy diagnosis', () => {
+  const commands = createCommandRegistry()
+  const bare = makeCommand()
+  delete bare.run
+  // Anchored: nothing follows "missing run()" when there is nothing to explain.
+  assert.throws(() => commands.register(bare), /'demo' missing run\(\)$/)
+})
