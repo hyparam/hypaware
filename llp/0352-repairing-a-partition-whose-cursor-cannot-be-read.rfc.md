@@ -6,8 +6,8 @@
 **Generated-by:** neutral
 **Author:** Phil / Claude
 **Date:** 2026-09-02
-**Related:** LLP 0013, LLP 0027, LLP 0069, LLP 0104, LLP 0310, LLP 0322,
-LLP 0323, LLP 0331, LLP 0332, LLP 0334, LLP 0344, LLP 0347;
+**Related:** LLP 0013, LLP 0027, LLP 0069, LLP 0104, LLP 0253, LLP 0310,
+LLP 0322, LLP 0323, LLP 0331, LLP 0332, LLP 0334, LLP 0344, LLP 0347;
 hyparam/hypaware#1174, hyparam/hypaware#1170, hyparam/hypaware#1131,
 PR #1173, PR #1135
 
@@ -255,6 +255,19 @@ The sequence, every step of it observed in #evidence above:
    `_hyp_ingest_seq`, still newer than the sink watermark, and the next sink
    pass ships them onward.
 
+That sequence has two populations in it, not one. Step 1's rows were
+committed before the cursor broke. Everything captured during the window is
+in the cache spool instead, because LLP 0347's gate refuses the append and
+the chunk waits whole (#spool below). The purge in step 2 misses those for
+the same reason it misses the committed ones and one more: `purgeCache`
+reads committed Iceberg tables only, `runPurge` settles nothing before it
+scans (`src/core/commands/purge.js:90`), and its one spool action sweeps the
+raw body spool rather than the cache spool (`:108`, LLP
+0253#purge-and-detach-sweep, which sweeps that sibling for exactly this
+reason). Step 4 then commits them along with the rest. It is the larger
+population, not a corner: #spool records that `active.jsonl` grows with the
+dataset's total ingest for as long as the refusal stands.
+
 The user asked for deletion, was told there was nothing to delete, and the
 data left the machine afterwards. LLP 0104 draws the purge boundary at the
 cache and says server-side deletion is out of scope, so a row that reaches a
@@ -275,9 +288,13 @@ make visible, and a sink has no way to know either.
    any purge issued while it was refusing. Cheapest, no new state. Costs:
    correctness rests on a human reading a message and remembering a purge
    that may have been run weeks earlier by someone else, and the failure is
-   silent and unrecoverable. The issue that carries these findings proposes
-   exactly this as the interim instruction, which is a fair reading of
-   "cheapest thing that is better than nothing", not of "sufficient".
+   silent and unrecoverable. It also assumes the operator can time the
+   re-run, and for the spooled rows they cannot: the flush that commits
+   those answers to the daemon and the query gate under LLP 0322's cooldown,
+   so a re-run issued the moment repair lands can still precede the drain.
+   The issue that carries these findings proposes exactly this as the
+   interim instruction, which is a fair reading of "cheapest thing that is
+   better than nothing", not of "sufficient".
 2. **A repair re-runs the outstanding purges.** Repair is not complete until
    every purge issued during the blind window has been replayed against the
    repaired partition. Costs a durable record of purge requests, which does
