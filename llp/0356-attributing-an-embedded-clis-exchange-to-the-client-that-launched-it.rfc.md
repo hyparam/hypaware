@@ -64,8 +64,12 @@ shipping build matches neither axis.
 ### The seam, against the real bundled catalog {#evidence-seam}
 
 `createSourceWithholdResolver` built from `discoverBundledPlugins()` at
-`01a6c661`, with `claude-desktop` the only opted-out source, asked for each
-row shape an attached or un-attached Desktop actually produces:
+`01a6c661`, over `buildPluginCatalog([...loaded, ...excluded])` as boot does.
+The second bucket matters: `@hypaware/claude-desktop` sits in
+`V1_EXCLUDED_FROM_DEFAULT` (`src/core/runtime/bundled.js`), so a catalog built
+from `loaded` alone declares no Desktop entrypoints at all and even the two
+claimed rows below ship. With `claude-desktop` the only opted-out source,
+asked for each row shape an attached or un-attached Desktop actually produces:
 
 ```
 entrypoint owners: cli -> claude, sdk-cli -> claude,
@@ -75,12 +79,16 @@ SHIPS     client_name="claude"          entrypoint="local-agent"        attached
 SHIPS     client_name="claude"          entrypoint="local-agent-v2"     attached Desktop, drifted tag
 WITHHELD  client_name="claude"          entrypoint="claude-desktop-3p"  attached Desktop, LLP 0133 first live test
 WITHHELD  client_name="claude"          entrypoint="claude-desktop"     un-attached Desktop, shared tree
+SHIPS     client_name="claude"          entrypoint=null                 attached Desktop, no transcript match
 SHIPS     client_name="claude"          entrypoint="cli"                Claude Code (correct)
 WITHHELD  client_name="claude-desktop"  entrypoint=null                 backfilled Desktop / Desktop UA
 ```
 
-The two rows that ship are the only two shapes the current attached-Desktop
-build produces live. The opt-out is written, reported, and unenforceable.
+Every attached-Desktop shape the current build produces live ships: the two
+tagged ones, and the untagged one an exchange gets when the projector matched
+no transcript (the finalize race), which LLP 0346 #consequences already
+records as a stated residual. The opt-out is written, reported, and
+unenforceable.
 
 ### The two routes disagree about the same session {#evidence-disagreement}
 
@@ -181,11 +189,16 @@ One-line manifest edit; the seam then withholds through the machinery PR
   `local-agent` in the **shared** `~/.claude/projects` tree to
   `claude-desktop`, and gate it out entirely when Desktop is not configured
   (LLP 0140 #gate-before-projection). That silently drops history a user opted
-  into. LLP 0346 rejected this for the same reason and added a pin against it
-  (`test/core/backfill-entrypoint-owner.test.js`), and the value has already
-  drifted once, so the list is a per-release chase. Splitting the two uses
-  apart means a second declaration, which LLP 0346 also rejected: "a third key
-  space would be a third thing to keep in agreement with the other two."
+  into. LLP 0346 #local-agent-residual declines to claim the value too, on its
+  own grounds: it names a CLI mode rather than a client, it drifted within a
+  week, and LLP 0140 #container-root-owns rules that a container value cannot
+  carry consent. Two pins catch a manifest that claims it anyway - the catalog
+  map LLP 0346 added in `test/core/source-withhold-build.test.js`, and the
+  Desktop-manifest assertion in `test/core/backfill-entrypoint-owner.test.js`,
+  which predates LLP 0346. The drift also makes the list a per-release chase.
+  Splitting the two uses apart means a second declaration, which LLP 0346
+  also rejected: "a third key space would be a third thing to keep in
+  agreement with the other two."
 
 ### C. Fail closed at the seam on an unclaimed entrypoint {#option-c}
 
