@@ -2,6 +2,7 @@
 
 import { Attr, getLogger } from '../observability/index.js'
 import { resolveRetentionDays, runBackfillProvider } from '../commands/backfill.js'
+import { readBackfillPolicy } from '../config/backfill_policy.js'
 import { cronMatches } from '../sinks/driver.js'
 
 // The sweep's telemetry identity: one pair on every record this driver emits,
@@ -219,8 +220,12 @@ export function createBackfillSweepDriver(opts) {
 
 /**
  * Resolve the source-specific sweep window from its existing backfill policy,
- * falling back to the cache retention contract used by manual backfill.
+ * falling back to the cache retention contract used by manual backfill. Reads
+ * the policy block through `backfill_policy.js`, the kernel's single reader of
+ * it, so the schedule cannot disagree with the join-time reconciler about what
+ * a given `window_days` means.
  *
+ * @ref LLP 0359#sweep-context [implements]: a positive `backfill.window_days` narrows that provider's sweep, else cache retention applies
  * @param {BackfillContribution} provider
  * @param {HypAwareV2Config} config
  * @returns {number}
@@ -229,12 +234,7 @@ function sweepRetentionDays(provider, config) {
   const entry = config?.plugins?.find((plugin) =>
     plugin?.name === provider.plugin && plugin.enabled !== false
   )
-  const backfill = entry?.config?.backfill
-  const windowDays = backfill && typeof backfill === 'object' && !Array.isArray(backfill)
-    ? backfill.window_days
-    : undefined
-  if (typeof windowDays === 'number' && Number.isInteger(windowDays) && windowDays > 0) {
-    return windowDays
-  }
+  const { windowDays } = readBackfillPolicy(entry)
+  if (windowDays !== undefined) return windowDays
   return resolveRetentionDays({ flag: undefined, config })
 }

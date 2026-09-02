@@ -653,30 +653,33 @@ export function aiGatewayBackfillMaterializer() {
 /**
  * Build the per-run pre-write dedupe used by the backfill materializer.
  *
- * Every item probes committed and spooled storage only for its own candidate
- * part ids and session ids. Emitted keys are also folded into an in-run set so
- * a re-yielded item is skipped before it reaches the writer. That set is keyed
- * by the runner's opaque token in a WeakMap, not by a process-wide current run
- * id, so concurrent callers cannot replace each other and completed runs are
- * not retained.
+ * Every item probes the committed partitions only for its own candidate part
+ * ids and session ids. Emitted keys are also folded into an in-run set so a
+ * re-yielded item is skipped before it reaches the writer. That set and the
+ * spool snapshot below are both keyed by the runner's opaque token in a
+ * WeakMap, not by a process-wide current run id, so concurrent callers cannot
+ * replace each other and completed runs are not retained.
  *
- * The seen-set is seeded from two sources: the committed (flushed)
- * Iceberg partitions AND the rows still pending in the spool (captured
- * live but not yet flushed, issue #107). Without the spool scan, backfill
- * re-materializes its own copy of an unflushed live row and the spool
- * later flushes its copy, leaving two rows with the same `part_id`. The
- * spool scan is BACKFILL-ONLY (see scanSpooledPartIds); the flush-time
+ * The rows still pending in the spool (captured live but not yet flushed,
+ * issue #107) are folded in too. Without them, backfill re-materializes its
+ * own copy of an unflushed live row and the spool later flushes its copy,
+ * leaving two rows with the same `part_id`. That scan is taken ONCE per run:
+ * `readSpooledRows` streams the whole spool and cannot stop early the way the
+ * committed scan can, and the spool grows with the run's own appends until
+ * the closing flush, so probing it per item costs O(items x spool) reads. The
+ * snapshot is bounded by the spool at run start and dies with the run token.
+ * The spool scan is BACKFILL-ONLY (see scanSpooledPartIds); the flush-time
  * settle path must never fold spool rows into its seen-set.
  *
  * @returns {{ skipExisting(rows: Record<string, unknown>[], ctx: BackfillMaterializeContext | undefined): Promise<Record<string, unknown>[]> }}
  */
 function createBackfillDedupe() {
-  /** @type {WeakMap<object, Set<string>>} */
-  const seenByRun = new WeakMap()
+  /** @type {WeakMap<object, { seen: Set<string>, spooled: Set<string> | undefined }>} */
+  const stateByRun = new WeakMap()
   // Compatibility for direct/older callers that do not supply a token. Keep
   // only the current diagnostic run so this path cannot retain historical
   // candidate sets. Production runners always take the WeakMap path.
-  /** @type {{ runId: string, seen: Set<string> } | undefined} */
+  /** @type {{ runId: string, state: { seen: Set<string>, spooled: Set<string> | undefined } } | undefined} */
   let legacyMemo
 
   return {
@@ -687,15 +690,20 @@ function createBackfillDedupe() {
       // method, so dedupe is skipped and every row passes through.
       if (rows.length === 0 || !canScanExistingRows(storage)) return rows
 
-      const batchKeys = partIdKeys(rows)
-      const stored = await scanExistingPartIds(storage, batchKeys, batchSessionIds(rows))
-      // Fold in only candidate ids pending in the spool. A full spool scan may
-      // still be required by the storage surface, but unrelated ids never
-      // inflate the materializer's heap.
-      await scanSpooledPartIds(storage, stored, batchKeys)
-      const runState = runSeen(ctx, seenByRun, legacyMemo)
-      legacyMemo = runState.legacyMemo
-      const seen = runState.seen
+      const resolved = runDedupeState(ctx, stateByRun, legacyMemo)
+      legacyMemo = resolved.legacyMemo
+      const state = resolved.state
+      // Once per run, never once per item: see this function's doc comment.
+      // Items of one run are materialized in sequence, so the first item pays
+      // for the snapshot and the rest reuse it.
+      if (!state.spooled) {
+        const snapshot = new Set()
+        await scanSpooledPartIds(storage, snapshot)
+        state.spooled = snapshot
+      }
+      const spooled = state.spooled
+      const seen = state.seen
+      const stored = await scanExistingPartIds(storage, partIdKeys(rows), batchSessionIds(rows))
 
       /** @type {Record<string, unknown>[]} */
       const fresh = []
@@ -706,7 +714,7 @@ function createBackfillDedupe() {
           fresh.push(row)
           continue
         }
-        if (stored.has(key) || seen.has(key)) continue
+        if (stored.has(key) || spooled.has(key) || seen.has(key)) continue
         seen.add(key)
         fresh.push(row)
       }
@@ -729,23 +737,28 @@ function partIdKeys(rows) {
 }
 
 /**
+ * The state one run accumulates: the ids it has already emitted, and its
+ * once-per-run spool snapshot (undefined until the first item takes it).
+ *
  * @param {BackfillMaterializeContext | undefined} ctx
- * @param {WeakMap<object, Set<string>>} seenByRun
- * @param {{ runId: string, seen: Set<string> } | undefined} legacyMemo
- * @returns {{ seen: Set<string>, legacyMemo: { runId: string, seen: Set<string> } | undefined }}
+ * @param {WeakMap<object, { seen: Set<string>, spooled: Set<string> | undefined }>} stateByRun
+ * @param {{ runId: string, state: { seen: Set<string>, spooled: Set<string> | undefined } } | undefined} legacyMemo
+ * @returns {{ state: { seen: Set<string>, spooled: Set<string> | undefined }, legacyMemo: { runId: string, state: { seen: Set<string>, spooled: Set<string> | undefined } } | undefined }}
  */
-function runSeen(ctx, seenByRun, legacyMemo) {
+function runDedupeState(ctx, stateByRun, legacyMemo) {
   if (ctx?.runToken) {
-    let seen = seenByRun.get(ctx.runToken)
-    if (!seen) {
-      seen = new Set()
-      seenByRun.set(ctx.runToken, seen)
+    let state = stateByRun.get(ctx.runToken)
+    if (!state) {
+      state = { seen: new Set(), spooled: undefined }
+      stateByRun.set(ctx.runToken, state)
     }
-    return { seen, legacyMemo }
+    return { state, legacyMemo }
   }
   const runId = ctx?.devRunId ?? 'legacy'
-  if (!legacyMemo || legacyMemo.runId !== runId) legacyMemo = { runId, seen: new Set() }
-  return { seen: legacyMemo.seen, legacyMemo }
+  if (!legacyMemo || legacyMemo.runId !== runId) {
+    legacyMemo = { runId, state: { seen: new Set(), spooled: undefined } }
+  }
+  return { state: legacyMemo.state, legacyMemo }
 }
 
 /**
@@ -926,9 +939,11 @@ async function collectPartIds(storage, tablePath, sessionIds, seen, restrictTo) 
  *   "backfill-vs-spool same-id duplicates" residue by scanning spooled
  *   rows in the materializer (not the settle path).
  *
- * `restrictTo`, when supplied, keeps only the keys of the batch in hand.
- * Backfill supplies it too, so even though the storage surface streams the
- * spool, unrelated identities do not accumulate in the materializer heap.
+ * `restrictTo`, when supplied, keeps only the keys of the batch in hand
+ * (the live-producer caller, `dedupeStoredPartIds`). Backfill omits it and
+ * takes one unrestricted snapshot per run instead: this scan streams the
+ * whole spool whatever `restrictTo` says, so restricting it would buy a
+ * smaller Set at the price of re-reading the spool once per item.
  *
  * @param {QueryStorageService} storage
  * @param {Set<string>} seen

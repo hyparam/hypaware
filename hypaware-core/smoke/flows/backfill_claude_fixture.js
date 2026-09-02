@@ -28,10 +28,11 @@ import { runBackfillProvider } from '../../../src/core/commands/backfill.js'
  *    content/provider/source.
  *  - **Internal telemetry**: `backfill.sweep_due` and
  *    `backfill.sweep_finished` logs around the provider spans and cache write.
- *  - **Idempotency**: a second scheduled tick (a fresh
- *    run id, so the materializer re-scans committed partitions) writes
- *    ZERO new rows and the query still returns exactly two rows. The
- *    rerun did not duplicate.
+ *  - **Idempotency, both layers**: a second scheduled tick skips the
+ *    unchanged transcript on its fingerprint; a third, after the file is
+ *    touched, re-reads and re-projects it and the materializer's
+ *    committed-partition dedupe is what writes ZERO new rows. Either way the
+ *    query still returns exactly two rows. The rerun did not duplicate.
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -63,8 +64,9 @@ export async function run({ harness, expect }) {
   const sessionId = `cl-${harness.devRunId}`
   const userTs = new Date(Date.now() - 60_000)
   const assistantTs = new Date(userTs.getTime() + 5_000)
+  const transcriptPath = path.join(projectsDir, `${sessionId}.jsonl`)
   await fs.writeFile(
-    path.join(projectsDir, `${sessionId}.jsonl`),
+    transcriptPath,
     [
       JSON.stringify({
         sessionId,
@@ -166,6 +168,7 @@ export async function run({ harness, expect }) {
 
     const tick1Now = new Date(Date.UTC(2026, 0, 1, 0, 0, 0))
     const tick2Now = new Date(tick1Now.getTime() + 5 * 60 * 1000)
+    const tick3Now = new Date(tick2Now.getTime() + 5 * 60 * 1000)
     const tick1RunId = `sweep-claude-${tick1Now.getTime()}`
 
     // ----- 1. First scheduled backfill tick -----
@@ -224,6 +227,23 @@ export async function run({ harness, expect }) {
     const rows2 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 2' })
     expect.that('query: rerun did not duplicate rows (still exactly two)', rows2, (v) => Array.isArray(v) && v.length === 2)
 
+    // ----- 3b. The fingerprint is a fast path, not the rerun guarantee.
+    //           Touch the transcript so tick 3 reads and re-projects the same
+    //           two messages, and the materializer's committed-partition
+    //           dedupe has to be the thing that writes zero rows. Without
+    //           this the flow would pass with that dedupe entirely broken.
+    const touched = new Date(Date.now() + 2_000)
+    await fs.utimes(transcriptPath, touched, touched)
+    const tick3 = await tickAndAwait(tick3Now)
+    expect.that('tick 3: claude provider fired again', tick3.report.fired, (v) => Array.isArray(v) && v.includes('claude'))
+    expect.that(
+      'tick 3: touched transcript is re-projected but the dedupe writes ZERO rows',
+      tick3.result,
+      (v) => v !== undefined && v.ok === true && v.scanned >= 1 && v.rowsWritten === 0,
+    )
+    const rows3 = await queryRows({ dispatch, sql, kernel, registry, env, expect, label: 'after run 3' })
+    expect.that('query: the re-projected rerun did not duplicate rows either', rows3, (v) => Array.isArray(v) && v.length === 2)
+
     // ----- 4. Internal telemetry: dev_run_id + provider + row counts -----
     await obs.shutdown()
     const traces = await expect.traces()
@@ -269,7 +289,7 @@ export async function run({ harness, expect }) {
     expect.that(
       'logs: backfill.sweep_due fired once per tick',
       dueLogs,
-      (v) => Array.isArray(v) && v.length === 2,
+      (v) => Array.isArray(v) && v.length === 3,
     )
     const finishedLogs = logs.filter(
       (/** @type {any} */ l) => l.body === 'backfill.sweep_finished' && l.attributes?.provider === 'claude',

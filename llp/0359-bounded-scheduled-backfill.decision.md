@@ -90,11 +90,17 @@ set by that object in a `WeakMap`, so concurrent or nested callers cannot
 replace one another and completed runs become collectible without an explicit
 cleanup callback.
 
-For each projected session, committed and spooled scans are restricted to that
-batch's candidate `part_id`s and session ids. The materializer never preloads
-the full gateway identity set. Heap is proportional to identities emitted by
-the current run plus one candidate batch, not total cache rows. An unchanged
-Claude tick yields no batch and performs no cache scan.
+For each projected session, the committed scan is restricted to that batch's
+candidate `part_id`s and session ids, and stops as soon as it has answered for
+all of them. The materializer never preloads the full committed gateway
+identity set. The spool is different: its read surface streams every pending
+row and cannot stop early, and the spool grows with the run's own appends
+until the closing flush, so restricting that scan per item would buy a smaller
+Set at the cost of re-reading the whole spool once per session. The spool is
+therefore snapshotted once per run and reused, on the same run token, so it
+dies with the run. Heap is proportional to identities emitted by the current
+run, plus one candidate batch, plus the spool at run start - not total cache
+rows. An unchanged Claude tick yields no batch and performs no cache scan.
 
 ## Consequences {#consequences}
 

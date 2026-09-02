@@ -51,10 +51,10 @@ export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
  * what keeps "record everything" from reading as if enter alone finished
  * the job.
  *
- * No BUNDLED row reaches it today: `claude-desktop` was the only one and is
- * now hidden (LLP 0297). `needs_setup` remains a kernel contract any plugin
- * may declare, so the suffix stays and is tested against a descriptor whose
- * `hidden` flag is cleared.
+ * No BUNDLED row reaches it today: `claude-desktop` was the only one, and
+ * LLP 0358 turned it into a plain transcript row with no `needs_setup` and no
+ * configure phase. `needs_setup` remains a kernel contract any plugin may
+ * declare, so the suffix stays and is tested against a synthetic descriptor.
  */
 export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
 

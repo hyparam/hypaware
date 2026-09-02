@@ -223,11 +223,13 @@ export async function activate(ctx) {
     },
   })
 
-  const credential = resolveCredential()
-  ctx.log.info('claude-desktop activated', {
-    capture_mode: 'scheduled_transcript',
-    credential_mode: credential?.mode ?? 'not_configured',
-  })
+  // No credential_mode here. Dropping the capability from `requires` also
+  // dropped the only thing that ordered this plugin after
+  // `@hypaware/claude-account`, so an activation-time probe would report
+  // 'not_configured' on a machine where the credential is configured but
+  // listed later. The commands resolve it when they run, which is the only
+  // moment the answer is both needed and settled.
+  ctx.log.info('claude-desktop activated', { capture_mode: 'scheduled_transcript' })
 }
 
 /**

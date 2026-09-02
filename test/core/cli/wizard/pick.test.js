@@ -156,9 +156,10 @@ test('runWizardPick: interactive prompt options pre-check detected sources', asy
   assert.equal(result.retentionDays, 90)
 })
 
-// A needs_setup row (Claude Desktop) is a deliberate opt-in: its configure
-// phase runs a sign-in and a sudo write on the strength of the tick, so a
-// probe's guess must never arrive pre-checked on the user's behalf.
+// A needs_setup row is a deliberate opt-in: its configure phase acts on the
+// strength of the tick, so a probe's guess must never arrive pre-checked on
+// the user's behalf. Driven by the synthetic descriptor above, no bundled row
+// declares needs_setup since LLP 0358.
 // @ref LLP 0011#autodetect-vs-default [tests]: detection labels a needs_setup row but never checks it
 test('runWizardPick: a detected needs_setup row arrives unchecked, labeled detected', async () => {
   const tmp = await mkTmp()
@@ -192,9 +193,8 @@ test('runWizardPick: the defaults omit a detected needs_setup row, and autoAccep
 // the configure phase can skip a carried needs_setup row's setup question
 // instead of re-asking an answer already given.
 //
-// A Desktop-only config collects nothing the menu can show now that the row
-// is hidden (LLP 0297), so this is also the LLP 0202 no-visible-row shape:
-// the menu opens on an empty seed, and the carried row has to survive it.
+// Since LLP 0358 the Desktop row is visible, so the seed it carries is an
+// ordinary checked row rather than LLP 0202's no-visible-row shape.
 test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
