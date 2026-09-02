@@ -50,12 +50,12 @@ opens "A failed or abandoned join returns to the fork." What the
 classification selects is the sentence `printJoinFailure` prints and the span
 `ERROR_KIND` (`join.js:93`), not whether a retry is on offer.
 
-That chain has exactly one channel for "terminal, but not a server refusal",
-and it is the one LLP 0179 deliberately closed: `callbackError` is the D7 code,
-and the `default` arm reads an unmodeled code as retriable on purpose, because
-"telling a user to stop trying over a code we cannot interpret is the worse
-error" (`test/core/remote-login-command.test.js`). Both problems below are
-outcomes that need to travel that chain and cannot.
+That chain has exactly one typed channel for "terminal, but not a server
+refusal", and its meaning is already spoken for: `callbackError` *is* the D7
+code, so `loginFailureReason`'s `default` arm reads anything else as retriable
+on purpose, because "telling a user to stop trying over a code we cannot
+interpret is the worse error" (`test/core/remote-login-command.test.js`). Both
+problems below are outcomes that need to travel that chain and cannot.
 
 ## Problem 1: a stale server reads as retriable {#stale-server}
 
@@ -101,16 +101,22 @@ correct message prints on every attempt. This is interactive UX fidelity.
 
 **Why it is not a patch.** The obvious fix, a `'no_poll_endpoint'` reason
 threaded through `loginFailureReason` and classified `'failed'`, edits what two
-Accepted decisions settled. LLP 0179#outcome enumerates the reason vocabulary,
-and its Decision states the classification rule as a closed set: "exactly the
-three refusals are `'failed'`; everything else non-zero stays `'abandoned'`".
-LLP 0342 D3 then promises, as part of the poll lane's contract, that
-"`loginFailureReason` / `explainLoginError` and the LLP 0179 outcome codes are
-untouched", and its Consequences repeat it. `classifyLoginFailure` carries the
-invariant as an `@ref`: "the three definitive reasons are the D7 refusal codes
-verbatim, so the split is the server's taxonomy and not a wizard-local one".
-Adding a non-D7 code to the definitive set is precisely the thing that
-annotation says the split is not.
+Accepted decisions settled, in two separable places. *Adding the reason* touches
+LLP 0179#outcome, which enumerates the vocabulary, and LLP 0342 D3, which
+promises as part of the poll lane's contract that "`loginFailureReason` /
+`explainLoginError` and the LLP 0179 outcome codes are untouched" (its
+Consequences repeat it). That is the cheaper half: LLP 0179's own Consequences
+already say `reason` is "a wider vocabulary than the wizard consumes today
+(`'seed_failed'`, `'daemon_incomplete'`, ...)" and that this is "deliberate", so
+a member the wizard does not classify on is the shape that decision anticipated.
+*Classifying it definitive* is the expensive half. LLP 0179#no-prose-control-flow
+states the rule as a closed set, "exactly the three refusals are `'failed'`;
+everything else non-zero stays `'abandoned'`", and `classifyLoginFailure` carries
+the invariant as an `@ref`: "the three definitive reasons are the D7 refusal
+codes verbatim, so the split is the server's taxonomy and not a wizard-local
+one". Adding a non-D7 code to the definitive set is precisely the thing that
+annotation says the split is not. The options below are ordered by which of
+those two halves they pay for.
 
 ### Options {#stale-server-options}
 
@@ -128,10 +134,10 @@ and the fallback "Joining failed: an admin needs to grant this account access
 before this machine can enroll." Without that branch, classifying
 `'no_poll_endpoint'` as `'failed'` sends a stale-server user to an admin for
 access they already have, which is worse than the text it replaces. Buys: the
-wizard says what actually happened instead of inviting a retry, and the
-`!callbackError` gate stops covering two unrelated cases. It does not remove
-the retry from the fork; nothing in the wizard's control flow can, because
-LLP 0129 re-presents the fork on both statuses.
+wizard names the fault instead of printing "Sign-in did not complete. You can
+try again", and the `!callbackError` gate stops covering two unrelated cases.
+It does not remove the retry from the fork; nothing in the wizard's control
+flow can, because LLP 0129 re-presents the fork on both statuses.
 
 **B. Reframe the definitive set as "retrying this cannot help", not "D7".**
 Same code change as A, but the decision being made is about the *predicate*
@@ -143,7 +149,27 @@ branch and its plumbing unchanged. Buys: the invariant that gets superseded is
 replaced by one that generalizes, so the next terminal non-D7 outcome (a
 server that removes the endpoint, say) needs no third decision.
 
-**C. Fix only the misleading hint.** Leave the vocabulary and the
+**C. A new reason the wizard does not reclassify.** Pay only the cheaper half:
+`'no_poll_endpoint'` joins the vocabulary exactly as in A, but
+`classifyLoginFailure` is untouched, the outcome stays `'abandoned'`, and
+`printJoinFailure`'s existing non-`'failed'` arm switches on `join.reason`
+instead of printing one sentence for every retriable failure. The wiring is
+already there: `join.js:94` returns `reason` on both statuses, and
+`WizardJoinResult.reason` is documented as "the login lane's reason code, which
+is what `printJoinFailure` branches on to name the wizard-level consequence"
+(`wizard/types.d.ts:415-418`). Costs: it still needs A's channel out of the
+poller, and it still reopens LLP 0179#outcome's enumeration and LLP 0342 D3's
+"untouched" promise, so it is not a patch either; the span `ERROR_KIND`
+(`join.js:93`) keeps saying `login_abandoned` for a fault nobody abandoned;
+and the definitive/retriable split stays a name that no longer describes what
+the wizard does with it, since the fork returns either way. Buys: the same
+wizard sentence A buys, without superseding the closed-set rule, the `@ref`
+invariant, or the D7 split, and without A's `printJoinFailure` fallback
+regression to repair. This is what the fork note in Problem 1 opens up: once
+the classification selects only a sentence, the sentence can be selected
+directly.
+
+**D. Fix only the misleading hint.** Leave the vocabulary and the
 classification alone; make the headless hint conditional on something narrower
 than `!callbackError`, so a stale server does not get told to try a static
 token. Costs: still needs a channel from the poller for "not a browser
@@ -155,7 +181,7 @@ touches no Accepted decision's settled text,
 since LLP 0179#no-prose-control-flow puts messages explicitly outside the
 contract.
 
-**D. Nothing.** Costs: the deployment where this fires is exactly the one
+**E. Nothing.** Costs: the deployment where this fires is exactly the one
 LLP 0342 D2 anticipated and wrote a message for, so the tool is at its least
 helpful in the case its design predicted. Buys: no decision is reopened, and
 there is exactly one deployed hypaware-server (D2), which we upgrade, so the
@@ -210,16 +236,21 @@ client outcome           : timed out waiting for the browser login to complete
 ```
 
 **How wide, exactly.** Instrumenting `perPollMs` across a full run at the
-shipped 2s cadence gives 151 polls, the last six budgeted
-`10000, 8000, 6000, 4000, 2000, 1` ms. So exactly one poll per login falls
-below a plausible round trip: the final one, the 1ms poll #1165 recorded as
-harmless residue. It covers the last ~2s of the 300s budget, which is the
-window a human must finish signing in inside for this to fire, so the rate is
-low; what the clamp establishes is that the condition is not only a wire
-fluke, because the client's own deadline arithmetic manufactures it on every
-run that reaches the deadline. Readers weighing the client-only option against
-the server-side ones should price it as a narrow but systematic window, not a
-common one.
+shipped 2s cadence, with the wire cost held at zero, gives 151 polls, the last
+six budgeted `10000, 8000, 6000, 4000, 2000, 1` ms. The final 1ms is not an
+artifact of that idealization: `:204` caps the inter-poll sleep at `remaining`,
+so the loop always wakes exactly on the deadline and the last poll is clamped
+to the 1ms floor on every run whatever the latency. Adding a per-poll wire cost
+only shifts the tail's phase, and can put the penultimate poll under a round
+trip too (at 40ms per poll: 149 polls, tail `..., 2160, 120, 1`). So one poll
+per login is below a plausible round trip by construction, occasionally two:
+the last one is the 1ms poll #1165 recorded as harmless residue. It covers the
+last ~2s of the 300s budget, which is the window a human must finish signing in
+inside for this to fire, so the rate is low; what the clamp establishes is that
+the condition is not only a wire fluke, because the client's own deadline
+arithmetic manufactures it on every run that reaches the deadline. Readers
+weighing the client-only option against the server-side ones should price it as
+a narrow but systematic window, not a common one.
 
 **Why it is not a patch.** The code is gone from the client's reach the moment
 the server answers; no client-side retry can recover it, because the flight is
@@ -257,9 +288,9 @@ and stop letting the deadline clamp shrink a poll that may already have
 consumed a delivery. Costs: does not fix the race, only the amplifier in
 #deadline-clamp; picks a "plausible round trip" number out of the air; and the
 window it closes is narrow (#deadline-clamp measures one sub-round-trip poll
-per login). Buys: client-only, needs no server deploy, and removes the one
-end-of-budget case the client creates for itself on every run that reaches the
-deadline.
+per login, occasionally two). Buys: client-only, needs no server deploy, and
+removes the one end-of-budget case the client creates for itself on every run
+that reaches the deadline.
 
 **D. Report it honestly.** Remember that a `200` was received and unreadable,
 and end the wait with a message saying the sign-in may have completed and to
@@ -274,7 +305,7 @@ failure is safe in every respect that matters.
 
 ## What this does not cover {#not-covered}
 
-**The two residues review round 2 recorded as non-findings.** The last loop
+**The two residues PR #1152's review recorded as non-findings.** The last loop
 iteration can issue one 1ms-budget poll that aborts immediately before the
 `remaining <= 0` throw, and `defaultSleep`'s timer survives a `close()`
 mid-sleep through the `Promise.race`. Both are noted at #1165, and the second
