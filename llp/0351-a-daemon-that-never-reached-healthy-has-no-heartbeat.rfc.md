@@ -9,7 +9,7 @@
 **Related:** [LLP 0348](./0348-a-live-pid-is-not-a-live-daemon.decision.md)
 (#heartbeat-is-derived, #stale-heartbeat-is-unresponsive: the check this asks
 to widen), [LLP 0017](./0017-daemon-runtime.decision.md) (the boot-time
-aggregate and the meaning of `startedAt` / `healthyAt`), [LLP 0164](./0164-status-names-recent-clients-from-gateway-entrypoints.decision.md)
+aggregate `state` is computed from), [LLP 0164](./0164-status-names-recent-clients-from-gateway-entrypoints.decision.md)
 (#status-reads-it-from-the-status-file: the file this reads);
 hyparam/hypaware#1183, hyparam/hypaware#1003, PR #1181
 
@@ -72,7 +72,9 @@ boot-degraded shape.
 
 ## Why this is not a patch {#why-not-a-patch}
 
-Both remedies that fit inside a review round are foreclosed by settled design.
+Neither remedy that fits inside a review round is available without a
+decision. One is foreclosed by settled design; the other is on record nowhere,
+which is its own reason to put it on record before taking it.
 
 **Recording a boot-time heartbeat means minting a `DaemonStatus` field.**
 LLP 0348#heartbeat-is-derived settled the opposite: the heartbeat costs one
@@ -80,11 +82,15 @@ arithmetic expression over two fields that were already there, and adds nothing
 to the status file's schema. A new field is a change to that decision, and to
 the file every other reader and every older build shares.
 
-**Treating `startedAt` as a heartbeat redefines a field LLP 0017 settled.**
-`startedAt` is written once, at process start, and never refreshed. Reading it
-as a heartbeat would give every daemon a permanently ageing one, so the
-derivation would have to be conditional on the state, which is a second meaning
-for the field rather than a reuse of it.
+**Treating `startedAt` as a heartbeat gives a settled field a second meaning.**
+`startedAt` is written once, at process start, and never refreshed
+(`src/core/daemon/runtime.js`). Reading it as a heartbeat would give every
+daemon a permanently ageing one, so the derivation would have to be conditional
+on the state, which is a second meaning for the field rather than a reuse of
+it. No document forbids that read: LLP 0017 settles the boot aggregate `state`
+is computed from and names neither `startedAt` nor `healthyAt`. What the read
+costs is the field's single meaning, and that is a judgement this document is
+asking for rather than one already on record.
 
 A third framing is worth stating so it is not mistaken for a way out: 0348's
 exclusion is not a bug in that document. It is accurate for the state it names.
@@ -104,8 +110,8 @@ Costs nothing in the status file and no new field. It needs a second window
 constant and a defensible number for it, and it has to answer what a
 legitimately slow boot looks like (a first-run plugin install, a cold cache
 open) so the check does not shout at a machine that is merely working. It also
-gives `startedAt` a read it did not have, which is the LLP 0017 question above
-in a smaller form.
+gives `startedAt` a read it did not have, which is the second-meaning question
+above in a smaller form.
 
 <a id="option-persist-from-starting"></a>**B. Persist a heartbeat from the
 `starting` state onward.** Have the daemon refresh the pair (or an equivalent)
@@ -125,6 +131,20 @@ oversight, on the grounds that the transcribed `daemon.state` already reads
 `degraded` or `starting` in these shapes. The cost is that `overall` (the field
 a monitor watches) stays `healthy` for a permanently stuck daemon, which is the
 same class of lie #1003 was filed about, only rarer.
+
+<a id="option-file-mtime"></a>**D. Read the status file's own mtime.** The
+snapshot is rewritten by `persist()` at the end of every tick whatever the
+`state`, so the file's modification time advances for a daemon that is ticking
+`degraded` and freezes for one that has stopped ticking, with no field minted
+and no second meaning given to `startedAt`. Reading a file's age for staleness
+is already the established move elsewhere in the tree (the self-update lock,
+the credentials lock, the cache's orphan grace). Its costs: the age lives
+outside the snapshot, so it is a property of this machine's filesystem rather
+than of the record, and it is lost the moment the file is copied; it adds a
+`stat` to a collector LLP 0348#consequences describes as adding no I/O beyond
+the status-file read it already performs; and for the `bootKernel` shape it
+inherits option A's question exactly, because the only write is the one at
+process start, so the mtime and `startedAt` are the same instant.
 
 ## What this does not cover {#not-covered}
 
