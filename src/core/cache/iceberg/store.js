@@ -632,7 +632,22 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   if (filtering && hasSeqColumn && !projected.includes(INGEST_SEQ_COLUMN.name)) {
     projected = [...projected, INGEST_SEQ_COLUMN.name]
   }
-  const scan = source.scan({ columns: projected, where: whereInExpr(source, opts?.whereIn) })
+  // @ref LLP 0040#storage-api-extension [implements]: `since` is pushed to
+  // icebird as a `seq > x` predicate, so a data file whose manifest upper
+  // bound on the seq column sits at or below the watermark is never opened.
+  // Without it an idle sink tick decoded every column of every file just to
+  // discard each row at the check below. Only when legacy rows are excluded:
+  // a null seq fails `seq > x`, and `includeLegacy` wants those rows yielded,
+  // so that case keeps the yielded-row filter as its only gate. The filter
+  // below stays in place either way as the fallback the section names.
+  const pushSince = filtering && hasSeqColumn && !includeLegacy
+  const scan = source.scan({
+    columns: projected,
+    where: andExpr(
+      whereInExpr(source, opts?.whereIn),
+      pushSince ? seqAfterExpr(/** @type {bigint} */ (since)) : undefined,
+    ),
+  })
   for await (const row of scan.rows()) {
     const resolved = await resolveAsyncRow(row, projected)
     if (filtering) {
@@ -681,6 +696,38 @@ function whereInExpr(source, whereIn) {
     expr = expr ? { ...at, type: 'binary', op: 'AND', left: expr, right: node } : node
   }
   return expr
+}
+
+/**
+ * `_hyp_ingest_seq > since` as an icebird expression. The literal stays a
+ * bigint: the column is int64 and icebird compares manifest bounds and row
+ * cells against it without narrowing.
+ *
+ * @param {bigint} since
+ * @returns {ExprNode}
+ */
+function seqAfterExpr(since) {
+  const at = { positionStart: 0, positionEnd: 0 }
+  return {
+    ...at,
+    type: 'binary',
+    op: '>',
+    left: { ...at, type: 'identifier', name: INGEST_SEQ_COLUMN.name },
+    right: { ...at, type: 'literal', value: since },
+  }
+}
+
+/**
+ * Conjoin two optional expressions; either side absent yields the other.
+ *
+ * @param {ExprNode | undefined} left
+ * @param {ExprNode | undefined} right
+ * @returns {ExprNode | undefined}
+ */
+function andExpr(left, right) {
+  if (!left) return right
+  if (!right) return left
+  return { positionStart: 0, positionEnd: 0, type: 'binary', op: 'AND', left, right }
 }
 
 /**

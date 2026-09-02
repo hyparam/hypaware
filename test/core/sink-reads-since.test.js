@@ -116,7 +116,7 @@ test('readRowsSince pairs each row with a monotonic after token and strips the s
 
   /** @type {Record<string, unknown>[]} */
   const fresh = []
-  for await (const { row, after } of svc.readRowsSince(tablePath, { since: watermark })) {
+  for await (const { row, after } of svc.readRowsSince(tablePath, { since: watermark, includeLegacy: false })) {
     assert.ok(row, 'no usage-policy resolver ⇒ no drops')
     fresh.push(row)
     assert.ok(BigInt(after.seq) > BigInt(watermark.seq))
@@ -211,6 +211,63 @@ test('an invalid continuation token is rejected', async () => {
     // @ts-expect-error: deliberately malformed token
     for await (const _ of svc.readRowsSince(tablePath, { since: { v: 2, seq: '1' } })) { /* drain */ }
   }, /invalid SinkContinuation/)
+
+  await fs.rm(cacheRoot, { recursive: true, force: true })
+})
+
+test('a watermark prunes data files below it: an idle tick opens no data file', async () => {
+  const cacheRoot = await makeTmpDir()
+  const svc = createQueryStorageService({ cacheRoot })
+  const spoolPath = svc.cacheTablePath('demo', ['all'])
+  await svc.appendRows(spoolPath, COLS, [
+    { id: 1, msg: 'a' },
+    { id: 2, msg: 'b' },
+  ])
+  await svc.flushTable(spoolPath, { reason: 'manual' })
+  const parts = await svc.discoverCachePartitions()
+  assert.equal(parts.length, 1)
+  const tablePath = parts[0].path
+
+  /** @type {{ v: 1, seq: string } | undefined} */
+  let watermark
+  for await (const pair of svc.readRowsSince(tablePath, {})) watermark = pair.after
+  assert.ok(watermark)
+
+  // A second flush lands in a second data file, above the watermark.
+  await svc.appendRows(spoolPath, COLS, [{ id: 3, msg: 'c' }])
+  await svc.flushTable(spoolPath, { reason: 'manual' })
+
+  // The local resolver reads every file through `fs.readFileSync`; record the
+  // data files it opens during each scan.
+  const fsSync = await import('node:fs')
+  const realRead = fsSync.default.readFileSync
+  /** @type {string[]} */
+  const opened = []
+  fsSync.default.readFileSync = /** @type {typeof realRead} */ ((...args) => {
+    const target = String(args[0])
+    if (target.endsWith('.parquet')) opened.push(path.basename(target))
+    return realRead.apply(fsSync.default, /** @type {any} */ (args))
+  })
+  try {
+    /** @type {number[]} */
+    const fresh = []
+    for await (const pair of svc.readRowsSince(tablePath, { since: watermark, includeLegacy: false })) {
+      if (pair.row) fresh.push(Number(pair.row.id))
+    }
+    assert.deepEqual(fresh, [3])
+    assert.equal(opened.length, 1, `only the file above the watermark is opened, got ${opened.join(', ')}`)
+
+    let tip = watermark
+    for await (const pair of svc.readRowsSince(tablePath, { since: watermark, includeLegacy: false })) tip = pair.after
+    opened.length = 0
+    /** @type {unknown[]} */
+    const none = []
+    for await (const pair of svc.readRowsSince(tablePath, { since: tip, includeLegacy: false })) none.push(pair)
+    assert.equal(none.length, 0)
+    assert.deepEqual(opened, [], 'an idle tick opens no data file at all')
+  } finally {
+    fsSync.default.readFileSync = realRead
+  }
 
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
