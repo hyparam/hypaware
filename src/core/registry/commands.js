@@ -80,7 +80,13 @@ export function createCommandRegistry() {
         `CommandRegistry.register: '${record.name}' missing run()${copyMiss(command, record, 'run')}`
       )
     }
-    warnDroppedOptionals(command, record)
+    // Probed here, said below. The probe has to read the copy before the
+    // defaulting, or a dropped `category` is papered over by the value
+    // derived to replace it; the saying has to wait until the registration
+    // has actually landed, because four refusals still stand between here
+    // and that, and a WARN that says a command was registered degraded is
+    // false about a command the next line refuses outright.
+    const dropped = droppedOptionals(command, record)
     // Fill the common metadata at the registry boundary so third-party
     // commands participate without boilerplate. Canonical registrations can
     // override every field; aliases always inherit this one semantic record.
@@ -114,6 +120,7 @@ export function createCommandRegistry() {
     for (const alias of record.aliases ?? []) {
       aliasIndex.set(alias, record.name)
     }
+    warnDroppedOptionals(record.name, dropped)
   }
 
   /** @param {string} name */
@@ -258,6 +265,23 @@ const OPTIONAL_MEMBERS = Object.freeze([
 ])
 
 /**
+ * Which optional members the copy dropped, of those the registration still
+ * declares.
+ *
+ * Read before the defaulting, so a dropped `category` is reported rather than
+ * papered over by the value derived to replace it. Presence-only, by reusing
+ * the same probe: naming a member must not run the accessor that provides it,
+ * which is the whole reason {@link copyMiss} reads `in`.
+ *
+ * @param {CommandRegistration} command the registration as passed
+ * @param {CommandRegistration} record the own-enumerable copy the checks read
+ * @returns {string[]} the dropped member names, in declaration order
+ */
+function droppedOptionals(command, record) {
+  return OPTIONAL_MEMBERS.filter((key) => copyMiss(command, record, key) !== '')
+}
+
+/**
  * Say that the copy dropped an optional member the registration still
  * declares.
  *
@@ -272,28 +296,27 @@ const OPTIONAL_MEMBERS = Object.freeze([
  * mirror. It fires only on a registration that lost something, so an ordinary
  * one stays as quiet as it was.
  *
- * Said before the defaulting below, so a dropped `category` is named rather
- * than papered over by the value derived to replace it. Presence-only, by
- * reusing the same probe: naming a member must not run the accessor that
- * provides it, which is the whole reason {@link copyMiss} reads `in`.
+ * Said once the command is in both indexes, never before: everything this
+ * line asserts is about a registration that happened, and a refusal for a
+ * duplicate name, a colliding alias, or an invalid `audience` still stands
+ * between the probe and here.
  *
- * @param {CommandRegistration} command the registration as passed
- * @param {CommandRegistration} record the own-enumerable copy the checks read
+ * @param {string} name the registered command's name
+ * @param {string[]} dropped what {@link droppedOptionals} found, possibly none
  * @ref LLP 0329#stderr-mirror [implements]: a degradation observable only as an absence opts into the mirror
  */
-function warnDroppedOptionals(command, record) {
-  const dropped = OPTIONAL_MEMBERS.filter((key) => copyMiss(command, record, key) !== '')
+function warnDroppedOptionals(name, dropped) {
   if (dropped.length === 0) return
   const named = dropped.map((key) => `'${key}'`).join(', ')
   getLogger('command-registry', { mirrorStderr: true }).warn(
-    `CommandRegistry.register: '${record.name}' registered without ${named} - ` +
+    `CommandRegistry.register: '${name}' registered without ${named} - ` +
       'reachable on the registration but not an own enumerable property, so the ' +
       "registry's copy did not carry it (a prototype member, or one defined non-enumerable)",
     {
       [Attr.OPERATION]: 'command.register',
       [Attr.STATUS]: 'degraded',
       [Attr.ERROR_KIND]: 'optional_member_not_copied',
-      command_name: record.name,
+      command_name: name,
       dropped_members: dropped.join(','),
     }
   )

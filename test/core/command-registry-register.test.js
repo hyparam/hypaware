@@ -316,15 +316,55 @@ test('a registration with no optional members warns about nothing', async () => 
 // registration it was only commenting on.
 test('a throwing has trap costs the warning, not the registration', async () => {
   const commands = createCommandRegistry()
-  const hasTrapped = new Proxy(
-    /** @type {any} */ (makeCommand({ name: 'has-trapped' })),
-    {
-      has() {
-        throw new Error('has boom')
-      }
+  // The target has to carry a prototype-resident optional member, or the
+  // empty stderr below holds whether or not the throw was contained and the
+  // test pins nothing it is named for. With one, the warning is exactly what
+  // would fire if the probe could reach it, so its absence is the cost.
+  class Trapped {
+    constructor() {
+      this.name = 'has-trapped'
+      this.summary = 'the trap sits over a droppable member'
+      this.usage = 'hyp has-trapped'
+      this.run = async () => 0
     }
-  )
+    get plugin() {
+      return '@hypaware/demo'
+    }
+  }
+  const hasTrapped = new Proxy(/** @type {any} */ (new Trapped()), {
+    has() {
+      throw new Error('has boom')
+    },
+  })
   const text = await stderrTextFrom(() => commands.register(hasTrapped))
   assert.equal(text, '')
   assert.equal(commands.get('has-trapped')?.name, 'has-trapped')
+})
+
+// The saying is separated from the probe so it can wait for the registration
+// to land: the probe must read the copy before the defaulting, but four
+// refusals still stand between there and a registered command, and a WARN
+// naming a command that was refused is false on the one channel LLP 0329
+// guarantees an operator can see.
+test('a refused registration is not warned about as a degraded one', async () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand({ name: 'taken' }))
+  class Prototyped {
+    constructor() {
+      this.name = 'taken'
+      this.summary = 'a duplicate whose optional member is on the prototype'
+      this.usage = 'hyp taken'
+      this.run = async () => 0
+    }
+    get plugin() {
+      return '@hypaware/demo'
+    }
+  }
+  const text = await stderrTextFrom(() => {
+    assert.throws(
+      () => commands.register(/** @type {any} */ (new Prototyped())),
+      /duplicate command name 'taken'/
+    )
+  })
+  assert.equal(text, '', 'a registration that was refused must not be reported as registered')
 })
