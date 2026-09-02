@@ -17,8 +17,8 @@ own stream, rejects the close that lost records, and a provider close that
 outruns the shutdown budget is reported instead of abandoned), and
 [LLP 0362](./0362-an-absence-only-degradation-opts-into-the-stderr-mirror.decision.md)
 (#not-a-fifth-mirror: the census of four mirrored lines is a head count and
-not a closed set, and the fifth call site to opt in is the first that is not
-a refusal)
+not a closed set, and the call site this admits is the first mirrored one
+with no containment refusal behind it)
 **Related:** LLP 0021 (#shutdown-and-flush and the exporter strategy this
 leaves unchanged), hyparam/hypaware#1122, hyparam/hypaware#1125,
 hyparam/hypaware#1130
@@ -186,9 +186,10 @@ telemetry, the thing `ctx.stderr` cannot diagnose, is broken.
 
 **Extended-by
 [LLP 0362](./0362-an-absence-only-degradation-opts-into-the-stderr-mirror.decision.md)**:
-"four" is a census at this head, not a closed set. A fifth call site opts in,
+"four" is a census at this head, not a closed set. Another call site opts in,
 `CommandRegistry.register`'s report of an optional member its copy dropped,
-and it is the first that is not a refusal. What this section draws stays
+and it is the first mirrored line with no containment refusal behind it,
+neither making one nor retracting one. What this section draws stays
 drawn: the guard's own line is still not a mirror, because no call site asked
 for it.
 

@@ -11,10 +11,10 @@
 refusals, admits one report on a registration that succeeded, because the
 property the rule turns on is the absence and not the refusal), and
 [LLP 0335](./0335-a-telemetry-failure-is-said-once-never-thrown.decision.md)
-(#not-a-fifth-mirror: its census of four mirrored lines becomes five, and the
-one this admits is the first of them that is not a refusal)
-**Related:** LLP 0332, LLP 0248, LLP 0268, hyparam/hypaware#1226,
-hyparam/hypaware#1227, hyparam/hypaware#1232
+(#not-a-fifth-mirror: its "four" is a head count and not a closed set, and
+the line this admits is the first mirrored one with no refusal behind it)
+**Related:** LLP 0332, LLP 0334, LLP 0344, LLP 0248, LLP 0268,
+hyparam/hypaware#1226, hyparam/hypaware#1227, hyparam/hypaware#1232
 
 > LLP 0329 settled a per-call-site `mirrorStderr` opt-in and wrote its rule
 > for the four containment refusals it was minted over, where refusing and
@@ -25,7 +25,7 @@ hyparam/hypaware#1227, hyparam/hypaware#1232
 > drops before any exporter. This decision admits that report to the opt-in
 > set and states the rule by the property it always turned on: a report whose
 > subject is observable only as an absence takes the mirror. A refusal is the
-> common case, not the qualification.
+> common case among the sites that have opted in, not the qualification.
 
 ## The rule turns on the absence, not on the refusal {#absence-not-refusal}
 
@@ -56,21 +56,33 @@ On the substrate 0329 measured (neither `HYP_DEV_TELEMETRY` nor
 any exporter), a WARN without the mirror is byte-identical to a registration
 that never declared the member: the same silence the drop already has, in a
 process the author is not watching, since registration happens during plugin
-activation. So the decision: **the opt-in set is the set of reports whose
-subject is observable only as an absence, whether the reporting site refused
-or carried on.** Nothing else about 0329 moves. The mirror stays
+activation. So the decision: **a report whose subject is observable only as
+an absence is inside the opt-in set, whether the reporting site refused or
+carried on.** Nothing else about 0329 moves. The mirror stays
 per-call-site, stays an addition to the structured record rather than a
 rerouting, and stays off every report a verb's own output already carries.
 
-## The census is five, and one of them is not a refusal {#fifth-mirror}
+## The opt-in set is open, and no refusal stands behind this entry {#not-a-refusal}
 
 LLP 0335 #not-a-fifth-mirror reads the corpus as "four named containment
 refusals" and distinguishes its own unconditional line as *not* a mirror,
 because no call site asked for `mirrorStderr`. That distinction is untouched.
-The count is not: the mirrored lines are now the four refusals plus this
-report, and this one is the first that fires on a path that succeeded. A
-reader auditing what writes to `process.stderr` without a provider needs both
-this section and 0335's.
+The count is not, and it had already moved before this decision:
+`mirrorStderr: true` stands at eight call sites at this head, because LLP
+0344 added the unreadable-cursor refusal and LLP 0334 #recovery-is-announced
+added two INFO lines, `noteEscapeCleared` and `noteUnreadableCleared` in
+`src/core/cache/partition.js`, which retract a refusal rather than make one.
+
+So this report is not the fifth of anything, and "not a refusal" does not
+single it out either. What singles it out is that no refusal stands behind
+it at all: every other mirrored line either makes a containment refusal or
+retracts one it made earlier, while this site refuses nothing and has nothing
+to retract. Registration succeeds, which is the design, and the report is
+about what the successful registration did not carry.
+
+A reader auditing what writes to `process.stderr` without a provider counts
+the `mirrorStderr: true` call sites rather than a number any document states.
+Every count in this section and in 0335's is a census at its own head.
 
 ## The audit LLP 0329 asked for is not re-opened {#still-not-every-warn}
 
@@ -136,6 +148,9 @@ remedy for a default as for a declared value.
 - `OPTIONAL_MEMBERS` is the diagnostic's coverage, and it is now pinned to the
   optional members of `CommandRegistration` by test rather than by hand, so a
   member added to the published interface cannot escape the report unnoticed.
+  The pin reads the declaration file, so it holds for every spelling the file
+  uses for an optional member, the optional method `foo?(...)` included, which
+  is the shape that always lives on a prototype and so the one the copy drops.
 
 ## References {#references}
 
