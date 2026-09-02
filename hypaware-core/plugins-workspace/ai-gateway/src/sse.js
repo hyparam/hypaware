@@ -39,14 +39,21 @@ export class SseParser {
     }
     /** @type {SseEvent[]} */
     const events = []
+    // One forward pass per feed. Each terminator search resumes where the
+    // last event ended, and the consumed prefix is dropped once at the end,
+    // so a whole-body feed (the compressed and header-blind paths hand the
+    // recorder the entire decoded stream in one call) costs O(bytes), not
+    // O(events x bytes) as it did when every event re-scanned the remainder.
+    let pos = 0
     while (true) {
-      const sep = findSeparator(this.buffer)
+      const sep = findSeparator(this.buffer, pos)
       if (sep === -1) break
-      const block = this.buffer.slice(0, sep.idx)
-      this.buffer = this.buffer.slice(sep.idx + sep.len)
+      const block = this.buffer.slice(pos, sep.idx)
+      pos = sep.idx + sep.len
       const ev = parseBlock(block)
       if (ev) events.push(ev)
     }
+    if (pos > 0) this.buffer = this.buffer.slice(pos)
     return events
   }
 }
@@ -66,21 +73,37 @@ export function isSseHeaders(headers) {
 }
 
 /**
- * Find the next event-block terminator (`\n\n` or `\r\n\r\n`) and
- * return its offset plus the terminator length so callers can advance
- * past it.
+ * Find the next event-block terminator (`\n\n` or `\r\n\r\n`) at or after
+ * `from` and return its offset plus the terminator length so callers can
+ * advance past it.
+ *
+ * Walks newlines rather than probing for each terminator separately: the
+ * `\r\n\r\n` probe almost never matches (providers send `\n\n`) and so
+ * scanned to the end of the buffer on every call. Every terminator holds a
+ * newline, so visiting newlines in order and testing the bytes around each
+ * finds the earliest terminator start in one pass. The two cannot tie: a
+ * `\r\n\r\n` starting at `b` has its first newline at `b + 1`, and `\n\n`
+ * cannot start there because the byte after it is `\r`.
  *
  * @param {string} buf
+ * @param {number} from
  * @returns {{ idx: number, len: number } | -1}
  */
-function findSeparator(buf) {
-  const a = buf.indexOf('\n\n')
-  const b = buf.indexOf('\r\n\r\n')
-  if (a === -1 && b === -1) return -1
-  if (a === -1) return { idx: b, len: 4 }
-  if (b === -1) return { idx: a, len: 2 }
-  if (a < b) return { idx: a, len: 2 }
-  return { idx: b, len: 4 }
+function findSeparator(buf, from) {
+  let i = buf.indexOf('\n', from)
+  while (i !== -1) {
+    if (buf.charCodeAt(i + 1) === 10) return { idx: i, len: 2 }
+    if (
+      i > from &&
+      buf.charCodeAt(i - 1) === 13 &&
+      buf.charCodeAt(i + 1) === 13 &&
+      buf.charCodeAt(i + 2) === 10
+    ) {
+      return { idx: i - 1, len: 4 }
+    }
+    i = buf.indexOf('\n', i + 1)
+  }
+  return -1
 }
 
 /**
