@@ -112,6 +112,35 @@ function requestWithHost(port, options) {
   })
 }
 
+/**
+ * Write a raw request and resolve with its status line. Used for request
+ * lines and header values no HTTP client will build.
+ *
+ * @param {number} port
+ * @param {string} request
+ * @returns {Promise<string>}
+ */
+function rawRequestLine(port, request) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1')
+    let received = ''
+    socket.on('connect', () => socket.write(request))
+    socket.on('data', (chunk) => {
+      received += chunk.toString('utf8')
+      if (received.includes('\r\n')) {
+        socket.destroy()
+        resolve(received.split('\r\n')[0])
+      }
+    })
+    socket.on('error', reject)
+    // A Node that rejected the request at the parser would close with no status
+    // line at all, and waiting on `data` alone would hang the run.
+    socket.on('close', () =>
+      reject(new Error(`socket closed with no status line, got ${JSON.stringify(received)}`))
+    )
+  })
+}
+
 test('listenAndResolve reports the port a dynamic bind actually got', async () => {
   const s = await startServer()
   try {
@@ -488,6 +517,27 @@ test('a malformed Host is refused rather than parsed', async () => {
   }
 })
 
+// Node's HTTP parser hands the handler request targets `new URL` refuses
+// (`//[`, `http://[::1`), and the throw would leave an `async` handler with no
+// `unhandledRejection` handler anywhere in the repo behind it: one request line
+// would end the daemon. The `Host` is loopback here, so the check above passes
+// it through to the parser.
+test('a request target new URL rejects is answered 400, not thrown out of the handler', async () => {
+  const s = await startServer()
+  try {
+    for (const target of ['//[', 'http://[::1', '//[::1']) {
+      const line = await rawRequestLine(s.bound.port, `GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`)
+      assert.equal(line, 'HTTP/1.1 400 Bad Request', `GET ${target} is answered`)
+    }
+    // Still serving, which is the half a status code alone would not prove.
+    const banner = await fetch(`http://127.0.0.1:${s.bound.port}/`)
+    assert.equal(banner.status, 200)
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
 test('the Host check judges loopback connections only, and needs a Host to judge', () => {
   /** @type {PluginLogger} */
   const log = { debug() {}, info() {}, warn() {}, error() {} }
@@ -510,6 +560,57 @@ test('the Host check judges loopback connections only, and needs a Host to judge
   assert.equal(misdirected('', 'attacker.example'), true)
   // No Host at all: HTTP/1.0 clients omit it and a browser never does.
   assert.equal(misdirected('127.0.0.1'), false)
+
+  // A `Host` no hostname can be read out of is refused with the foreign ones,
+  // rather than half-read into a loopback name.
+  assert.equal(misdirected('127.0.0.1', '[::1'), true)
+  assert.equal(misdirected('127.0.0.1', '[::1]x'), true)
+  assert.equal(misdirected('127.0.0.1', '127.0.0.1:'), true)
+  assert.equal(misdirected('127.0.0.1', '127.0.0.1:80x'), true)
+  assert.equal(misdirected('127.0.0.1', 'localhost:1:2'), true)
+  assert.equal(misdirected('127.0.0.1', 'user@localhost'), true)
+})
+
+// The bound on the refusal line, which is the half of a refusal a rebound page
+// still controls: it chooses the `Host` and the rate, and the line lands in
+// `logs`.
+test('a refusal is always counted but logged at most once an interval, with the Host bounded', () => {
+  /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
+  const lines = []
+  /** @type {PluginLogger} */
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    warn(event, fields) {
+      lines.push({ event, fields: fields ?? {} })
+    },
+  }
+  // Bounded only by Node's header budget, which is not a bound worth writing
+  // a row against.
+  const host = `${'a'.repeat(400)}.example`
+  const refuse = () =>
+    isMisdirectedHost(
+      /** @type {any} */ ({ socket: { localAddress: '127.0.0.1' }, headers: { host } }),
+      // A listener name of its own: the tally is per listener and lives as long
+      // as the process, so sharing one with another test would couple the two.
+      { name: 'hypaware/refusal-bound', log }
+    )
+
+  assert.equal(refuse(), true)
+  assert.equal(refuse(), true)
+  assert.equal(refuse(), true)
+
+  // A page can send these as fast as it likes, so only the first is written:
+  // a line apiece would answer blocked row injection with unbounded row growth
+  // in `logs`.
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0]?.event, 'listener.host_refused')
+  assert.equal(lines[0]?.fields?.refused_total, 1)
+  // The one line that is written cannot carry an unbounded value either.
+  const logged = String(lines[0]?.fields?.host)
+  assert.equal(logged.length, 128)
+  assert.ok(host.startsWith(logged))
 })
 
 test('a listener can serve a subset of the signals', async () => {

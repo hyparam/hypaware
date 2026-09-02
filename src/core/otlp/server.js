@@ -135,6 +135,35 @@ export function isMisdirectedHost(req, opts) {
   return true
 }
 
+/**
+ * The base every listener parses its request target against. A constant,
+ * because nothing downstream reads the authority (only `pathname` and
+ * `searchParams`), and building one out of `Host` puts a caller-chosen
+ * string into the parser below.
+ */
+const REQUEST_URL_BASE = 'http://localhost'
+
+/**
+ * The request target as a `URL`, or `undefined` when it is one Node's HTTP
+ * parser accepted and `new URL` will not (`//[`, `http://[::1` and friends
+ * all reach a handler as `req.url`). The caller answers those 400.
+ *
+ * The distinction matters more than a parse helper usually does: an
+ * uncaught throw here leaves the request handler, and there is no
+ * `uncaughtException` or `unhandledRejection` handler anywhere in this
+ * repo, so one malformed request line would end the daemon.
+ *
+ * @param {IncomingMessage} req
+ * @returns {URL | undefined}
+ */
+export function requestUrlOf(req) {
+  try {
+    return new URL(req.url ?? '/', REQUEST_URL_BASE)
+  } catch {
+    return undefined
+  }
+}
+
 /** Path to signal, the OTLP/HTTP standard routes. */
 const SIGNAL_ROUTES = /** @type {Record<string, OtlpSignal>} */ ({
   '/v1/logs': 'logs',
@@ -181,12 +210,12 @@ export function createOtlpJsonServer(options) {
       return
     }
 
-    // A constant base. Nothing below reads the authority, only the path and
-    // the query, and a `Host` no authority can be parsed out of throws here,
-    // out of an `async` handler nothing catches, which takes the daemon with
-    // it. The `Host` check above refuses such a header, but only on the
-    // loopback binds it judges.
-    const url = new URL(req.url ?? '/', 'http://localhost')
+    const url = requestUrlOf(req)
+    if (!url) {
+      req.resume()
+      respondJsonError(res, 400, 3, 'Invalid request target')
+      return
+    }
     const route = url.pathname
 
     // The reserved `/_hypaware/` prefix is a LOCAL control surface, exactly

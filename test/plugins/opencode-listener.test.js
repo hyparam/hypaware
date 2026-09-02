@@ -283,6 +283,37 @@ test('a request carrying a foreign Host reaches neither /snapshot nor the contro
   }
 })
 
+// The handler here is synchronous, so a throw out of it is an
+// `uncaughtException`, and this repo installs no handler for one.
+test('a request target new URL rejects is answered 400 rather than ending the daemon', async () => {
+  const listener = await startListener()
+  const port = Number(new URL(listener.endpoint).port)
+  try {
+    const line = await new Promise((resolve, reject) => {
+      const socket = net.connect(port, '127.0.0.1')
+      let received = ''
+      socket.on('connect', () => socket.write('GET //[ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n'))
+      socket.on('data', (chunk) => {
+        received += chunk.toString('utf8')
+        if (received.includes('\r\n')) {
+          socket.destroy()
+          resolve(received.split('\r\n')[0])
+        }
+      })
+      socket.on('error', reject)
+      socket.on('close', () =>
+        reject(new Error(`socket closed with no status line, got ${JSON.stringify(received)}`))
+      )
+    })
+    assert.equal(line, 'HTTP/1.1 400 Bad Request')
+    // Still serving.
+    const banner = await fetch(`${listener.endpoint}/`)
+    assert.equal(banner.status, 200)
+  } finally {
+    await listener.cleanup()
+  }
+})
+
 test('OpenCode listener reports malformed snapshot errors without exposing request content', async () => {
   const listener = await startListener()
   try {
