@@ -262,7 +262,7 @@ test('a leftover snapshot is not read as the heartbeat of whatever now holds its
  * @param {string[]} [argv]
  * @returns {Promise<{ code: number, out: string }>}
  */
-async function runDaemonStatusText(hypHome, argv = []) {
+async function captureDaemonStatus(hypHome, argv = []) {
   let out = ''
   const ctx = /** @type {any} */ ({
     env: { ...process.env, HYP_HOME: hypHome },
@@ -283,7 +283,7 @@ test('hyp daemon status does not repeat a wedged daemon\'s recorded healthy stat
     otelPort: 4319,
   })
 
-  const { out } = await runDaemonStatusText(hypHome)
+  const { out } = await captureDaemonStatus(hypHome)
   assert.match(out, /^daemon: degraded/, 'a daemon that cannot serve must not print healthy here either')
   assert.match(out, /no status write for 11m/, 'and says how long the snapshot has been frozen')
   // The uptime counter stops at the last write. `now - healthyAt` would keep
@@ -302,7 +302,7 @@ test('hyp daemon status --json still copies the wedged snapshot verbatim', async
     otelPort: 4319,
   })
 
-  const { out } = await runDaemonStatusText(hypHome, ['--json'])
+  const { out } = await captureDaemonStatus(hypHome, ['--json'])
   const payload = JSON.parse(out)
   assert.equal(payload.running, true)
   assert.equal(payload.state, 'healthy')
@@ -320,7 +320,7 @@ test('hyp daemon status still prints the recorded state and live uptime for a ti
     otelPort: 4319,
   })
 
-  const { out } = await runDaemonStatusText(hypHome)
+  const { out } = await captureDaemonStatus(hypHome)
   assert.match(out, /^daemon: healthy\n/)
   assert.doesNotMatch(out, /status write/)
   const uptime = Number(/uptime_ms:\s+(\d+)/.exec(out)?.[1])
@@ -344,7 +344,7 @@ test('hyp daemon status leaves a dead daemon\'s leftover snapshot alone', async 
     sinks: [],
   }))
 
-  const { out } = await runDaemonStatusText(hypHome)
+  const { out } = await captureDaemonStatus(hypHome)
   assert.match(out, /^daemon: healthy \(no live process\)\n/)
   assert.doesNotMatch(out, /status write/)
 })
@@ -368,7 +368,7 @@ test('hyp daemon status does not read a leftover snapshot as the heartbeat of wh
     sinks: [],
   }))
 
-  const { out } = await runDaemonStatusText(hypHome)
+  const { out } = await captureDaemonStatus(hypHome)
   assert.match(out, /^daemon: healthy\n/)
   assert.doesNotMatch(out, /status write/)
   // The uptime is that leftover's own recorded value, not a live count

@@ -176,15 +176,6 @@ export async function runDaemonStatus(argv, ctx) {
   const staleNote = heartbeatAgeMs !== null && heartbeatAgeMs > DAEMON_HEARTBEAT_STALE_MS
     ? ` (no status write for ${formatGapDuration(heartbeatAgeMs)})`
     : ''
-  // A frozen loop's uptime stops at its last write. `now - healthyAt` is the
-  // right reading only while the ticks that fill the gap are still landing,
-  // and only while the pair being read is this process's own: a leftover
-  // snapshot whose pid the OS has since reissued ages forever and is a record
-  // of what happened, not a claim about now, so its recorded `uptimeMs` is
-  // what goes out rather than a number climbing against a stranger's clock.
-  const liveUptimeMs = running && snapshotIsThisProcess && !staleNote && status.healthyAt
-    ? Math.max(0, Date.now() - Date.parse(status.healthyAt))
-    : status.uptimeMs
   if (json) {
     // `uptimeMs` goes out exactly as the daemon wrote it, not as the live
     // `liveUptimeMs` the text line below prints. LLP 0348 reads
@@ -207,6 +198,20 @@ export async function runDaemonStatus(argv, ctx) {
   ctx.stdout.write(`  startedAt:  ${printable(status.startedAt)}\n`)
   if (status.healthyAt) ctx.stdout.write(`  healthyAt:  ${printable(status.healthyAt)}\n`)
   if (status.stoppedAt) ctx.stdout.write(`  stoppedAt:  ${printable(status.stoppedAt)}\n`)
+  // A frozen loop's uptime stops at its last write. `now - healthyAt` is the
+  // right reading only while the ticks that fill the gap are still landing,
+  // and only while the pair being read is this process's own: a leftover
+  // snapshot whose pid the OS has since reissued ages forever and is a record
+  // of what happened, not a claim about now, so its recorded `uptimeMs` is
+  // what goes out rather than a number climbing against a stranger's clock.
+  //
+  // Derived below the `--json` return because it is this text line's number
+  // alone: the payload above carries the daemon's own recorded `uptimeMs`, so
+  // computing it before that return spent a clock read the machine surface
+  // never spends, and read as though the payload might use it.
+  const liveUptimeMs = running && snapshotIsThisProcess && !staleNote && status.healthyAt
+    ? Math.max(0, Date.now() - Date.parse(status.healthyAt))
+    : status.uptimeMs
   ctx.stdout.write(`  uptime_ms:  ${printableNumber(liveUptimeMs)}\n`)
   const sources = entryList(status.sources)
   const sinks = entryList(status.sinks)
