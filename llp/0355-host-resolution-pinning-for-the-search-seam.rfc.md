@@ -54,9 +54,16 @@ if (err instanceof GrepQueryError) throw new VerbUsageError(err.message)
 throw err
 ```
 
-`src/core/cli/verb_command.js:164-178` is what makes the distinction
-visible: a `VerbUsageError` writes the message, then a `usage:` line, and
-returns **2**. Anything else writes the message and returns **1**.
+`src/core/cli/verb_command.js:164-178` is where the kernel states the
+distinction: a `VerbUsageError` writes the message, then a `usage:` line,
+and returns **2**. Anything else writes the message and returns **1**. That
+is the rule, not the failing path. `runVerbCommand` builds its own operation
+context through `buildOperationContext`, which returns a seven-field literal
+and never carries a caller's `search`, and `verb_command.js:174` is the only
+place in this repository that reads `VerbUsageError` for an exit code. So the
+one in-tree surface that maps the two classes to exit codes is also the one
+surface an injected backend can never reach; the failure needs a host that
+does both, and that host is out of tree (condition 1 below).
 
 The install topology that breaks it, stated exactly:
 
@@ -74,12 +81,14 @@ The install topology that breaks it, stated exactly:
    kernel resolved are different files. Node keys the ESM module cache by
    resolved URL, so the two copies define two distinct class objects.
 
-Then the refusal is a plain failed search: exit 1, no usage line. The
-**message still surfaces** (`verb_command.js:166` writes it before the
-branch), so the operator is told what is wrong; only the exit class, which
-is what a script reads, is wrong.
+Then the refusal is a plain failed search: exit 1, no usage line, in
+whatever that host's own equivalent of `verb_command.js:164-178` is. The
+**message still surfaces** (any mapping of this shape writes it before it
+branches on the class, as `verb_command.js:166` does), so the operator is
+told what is wrong; only the exit class, which is what a script reads, is
+wrong.
 
-Two facts bound the blast radius, and a decision should not overstate it:
+Three facts bound the blast radius, and a decision should not overstate it:
 
 - **MCP is unaffected.** `src/core/mcp/server.js:143-148` maps every throw
   from a tool to `isError: true` with the message. A `VerbUsageError` and
@@ -89,9 +98,23 @@ Two facts bound the blast radius, and a decision should not overstate it:
   because no in-tree host injects. It is a contract defect at a
   seam whose only consumer is out of tree, which is why triage classified
   it a preference rather than a blocker.
+- **No injecting host is named that has exit codes at all.** LLP 0314#decision
+  names exactly one injection site: "The server then supplies the backend in
+  the operation context it already builds per org (`buildMcpAssembly`)". That
+  is an MCP assembly, and the first bullet says the distinction is already
+  flat there. So the failure needs a host that injects `ctx.search` *and*
+  maps `VerbUsageError` to an exit code itself, and no such host is named in
+  this repository, in LLP 0314, or in LLP 0353. A decision has to weigh that
+  either way: it is an argument that the defect has no observer today, and it
+  is equally an argument for settling a published contract before the host
+  that would trip on it is written. This document does not choose between
+  those readings.
 
-Nothing pushes npm toward a single copy, and the lever that would is not this
-repository's to pull. `hypaware` declares no `peerDependencies` today, but
+Nothing *declares* the single-copy requirement, and the lever that would
+enforce it is not this repository's to pull. npm's own default hoisting
+already resolves to one copy whenever the requested ranges are compatible, so
+the topology takes more than an ordinary install; the rest of this paragraph
+is what that "more" is. `hypaware` declares no `peerDependencies` today, but
 adding one would not help: a package's `peerDependencies` constrains what
 *its own* consumers must supply, and has no bearing on whether that package
 is itself deduplicated in a consumer's tree. Only a package that depends on
@@ -275,10 +298,13 @@ install is a host packaging defect, and close the question.
    (LLP 0353#summary-drift already says so for the allowlist check, and the
    same is true here), so anything assertable is asserted by the host, and
    the decision has to say what the kernel hands the host to assert with.
-4. Whether the requirement is stated as a `peerDependencies` declaration in
-   the injecting host's manifest (it cannot be one in this repository's, per
-   `#failure`), a documented contract line, a runtime assertion, or some
-   combination.
+4. Whether the requirement is stated as a packaging constraint in the
+   injecting host's manifest, a documented contract line, a runtime
+   assertion, or some combination. `#failure` bounds the packaging option:
+   the constraint is `overrides` when the injecting host is the root project,
+   and a `peerDependencies` declaration only when that host is itself a
+   library its own consumer installs. Neither has any effect stated in this
+   repository's manifest.
 5. Whether it extends LLP 0353 or supersedes `#refusals`. LLP 0353 is
    Active, so the answer lands as a new document with a forward-ref on
    0353, not as an edit to it.
