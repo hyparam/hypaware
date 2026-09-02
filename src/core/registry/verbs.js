@@ -52,7 +52,7 @@ export function createVerbRegistry(opts = {}) {
     // needs it feature-detects it at daemon boot and re-checks `getByTool`
     // after: a throw here would take boot down, and a half-removal would
     // leave the tool slot held and the caller silently degraded.
-    // @ref LLP 0264#verb [implements]: a server host displaces the kernel-shipped twin by taking the name back, so archive-backed grep_search keeps the tool slot
+    // @ref LLP 0264#verb [implements]: a server host displaces the kernel-shipped twin by taking the name back, so archive-backed grep_search keeps the tool slot. LLP 0314#sequencing keeps this displacement rule the bridge until the server's `hypaware` floor rises and it drops its own registration; transitional, not retired.
     unregister(name) {
       const verb = byName.get(name)
       if (!verb) return

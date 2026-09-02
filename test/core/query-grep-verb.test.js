@@ -9,6 +9,12 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
+// A namespace import, not a named one: `registerHooks` is absent below
+// Node 22.15 and a named import of a missing builtin export is a load-time
+// SyntaxError, which would take the whole file down instead of skipping the
+// one test that needs it.
+import * as nodeModule from 'node:module'
 
 import { verbToCommand } from '../../src/core/cli/verb_command.js'
 import { argvToParams } from '../../src/core/cli/verb_codec.js'
@@ -16,6 +22,8 @@ import { CORE_VERBS } from '../../src/core/cli/core_verbs.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { queryGrepVerb } from '../../src/core/search/grep_verb.js'
+import { GrepQueryError } from '../../src/core/search/matcher.js'
+import { VerbUsageError } from '../../src/core/cli/verb_errors.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
 /**
@@ -407,4 +415,253 @@ test('--remote calls the server grep_search with the wire params and renders its
   }, 'only wire params travel; include-local-only never rides uninvited')
   assert.match(out.join(''), /remote needle/)
   assert.match(err.join(''), /more matches exist beyond the limit/)
+})
+
+// The injected-backend seam (LLP 0314 / LLP 0353). These drive
+// `operation` directly with a stubbed context, because the harness above
+// goes through the projected command, whose `buildOperationContext` never
+// sets `search`: that whole suite is the proof the default path is
+// unchanged, and none of it is edited here.
+
+/**
+ * A context whose local plane throws on ANY access. A supplied backend
+ * means the verb must not load or touch the cache service at all, and a
+ * plain `{}` storage would let a regression that still reached for it pass.
+ *
+ * @param {(args: any) => Promise<any>} search
+ */
+function injectedCtx(search) {
+  const forbidden = () => { throw new Error('the local plane was consulted despite an injected backend') }
+  return /** @type {any} */ ({
+    env: {},
+    config: { version: 2 },
+    query: {},
+    storage: new Proxy({}, { get: forbidden, set: forbidden, has: forbidden, ownKeys: forbidden }),
+    get refresh() { return forbidden() },
+    get callerCwd() { return forbidden() },
+    search,
+  })
+}
+
+/** A bare server-shaped answer: none of the local extras. */
+const BARE = { hits: [], truncated: false, exhausted: true }
+
+test('an injected backend receives exactly the seam shape, and never the host wiring', async () => {
+  /** @type {any[]} */ const seen = []
+  const ctx = injectedCtx(async (args) => { seen.push(args); return BARE })
+  await queryGrepVerb.operation({
+    query: 'needle',
+    regex: true,
+    session_id: 's2',
+    chain_id: 'a2',
+    from: '2026-08-01',
+    to: '2026-08-31',
+    limit: 9999,
+    'include-local-only': true,
+  }, ctx)
+  // Exactly these keys: `storage`, `refresh` and `callerCwd` are this
+  // host's wiring, and a backend that had to accept and ignore them would
+  // be implementing a contract that lies about what it needs.
+  assert.deepEqual(Object.keys(seen[0]).sort(), [
+    'chainId', 'from', 'includeLocalOnly', 'limit', 'query', 'regex', 'sessionId', 'to',
+  ])
+  assert.deepEqual(seen[0], {
+    query: 'needle',
+    regex: true,
+    sessionId: 's2',
+    chainId: 'a2',
+    from: '2026-08-01',
+    to: '2026-08-31',
+    // Clamped by the verb, before the seam: a backend never has to
+    // re-default or re-cap, and both planes page identically.
+    limit: 1000,
+    includeLocalOnly: true,
+  })
+
+  // The absent cases: the default limit, no window, and the local-only
+  // override off rather than missing.
+  await queryGrepVerb.operation({ query: 'needle' }, ctx)
+  assert.deepEqual(seen[1], {
+    query: 'needle',
+    regex: false,
+    sessionId: undefined,
+    chainId: undefined,
+    from: undefined,
+    to: undefined,
+    limit: 50,
+    includeLocalOnly: false,
+  })
+})
+
+test('the argument refusals run before the seam, so a typo never reaches the backend', async () => {
+  let calls = 0
+  const ctx = injectedCtx(async () => { calls += 1; return BARE })
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle', from: '2026-8-1' }, ctx) },
+    VerbUsageError,
+  )
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle', from: '2026-08-20', to: '2026-08-01' }, ctx) },
+    VerbUsageError,
+  )
+  assert.equal(calls, 0, 'a cross-field or shape refusal is true for any data plane')
+})
+
+test('with a backend supplied the local plane is never consulted', async () => {
+  // `injectedCtx` makes storage/refresh/callerCwd throw on any access, so
+  // this fails loudly if the operation still reaches for the cache service.
+  // Merely LOADING that service touches no context field, so the proxy
+  // cannot see it; the child probe below is what pins the import's place.
+  const ctx = injectedCtx(async () => ({
+    hits: [{
+      date: '2026-08-12', sessionId: 'srv-s', agentId: null, conversationId: null,
+      partId: 'p1', messageId: 'm1', messageCreatedAt: '2026-08-12T00:00:00Z',
+      matches: [{ column: 'content_text', snippet: '...injected needle...' }],
+    }],
+    truncated: false,
+    exhausted: true,
+  }))
+  const result = /** @type {any} */ (await queryGrepVerb.operation({ query: 'needle' }, ctx))
+  assert.equal(result.hits.length, 1)
+  const rendered = queryGrepVerb.render(result, /** @type {any} */ ({ format: 'table', json: false, maxCell: 200, maxBytes: 32768 }))
+  assert.match(rendered.stdout ?? '', /injected needle/)
+})
+
+test('a bare result gets the clamp fact appended and does not forge "nothing is recorded"', async () => {
+  // The file counters are the local service's own; an injected backend
+  // leaves them `undefined`, and the render's guard is a strict `=== 0`,
+  // so the "nothing is recorded on this machine yet" line correctly stays
+  // silent for a server-shaped empty answer. This pins that behavior; the
+  // guard needs no change.
+  const ctx = injectedCtx(async () => BARE)
+  const atCeiling = /** @type {any} */ (await queryGrepVerb.operation({ query: 'needle', limit: 1000 }, ctx))
+  assert.equal(atCeiling.limitCeilingReached, true)
+  const below = /** @type {any} */ (await queryGrepVerb.operation({ query: 'needle' }, ctx))
+  assert.equal(below.limitCeilingReached, false)
+  assert.equal(below.indexedFiles, undefined)
+  assert.equal(below.scannedFiles, undefined)
+  const rendered = queryGrepVerb.render(below, /** @type {any} */ ({ format: 'table', json: false, maxCell: 200, maxBytes: 32768 }))
+  assert.doesNotMatch(rendered.stderr ?? '', /nothing is recorded on this machine/)
+  assert.equal(rendered.stderr ?? '', '', 'an exhausted, untruncated empty answer says nothing')
+})
+
+test("a backend's own refusal is the caller's usage error; anything else is a failed search", async () => {
+  // A serving backend gates regex to its operator and refuses an
+  // `includeLocalOnly` it has no local plane to honor. Both are the
+  // caller typing something this host cannot serve, so both must reach
+  // the caller as exit 2 through the same channel the local matcher uses.
+  const refusing = injectedCtx(async () => { throw new GrepQueryError('regex mode is operator-only here') })
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle', regex: true }, refusing) },
+    (err) => {
+      assert.ok(err instanceof VerbUsageError)
+      assert.match(/** @type {Error} */ (err).message, /operator-only/)
+      return true
+    },
+  )
+  // A backend that simply failed is still exit 1: the two codes have to
+  // stay apart, or a script retries a refusal it can never satisfy.
+  const failing = injectedCtx(async () => { throw new Error('the archive is unreachable') })
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle' }, failing) },
+    (err) => {
+      assert.ok(!(err instanceof VerbUsageError))
+      assert.match(/** @type {Error} */ (err).message, /archive is unreachable/)
+      return true
+    },
+  )
+})
+
+test('a backend answering with the wrong shape is a failed search, not an empty archive', async () => {
+  // The render falls back field by field, so a misnamed or missing `hits`
+  // would otherwise reach the caller as a clean zero-row table with exit 0,
+  // and the zero-files line that guards against a forged "nothing is
+  // stored" cannot fire for a server-shaped result. Exit 1 keeps a broken
+  // backend distinguishable from an archive with nothing in it.
+  const misnamed = injectedCtx(async () => ({ results: [], truncated: false, exhausted: true }))
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle' }, misnamed) },
+    (err) => {
+      assert.ok(!(err instanceof VerbUsageError))
+      assert.match(/** @type {Error} */ (err).message, /no hits array/)
+      return true
+    },
+  )
+  const nothing = injectedCtx(async () => undefined)
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle' }, nothing) },
+    /no hits array/,
+  )
+  // Hits alone are not the whole answer. `truncated` and `exhausted` are
+  // required booleans, and the render tests each with a strict comparison,
+  // so a backend that stopped at its deadline and omitted `exhausted`
+  // would hand the caller a partial answer with no notice and exit 0 -
+  // the same forgery as a missing `hits`, reached one field along.
+  const noFacts = injectedCtx(async () => ({ hits: [], truncated: false }))
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle' }, noFacts) },
+    /truncated\/exhausted/,
+  )
+  const notBooleans = injectedCtx(async () => ({ hits: [], truncated: 'no', exhausted: 1 }))
+  await assert.rejects(
+    async () => { await queryGrepVerb.operation({ query: 'needle' }, notBooleans) },
+    /truncated\/exhausted/,
+  )
+})
+
+/**
+ * The child probe for the load-order pin below. Records every module the
+ * injected path pulls in, then fails if the local search stack is among
+ * them. `--input-type=module` so the top-level `await` and the load hook
+ * both work; the verb's specifier arrives by env so the source stays a
+ * plain string.
+ */
+const NO_LOCAL_LOAD_PROBE = `
+  import assert from 'node:assert/strict'
+  import { registerHooks } from 'node:module'
+  const loaded = []
+  registerHooks({ load(url, context, next) { loaded.push(url); return next(url, context) } })
+  const { queryGrepVerb } = await import(process.env.HYP_TEST_GREP_VERB_MODULE)
+  await queryGrepVerb.operation(
+    { query: 'needle' },
+    { search: async () => ({ hits: [], truncated: false, exhausted: true }) },
+  )
+  assert.ok(
+    !loaded.some((url) => url.endsWith('/search/grep_service.js')),
+    'grep_service.js was loaded on the injected path: the dynamic import escaped buildLocalBackend',
+  )
+`
+
+test('an injecting host never loads the local search stack', (t) => {
+  // The throwing proxy above catches a local plane that is CONSULTED; it
+  // cannot catch one that is merely LOADED, because importing a module
+  // touches no context field. Hoisting the `await import` back out of
+  // `buildLocalBackend` leaves every case above green while costing an
+  // injecting host the load-time win LLP 0353#default-resolution buys, and
+  // that win is half the reason the import sits in the fallback branch.
+  //
+  // Which modules a process has loaded is a property of the whole process,
+  // and the suite above has already pulled in `grep_service.js` through the
+  // projected command, so the probe needs a process of its own.
+  if (typeof nodeModule.registerHooks !== 'function') {
+    // Node's synchronous load hook lands in 22.15; the package floor is
+    // 22.12, so an older supported runtime skips rather than fails. Both CI
+    // matrix legs are well past it.
+    return t.skip('node:module registerHooks is unavailable on this runtime')
+  }
+  const verbModule = new URL('../../src/core/search/grep_verb.js', import.meta.url).href
+  const run = spawnSync(process.execPath, ['--input-type=module', '--eval', NO_LOCAL_LOAD_PROBE], {
+    encoding: 'utf8',
+    // A wedged child (a loader inherited through NODE_OPTIONS, a future
+    // registerHooks regression) must fail this one test, not sit until the
+    // CI job's own 5-minute timeout kills the whole run. The probe costs
+    // tens of milliseconds, so this is pure headroom.
+    timeout: 30000,
+    env: { ...process.env, HYP_TEST_GREP_VERB_MODULE: verbModule },
+  })
+  // A spawn that never ran, or one the timeout killed, leaves `status` and
+  // `stderr` both null, so the assertion below would fail with an empty
+  // message and `run.error` - the only value naming the cause - discarded.
+  assert.ifError(run.error)
+  assert.equal(run.status, 0, run.stderr)
 })
