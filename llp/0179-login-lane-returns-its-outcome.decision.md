@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-03
 **Related:** LLP 0058 (the D7 taxonomy), LLP 0134 (the wizard wraps the login lane), LLP 0135 (`classifyLoginFailure`), LLP 0129 (a failed join returns to the fork)
+**Extended-by:** LLP 0357 (the request to reconsider #outcome's vocabulary and the closed `'failed'` set in #no-prose-control-flow, for a terminal outcome that is not a D7 refusal)
 
 > The wizard classifies a failed join by substring-matching three
 > exported English sentences out of the login lane's captured stderr.
