@@ -10,9 +10,9 @@ import { GrepQueryError } from './matcher.js'
 import { SEARCHABLE_COLUMNS } from './searchable_columns.js'
 
 /**
- * @import { VerbRegistration } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { VerbOperationContext, VerbRegistration } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { GrepSearchHit, GrepSearchResult } from '../../../src/core/search/types.js'
+ * @import { GrepSearchBackend, GrepSearchHit, GrepSearchResult } from '../../../src/core/search/types.js'
  * @import { LocalOnlyVisibilityReport } from '../../../src/core/query/types.js'
  */
 
@@ -108,13 +108,6 @@ export const queryGrepVerb = {
       typeof rawLimit === 'number' && Number.isInteger(rawLimit) && rawLimit >= 1
         ? Math.min(rawLimit, MAX_LIMIT)
         : DEFAULT_LIMIT
-    // Loaded on demand, not at module scope: `registerCoreCommands`
-    // projects every `CORE_VERBS` entry pre-boot so `hyp --help` can
-    // render, so a top-level import would pull hypgrep, hyparquet and the
-    // Iceberg store into the front door of every `hyp` invocation (measured
-    // at ~16ms on `hyp --help`, ~10%) for the one command that needs them.
-    // The remote stack in `verb_command.js` is deferred for the same reason.
-    const { executeGrepSearch } = await import('./grep_service.js')
     const from = dayBound(params.from, 'from')
     const to = dayBound(params.to, 'to')
     // An inverted window selects no day at all, so the walk would prune
@@ -127,10 +120,21 @@ export const queryGrepVerb = {
     if (from !== undefined && to !== undefined && from > to) {
       throw new VerbUsageError(`--from ${from} is after --to ${to}, so the window selects no days`)
     }
+    // The verb owns the argument rules above and the clamp fact below; the
+    // data plane is whatever the host handed it. Nothing past this line
+    // knows which backend answered, which is what lets the process hold one
+    // `grep_search` registration instead of a second verb displacing this
+    // one.
+    // @ref LLP 0314#decision [implements]: a host owning its own data plane injects it here rather than registering a rival grep_search
+    const search = ctx.search ?? (await buildLocalBackend(ctx))
     let result
     try {
-      result = await executeGrepSearch({
-        storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+      // EXACTLY the seam shape: caller intent, nothing else. `storage`,
+      // `refresh` and `callerCwd` are this host's wiring, closed over by
+      // the local adapter, because a required field whose only correct
+      // server implementation is to never touch it is a contract that lies.
+      // @ref LLP 0353#seam [constrained-by]: the seam carries caller intent only, never host wiring
+      result = await search({
         query: String(params.query ?? ''),
         regex: params.regex === true,
         sessionId: typeof params.session_id === 'string' ? params.session_id : undefined,
@@ -138,9 +142,6 @@ export const queryGrepVerb = {
         from,
         to,
         limit,
-        refresh: ctx.refresh,
-        // @ref LLP 0105 [constrained-by]: the caller's context rides every search; the service's shared predicate decides visibility, never this verb
-        callerCwd: ctx.callerCwd,
         includeLocalOnly: params['include-local-only'] === true,
       })
     } catch (err) {
@@ -150,6 +151,13 @@ export const queryGrepVerb = {
       // what keeps that module free of the CLI: the matcher names the kind,
       // the verb names the exit code, and the same refusal can mean 400 on
       // a serving surface that never heard of `VerbUsageError`.
+      //
+      // It is the seam's refusal channel too: an injected backend gating
+      // `regex` to its operator, or refusing an `includeLocalOnly` it has
+      // no local plane to honor, raises the same `GrepQueryError` and
+      // reaches the caller as the same usage refusal. Anything else either
+      // backend throws is a failed search, exit 1.
+      // @ref LLP 0353#refusals [implements]: one refusal channel for both backends, translated at the surface not inside it
       // @ref LLP 0303#query-refusal-exit [implements]: the shared module's refusal becomes this surface's usage error at the surface, not inside it
       if (err instanceof GrepQueryError) throw new VerbUsageError(err.message)
       throw err
@@ -157,9 +165,11 @@ export const queryGrepVerb = {
     // The clamp's own promise, carried through to the render: at the
     // ceiling there is no larger `--limit` left to ask for, so the
     // truncation notice must not send the caller back to a flag that
-    // cannot move. Local-only, like the freshness and visibility fields; a
-    // server result carries none of them and falls back to the general
-    // wording.
+    // cannot move. It is the verb's fact about its own clamp, so it rides
+    // whichever backend answered: a backend never sees an absent or
+    // unclamped limit, so it has nothing to say about the ceiling. Like the
+    // freshness and visibility fields, a server-shaped result carries none
+    // of the local extras and the render falls back field by field.
     return { ...result, limitCeilingReached: limit >= MAX_LIMIT }
   },
   render(result, controls) {
@@ -225,6 +235,41 @@ export const queryGrepVerb = {
       ...(out.file ? { file: out.file } : {}),
     }
   },
+}
+
+/**
+ * The kernel's own backend: `executeGrepSearch` over this machine's cache,
+ * adapted to the seam. The three context fields the local service needs
+ * (`storage`, `refresh`, `callerCwd`) are closed over here rather than
+ * carried on the seam, so a serving host implements a signature made of
+ * caller intent alone instead of accepting a local-cache handle it must
+ * promise never to touch.
+ *
+ * Loaded on demand, not at module scope: `registerCoreCommands` projects
+ * every `CORE_VERBS` entry pre-boot so `hyp --help` can render, so a
+ * top-level import would pull hypgrep, hyparquet and the Iceberg store into
+ * the front door of every `hyp` invocation (measured at ~16ms on
+ * `hyp --help`, ~10%) for the one command that needs them. The remote stack
+ * in `verb_command.js` is deferred for the same reason. Sitting in the
+ * fallback branch pays a second time: a host that injects its own backend
+ * never loads the local search stack at all, which is precisely the process
+ * with no use for it.
+ *
+ * @ref LLP 0353#default-resolution [implements]: the local plane is an adapter closure, built only when no host supplied a backend
+ * @param {VerbOperationContext} ctx
+ * @returns {Promise<GrepSearchBackend>}
+ */
+async function buildLocalBackend(ctx) {
+  const { executeGrepSearch } = await import('./grep_service.js')
+  /** @type {GrepSearchBackend} */
+  const local = (args) => executeGrepSearch({
+    ...args,
+    storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+    refresh: ctx.refresh,
+    // @ref LLP 0105 [constrained-by]: the caller's context rides every search; the service's shared predicate decides visibility, never this verb
+    callerCwd: ctx.callerCwd,
+  })
+  return local
 }
 
 /**
