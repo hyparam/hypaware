@@ -262,7 +262,20 @@ export function createCommandRegistry() {
  */
 function copyMiss(command, record, key) {
   if (key in record) return ''
-  if (/** @type {any} */ (command)[key] === undefined) return ''
+  // Presence, not value. Reading `command[key]` would run a prototype
+  // accessor, and a class instance is one of the shapes this clause exists to
+  // diagnose: a lazily-initializing getter would fire on a path that rejects,
+  // against the promise above that a rejected registration comes back exactly
+  // as it arrived, and a throwing one would replace this boundary error with
+  // its own, which is the opposite of what this function is for. `in` walks
+  // the chain without invoking anything, and the `has` trap of a Proxy
+  // registration, the one thing left that can object, does not get to break
+  // the error either.
+  try {
+    if (!(key in /** @type {any} */ (command))) return ''
+  } catch {
+    return ''
+  }
   return (
     ` - '${key}' is reachable on the registration but is not an own enumerable property, ` +
     "so the registry's copy did not carry it (a prototype member, or one defined non-enumerable)"

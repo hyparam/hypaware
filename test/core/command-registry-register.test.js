@@ -200,3 +200,41 @@ test('a genuinely absent member is reported without the copy diagnosis', () => {
   // Anchored: nothing follows "missing run()" when there is nothing to explain.
   assert.throws(() => commands.register(bare), /'demo' missing run\(\)$/)
 })
+
+// The clause has to read the argument to know the member was reachable, and
+// one of the shapes it exists to diagnose puts that member on a prototype -
+// where reading it can run caller code. A registration this function rejects
+// comes back exactly as it arrived, and a getter that throws must not replace
+// the boundary error with its own.
+test('the copy diagnosis does not run a prototype accessor to make its case', () => {
+  const commands = createCommandRegistry()
+  let reads = 0
+  class Lazy {
+    constructor() {
+      this.name = 'lazy'
+      this.summary = 'run() is built on first read'
+      this.usage = 'hyp lazy'
+    }
+    get run() {
+      reads += 1
+      throw new Error('provider not configured yet')
+    }
+  }
+  assert.throws(
+    () => commands.register(/** @type {any} */ (new Lazy())),
+    /'lazy' missing run\(\).*not an own enumerable property/s
+  )
+  assert.equal(reads, 0, 'the rejection path must not invoke the getter')
+
+  // A Proxy is the same argument through a different door.
+  const trapped = new Proxy(
+    /** @type {any} */ ({ name: 'trapped', summary: 's', usage: 'hyp trapped' }),
+    {
+      get(target, key) {
+        if (key === 'run') throw new Error('trap boom')
+        return target[key]
+      }
+    }
+  )
+  assert.throws(() => commands.register(trapped), /'trapped' missing run\(\)/)
+})
