@@ -35,11 +35,15 @@ only when the boot aggregate lands `healthy`:
 - a boot where any configured source failed to start writes `state: 'degraded'`
   and never sets `healthyAt`
 - a boot that never returns from `bootKernel` leaves `state: 'starting'`, with
-  no `healthyAt` and no `uptimeMs`
+  no `healthyAt` and `uptimeMs` still at the `0` the first write recorded
 
-In both shapes the process is alive, it owns its pid, and its listeners are
-bound exactly as in the #1003 brownout. The heartbeat derivation returns
-`null`, so the collector raises nothing.
+In both shapes the process is alive and owns its pid, so every cheap liveness
+signal reads as it did in the #1003 brownout. The listeners differ between
+them: the boot-degraded shape has the sources that did start bound and
+accepting, exactly as in #1003, while a boot wedged inside `bootKernel` never
+reached `startConfiguredSources` and has none. What both share is the
+reading: the heartbeat derivation returns `null`, so the collector raises
+nothing.
 
 ## Evidence {#evidence}
 

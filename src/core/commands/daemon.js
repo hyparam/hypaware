@@ -177,8 +177,12 @@ export async function runDaemonStatus(argv, ctx) {
     ? ` (no status write for ${formatGapDuration(heartbeatAgeMs)})`
     : ''
   // A frozen loop's uptime stops at its last write. `now - healthyAt` is the
-  // right reading only while the ticks that fill the gap are still landing.
-  const liveUptimeMs = running && !staleNote && status.healthyAt
+  // right reading only while the ticks that fill the gap are still landing,
+  // and only while the pair being read is this process's own: a leftover
+  // snapshot whose pid the OS has since reissued ages forever and is a record
+  // of what happened, not a claim about now, so its recorded `uptimeMs` is
+  // what goes out rather than a number climbing against a stranger's clock.
+  const liveUptimeMs = running && snapshotIsThisProcess && !staleNote && status.healthyAt
     ? Math.max(0, Date.now() - Date.parse(status.healthyAt))
     : status.uptimeMs
   if (json) {

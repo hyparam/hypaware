@@ -371,4 +371,8 @@ test('hyp daemon status does not read a leftover snapshot as the heartbeat of wh
   const { out } = await runDaemonStatusText(hypHome)
   assert.match(out, /^daemon: healthy\n/)
   assert.doesNotMatch(out, /status write/)
+  // The uptime is that leftover's own recorded value, not a live count
+  // against a stranger's clock: the same snapshot the state line refuses to
+  // read as a heartbeat cannot supply a climbing uptime either.
+  assert.match(out, /uptime_ms:\s+60000\n/)
 })
