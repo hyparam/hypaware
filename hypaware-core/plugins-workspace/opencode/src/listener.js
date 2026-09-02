@@ -66,6 +66,23 @@ export function createStartOpenCodeSource(deps) {
         sendJson(res, 404, { error: 'not found' })
         return
       }
+      // A page in the user's browser cannot preflight its way in here, but it
+      // can send a preflight-free 'simple request' - text/plain,
+      // application/x-www-form-urlencoded, multipart/form-data - and without
+      // this gate that was enough to inject fabricated rows into
+      // ai_gateway_messages. Requiring application/json takes the route out of
+      // the simple-request set, so a cross-origin POST needs a preflight this
+      // server never answers. Same posture, and the same 415, as the shared
+      // OTLP listener (src/core/otlp/server.js). The managed plugin asset
+      // already sends this header, so nothing legitimate is turned away.
+      const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
+      if (contentType !== 'application/json') {
+        req.resume()
+        sendJson(res, 415, {
+          error: `unsupported content-type: expected application/json, got '${contentType || 'none'}'`,
+        })
+        return
+      }
       void receiveSnapshot(req, res, { ctx, state, ignoredSessions, resolver, writer })
     })
     const bound = await listenAndResolve(server, HOST, opencodeListenPort(ctx.config), 'hypaware/opencode')

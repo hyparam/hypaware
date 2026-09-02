@@ -325,3 +325,42 @@ test('OpenCode listener stop() does not wait on a connected client socket', asyn
     await fs.rm(listener.root, { recursive: true, force: true })
   }
 })
+
+// A browser page cannot preflight its way onto this listener, but it can fire a
+// preflight-free "simple request" at it: `text/plain`,
+// `application/x-www-form-urlencoded` and `multipart/form-data` all go out
+// without asking. `/snapshot` used to parse whatever arrived, so any page the
+// user had open could inject fabricated rows into `ai_gateway_messages`. The
+// shared OTLP listener already closes this by requiring `application/json`
+// (`src/core/otlp/server.js`), which is a content-type no browser can send
+// cross-origin without a preflight this server never answers.
+test('OpenCode listener rejects a snapshot whose content-type a browser could send cross-origin', async () => {
+  const listener = await startListener()
+  const cwd = path.join(listener.root, 'work')
+  await fs.mkdir(cwd, { recursive: true })
+  try {
+    for (const contentType of ['text/plain;charset=UTF-8', 'application/x-www-form-urlencoded', '']) {
+      const res = await fetch(`${listener.endpoint}/snapshot`, {
+        method: 'POST',
+        ...(contentType ? { headers: { 'content-type': contentType } } : {}),
+        body: JSON.stringify(snapshot('ses_simple_request', cwd)),
+      })
+      assert.equal(res.status, 415, `content-type '${contentType || 'none'}' was accepted`)
+      await res.json()
+    }
+    assert.deepEqual(listener.storage.appended, [], 'a rejected snapshot must write no rows')
+
+    // The real plugin asset sends `application/json`, with or without a charset
+    // parameter, and must keep working.
+    const ok = await fetch(`${listener.endpoint}/snapshot`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+      body: JSON.stringify(snapshot('ses_json_ok', cwd)),
+    })
+    assert.equal(ok.status, 200)
+    await ok.json()
+    assert.ok(listener.storage.appended.length > 0, 'an application/json snapshot still records')
+  } finally {
+    await listener.cleanup()
+  }
+})
