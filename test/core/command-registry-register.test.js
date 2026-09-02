@@ -146,3 +146,111 @@ test('the run() the checks accepted is the run() the registry stores', () => {
   commands.register(/** @type {any} */ (shifty))
   assert.equal(commands.get('shifty')?.run, accepted)
 })
+
+// The compiler cannot warn about any of this. A class instance whose `run()`
+// lives on the prototype satisfies `CommandRegistration` under `tsc --strict`,
+// because TypeScript's type system has no notion of own or enumerable
+// properties, and `hypaware-plugin-kernel-types.d.ts` is published, so
+// `register` is a third-party API. That leaves the boundary error as the whole
+// diagnosis, read out of a `plugin.activate_failed` log line after the plugin
+// quietly failed to load - and "missing run()" about a registration that
+// visibly declares `run()` sends the author looking in the wrong place.
+test('the boundary error says why a member did not survive the copy', () => {
+  const commands = createCommandRegistry()
+  class Prototyped {
+    constructor() {
+      this.name = 'prototyped'
+      this.summary = 'run() lives on the prototype'
+      this.usage = 'hyp prototyped'
+    }
+    async run() {
+      return 0
+    }
+  }
+  assert.throws(
+    () => commands.register(/** @type {any} */ (new Prototyped())),
+    /'prototyped' missing run\(\).*'run' is reachable on the registration but is not an own enumerable property/s
+  )
+
+  // Same cause, a different member, and reached through `Object.create`
+  // rather than through a class.
+  const inherited = Object.create({ summary: 'inherited', usage: 'hyp inherited', run: async () => 0 })
+  inherited.name = 'inherited'
+  assert.throws(
+    () => commands.register(inherited),
+    /'inherited' missing summary.*'summary' is reachable on the registration but is not an own enumerable property/s
+  )
+
+  // Own, but not enumerable, so the spread does not carry it either.
+  const hidden = makeCommand({ name: 'hidden' })
+  delete hidden.run
+  Object.defineProperty(hidden, 'run', { value: async () => 0, enumerable: false })
+  assert.throws(
+    () => commands.register(hidden),
+    /'hidden' missing run\(\).*is not an own enumerable property/s
+  )
+})
+
+// The diagnosis has to stay off a registration that really is incomplete,
+// or it would send the next author hunting a prototype that is not there.
+test('a genuinely absent member is reported without the copy diagnosis', () => {
+  const commands = createCommandRegistry()
+  const bare = makeCommand()
+  delete bare.run
+  // Anchored: nothing follows "missing run()" when there is nothing to explain.
+  assert.throws(() => commands.register(bare), /'demo' missing run\(\)$/)
+})
+
+// The clause has to read the argument to know the member was reachable, and
+// one of the shapes it exists to diagnose puts that member on a prototype -
+// where reading it can run caller code. A registration this function rejects
+// comes back exactly as it arrived, and a getter that throws must not replace
+// the boundary error with its own.
+test('the copy diagnosis does not run a prototype accessor to make its case', () => {
+  const commands = createCommandRegistry()
+  let reads = 0
+  class Lazy {
+    constructor() {
+      this.name = 'lazy'
+      this.summary = 'run() is built on first read'
+      this.usage = 'hyp lazy'
+    }
+    get run() {
+      reads += 1
+      throw new Error('provider not configured yet')
+    }
+  }
+  assert.throws(
+    () => commands.register(/** @type {any} */ (new Lazy())),
+    /'lazy' missing run\(\).*not an own enumerable property/s
+  )
+  assert.equal(reads, 0, 'the rejection path must not invoke the getter')
+
+  // A Proxy is the same argument through two more doors, and they are
+  // different doors: the spread consults `get`, while `in` consults `has`
+  // and never `get`. Both assertions are anchored, so a clause appended
+  // where none belongs fails them too.
+  const getTrapped = new Proxy(
+    /** @type {any} */ ({ name: 'trapped', summary: 's', usage: 'hyp trapped' }),
+    {
+      get(target, key) {
+        if (key === 'run') throw new Error('trap boom')
+        return target[key]
+      }
+    }
+  )
+  assert.throws(() => commands.register(getTrapped), /'trapped' missing run\(\)$/)
+
+  // `has` is the one trap `in` does reach, so it is the one thing left that
+  // can object. It must not get to replace the boundary error either: the
+  // diagnosis goes quiet and the registry still says what it refused.
+  const hasTrapped = new Proxy(
+    /** @type {any} */ ({ name: 'has-trapped', summary: 's', usage: 'hyp has-trapped' }),
+    {
+      has() {
+        throw new Error('has boom')
+      }
+    }
+  )
+  assert.throws(() => commands.register(hasTrapped), /'has-trapped' missing run\(\)$/)
+})

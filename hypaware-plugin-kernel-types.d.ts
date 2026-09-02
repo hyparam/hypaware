@@ -949,6 +949,12 @@ export interface CommandRegistry {
    * The copy is own enumerable properties only, and the shape checks run
    * on it, so a registration whose members live on a prototype (a class
    * instance) is rejected here rather than stored half-formed.
+   *
+   * This declaration cannot express that rule: TypeScript has no notion of
+   * property ownership or enumerability, so a class whose `run()` sits on
+   * its prototype satisfies `CommandRegistration` under `--strict` and then
+   * throws at this call. Register a plain object, or assign the members onto
+   * the instance itself.
    */
   register(command: CommandRegistration): void
   /**
