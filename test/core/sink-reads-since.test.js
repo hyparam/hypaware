@@ -271,3 +271,136 @@ test('a watermark prunes data files below it: an idle tick opens no data file', 
 
   await fs.rm(cacheRoot, { recursive: true, force: true })
 })
+
+/**
+ * Run `fn` with `fs.readFileSync` instrumented, returning the basenames of the
+ * data files it opened. The local Iceberg resolver reads every file through
+ * `fs.readFileSync`, so this is what "the scan never opened that file" means.
+ *
+ * @param {() => Promise<void>} fn
+ * @returns {Promise<string[]>}
+ */
+async function parquetOpens(fn) {
+  const fsSync = await import('node:fs')
+  const realRead = fsSync.default.readFileSync
+  /** @type {string[]} */
+  const opened = []
+  fsSync.default.readFileSync = /** @type {typeof realRead} */ ((...args) => {
+    const target = String(args[0])
+    // Sidecar indexes and delete files are not the data files under test.
+    if (target.endsWith('.parquet') && !target.endsWith('.index.parquet') &&
+        !target.endsWith('-deletes.parquet')) opened.push(path.basename(target))
+    return realRead.apply(fsSync.default, /** @type {any} */ (args))
+  })
+  try {
+    await fn()
+  } finally {
+    fsSync.default.readFileSync = realRead
+  }
+  return opened
+}
+
+// The loss-bearing direction of the pushdown. Pruning trusts the manifest's
+// upper bound on the seq column, so the file-skip and the yielded-row filter
+// have to agree on `> since` EXACTLY: prune iff `hi <= since`. One step the
+// wrong way (`hi < since`, or a `>=` predicate) and the file holding the very
+// next row is skipped, its rows are never forwarded, and the watermark still
+// advances past them. Adjacent seqs on either side of the watermark are the
+// only fixture that can tell those apart.
+test('the pushed predicate agrees with the row filter at the exact watermark boundary', async () => {
+  const root = await makeTmpDir()
+  const dir = path.join(root, 'boundary')
+  /** @type {ColumnSpec[]} */
+  const cols = [
+    { name: 'id', type: 'INT64', nullable: false },
+    INGEST_SEQ_COLUMN,
+  ]
+  // One row per data file, at three consecutive seqs, so each file's manifest
+  // bounds are a single point and pruning has no slack to hide an off-by-one.
+  await appendRowsToTable(dir, cols, [{ id: 10, [INGEST_SEQ_COLUMN.name]: 10n }])
+  await appendRowsToTable(dir, cols, [{ id: 11, [INGEST_SEQ_COLUMN.name]: 11n }])
+  await appendRowsToTable(dir, cols, [{ id: 12, [INGEST_SEQ_COLUMN.name]: 12n }])
+
+  // since = 10: seq 10 is NOT new (strictly `>`), 11 and 12 are. The seq-11
+  // file sits exactly one above the watermark: it must still be opened.
+  /** @type {number[]} */
+  const above = []
+  const openedAbove = await parquetOpens(async () => {
+    for await (const row of scanRowsFromTable(dir, undefined, { since: 10n, includeLegacy: false })) {
+      above.push(Number(row.id))
+    }
+  })
+  assert.deepEqual(above.sort((a, b) => a - b), [11, 12], 'the row one seq above the watermark is never dropped')
+  assert.equal(openedAbove.length, 2, `the seq-10 file is pruned and no other, got ${openedAbove.join(', ')}`)
+
+  // since = 11: only seq 12 survives, and the two files at or below are pruned.
+  /** @type {number[]} */
+  const tail = []
+  const openedTail = await parquetOpens(async () => {
+    for await (const row of scanRowsFromTable(dir, undefined, { since: 11n, includeLegacy: false })) {
+      tail.push(Number(row.id))
+    }
+  })
+  assert.deepEqual(tail, [12])
+  assert.equal(openedTail.length, 1, `only the seq-12 file is opened, got ${openedTail.join(', ')}`)
+
+  // since = 12: the tip. Nothing is new and nothing is opened.
+  /** @type {number[]} */
+  const none = []
+  const openedNone = await parquetOpens(async () => {
+    for await (const row of scanRowsFromTable(dir, undefined, { since: 12n, includeLegacy: false })) {
+      none.push(Number(row.id))
+    }
+  })
+  assert.deepEqual(none, [])
+  assert.deepEqual(openedNone, [], 'an idle tick at the tip opens no data file')
+
+  await fs.rm(root, { recursive: true, force: true })
+})
+
+// `includeLegacy: false` is the ONLY case the predicate is pushed on, and it is
+// also the case where null-seq rows are reachable: a table mid-migration holds
+// both. `null > since` is false for icebird and for the row filter alike, so
+// the two must land on the same rows. A file mixing nulls with real seqs must
+// still be opened on the strength of its real ones, and its real rows above the
+// watermark must all come out.
+test('with includeLegacy false the pushed predicate drops null seqs and no real one', async () => {
+  const root = await makeTmpDir()
+  const dir = path.join(root, 'mixed')
+  /** @type {ColumnSpec[]} */
+  const cols = [
+    { name: 'id', type: 'INT64', nullable: false },
+    INGEST_SEQ_COLUMN,
+  ]
+  // File 1 mixes pre-column rows with real seqs at and above the watermark;
+  // its bounds are [5, 10], so it cannot be pruned at since = 5.
+  await appendRowsToTable(dir, cols, [
+    { id: 1, [INGEST_SEQ_COLUMN.name]: null },
+    { id: 2, [INGEST_SEQ_COLUMN.name]: 5n },
+    { id: 3, [INGEST_SEQ_COLUMN.name]: 10n },
+    { id: 4, [INGEST_SEQ_COLUMN.name]: null },
+  ])
+  // File 2 is all null seq: it records no bound on the column at all, which is
+  // the "absent bound" case pruning must resolve by KEEPING the file.
+  await appendRowsToTable(dir, cols, [
+    { id: 5, [INGEST_SEQ_COLUMN.name]: null },
+    { id: 6, [INGEST_SEQ_COLUMN.name]: null },
+  ])
+
+  /** @type {number[]} */
+  const kept = []
+  for await (const row of scanRowsFromTable(dir, undefined, { since: 5n, includeLegacy: false })) {
+    kept.push(Number(row.id))
+  }
+  assert.deepEqual(kept, [3], 'only the real seq above the watermark; every null seq is already exported')
+
+  // The same table under the default policy keeps the legacy rows, which is
+  // exactly why the predicate is not pushed there. Same rows as before the
+  // pushdown existed.
+  /** @type {number[]} */
+  const withLegacy = []
+  for await (const row of scanRowsFromTable(dir, undefined, { since: 5n })) withLegacy.push(Number(row.id))
+  assert.deepEqual(withLegacy.sort((a, b) => a - b), [1, 3, 4, 5, 6])
+
+  await fs.rm(root, { recursive: true, force: true })
+})

@@ -600,13 +600,21 @@ export async function listLiveDataFiles(tablePath) {
  * so the predicate can be evaluated even when the caller asked for a narrower
  * set; `QueryStorageService` strips it from the row afterwards.
  *
- * The predicate is applied as a yielded-row filter rather than pushed into
- * icebird's `scan({ where })`. icebird couples file/row-group pruning with a
- * per-row match that DROPS nulls (`null > since` is false in both hyparquet's
- * matcher and JS), which would skip exactly the legacy null-seq rows the
- * migration must preserve. The design (LLP 0040 §2) names this yielded-row
- * filter as the fallback; a future null-aware icebird filter can layer the
- * file-skip optimization on top without changing this contract.
+ * The yielded-row filter below is always the authority on what comes out. On
+ * top of it, and only when `includeLegacy` is false, the same predicate is
+ * ALSO pushed into icebird's `scan({ where })` so whole data files whose
+ * manifest bound on the seq column sits at or below the watermark are never
+ * opened (LLP 0040 §2's file-skip). The push is confined to that case because
+ * icebird couples file/row-group pruning with a per-row match that DROPS nulls
+ * (`null > since` is false in both hyparquet's matcher and JS): under
+ * `includeLegacy` false a null-seq row is skipped anyway, so the push removes
+ * only rows the filter would have removed, but under `includeLegacy` true it
+ * would skip exactly the legacy null-seq rows the migration must preserve.
+ *
+ * The push can never subtract a row the filter would have yielded. Pruning is
+ * an inclusive projection on both sides: a file with no recorded bound for the
+ * seq column is kept, and a file that predates the column entirely has no such
+ * bound, so it is read and its rows are decided by the filter below.
  *
  * @ref LLP 0040#storage-api-extension [implements]: since-filtered incremental scan; null-seq new on first export, then excluded
  * @param {string} tablePath
@@ -632,14 +640,10 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   if (filtering && hasSeqColumn && !projected.includes(INGEST_SEQ_COLUMN.name)) {
     projected = [...projected, INGEST_SEQ_COLUMN.name]
   }
-  // @ref LLP 0040#storage-api-extension [implements]: `since` is pushed to
-  // icebird as a `seq > x` predicate, so a data file whose manifest upper
-  // bound on the seq column sits at or below the watermark is never opened.
-  // Without it an idle sink tick decoded every column of every file just to
-  // discard each row at the check below. Only when legacy rows are excluded:
-  // a null seq fails `seq > x`, and `includeLegacy` wants those rows yielded,
-  // so that case keeps the yielded-row filter as its only gate. The filter
-  // below stays in place either way as the fallback the section names.
+  // @ref LLP 0040#storage-api-extension [implements]: the `seq > x` file skip
+  // the section asks for, gated as the header explains. Without it an idle
+  // sink tick decoded every column of every file just to discard each row at
+  // the check below.
   const pushSince = filtering && hasSeqColumn && !includeLegacy
   const scan = source.scan({
     columns: projected,
