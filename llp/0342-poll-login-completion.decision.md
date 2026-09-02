@@ -7,6 +7,7 @@
 **Date:** 2026-08-31
 **Related:** LLP 0058 (extends D2, D8), LLP 0059, LLP 0061, LLP 0063, LLP 0134, LLP 0179
 **Extends:** LLP 0058
+**Extended-by:** LLP 0357 (the request covering two outcomes the poll lane misreports: #d2's loud stale-server failure, which reaches the wizard as retriable, and #d3's single delivery, which strands a successful sign-in when the client cannot read the response that carried it)
 
 > `hyp remote login` on an SSH session is broken by design: the browser flow
 > hands the IdP a `redirect_uri` of `http://127.0.0.1:<port>/callback`, but the
