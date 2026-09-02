@@ -59,18 +59,46 @@ test('a partial trailing block stays buffered until its terminator arrives', () 
   assert.equal(parser.buffer, '')
 })
 
+/**
+ * An SSE body of `count` small delta events, the shape a provider streams.
+ * @param {number} count
+ */
+function sseBody(count) {
+  const delta = 'x'.repeat(100)
+  let body = ''
+  for (let i = 0; i < count; i++) body += `event: delta\ndata: {"i":${i},"d":"${delta}"}\n\n`
+  return body
+}
+
+/**
+ * Milliseconds for the fastest of three whole-body parses. Best-of keeps a
+ * single GC pause from deciding the measurement.
+ * @param {string} body
+ */
+function bestFeedMs(body) {
+  let best = Infinity
+  for (let i = 0; i < 3; i++) {
+    const started = process.hrtime.bigint()
+    feedWhole(body)
+    const ms = Number(process.hrtime.bigint() - started) / 1e6
+    if (ms < best) best = ms
+  }
+  return best
+}
+
 test('a whole-body feed of many events costs linear time', () => {
   // The deferred path (compressed or header-blind SSE) feeds the entire
   // decoded body in one call. Before the single-pass scan this was
-  // O(events x bytes): 20,000 events over 4 MB took about 700 ms.
-  const delta = 'x'.repeat(100)
-  let body = ''
-  for (let i = 0; i < 20000; i++) body += `event: delta\ndata: {"i":${i},"d":"${delta}"}\n\n`
-  const started = process.hrtime.bigint()
-  const events = feedWhole(body)
-  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6
-  assert.equal(events.length, 20000)
-  assert.ok(elapsedMs < 200, `whole-body feed took ${elapsedMs.toFixed(0)} ms`)
+  // O(events x bytes), so quadrupling the body more than quadrupled the
+  // cost: the two-probe search measures about 17x for a 4x body, against
+  // about 4x for the single pass. Compare the two sizes rather than
+  // asserting an absolute millisecond bound, which measures the runner as
+  // much as the parser and would have to be retuned per machine.
+  const small = sseBody(5000)
+  const big = sseBody(20000)
+  assert.equal(feedWhole(big).length, 20000)
+  const ratio = bestFeedMs(big) / bestFeedMs(small)
+  assert.ok(ratio < 10, `4x the body cost ${ratio.toFixed(1)}x the time; a linear scan costs about 4x`)
 })
 
 /**
@@ -107,7 +135,10 @@ test('chunked feeds consume the same bytes the two-probe scan consumed', () => {
   // Parity is on the split, so the oracle compares raw blocks, not parsed
   // events; a block that is only CRs or empty is still a block to both.
   let seed = 12345
-  const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff
+  // Math.imul keeps the multiply exact. A plain `*` overflows the 53-bit
+  // mantissa, which drops the generator into a short cycle (it repeats after
+  // about 6,000 draws) and quietly re-tests inputs it has already seen.
+  const rand = () => (seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff) / 0x7fffffff
   const alphabet = ['\r', '\n', '\n', 'd', 'a', 't', ':', ' ', '1']
   for (let round = 0; round < 3000; round++) {
     let text = ''
@@ -154,6 +185,9 @@ test('the single-pass scan splits blocks exactly where the two-probe scan did', 
       const tail = findSeparatorOriginal(buf.slice(from))
       const want = tail === -1 ? -1 : { idx: tail.idx + from, len: tail.len }
       assert.deepEqual(findSeparator(buf, from), want, JSON.stringify({ buf, from }))
+      // `from` defaults to 0, so the one-argument call the old signature took
+      // must still find CRLF terminators rather than report none.
+      if (from === 0) assert.deepEqual(findSeparator(buf), want, JSON.stringify({ buf }))
       checked++
     }
     if (buf.length === 8) return

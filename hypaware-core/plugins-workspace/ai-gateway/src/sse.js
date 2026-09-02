@@ -88,11 +88,16 @@ export function isSseHeaders(headers) {
  * Exported only so the parser tests can check every split point against the
  * two-probe search this replaced; `feed` is the sole runtime caller.
  *
+ * `from` defaults to 0 so a one-argument call scans the whole buffer, the
+ * shape this replaced. Without the default it would not throw: the CRLF
+ * branch compares `i > from` against undefined, which is never true, so
+ * every `\r\n\r\n` terminator would go silently unreported.
+ *
  * @param {string} buf
- * @param {number} from
+ * @param {number} [from]
  * @returns {{ idx: number, len: number } | -1}
  */
-export function findSeparator(buf, from) {
+export function findSeparator(buf, from = 0) {
   let i = buf.indexOf('\n', from)
   while (i !== -1) {
     if (buf.charCodeAt(i + 1) === 10) return { idx: i, len: 2 }
