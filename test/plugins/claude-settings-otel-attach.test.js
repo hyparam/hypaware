@@ -12,7 +12,14 @@ import {
   MODE_PROXY,
   attach,
   otelModeEnv,
+  preflightOtelAttach,
 } from '../../hypaware-core/plugins-workspace/claude/src/settings.js'
+import { createAttachHandler } from '../../src/core/config/action_attach.js'
+import {
+  createActionReconciler,
+  readClientActionStatus,
+} from '../../src/core/config/action_reconciler.js'
+import { isActionRefused } from '../../src/core/config/action_refusal.js'
 import { detachClientFromDisk } from '../../src/core/config/client_detach_disk.js'
 import { ensureLocalCa } from '../../src/core/tls/ca.js'
 
@@ -599,4 +606,98 @@ test('a headers key is not told to point itself at the local listener', async (t
   })
   const routingWarnings = (routingResult.changed && routingResult.warnings) || []
   assert.match(routingWarnings[0], /point it at the same local listener/)
+})
+
+// The floor refusal is a fact about the installed client, not about anything
+// the user wrote for HypAware to read, so it must not be marked as one of
+// LLP 0186's terminal refusals. The JSONC site in the same module is the
+// contrast: that one stays refused until the user rewrites the file.
+// @ref LLP 0363#version-floor-is-retryable [tests]: the floor error is thrown unmarked, so the reconciler records a retryable failed marker
+test('a floor refusal is not marked as a permanent refusal', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+
+  await assert.rejects(
+    () => otelAttach(r, { claudeVersion: '2.1.192' }),
+    (err) => {
+      assert.equal(/** @type {any} */ (err).code, 'VERSION_FLOOR')
+      assert.equal(
+        isActionRefused(err),
+        false,
+        'the floor clears when the client updates itself, so the reconciler must be allowed to retry it'
+      )
+      return true
+    }
+  )
+})
+
+// The whole recovery path, through the real reconciler and the real attach
+// handler: below the floor the pass refuses and records a retryable marker,
+// and the very next pass after the client is upgraded performs the attach.
+// Nothing between the two passes stands in for `hyp client attach claude`.
+// @ref LLP 0363#version-floor-is-retryable [tests]: an upgraded client re-attaches on the next reconcile pass, with no manual re-arm
+test('a below-floor machine attaches on the first pass after the client is upgraded', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+
+  let installedVersion = '2.1.192'
+  /** @type {any} */
+  const registration = {
+    name: 'claude',
+    defaultUpstream: 'anthropic',
+    /** @param {any} attachCtx */
+    async attach(attachCtx) {
+      preflightOtelAttach({
+        claudeVersion: installedVersion,
+        telemetryPort: TELEMETRY_PORT,
+        spoolDir: r.spoolDir,
+      })
+      attachCtx.stdout.write(JSON.stringify({
+        status: 'attached',
+        action: 'attach',
+        client: 'claude',
+        dry_run: false,
+        changed: true,
+        settings_path: r.settingsPath,
+      }))
+    },
+  }
+  /** @type {any} */
+  const clients = {
+    getClient(/** @type {string} */ name) { return name === 'claude' ? registration : undefined },
+  }
+  const reconciler = createActionReconciler({
+    stateRoot: r.stateRoot,
+    handlers: [createAttachHandler()],
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+  })
+  const input = {
+    config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/claude', enabled: true }] }),
+    backfills: /** @type {any} */ ({ register() {}, get() { return undefined }, list() { return [] } }),
+    env: process.env,
+    clientDescriptors: new Map([['claude', /** @type {any} */ (CLAUDE_DESCRIPTOR)]]),
+    clients,
+    endpoint: `http://127.0.0.1:${PORT}`,
+  }
+
+  const below = await reconciler.reconcile(input)
+  assert.deepEqual(
+    below.results.map((entry) => entry.outcome),
+    ['failed'],
+    'a floor refusal is recorded as retryable, not as a terminal refusal'
+  )
+  const refusedMarker = readClientActionStatus({ stateRoot: r.stateRoot }).byKind.attach.claude
+  assert.equal(refusedMarker.status, 'failed')
+  assert.match(String(refusedMarker.reason), /claude update/)
+
+  installedVersion = '2.1.233'
+  const upgraded = await reconciler.reconcile(input)
+  assert.deepEqual(
+    upgraded.results.map((entry) => entry.outcome),
+    ['done'],
+    'the pass after the upgrade attaches, with no manual hyp client attach claude'
+  )
+  const doneMarker = readClientActionStatus({ stateRoot: r.stateRoot }).byKind.attach.claude
+  assert.equal(doneMarker.status, 'done')
+  assert.equal(doneMarker.mode, MODE_OTEL)
 })
