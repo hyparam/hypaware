@@ -297,15 +297,29 @@ function neuter(contribution) {
    * and it stays one. A define naming a function of the plugin's own is left
    * alone: that one really is meant to land.
    *
+   * The substitute has to be swapped back out whatever kind `start` now is,
+   * not only when it is the kind the descriptor was read as. A plugin that
+   * turns its own `start` from a data property into an accessor between the
+   * read and the define leaves the two disagreeing, and a guard that gives up
+   * on the mismatch forwards the stand-in's own function verbatim, which is
+   * the write onto the plugin's object this exists to prevent.
+   *
    * @param {PropertyDescriptor} desc
    * @returns {PropertyDescriptor}
    */
   function restoreStart(desc) {
     const own = Reflect.getOwnPropertyDescriptor(contribution, 'start')
     if (own === undefined) return desc
-    if (desc.get === inertStartGetter) return { ...desc, get: own.get }
-    if (desc.value === inertStart && own.get === undefined && own.set === undefined) return { ...desc, value: own.value }
-    return desc
+    if (desc.get !== inertStartGetter && desc.value !== inertStart) return desc
+    if (own.get === undefined && own.set === undefined) {
+      if (desc.get === undefined && desc.set === undefined) return { ...desc, value: own.value }
+    } else if (desc.get !== undefined || desc.set !== undefined) {
+      return { ...desc, get: own.get, set: own.set }
+    }
+    // Kinds disagree, so no descriptor carries the report across unchanged.
+    // The define is the no-op the kernel takes it for: put back exactly what
+    // the contribution holds now.
+    return { ...own }
   }
 
   /**
@@ -320,13 +334,22 @@ function neuter(contribution) {
    * non-writable against a writable target. Both throw a proxy invariant at
    * the plugin, so the two are reconciled before either trap answers. Only
    * keys the target already carries are visited, because those are the only
-   * ones its extensibility pins it to.
+   * ones the target has to answer for; a fresh one carries none, so this costs
+   * nothing until something puts a key there.
+   *
+   * Extensibility is not the thing that pins the target: an individual
+   * `defineProperty` through the stand-in mirrors that property onto an
+   * otherwise extensible target, non-configurable and all, and skipping the
+   * reconcile while the target is still extensible left exactly those keys to
+   * go stale. `defineProperty(stored, k, { configurable: false })` followed by
+   * the plugin tightening `k` on its own reference threw
+   * `getOwnPropertyDescriptor` at it, against a pair the kernel takes without
+   * complaint.
    *
    * @param {object} target
    */
   function resync(target) {
     matchExtensibility(target)
-    if (Reflect.isExtensible(target)) return
     for (const prop of Reflect.ownKeys(target)) {
       const desc = Reflect.getOwnPropertyDescriptor(contribution, prop)
       if (desc === undefined) Reflect.deleteProperty(target, prop)
@@ -401,11 +424,53 @@ function neuter(contribution) {
       const desc = Reflect.getOwnPropertyDescriptor(contribution, prop)
       if (desc === undefined) return undefined
       const shown = prop === 'start' ? startDescriptor(desc) : desc
+      // A property the contribution holds non-configurable may only be
+      // reported that way against a target carrying it non-configurable too,
+      // so mirror it there rather than over-reporting it configurable: under
+      // the kernel a plugin re-applying the descriptor it just read is an
+      // ordinary no-op, and the `configurable: true` it never asked for is
+      // exactly what the contribution then refuses. Reachable without anything
+      // hardening the object at all, since `defineProperty(c, k, { value })`
+      // leaves `k` non-configurable by default.
+      //
+      // `start` is the exception, and mirroring it here is measurably worse
+      // rather than better. The only value its pin may carry is the inert one,
+      // so pinning turns `defineProperty(stored, 'start', { value:
+      // contribution.start })`, the no-op redefine the kernel performs and
+      // `neuter` was fixed to keep working, back into a throw. The trap below
+      // pins `start` only where the engine leaves no alternative. So a
+      // `start` the contribution holds non-configurable keeps being reported
+      // configurable and re-applying that descriptor stays refused: the read
+      // half of the residual the define trap explains.
+      if (prop !== 'start' && desc.configurable === false) Reflect.defineProperty(target, prop, desc)
       const pinned = Reflect.getOwnPropertyDescriptor(target, prop)
       if (pinned !== undefined && pinned.configurable === false) return shown
       return { ...shown, configurable: true }
     },
     getPrototypeOf: () => Reflect.getPrototypeOf(contribution),
+    /**
+     * Untrapped, `in` answered off the target: right by accident while the
+     * target still inherited from the contribution, and wrong once a define
+     * mirrored a key there that the plugin later dropped through its own
+     * reference, or once `matchExtensibility` reparented the target away.
+     * Everything else here resolves off the contribution, and `in` is no
+     * different: a plugin that guards with it saw a key `ownKeys`,
+     * `getOwnPropertyDescriptor` and `get` all agreed was gone.
+     *
+     * Reconciled only once the target has been hardened, which is the only
+     * state in which it has to answer for its own keys: reporting a key gone
+     * is refused for a non-extensible target that still holds it. Doing it
+     * unconditionally would harden the target from an `in` check, pinning
+     * `start` before anything asked, and turn the no-op redefine of a frozen
+     * contribution's `start` into the residual the define trap describes.
+     *
+     * @param {object} target
+     * @param {string | symbol} prop
+     */
+    has(target, prop) {
+      if (!Reflect.isExtensible(target)) resync(target)
+      return Reflect.has(contribution, prop)
+    },
     /**
      * @param {object} target
      * @param {string | symbol} prop

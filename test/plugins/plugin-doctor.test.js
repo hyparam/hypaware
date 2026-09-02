@@ -980,3 +980,176 @@ export async function activate(ctx) {
   const report = await diagnosePlugin(root)
   assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
 })
+
+// A define through the stand-in mirrors that property onto its target,
+// non-configurable and all, while the target itself is still extensible. The
+// reconcile skipped exactly those keys (it ran only once the target had been
+// hardened), so the plugin tightening the same property through its own
+// reference left the descriptor trap reporting non-writable against a
+// writable target: a proxy invariant thrown at a pair the kernel takes.
+test('a property pinned through the stand-in tracks the contribution tightening it', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const contribution = {
+    name: 'demo',
+    plugin: '@test/example',
+    configSection: 'demo',
+    async start() { throw new Error('start() must not run during a dry run') },
+  }
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  // Pins 'name' onto the stand-in's target. Nothing here hardens the object,
+  // so the target stays extensible and the contribution stays extensible too.
+  Object.defineProperty(stored, 'name', { configurable: false })
+  if (Object.getOwnPropertyDescriptor(contribution, 'name').configurable !== false) {
+    throw new Error('the pin never reached the contribution')
+  }
+  if (!Object.isExtensible(stored)) throw new Error('a pin should not harden the contribution')
+
+  // Tightened through the plugin's own reference, the half the stand-in
+  // never sees coming.
+  Object.defineProperty(contribution, 'name', { writable: false })
+  const desc = Object.getOwnPropertyDescriptor(stored, 'name')
+  if (!desc || desc.writable !== false || desc.configurable !== false) {
+    throw new Error('the tightened property reports back as ' + JSON.stringify(desc))
+  }
+  if (Object.keys(stored).sort().join(',') !== 'configSection,name,plugin,start') {
+    throw new Error('the tightened contribution stopped enumerating')
+  }
+
+  // The same for 'start', whose pin carries the inert function rather than
+  // the plugin's own.
+  Object.defineProperty(stored, 'start', { configurable: false })
+  Object.defineProperty(contribution, 'start', { writable: false })
+  const startDesc = Object.getOwnPropertyDescriptor(stored, 'start')
+  if (!startDesc || startDesc.writable !== false) throw new Error('the tightened start() reports writable')
+  if (typeof stored.start !== 'function') throw new Error('start() stopped reading back')
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// The inert function is swapped back out of a `start` descriptor coming the
+// other way only when `start` is still the kind it was read as. A plugin that
+// turns its own `start` into an accessor in between got the stand-in's own
+// function written onto its object instead, the same leak in reverse the
+// round-trip closes.
+test('a stale start descriptor is not written into a contribution that changed its kind', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const real = async function pluginStart() { throw new Error('start() must not run during a dry run') }
+  const contribution = { name: 'demo', plugin: '@test/example', start: real }
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  const stale = Object.getOwnPropertyDescriptor(stored, 'start')
+  function pluginStartGetter() { return real }
+  Object.defineProperty(contribution, 'start', { get: pluginStartGetter, enumerable: true, configurable: true })
+  Object.defineProperty(stored, 'start', stale)
+
+  const own = Object.getOwnPropertyDescriptor(contribution, 'start')
+  if (own.get !== pluginStartGetter || own.value !== undefined) {
+    throw new Error("the stale round-trip overwrote the plugin's own start()")
+  }
+  if (stored.start === real) throw new Error('the real start() reads back off the stand-in')
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// `Object.defineProperty(c, 'k', { value })` leaves `k` non-configurable, so
+// an ordinary contribution can hold one without ever hardening the object.
+// The descriptor trap reported every such property configurable, because the
+// stand-in's target carried nothing to back an honest report, and re-applying
+// the descriptor the plugin had just read was then refused by the
+// contribution: a fabricated failure against the no-op the kernel performs.
+test('a descriptor round-trip on a non-configurable property is a no-op', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const contribution = {
+    plugin: '@test/example',
+    async start() { throw new Error('start() must not run during a dry run') },
+  }
+  Object.defineProperty(contribution, 'name', { value: 'demo', enumerable: true })
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  const desc = Object.getOwnPropertyDescriptor(stored, 'name')
+  if (!desc || desc.configurable !== false) {
+    throw new Error('a non-configurable property reports back as ' + JSON.stringify(desc))
+  }
+  Object.defineProperty(stored, 'name', desc)
+  if (stored.name !== 'demo') throw new Error('the round-trip lost the name')
+  if (Object.getOwnPropertyDescriptor(contribution, 'name').configurable !== false) {
+    throw new Error('the round-trip made a non-configurable property configurable')
+  }
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// `in` was the one operation left answering off the stand-in's own target.
+// A define mirrors the key there, and dropping it through the plugin's own
+// reference left `in` insisting on a key `Object.keys`, the descriptor and the
+// read all agreed was gone: the store-a-different-shape divergence this
+// stand-in exists to close, for a plugin that guards with `in`.
+test('in agrees with the rest of the stand-in about what the contribution holds', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const contribution = {
+    name: 'demo',
+    plugin: '@test/example',
+    async start() { throw new Error('start() must not run during a dry run') },
+  }
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  Object.defineProperty(stored, 'temp', { value: 1, writable: true, enumerable: true, configurable: true })
+  if (!('temp' in stored)) throw new Error('a defined property is missing from in')
+  delete contribution.temp
+  if ('temp' in stored) throw new Error('a dropped property is still reported by in')
+  if (Object.keys(stored).includes('temp')) throw new Error('a dropped property still enumerates')
+
+  // A key the contribution only inherits still answers, as it does under the
+  // kernel, and hardening does not change any of it.
+  if (!('toString' in stored)) throw new Error('an inherited key is missing from in')
+  Object.freeze(stored)
+  if (!('name' in stored) || !('start' in stored)) throw new Error('the frozen contribution lost a key from in')
+  if ('temp' in stored) throw new Error('the frozen contribution regained a dropped key')
+
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
