@@ -111,3 +111,52 @@ test('GitHub auth failure is safe and classified', async () => {
   assert.equal(fetched, false)
 })
 
+test('list methods return one normalized page and discard content bodies', async () => {
+  let fetches = 0
+  const client = createGithubClient({
+    tokenEnv: 'GITHUB_TOKEN',
+    env: { GITHUB_TOKEN: 'secret' },
+    log: silentLog,
+    async fetchImpl() {
+      fetches += 1
+      return new Response(JSON.stringify([{
+        number: 7,
+        state: 'open',
+        body: 'unused content'.repeat(10_000),
+        user: { login: 'Octocat', type: 'User', extra: 'discarded' },
+      }]), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          link: '<https://api.github.test/repos/o/r/issues?page=2>; rel="next"',
+        },
+      })
+    },
+  })
+
+  const page = await client.listIssuesPage('o', 'r', undefined)
+  assert.equal(fetches, 1)
+  assert.equal(page.next, 'https://api.github.test/repos/o/r/issues?page=2')
+  assert.deepEqual(page.items, [{ number: 7, state: 'open', user: { login: 'Octocat', type: 'User' } }])
+  assert.ok(!Object.hasOwn(page.items[0], 'body'))
+})
+
+test('incremental pull page is newest-first and sends the saved ETag', async () => {
+  let requested = ''
+  let ifNoneMatch = ''
+  const client = createGithubClient({
+    tokenEnv: 'GITHUB_TOKEN',
+    env: { GITHUB_TOKEN: 'secret' },
+    log: silentLog,
+    async fetchImpl(input, init) {
+      requested = String(input)
+      ifNoneMatch = /** @type {Record<string, string>} */ (init?.headers)['If-None-Match']
+      return new Response(null, { status: 304 })
+    },
+  })
+
+  const page = await client.listPullRequestsPage('o', 'r', 'saved-etag')
+  assert.match(requested, /sort=updated&direction=desc/)
+  assert.equal(ifNoneMatch, 'saved-etag')
+  assert.equal(page.notModified, true)
+})

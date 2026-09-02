@@ -1,7 +1,6 @@
 // @ts-check
 
 import { commitKey, repoKey, str } from './keys.js'
-import { cursorFor } from './cursors.js'
 
 /**
  * Capture orchestration: turn the active local inventory into appended
@@ -16,8 +15,11 @@ import { cursorFor } from './cursors.js'
  *
  * @ref LLP 0360#three-invariants [implements]: ignore is enforced at capture, forward-only, exact-match
  *
- * @import { CursorState, GithubActor, GithubClient, GithubComment, GithubCommit, GithubConfig, GithubIssue, GithubPull, GithubReview, PluginLogger, RepoCursor } from './types.js'
+ * @import { CursorState, GithubActor, GithubClient, GithubComment, GithubCommit, GithubCommitTask, GithubConfig, GithubIssue, GithubPull, GithubPullTask, GithubReview, GithubRepoWork, PluginLogger, RepoCursor } from './types.js'
  */
+
+// @ref LLP 0361#budget [implements]: one fixed request allowance bounds the whole repository-capture tick
+export const CAPTURE_REQUEST_LIMIT = 400
 
 /**
  * Resolve the repository set to capture. `session_repos` consumes only the
@@ -79,9 +81,10 @@ export async function resolveRepos(config, client, log, observedRepos) {
  * @param {'backfill' | 'poll'} args.mode
  * @param {string[]} [args.only]  restrict to these repos (e.g. `hyp github backfill owner/repo`)
  * @param {string[]} [args.observedRepos] repositories evidenced by export-eligible local agent activity
- * @returns {Promise<{ repos: number, events: number, errors: Array<{ repo: string, error: string }> }>}
+ * @param {number} [args.requestLimit] test seam; production uses CAPTURE_REQUEST_LIMIT
+ * @returns {Promise<{ repos: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>}
  */
-export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos }) {
+export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos, requestLimit = CAPTURE_REQUEST_LIMIT }) {
   let repos = await resolveRepos(config, client, log, observedRepos)
   if (only && only.length > 0) {
     const onlySet = new Set(only.map((r) => r.toLowerCase()))
@@ -89,56 +92,82 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
   }
 
   let events = 0
+  const budget = requestBudget(requestLimit)
   /** @type {Array<{ repo: string, error: string }>} */
   const errors = []
+  let pending = false
+  let visited = 0
 
-  for (const repo of repos) {
-    if (mode === 'backfill') cursors.repos[repo] = {}
-    const cursor = cursors.repos[repo] ?? (cursors.repos[repo] = {})
+  repos = rotateTo(repos, cursors.next_repo)
+
+  for (let i = 0; i < repos.length; i++) {
+    if (budget.remaining === 0) {
+      pending = true
+      break
+    }
+    const repo = repos[i]
+    visited += 1
+    let cursor = cursors.repos[repo] ?? (cursors.repos[repo] = {})
+    if (mode === 'backfill' && cursor.work?.mode !== 'backfill') {
+      cursor = {}
+      cursors.repos[repo] = cursor
+    }
     let repoEvents = 0
     try {
-      await captureRepo({
+      const complete = await captureRepo({
         client,
         repo,
         cursor,
-        mode,
+        requestedMode: mode,
+        budget,
         append: async (rows) => {
           await append(rows)
           repoEvents += rows.length
         },
-        log,
       })
+      if (!complete) pending = true
     } catch (err) {
       const message = errMessage(err)
       errors.push({ repo, error: message })
+      if (cursor.work) pending = true
       log.error('github.repo_capture_failed', { repo, error: message })
     }
     events += repoEvents
     // Persist the advanced cursor onto the shared state after each repo.
     cursors.repos[repo] = cursor
+    cursors.next_repo = repos[(i + 1) % repos.length]
   }
 
-  return { repos: repos.length, events, errors }
+  if (visited < repos.length) pending = true
+  if (budget.remaining === 0 && pending) {
+    log.info('github.capture_budget_exhausted', {
+      request_limit: budget.limit,
+      requests: budget.used,
+      pending_repos: repos.filter((repo) => cursors.repos[repo]?.work).length,
+    })
+  }
+  return { repos: repos.length, events, requests: budget.used, pending, errors }
 }
 
 /**
  * Capture one repo through every pass, appending `github_events` rows. Returns
- * the number of event rows written.
+ * true when the repository has no continuation work left.
  *
  * @param {object} args
  * @param {GithubClient} args.client
  * @param {string} args.repo  canonical `owner/repo`
  * @param {RepoCursor} args.cursor
- * @param {'backfill' | 'poll'} args.mode
+ * @param {'backfill' | 'poll'} args.requestedMode
+ * @param {{ limit: number, remaining: number, used: number, take: () => boolean }} args.budget
  * @param {(rows: Record<string, unknown>[]) => Promise<void>} args.append
- * @param {PluginLogger} args.log
- * @returns {Promise<number>}
+ * @returns {Promise<boolean>}
  */
-async function captureRepo({ client, repo, cursor, mode, append }) {
+async function captureRepo({ client, repo, cursor, requestedMode, budget, append }) {
   const [owner, name] = repo.split('/')
-  /** @type {Set<number>} */
-  const prNumbers = new Set()
-  let written = 0
+  const prNumbers = new Set(cursor.pull_numbers ?? [])
+
+  if (!cursor.work) cursor.work = { mode: requestedMode, phase: 'issues' }
+  const work = cursor.work
 
   /** @param {Record<string, unknown>[]} rows */
   async function flush(rows) {
@@ -154,63 +183,155 @@ async function captureRepo({ client, repo, cursor, mode, append }) {
     })
     if (fresh.length === 0) return
     await append(fresh)
-    written += fresh.length
   }
 
-  // --- issues (non-PR; PRs come from the pulls pass) ---
-  const issueCursor = cloneCursor(cursor)
-  const issues = await client.listIssues(owner, name, issueCursor)
-  await flush(
-    issues
-      .filter((it) => !it.pull_request)
-      .map((it) => issueRow(repo, it)),
-  )
-  commitCursor(cursor, issueCursor)
+  // @ref LLP 0361#page-work [implements]: each successful page advances durable work only after its rows land
+  while (true) {
+    if (work.phase === 'issues') {
+      if (!budget.take()) return false
+      const page = await client.listIssuesPage(owner, name, cursor.since?.issues, pageUrl(work.page))
+      for (const issue of page.items) if (issue.pull_request) prNumbers.add(issue.number)
+      await flush(page.items.filter((it) => !it.pull_request).map((it) => issueRow(repo, it)))
+      cursor.pull_numbers = sortedNumbers(prNumbers)
+      advanceSince(cursor, 'issues', page.items)
+      work.page = page.next
+      if (page.next === null) beginPulls(work, cursor)
+      continue
+    }
 
-  // --- pull requests + their sub-resources ---
-  const pullCursor = cloneCursor(cursor)
-  const pulls = await client.listPullRequests(owner, name, pullCursor)
-  for (const pr of pulls) prNumbers.add(pr.number)
-  await flush(pulls.map((pr) => pullRow(repo, pr)))
+    if (work.phase === 'pulls') {
+      const tasks = work.pull_tasks ?? (work.pull_tasks = [])
+      if (tasks.length > 0) {
+        if (!await drainPullTask({ client, owner, name, repo, tasks, budget, flush })) return false
+        continue
+      }
+      if (work.page === null) {
+        finishPulls(work, cursor)
+        continue
+      }
+      if (!budget.take()) return false
+      const page = await client.listPullRequestsPage(owner, name, cursor.etag?.pulls, pageUrl(work.page))
+      if (page.notModified) {
+        work.page = null
+        continue
+      }
+      const baseline = work.baseline_pulls
+      const changed = work.mode === 'backfill' ? page.items : page.items.filter((pr) => pullChangedSince(pr, baseline, prNumbers))
+      for (const pr of page.items) prNumbers.add(pr.number)
+      await flush(changed.map((pr) => pullRow(repo, pr)))
+      cursor.pull_numbers = sortedNumbers(prNumbers)
+      work.pull_tasks = changed.map((pr) => ({ number: pr.number, created_at: pr.created_at, phase: 'files' }))
+      work.pulls_high = newestPullTime(work.pulls_high, page.items)
+      if (page.etag) work.pulls_etag = page.etag
+      const reachedHighWater = work.mode === 'poll' && baseline !== undefined && page.items.some((pr) => olderThan(pr, baseline))
+      work.page = reachedHighWater ? null : page.next
+      continue
+    }
 
-  // Only descend into a PR's sub-resources when the PR is new/changed since the
-  // last run (backfill processes all). Bounds the per-tick N+1 over PRs.
-  const pullsHigh = cursor.since?.pulls
-  const toDescend = mode === 'backfill' ? pulls : pulls.filter((pr) => changedSince(pr, pullsHigh))
-  for (const pr of toDescend) {
-    const files = await client.listPullRequestFiles(owner, name, pr.number)
-    await flush(files.map((path) => prFileRow(repo, pr, path)))
+    if (work.phase === 'commits') {
+      const tasks = work.commit_tasks ?? (work.commit_tasks = [])
+      if (tasks.length > 0) {
+        if (!budget.take()) return false
+        const task = tasks[0]
+        const page = await client.listCommitFilesPage(owner, name, task.sha, pageUrl(task.page))
+        const commit = commitFromTask(task)
+        await flush(page.items.map((path) => commitFileRow(repo, commit, path)))
+        task.page = page.next
+        if (page.next === null) tasks.shift()
+        continue
+      }
+      if (work.page === null) {
+        work.phase = 'comments'
+        delete work.page
+        continue
+      }
+      if (!budget.take()) return false
+      const page = await client.listCommitsPage(owner, name, cursor.since?.commits, pageUrl(work.page))
+      await flush(page.items.map((c) => commitRow(repo, c, null)))
+      advanceCommitSince(cursor, page.items)
+      work.commit_tasks = page.items.map((c) => ({ sha: c.sha, created_at: commitDate(c) ?? undefined }))
+      work.page = page.next
+      continue
+    }
 
-    const reviews = await client.listPullRequestReviews(owner, name, pr.number)
-    await flush(reviews.map((rv) => reviewRow(repo, pr, rv)))
-
-    const prCommits = await client.listPullRequestCommits(owner, name, pr.number)
-    await flush(prCommits.map((c) => commitRow(repo, c, pr.number)))
+    if (!budget.take()) return false
+    const page = await client.listIssueCommentsPage(owner, name, cursor.since?.comments, pageUrl(work.page))
+    await flush(page.items.map((c) => commentRow(repo, c, prNumbers)).filter((r) => r !== null))
+    advanceSince(cursor, 'comments', page.items)
+    work.page = page.next
+    if (page.next === null) {
+      cursor.pull_numbers = sortedNumbers(prNumbers)
+      delete cursor.work
+      return true
+    }
   }
-  advancePullsHigh(pullCursor, pulls)
-  commitCursor(cursor, pullCursor)
+}
 
-  // --- repo-level commits + their files ---
-  const commitsCursor = cloneCursor(cursor)
-  const commits = await client.listCommits(owner, name, commitsCursor)
-  await flush(commits.map((c) => commitRow(repo, c, null)))
-  for (const c of commits) {
-    const files = await client.listCommitFiles(owner, name, c.sha)
-    await flush(files.map((path) => commitFileRow(repo, c, path)))
+/**
+ * Drain one page of the current pull subresource.
+ * @param {object} args
+ * @param {GithubClient} args.client
+ * @param {string} args.owner
+ * @param {string} args.name
+ * @param {string} args.repo
+ * @param {GithubPullTask[]} args.tasks
+ * @param {{ take: () => boolean }} args.budget
+ * @param {(rows: Record<string, unknown>[]) => Promise<void>} args.flush
+ */
+async function drainPullTask({ client, owner, name, repo, tasks, budget, flush }) {
+  if (!budget.take()) return false
+  const task = tasks[0]
+  const pr = /** @type {GithubPull} */ ({ number: task.number, created_at: task.created_at })
+  if (task.phase === 'files') {
+    const page = await client.listPullRequestFilesPage(owner, name, task.number, pageUrl(task.page))
+    await flush(page.items.map((path) => prFileRow(repo, pr, path)))
+    task.page = page.next
+    if (page.next === null) {
+      task.phase = 'reviews'
+      delete task.page
+    }
+    return true
   }
-  commitCursor(cursor, commitsCursor)
+  if (task.phase === 'reviews') {
+    const page = await client.listPullRequestReviewsPage(owner, name, task.number, pageUrl(task.page))
+    await flush(page.items.map((rv) => reviewRow(repo, pr, rv)))
+    task.page = page.next
+    if (page.next === null) {
+      task.phase = 'commits'
+      delete task.page
+    }
+    return true
+  }
+  const page = await client.listPullRequestCommitsPage(owner, name, task.number, pageUrl(task.page))
+  await flush(page.items.map((c) => commitRow(repo, c, task.number)))
+  task.page = page.next
+  if (page.next === null) tasks.shift()
+  return true
+}
 
-  // --- conversation comments (on issues AND PRs) ---
-  const commentCursor = cloneCursor(cursor)
-  const comments = await client.listIssueComments(owner, name, commentCursor)
-  await flush(
-    comments
-      .map((c) => commentRow(repo, c, prNumbers))
-      .filter((r) => r !== null),
-  )
-  commitCursor(cursor, commentCursor)
+/** @param {GithubRepoWork} work @param {RepoCursor} cursor */
+function beginPulls(work, cursor) {
+  work.phase = 'pulls'
+  delete work.page
+  work.baseline_pulls = cursor.since?.pulls
+  work.pulls_high = cursor.since?.pulls
+  work.pull_tasks = []
+}
 
-  return written
+/** @param {GithubRepoWork} work @param {RepoCursor} cursor */
+function finishPulls(work, cursor) {
+  if (work.pulls_high) setSince(cursor, 'pulls', work.pulls_high)
+  if (work.pulls_etag) {
+    if (!cursor.etag) cursor.etag = {}
+    cursor.etag.pulls = work.pulls_etag
+  }
+  work.phase = 'commits'
+  delete work.page
+  delete work.baseline_pulls
+  delete work.pulls_high
+  delete work.pulls_etag
+  delete work.pull_tasks
+  work.commit_tasks = []
 }
 
 /* ---------------------------------------------------------------- row builders */
@@ -381,6 +502,14 @@ function commitDate(c) {
   return author && typeof author.date === 'string' ? author.date : null
 }
 
+/** @param {GithubCommitTask} task @returns {GithubCommit} */
+function commitFromTask(task) {
+  return {
+    sha: task.sha,
+    commit: { author: task.created_at ? { date: task.created_at } : null },
+  }
+}
+
 /**
  * Extract the trailing issue/PR number from a comment's `issue_url`
  * (`.../issues/123`).
@@ -396,58 +525,103 @@ function numberFromIssueUrl(issueUrl) {
 
 /**
  * @param {GithubPull} pr
+ * GitHub timestamps have second granularity. An unseen pull at exactly the
+ * saved high-water is new work; a pull already in `seen` is not. Page traversal
+ * still continues through the whole equal-time boundary and stops only after
+ * reaching an older pull.
+ *
  * @param {string | undefined} high
+ * @param {Set<number>} seen
  * @returns {boolean}
  */
-function changedSince(pr, high) {
+function pullChangedSince(pr, high, seen) {
   if (!high) return true
   const updated = updatedAt(pr)
-  return updated == null || updated > high
+  return updated == null || updated > high || (updated === high && !seen.has(pr.number))
+}
+
+/** @param {GithubPull} pr @param {string} high */
+function olderThan(pr, high) {
+  const updated = updatedAt(pr)
+  return updated !== null && updated < high
 }
 
 /**
- * @param {CursorState['repos'][string]} cursor
+ * @param {string | undefined} high
  * @param {GithubPull[]} pulls
+ * @returns {string | undefined}
  */
-function advancePullsHigh(cursor, pulls) {
-  let max = cursor.since?.pulls
+function newestPullTime(high, pulls) {
+  let max = high
   for (const pr of pulls) {
-    const t = updatedAt(pr)
-    if (t && (!max || t > max)) max = t
+    const value = updatedAt(pr)
+    if (value && (!max || value > max)) max = value
   }
-  if (max) {
-    if (!cursor.since) cursor.since = {}
-    cursor.since.pulls = max
-  }
+  return max
 }
 
 /**
- * Clone mutable API cursor state for one capture phase. A client is allowed to
- * advance the clone while listing, but the durable cursor is updated only
- * after that phase's rows and dependent sub-resources have landed.
- *
  * @param {RepoCursor} cursor
- * @returns {RepoCursor}
+ * @param {'issues' | 'comments'} key
+ * @param {Array<GithubIssue | GithubComment>} rows
  */
-function cloneCursor(cursor) {
-  return {
-    ...(cursor.since ? { since: { ...cursor.since } } : {}),
-    ...(cursor.etag ? { etag: { ...cursor.etag } } : {}),
+function advanceSince(cursor, key, rows) {
+  let max = cursor.since?.[key]
+  for (const row of rows) {
+    const value = row.updated_at ?? row.created_at
+    if (value && (!max || value > max)) max = value
   }
+  if (max) setSince(cursor, key, max)
 }
 
-/**
- * Replace a cursor in place so the object held by the repository state remains
- * stable while a successfully captured phase publishes its high-water marks.
- *
- * @param {RepoCursor} target
- * @param {RepoCursor} next
- */
-function commitCursor(target, next) {
-  delete target.since
-  delete target.etag
-  if (next.since) target.since = { ...next.since }
-  if (next.etag) target.etag = { ...next.etag }
+/** @param {RepoCursor} cursor @param {GithubCommit[]} commits */
+function advanceCommitSince(cursor, commits) {
+  let max = cursor.since?.commits
+  for (const commit of commits) {
+    const value = commit.commit?.committer?.date ?? commit.commit?.author?.date
+    if (value && (!max || value > max)) max = value
+  }
+  if (max) setSince(cursor, 'commits', max)
+}
+
+/** @param {RepoCursor} cursor @param {'issues' | 'pulls' | 'commits' | 'comments'} key @param {string} value */
+function setSince(cursor, key, value) {
+  if (!cursor.since) cursor.since = {}
+  cursor.since[key] = value
+}
+
+/** @param {Set<number>} values */
+function sortedNumbers(values) {
+  return [...values].sort((a, b) => a - b)
+}
+
+/** @param {string[]} repos @param {string | undefined} nextRepo */
+function rotateTo(repos, nextRepo) {
+  if (!nextRepo) return repos
+  const at = repos.indexOf(nextRepo)
+  return at > 0 ? [...repos.slice(at), ...repos.slice(0, at)] : repos
+}
+
+/** @param {number} requested */
+function requestBudget(requested) {
+  const limit = Number.isSafeInteger(requested) && requested > 0 ? requested : CAPTURE_REQUEST_LIMIT
+  const budget = {
+    limit,
+    remaining: limit,
+    used: 0,
+    take() {
+      if (budget.remaining === 0) return false
+      budget.remaining -= 1
+      budget.used += 1
+      return true
+    },
+  }
+  return budget
+}
+
+/** @param {string | null | undefined} value */
+function pageUrl(value) {
+  return typeof value === 'string' && value !== '' ? value : undefined
 }
 
 /** @param {GithubPull} pr @returns {string | null} */

@@ -1,9 +1,13 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import { captureRepos, resolveRepos } from '../../hypaware-core/plugins-workspace/github/src/capture.js'
+import { readCursors, writeCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
 import { fakeClient, silentLog } from './github-fake-client.js'
 
 /** @import { CursorState, GithubClient, GithubConfig } from '../../hypaware-core/plugins-workspace/github/src/types.d.ts' */
@@ -202,9 +206,8 @@ test('a failed append does not advance past rows that never landed', async () =>
   const client = fakeClient({
     repos: { 'o/r': { issues: [{ number: 1, state: 'open' }] } },
   })
-  client.listIssues = async (_owner, _repo, cursor) => {
-    cursor.since = { issues: '2026-09-02T12:00:00.000Z' }
-    return [{ number: 1, state: 'open' }]
+  client.listIssuesPage = async () => {
+    return { items: [{ number: 1, state: 'open', updated_at: '2026-09-02T12:00:00.000Z' }], next: null }
   }
   const cursors = freshCursors()
   const result = await captureRepos({
@@ -218,16 +221,16 @@ test('a failed append does not advance past rows that never landed', async () =>
   })
   assert.equal(result.errors.length, 1)
   assert.equal(result.events, 0)
-  assert.deepEqual(cursors.repos['o/r'], {})
+  assert.equal(cursors.repos['o/r'].since, undefined)
+  assert.deepEqual(cursors.repos['o/r'].work, { mode: 'poll', phase: 'issues' })
 })
 
 test('a failed PR subresource does not publish the pulls cursor', async () => {
   const client = fakeClient({})
-  client.listPullRequests = async (_owner, _repo, cursor) => {
-    cursor.etag = { pulls: 'etag-new' }
-    return [{ number: 7, state: 'open', updated_at: '2026-09-02T12:00:00.000Z' }]
+  client.listPullRequestsPage = async () => {
+    return { items: [{ number: 7, state: 'open', updated_at: '2026-09-02T12:00:00.000Z' }], next: null, etag: 'etag-new' }
   }
-  client.listPullRequestFiles = async () => { throw new Error('rate limited') }
+  client.listPullRequestFilesPage = async () => { throw new Error('rate limited') }
   const cursors = freshCursors()
   const result = await captureRepos({
     client,
@@ -240,7 +243,174 @@ test('a failed PR subresource does not publish the pulls cursor', async () => {
   })
   assert.equal(result.errors.length, 1)
   assert.equal(result.events, 1, 'the successfully appended pull snapshot is still reported')
-  assert.deepEqual(cursors.repos['o/r'], {})
+  assert.equal(cursors.repos['o/r'].etag, undefined, 'etag is not published before subresources finish')
+  assert.equal(cursors.repos['o/r'].since?.pulls, undefined)
+  assert.equal(cursors.repos['o/r'].work?.phase, 'pulls')
+  assert.equal(cursors.repos['o/r'].work?.pull_tasks?.[0].number, 7)
+})
+
+test('whole-tick budget resumes a backfill without replaying completed pages', async () => {
+  const calls = []
+  const client = fakeClient({
+    calls,
+    repos: {
+      'o/r': {
+        pulls: [{ number: 7, state: 'open', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z' }],
+        prFiles: { 7: ['src/a.js'] },
+        prReviews: { 7: [{ id: 80, state: 'APPROVED' }] },
+        prCommits: { 7: [{ sha: 'deadbeef' }] },
+      },
+    },
+  })
+  const cursors = freshCursors()
+  const rows = []
+  const args = {
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: /** @type {const} */ ('backfill'),
+    observedRepos: ['o/r'],
+    requestLimit: 4,
+  }
+
+  const first = await captureRepos(args)
+  assert.equal(first.requests, 4)
+  assert.equal(first.pending, true)
+  assert.equal(cursors.repos['o/r'].work?.phase, 'pulls')
+  assert.equal(cursors.repos['o/r'].work?.pull_tasks?.[0].phase, 'commits')
+
+  const second = await captureRepos(args)
+  assert.equal(second.pending, false)
+  assert.equal(cursors.repos['o/r'].work, undefined)
+  assert.equal(calls.filter((call) => call.startsWith('listIssues')).length, 1)
+  assert.equal(calls.filter((call) => call.startsWith('listPullRequests')).length, 1)
+  assert.equal(new Set(rows.map((row) => row.event_id)).size, rows.length)
+})
+
+test('request exhaustion rotates the next tick to the next repository', async () => {
+  const calls = []
+  const client = fakeClient({ calls })
+  const cursors = freshCursors()
+  const args = {
+    client,
+    config: cfg(),
+    cursors,
+    append: async () => {},
+    log: silentLog,
+    mode: /** @type {const} */ ('backfill'),
+    observedRepos: ['o/a', 'o/b'],
+    requestLimit: 1,
+  }
+
+  await captureRepos(args)
+  await captureRepos(args)
+  assert.deepEqual(calls.filter((call) => call.startsWith('listIssues')), [
+    'listIssues:o/a',
+    'listIssues:o/b',
+  ])
+})
+
+test('incremental pulls stop at the prior high-water page', async () => {
+  const client = fakeClient({})
+  let pullPages = 0
+  client.listPullRequestsPage = async (_owner, _repo, _etag, page) => {
+    pullPages += 1
+    assert.equal(page, undefined)
+    return {
+      items: [
+        { number: 9, updated_at: '2026-02-01T00:00:00Z' },
+        { number: 8, updated_at: '2026-01-01T00:00:00Z' },
+      ],
+      next: 'https://api.github.test/repos/o/r/pulls?page=2',
+    }
+  }
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { pulls: '2026-01-15T00:00:00Z' } }
+  const rows = []
+  const result = await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.equal(result.pending, false)
+  assert.equal(pullPages, 1)
+  assert.deepEqual(rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number), [9])
+  assert.equal(cursors.repos['o/r'].since?.pulls, '2026-02-01T00:00:00Z')
+})
+
+test('incremental pulls include unseen PRs tied at the high-water timestamp', async () => {
+  const client = fakeClient({})
+  let pullPages = 0
+  client.listPullRequestsPage = async (_owner, _repo, _etag, page) => {
+    pullPages += 1
+    if (page === undefined) {
+      return {
+        items: [{ number: 10, updated_at: '2026-02-01T00:00:00Z' }],
+        next: 'https://api.github.test/repos/o/r/pulls?page=2',
+      }
+    }
+    assert.match(page, /page=2$/)
+    return {
+      items: [
+        { number: 11, updated_at: '2026-02-01T00:00:00Z' },
+        { number: 9, updated_at: '2026-01-31T23:59:59Z' },
+      ],
+      next: 'https://api.github.test/repos/o/r/pulls?page=3',
+    }
+  }
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = {
+    since: { pulls: '2026-02-01T00:00:00Z' },
+    pull_numbers: [10],
+  }
+  const rows = []
+  const result = await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.equal(result.pending, false)
+  assert.equal(pullPages, 2)
+  assert.deepEqual(rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number), [11])
+  assert.deepEqual(cursors.repos['o/r'].pull_numbers, [9, 10, 11])
+})
+
+test('page and task continuations survive the cursor sidecar round trip', (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-cursors-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const state = {
+    schema_version: 1,
+    next_repo: 'o/b',
+    repos: {
+      'o/a': {
+        pull_numbers: [7, 9],
+        work: {
+          mode: /** @type {const} */ ('backfill'),
+          phase: /** @type {const} */ ('pulls'),
+          page: 'https://api.github.test/repos/o/a/pulls?page=2',
+          baseline_pulls: '2026-01-01T00:00:00Z',
+          pulls_high: '2026-02-01T00:00:00Z',
+          pulls_etag: 'etag-new',
+          pull_tasks: [{ number: 9, created_at: '2026-02-01T00:00:00Z', phase: /** @type {const} */ ('reviews'), page: 'https://api.github.test/reviews?page=2' }],
+        },
+      },
+    },
+  }
+
+  writeCursors(stateDir, state)
+  assert.deepEqual(readCursors(stateDir), state)
 })
 
 /**

@@ -18,7 +18,7 @@ import { getClient } from './runtime.js'
  *
  * @param {GithubRuntime} runtime
  * @param {{ mode: 'backfill' | 'poll', only?: string[], observedRepos?: string[] }} opts
- * @returns {Promise<{ repos: number, events: number, errors: Array<{ repo: string, error: string }> }>}
+ * @returns {Promise<{ repos: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>}
  */
 export async function runCaptureTick(runtime, opts) {
   const cursors = readCursors(runtime.stateDir)
@@ -38,7 +38,7 @@ export async function runCaptureTick(runtime, opts) {
   }
 
   try {
-    return await captureRepos({
+    const result = await captureRepos({
       client,
       config: runtime.config,
       cursors,
@@ -47,7 +47,17 @@ export async function runCaptureTick(runtime, opts) {
       mode: opts.mode,
       only: opts.only,
       observedRepos,
+      requestLimit: runtime.captureRequestLimit,
     })
+    runtime.log.info('github.capture_tick_completed', {
+      mode: opts.mode,
+      repos: result.repos,
+      events: result.events,
+      requests: result.requests,
+      pending: result.pending,
+      errors: result.errors.length,
+    })
+    return result
   } finally {
     writeCursors(runtime.stateDir, cursors)
   }

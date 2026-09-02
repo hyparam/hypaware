@@ -151,6 +151,16 @@ export async function run({ harness, expect }) {
       row.attributes?.selected_repos === 1
     )
   )
+  expect.that(
+    'telemetry: bounded capture reports request use and no remaining work',
+    logs,
+    (rows) => rows.some((row) =>
+      row.body === 'github.capture_tick_completed' &&
+      row.attributes?.mode === 'poll' &&
+      row.attributes?.requests === 4 &&
+      row.attributes?.pending === false
+    )
+  )
 
   /** @param {string} smokeStep @param {() => Promise<void>} fn */
   async function step(smokeStep, fn) {
@@ -172,21 +182,21 @@ export async function run({ harness, expect }) {
 function fakeGithubClient() {
   return {
     async listViewerRepos() { throw new Error('session inventory must not enumerate GitHub') },
-    async listIssues() {
-      return [{
+    async listIssuesPage() {
+      return { items: [{
         number: 7,
         state: 'open',
         created_at: '2026-09-02T12:00:00.000Z',
         user: { login: 'octocat', type: 'User' },
-      }]
+      }], next: null }
     },
-    async listPullRequests() { return [] },
-    async listPullRequestFiles() { return [] },
-    async listPullRequestReviews() { return [] },
-    async listPullRequestCommits() { return [] },
-    async listCommits() { return [] },
-    async listCommitFiles() { return [] },
-    async listIssueComments() { return [] },
+    async listPullRequestsPage() { return { items: [], next: null } },
+    async listPullRequestFilesPage() { return { items: [], next: null } },
+    async listPullRequestReviewsPage() { return { items: [], next: null } },
+    async listPullRequestCommitsPage() { return { items: [], next: null } },
+    async listCommitsPage() { return { items: [], next: null } },
+    async listCommitFilesPage() { return { items: [], next: null } },
+    async listIssueCommentsPage() { return { items: [], next: null } },
   }
 }
 

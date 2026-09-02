@@ -4,6 +4,9 @@ import { parseInterval } from './config.js'
 import { requireGithubRuntime } from './runtime.js'
 import { runCaptureTick } from './tick.js'
 
+// @ref LLP 0361#cadence [implements]: unfinished bounded work resumes without turning capture into a busy loop
+export const BACKLOG_RETRY_MS = 15 * 60_000
+
 /**
  * `startGithubSource` is the `SourceContribution.start` callback. Local
  * capture defaults to session repositories on a 24-hour cadence. The first
@@ -29,6 +32,7 @@ export async function startGithubSource() {
   let nextTickAt = null
   let lastRepoCount = 0
   let rowsWritten = 0
+  let backlogPending = false
   /** @type {string | undefined} */
   let lastError
   let generation = 0
@@ -40,6 +44,7 @@ export async function startGithubSource() {
     try {
       const result = await runCaptureTick(runtime, { mode: 'poll' })
       rowsWritten += result.events
+      backlogPending = result.pending
       lastRepoCount = result.repos
       lastError = result.errors[0]?.error
       if (result.errors.length === 0) lastSuccessAt = new Date().toISOString()
@@ -48,6 +53,8 @@ export async function startGithubSource() {
         repos: result.repos,
         events: result.events,
         errors: result.errors.length,
+        requests: result.requests,
+        pending: result.pending,
         duration_ms: Date.now() - started,
       })
     } catch (err) {
@@ -69,7 +76,7 @@ export async function startGithubSource() {
       nextTickAt = null
       inFlight = tick().finally(() => {
         inFlight = null
-        if (generation === ownGeneration) schedule(intervalMs(), ownGeneration)
+        if (generation === ownGeneration) schedule(nextDelayMs(), ownGeneration)
       })
     }, delayMs)
     if (typeof handle.unref === 'function') handle.unref()
@@ -77,6 +84,10 @@ export async function startGithubSource() {
 
   function intervalMs() {
     return Math.max(1, parseInterval(runtime.config.poll_interval) ?? 86_400_000)
+  }
+
+  function nextDelayMs() {
+    return nextCaptureDelay(intervalMs(), backlogPending)
   }
 
   function startTimer() {
@@ -115,6 +126,7 @@ export async function startGithubSource() {
           next_tick_at: nextTickAt,
           last_repo_count: lastRepoCount,
           in_flight: inFlight !== null,
+          backlog_pending: backlogPending,
         },
         rowsWritten,
       }
@@ -130,4 +142,9 @@ export async function startGithubSource() {
       if (inFlight) await inFlight.catch(() => {})
     },
   }
+}
+
+/** @param {number} intervalMs @param {boolean} pending */
+export function nextCaptureDelay(intervalMs, pending) {
+  return pending ? Math.min(intervalMs, BACKLOG_RETRY_MS) : intervalMs
 }

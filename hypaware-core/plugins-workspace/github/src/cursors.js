@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto'
  *
  * @ref LLP 0360#cursoring [implements]: cursored per repo, shared by backfill + poll; cursors are sidecar state, not event columns
  *
- * @import { CursorState, RepoCursor } from './types.js'
+ * @import { CursorState, GithubCommitTask, GithubPullTask, GithubRepoWork, RepoCursor } from './types.js'
  */
 
 const STATE_FILE = 'github-cursors.json'
@@ -33,7 +33,8 @@ export function readCursors(stateDir) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
     if (parsed && parsed.schema_version === SCHEMA_VERSION && parsed.repos && typeof parsed.repos === 'object') {
-      return { schema_version: SCHEMA_VERSION, repos: readRepos(parsed.repos) }
+      const nextRepo = typeof parsed.next_repo === 'string' && parsed.next_repo !== '' ? parsed.next_repo : undefined
+      return { schema_version: SCHEMA_VERSION, repos: readRepos(parsed.repos), ...(nextRepo ? { next_repo: nextRepo } : {}) }
     }
   } catch {
     // Missing, malformed, or an older schema - start clean (a fresh poll
@@ -105,5 +106,52 @@ function readRepoCursor(value) {
     }
     if (Object.keys(etag).length > 0) cursor.etag = etag
   }
+  if (Array.isArray(v.pull_numbers)) {
+    cursor.pull_numbers = [...new Set(v.pull_numbers.filter((n) => Number.isSafeInteger(n) && n > 0))]
+  }
+  const work = readWork(v.work)
+  if (work) cursor.work = work
   return cursor
+}
+
+/** @param {unknown} value @returns {GithubRepoWork | null} */
+function readWork(value) {
+  if (!value || typeof value !== 'object') return null
+  const v = /** @type {Record<string, unknown>} */ (value)
+  if (v.mode !== 'backfill' && v.mode !== 'poll') return null
+  if (v.phase !== 'issues' && v.phase !== 'pulls' && v.phase !== 'commits' && v.phase !== 'comments') return null
+  /** @type {GithubRepoWork} */
+  const work = { mode: v.mode, phase: v.phase }
+  if (v.page === null || typeof v.page === 'string') work.page = v.page
+  if (typeof v.baseline_pulls === 'string') work.baseline_pulls = v.baseline_pulls
+  if (typeof v.pulls_high === 'string') work.pulls_high = v.pulls_high
+  if (typeof v.pulls_etag === 'string') work.pulls_etag = v.pulls_etag
+  if (Array.isArray(v.pull_tasks)) work.pull_tasks = v.pull_tasks.map(readPullTask).filter((x) => x !== null).slice(0, 100)
+  if (Array.isArray(v.commit_tasks)) work.commit_tasks = v.commit_tasks.map(readCommitTask).filter((x) => x !== null).slice(0, 100)
+  return work
+}
+
+/** @param {unknown} value @returns {GithubPullTask | null} */
+function readPullTask(value) {
+  if (!value || typeof value !== 'object') return null
+  const v = /** @type {Record<string, unknown>} */ (value)
+  if (typeof v.number !== 'number' || !Number.isSafeInteger(v.number) || v.number <= 0) return null
+  if (v.phase !== 'files' && v.phase !== 'reviews' && v.phase !== 'commits') return null
+  /** @type {GithubPullTask} */
+  const task = { number: /** @type {number} */ (v.number), phase: v.phase }
+  if (typeof v.created_at === 'string') task.created_at = v.created_at
+  if (v.page === null || typeof v.page === 'string') task.page = v.page
+  return task
+}
+
+/** @param {unknown} value @returns {GithubCommitTask | null} */
+function readCommitTask(value) {
+  if (!value || typeof value !== 'object') return null
+  const v = /** @type {Record<string, unknown>} */ (value)
+  if (typeof v.sha !== 'string' || v.sha === '') return null
+  /** @type {GithubCommitTask} */
+  const task = { sha: v.sha }
+  if (typeof v.created_at === 'string') task.created_at = v.created_at
+  if (v.page === null || typeof v.page === 'string') task.page = v.page
+  return task
 }

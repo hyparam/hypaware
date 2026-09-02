@@ -13,19 +13,18 @@ import path from 'node:path'
  *      sensitive content) into the thrown error or logs - only status + the
  *      query-less path.
  *   3. Polling is **cheap**: time-windowed endpoints carry `since`, listing
- *      endpoints carry `If-None-Match` (a `304` costs no rate budget). All
- *      cursor mechanics live here; capture just passes the per-repo cursor and
- *      persists it afterward (LLP 0360 §cursoring).
+ *      endpoints carry `If-None-Match`, and every call returns one normalized
+ *      page so capture owns the durable work cursor (LLP 0361).
  *
  * `fetchImpl` is injectable so tests drive the client without a network.
  *
- * @import { GithubClient, GithubCommit, GithubComment, GithubIssue, GithubPull, GithubReview, HypError, PluginLogger, RepoCursor } from './types.js'
+ * @import { GithubActor, GithubClient, GithubCommit, GithubComment, GithubIssue, GithubPage, GithubPull, GithubReview, HypError, PluginLogger } from './types.js'
  */
 
 const API_BASE = 'https://api.github.com'
 const API_VERSION = '2022-11-28'
 const PER_PAGE = 100
-/** Hard page cap per endpoint per run, so a runaway listing can't hang a tick. */
+/** The explicit all-visible inventory is normalized into small strings. */
 const MAX_PAGES = 50
 
 /**
@@ -64,7 +63,7 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
    * response body on a non-OK status.
    *
    * @param {string} pathAndQuery  e.g. `/repos/o/r/commits?since=...`
-   * @param {{ etagKey?: string, cursor?: RepoCursor }} [opts]
+   * @param {{ etag?: string }} [opts]
    * @returns {Promise<{ notModified: true } | { notModified: false, data: unknown, next: string | null, etag: string | null }>}
    */
   async function request(pathAndQuery, opts = {}) {
@@ -76,8 +75,7 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
       'User-Agent': '@hypaware/github',
     }
     headers.Authorization = `Bearer ${authToken}`
-    const priorEtag = opts.etagKey && opts.cursor?.etag ? opts.cursor.etag[opts.etagKey] : undefined
-    if (priorEtag) headers['If-None-Match'] = priorEtag
+    if (opts.etag) headers['If-None-Match'] = opts.etag
 
     const url = pathAndQuery.startsWith('http') ? pathAndQuery : `${baseUrl}${pathAndQuery}`
     const res = await doFetch(url, { headers })
@@ -93,94 +91,98 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     }
 
     const etag = res.headers.get('etag')
-    if (opts.etagKey && opts.cursor && etag) {
-      if (!opts.cursor.etag) opts.cursor.etag = {}
-      opts.cursor.etag[opts.etagKey] = etag
-    }
     const next = parseNextLink(res.headers.get('link'))
     const data = await res.json()
     return { notModified: false, data, next, etag }
   }
 
   /**
-   * Fetch all pages of a listing. The first page is conditional (If-None-Match)
-   * when an `etagKey` is given; a `304` there means "unchanged" → `[]`.
+   * Fetch and normalize one list page. Complete REST objects, including content
+   * bodies, become unreachable before the next request.
    *
-   * @param {string} firstPathAndQuery
-   * @param {{ etagKey?: string, cursor?: RepoCursor, label: string }} opts
-   * @returns {Promise<any[]>}  raw JSON objects (untyped at the API boundary)
+   * @template T
+   * @param {string} url
+   * @param {(row: Record<string, unknown>) => T | null} project
+   * @param {string} [etag]
+   * @returns {Promise<GithubPage<T>>}
    */
-  async function paginate(firstPathAndQuery, opts) {
-    /** @type {any[]} */
-    const out = []
-    let url = firstPathAndQuery
-    let first = true
-    for (let page = 0; page < MAX_PAGES && url; page++) {
-      const result = await request(url, { etagKey: first ? opts.etagKey : undefined, cursor: opts.cursor })
-      if (result.notModified) return []
-      if (Array.isArray(result.data)) out.push(.../** @type {Record<string, unknown>[]} */ (result.data))
-      url = result.next ?? ''
-      first = false
-      if (page === MAX_PAGES - 1 && url) {
-        log.warn('github.listing_truncated', { label: opts.label, max_pages: MAX_PAGES, per_page: PER_PAGE })
+  async function listingPage(url, project, etag) {
+    const result = await request(url, { etag })
+    if (result.notModified) return { items: [], next: null, notModified: true }
+    /** @type {T[]} */
+    const items = []
+    if (Array.isArray(result.data)) {
+      for (const raw of /** @type {Record<string, unknown>[]} */ (result.data)) {
+        const item = project(raw)
+        if (item !== null) items.push(item)
       }
     }
-    return out
+    return { items, next: result.next, etag: result.etag }
   }
 
   return {
     async listViewerRepos() {
       const affiliations = encodeURIComponent('owner,collaborator,organization_member')
-      const rows = await paginate(`/user/repos?affiliation=${affiliations}&visibility=all&sort=full_name&per_page=${PER_PAGE}`, { label: 'user/repos' })
-      return fullNames(rows)
+      /** @type {string[]} */
+      const repos = []
+      let url = `/user/repos?affiliation=${affiliations}&visibility=all&sort=full_name&per_page=${PER_PAGE}`
+      for (let page = 0; page < MAX_PAGES && url; page++) {
+        const result = await listingPage(url, fullName)
+        repos.push(...result.items)
+        url = result.next ?? ''
+        if (page === MAX_PAGES - 1 && url) {
+          log.warn('github.listing_truncated', { label: 'user/repos', max_pages: MAX_PAGES, per_page: PER_PAGE })
+        }
+      }
+      return repos
     },
 
-    async listIssues(owner, repo, cursor) {
-      const q = sinceQuery(cursor.since?.issues)
-      const rows = await paginate(`/repos/${enc(owner)}/${enc(repo)}/issues?state=all&per_page=${PER_PAGE}${q}`, { label: `${owner}/${repo}/issues`, cursor })
-      advanceSince(cursor, 'issues', rows)
-      return /** @type {GithubIssue[]} */ (rows)
+    async listIssuesPage(owner, repo, since, page) {
+      const q = sinceQuery(since)
+      const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/issues?state=all&per_page=${PER_PAGE}${q}`
+      return listingPage(url, issueOf)
     },
 
-    async listPullRequests(owner, repo, cursor) {
-      const rows = await paginate(`/repos/${enc(owner)}/${enc(repo)}/pulls?state=all&per_page=${PER_PAGE}`, { label: `${owner}/${repo}/pulls`, etagKey: 'pulls', cursor })
-      return /** @type {GithubPull[]} */ (rows)
+    async listPullRequestsPage(owner, repo, etag, page) {
+      const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls?state=all&sort=updated&direction=desc&per_page=${PER_PAGE}`
+      return listingPage(url, pullOf, page ? undefined : etag)
     },
 
-    async listPullRequestFiles(owner, repo, number) {
-      const rows = await paginate(`/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/files?per_page=${PER_PAGE}`, { label: `${owner}/${repo}/pulls/${number}/files` })
-      return filenames(rows)
+    async listPullRequestFilesPage(owner, repo, number, page) {
+      const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/files?per_page=${PER_PAGE}`
+      return listingPage(url, filename)
     },
 
-    async listPullRequestReviews(owner, repo, number) {
-      const rows = await paginate(`/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/reviews?per_page=${PER_PAGE}`, { label: `${owner}/${repo}/pulls/${number}/reviews` })
-      return /** @type {GithubReview[]} */ (rows)
+    async listPullRequestReviewsPage(owner, repo, number, page) {
+      const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/reviews?per_page=${PER_PAGE}`
+      return listingPage(url, reviewOf)
     },
 
-    async listPullRequestCommits(owner, repo, number) {
-      const rows = await paginate(`/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/commits?per_page=${PER_PAGE}`, { label: `${owner}/${repo}/pulls/${number}/commits` })
-      return /** @type {GithubCommit[]} */ (rows)
+    async listPullRequestCommitsPage(owner, repo, number, page) {
+      const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/pulls/${number}/commits?per_page=${PER_PAGE}`
+      return listingPage(url, commitOf)
     },
 
-    async listCommits(owner, repo, cursor) {
-      const q = sinceQuery(cursor.since?.commits)
-      const rows = await paginate(`/repos/${enc(owner)}/${enc(repo)}/commits?per_page=${PER_PAGE}${q}`, { label: `${owner}/${repo}/commits`, cursor })
-      advanceSinceCommit(cursor, rows)
-      return /** @type {GithubCommit[]} */ (rows)
+    async listCommitsPage(owner, repo, since, page) {
+      const q = sinceQuery(since)
+      const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/commits?per_page=${PER_PAGE}${q}`
+      return listingPage(url, commitOf)
     },
 
-    async listCommitFiles(owner, repo, sha) {
-      const result = await request(`/repos/${enc(owner)}/${enc(repo)}/commits/${enc(sha)}`)
-      if (result.notModified) return []
+    async listCommitFilesPage(owner, repo, sha, page) {
+      const result = await request(page ?? `/repos/${enc(owner)}/${enc(repo)}/commits/${enc(sha)}?per_page=${PER_PAGE}`)
+      if (result.notModified) return { items: [], next: null, notModified: true }
       const data = /** @type {Record<string, unknown>} */ (result.data)
-      return filenames(Array.isArray(data.files) ? /** @type {Record<string, unknown>[]} */ (data.files) : [])
+      const items = Array.isArray(data.files)
+        ? /** @type {Record<string, unknown>[]} */ (data.files).map(filename).filter((x) => x !== null)
+        : []
+      return { items, next: result.next, etag: result.etag }
     },
 
-    async listIssueComments(owner, repo, cursor) {
-      const q = sinceQuery(cursor.since?.comments)
-      const rows = await paginate(`/repos/${enc(owner)}/${enc(repo)}/issues/comments?per_page=${PER_PAGE}${q}`, { label: `${owner}/${repo}/issues/comments`, cursor })
-      advanceSince(cursor, 'comments', rows)
-      return /** @type {GithubComment[]} */ (rows)
+    async listIssueCommentsPage(owner, repo, since, page) {
+      const q = sinceQuery(since)
+      const url = page ?? `/repos/${enc(owner)}/${enc(repo)}/issues/comments?per_page=${PER_PAGE}${q}`
+      return listingPage(url, commentOf)
     },
   }
 }
@@ -248,71 +250,116 @@ function sinceQuery(since) {
   return since ? `&since=${encodeURIComponent(since)}` : ''
 }
 
-/**
- * Advance a `since` high-water to the newest `updated_at`/`created_at` in the
- * fetched rows. Using `updated_at` means an edited item re-qualifies next poll.
- *
- * @param {RepoCursor} cursor
- * @param {'issues' | 'comments'} key
- * @param {Record<string, unknown>[]} rows
- */
-function advanceSince(cursor, key, rows) {
-  let max = cursor.since?.[key]
-  for (const r of rows) {
-    const t = typeof r.updated_at === 'string' ? r.updated_at : typeof r.created_at === 'string' ? r.created_at : null
-    if (t && (!max || t > max)) max = t
-  }
-  if (max) {
-    if (!cursor.since) cursor.since = {}
-    cursor.since[key] = max
+/** @param {Record<string, unknown>} row @returns {GithubIssue | null} */
+function issueOf(row) {
+  const number = positiveInt(row.number)
+  if (number === null) return null
+  const state = text(row.state)
+  const createdAt = text(row.created_at)
+  const updatedAt = text(row.updated_at)
+  return {
+    number,
+    ...(state ? { state } : {}),
+    ...(createdAt ? { created_at: createdAt } : {}),
+    ...(updatedAt ? { updated_at: updatedAt } : {}),
+    ...(row.pull_request != null ? { pull_request: true } : {}),
+    user: actorOf(row.user),
   }
 }
 
-/**
- * Advance the commit `since` to the newest committer date seen.
- *
- * @param {RepoCursor} cursor
- * @param {Record<string, unknown>[]} rows
- */
-function advanceSinceCommit(cursor, rows) {
-  let max = cursor.since?.commits
-  for (const r of rows) {
-    const commit = /** @type {Record<string, unknown> | undefined} */ (r.commit)
-    const committer = commit && typeof commit.committer === 'object' ? /** @type {Record<string, unknown>} */ (commit.committer) : null
-    const author = commit && typeof commit.author === 'object' ? /** @type {Record<string, unknown>} */ (commit.author) : null
-    const t = (committer && typeof committer.date === 'string' ? committer.date : null) ?? (author && typeof author.date === 'string' ? author.date : null)
-    if (t && (!max || t > max)) max = t
-  }
-  if (max) {
-    if (!cursor.since) cursor.since = {}
-    cursor.since.commits = max
+/** @param {Record<string, unknown>} row @returns {GithubPull | null} */
+function pullOf(row) {
+  const number = positiveInt(row.number)
+  if (number === null) return null
+  const state = text(row.state)
+  const createdAt = text(row.created_at)
+  const updatedAt = text(row.updated_at)
+  return {
+    number,
+    ...(state ? { state } : {}),
+    ...(createdAt ? { created_at: createdAt } : {}),
+    ...(updatedAt ? { updated_at: updatedAt } : {}),
+    merged_at: text(row.merged_at),
+    draft: row.draft === true,
+    user: actorOf(row.user),
   }
 }
 
-/**
- * @param {Record<string, unknown>[]} rows
- * @returns {string[]}
- */
-function filenames(rows) {
-  /** @type {string[]} */
-  const out = []
-  for (const r of rows) {
-    if (typeof r.filename === 'string') out.push(r.filename)
+/** @param {Record<string, unknown>} row @returns {GithubReview | null} */
+function reviewOf(row) {
+  const id = positiveInt(row.id)
+  if (id === null) return null
+  const state = text(row.state)
+  const submittedAt = text(row.submitted_at)
+  return {
+    id,
+    ...(state ? { state } : {}),
+    ...(submittedAt ? { submitted_at: submittedAt } : {}),
+    user: actorOf(row.user),
   }
-  return out
 }
 
-/**
- * @param {Record<string, unknown>[]} rows
- * @returns {string[]}
- */
-function fullNames(rows) {
-  /** @type {string[]} */
-  const out = []
-  for (const row of rows) {
-    if (typeof row.full_name === 'string') out.push(row.full_name)
+/** @param {Record<string, unknown>} row @returns {GithubCommit | null} */
+function commitOf(row) {
+  const sha = text(row.sha)
+  if (!sha) return null
+  const detail = row.commit && typeof row.commit === 'object' ? /** @type {Record<string, unknown>} */ (row.commit) : null
+  const author = detail?.author && typeof detail.author === 'object' ? /** @type {Record<string, unknown>} */ (detail.author) : null
+  const committer = detail?.committer && typeof detail.committer === 'object' ? /** @type {Record<string, unknown>} */ (detail.committer) : null
+  return {
+    sha,
+    author: actorOf(row.author),
+    commit: {
+      author: author ? { date: text(author.date) ?? undefined } : null,
+      committer: committer ? { date: text(committer.date) ?? undefined } : null,
+    },
   }
-  return out
+}
+
+/** @param {Record<string, unknown>} row @returns {GithubComment | null} */
+function commentOf(row) {
+  const id = positiveInt(row.id)
+  if (id === null) return null
+  const createdAt = text(row.created_at)
+  const updatedAt = text(row.updated_at)
+  const issueUrl = text(row.issue_url)
+  return {
+    id,
+    ...(createdAt ? { created_at: createdAt } : {}),
+    ...(updatedAt ? { updated_at: updatedAt } : {}),
+    ...(issueUrl ? { issue_url: issueUrl } : {}),
+    user: actorOf(row.user),
+  }
+}
+
+/** @param {Record<string, unknown>} row @returns {string | null} */
+function filename(row) {
+  return text(row.filename)
+}
+
+/** @param {Record<string, unknown>} row @returns {string | null} */
+function fullName(row) {
+  return text(row.full_name)
+}
+
+/** @param {unknown} value @returns {GithubActor | null} */
+function actorOf(value) {
+  if (!value || typeof value !== 'object') return null
+  const row = /** @type {Record<string, unknown>} */ (value)
+  const login = text(row.login)
+  if (!login) return null
+  const type = text(row.type)
+  return { login, ...(type ? { type } : {}) }
+}
+
+/** @param {unknown} value @returns {string | null} */
+function text(value) {
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
+/** @param {unknown} value @returns {number | null} */
+function positiveInt(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null
 }
 
 /**

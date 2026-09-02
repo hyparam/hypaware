@@ -29,6 +29,7 @@ const REPO_SLUG = /^[^/\s]+\/[^/\s]+$/
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 /** A duration like `10m`, `30s`, `1h`, `500ms`. */
 const DURATION = /^(\d+)(ms|s|m|h)$/
+export const MIN_POLL_INTERVAL_MS = 5 * 60_000
 
 /**
  * @param {unknown} value
@@ -160,8 +161,13 @@ function readEnvName(raw, key, errors) {
 function readDuration(raw, key, errors) {
   const v = raw[key]
   if (v === undefined) return undefined
-  if (typeof v !== 'string' || parseInterval(v) === null) {
-    errors.push(invalid(`/${key}`, `${key} must be a duration like "10m", "30s", or "1h"`))
+  if (typeof v !== 'string') {
+    errors.push(invalid(`/${key}`, `${key} must be a duration of at least "5m"`))
+    return undefined
+  }
+  const interval = parseInterval(v)
+  if (interval === null || interval < MIN_POLL_INTERVAL_MS) {
+    errors.push(invalid(`/${key}`, `${key} must be a duration of at least "5m"`))
     return undefined
   }
   return v

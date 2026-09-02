@@ -22,15 +22,20 @@ const TS = '2026-06-05T12:00:00.000Z'
 
 /**
  * Find a rule by kind + type, optionally disambiguating the several same-typed
- * rules (`in`, `touched`, `commented`) by a substring of their SQL.
+ * rules (`in`, `touched`, `commented`) by predicate or selected column.
  *
  * @param {'node' | 'edge'} kind
  * @param {string} type
- * @param {string} [sqlIncludes]
+ * @param {{ eventType?: string, column?: string }} [match]
  */
-function rule(kind, type, sqlIncludes) {
-  const found = contract.rules.find((r) => r.kind === kind && r.type === type && (!sqlIncludes || r.sql.includes(sqlIncludes)))
-  assert.ok(found, `${kind}/${type}${sqlIncludes ? ` (${sqlIncludes})` : ''} exists`)
+function rule(kind, type, match) {
+  const found = contract.rules.find((r) =>
+    r.kind === kind &&
+    r.type === type &&
+    (!match?.eventType || r.where?.eq?.event_type === match.eventType) &&
+    (!match?.column || r.columns?.includes(match.column))
+  )
+  assert.ok(found, `${kind}/${type}${match ? ` (${JSON.stringify(match)})` : ''} exists`)
   return found
 }
 
@@ -100,14 +105,14 @@ test('Issue / PullRequest / Review nodes carry state props', () => {
 })
 
 test('Commit -in-> Repo and File -in-> Repo wire node ids', () => {
-  const commitIn = rule('edge', 'in', "event_type = 'commit'").toRow({ repo: 'o/r', sha: 'abc', created_at: TS })
+  const commitIn = rule('edge', 'in', { eventType: 'commit' }).toRow({ repo: 'o/r', sha: 'abc', created_at: TS })
   assert.ok(commitIn)
   assert.equal(commitIn.src_type, 'Commit')
   assert.equal(commitIn.dst_type, 'Repo')
   assert.equal(commitIn.src_id, nodeId('Commit', 'abc'))
   assert.equal(commitIn.dst_id, nodeId('Repo', 'o/r'))
 
-  const fileIn = rule('edge', 'in', 'path IS NOT NULL').toRow({ repo: 'o/r', path: 'a.js', created_at: TS })
+  const fileIn = rule('edge', 'in', { column: 'path' }).toRow({ repo: 'o/r', path: 'a.js', created_at: TS })
   assert.ok(fileIn)
   assert.equal(fileIn.src_type, 'File')
   assert.equal(fileIn.dst_type, 'Repo')
@@ -120,7 +125,7 @@ test('authorship + activity edges', () => {
   assert.equal(authored.src_id, nodeId('Actor', 'octo'))
   assert.equal(authored.dst_id, nodeId('Commit', 'abc'))
 
-  const openedPr = rule('edge', 'opened', "event_type = 'pull_request'").toRow({ repo: 'o/r', number: 7, actor_login: 'Octo', created_at: TS })
+  const openedPr = rule('edge', 'opened', { eventType: 'pull_request' }).toRow({ repo: 'o/r', number: 7, actor_login: 'Octo', created_at: TS })
   assert.ok(openedPr)
   assert.equal(openedPr.src_type, 'Actor')
   assert.equal(openedPr.dst_type, 'PullRequest')
@@ -128,11 +133,11 @@ test('authorship + activity edges', () => {
 })
 
 test('comment edges discriminate Issue vs PullRequest by event_type', () => {
-  const onIssue = rule('edge', 'commented', "event_type = 'issue_comment'").toRow({ repo: 'o/r', number: 5, actor_login: 'a', created_at: TS })
+  const onIssue = rule('edge', 'commented', { eventType: 'issue_comment' }).toRow({ repo: 'o/r', number: 5, actor_login: 'a', created_at: TS })
   assert.ok(onIssue)
   assert.equal(onIssue.dst_type, 'Issue')
 
-  const onPr = rule('edge', 'commented', "event_type = 'pull_request_comment'").toRow({ repo: 'o/r', number: 5, actor_login: 'a', created_at: TS })
+  const onPr = rule('edge', 'commented', { eventType: 'pull_request_comment' }).toRow({ repo: 'o/r', number: 5, actor_login: 'a', created_at: TS })
   assert.ok(onPr)
   assert.equal(onPr.dst_type, 'PullRequest')
 })
@@ -147,12 +152,12 @@ test('review, code, and linkage edges', () => {
   assert.equal(on.src_id, nodeId('Review', 'review/80'))
   assert.equal(on.dst_id, nodeId('PullRequest', 'o/r#7'))
 
-  const commitTouched = rule('edge', 'touched', "event_type = 'commit_file'").toRow({ sha: 'abc', repo: 'o/r', path: 'a.js', created_at: TS })
+  const commitTouched = rule('edge', 'touched', { eventType: 'commit_file' }).toRow({ sha: 'abc', repo: 'o/r', path: 'a.js', created_at: TS })
   assert.ok(commitTouched)
   assert.equal(commitTouched.src_id, nodeId('Commit', 'abc'))
   assert.equal(commitTouched.dst_id, nodeId('File', 'o/r:a.js'))
 
-  const prTouched = rule('edge', 'touched', "event_type = 'pull_request_file'").toRow({ repo: 'o/r', number: 7, path: 'a.js', created_at: TS })
+  const prTouched = rule('edge', 'touched', { eventType: 'pull_request_file' }).toRow({ repo: 'o/r', number: 7, path: 'a.js', created_at: TS })
   assert.ok(prTouched)
   assert.equal(prTouched.src_id, nodeId('PullRequest', 'o/r#7'))
 
@@ -168,9 +173,10 @@ test('every rule skips rows missing an endpoint key', () => {
   assert.equal(rule('edge', 'references').toRow({ repo: 'o/r', sha: null, pr_number: 7, created_at: TS }), null)
 })
 
-test('contract has no duplicate (name, plugin) and every rule is well-formed', () => {
+test('every rule uses the one-scan declarative contract form', () => {
   for (const r of contract.rules) {
-    assert.match(r.sql, /^SELECT\b/i, `${r.kind}/${r.type} sql is a SELECT`)
+    assert.equal(r.sql, undefined)
+    assert.ok(Array.isArray(r.columns) && r.columns.length > 0, `${r.kind}/${r.type} declares columns`)
     assert.equal(typeof r.toRow, 'function')
     assert.ok(r.kind === 'node' || r.kind === 'edge')
   }

@@ -79,11 +79,19 @@ export type ExtendedQueryStorageService = QueryStorageService & {
 
 export type GraphRow = Record<string, unknown>
 
-/** One T0 contract rule: a read-only SELECT plus a row mapper. */
+export interface RulePredicate {
+  eq?: Record<string, string>
+  in?: Record<string, string[]>
+  likePrefix?: Record<string, string>
+}
+
+/** One T0 contract rule in the declarative or raw-SQL capability form. */
 export interface ContractRule {
   kind: 'node' | 'edge'
   type: string
-  sql: string
+  sql?: string
+  columns?: string[]
+  where?: RulePredicate
   toRow(row: Record<string, unknown>): GraphRow | null
 }
 
@@ -176,6 +184,8 @@ export interface GithubRuntime {
   observedRepos: ObservedReposIndex
   /** Test seam; production defaults to the real fetch client. */
   clientFactory?: () => GithubClient
+  /** Test seam; production uses the fixed whole-tick request limit. */
+  captureRequestLimit?: number
 }
 
 export interface LocalObservedRepoState {
@@ -198,11 +208,38 @@ export interface LocalObservedRepoState {
 export interface RepoCursor {
   since?: { issues?: string; commits?: string; comments?: string; pulls?: string }
   etag?: Record<string, string>
+  pull_numbers?: number[]
+  work?: GithubRepoWork
 }
 
 export interface CursorState {
   schema_version: number
   repos: Record<string, RepoCursor>
+  next_repo?: string
+}
+
+export interface GithubPullTask {
+  number: number
+  created_at?: string
+  phase: 'files' | 'reviews' | 'commits'
+  page?: string | null
+}
+
+export interface GithubCommitTask {
+  sha: string
+  created_at?: string
+  page?: string | null
+}
+
+export interface GithubRepoWork {
+  mode: 'backfill' | 'poll'
+  phase: 'issues' | 'pulls' | 'commits' | 'comments'
+  page?: string | null
+  baseline_pulls?: string
+  pulls_high?: string
+  pulls_etag?: string
+  pull_tasks?: GithubPullTask[]
+  commit_tasks?: GithubCommitTask[]
 }
 
 // ---------------------------------------------------------------------------
@@ -219,21 +256,28 @@ export interface GithubActor {
 export interface GithubClient {
   /** Enumerate every repository visible to the authenticated local identity. */
   listViewerRepos(): Promise<string[]>
-  /** Issues (state=all). PRs are filtered out by the caller via `isPullRequest`. */
-  listIssues(owner: string, repo: string, cursor: RepoCursor): Promise<GithubIssue[]>
-  listPullRequests(owner: string, repo: string, cursor: RepoCursor): Promise<GithubPull[]>
-  listPullRequestFiles(owner: string, repo: string, number: number): Promise<string[]>
-  listPullRequestReviews(owner: string, repo: string, number: number): Promise<GithubReview[]>
-  listPullRequestCommits(owner: string, repo: string, number: number): Promise<GithubCommit[]>
-  listCommits(owner: string, repo: string, cursor: RepoCursor): Promise<GithubCommit[]>
-  listCommitFiles(owner: string, repo: string, sha: string): Promise<string[]>
-  listIssueComments(owner: string, repo: string, cursor: RepoCursor): Promise<GithubComment[]>
+  listIssuesPage(owner: string, repo: string, since: string | undefined, page?: string): Promise<GithubPage<GithubIssue>>
+  listPullRequestsPage(owner: string, repo: string, etag: string | undefined, page?: string): Promise<GithubPage<GithubPull>>
+  listPullRequestFilesPage(owner: string, repo: string, number: number, page?: string): Promise<GithubPage<string>>
+  listPullRequestReviewsPage(owner: string, repo: string, number: number, page?: string): Promise<GithubPage<GithubReview>>
+  listPullRequestCommitsPage(owner: string, repo: string, number: number, page?: string): Promise<GithubPage<GithubCommit>>
+  listCommitsPage(owner: string, repo: string, since: string | undefined, page?: string): Promise<GithubPage<GithubCommit>>
+  listCommitFilesPage(owner: string, repo: string, sha: string, page?: string): Promise<GithubPage<string>>
+  listIssueCommentsPage(owner: string, repo: string, since: string | undefined, page?: string): Promise<GithubPage<GithubComment>>
+}
+
+export interface GithubPage<T> {
+  items: T[]
+  next: string | null
+  etag?: string | null
+  notModified?: boolean
 }
 
 export interface GithubIssue {
   number: number
   state?: string
   created_at?: string
+  updated_at?: string
   user?: GithubActor | null
   pull_request?: unknown
 }
@@ -258,12 +302,13 @@ export interface GithubReview {
 export interface GithubCommit {
   sha: string
   author?: GithubActor | null
-  commit?: { author?: { date?: string } | null } | null
+  commit?: { author?: { date?: string } | null; committer?: { date?: string } | null } | null
 }
 
 export interface GithubComment {
   id: number
   created_at?: string
+  updated_at?: string
   user?: GithubActor | null
   /** `.../issues/{number}` - the subject the comment is attached to. */
   issue_url?: string

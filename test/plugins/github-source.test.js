@@ -7,8 +7,14 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { setGithubRuntime } from '../../hypaware-core/plugins-workspace/github/src/runtime.js'
-import { startGithubSource } from '../../hypaware-core/plugins-workspace/github/src/source.js'
+import { BACKLOG_RETRY_MS, nextCaptureDelay, startGithubSource } from '../../hypaware-core/plugins-workspace/github/src/source.js'
 import { fakeClient } from './github-fake-client.js'
+
+test('unfinished work resumes on the bounded backlog cadence', () => {
+  assert.equal(nextCaptureDelay(24 * 60 * 60_000, true), BACKLOG_RETRY_MS)
+  assert.equal(nextCaptureDelay(5 * 60_000, true), 5 * 60_000)
+  assert.equal(nextCaptureDelay(24 * 60 * 60_000, false), 24 * 60 * 60_000)
+})
 
 test('source runs shortly after boot and reports structured completion-relative cadence', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-source-'))

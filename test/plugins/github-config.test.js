@@ -59,8 +59,11 @@ test('token_env must be an env-var NAME, never a token value', () => {
 
 test('poll_interval must be a duration', () => {
   assert.equal(validateGithubConfig({ poll_interval: '10m' }).ok, true)
-  assert.equal(validateGithubConfig({ poll_interval: '30s' }).ok, true)
+  assert.equal(validateGithubConfig({ poll_interval: '5m' }).ok, true)
   assert.equal(validateGithubConfig({ poll_interval: '1h' }).ok, true)
+  assert.equal(validateGithubConfig({ poll_interval: '30s' }).ok, false)
+  assert.equal(validateGithubConfig({ poll_interval: '0ms' }).ok, false)
+  assert.equal(validateGithubConfig({ poll_interval: '1ms' }).ok, false)
   assert.equal(validateGithubConfig({ poll_interval: 'soon' }).ok, false)
   assert.equal(validateGithubConfig({ poll_interval: 600 }).ok, false)
 })

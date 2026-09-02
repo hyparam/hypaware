@@ -29,39 +29,44 @@ export function fakeClient(data) {
       calls.push('listViewerRepos')
       return data.viewerRepos ?? []
     },
-    async listIssues(owner, repo) {
+    async listIssuesPage(owner, repo) {
       calls.push(`listIssues:${owner}/${repo}`)
-      return get(owner, repo).issues ?? []
+      return page(get(owner, repo).issues)
     },
-    async listPullRequests(owner, repo) {
+    async listPullRequestsPage(owner, repo) {
       calls.push(`listPullRequests:${owner}/${repo}`)
-      return get(owner, repo).pulls ?? []
+      return page(get(owner, repo).pulls)
     },
-    async listPullRequestFiles(owner, repo, number) {
+    async listPullRequestFilesPage(owner, repo, number) {
       calls.push(`listPullRequestFiles:${owner}/${repo}#${number}`)
-      return get(owner, repo).prFiles?.[number] ?? []
+      return page(get(owner, repo).prFiles?.[number])
     },
-    async listPullRequestReviews(owner, repo, number) {
+    async listPullRequestReviewsPage(owner, repo, number) {
       calls.push(`listPullRequestReviews:${owner}/${repo}#${number}`)
-      return get(owner, repo).prReviews?.[number] ?? []
+      return page(get(owner, repo).prReviews?.[number])
     },
-    async listPullRequestCommits(owner, repo, number) {
+    async listPullRequestCommitsPage(owner, repo, number) {
       calls.push(`listPullRequestCommits:${owner}/${repo}#${number}`)
-      return get(owner, repo).prCommits?.[number] ?? []
+      return page(get(owner, repo).prCommits?.[number])
     },
-    async listCommits(owner, repo) {
+    async listCommitsPage(owner, repo) {
       calls.push(`listCommits:${owner}/${repo}`)
-      return get(owner, repo).commits ?? []
+      return page(get(owner, repo).commits)
     },
-    async listCommitFiles(owner, repo, sha) {
+    async listCommitFilesPage(owner, repo, sha) {
       calls.push(`listCommitFiles:${owner}/${repo}@${sha}`)
-      return get(owner, repo).commitFiles?.[sha] ?? []
+      return page(get(owner, repo).commitFiles?.[sha])
     },
-    async listIssueComments(owner, repo) {
+    async listIssueCommentsPage(owner, repo) {
       calls.push(`listIssueComments:${owner}/${repo}`)
-      return get(owner, repo).comments ?? []
+      return page(get(owner, repo).comments)
     },
   }
+}
+
+/** @template T @param {T[] | undefined} items */
+function page(items) {
+  return { items: items ?? [], next: null }
 }
 
 /** A logger that records nothing (tests assert on outputs, not logs). */

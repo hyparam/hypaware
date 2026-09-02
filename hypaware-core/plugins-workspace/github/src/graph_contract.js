@@ -31,7 +31,7 @@ export const PROJECTOR_VERSION = 1
 
 /**
  * Build the `github_events → graph` T0 contract: a hand-authored list of
- * read-only `SELECT` + `toRow` rules realizing the LLP 0032 taxonomy. Rows are
+ * declarative column/predicate + `toRow` rules realizing the LLP 0032 taxonomy. Rows are
  * built with the graph plugin's `kit`, so the id recipe and provenance columns
  * stay owned by the graph plugin - this plugin owns only the SQL + `toRow`
  * semantics and the natural-key normalization ({@link file:./keys.js}).
@@ -61,7 +61,7 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'node',
       type: 'Repo',
-      sql: `SELECT repo, created_at FROM ${SOURCE_DATASET}`,
+      columns: ['repo', 'created_at'],
       toRow(r) {
         const key = repoKey(r.repo)
         if (!key) return null
@@ -75,7 +75,7 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'node',
       type: 'Actor',
-      sql: `SELECT actor_login, actor_type, created_at FROM ${SOURCE_DATASET} WHERE actor_login IS NOT NULL`,
+      columns: ['actor_login', 'actor_type', 'created_at'],
       toRow(r) {
         const key = actorKey(r.actor_login)
         if (!key) return null
@@ -94,7 +94,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'node',
       type: 'Commit',
-      sql: `SELECT sha, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'commit'`,
+      columns: ['sha', 'created_at'],
+      where: { eq: { event_type: 'commit' } },
       toRow(r) {
         const key = commitKey(r.sha)
         if (!key) return null
@@ -106,7 +107,7 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'node',
       type: 'File',
-      sql: `SELECT repo, path, created_at FROM ${SOURCE_DATASET} WHERE path IS NOT NULL`,
+      columns: ['repo', 'path', 'created_at'],
       toRow(r) {
         const key = fileKey(r.repo, r.path)
         if (!key) return null
@@ -118,7 +119,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'node',
       type: 'Issue',
-      sql: `SELECT repo, number, state, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'issue'`,
+      columns: ['repo', 'number', 'state', 'created_at'],
+      where: { eq: { event_type: 'issue' } },
       toRow(r) {
         const key = issueKey(r.repo, r.number)
         if (!key) return null
@@ -130,7 +132,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'node',
       type: 'PullRequest',
-      sql: `SELECT repo, number, state, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'pull_request'`,
+      columns: ['repo', 'number', 'state', 'created_at'],
+      where: { eq: { event_type: 'pull_request' } },
       toRow(r) {
         const key = pullRequestKey(r.repo, r.number)
         if (!key) return null
@@ -142,7 +145,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'node',
       type: 'Review',
-      sql: `SELECT review_id, review_state, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'review'`,
+      columns: ['review_id', 'review_state', 'created_at'],
+      where: { eq: { event_type: 'review' } },
       toRow(r) {
         const key = reviewKey(r.review_id)
         if (!key) return null
@@ -158,7 +162,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'edge',
       type: 'in',
-      sql: `SELECT repo, sha, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'commit'`,
+      columns: ['repo', 'sha', 'created_at'],
+      where: { eq: { event_type: 'commit' } },
       toRow(r) {
         const repo = repoKey(r.repo)
         const sha = commitKey(r.sha)
@@ -169,7 +174,7 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'edge',
       type: 'in',
-      sql: `SELECT repo, path, created_at FROM ${SOURCE_DATASET} WHERE path IS NOT NULL`,
+      columns: ['repo', 'path', 'created_at'],
       toRow(r) {
         const repo = repoKey(r.repo)
         const file = fileKey(r.repo, r.path)
@@ -184,7 +189,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'edge',
       type: 'authored',
-      sql: `SELECT actor_login, sha, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'commit' AND actor_login IS NOT NULL`,
+      columns: ['actor_login', 'sha', 'created_at'],
+      where: { eq: { event_type: 'commit' } },
       toRow(r) {
         const actor = actorKey(r.actor_login)
         const sha = commitKey(r.sha)
@@ -199,7 +205,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'edge',
       type: 'submitted',
-      sql: `SELECT actor_login, review_id, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'review' AND actor_login IS NOT NULL`,
+      columns: ['actor_login', 'review_id', 'created_at'],
+      where: { eq: { event_type: 'review' } },
       toRow(r) {
         const actor = actorKey(r.actor_login)
         const review = reviewKey(r.review_id)
@@ -210,7 +217,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'edge',
       type: 'on',
-      sql: `SELECT repo, review_id, pr_number, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'review' AND pr_number IS NOT NULL`,
+      columns: ['repo', 'review_id', 'pr_number', 'created_at'],
+      where: { eq: { event_type: 'review' } },
       toRow(r) {
         const review = reviewKey(r.review_id)
         const pr = pullRequestKey(r.repo, r.pr_number)
@@ -223,7 +231,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'edge',
       type: 'touched',
-      sql: `SELECT sha, repo, path, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'commit_file'`,
+      columns: ['sha', 'repo', 'path', 'created_at'],
+      where: { eq: { event_type: 'commit_file' } },
       toRow(r) {
         const sha = commitKey(r.sha)
         const file = fileKey(r.repo, r.path)
@@ -234,7 +243,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'edge',
       type: 'touched',
-      sql: `SELECT repo, number, path, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'pull_request_file'`,
+      columns: ['repo', 'number', 'path', 'created_at'],
+      where: { eq: { event_type: 'pull_request_file' } },
       toRow(r) {
         const pr = pullRequestKey(r.repo, r.number)
         const file = fileKey(r.repo, r.path)
@@ -247,7 +257,8 @@ export function createGithubGraphContract(kit) {
     {
       kind: 'edge',
       type: 'references',
-      sql: `SELECT repo, sha, pr_number, created_at FROM ${SOURCE_DATASET} WHERE event_type = 'commit' AND pr_number IS NOT NULL`,
+      columns: ['repo', 'sha', 'pr_number', 'created_at'],
+      where: { eq: { event_type: 'commit' } },
       toRow(r) {
         const pr = pullRequestKey(r.repo, r.pr_number)
         const sha = commitKey(r.sha)
@@ -278,7 +289,8 @@ export function createGithubGraphContract(kit) {
     return {
       kind: 'edge',
       type: 'in',
-      sql: `SELECT repo, number, created_at FROM ${SOURCE_DATASET} WHERE event_type = '${eventType}'`,
+      columns: ['repo', 'number', 'created_at'],
+      where: { eq: { event_type: eventType } },
       toRow(r) {
         const repo = repoKey(r.repo)
         const subject = subjectKey(r.repo, r.number)
@@ -301,7 +313,8 @@ export function createGithubGraphContract(kit) {
     return {
       kind: 'edge',
       type: rel,
-      sql: `SELECT repo, number, actor_login, created_at FROM ${SOURCE_DATASET} WHERE event_type = '${eventType}' AND actor_login IS NOT NULL`,
+      columns: ['repo', 'number', 'actor_login', 'created_at'],
+      where: { eq: { event_type: eventType } },
       toRow(r) {
         const actor = actorKey(r.actor_login)
         const subject = subjectKey(r.repo, r.number)
