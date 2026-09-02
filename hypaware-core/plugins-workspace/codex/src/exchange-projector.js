@@ -1086,13 +1086,14 @@ function codexClientFromUserAgent(userAgent) {
 
 /**
  * @param {Record<string, unknown> | undefined} metadata
+ * @param {string | undefined} cwd
  * @returns {{ path: string, info?: Record<string, unknown> } | undefined}
  */
 function selectCodexWorkspace(metadata, cwd) {
   const workspaces = readKey(metadata, 'workspaces')
   if (!isPlainObject(workspaces)) return undefined
   const workspacePaths = Object.keys(workspaces).filter((key) => key.length > 0)
-  const workspacePath = workspacePaths.find((key) => pathsEqual(key, cwd)) ?? workspacePaths[0]
+  const workspacePath = nearestCoveringWorkspace(workspacePaths, cwd) ?? workspacePaths[0]
   if (!workspacePath) return undefined
   const info = readKey(workspaces, workspacePath)
   return {
@@ -1370,12 +1371,63 @@ function workspaceCoversCwd(workspacePath, cwd) {
 }
 
 /**
- * @param {string} candidate
- * @param {string | undefined} wanted
+ * The `workspaces` key that best accounts for `cwd`: the longest one the `cwd`
+ * is equal to or nested under, or `undefined` when none covers it.
+ *
+ * Selection and the refusal predicate used to disagree about what "matches"
+ * means. Selection asked for byte equality (a since-removed `pathsEqual`) while
+ * `workspaceCoversCwd` refuses on equal-or-descendant, so a key that genuinely
+ * contained the `cwd` could still lose to whichever key the JSON object
+ * happened to list first. The row was then enriched
+ * (`attributes.codex.workspace`, `git_remote`, `head_sha`) from an unrelated
+ * tree while the projector simultaneously reported that same substitution as
+ * refused. When the first-listed key named a `.hypignore`-ignored tree, an
+ * admitted row carried the ignored repository's remote although a covering key
+ * was sitting in the same map (#1189). Running the one equal-or-descendant rule
+ * on both sides removes that whole class.
+ *
+ * Longest-wins rather than first-covering, because `workspaces` may declare
+ * nested trees: for a `cwd` of `/work/proj/sub` with both `/work` and
+ * `/work/proj` declared, `/work` covers too, and taking it would enrich from
+ * the wrong remote AND silence `refused_workspace_cwd`, since a covering key is
+ * not a refusal. Nearest-governs is how the gate itself resolves a `cwd`
+ * (`matchDepth` in core's matcher), so this reuses that rule rather than
+ * inventing a tie-break.
+ *
+ * Equality is the deepest cover there can be (no strict descendant of `cwd`
+ * contains `cwd`), so an exactly-equal key still wins exactly as byte equality
+ * made it win. What changes is only which key is picked when none is equal.
+ *
+ * The `cwd` guard is load-bearing: the old equality test refused a missing
+ * value and `workspaceCoversCwd` does not, and this is called with the in-band
+ * cwd, which is absent for the whole subscription route. Without the guard,
+ * every subscription turn carrying a `workspaces` map would throw here. With
+ * it, that route falls through to the first key exactly as before, which is
+ * what keeps the key's last-resort `cwd` role intact.
+ *
+ * @ref LLP 0069#requirements [implements]: R8, the one shared
+ * equal-or-descendant test, never a second copy of the path rule
+ * @ref LLP 0049#scope [implements]: nearest-governs, the depth rule the gate
+ * resolves a cwd by, applied to picking the key that describes that cwd
+ * @ref LLP 0350#options: option (F). This changes WHICH key the last-ranked
+ * source picks, not the RANK of the sources, which is what
+ * LLP 0083#workspace-key-ranks-last settled and which is untouched here: the
+ * key still loses the cwd to in-band and to the rollout, still enriches, and is
+ * still substituted when no key covers the cwd at all.
+ *
+ * @param {readonly string[]} workspacePaths
+ * @param {string | undefined} cwd
+ * @returns {string | undefined}
  */
-function pathsEqual(candidate, wanted) {
-  if (!wanted) return false
-  return trimTrailingSlash(candidate) === trimTrailingSlash(wanted)
+function nearestCoveringWorkspace(workspacePaths, cwd) {
+  if (!cwd) return undefined
+  /** @type {string | undefined} */
+  let best
+  for (const key of workspacePaths) {
+    if (!workspaceCoversCwd(key, cwd)) continue
+    if (best === undefined || trimTrailingSlash(key).length > trimTrailingSlash(best).length) best = key
+  }
+  return best
 }
 
 /** @param {string} value */
