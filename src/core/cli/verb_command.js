@@ -98,7 +98,7 @@ function markVerbProjection(command) {
  *
  * @param {CommandRegistration | undefined | null} command
  * @returns {boolean}
- * @ref LLP 0264#verb [implements]: releasing a verb name gives the CLI surface back whichever kernel path projected it, and never takes somebody else's command
+ * @ref LLP 0264#verb [implements]: releasing a verb name gives the CLI surface back whichever kernel path projected it, and never takes somebody else's command. LLP 0314#sequencing is why release still matters: the displacement rule this supports is the bridge until the server's `hypaware` floor rises, not retired.
  */
 export function isVerbProjection(command) {
   if (command === undefined || command === null) return false
