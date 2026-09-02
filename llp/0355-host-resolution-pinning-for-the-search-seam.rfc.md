@@ -6,7 +6,7 @@
 **Generated-by:** neutral
 **Author:** Phil / Claude
 **Date:** 2026-09-02
-**Related:** LLP 0314, LLP 0353, LLP 0303, LLP 0264, LLP 0302;
+**Related:** LLP 0314, LLP 0353, LLP 0303, LLP 0293, LLP 0264, LLP 0302;
 hyparam/hypaware#1215, PR #1213
 
 > LLP 0353#refusals settled `GrepQueryError` as the one refusal channel a
@@ -31,8 +31,10 @@ hyparam/hypaware#1215, PR #1213
 (Accepted) removed the registration collision between the kernel's
 `grep_search` verb and a server's own by making the data plane injectable:
 `VerbOperationContext` gains an optional `search` backend and the one
-registered verb calls it. LLP 0353 is the technical design that binds it
-to the tree, and PR #1213 is the implementation.
+registered verb calls it.
+[LLP 0353](./0353-grep-search-injected-backend.design.md) (Active) is the
+technical design that binds it to the tree, and PR #1213 is the
+implementation, merged to `master` as `01a6c661`.
 
 The seam is a package boundary. The kernel and the injecting host are two
 repositories: the backend is written in `hypaware-server`, the verb that
@@ -44,7 +46,8 @@ refusal channel is built on.
 
 ## What breaks, and for whom {#failure}
 
-`src/core/search/grep_verb.js` (PR #1213 head `5ea0a56c`, line 162):
+`src/core/search/grep_verb.js:162` on `master` (unchanged from PR #1213's
+head `5ea0a56c`):
 
 ```
 if (err instanceof GrepQueryError) throw new VerbUsageError(err.message)
@@ -82,16 +85,22 @@ Two facts bound the blast radius, and a decision should not overstate it:
   from a tool to `isError: true` with the message. A `VerbUsageError` and
   a bare `Error` are already indistinguishable there, so the degradation is
   CLI-exit-code-only.
-- **Nothing in this repository can reach it**, today or after PR #1213
-  merges, because no in-tree host injects. It is a contract defect at a
+- **Nothing in this repository can reach it**, now that PR #1213 has landed,
+  because no in-tree host injects. It is a contract defect at a
   seam whose only consumer is out of tree, which is why triage classified
   it a preference rather than a blocker.
 
-`hypaware` declares no `peerDependencies` and is depended on as an ordinary
-dependency, so nothing in the published package pushes npm toward a single
-copy: two dependents wanting incompatible ranges is the ordinary way npm
-produces a nested install, and a `file:`/`link:` checkout beside a
-registry install is the ordinary way a developer produces one by hand.
+Nothing pushes npm toward a single copy, and the lever that would is not this
+repository's to pull. `hypaware` declares no `peerDependencies` today, but
+adding one would not help: a package's `peerDependencies` constrains what
+*its own* consumers must supply, and has no bearing on whether that package
+is itself deduplicated in a consumer's tree. Only a package that depends on
+`hypaware` can declare it a peer, and only the root project can force one
+copy through `overrides`. Both are host-side. Meanwhile `hypaware` is
+depended on as an ordinary dependency, and two dependents wanting
+incompatible ranges is the ordinary way npm produces a nested install, just
+as a `file:`/`link:` checkout beside a registry install is the ordinary way
+a developer produces one by hand.
 
 ## Reproduction {#evidence}
 
@@ -128,7 +137,9 @@ a decision has to work inside.
   not replace the class with a second error type or a result-shaped
   refusal.
 - **A refusal is exit 2 at every surface that has exit codes.**
-  LLP 0303#query-refusal-exit and LLP 0302#usage-exit. That is the property
+  LLP 0293#one-contract settles the rule (a caller's argument mistake is
+  exit 2, not exit 1 through a downstream failure); LLP 0302#usage-exit and
+  LLP 0303#query-refusal-exit apply it to this verb. That is the property
   the split identity breaks, so it is the property a decision must restore
   or explicitly give up.
 - **The seam args carry caller intent only.** LLP 0353#seam rejected the
@@ -177,20 +188,26 @@ install, and that the refusal channel is identity-based. No code change.
 
 `GrepQueryError` sets a well-known registered symbol on itself; the verb
 checks the brand instead of, or in addition to, `instanceof`. The symbol
-registry is per-realm, not per-module, so two copies in one realm agree.
+registry is per-thread, not per-module and not per-realm, so two copies
+loaded in one thread agree.
 
 - Fixes the reported case with a few lines and no new dependency.
 - Changes the recognition mechanism on a published class: the brand becomes
-  part of the cross-repo contract, and an older `hypaware` copy constructing
-  an unbranded instance is not recognised by a newer verb, which is a
-  version-skew failure in the same family as the one being fixed.
+  part of the cross-repo contract. An older `hypaware` copy constructs an
+  unbranded instance a newer verb does not recognise, but that sub-case is
+  not a regression: an older copy is a distinct copy and already fails
+  `instanceof` today. The cost here is the contract, not the skew.
 - Weaker than `instanceof` against forgery, though not as weak as a name
   check: a foreign module has to reach for the registered symbol on purpose
   rather than merely name a class `GrepQueryError`. Whether "on purpose" is
   the right bar is the decision.
-- Realm-scoped, not process-scoped: `worker_threads` and `vm` contexts have
-  their own symbol registries, so it fixes duplicate *installs*, not
-  duplicate *realms*.
+- Thread-scoped, not process-scoped: a `worker_threads` worker is a separate
+  isolate with its own registry, and a value crossing that boundary is
+  structured-cloned, which drops symbol-keyed properties anyway. A `vm`
+  context is a separate realm but *shares* the thread's registry (its
+  `Symbol` is a different constructor, yet `Symbol.for(k)` returns the same
+  symbol), so a brand does carry there. It fixes duplicate *installs* within
+  a thread, not duplicate *threads*.
 
 ### Option 3: the kernel exports a type-guard predicate it owns
 
@@ -258,8 +275,10 @@ install is a host packaging defect, and close the question.
    (LLP 0353#summary-drift already says so for the allowlist check, and the
    same is true here), so anything assertable is asserted by the host, and
    the decision has to say what the kernel hands the host to assert with.
-4. Whether the requirement is stated as a `peerDependencies` declaration, a
-   documented contract line, a runtime assertion, or some combination.
+4. Whether the requirement is stated as a `peerDependencies` declaration in
+   the injecting host's manifest (it cannot be one in this repository's, per
+   `#failure`), a documented contract line, a runtime assertion, or some
+   combination.
 5. Whether it extends LLP 0353 or supersedes `#refusals`. LLP 0353 is
    Active, so the answer lands as a new document with a forward-ref on
    0353, not as an edit to it.
@@ -281,8 +300,12 @@ install is a host packaging defect, and close the question.
 - LLP 0314 `#decision`, `#backend`, `#sequencing`: the accepted request.
 - LLP 0353 `#refusals`, `#backend-contract`, `#summary-drift`, `#unchanged`:
   the technical design this extends.
-- LLP 0303 `#query-refusal-exit`, `#completeness-signals`; LLP 0302
-  `#usage-exit`: the exit-class rules the failure breaks.
+- LLP 0293 `#one-contract`: the rule that a caller's argument mistake is
+  exit 2, which is what the failure breaks. LLP 0302 `#usage-exit` and
+  LLP 0303 `#query-refusal-exit` apply that rule to this verb.
+- LLP 0303 `#completeness-signals`: `truncated` and `exhausted` as two
+  independent facts, which is what the seam's result guard checks for and
+  is not itself an exit-class rule.
 - LLP 0264 `#shared`: why the refusal kind lives in the shared module at all.
 - PR #1213, review round 1 and round 2 comments and the triage note: the
   three deferrals and their reasoning.
