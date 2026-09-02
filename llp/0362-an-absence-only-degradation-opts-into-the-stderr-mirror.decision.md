@@ -13,7 +13,7 @@ property the rule turns on is the absence and not the refusal), and
 [LLP 0335](./0335-a-telemetry-failure-is-said-once-never-thrown.decision.md)
 (#not-a-fifth-mirror: its "four" is a head count and not a closed set, and
 the line this admits is the first mirrored one with no refusal behind it)
-**Related:** LLP 0332, LLP 0334, LLP 0344, LLP 0248, LLP 0268,
+**Related:** LLP 0323, LLP 0332, LLP 0334, LLP 0248, LLP 0268,
 hyparam/hypaware#1226, hyparam/hypaware#1227, hyparam/hypaware#1232
 
 > LLP 0329 settled a per-call-site `mirrorStderr` opt-in and wrote its rule
@@ -68,10 +68,12 @@ LLP 0335 #not-a-fifth-mirror reads the corpus as "four named containment
 refusals" and distinguishes its own unconditional line as *not* a mirror,
 because no call site asked for `mirrorStderr`. That distinction is untouched.
 The count is not, and it had already moved before this decision:
-`mirrorStderr: true` stands at eight call sites at this head, because LLP
-0344 added the unreadable-cursor refusal and LLP 0334 #recovery-is-announced
-added two INFO lines, `noteEscapeCleared` and `noteUnreadableCleared` in
-`src/core/cache/partition.js`, which retract a refusal rather than make one.
+`mirrorStderr: true` stands at eight call sites at this head, because
+`reportUnreadableCursor` in `src/core/cache/partition.js` became a fifth
+containment refusal on 0329's own terms (LLP 0323 #say-it, added in
+hyparam/hypaware#1162), and LLP 0334 #recovery-is-announced added two INFO
+lines in the same file, `noteEscapeCleared` and `noteUnreadableCleared`,
+which retract a refusal rather than make one.
 
 So this report is not the fifth of anything, and "not a refusal" does not
 single it out either. What singles it out is that no refusal stands behind
@@ -145,12 +147,15 @@ remedy for a default as for a declared value.
   daemon's refusals. It is not rate-limited the way LLP 0332 rebased the
   cursor guard: registration is once per command per process, not once per
   read.
-- `OPTIONAL_MEMBERS` is the diagnostic's coverage, and it is now pinned to the
-  optional members of `CommandRegistration` by test rather than by hand, so a
-  member added to the published interface cannot escape the report unnoticed.
-  The pin reads the declaration file, so it holds for every spelling the file
-  uses for an optional member, the optional method `foo?(...)` included, which
-  is the shape that always lives on a prototype and so the one the copy drops.
+- `OPTIONAL_MEMBERS` is the diagnostic's coverage, and a test now pins it to
+  cover every optional member `CommandRegistration` declares rather than
+  trusting the hand-written list, so a member added to the published interface
+  cannot escape the report unnoticed. The pin runs that direction only: a key
+  left in the list after its member leaves the interface is named by nothing
+  and costs nothing. The pin reads the declaration file, so it holds for every
+  spelling the file uses for an optional member, the optional method
+  `foo?(...)` included, which is the shape that always lives on a prototype
+  and so the one the copy drops.
 
 ## References {#references}
 

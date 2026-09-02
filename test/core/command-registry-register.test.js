@@ -413,8 +413,10 @@ test('a throwing mirror write costs the warning, not the registration', () => {
  * The optional members of `CommandRegistration`, read out of the published
  * declaration file rather than restated here. Both spellings the file uses
  * for one, `foo?: T` and the optional method `foo?(...): T`, and the
- * `readonly` prefix either may carry: an optional method is the member shape
- * that always lives on a prototype, so it is the one the copy drops.
+ * `readonly` prefix either may carry, with the whitespace TypeScript allows
+ * around the `?` (nothing formats this file, so no spelling is ruled out): an
+ * optional method is the member shape that always lives on a prototype, so it
+ * is the one the copy drops.
  *
  * @returns {string[]} the optional keys
  */
@@ -423,7 +425,7 @@ function declaredOptionalMembers() {
   const start = types.indexOf('export interface CommandRegistration {')
   assert.notEqual(start, -1, 'interface CommandRegistration is not where the test looks for it')
   const body = types.slice(start, types.indexOf('\n}', start))
-  return [...body.matchAll(/^[ \t]*(?:readonly[ \t]+)?([A-Za-z_$][\w$]*)\?[:(]/gm)].map((match) => match[1])
+  return [...body.matchAll(/^[ \t]*(?:readonly[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\?[ \t]*[:(]/gm)].map((match) => match[1])
 }
 
 // `OPTIONAL_MEMBERS` is a hand-written copy of the optional keys of
