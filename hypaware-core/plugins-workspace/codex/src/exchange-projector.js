@@ -1394,8 +1394,9 @@ function workspaceCoversCwd(workspacePath, cwd) {
  * on both sides removes every case where a covering key existed and lost.
  *
  * It does not remove every ignored-tree remote, and the residue is worth
- * stating rather than reading "whole class" for it. Two cases survive, and
- * neither is created here.
+ * stating rather than reading "whole class" for it. Besides the substitution
+ * LLP 0083 priced, where no key covers the `cwd` at all (the `@ref` below), two
+ * further cases survive, and neither is created here.
  *
  * The larger one is the whole **subscription route**. The `cwd` passed in is the
  * in-band one, which that route never states, so the guard below returns
