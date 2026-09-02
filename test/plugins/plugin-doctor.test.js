@@ -605,6 +605,77 @@ export async function activate(ctx) {
   if (keys !== 'configSection,name,plugin,start') throw new Error('the stored contribution enumerates as [' + keys + ']')
   const copy = { ...stored }
   if (copy.name !== 'demo' || typeof copy.start !== 'function') throw new Error('a spread of the stored contribution lost fields')
+  // The kernel hands the frozen object itself back, so reshaping it fails
+  // loudly. A stand-in that took the define or the delete onto a target of
+  // its own would report a success the kernel never gives.
+  let defined = true
+  try { Object.defineProperty(stored, 'meta', { value: 1 }) } catch { defined = false }
+  if (defined) throw new Error('a define onto a frozen contribution was accepted')
+  let deleted = true
+  try { delete stored.name } catch { deleted = false }
+  if (deleted) throw new Error('a delete on a frozen contribution was accepted')
+  await ctx.sources.start('demo', ctx)
+  if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
+})
+
+// The frozen branch proxies a stand-in target instead of the contribution, and
+// `defineProperty`/`deleteProperty` were left untrapped, so they landed on that
+// target. The define succeeded there while the `get` trap kept answering from
+// the contribution, which never got the property, so the next read threw the
+// proxy invariant: a fabricated `activate_threw` against a plugin the real
+// kernel accepts. `delete` diverged the other way and silently no-opped where
+// the kernel removes the property.
+test('a contribution with a frozen start() takes a define and a delete as the kernel does', async () => {
+  const root = await fixture({
+    manifest: baseManifest({ contributes: { sources: [{ name: 'demo' }] } }),
+    index: `
+export async function activate(ctx) {
+  const contribution = { name: 'demo', plugin: '@test/example', configSection: 'demo' }
+  // Own, non-writable and non-configurable, so the stand-in takes its frozen
+  // branch, on an object the kernel still lets a plugin reshape.
+  Object.defineProperty(contribution, 'start', {
+    value: async () => { throw new Error('start() must not run during a dry run') },
+    enumerable: true,
+  })
+  ctx.sources.register(contribution)
+  const stored = ctx.sources.get('demo')
+  if (!stored) throw new Error('the contribution registered under no name')
+
+  Object.defineProperty(stored, 'meta', { value: 1 })
+  if (stored.meta !== 1) throw new Error('the defined property read back as ' + String(stored.meta))
+  if (contribution.meta !== 1) throw new Error('the define never reached the contribution')
+  const desc = Object.getOwnPropertyDescriptor(stored, 'meta')
+  if (!desc || desc.value !== 1) throw new Error('the defined property reports no descriptor')
+  const copy = { ...stored }
+  if (copy.name !== 'demo' || typeof copy.start !== 'function') throw new Error('a spread of the stored contribution lost fields')
+
+  // The mirrored property is non-configurable on the contribution, so the
+  // kernel refuses the delete. The stand-in has to refuse it too: mirroring a
+  // define onto a target of its own must not turn a refusal into a success.
+  let removed = true
+  try { delete stored.meta } catch { removed = false }
+  if (removed) throw new Error('a delete of a non-configurable property was accepted')
+  if (stored.meta !== 1) throw new Error('the refused delete lost the property')
+
+  delete stored.configSection
+  if ('configSection' in contribution) throw new Error('the delete never reached the contribution')
+  if (stored.configSection !== undefined) throw new Error('the deleted property still reads back')
+  // And a define after that delete lands on the contribution again.
+  Object.defineProperty(stored, 'configSection', { value: 'other', enumerable: true })
+  if (stored.configSection !== 'other' || contribution.configSection !== 'other') throw new Error('a define after a delete did not reach the contribution')
+
+  // The kernel takes a redefine of the frozen start() to its own value as the
+  // no-op it is. A stand-in that pinned start() onto a target of its own could
+  // only pin the inert value it answers reads with, so the redefine would be
+  // judged incompatible with that target and throw.
+  Object.defineProperty(stored, 'start', { value: contribution.start })
+  if (typeof stored.start !== 'function') throw new Error('start() stopped reading back after a redefine')
+
   await ctx.sources.start('demo', ctx)
   if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
 }
