@@ -57,7 +57,10 @@ export function createStartOpenCodeSource(deps) {
         sendJson(res, 421, { error: 'misdirected request' })
         return
       }
-      const url = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`)
+      // A constant base: nothing below reads the authority, and a `Host` no
+      // authority can be parsed out of throws here, out of the request
+      // handler. See the same call in `src/core/otlp/server.js`.
+      const url = new URL(req.url ?? '/', 'http://localhost')
       if (isControlPath(url.pathname)) {
         control(req, res, url)
         return

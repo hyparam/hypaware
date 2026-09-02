@@ -438,6 +438,12 @@ test('loopback Hosts keep passing, with any port and in every spelling', async (
       'LocalHost',
       `[::1]:${s.bound.port}`,
       '[::1]',
+      // What a wildcard bind advertises as its `listen_host`, and therefore
+      // what `hyp session ignore` addresses that recorder by. Refusing it
+      // would leave the opt-out unable to reach a listener whose exports
+      // keep flowing.
+      `0.0.0.0:${s.bound.port}`,
+      '[::]',
     ]
     for (const host of hosts) {
       const res = await requestWithHost(s.bound.port, { path: '/v1/logs', host })
@@ -449,10 +455,9 @@ test('loopback Hosts keep passing, with any port and in every spelling', async (
   }
 })
 
-// A `Host` no hostname can be read out of is refused with the foreign ones,
-// which is also what keeps it away from `new URL()`: it throws there, out of
-// the request handler, and takes the process with it. Sent over a raw socket
-// because an HTTP client will not put a space in a header value.
+// A `Host` no hostname can be read out of is refused with the foreign ones.
+// Sent over a raw socket because an HTTP client will not put a space in a
+// header value.
 test('a malformed Host is refused rather than parsed', async () => {
   const s = await startServer()
   try {
@@ -470,6 +475,10 @@ test('a malformed Host is refused rather than parsed', async () => {
         if (received.includes('\r\n')) resolve(received.split('\r\n')[0])
       })
       socket.on('error', reject)
+      // A Node that rejected the header at the parser would close with no
+      // status line at all, and waiting on `data` alone would hang the run
+      // instead of failing it.
+      socket.on('close', () => reject(new Error(`socket closed with no status line, got ${JSON.stringify(received)}`)))
     })
     socket.destroy()
     assert.equal(statusLine, 'HTTP/1.1 421 Misdirected Request')
@@ -496,6 +505,9 @@ test('the Host check judges loopback connections only, and needs a Host to judge
   // Bound to a routable address, the listener is meant to answer to whatever
   // name resolves there, and a rebound request never lands on that address.
   assert.equal(misdirected('203.0.113.5', 'collector.example'), false)
+  // A local address that cannot be read is not an exemption. Only a routable
+  // one is, so the unknown case is judged like a loopback one.
+  assert.equal(misdirected('', 'attacker.example'), true)
   // No Host at all: HTTP/1.0 clients omit it and a browser never does.
   assert.equal(misdirected('127.0.0.1'), false)
 })

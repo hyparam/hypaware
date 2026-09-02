@@ -252,10 +252,16 @@ test('a request carrying a foreign Host reaches neither /snapshot nor the contro
     })
     assert.equal(optOut.status, 421)
 
+    // Both refusals are counted, but a page can send these as fast as it
+    // likes, so only the first is written: a line apiece would answer blocked
+    // row injection with unbounded row growth in `logs`.
     const refused = listener.logs.filter((entry) => entry.event === 'listener.host_refused')
-    assert.equal(refused.length, 2)
+    assert.equal(refused.length, 1)
     assert.equal(refused[0]?.fields?.error_kind, 'host_not_loopback')
     assert.equal(refused[0]?.fields?.host, 'attacker.example')
+    // The running tally rides along, so the next line past the interval says
+    // how much the interval swallowed.
+    assert.equal(refused[0]?.fields?.refused_total, 1)
 
     const status = await listener.source.status?.()
     assert.equal(status?.details?.snapshots_received, 0)

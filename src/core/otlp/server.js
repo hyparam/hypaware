@@ -24,6 +24,33 @@ const JSON_CT = { 'Content-Type': 'application/json' }
  */
 const LOOPBACK_HOST_NAMES = new Set(['localhost', '::1'])
 
+/**
+ * The two wildcard binds, answered to as well when they arrive in `Host`.
+ * A listener given `listen_host: "0.0.0.0"` (or `"::"`) advertises exactly
+ * that string as its `listen_host` in the live status snapshot, so it is what
+ * `hyp session ignore` and anything else that resolves a recorder's endpoint
+ * from that snapshot address it by, over loopback. Answering costs nothing:
+ * a numeric literal is not a name DNS can point somewhere else, so it never
+ * carries the signal this check reads.
+ */
+const WILDCARD_BIND_NAMES = new Set(['0.0.0.0', '::'])
+
+// A refusal costs the caller nothing, and the refused routes are reachable by
+// the same browser page the check exists to turn away, so a line per refusal
+// would trade blocked row injection for unbounded row growth in `logs`. That
+// is the trade the neighbouring content-type gate already declined to make, so
+// refusals are always counted and logged at most this often per listener.
+const HOST_REFUSED_LOG_INTERVAL_MS = 60 * 1000
+// The logged `Host` is caller-chosen and bounded only by Node's header budget;
+// a real one is short.
+const LOGGED_HOST_MAX_CHARS = 128
+/**
+ * Refusals so far, per listener name, for the bound above.
+ *
+ * @type {Map<string, { total: number, loggedAt: number }>}
+ */
+const HOST_REFUSALS = new Map()
+
 /** @param {string} hostname lowercased, with brackets and port removed */
 function isLoopbackHostName(hostname) {
   if (LOOPBACK_HOST_NAMES.has(hostname)) return true
@@ -34,8 +61,7 @@ function isLoopbackHostName(hostname) {
  * Read the hostname out of a `Host` header, dropping the optional port
  * and the brackets an IPv6 literal is written in. Returns `undefined` for
  * a header no hostname can be read out of, which the caller refuses along
- * with the foreign ones. That also keeps a malformed `Host` away from
- * `new URL()`, where it throws out of the request handler.
+ * with the foreign ones.
  *
  * @param {string} value
  * @returns {string | undefined}
@@ -63,9 +89,12 @@ function hostnameOfHostHeader(value) {
  * Only connections that arrived over loopback are judged. A listener
  * given a routable `listen_host` is reachable under whatever name
  * resolves to that address, and answering to that name is the point of
- * configuring it; a rebound request, by contrast, always lands on
- * loopback. A request with no `Host` at all passes: HTTP/1.0 clients omit
- * it and a browser never does, so its absence is not the signal.
+ * configuring it. A request rebound at a loopback listener, which is the
+ * default bind and the one this guards, always lands on loopback; an
+ * operator who deliberately published the listener on a routable address
+ * is outside that guarantee and outside this check. A request with no
+ * `Host` at all passes: HTTP/1.0 clients omit it and a browser never
+ * does, so its absence is not the signal.
  *
  * @param {IncomingMessage} req
  * @param {{ name: string, log?: PluginLogger }} opts `name` identifies the
@@ -74,20 +103,35 @@ function hostnameOfHostHeader(value) {
  * @returns {boolean}
  */
 export function isMisdirectedHost(req, opts) {
-  if (!isLoopbackHostName((req.socket.localAddress ?? '').toLowerCase())) return false
+  // Only a local address that reads as a routable one earns the exemption. An
+  // address that cannot be read at all is judged instead of waved through:
+  // this check is the whole barrier in front of these routes, so its unknown
+  // case fails closed.
+  const localAddress = (req.socket.localAddress ?? '').toLowerCase()
+  if (localAddress !== '' && !isLoopbackHostName(localAddress)) return false
   const value = req.headers.host
   if (!value) return false
   const hostname = hostnameOfHostHeader(value)
-  if (hostname !== undefined && isLoopbackHostName(hostname)) return false
-  const log = opts.log ?? getLogger('otlp')
-  log.warn('listener.host_refused', {
-    [Attr.COMPONENT]: 'sources',
-    [Attr.OPERATION]: 'host_check',
-    [Attr.STATUS]: 'skipped',
-    [Attr.ERROR_KIND]: 'host_not_loopback',
-    listener: opts.name,
-    host: value,
-  })
+  if (hostname !== undefined && (isLoopbackHostName(hostname) || WILDCARD_BIND_NAMES.has(hostname))) return false
+  const refusals = HOST_REFUSALS.get(opts.name) ?? { total: 0, loggedAt: 0 }
+  refusals.total += 1
+  HOST_REFUSALS.set(opts.name, refusals)
+  const now = Date.now()
+  if (now - refusals.loggedAt >= HOST_REFUSED_LOG_INTERVAL_MS) {
+    refusals.loggedAt = now
+    const log = opts.log ?? getLogger('otlp')
+    log.warn('listener.host_refused', {
+      [Attr.COMPONENT]: 'sources',
+      [Attr.OPERATION]: 'host_check',
+      [Attr.STATUS]: 'skipped',
+      [Attr.ERROR_KIND]: 'host_not_loopback',
+      listener: opts.name,
+      host: value.slice(0, LOGGED_HOST_MAX_CHARS),
+      // Every refusal since this process started, so a burst the interval
+      // above swallowed is still legible from one line.
+      refused_total: refusals.total,
+    })
+  }
   return true
 }
 
@@ -137,7 +181,12 @@ export function createOtlpJsonServer(options) {
       return
     }
 
-    const url = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`)
+    // A constant base. Nothing below reads the authority, only the path and
+    // the query, and a `Host` no authority can be parsed out of throws here,
+    // out of an `async` handler nothing catches, which takes the daemon with
+    // it. The `Host` check above refuses such a header, but only on the
+    // loopback binds it judges.
+    const url = new URL(req.url ?? '/', 'http://localhost')
     const route = url.pathname
 
     // The reserved `/_hypaware/` prefix is a LOCAL control surface, exactly
