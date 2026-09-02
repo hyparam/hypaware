@@ -93,6 +93,21 @@ retry is one `claude --version` probe with a 3s timeout and one refusal, both
 read-only, and the marker's `attempts` counter is the honest count of how many
 boots have seen an old client.
 
+That accounting assumes the probe answers the same way on every pass, and
+it does not have to. `resolveClaudeCodeVersion` is best effort: a missing
+binary, a non-zero exit, or a probe slower than its 3s timeout all read as
+`undefined`, which LLP 0258 `#version-floor` settled as "not proven old,
+proceed". A terminal `refused` marker incidentally pinned a machine an
+earlier pass had proven below the floor, so a later blind probe could not
+move it. A retryable `failed` marker does not pin it, so a pass whose probe
+comes back blank attaches `otel` over a client that emits nothing, and the
+resulting `done` marker is current forever. That end state is already
+reachable on `master` whenever the *first* pass is the blind one (no daemon
+unit sets a `PATH`), so this narrows an incidental guard rather than opening
+a new failure mode, and closing it needs the persisted state this document
+declines to add. Tracked as
+[hyparam/hypaware#1246](https://github.com/hyparam/hypaware/issues/1246).
+
 LLP 0184's complaint was a permanent failure retried forever with no way out.
 This one has a way out, and taking it is the point.
 
