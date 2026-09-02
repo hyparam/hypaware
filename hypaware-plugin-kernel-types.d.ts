@@ -14,6 +14,7 @@
 import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'
 import type { CachePartitioningDeclaration } from './src/core/iceberg/types.d.ts'
 import type { UsagePolicyDrop } from './src/core/usage-policy/types.d.ts'
+import type { GrepSearchBackend } from './src/core/search/types.d.ts'
 
 export type { AsyncDataSource, ScanOptions, ScanResults }
 
@@ -1823,6 +1824,18 @@ export interface VerbOperationContext {
    * to `executeQuerySql` as `callerCwd`.
    */
   callerCwd: string | null
+  /**
+   * Host-supplied grep-search data plane (LLP 0314). When present,
+   * queryGrepVerb calls it instead of the local cache service, so a host
+   * owning a different data plane answers grep_search without registering
+   * a second verb. Absent on every in-tree host: buildOperationContext
+   * never sets it, and the verb then runs executeGrepSearch over
+   * ctx.storage as before.
+   *
+   * @ref LLP 0353#seam [implements]: host-supplied grep-search data plane,
+   * absent on every in-tree host
+   */
+  search?: GrepSearchBackend
 }
 
 /** CLI render controls parsed by the kernel and passed to `render`. */
