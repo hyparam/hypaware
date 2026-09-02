@@ -244,9 +244,9 @@ function inertSourceRegistry() {
  * original with the original as the receiver, so inherited fields, accessors,
  * and private state answer exactly as they do under the real kernel, and
  * neutering writes nothing to the plugin's own object. It does not make that
- * object read-only: a write through the stand-in reaches the contribution,
- * because the real registry hands the contribution out by reference and does
- * not shield it either.
+ * object read-only: a write, a define, and a delete through the stand-in all
+ * reach the contribution, because the real registry hands the contribution out
+ * by reference and does not shield it either.
  *
  * @param {SourceContribution} contribution
  * @returns {SourceContribution}
@@ -278,29 +278,63 @@ function neuter(contribution) {
   // That inheriting target has no own properties and a prototype of its own,
   // so the remaining traps exist to hide it: without them the stored
   // contribution enumerates as `{}` and reports the wrong prototype, which is
-  // the same store-a-different-shape defect this stand-in exists to close. A
-  // descriptor is reported configurable because the target holds no
-  // non-configurable property to pin one to, and `start` is reported as the
-  // inert function the `get` trap already answers with.
-  // `defineProperty` stays untrapped on purpose: forwarding it would throw on
-  // an explicit `configurable: false` define, which the target cannot be made
-  // to carry, and a fabricated throw is the failure this stand-in exists to
-  // prevent. Nothing reshapes a stored contribution; ordinary writes go
-  // through `set`.
+  // the same store-a-different-shape defect this stand-in exists to close.
+  // `start` is reported as the inert function the `get` trap already answers
+  // with, and a descriptor is reported configurable unless `defineProperty`
+  // pinned that property onto the target, because otherwise the target holds
+  // no non-configurable property to pin one to.
   return new Proxy(Object.create(contribution), {
     get,
     ownKeys: () => Reflect.ownKeys(contribution),
     /**
-     * @param {object} _target
+     * @param {object} target
      * @param {string | symbol} prop
      */
-    getOwnPropertyDescriptor(_target, prop) {
+    getOwnPropertyDescriptor(target, prop) {
       const desc = Reflect.getOwnPropertyDescriptor(contribution, prop)
       if (desc === undefined) return undefined
-      if (prop === 'start') return { ...desc, value: inertStart, configurable: true }
-      return { ...desc, configurable: true }
+      const shown = prop === 'start' ? { ...desc, value: inertStart } : desc
+      const pinned = Reflect.getOwnPropertyDescriptor(target, prop)
+      if (pinned !== undefined && pinned.configurable === false) return shown
+      return { ...shown, configurable: true }
     },
     getPrototypeOf: () => Reflect.getPrototypeOf(contribution),
+    /**
+     * @param {object} target
+     * @param {string | symbol} prop
+     * @param {PropertyDescriptor} desc
+     */
+    defineProperty(target, prop, desc) {
+      // The define has to reach the contribution: that is the object the real
+      // registry stores and hands back, and the one every read here answers
+      // from. Untrapped it landed on the inheriting target alone, so it
+      // succeeded while the `get` trap kept answering from a contribution
+      // that never got the property, and the next read of that property threw
+      // the proxy invariant: the fabricated `activate_threw` this stand-in
+      // exists to prevent. Forwarding first also keeps a define the kernel
+      // refuses, on a contribution frozen whole, refused here.
+      if (!Reflect.defineProperty(contribution, prop, desc)) return false
+      // Then mirror what the contribution ended up with, because a
+      // non-configurable define may only be reported as having succeeded when
+      // the target carries that property too. `start` mirrors the inert value
+      // the `get` trap answers with, so pinning it cannot leave the next read
+      // disagreeing with the target.
+      const applied = /** @type {PropertyDescriptor} */ (Reflect.getOwnPropertyDescriptor(contribution, prop))
+      Reflect.defineProperty(target, prop, prop === 'start' ? { ...applied, value: inertStart } : applied)
+      return true
+    },
+    /**
+     * @param {object} target
+     * @param {string | symbol} prop
+     */
+    deleteProperty(target, prop) {
+      // Symmetrically: the kernel removes the property from the contribution,
+      // or refuses to, where the untrapped trap silently no-opped against a
+      // target that never held it.
+      if (!Reflect.deleteProperty(contribution, prop)) return false
+      Reflect.deleteProperty(target, prop)
+      return true
+    },
     /**
      * @param {object} _target
      * @param {string | symbol} prop
