@@ -71,34 +71,53 @@ function sseBody(count) {
 }
 
 /**
- * Milliseconds for the fastest of three whole-body parses. Best-of keeps a
- * single GC pause from deciding the measurement.
- * @param {string} body
+ * Characters `run` walks past, counted by wrapping `String.prototype.indexOf`
+ * for the duration of the call. Every scan the parser performs goes through
+ * it: the newline walk in `findSeparator` and the field split in `parseBlock`.
+ * The wrapper is restored even if `run` throws.
+ *
+ * @param {() => void} run
+ * @returns {number}
  */
-function bestFeedMs(body) {
-  let best = Infinity
-  for (let i = 0; i < 3; i++) {
-    const started = process.hrtime.bigint()
-    feedWhole(body)
-    const ms = Number(process.hrtime.bigint() - started) / 1e6
-    if (ms < best) best = ms
+function scannedChars(run) {
+  const real = String.prototype.indexOf
+  let scanned = 0
+  String.prototype.indexOf = function (needle, from) {
+    const at = real.call(this, needle, from)
+    scanned += (at === -1 ? this.length : at) - (from ?? 0)
+    return at
   }
-  return best
+  try {
+    run()
+  } finally {
+    String.prototype.indexOf = real
+  }
+  return scanned
 }
 
-test('a whole-body feed of many events costs linear time', () => {
+test('a whole-body feed scans the body once, not once per event', () => {
   // The deferred path (compressed or header-blind SSE) feeds the entire
-  // decoded body in one call. Before the single-pass scan this was
-  // O(events x bytes), so quadrupling the body more than quadrupled the
-  // cost: the two-probe search measures about 17x for a 4x body, against
-  // about 4x for the single pass. Compare the two sizes rather than
-  // asserting an absolute millisecond bound, which measures the runner as
-  // much as the parser and would have to be retuned per machine.
-  const small = sseBody(5000)
-  const big = sseBody(20000)
-  assert.equal(feedWhole(big).length, 20000)
-  const ratio = bestFeedMs(big) / bestFeedMs(small)
-  assert.ok(ratio < 10, `4x the body cost ${ratio.toFixed(1)}x the time; a linear scan costs about 4x`)
+  // decoded body in one call. The two-probe search this replaced re-scanned
+  // the whole remainder for `\r\n\r\n` on every event, so this body cost
+  // about 27 billion character steps against its own 2.7 million.
+  //
+  // Count the steps rather than the milliseconds. The count is identical on
+  // every machine and every run, where a wall-clock bound measures the runner
+  // as much as the parser: `npm test` hands all 461 files to `node --test`,
+  // which runs them in parallel, so on a 2-core CI box this body's parse is
+  // competing with the rest of the suite. A timing ratio measured under that
+  // contention overlaps the quadratic signature it is supposed to catch, and
+  // cannot tell a regression from a busy runner.
+  const body = sseBody(20000)
+  let events = []
+  const scanned = scannedChars(() => {
+    events = new SseParser().feed(body)
+  })
+  assert.equal(events.length, 20000)
+  assert.ok(
+    scanned < body.length * 2,
+    `scanned ${scanned} chars of a ${body.length} char body; one pass is about 1x, the two-probe search about 10000x`,
+  )
 })
 
 /**
