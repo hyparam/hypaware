@@ -316,11 +316,19 @@ function neuter(contribution) {
       if (!Reflect.defineProperty(contribution, prop, desc)) return false
       // Then mirror what the contribution ended up with, because a
       // non-configurable define may only be reported as having succeeded when
-      // the target carries that property too. `start` mirrors the inert value
-      // the `get` trap answers with, so pinning it cannot leave the next read
-      // disagreeing with the target.
-      const applied = /** @type {PropertyDescriptor} */ (Reflect.getOwnPropertyDescriptor(contribution, prop))
-      Reflect.defineProperty(target, prop, prop === 'start' ? { ...applied, value: inertStart } : applied)
+      // the target carries that property too. `start` is the exception and
+      // stays off the target: the only value it could be pinned to is the
+      // inert one the `get` trap answers with, so a define naming the real
+      // `start` as its value would be judged incompatible with the target and
+      // throw, which is the same fabricated `activate_threw` this trap exists
+      // to prevent, against the ordinary no-op redefine the kernel accepts.
+      // Leaving it unpinned is safe: a define of a frozen `start` only ever
+      // succeeds as a no-op, and the descriptor trap keeps reporting `start`
+      // configurable for as long as nothing pins it.
+      if (prop !== 'start') {
+        const applied = /** @type {PropertyDescriptor} */ (Reflect.getOwnPropertyDescriptor(contribution, prop))
+        Reflect.defineProperty(target, prop, applied)
+      }
       return true
     },
     /**

@@ -658,6 +658,13 @@ export async function activate(ctx) {
   if ('configSection' in contribution) throw new Error('the delete never reached the contribution')
   if (stored.configSection !== undefined) throw new Error('the deleted property still reads back')
 
+  // The kernel takes a redefine of the frozen start() to its own value as the
+  // no-op it is. A stand-in that pinned start() onto a target of its own could
+  // only pin the inert value it answers reads with, so the redefine would be
+  // judged incompatible with that target and throw.
+  Object.defineProperty(stored, 'start', { value: contribution.start })
+  if (typeof stored.start !== 'function') throw new Error('start() stopped reading back after a redefine')
+
   await ctx.sources.start('demo', ctx)
   if (await ctx.sources.status('demo') === undefined) throw new Error('the started source was lost')
 }
