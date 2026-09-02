@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
+import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
 import test from 'node:test'
@@ -115,6 +116,37 @@ async function startListener() {
   }
 }
 
+/**
+ * POST with an explicit `Host` header, which `fetch` forbids.
+ *
+ * @param {string} endpoint
+ * @param {{ path: string, host: string, body?: unknown }} options
+ * @returns {Promise<{ status: number, body: string }>}
+ */
+function postWithHost(endpoint, options) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: Number(new URL(endpoint).port),
+        path: options.path,
+        method: 'POST',
+        headers: { host: options.host, 'content-type': 'application/json' },
+      },
+      (res) => {
+        /** @type {Buffer[]} */
+        const chunks = []
+        res.on('data', (chunk) => chunks.push(chunk))
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+        )
+      }
+    )
+    req.on('error', reject)
+    req.end(JSON.stringify(options.body ?? {}))
+  })
+}
+
 test('OpenCode listener writes text and tool rows, converges replays, and publishes source health', async () => {
   const listener = await startListener()
   const cwd = path.join(listener.root, 'work')
@@ -190,6 +222,93 @@ test('OpenCode listener applies .hypignore, machine policy, local-only, session 
     assert.equal(status?.details?.unknown_entrypoints, 1)
     assert.equal(status?.details?.ignored_sessions, 1)
     assert.equal(status?.details?.store_activity_gaps, 0)
+  } finally {
+    await listener.cleanup()
+  }
+})
+
+// DNS rebinding is what is left once the content-type gate is up: an attacker
+// page whose domain re-resolves to 127.0.0.1 is same-origin with this
+// listener, so it can post whatever content type it likes. What it cannot
+// change is the `Host` it carries, which names the attacker, not loopback.
+test('a request carrying a foreign Host reaches neither /snapshot nor the control route', async () => {
+  const listener = await startListener()
+  const cwd = path.join(listener.root, 'work')
+  await fs.mkdir(cwd, { recursive: true })
+  try {
+    const injected = await postWithHost(listener.endpoint, {
+      path: '/snapshot',
+      host: 'attacker.example',
+      body: snapshot('ses_rebound', cwd),
+    })
+    assert.equal(injected.status, 421)
+    assert.deepEqual(JSON.parse(injected.body), { error: 'misdirected request' })
+    assert.equal(listener.storage.appended.length, 0, 'no row was injected')
+
+    const optOut = await postWithHost(listener.endpoint, {
+      path: '/_hypaware/ignore/session',
+      host: 'attacker.example',
+      body: { session_id: 'ses_rebound' },
+    })
+    assert.equal(optOut.status, 421)
+
+    // Both refusals are counted, but a page can send these as fast as it
+    // likes, so only the first is written: a line apiece would answer blocked
+    // row injection with unbounded row growth in `logs`.
+    const refused = listener.logs.filter((entry) => entry.event === 'listener.host_refused')
+    assert.equal(refused.length, 1)
+    assert.equal(refused[0]?.fields?.error_kind, 'host_not_loopback')
+    assert.equal(refused[0]?.fields?.host, 'attacker.example')
+    // The running tally rides along, so the next line past the interval says
+    // how much the interval swallowed.
+    assert.equal(refused[0]?.fields?.refused_total, 1)
+
+    const status = await listener.source.status?.()
+    assert.equal(status?.details?.snapshots_received, 0)
+    assert.equal(status?.details?.ignored_sessions, 0, 'the control route mutated nothing')
+
+    // Every loopback spelling, with any port, still records.
+    const hosts = ['127.0.0.1', `127.0.0.1:${new URL(listener.endpoint).port}`, 'localhost:9999', '[::1]']
+    for (const host of hosts) {
+      const allowed = await postWithHost(listener.endpoint, {
+        path: '/snapshot',
+        host,
+        body: snapshot(`ses_${host.replace(/\W/g, '')}`, cwd),
+      })
+      assert.equal(allowed.status, 200, `Host: ${host} still records`)
+    }
+    assert.equal(listener.storage.appended.length, hosts.length * 3)
+  } finally {
+    await listener.cleanup()
+  }
+})
+
+// The handler here is synchronous, so a throw out of it is an
+// `uncaughtException`, and this repo installs no handler for one.
+test('a request target new URL rejects is answered 400 rather than ending the daemon', async () => {
+  const listener = await startListener()
+  const port = Number(new URL(listener.endpoint).port)
+  try {
+    const line = await new Promise((resolve, reject) => {
+      const socket = net.connect(port, '127.0.0.1')
+      let received = ''
+      socket.on('connect', () => socket.write('GET //[ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n'))
+      socket.on('data', (chunk) => {
+        received += chunk.toString('utf8')
+        if (received.includes('\r\n')) {
+          socket.destroy()
+          resolve(received.split('\r\n')[0])
+        }
+      })
+      socket.on('error', reject)
+      socket.on('close', () =>
+        reject(new Error(`socket closed with no status line, got ${JSON.stringify(received)}`))
+      )
+    })
+    assert.equal(line, 'HTTP/1.1 400 Bad Request')
+    // Still serving.
+    const banner = await fetch(`${listener.endpoint}/`)
+    assert.equal(banner.status, 200)
   } finally {
     await listener.cleanup()
   }

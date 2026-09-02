@@ -4,7 +4,7 @@ import http from 'node:http'
 
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { SESSION_IGNORE_ROUTE, createControlHandler, isControlPath } from '../../../../src/core/control/session_ignore.js'
-import { listenAndResolve } from '../../../../src/core/otlp/server.js'
+import { isMisdirectedHost, listenAndResolve, requestUrlOf } from '../../../../src/core/otlp/server.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { createProjectedExchangeWriter } from '../../ai-gateway/src/exchange_writer.js'
 import { opencodeListenPort } from './config.js'
@@ -63,7 +63,20 @@ export function createStartOpenCodeSource(deps) {
     })
 
     const server = http.createServer((req, res) => {
-      const url = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`)
+      if (isMisdirectedHost(req, { name: PLUGIN_NAME, log: ctx.log })) {
+        req.resume()
+        sendJson(res, 421, { error: 'misdirected request' })
+        return
+      }
+      // Shared with the OTLP listener: a constant base keeps `Host` out of the
+      // parser, and a request target `new URL` rejects is answered rather than
+      // thrown out of this handler, where nothing would catch it.
+      const url = requestUrlOf(req)
+      if (!url) {
+        req.resume()
+        sendJson(res, 400, { error: 'invalid request target' })
+        return
+      }
       if (isControlPath(url.pathname)) {
         control(req, res, url)
         return

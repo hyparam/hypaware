@@ -8,11 +8,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import net from 'node:net'
 import zlib from 'node:zlib'
 
-import { createOtlpJsonServer, listenAndResolve } from '../../src/core/otlp/server.js'
+import { createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../../src/core/otlp/server.js'
 
 /**
+ * @import { PluginLogger } from '../../hypaware-plugin-kernel-types.js'
  * @import { OtlpJsonServerOptions, OtlpRequest, OtlpSignal } from '../../src/core/otlp/types.js'
  */
 
@@ -76,6 +78,66 @@ function postWithoutContentType(port, path) {
     })
     req.on('error', reject)
     req.end('{}')
+  })
+}
+
+/**
+ * Send a request with an explicit `Host` header, which `fetch` forbids.
+ *
+ * @param {number} port
+ * @param {{ path: string, host: string, method?: string }} options
+ * @returns {Promise<{ status: number, body: string }>}
+ */
+function requestWithHost(port, options) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: options.path,
+        method: options.method ?? 'POST',
+        headers: { host: options.host, 'content-type': 'application/json' },
+      },
+      (res) => {
+        /** @type {Buffer[]} */
+        const chunks = []
+        res.on('data', (chunk) => chunks.push(chunk))
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+        )
+      }
+    )
+    req.on('error', reject)
+    req.end('{}')
+  })
+}
+
+/**
+ * Write a raw request and resolve with its status line. Used for request
+ * lines and header values no HTTP client will build.
+ *
+ * @param {number} port
+ * @param {string} request
+ * @returns {Promise<string>}
+ */
+function rawRequestLine(port, request) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1')
+    let received = ''
+    socket.on('connect', () => socket.write(request))
+    socket.on('data', (chunk) => {
+      received += chunk.toString('utf8')
+      if (received.includes('\r\n')) {
+        socket.destroy()
+        resolve(received.split('\r\n')[0])
+      }
+    })
+    socket.on('error', reject)
+    // A Node that rejected the request at the parser would close with no status
+    // line at all, and waiting on `data` alone would hang the run.
+    socket.on('close', () =>
+      reject(new Error(`socket closed with no status line, got ${JSON.stringify(received)}`))
+    )
   })
 }
 
@@ -360,6 +422,195 @@ test('without a control handler, control paths fall through as unknown OTLP rout
   } finally {
     await s.close()
   }
+})
+
+// A page whose domain re-resolves to 127.0.0.1 is same-origin with this
+// listener, so it needs no preflight and the content-type gate above lets it
+// through; the attacker's name in `Host` is the one signal that separates it
+// from a local exporter.
+test('a Host naming anything but loopback is refused on every route, control surface included', async () => {
+  /** @type {string[]} */
+  const controlPaths = []
+  const s = await startServer({
+    onControlRequest(req, res, url) {
+      controlPaths.push(url.pathname)
+      req.resume()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    },
+  })
+  try {
+    for (const path of ['/v1/logs', '/v1/traces', '/v1/metrics', '/_hypaware/ignore/session']) {
+      const res = await requestWithHost(s.bound.port, { path, host: 'attacker.example' })
+      assert.equal(res.status, 421, `${path} refuses a rebound Host`)
+      assert.match(JSON.parse(res.body).message, /Host/)
+    }
+    assert.equal(s.seen.length, 0, 'no export reached the handler')
+    assert.deepEqual(controlPaths, [], 'no control request reached the handler')
+
+    // A GET of the banner is refused too: rebinding reads as easily as it writes.
+    const banner = await requestWithHost(s.bound.port, { path: '/', host: 'attacker.example', method: 'GET' })
+    assert.equal(banner.status, 421)
+  } finally {
+    await s.close()
+  }
+})
+
+test('loopback Hosts keep passing, with any port and in every spelling', async () => {
+  const s = await startServer()
+  try {
+    const hosts = [
+      `127.0.0.1:${s.bound.port}`,
+      '127.0.0.1',
+      '127.0.0.2:9999',
+      `localhost:${s.bound.port}`,
+      'LocalHost',
+      `[::1]:${s.bound.port}`,
+      '[::1]',
+      // What a wildcard bind advertises as its `listen_host`, and therefore
+      // what `hyp session ignore` addresses that recorder by. Refusing it
+      // would leave the opt-out unable to reach a listener whose exports
+      // keep flowing.
+      `0.0.0.0:${s.bound.port}`,
+      '[::]',
+    ]
+    for (const host of hosts) {
+      const res = await requestWithHost(s.bound.port, { path: '/v1/logs', host })
+      assert.equal(res.status, 200, `Host: ${host} still exports`)
+    }
+    assert.equal(s.seen.length, hosts.length)
+  } finally {
+    await s.close()
+  }
+})
+
+// A `Host` no hostname can be read out of is refused with the foreign ones.
+// Sent over a raw socket because an HTTP client will not put a space in a
+// header value.
+test('a malformed Host is refused rather than parsed', async () => {
+  const s = await startServer()
+  try {
+    const socket = net.connect(s.bound.port, '127.0.0.1')
+    const statusLine = await new Promise((resolve, reject) => {
+      let received = ''
+      socket.on('connect', () => {
+        socket.write(
+          'POST /v1/logs HTTP/1.1\r\nHost: attacker example\r\n' +
+            'Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}'
+        )
+      })
+      socket.on('data', (chunk) => {
+        received += chunk.toString('utf8')
+        if (received.includes('\r\n')) resolve(received.split('\r\n')[0])
+      })
+      socket.on('error', reject)
+      // A Node that rejected the header at the parser would close with no
+      // status line at all, and waiting on `data` alone would hang the run
+      // instead of failing it.
+      socket.on('close', () => reject(new Error(`socket closed with no status line, got ${JSON.stringify(received)}`)))
+    })
+    socket.destroy()
+    assert.equal(statusLine, 'HTTP/1.1 421 Misdirected Request')
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+// Node's HTTP parser hands the handler request targets `new URL` refuses
+// (`//[`, `http://[::1`), and the throw would leave an `async` handler with no
+// `unhandledRejection` handler anywhere in the repo behind it: one request line
+// would end the daemon. The `Host` is loopback here, so the check above passes
+// it through to the parser.
+test('a request target new URL rejects is answered 400, not thrown out of the handler', async () => {
+  const s = await startServer()
+  try {
+    for (const target of ['//[', 'http://[::1', '//[::1']) {
+      const line = await rawRequestLine(s.bound.port, `GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`)
+      assert.equal(line, 'HTTP/1.1 400 Bad Request', `GET ${target} is answered`)
+    }
+    // Still serving, which is the half a status code alone would not prove.
+    const banner = await fetch(`http://127.0.0.1:${s.bound.port}/`)
+    assert.equal(banner.status, 200)
+    assert.equal(s.seen.length, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('the Host check judges loopback connections only, and needs a Host to judge', () => {
+  /** @type {PluginLogger} */
+  const log = { debug() {}, info() {}, warn() {}, error() {} }
+  /** @param {string} localAddress @param {string} [host] */
+  const misdirected = (localAddress, host) =>
+    isMisdirectedHost(
+      /** @type {any} */ ({ socket: { localAddress }, headers: host === undefined ? {} : { host } }),
+      { name: 'hypaware/test', log }
+    )
+
+  assert.equal(misdirected('127.0.0.1', 'attacker.example'), true)
+  // How a dual-stack bind reports an IPv4 loopback peer. Still loopback.
+  assert.equal(misdirected('::ffff:127.0.0.1', 'attacker.example'), true)
+  assert.equal(misdirected('::1', 'attacker.example'), true)
+  // Bound to a routable address, the listener is meant to answer to whatever
+  // name resolves there, and a rebound request never lands on that address.
+  assert.equal(misdirected('203.0.113.5', 'collector.example'), false)
+  // A local address that cannot be read is not an exemption. Only a routable
+  // one is, so the unknown case is judged like a loopback one.
+  assert.equal(misdirected('', 'attacker.example'), true)
+  // No Host at all: HTTP/1.0 clients omit it and a browser never does.
+  assert.equal(misdirected('127.0.0.1'), false)
+
+  // A `Host` no hostname can be read out of is refused with the foreign ones,
+  // rather than half-read into a loopback name.
+  assert.equal(misdirected('127.0.0.1', '[::1'), true)
+  assert.equal(misdirected('127.0.0.1', '[::1]x'), true)
+  assert.equal(misdirected('127.0.0.1', '127.0.0.1:'), true)
+  assert.equal(misdirected('127.0.0.1', '127.0.0.1:80x'), true)
+  assert.equal(misdirected('127.0.0.1', 'localhost:1:2'), true)
+  assert.equal(misdirected('127.0.0.1', 'user@localhost'), true)
+})
+
+// The bound on the refusal line, which is the half of a refusal a rebound page
+// still controls: it chooses the `Host` and the rate, and the line lands in
+// `logs`.
+test('a refusal is always counted but logged at most once an interval, with the Host bounded', () => {
+  /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
+  const lines = []
+  /** @type {PluginLogger} */
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    warn(event, fields) {
+      lines.push({ event, fields: fields ?? {} })
+    },
+  }
+  // Bounded only by Node's header budget, which is not a bound worth writing
+  // a row against.
+  const host = `${'a'.repeat(400)}.example`
+  const refuse = () =>
+    isMisdirectedHost(
+      /** @type {any} */ ({ socket: { localAddress: '127.0.0.1' }, headers: { host } }),
+      // A listener name of its own: the tally is per listener and lives as long
+      // as the process, so sharing one with another test would couple the two.
+      { name: 'hypaware/refusal-bound', log }
+    )
+
+  assert.equal(refuse(), true)
+  assert.equal(refuse(), true)
+  assert.equal(refuse(), true)
+
+  // A page can send these as fast as it likes, so only the first is written:
+  // a line apiece would answer blocked row injection with unbounded row growth
+  // in `logs`.
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0]?.event, 'listener.host_refused')
+  assert.equal(lines[0]?.fields?.refused_total, 1)
+  // The one line that is written cannot carry an unbounded value either.
+  const logged = String(lines[0]?.fields?.host)
+  assert.equal(logged.length, 128)
+  assert.ok(host.startsWith(logged))
 })
 
 test('a listener can serve a subset of the signals', async () => {
