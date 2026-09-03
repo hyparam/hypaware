@@ -148,10 +148,11 @@ conclusion (pin `listen` to loopback or a wildcard) is right either way.
 
 *Resolved by issue #1291.* The README paragraph now scopes the pass-through to
 the openclaw writer and the `claude-desktop` install profile, and names the
-reachable failure on a specific routable bind: `ECONNREFUSED` against a
-loopback port nothing bound. The `403` it predicted is unreachable, because a
-proxy-mode client never connects from the routable interface in the first
-place.
+reachable failure on any bind that leaves nothing listening on `127.0.0.1` (a
+routable address, another loopback literal, or a hostname resolving to one):
+`ECONNREFUSED` against a loopback port nothing bound. The `403` it predicted
+is unreachable, because a proxy-mode client never connects from the routable
+interface in the first place.
 
 ## Consequences {#consequences}
 
