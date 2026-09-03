@@ -43,12 +43,9 @@ export const configSection = {
  * (`/Library/Managed Preferences/com.anthropic.claudefordesktop.plist`) as a
  * real local surface, so the manifest also declares `contributes.client`
  * (for `skill_dir`/`agent_dir`) and `contributes.picker` (LLP 0130). That
- * picker row is `hidden` (LLP 0297): onboarding never offers Claude Desktop,
- * because every route to a working Desktop capture runs through the sudo'd
- * plist write below, and a wizard checkbox is the wrong place to ask for it.
- * The row survives hidden so `hyp init --source claude-desktop`, the
- * reconfigure read-back, and the dataset-owner map keep working. This does
- * not reinstate generic
+ * picker row is a transcript-only choice (LLP 0358): onboarding composes the
+ * scheduled Claude reader and this plugin's ownership declaration, but never
+ * runs the sudo'd plist path below. This does not reinstate generic
  * attach-on-join (LLP 0044): the plugin registers no runtime `ctx.clients`
  * adapter, so the generic reconciler's `desired()` (`action_attach.js`) stays
  * inert for `claude-desktop` and the plist is placed only via the explicit
@@ -62,8 +59,9 @@ export const configSection = {
  * read or replay. Its state surface is `claude-desktop verify` and its undo is
  * removing the plist with sudo, not `hyp detach` (#444).
  *
+ * @ref LLP 0358#onboarding [implements]: activation and transcript ownership need no credential; legacy profile commands resolve that capability only when explicitly configured
  * @ref LLP 0115#no-attach-on-join [constrained-by]: no `attach_probe` - the LLP 0044 loop needs a reversible settings-file write, and the managed plist is not one; the probe that was declared here answered "not attached" over a $HOME-re-anchored path that never existed, and would have thrown MALFORMED_JSON over the real XML plist the moment that path was corrected (LLP 0135#no-probe)
- * @ref LLP 0133#attribution [constrained-by]: the client descriptor and picker row exist for wizard/asset plumbing, but captured rows still land under client_name "claude" with entrypoint "claude-desktop-3p"; query and hyp status surfaces key off entrypoint, not this descriptor's name
+ * @ref LLP 0133#attribution [constrained-by]: optional managed-profile traffic still lands under client_name "claude" with entrypoint "claude-desktop-3p"; scheduled transcript rows are reattributed to "claude-desktop" through the ownership declaration per LLP 0358
  * @param {PluginActivationContext} ctx
  */
 export async function activate(ctx) {
@@ -77,8 +75,17 @@ export async function activate(ctx) {
   // requiring the capability makes that dependency loud at activation.
   ctx.requireCapability('hypaware.ai-gateway', '^2.0.0')
 
-  /** @type {AnthropicCredentialCapability} */
-  const credential = ctx.requireCapability('hypaware.anthropic-credential', '^1.0.0')
+  // The credential belongs only to the optional managed-profile experiment.
+  // A normal Desktop selection intentionally omits its provider, so plugin
+  // activation and scheduled transcript ownership must survive its absence.
+  // The fallback keeps older activation harnesses that expose only
+  // `requireCapability` working while the real kernel uses `capabilities.has`.
+  /** @returns {AnthropicCredentialCapability | undefined} */
+  const resolveCredential = () => ctx.capabilities && typeof ctx.capabilities.has === 'function'
+    ? (ctx.capabilities.has('hypaware.anthropic-credential', '^1.0.0')
+        ? ctx.requireCapability('hypaware.anthropic-credential', '^1.0.0')
+        : undefined)
+    : ctx.requireCapability('hypaware.anthropic-credential', '^1.0.0')
 
   const sectionConfig = /** @type {Record<string, unknown>} */ (ctx.config ?? {})
   const stateDir = ctx.paths.stateDir
@@ -113,7 +120,12 @@ export async function activate(ctx) {
       + 'plist dict with --plist) for MDM distribution. The payload carries no secret: it references '
       + "the credential wrapper by absolute path. Run 'hyp client claude-desktop install-helper' first so the "
       + 'wrapper exists on disk.',
-    run: async (argv, cmdCtx) => runProfile(argv, cmdCtx, sectionConfig, credential, stateDir),
+    run: async (argv, cmdCtx) => {
+      const credential = resolveCredential()
+      return credential
+        ? runProfile(argv, cmdCtx, sectionConfig, credential, stateDir)
+        : credentialUnavailable(cmdCtx)
+    },
   })
 
   ctx.commands.register({
@@ -127,7 +139,12 @@ export async function activate(ctx) {
     help: 'Generates the executable wrapper that runs `hyp claude-account credential` with no '
       + 'arguments (Desktop runs the helper with no argv). Writes it under the plugin state dir by '
       + 'default, marked executable, outside any TCC-protected directory.',
-    run: async (argv, cmdCtx) => runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDir),
+    run: async (argv, cmdCtx) => {
+      const credential = resolveCredential()
+      return credential
+        ? runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDir)
+        : credentialUnavailable(cmdCtx)
+    },
   })
 
   ctx.commands.register({
@@ -146,12 +163,16 @@ export async function activate(ctx) {
       + 'what the inputs resolve to, not whether Desktop is configured. Exits nonzero when the '
       + 'credential wrapper is missing, and when the inputs do not resolve at all - an ephemeral '
       + "gateway listen (':0') has no stable port for a profile to point at.",
-    run: async (argv, cmdCtx) => runStatus(cmdCtx, sectionConfig, credential, stateDir),
+    run: async (_argv, cmdCtx) => {
+      const credential = resolveCredential()
+      return credential
+        ? runStatus(cmdCtx, sectionConfig, credential, stateDir)
+        : credentialUnavailable(cmdCtx)
+    },
   })
 
-  // `claude-desktop install` and `claude-desktop verify` are the picker's
-  // `configure_command` and the post-wizard verify hint (LLP 0135, LLP
-  // 0133#one-surface). The command bodies live in src/install.js and
+  // `claude-desktop install` and `claude-desktop verify` are optional legacy
+  // live-route controls (LLP 0135, LLP 0133#one-surface). The command bodies live in src/install.js and
   // src/verify.js; this registration just wires the resolved inputs
   // (sectionConfig, the credential capability, stateDir) through.
   ctx.commands.register({
@@ -174,7 +195,12 @@ export async function activate(ctx) {
       + 'own already-done state, so a bailed sudo prompt converges on re-run (LLP 0131#idempotent-rerun), '
       + 'and an already-configured machine is not re-prompted. --yes accepts the changes in advance; '
       + '--print-commands prints the privileged commands without running them.',
-    run: async (argv, cmdCtx) => runInstall(argv, cmdCtx, { sectionConfig, credential, stateDir }),
+    run: async (argv, cmdCtx) => {
+      const credential = resolveCredential()
+      return credential
+        ? runInstall(argv, cmdCtx, { sectionConfig, credential, stateDir })
+        : credentialUnavailable(cmdCtx)
+    },
   })
 
   ctx.commands.register({
@@ -189,10 +215,37 @@ export async function activate(ctx) {
       + 'and sets the exit code from it. Also prints the in-app half as a hint only (send a message in '
       + 'Claude Desktop, confirm it was captured); that half is never checked automatically and never '
       + 'blocks (LLP 0131#verify-is-a-hint).',
-    run: async (argv, cmdCtx) => runVerify(argv, cmdCtx, { sectionConfig, credential, stateDir }),
+    run: async (argv, cmdCtx) => {
+      const credential = resolveCredential()
+      return credential
+        ? runVerify(argv, cmdCtx, { sectionConfig, credential, stateDir })
+        : credentialUnavailable(cmdCtx)
+    },
   })
 
-  ctx.log.info('claude-desktop activated', { credential_mode: credential.mode })
+  // No credential_mode here. Dropping the capability from `requires` also
+  // dropped the only thing that ordered this plugin after
+  // `@hypaware/claude-account`, so an activation-time probe would report
+  // 'not_configured' on a machine where the credential is configured but
+  // listed later. The commands resolve it when they run, which is the only
+  // moment the answer is both needed and settled.
+  ctx.log.info('claude-desktop activated', { capture_mode: 'scheduled_transcript' })
+}
+
+/**
+ * The optional managed-profile commands are not the capture path. Keep their
+ * missing dependency local to the invoked command instead of failing plugin
+ * activation and disabling transcript ownership.
+ *
+ * @param {CommandRunContext} cmdCtx
+ * @returns {number}
+ */
+function credentialUnavailable(cmdCtx) {
+  cmdCtx.stderr.write(
+    'claude-desktop: managed-profile commands require @hypaware/claude-account; '
+    + 'scheduled transcript capture does not\n'
+  )
+  return 1
 }
 
 /**

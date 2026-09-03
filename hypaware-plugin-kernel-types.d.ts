@@ -2781,8 +2781,8 @@ export interface BackfillContribution {
    * T9's `backfill_sweep.js`), not a new mechanism: a contribution with no
    * `sweep` field is never ticked by the sweep driver, so this is
    * absent-by-default and zero behavior change for every provider that
-   * doesn't set it (Claude's and Codex's contributions today, and
-   * OpenClaw's own prior to LLP 0173). `cron` is a standard 5-field cron
+   * doesn't set it (Codex today, and Claude/OpenClaw before their scheduled
+   * transcript lanes). `cron` is a standard 5-field cron
    * expression, evaluated by `cronMatches` (`src/core/sinks/driver.js`),
    * the same schedule shape sinks already use.
    *
@@ -2840,6 +2840,8 @@ export interface BackfillPlanContext {
 
 export interface BackfillRunContext extends BackfillPlanContext {
   storage: QueryStorageService
+  /** True only for a daemon-scheduled provider pass. */
+  sweep?: boolean
   /**
    * When true, the runner expects the provider to scan and yield items
    * without performing irreversible side effects. The runner skips the
@@ -2927,4 +2929,8 @@ export interface BackfillMaterializeContext {
   storage: QueryStorageService
   /** Stable run id propagated from the CLI runner. */
   devRunId?: string
+  /** Opaque identity unique to one provider invocation. */
+  runToken?: object
+  /** True only for a daemon-scheduled provider pass. */
+  sweep?: boolean
 }

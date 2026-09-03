@@ -11,7 +11,8 @@ speculatively and discards the answer, so an enricher's `settle` must be free
 of observable side effects and idempotent); [LLP 0319](./0319-resettle-scan-failure-cooldown.decision.md)
 (#re-settle-sweep: the seeding scan that could not read its table is stamped on
 the cursor and retried on a cooldown, so the unknown answer costs one scan per
-window instead of one per tick)
+window instead of one per tick); LLP 0359 (#bounded-dedupe: scheduled
+backfill probes only candidate identities and isolates in-run state by token)
 
 ## Summary
 

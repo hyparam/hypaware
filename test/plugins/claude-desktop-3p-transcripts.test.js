@@ -43,6 +43,15 @@ function nestedSandboxProjectsDir(homeDir) {
   )
 }
 
+/** First-party layout observed on Desktop app 1.40609.1. */
+function firstPartySandboxProjectsDir(homeDir) {
+  return path.join(
+    homeDir, 'Library', 'Application Support', 'Claude',
+    'local-agent-mode-sessions', '99990000', '00000000', 'local_ghi789',
+    '.claude', 'projects', 'sandbox-outputs'
+  )
+}
+
 /**
  * @param {string} dir
  * @param {string} sessionId
@@ -121,13 +130,15 @@ async function collectItems(iterable) {
   return items
 }
 
-test('findDesktop3pProjectsDirs discovers nested .claude/projects under both container layouts', async () => {
+test('findDesktop3pProjectsDirs discovers nested .claude/projects under all Desktop layouts', async () => {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-discover-'))
   try {
     const sibling = siblingSandboxProjectsDir(homeDir)
     const nested = nestedSandboxProjectsDir(homeDir)
+    const firstParty = firstPartySandboxProjectsDir(homeDir)
     await fs.mkdir(sibling, { recursive: true })
     await fs.mkdir(nested, { recursive: true })
+    await fs.mkdir(firstParty, { recursive: true })
     // Decoys: a jsonl outside any .claude/projects (the sandbox's
     // audit.jsonl) must not create a discovered root.
     await fs.writeFile(
@@ -142,7 +153,7 @@ test('findDesktop3pProjectsDirs discovers nested .claude/projects under both con
     // (one level above the per-project subdir the transcript sits in).
     assert.deepEqual(
       found.sort(),
-      [path.dirname(sibling), path.dirname(nested)].sort()
+      [path.dirname(sibling), path.dirname(nested), path.dirname(firstParty)].sort()
     )
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
@@ -197,11 +208,11 @@ test('loadTranscript does not scan the 3p tree when the shared tree matches', as
   }
 })
 
-test('backfill imports a 3p sandbox session and attributes it to the configured owner', async () => {
+test('backfill imports a first-party sandbox session and attributes it to the configured Desktop owner', async () => {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-backfill-'))
   try {
     const filePath = await writeTranscriptAt(
-      siblingSandboxProjectsDir(homeDir), 'sess-3p', desktop3pRows('sess-3p')
+      firstPartySandboxProjectsDir(homeDir), 'sess-1p', desktop3pRows('sess-1p')
     )
     const provider = createClaudeBackfillProvider({
       homeDir,
@@ -220,7 +231,7 @@ test('backfill imports a 3p sandbox session and attributes it to the configured 
     assert.equal(items.length, 1)
     assert.equal(items[0]?.provenance?.client_name, 'claude-desktop')
     assert.equal(items[0]?.provenance?.source_path, filePath)
-    assert.equal(items[0]?.provenance?.native_id, 'sess-3p')
+    assert.equal(items[0]?.provenance?.native_id, 'sess-1p')
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }
@@ -236,11 +247,15 @@ test('backfill gates 3p sessions with absent or unclaimed entrypoints when Deskt
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-failopen-'))
   try {
     // One session whose lines never carry the field, one tagged with a value
-    // no plugin claims (the observed drift, 'local-agent' to 'local-agent-v2').
+    // no plugin claims (the observed drift, 'local-agent' to 'local-agent-v2'),
+    // and one under the current first-party Desktop root.
     const noEntrypoint = desktop3pRows('sess-noep').map(({ entrypoint, ...rest }) => rest)
     const drifted = desktop3pRows('sess-drift').map((r) => ({ ...r, entrypoint: 'local-agent-v2' }))
     await writeTranscriptAt(siblingSandboxProjectsDir(homeDir), 'sess-noep', noEntrypoint)
     await writeTranscriptAt(nestedSandboxProjectsDir(homeDir), 'sess-drift', drifted)
+    await writeTranscriptAt(
+      firstPartySandboxProjectsDir(homeDir), 'sess-1p', desktop3pRows('sess-1p')
+    )
     const provider = createClaudeBackfillProvider({
       homeDir,
       stateFile: path.join(homeDir, 'sc.jsonl'),
@@ -261,10 +276,10 @@ test('backfill gates 3p sessions with absent or unclaimed entrypoints when Deskt
 
     assert.equal(items.length, 0, 'nothing from the container is imported')
     const gated = entries.filter((e) => e.message === 'claude.backfill.entrypoint_not_configured')
-    assert.equal(gated.length, 2, 'both sessions are gated, whatever their tag')
+    assert.equal(gated.length, 3, 'all sessions are gated, whatever their tag or root layout')
     assert.ok(gated.every((e) => e.owner_plugin === '@hypaware/claude-desktop'))
     const complete = entries.find((e) => e.message === 'claude.backfill.scan_complete')
-    assert.equal(complete?.sessions_gated, 2)
+    assert.equal(complete?.sessions_gated, 3)
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }

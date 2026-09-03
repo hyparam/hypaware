@@ -309,6 +309,7 @@ export async function runBackfillPlan(argv, ctx) {
  *   since?: string,
  *   until?: string,
  *   devRunId?: string,
+ *   sweep?: boolean,
  * }} args
  * @returns {Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>}
  */
@@ -327,6 +328,7 @@ export async function runBackfillProvider(args) {
     since: args.since,
     until: args.until,
     dryRun,
+    sweep: args.sweep,
   })
   return {
     ok: result.status === 'ok',
@@ -370,11 +372,12 @@ function markProviderFailed(result, error) {
  *   since: string | undefined,
  *   until: string | undefined,
  *   dryRun: boolean,
+ *   sweep?: boolean,
  * }} args
  * @returns {Promise<BackfillProviderResult>}
  */
 async function runProvider(args) {
-  const { provider, ctx, devRunId, retentionDays, since, until, dryRun } = args
+  const { provider, ctx, devRunId, retentionDays, since, until, dryRun, sweep } = args
   /** @type {BackfillProviderResult} */
   const result = {
     provider: provider.name,
@@ -389,6 +392,12 @@ async function runProvider(args) {
 
   const log = createProviderLogger(provider.name, devRunId)
   const datasetsTouched = new Set()
+  // One opaque identity per provider invocation. Dataset materializers may
+  // keep in-run state in a WeakMap without keying it on a reusable diagnostic
+  // string or retaining it after this invocation becomes unreachable.
+  // @ref LLP 0359#bounded-dedupe [implements]: concurrent/nested runs get
+  //   isolated, automatically collectible materializer state
+  const runToken = {}
 
   return withSpan(
     'backfill.provider_start',
@@ -419,6 +428,7 @@ async function runProvider(args) {
         since,
         until,
         dryRun,
+        sweep,
         log,
         entrypointOwners: owners.entrypointOwners,
         isPluginConfigured: owners.isPluginConfigured,
@@ -483,6 +493,8 @@ async function runProvider(args) {
             devRunId,
             provider: provider.name,
             log,
+            runToken,
+            sweep,
           })
           if (!Array.isArray(rows) || rows.length === 0) {
             result.rows_skipped += 1
@@ -559,10 +571,12 @@ async function runProvider(args) {
  *   devRunId: string,
  *   provider: string,
  *   log: PluginLogger,
+ *   runToken: object,
+ *   sweep: boolean | undefined,
  * }} args
  */
 async function materializeItem(args) {
-  const { materializer, item, ctx, devRunId, provider, log } = args
+  const { materializer, item, ctx, devRunId, provider, log, runToken, sweep } = args
   return withSpan(
     'backfill.materialize',
     {
@@ -582,6 +596,8 @@ async function materializeItem(args) {
         log,
         storage: ctx.storage,
         devRunId,
+        runToken,
+        ...(sweep !== undefined ? { sweep } : {}),
       })
       return rows ?? []
     },
@@ -732,6 +748,7 @@ function handleEvent(args) {
  *   since?: string,
  *   until?: string,
  *   dryRun: boolean,
+ *   sweep?: boolean,
  *   log: PluginLogger,
  *   entrypointOwners?: EntrypointOwners,
  *   isPluginConfigured?: (plugin: PluginName) => boolean,
@@ -749,6 +766,7 @@ function buildRunContext(args) {
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
     ...(args.entrypointOwners !== undefined ? { entrypointOwners: args.entrypointOwners } : {}),
     ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
+    ...(args.sweep !== undefined ? { sweep: args.sweep } : {}),
     dryRun: args.dryRun,
     log: args.log,
   }
@@ -804,9 +822,9 @@ async function resolveOwnersForRun(ctx, log) {
  * `hyp init` boots the `all-available` profile, which by construction
  * omits every `V1_EXCLUDED_FROM_DEFAULT` plugin (`@hypaware/claude-desktop`
  * among them), and the picker cannot change an activation set that was
- * fixed at process start. So a user who ticked Claude Desktop, read the
- * consent explanation and accepted it got the plist written and then had
- * their Desktop history silently gated out of the finale's own backfill.
+ * fixed at process start. So a user who selected Claude Desktop could get the
+ * transcript plugins written to config and then have Desktop history silently
+ * gated out of the finale's own backfill.
  * That contradicts LLP 0139's "works end to end" and
  * LLP 0140#manifest-declares-ownership, which says the *effective plugin
  * list*, not the activated one.

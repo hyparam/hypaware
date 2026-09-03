@@ -1,7 +1,8 @@
 // @ts-check
 
 import { Attr, getLogger } from '../observability/index.js'
-import { runBackfillProvider } from '../commands/backfill.js'
+import { resolveRetentionDays, runBackfillProvider } from '../commands/backfill.js'
+import { readBackfillPolicy } from '../config/backfill_policy.js'
 import { cronMatches } from '../sinks/driver.js'
 
 // The sweep's telemetry identity: one pair on every record this driver emits,
@@ -16,7 +17,7 @@ const SWEEP_COMPONENT = 'backfill-sweep'
 const SWEEP_OPERATION = 'backfill.sweep'
 
 /**
- * @import { BackfillContribution } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { BackfillContribution, HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
  * @import {
  *   BackfillSweepDriver,
  *   BackfillSweepDriverOptions,
@@ -33,22 +34,22 @@ const SWEEP_OPERATION = 'backfill.sweep'
  * existing 60-second sink tick, evaluates each contribution's `sweep.cron`
  * against `now` with the same `cronMatches` the sink driver uses, and fires a
  * run for each due provider. A contribution with no `sweep` field is never
- * ticked, which is why adding this driver is zero behavior change for Claude's
- * and Codex's contributions.
+ * ticked.
  *
- * `tick()` resolves once every due provider's run has been *started*, not once
- * any of them finishes. Runs are fired unblocked: `runProvider`'s scan, materialize,
- * write and flush pass is unbounded in the size of a user's transcript tree, and
- * the tick it rides also refreshes source details and persists `status.json`.
- * Blocking on a sweep would stall those behind a provider's disk walk. The
- * fired promise is still handled, so a failing run is a logged
+ * `tick()` resolves once every due provider has been enqueued, not once any of
+ * them finishes. The queue runs providers serially in the background:
+ * `runProvider`'s scan, materialize, write and flush pass is unbounded in the
+ * size of a user's transcript tree, and the tick it rides also refreshes
+ * source details and persists `status.json`. Blocking on the queue would stall
+ * those behind a provider's disk walk. Every queued promise is still handled,
+ * so a failing run is a logged
  * `backfill.sweep_failed` record rather than an unhandled rejection that takes
  * the daemon process down.
  *
  * Not blocking is what makes the re-entrancy guard necessary: a provider whose
  * run outlives its own cron interval is due again while the first pass is still
- * running, so the driver tracks which providers are in flight and skips a due
- * one that already is.
+ * running or waiting in the queue, so the driver tracks which providers are in
+ * flight and skips a due one that already is.
  *
  * @ref LLP 0172#lane-b-sweep [implements]: the sweep rides the existing sink-tick cadence with `cronMatches` as its due-check, fires each due provider without blocking the tick, and never overlaps two runs of the same provider
  * @ref LLP 0170#decision [implements]: scheduling an existing job (the backfill provider) on the daemon's existing cron-matched loop, not building a new scheduling primitive
@@ -63,15 +64,22 @@ export function createBackfillSweepDriver(opts) {
   if (!query) throw new Error('createBackfillSweepDriver: query required')
   const runBackfill = opts.runBackfill ?? runBackfillProvider
   const log = getLogger('backfill-sweep')
+  // Due providers share the gateway materializer and backfill spool. Keep the
+  // daemon tick non-blocking, but serialize the background work itself so two
+  // same-cadence providers cannot replace each other's run-local state or
+  // scan/write the shared cache concurrently.
+  // @ref LLP 0359#serialized-providers [implements]: one background queue for
+  //   every scheduled provider, while tick() still resolves after enqueue
+  let queue = Promise.resolve()
 
   /**
-   * The providers whose fired run has not settled yet. Because `tick()` does
-   * not block on the run it fires, a provider whose pass outlives its own cron
-   * interval is due again while the previous one is still walking the
+   * The providers whose queued run has not settled yet. Because `tick()` does
+   * not block on the work queue, a provider whose pass outlives its own cron
+   * interval is due again while the previous one is waiting or walking the
    * transcript tree, and firing again would put two runs on the same datasets
    * and the same mid-flush spool. Neither `runBackfillProvider` nor
    * `runProvider` carries a lock of its own, so the guard belongs here, in the
-   * only place that knows a run was started. Same shape as the daemon's
+   * only place that knows a run was queued. Same shape as the daemon's
    * `maintenanceInFlight` (`src/core/daemon/runtime.js`), a set rather than a
    * single handle because this driver fires one run per provider.
    *
@@ -117,14 +125,21 @@ export function createBackfillSweepDriver(opts) {
         hyp_sweep_schedule: provider.sweep.cron,
         status: 'ok',
       })
-      // Fire-and-forget, with both settlements handled: `void` here means "not
-      // awaited", never "not observed".
-      void runBackfill({
-        ctx: { env, config: config ?? { version: 2 }, storage, query, backfills, backfillMaterializers },
+      const effectiveConfig = config ?? { version: 2 }
+      const pending = queue.then(() => runBackfill({
+        ctx: { env, config: effectiveConfig, storage, query, backfills, backfillMaterializers },
         provider: provider.name,
         dryRun: false,
         devRunId,
-      }).then(
+        retentionDays: sweepRetentionDays(provider, effectiveConfig),
+        sweep: true,
+      }))
+      // Keep the queue live after either settlement. `pending` itself retains
+      // the provider result for its telemetry handlers below.
+      queue = pending.then(() => undefined, () => undefined)
+      // Fire-and-forget, with both settlements handled: `void` here means "not
+      // awaited", never "not observed".
+      void pending.then(
         (result) => { inFlight.delete(provider.name); logSettled(provider, devRunId, result) },
         (err) => { inFlight.delete(provider.name); logFailed(provider, devRunId, err) }
       )
@@ -201,4 +216,25 @@ export function createBackfillSweepDriver(opts) {
   }
 
   return { tick }
+}
+
+/**
+ * Resolve the source-specific sweep window from its existing backfill policy,
+ * falling back to the cache retention contract used by manual backfill. Reads
+ * the policy block through `backfill_policy.js`, the kernel's single reader of
+ * it, so the schedule cannot disagree with the join-time reconciler about what
+ * a given `window_days` means.
+ *
+ * @ref LLP 0359#sweep-context [implements]: a positive `backfill.window_days` narrows that provider's sweep, else cache retention applies
+ * @param {BackfillContribution} provider
+ * @param {HypAwareV2Config} config
+ * @returns {number}
+ */
+function sweepRetentionDays(provider, config) {
+  const entry = config?.plugins?.find((plugin) =>
+    plugin?.name === provider.plugin && plugin.enabled !== false
+  )
+  const { windowDays } = readBackfillPolicy(entry)
+  if (windowDays !== undefined) return windowDays
+  return resolveRetentionDays({ flag: undefined, config })
 }

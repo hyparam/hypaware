@@ -227,6 +227,18 @@ function nativeProjection() {
   }
 }
 
+/** A second session, so one run materializes two distinct items. */
+function secondProjection() {
+  return {
+    ...nativeProjection(),
+    session_id: 'conv-dedupe-2',
+    messages: [
+      { role: 'user', content: 'hi again', message_id: 'n1', previous_message_id: [], message_created_at: '2026-05-01T00:00:03.000Z' },
+      { role: 'assistant', content: 'yo again', message_id: 'n2', previous_message_id: ['n1'], message_created_at: '2026-05-01T00:00:04.000Z' },
+    ],
+  }
+}
+
 /**
  * Minimal `QueryStorageService` double exposing only the partition-read
  * surface the dedupe feature-detects: one partition holding whatever has
@@ -265,10 +277,84 @@ function dedupeStorage(initial = []) {
   }
 }
 
-/** @param {any} storage @param {string} devRunId */
-function matCtx(storage, devRunId) {
-  return /** @type {any} */ ({ log: { debug() {}, info() {}, warn() {}, error() {} }, env: {}, storage, devRunId })
+/** @param {any} storage @param {string} devRunId @param {object} [runToken] */
+function matCtx(storage, devRunId, runToken) {
+  return /** @type {any} */ ({
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+    env: {},
+    storage,
+    devRunId,
+    ...(runToken ? { runToken } : {}),
+  })
 }
+
+// @ref LLP 0359#bounded-dedupe [tests]: a scheduled materialization probes
+// only the batch's session/key candidates and never opens the unrestricted
+// committed-row scan.
+test('backfill dedupe scopes committed reads to the candidate session and part ids', async () => {
+  let unrestrictedReads = 0
+  let targetedReads = 0
+  const storage = {
+    cacheRoot: '/tmp/fake-dedupe',
+    async discoverCachePartitions() {
+      return [{ dataset: 'ai_gateway_messages', partition: {}, path: '/tmp/fake-dedupe/p', epoch: 1, rowCount: 2 }]
+    },
+    async *readRows() {
+      unrestrictedReads++
+      yield { part_id: 'unrelated#0' }
+    },
+    async *readRowsWhere(_path, _columns, where) {
+      targetedReads++
+      assert.deepEqual(where, { session_id: ['conv-dedupe'] })
+      yield { part_id: 'm1#0' }
+      yield { part_id: 'm2#0' }
+    },
+    async *readSpooledRows() {},
+  }
+  const m = aiGatewayBackfillMaterializer()
+  const rows = await m.materialize(item(nativeProjection()), matCtx(storage, 'run-targeted', {}))
+  assert.deepEqual(rows, [])
+  assert.equal(targetedReads, 1)
+  assert.equal(unrestrictedReads, 0)
+})
+
+// @ref LLP 0359#bounded-dedupe [tests]: the spool half of the dedupe is one
+// snapshot per run, not one scan per item. `readSpooledRows` streams the whole
+// spool and cannot stop early, and the spool grows with the run's own appends,
+// so a per-item scan costs O(items x spool) reads.
+test('backfill dedupe snapshots the spool once per run and reuses it', async () => {
+  const m = aiGatewayBackfillMaterializer()
+  const base = dedupeStorage()
+  base.spool([{ part_id: 'm1#0' }, { part_id: 'm2#0' }, { part_id: 'n1#0' }, { part_id: 'n2#0' }])
+  let spoolReads = 0
+  const storage = /** @type {any} */ ({
+    ...base,
+    async *readSpooledRows() {
+      spoolReads += 1
+      yield* base.readSpooledRows()
+    },
+  })
+
+  const token = {}
+  assert.deepEqual(await m.materialize(item(nativeProjection()), matCtx(storage, 'one-run', token)), [])
+  assert.deepEqual(await m.materialize(item(secondProjection()), matCtx(storage, 'one-run', token)), [])
+  assert.equal(spoolReads, 1, 'one spool scan for the run, whatever the item count')
+  // The second item still deduped, so the reuse is the snapshot, not a skip.
+  assert.deepEqual(await m.materialize(item(nativeProjection()), matCtx(storage, 'next-run', {})), [])
+  assert.equal(spoolReads, 2, 'a new run token takes a fresh snapshot')
+})
+
+// The token, not a process-wide current run id, owns in-run emitted keys.
+// Two callers may reuse a diagnostic run id without sharing dedupe state.
+test('backfill dedupe isolates in-run state by opaque run token', async () => {
+  const m = aiGatewayBackfillMaterializer()
+  const storage = dedupeStorage()
+  const tokenA = {}
+  const tokenB = {}
+  assert.equal((await m.materialize(item(nativeProjection()), matCtx(storage, 'same-label', tokenA))).length, 2)
+  assert.deepEqual(await m.materialize(item(nativeProjection()), matCtx(storage, 'same-label', tokenA)), [])
+  assert.equal((await m.materialize(item(nativeProjection()), matCtx(storage, 'same-label', tokenB))).length, 2)
+})
 
 test('backfill dedupe: a clean rerun writes zero new rows', async () => {
   const m = aiGatewayBackfillMaterializer()

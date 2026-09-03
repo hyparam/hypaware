@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-19
 **Related:** LLP 0202 (#hidden-rows: the display filter this reuses, #carry-through: the rule this narrows), LLP 0133 (#solo-sudo, #dialog-residue: what the row's setup actually does), LLP 0131 (the configure phase the row drove), LLP 0139 (#repair-must-be-runnable: the standalone command this makes the only entry), LLP 0130 (#picker-block, #configure-command), LLP 0011 (#autodetect-vs-default), LLP 0224 (#ask-once-per-pick)
+**Superseded-by:** LLP 0358 (Desktop returns as a transcript-only picker row with no setup command)
 
 > Extends [LLP 0202 §hidden-rows](./0202-hidden-picker-rows.decision.md#hidden-rows):
 > `claude-desktop` sets `hidden: true`, so "`raw-anthropic` and `raw-openai`

@@ -1008,9 +1008,9 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
  * The activation set is fixed at boot, but the wizard writes its composed
  * config mid-process: `hyp init` boots `all-available`, which by
  * construction never activates a `V1_EXCLUDED_FROM_DEFAULT` plugin, so a
- * picked row whose `configure_command` lives in one (Claude Desktop) missed
- * dispatch and drop-on-failure ate the consent prompt the command exists to
- * show. Same staleness class as the entrypoint gate's fix: only a fresh
+ * picked row whose `configure_command` lives in one could miss dispatch and
+ * drop-on-failure could eat the consent prompt the command exists to show.
+ * Same staleness class as the entrypoint gate's fix: only a fresh
  * read of the config reflects a write that happened after boot.
  *
  * On a registry miss for `name`, re-read the effective config from disk and,

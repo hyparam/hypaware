@@ -158,6 +158,7 @@ export async function activate(ctx) {
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
       localOnlyListPath: localOnlyList,
+      config: ctx.config,
     })
   )
 

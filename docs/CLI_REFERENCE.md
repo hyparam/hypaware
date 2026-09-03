@@ -626,40 +626,56 @@ hyp client claude-account status
 
 ### Claude Desktop commands
 
-Plugin: `@hypaware/claude-desktop`. These commands require macOS where noted,
-an active local gateway capability, and the Claude account credential
-capability.
+Plugin: `@hypaware/claude-desktop`.
 
-`hyp init` does not offer Claude Desktop (LLP 0297): its setup is a browser
-sign-in plus a `sudo` write to a root-owned system file, which is not
-something a first-run checklist should ask for. The plugin is not activated by
-default either, so these commands register only once the config names it - on
-a config that does not, `hyp` reports which plugin owns the command and how to
-add it. The whole set Desktop capture needs is:
+Desktop capture is transcript-only by default (LLP 0358). Select Claude
+Desktop in `hyp init`; the daemon reruns the Claude history provider every
+five minutes. This needs no Claude account credential and makes no changes to
+the Desktop app.
+
+Selecting Claude Desktop also enables Claude Code capture: the capture set
+below includes `@hypaware/claude`, the shared transcript reader, so a
+Desktop-only selection imports existing Claude Code CLI history from
+`~/.claude/projects` under `client_name = 'claude'` and may attach Claude
+Code by updating `~/.claude/settings.json`. Set `attach.on_join: false` on
+the `@hypaware/claude` entry to withhold the attach; `backfill.on_join:
+false` (below) withholds the history import.
+
+The resulting config has this capture set:
 
 ```json
 {
   "plugins": [
-    { "name": "@hypaware/ai-gateway", "config": { "upstreams": [
-      { "name": "anthropic", "base_url": "https://api.anthropic.com",
-        "path_prefix": "/v1/messages", "provider": "anthropic" }
-    ] } },
-    { "name": "@hypaware/claude-account", "config": { "mode": "subscription" } },
+    { "name": "@hypaware/ai-gateway", "config": { "upstreams": [] } },
+    { "name": "@hypaware/claude" },
     { "name": "@hypaware/claude-desktop" }
   ]
 }
 ```
 
-`@hypaware/claude-account` is not optional: it provides the
-`hypaware.anthropic-credential` capability `@hypaware/claude-desktop`
-requires, and without it the adapter fails activation and its commands never
-register. Merge those entries into the `plugins[]` already in
-`~/.hyp/hypaware-config.json`, restart the daemon, then run:
+Tune the timer in the Claude plugin config if needed:
 
-```sh
-hyp client claude-desktop install
-hyp client claude-desktop verify
+```json
+{ "name": "@hypaware/claude", "config": {
+  "backfill": { "sweep_cron": "*/10 * * * *" }
+} }
 ```
+
+To turn the schedule off, set the same block's `on_join` to false. That is the
+existing opt-out from automatic history import, and it now withholds the
+scheduled rerun as well as the join-time one; `sweep_cron` chooses a cadence
+and has no "never" value.
+
+```json
+{ "name": "@hypaware/claude", "config": {
+  "backfill": { "on_join": false }
+} }
+```
+
+The subcommands below operate the older managed third-party-inference route.
+They are optional experiments, not prerequisites for transcript capture. They
+require `@hypaware/claude-account`; without that capability they return a
+repair message while the scheduled transcript lane continues normally.
 
 ```text
 hyp client claude-desktop <subcommand> [args...]
@@ -671,7 +687,7 @@ hyp client claude-desktop <subcommand> [args...]
 hyp client claude-desktop install [--yes] [--print-commands]
 ```
 
-Runs the attended macOS setup: explains the changes, signs in if needed,
+Optionally runs the attended macOS live-route setup: explains the changes, signs in if needed,
 writes the credential helper, backs up and clears stale dialog residue, writes
 the root-owned managed-preferences property list through `sudo`, and asks you
 to restart Claude Desktop. It is resumable and idempotent.

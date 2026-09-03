@@ -101,24 +101,27 @@ for (const row of ['raw-anthropic', 'raw-openai']) {
   })
 }
 
-// The real machine change (managed plist, helper write, residue clear) sits
-// behind `needs_setup: true` + `configure_command: "claude-desktop install"`,
-// and that command explains and asks - defaulting to yes, naming the
-// browser sign-in a yes may launch - before touching anything
-// (`claude-desktop/src/install.js`, @ref LLP 0139#informed-consent as
-// amended). The reassurance is load-bearing on a row whose other clause
-// ("admin approval") reads as a sudo ambush without it.
-test('claude-desktop picker summary keeps the asks-before-changing reassurance', async () => {
+// @ref LLP 0358#onboarding [tests]: selecting transcript capture must not
+// imply the optional credential/plist experiment runs behind the checkbox.
+test('claude-desktop picker summary states that capture makes no Desktop changes', async () => {
   const summary = await pickerSummary('claude-desktop', 'claude-desktop')
-  assert.match(summary, /asks before changing anything/i)
+  assert.match(summary, /makes no changes to Claude Desktop/i)
+  assert.match(summary, /needs no sign-in or admin approval/i)
 })
 
-// `claude-desktop`'s row sets `requires_gateway` *with* a `gateway_upstream`
-// (`claude-desktop/hypaware.plugin.json` compose), composed as soon as the
-// row is picked, independent of whether the `needs_setup` configure_command
-// has run. Same side-effect class as `claude`, `otel`, and
-// `raw-anthropic`/`raw-openai` above; this row carries no adapter besides
-// the picker summary to disclose it.
+// @ref LLP 0358#claude-code-consequences [tests]: a Desktop-only pick also
+// captures Claude Code, and the row must admit it before selection (PR #1231
+// B1, resolved by disclosure: keep the composition, state it plainly).
+test('claude-desktop picker summary discloses the Claude Code capture, history import, and attach', async () => {
+  const summary = await pickerSummary('claude-desktop', 'claude-desktop')
+  assert.match(summary, /Claude Code capture/i)
+  assert.match(summary, /Claude Code CLI history/i)
+  assert.match(summary, /attach Claude Code/i)
+})
+
+// The shared ai-gateway plugin supplies the backfill materializer and also
+// binds its listener, so the transcript-only row still discloses that local
+// side effect even though no Desktop traffic is redirected through it.
 test('claude-desktop picker summary discloses that a local gateway listener is started', async () => {
   const summary = await pickerSummary('claude-desktop', 'claude-desktop')
   assert.match(summary, /starts a local gateway listener/i)

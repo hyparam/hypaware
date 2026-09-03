@@ -626,9 +626,9 @@ function safeParseJson(value) {
  * @returns {BackfillMaterializerContribution}
  */
 export function aiGatewayBackfillMaterializer() {
-  // The materializer instance is created once at plugin activation and
-  // reused for every `hyp backfill` invocation in the process, so the
-  // dedupe state is scoped per run id (see createBackfillDedupe).
+  // The materializer instance is created once at plugin activation and reused
+  // for every invocation. The dedupe state is isolated by the runner's opaque
+  // run token and becomes collectible with that token.
   const dedupe = createBackfillDedupe()
   return {
     kind: AI_GATEWAY_PROJECTED_EXCHANGE_KIND,
@@ -653,28 +653,34 @@ export function aiGatewayBackfillMaterializer() {
 /**
  * Build the per-run pre-write dedupe used by the backfill materializer.
  *
- * The seen-`part_id` set is rebuilt whenever `ctx.devRunId` changes: all
- * items in one backfill run share a single scan of the already-committed
- * partitions, and every emitted batch folds its own keys back in so two
- * items in the same run that resolve to the same `part_id` (transitional
- * fixtures, fallback-id collisions, a re-yielded conversation) also
- * dedupe against each other. A later run carries a fresh run id, so it
- * re-scans and observes the prior run's now-committed rows, which is
- * what makes a clean rerun write zero new rows.
+ * Every item probes the committed partitions only for its own candidate part
+ * ids and session ids. Emitted keys are also folded into an in-run set so a
+ * re-yielded item is skipped before it reaches the writer. That set and the
+ * spool snapshot below are both keyed by the runner's opaque token in a
+ * WeakMap, not by a process-wide current run id, so concurrent callers cannot
+ * replace each other and completed runs are not retained.
  *
- * The seen-set is seeded from two sources: the committed (flushed)
- * Iceberg partitions AND the rows still pending in the spool (captured
- * live but not yet flushed, issue #107). Without the spool scan, backfill
- * re-materializes its own copy of an unflushed live row and the spool
- * later flushes its copy, leaving two rows with the same `part_id`. The
- * spool scan is BACKFILL-ONLY (see scanSpooledPartIds); the flush-time
+ * The rows still pending in the spool (captured live but not yet flushed,
+ * issue #107) are folded in too. Without them, backfill re-materializes its
+ * own copy of an unflushed live row and the spool later flushes its copy,
+ * leaving two rows with the same `part_id`. That scan is taken ONCE per run:
+ * `readSpooledRows` streams the whole spool and cannot stop early the way the
+ * committed scan can, and the spool grows with the run's own appends until
+ * the closing flush, so probing it per item costs O(items x spool) reads. The
+ * snapshot is bounded by the spool at run start and dies with the run token.
+ * The spool scan is BACKFILL-ONLY (see scanSpooledPartIds); the flush-time
  * settle path must never fold spool rows into its seen-set.
  *
  * @returns {{ skipExisting(rows: Record<string, unknown>[], ctx: BackfillMaterializeContext | undefined): Promise<Record<string, unknown>[]> }}
  */
 function createBackfillDedupe() {
-  /** @type {{ runId: string | undefined, seen: Set<string> } | undefined} */
-  let memo
+  /** @type {WeakMap<object, { seen: Set<string>, spooled: Set<string> | undefined }>} */
+  const stateByRun = new WeakMap()
+  // Compatibility for direct/older callers that do not supply a token. Keep
+  // only the current diagnostic run so this path cannot retain historical
+  // candidate sets. Production runners always take the WeakMap path.
+  /** @type {{ runId: string, state: { seen: Set<string>, spooled: Set<string> | undefined } } | undefined} */
+  let legacyMemo
 
   return {
     async skipExisting(rows, ctx) {
@@ -684,16 +690,20 @@ function createBackfillDedupe() {
       // method, so dedupe is skipped and every row passes through.
       if (rows.length === 0 || !canScanExistingRows(storage)) return rows
 
-      const runId = ctx?.devRunId
-      if (!memo || memo.runId !== runId) {
-        const seen = await scanExistingPartIds(storage)
-        // Fold in part_ids pending in the spool so backfill does not
-        // re-materialize a row that was captured live and is still waiting
-        // to flush. Opt-in to the backfill path only (see scanSpooledPartIds).
-        await scanSpooledPartIds(storage, seen)
-        memo = { runId, seen }
+      const resolved = runDedupeState(ctx, stateByRun, legacyMemo)
+      legacyMemo = resolved.legacyMemo
+      const state = resolved.state
+      // Once per run, never once per item: see this function's doc comment.
+      // Items of one run are materialized in sequence, so the first item pays
+      // for the snapshot and the rest reuse it.
+      if (!state.spooled) {
+        const snapshot = new Set()
+        await scanSpooledPartIds(storage, snapshot)
+        state.spooled = snapshot
       }
-      const seen = memo.seen
+      const spooled = state.spooled
+      const seen = state.seen
+      const stored = await scanExistingPartIds(storage, partIdKeys(rows), batchSessionIds(rows))
 
       /** @type {Record<string, unknown>[]} */
       const fresh = []
@@ -704,13 +714,51 @@ function createBackfillDedupe() {
           fresh.push(row)
           continue
         }
-        if (seen.has(key)) continue
+        if (stored.has(key) || spooled.has(key) || seen.has(key)) continue
         seen.add(key)
         fresh.push(row)
       }
       return fresh
     },
   }
+}
+
+/**
+ * @param {Record<string, unknown>[]} rows
+ * @returns {Set<string>}
+ */
+function partIdKeys(rows) {
+  const keys = new Set()
+  for (const row of rows) {
+    const key = partIdKey(row)
+    if (key !== undefined) keys.add(key)
+  }
+  return keys
+}
+
+/**
+ * The state one run accumulates: the ids it has already emitted, and its
+ * once-per-run spool snapshot (undefined until the first item takes it).
+ *
+ * @param {BackfillMaterializeContext | undefined} ctx
+ * @param {WeakMap<object, { seen: Set<string>, spooled: Set<string> | undefined }>} stateByRun
+ * @param {{ runId: string, state: { seen: Set<string>, spooled: Set<string> | undefined } } | undefined} legacyMemo
+ * @returns {{ state: { seen: Set<string>, spooled: Set<string> | undefined }, legacyMemo: { runId: string, state: { seen: Set<string>, spooled: Set<string> | undefined } } | undefined }}
+ */
+function runDedupeState(ctx, stateByRun, legacyMemo) {
+  if (ctx?.runToken) {
+    let state = stateByRun.get(ctx.runToken)
+    if (!state) {
+      state = { seen: new Set(), spooled: undefined }
+      stateByRun.set(ctx.runToken, state)
+    }
+    return { state, legacyMemo }
+  }
+  const runId = ctx?.devRunId ?? 'legacy'
+  if (!legacyMemo || legacyMemo.runId !== runId) {
+    legacyMemo = { runId, state: { seen: new Set(), spooled: undefined } }
+  }
+  return { state: legacyMemo.state, legacyMemo }
 }
 
 /**
@@ -770,8 +818,9 @@ const MAX_SCOPED_SESSION_IDS = 200
  * `restrictTo` bounds the result: only keys in that set are collected,
  * and the scan stops early once all of them have been found. The
  * flush-time settle passes its batch keys here so a steady-state flush
- * holds O(batch) memory; backfill omits it because its per-run memo
- * legitimately needs the full committed set (see createBackfillDedupe).
+ * holds O(batch) memory. Backfill now passes the same candidate restriction;
+ * its in-run emitted-id set is separate and never needs the full committed
+ * identity set (LLP 0359).
  *
  * `sessionIds` scopes hot-path reads to the batch's exact sessions. The cache
  * is sorted by `session_id`, so Iceberg can prune unrelated files while the
@@ -891,8 +940,10 @@ async function collectPartIds(storage, tablePath, sessionIds, seen, restrictTo) 
  *   rows in the materializer (not the settle path).
  *
  * `restrictTo`, when supplied, keeps only the keys of the batch in hand
- * (the live-producer caller, `dedupeStoredPartIds`); backfill omits it
- * because its per-run memo legitimately needs every spooled key.
+ * (the live-producer caller, `dedupeStoredPartIds`). Backfill omits it and
+ * takes one unrestricted snapshot per run instead: this scan streams the
+ * whole spool whatever `restrictTo` says, so restricting it would buy a
+ * smaller Set at the price of re-reading the spool once per item.
  *
  * @param {QueryStorageService} storage
  * @param {Set<string>} seen
