@@ -9,7 +9,7 @@
 **Related:** LLP 0032, LLP 0049, LLP 0050, LLP 0069, LLP 0083, LLP 0121,
 LLP 0151, LLP 0160;
 hyparam/hypaware#1189, hyparam/hypaware#492, hyparam/hypaware#481,
-hyparam/hypaware#476, PR #477, PR #1076;
+hyparam/hypaware#476, PR #477, PR #1076, PR #1198;
 hyparam/hypaware-server#413 (server LLP 0327, out of tree)
 
 > The Codex live projector may stamp `git_remote` from a `workspaces` key it
@@ -101,6 +101,14 @@ So the trade LLP 0083 recorded was priced when the leak was decoration. Nothing
 about the projector has drifted; the buyer is changing.
 
 ## Verified behaviour {#evidence}
+
+**This reproduction is pre-#1198 and no longer reproduces as written.** Option
+(F) has since landed (see [§options](#options)), so on the shape below a
+covering key is now selected and the row carries `acme/clean`. It reproduces
+unchanged on the **subscription** route, where no in-band `cwd` is stated: see
+the second bullet of the landing note in [§options](#options). Kept as written
+because the argument this document makes rests on it and because the
+subscription half is still live.
 
 Reproduced against `origin/master` at `b70026f6` by executing the real projector
 and the real shared matcher (`createUsagePolicyResolver`), with a governing
@@ -256,6 +264,56 @@ disturb what LLP 0083 settled, which is the **rank** of the sources for the
 therefore plausibly a defect fix rather than a design change, and the human
 answering this document should say whether it is: if it is, it can land ahead
 of the choice among (A)-(E) and shrink what that choice has to cover.
+
+**(F) has landed, and it left more than the paragraph above says.** It landed
+as PR #1198 on the reading that it is a defect fix, the ground being
+[LLP 0160 §context](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#context)'s
+record of what LLP 0083 did and did not settle: *"It named the signal and its
+`error_kind`; it did not state the predicate, which lived only in the code"*.
+The predicate is the only thing (F) changes. **Three** residuals survive it, and
+all three are inside the (A)-(E) question rather than beside it:
+
+- the one the paragraph above names, where **no** key covers the `cwd`, the
+  first is still substituted, and it still enriches;
+- **the whole ChatGPT-subscription route**, which is the larger half and which
+  the paragraph above does not name at all. `selectCodexWorkspace` is called
+  with the *in-band* `cwd`, which that route never states, so the `cwd &&` guard
+  the paragraph above correctly insists on also means the covering test never
+  runs there: the first key is selected even when a covering key is in the same
+  map, the row is admitted on the **rollout** `cwd`, and it carries the first
+  key's remote with **no** `refused_workspace_cwd`, because that signal is
+  computed from the in-band value too. Verified against the merged projector,
+  the real `createUsagePolicyResolver`, and a rollout resolver, on
+  [§evidence](#evidence)'s own workspace map: `cwd = /work/clean/sub` from the
+  rollout, `git_remote = https://github.com/acme/SECRET.git`,
+  `attributes.codex.workspace = /work/ignored/secret-proj`, no warn. This is
+  [§evidence](#evidence)'s second bullet arriving on the selection side: closing
+  it means running the predicate against the rollout `cwd`, which is the half
+  every option has to price separately;
+- a key that **does** cover the `cwd` and yet itself resolves `ignore`. A
+  covering key is an *ancestor* of the `cwd`, and nearest-governs is not
+  monotone down that chain
+  ([LLP 0160 §decision](./0160-workspace-cwd-refusal-is-an-ancestor-test.decision.md#decision)),
+  so an ancestor marked `ignore` with a nested loosening at or under the `cwd`
+  still enriches the admitted row with its remote, and, because it covers, does
+  so with **no** `refused_workspace_cwd` at all. This is the one shape in which
+  (F) **widens** the leak rather than only de-randomising it. Where the ignored
+  ancestor already sorted first, `master` produced the identical row; where a
+  **non**-covering key sorted first, `master` enriched from that key and
+  warned. Verified both ways (`ignore` at `/work/outer`, `local-only` at
+  `/work/outer/proj`, `cwd = /work/outer/proj/sub`): with `/work/clean` listed
+  first, `master` stamps `acme/clean` plus a `refused_workspace_cwd` warn and
+  (F) stamps `acme/SECRET` with none. Withholding it is option (C), which costs
+  the second usage-policy resolution
+  ([LLP 0049 R6](./0049-hypignore-usage-policy.spec.md#requirements)) does not
+  budget for, so (F) records the case and leaves it to this document rather
+  than taking (C) by the back door.
+
+So (F) removes the **in-band** half of the class where a covering key exists,
+not the class, and in the third case above it moves one narrow shape the other
+way. What (A)-(E) must price is "a **guessed or `ignore`-resolving** key
+enriches, on a route where the covering test may never have run". This
+paragraph records verified behaviour of the code and takes none of the options.
 
 ## What this document decides {#decides}
 

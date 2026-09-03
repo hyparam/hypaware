@@ -1086,13 +1086,14 @@ function codexClientFromUserAgent(userAgent) {
 
 /**
  * @param {Record<string, unknown> | undefined} metadata
+ * @param {string | undefined} cwd
  * @returns {{ path: string, info?: Record<string, unknown> } | undefined}
  */
 function selectCodexWorkspace(metadata, cwd) {
   const workspaces = readKey(metadata, 'workspaces')
   if (!isPlainObject(workspaces)) return undefined
   const workspacePaths = Object.keys(workspaces).filter((key) => key.length > 0)
-  const workspacePath = workspacePaths.find((key) => pathsEqual(key, cwd)) ?? workspacePaths[0]
+  const workspacePath = nearestCoveringWorkspace(workspacePaths, cwd) ?? workspacePaths[0]
   if (!workspacePath) return undefined
   const info = readKey(workspaces, workspacePath)
   return {
@@ -1323,7 +1324,9 @@ function resolveRequestId(input) {
  * an ancestor of it, i.e. whether the key was ever a *guess about where the
  * session ran* rather than a less specific name for the same tree.
  *
- * This is the predicate behind `refused_workspace_cwd`, and it is deliberately
+ * This is the predicate behind `refused_workspace_cwd` and, since #1189, behind
+ * *selection* as well (`nearestCoveringWorkspace`), which is what stops the two
+ * sides disagreeing about what "matches" means. It is deliberately
  * not byte-equality. When the key is an ancestor of the in-band `cwd` it names
  * the same tree, less specifically, and the `cwd` is strictly the better answer
  * to the question the key stood in for; under the resolver's nearest-governs
@@ -1354,8 +1357,13 @@ function resolveRequestId(input) {
  * with `realpath` syscalls this per-exchange seam must not spend (LLP 0049 R6).
  * So this compares paths, not directories, in both directions: a symlinked
  * spelling of one tree reads as a refusal, and a lexical descendant that is
- * really a symlink out of the key's tree reads as covered. Reporting-only, and
- * the gate itself still resolves over every spelling.
+ * really a symlink out of the key's tree reads as covered. The gate itself
+ * still resolves over every spelling, so no verdict turns on this. Selection
+ * now does, which is new since #1189 and is the reason this paragraph no longer
+ * says "reporting-only": where the `cwd` and a key spell one tree differently,
+ * nothing covers, selection falls back to the first key, and the #1189 leak
+ * survives at that spelling. Knowingly retained, for the hot-path reason above
+ * (LLP 0160#decision retains it here; #479 is closed only at the gate).
  *
  * @ref LLP 0069#requirements [implements]: R8, the one shared equal-or-descendant
  * test, never a second copy of the path rule
@@ -1370,12 +1378,108 @@ function workspaceCoversCwd(workspacePath, cwd) {
 }
 
 /**
- * @param {string} candidate
- * @param {string | undefined} wanted
+ * The `workspaces` key that best accounts for `cwd`: the longest one the `cwd`
+ * is equal to or nested under, or `undefined` when none covers it.
+ *
+ * Selection and the refusal predicate used to disagree about what "matches"
+ * means. Selection asked for byte equality (a since-removed `pathsEqual`) while
+ * `workspaceCoversCwd` refuses on equal-or-descendant, so a key that genuinely
+ * contained the `cwd` could still lose to whichever key the JSON object
+ * happened to list first. The row was then enriched
+ * (`attributes.codex.workspace`, `git_remote`, `head_sha`) from an unrelated
+ * tree while the projector simultaneously reported that same substitution as
+ * refused. When the first-listed key named a `.hypignore`-ignored tree, an
+ * admitted row carried the ignored repository's remote although a covering key
+ * was sitting in the same map (#1189). Running the one equal-or-descendant rule
+ * on both sides removes every case where a covering key existed and lost.
+ *
+ * It does not remove every ignored-tree remote, and the residue is worth
+ * stating rather than reading "whole class" for it. Besides the substitution
+ * LLP 0083 priced, where no key covers the `cwd` at all (the `@ref` below), two
+ * further cases survive, and neither is created here.
+ *
+ * The larger one is the whole **subscription route**. The `cwd` passed in is the
+ * in-band one, which that route never states, so the guard below returns
+ * `undefined` and the first key is selected even when a covering key is sitting
+ * in the map: the row is admitted on the *rollout* `cwd` and still carries the
+ * first key's remote, and, because `refused_workspace_cwd` is also computed from
+ * the in-band value, with no warn either. This fix therefore covers the in-band
+ * half of #1189 only. Reaching the other half means running the predicate
+ * against the rollout `cwd`, which LLP 0350#evidence names as the open half of
+ * every option and LLP 0083#workspace-key-ranks-last leaves silent on purpose,
+ * so it is not a selection defect to fix here.
+ *
+ * The smaller one: a covering key is an ancestor of the `cwd`, and
+ * nearest-governs is not monotone down that chain (`LLP 0160#decision`), so an
+ * ancestor that itself resolves `ignore` under a nested loosening still enriches
+ * the admitted row, and, because it does cover, does so with no
+ * `refused_workspace_cwd`. This one is NOT merely de-randomised, and calling it
+ * that understates it: where the ignored ancestor already sorted first,
+ * `master` produced the identical row, but where a NON-covering key sorted
+ * first `master` enriched from that key and warned, so in those orderings the
+ * row is new here and the warn is gone with it. Verified both ways (`ignore`
+ * at `/work/outer`, `local-only` at `/work/outer/proj`, cwd
+ * `/work/outer/proj/sub`): with `/work/clean` listed first, `master` stamps
+ * `acme/clean` and warns, this stamps `acme/SECRET` and does not. Accepted
+ * rather than overlooked: withholding it is LLP 0350 (C), which costs a second
+ * usage-policy resolution per exchange that LLP 0049 R6 does not budget for,
+ * and the remote it now names is at least the tree the session ran in.
+ *
+ * Both are the enrichment question LLP 0350 (B)/(C) is open on, so both are
+ * deliberately left unpinned by a test: pinning them would be the accepted-test
+ * problem LLP 0350#consequences already warns (B) about.
+ *
+ * Longest-wins rather than first-covering, because `workspaces` may declare
+ * nested trees: for a `cwd` of `/work/proj/sub` with both `/work` and
+ * `/work/proj` declared, `/work` covers too, and taking it would enrich from
+ * the wrong remote AND silence `refused_workspace_cwd`, since a covering key is
+ * not a refusal. Nearest-governs is how the gate itself resolves a `cwd`
+ * (`matchDepth` in core's matcher), so this reuses that rule rather than
+ * inventing a tie-break.
+ *
+ * Equality is the deepest cover there can be (no strict descendant of `cwd`
+ * contains `cwd`), so an exactly-equal key still wins exactly as byte equality
+ * made it win. What changes is only which key is picked when none is equal.
+ *
+ * The `cwd` guard is load-bearing: the old equality test refused a missing
+ * value and `workspaceCoversCwd` does not, and this is called with the in-band
+ * cwd, which is absent for the whole subscription route. Without the guard,
+ * every subscription turn carrying a `workspaces` map would throw here. With
+ * it, that route falls through to the first key exactly as before, which is
+ * what keeps the key's last-resort `cwd` role intact.
+ *
+ * The guard tests presence, not usability. `inBandCwd` is any non-empty
+ * string, and absoluteness is checked later and elsewhere, at the gate
+ * (`usableInBandCwd`), so a relative `cwd` reaches the ancestor test and a
+ * relative key can cover it: selection moves, and `refused_workspace_cwd` is
+ * silenced, on a value this same projector goes on to refuse as a directory.
+ * Byte equality could not do that. Left as is because Codex states absolute
+ * paths and because the answer is to validate once at one seam, not to grow a
+ * second usability rule here.
+ *
+ * @ref LLP 0069#requirements [implements]: R8, the one shared
+ * equal-or-descendant test, never a second copy of the path rule
+ * @ref LLP 0049#scope [implements]: nearest-governs, the depth rule the gate
+ * resolves a cwd by, applied to picking the key that describes that cwd
+ * @ref LLP 0350#options: option (F). This changes WHICH key the last-ranked
+ * source picks, not the RANK of the sources, which is what
+ * LLP 0083#workspace-key-ranks-last settled and which is untouched here: the
+ * key still loses the cwd to in-band and to the rollout, still enriches, and is
+ * still substituted when no key covers the cwd at all.
+ *
+ * @param {readonly string[]} workspacePaths
+ * @param {string | undefined} cwd
+ * @returns {string | undefined}
  */
-function pathsEqual(candidate, wanted) {
-  if (!wanted) return false
-  return trimTrailingSlash(candidate) === trimTrailingSlash(wanted)
+function nearestCoveringWorkspace(workspacePaths, cwd) {
+  if (!cwd) return undefined
+  /** @type {string | undefined} */
+  let best
+  for (const key of workspacePaths) {
+    if (!workspaceCoversCwd(key, cwd)) continue
+    if (best === undefined || trimTrailingSlash(key).length > trimTrailingSlash(best).length) best = key
+  }
+  return best
 }
 
 /** @param {string} value */

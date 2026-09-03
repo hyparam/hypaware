@@ -1485,6 +1485,137 @@ test('a workspace key off the session cwd ancestry is still a refusal (#481)', (
   }
 })
 
+// ---------------------------------------------------------------------
+// The key that COVERS the cwd is picked, not the one listed first (#1189)
+//
+// Selection matched on byte equality while the refusal predicate matches on
+// equal-or-descendant, so a `workspaces` key that genuinely contained the cwd
+// could lose to whichever key the object listed first, and the row was enriched
+// from that unrelated tree. This is a selection defect inside the last-ranked
+// source, not a change to the ranking: LLP 0083#workspace-key-ranks-last still
+// decides which SOURCE supplies the cwd, and the case it priced (no key covers
+// the cwd, the first is substituted, and it still enriches) is pinned unchanged
+// by the #476 and #481 tests above.
+//
+// @ref LLP 0350#evidence [tests]: the reproduction, removed
+// @ref LLP 0049#scope [tests]: nearest-governs picks the key, as it picks the
+// governing declaration
+// ---------------------------------------------------------------------
+
+test('an ignored workspace key does not enrich a row whose cwd a clean key covers (#1189)', () => {
+  // The reported leak, verbatim from LLP 0350#evidence. The session ran in
+  // /work/clean/sub, which /work/clean covers; /work/ignored/secret-proj is
+  // .hypignore'd and merely sorts first. Admission is correct (the session
+  // really did run in a clean tree) - what must not happen is the admitted row
+  // carrying the ignored repository's remote, which under a session_repos
+  // inventory is the evidence authorizing capture of that repository.
+  /** @type {Array<{ message: string, fields?: Record<string, unknown> }>} */
+  const warns = []
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    /** @param {string} message @param {Record<string, unknown>=} fields */
+    warn: (message, fields) => { warns.push({ message, fields }) },
+  }
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-1189a',
+        workspaces: {
+          '/work/ignored/secret-proj': {
+            associated_remote_urls: { origin: 'https://github.com/acme/SECRET.git' },
+            latest_git_commit_hash: 'deadbeef',
+          },
+          '/work/clean': {
+            associated_remote_urls: { origin: 'https://github.com/acme/clean.git' },
+            latest_git_commit_hash: 'feedface',
+          },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ cwd: '/work/clean/sub', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), { log }))
+
+  assert.ok(projection && projection !== USAGE_POLICY_DROP, 'the session ran in a clean tree')
+  assert.equal(projection.cwd, '/work/clean/sub', 'the row still records where it actually ran')
+  assert.equal(
+    projection.git_remote,
+    'https://github.com/acme/clean.git',
+    'the remote comes from the key that covers the cwd, never the ignored tree',
+  )
+  assert.equal(projection.head_sha, 'feedface')
+  assert.equal(projection.attributes.codex.workspace, '/work/clean')
+  assert.equal(projection.attributes.codex.git_origin_url, 'https://github.com/acme/clean.git')
+  assert.ok(
+    !JSON.stringify(projection).includes('SECRET'),
+    'no part of the ignored tree reaches the admitted row',
+  )
+  assert.deepEqual(
+    warns.filter((e) => e.message === 'plugin.codex.usage_policy_workspace_cwd_refused'),
+    [],
+    'nothing was substituted: a covering key was selected',
+  )
+})
+
+test('the NEAREST covering workspace key wins, not merely the first one listed (#1189)', () => {
+  // Two covering keys. Taking the shallower one would enrich from the wrong
+  // remote and, because it does cover the cwd, would also silence
+  // refused_workspace_cwd - removing the only signal that a substitution
+  // happened at all. Nearest-governs is the gate's own rule (LLP 0049#scope).
+  const projector = createCodexExchangeProjector({ resolver: governsNothingResolver() })
+  const projection = /** @type {any} */ (projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-1189b',
+        workspaces: {
+          '/work': { associated_remote_urls: { origin: 'git@github.com:acme/outer.git' } },
+          '/work/clean': { associated_remote_urls: { origin: 'git@github.com:acme/inner.git' } },
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ cwd: '/work/clean/sub', input: 'go' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context()))
+  assert.equal(projection.attributes.codex.workspace, '/work/clean')
+  assert.equal(projection.git_remote, 'git@github.com:acme/inner.git')
+})
+
+test('a subscription turn with no in-band cwd still falls through to the first key (#1189)', () => {
+  // The guard LLP 0350#options names as the trap: workspaceCoversCwd does not
+  // guard its argument. Reaching it with no cwd would throw on every
+  // subscription turn carrying a workspaces map, and the key's last-resort cwd
+  // role (LLP 0083#workspace-key-ranks-last) would be gone with it. The drop
+  // proves both: the first key is still selected, and it still gates.
+  const projector = createCodexExchangeProjector({
+    resolver: ignoringResolver('/work/ignored'),
+  })
+  const projection = projector.project(exchange({
+    path: '/backend-api/codex/responses',
+    provider: 'chatgpt',
+    request_headers: JSON.stringify({
+      'x-codex-turn-metadata': JSON.stringify({
+        thread_id: 'thread-1189c',
+        workspaces: {
+          '/work/ignored/proj': {},
+          '/work/clean': {},
+        },
+      }),
+    }),
+    request_body: JSON.stringify({ input: 'secret' }),
+    response_body: JSON.stringify({ output_text: 'done' }),
+  }), context())
+  assert.equal(projection, USAGE_POLICY_DROP, 'the first key is still the only cwd there is')
+})
+
 test('an ancestor key that resolves MORE restrictively than the cwd is silent (documents the residue, #481)', () => {
   // The disclosed cost of the ancestor test, pinned so it stays a decision
   // rather than becoming a surprise. Nearest-governs is NOT monotone down the
