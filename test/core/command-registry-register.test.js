@@ -418,18 +418,43 @@ test('a throwing mirror write costs the warning, not the registration', () => {
  * optional method is the member shape that always lives on a prototype, so it
  * is the one the copy drops.
  *
+ * @param {string} [types] the declaration text to read, the published file by default
  * @returns {string[]} the optional keys
  */
-function declaredOptionalMembers() {
-  const types = readFileSync(new URL('../../hypaware-plugin-kernel-types.d.ts', import.meta.url), 'utf8')
+function declaredOptionalMembers(types = readFileSync(new URL('../../hypaware-plugin-kernel-types.d.ts', import.meta.url), 'utf8')) {
   // Matched brace to brace, not cut at the first `\n}`: a member whose nested
   // object type closes in column 0 would end the slice early, and an early cut
   // is silent, because the warning then names the same short list the parse
   // found. Comments and quoted spans are blanked to spaces first, same length
   // so the offsets still index `types`: a lone `}` in JSDoc prose or inside a
   // string literal type would cut the slice just as early and just as quietly.
-  const literal = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g
+  const literal = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\\n]|\\.)*`/g
   const scan = types.replace(literal, (span) => span.replace(/[^\n]/g, ' '))
+  // Fail closed when the mask over-runs, and bound the span so it cannot.
+  // The template alternative excludes newlines like the two quote ones do: a
+  // span free to cross lines pairs an unterminated backtick with the next one
+  // anywhere in the file, blanking this interface's closing brace and a later
+  // interface's opening one, so the scan stops on that interface's column-0
+  // `}` and satisfies the check below with members it never read. Left
+  // unbounded, whether that is caught turns on how many backticks happen to
+  // sit below the stray one: an odd count leaves one standing, an even count
+  // pairs off and says nothing, which is no guard at all. Bounded to one line
+  // an unterminated backtick blanks nothing and simply survives, so asserting
+  // that none survives holds at either parity. A template literal type written
+  // across lines is refused along with it, and none is written that way here.
+  //
+  // Asked of the two quotes and of `/*` as well, because bounding the quotes
+  // to a line is not by itself what makes them safe. A `/*` inside an
+  // unterminated quote is not consumed by that span, so the block-comment
+  // alternative, the one still free to cross lines, claims it and blanks
+  // forward to the next `*/`, over-running exactly as the unbounded backtick
+  // did: `sb: "/*` injected above a member of the real declaration file drops
+  // that member and `plugin` with it, and the guard says nothing. A `/*` with
+  // no `*/` after it anywhere reaches the same place from the other side,
+  // masking nothing and leaving its braces to be read as code. The mask blanks
+  // every comment and quoted span, so an opener still standing in `scan` is
+  // one it failed to close, whichever kind it is.
+  assert.equal(/['"`]|\/\*/.test(scan), false, 'a comment or quoted span in hypaware-plugin-kernel-types.d.ts is never terminated (a quote or a template literal must close on its own line): the mask cannot be trusted, so neither can the parse')
   // Both anchors are found in the blanked copy, not in `types`, or the same
   // hole reopens one step earlier: a JSDoc quoting the declaration line would
   // put `start` inside a comment, where the opening brace is already a space,
@@ -466,6 +491,51 @@ function declaredOptionalMembers() {
   assert.equal(types[end - 1], '\n', 'interface CommandRegistration does not close in column 0: the parse stopped early, or the declaration was reformatted onto fewer lines')
   return [...body.matchAll(/^[ \t]*(?:readonly[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\?[ \t]*[:(]/gm)].map((match) => match[1])
 }
+
+// Left free to pair across lines, the stray backtick joins one in the later
+// JSDoc, blanking `CommandRegistration`'s closing brace and `Other`'s opening
+// one, so the scan stops on `Other`'s column-0 `}`: past `probeZ`, and holding
+// `gone`, which `CommandRegistration` never declared. Asserted at both parities
+// of the backtick count below the stray one, since that count is the whole of
+// what an unbounded span leaves the guard resting on: the closed code span
+// pairs off around the run, the open one pairs with it.
+test('the interface parse fails closed on an unterminated template literal', () => {
+  const unterminated = (tick) => [
+    'export interface CommandRegistration {',
+    '  sb: `',
+    '  probeZ?: string',
+    '}',
+    'export interface Other {',
+    `  /** prose with a \`tick${tick} */`,
+    '  gone?: string',
+    '}',
+  ].join('\n')
+  assert.throws(() => declaredOptionalMembers(unterminated('`')), /is never terminated/)
+  assert.throws(() => declaredOptionalMembers(unterminated('')), /is never terminated/)
+})
+
+// The same under-run reached without a template literal, and the reason
+// bounding the quotes to a line does not by itself close it: an unterminated
+// quote leaves the `/*` inside it to the block-comment alternative, which
+// still crosses lines and blanks forward to the next `*/`, past the member
+// the guard was raised to name. Injected into the real
+// `hypaware-plugin-kernel-types.d.ts`, either quote returns that interface's
+// optionals minus `plugin` and minus the added member, with nothing said. The
+// third shape is the block comment nothing closes, which masks nothing at all.
+test('the interface parse fails closed on an unterminated quote or block comment', () => {
+  const unterminated = (opener, closer) => [
+    'export interface CommandRegistration {',
+    '  name: string',
+    `  ${opener}`,
+    '  probeZ?: string',
+    closer,
+    '  gone?: string',
+    '}',
+  ].join('\n')
+  assert.throws(() => declaredOptionalMembers(unterminated('sb: "/*', '  /** prose */')), /is never terminated/)
+  assert.throws(() => declaredOptionalMembers(unterminated("sb: '/*", '  /** prose */')), /is never terminated/)
+  assert.throws(() => declaredOptionalMembers(unterminated('/* nothing closes this', '  no closer here')), /is never terminated/)
+})
 
 // `OPTIONAL_MEMBERS` is a hand-written copy of the optional keys of
 // `CommandRegistration`, and nothing keeps the two in step: `tsc` cannot see
