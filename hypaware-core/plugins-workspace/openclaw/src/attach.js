@@ -461,9 +461,10 @@ function fail(span, attachCtx, logger, settingsPath, reason, errorKind) {
  * identically to a hard {@link fail} on every user-facing surface, but handed
  * back as the terminal `refused` outcome, because no number of reconciler
  * passes changes what is in the user's config. `failed` here is what produced
- * LLP 0184's forever-retried marker with `attempts` climbing; only the user
- * removing the entry (or `hyp detach`) fixes it, and only an explicit
- * `hyp attach` re-arms the marker.
+ * LLP 0184's forever-retried marker with `attempts` climbing, and only the user
+ * removing the entry (or `hyp detach`) fixes it. The marker is re-armed by an
+ * explicit `hyp attach`, or once by a release that bumps the re-arm generation
+ * past it (LLP 0364), which asks again and refuses again while the entry stands.
  *
  * Its own function rather than a `status` argument to {@link fail} on purpose:
  * this is the sole refusal in the adapter, so there is no parameter for a

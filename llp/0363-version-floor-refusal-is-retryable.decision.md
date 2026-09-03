@@ -101,6 +101,11 @@ a marker, so nothing on disk tells a floor refusal from a JSONC one. What this
 document settles is how the *next* floor refusal is classified. Residual 2 of
 #999 is closed for new occurrences and stays open for markers already written.
 
+**Extended-by: [LLP 0364](./0364-refused-markers-re-arm-on-a-generation-bump.decision.md)**,
+which reaches exactly this population: a `refused` marker carrying no
+`rearm_generation` is below the build's own, so one reconcile pass re-arms it
+and re-`perform()`s it once. What is settled here is unaffected.
+
 <a id="what-a-retry-costs"></a>
 
 ### What the retry costs

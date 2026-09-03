@@ -5,7 +5,7 @@
 **Systems:** Config, Daemon
 **Generated-by:** neutral
 **Related:** LLP 0036, LLP 0041, LLP 0086, LLP 0109, LLP 0184
-**Extended-by:** LLP 0250 (#how-the-reconciler-distinguishes-it-from-done: the reverse gap's drop also reads a `prior_done` bit, so a settings-only attach rewritten to `refused` is reversed rather than dropped), LLP 0295 (#re-arm-explicit-hyp-attach-re-run-only: the re-arm fires at every success exit of the explicit re-run, including the daemon-managed one that calls no adapter `attach()`), LLP 0363 (#which-handlers-migrate-summarized: the LLP 0258 version floor is a retryable `failed`, not a `refused`, so an upgraded client re-attaches on the next pass)
+**Extended-by:** LLP 0250 (#how-the-reconciler-distinguishes-it-from-done: the reverse gap's drop also reads a `prior_done` bit, so a settings-only attach rewritten to `refused` is reversed rather than dropped), LLP 0295 (#re-arm-explicit-hyp-attach-re-run-only: the re-arm fires at every success exit of the explicit re-run, including the daemon-managed one that calls no adapter `attach()`), LLP 0363 (#which-handlers-migrate-summarized: the LLP 0258 version floor is a retryable `failed`, not a `refused`, so an upgraded client re-attaches on the next pass), LLP 0364 (#follow-up-candidate-not-built-here and #how-the-reconciler-distinguishes-it-from-done: the short-circuit is unconditional against the machine but not against the build, so a marker written below the build's re-arm generation is re-`perform()`ed once)
 
 > [LLP 0184](./0184-reconciler-retries-permanent-failures.issue.md) reports
 > that the action reconciler ([LLP 0036](./0036-central-config-driven-client-actions.decision.md)
@@ -393,6 +393,13 @@ instruction, and would need its own per-handler contract (what "the refused
 input" is, per handler) that this document deliberately does not design. A
 future LLP extending this one is the place for it, if it is wanted; this
 document only names it so the option is not lost.
+
+**Extended-by: [LLP 0364](./0364-refused-markers-re-arm-on-a-generation-bump.decision.md).**
+It builds this follow-up, and in a different shape than sketched here: the
+per-handler contract is what a marker recording no error code cannot honour,
+so the re-arm is scoped to the *release* instead (a `rearm_generation` bump),
+and a stored refusal below the build's generation is re-`perform()`ed exactly
+once.
 
 ## Which handlers migrate, summarized
 
