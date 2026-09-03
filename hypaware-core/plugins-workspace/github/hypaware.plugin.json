@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "hypaware_api": "^1.0.0",
   "runtime": "node",
-  "node_engine": ">=20",
+  "node_engine": ">=22.12",
   "entrypoint": "./src/index.js",
   "description": "GitHub source plugin built for the context-graph. Captures GitHub activity (issues, pull requests, commits, files, reviews, comments) into a thin append-only github_events skeleton and bundles a T0 projection contract that maps it into the node/edge graph with bridge-ready natural keys. Capture is poll/backfill/sync; projection is the graph plugin's `hyp graph project`.",
   "permissions": ["network", "read_state", "write_state"],

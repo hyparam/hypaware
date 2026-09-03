@@ -79,6 +79,11 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
    * @returns {Promise<{ notModified: true } | { notModified: false, data: unknown, next: string | null, etag: string | null }>}
    */
   async function request(pathAndQuery, opts = {}) {
+    // Pin the origin before the credential exists. A refused continuation must
+    // not materialize the token at all, which for an install with no token env
+    // var means not spawning `gh auth token` (a subprocess with a 10s timeout)
+    // on behalf of a URL we are about to throw away.
+    const url = resolveUrl(baseUrl, pathAndQuery)
     const authToken = await token()
     /** @type {Record<string, string>} */
     const headers = {
@@ -89,7 +94,6 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     headers.Authorization = `Bearer ${authToken}`
     if (opts.etag) headers['If-None-Match'] = opts.etag
 
-    const url = pathAndQuery.startsWith('http') ? pathAndQuery : `${baseUrl}${pathAndQuery}`
     const res = await doFetch(url, { headers })
 
     if (res.status === 304) return { notModified: true }
@@ -253,6 +257,52 @@ function githubCliPath(env) {
     ...(userHome ? [path.join(userHome, '.local', 'bin'), path.join(userHome, '.local', 'share', 'mise', 'shims')] : []),
   ].filter(Boolean)
   return [...new Set(entries)].join(path.delimiter)
+}
+
+/**
+ * Resolve one request URL against the configured API origin.
+ *
+ * A continuation URL is parsed out of a response `Link` header or read back as
+ * a page cursor from `github-cursors.json`, and the request that follows
+ * carries the bearer token. Neither source is trusted to choose the host, so
+ * pin the origin to `baseUrl` and refuse the rest. Refusing beats dropping the
+ * Authorization header: an origin nobody configured is not one to talk to at
+ * all.
+ *
+ * The pin has to be applied to the **built** URL, not only to a continuation
+ * that already parses as absolute. `@evil.test/repos/o/r/issues` is not an
+ * absolute URL, so it joins onto the base, and the join reads back as
+ * `https://api.github.com@evil.test/...`: everything before the `@` is
+ * userinfo and the authority is `evil.test`. Pinning only the absolute case
+ * would hand the token to exactly the origin this is here to refuse.
+ *
+ * @param {string} baseUrl
+ * @param {string} pathAndQuery
+ * @returns {string}
+ */
+function resolveUrl(baseUrl, pathAndQuery) {
+  const base = new URL(baseUrl)
+  const url = URL.parse(pathAndQuery) ?? URL.parse(`${baseUrl}${pathAndQuery}`)
+  // A matching `origin` is not on its own a matching authority. `blob:` and
+  // the other wrapper schemes report the origin of the URL they wrap, so
+  // `blob:https://api.github.com/x` passes an origin-only check while
+  // addressing something else entirely, and userinfo survives into `href`.
+  // Pin the scheme and refuse credentials too: what was checked has to be the
+  // whole of what gets fetched.
+  const ok = url && url.origin === base.origin && url.protocol === base.protocol && !url.username && !url.password
+  if (!ok) throw foreignOrigin(url)
+  // The parsed href, not the input.
+  return url.href
+}
+
+/** @param {URL | null} url @returns {HypError} */
+function foreignOrigin(url) {
+  // Origin only. The path and query of an untrusted URL stay out of the error,
+  // for the same reason a failed response body does. An opaque or unparseable
+  // authority reports as `null`, which is what `URL.origin` already calls it.
+  const err = /** @type {HypError} */ (new Error(`GitHub continuation URL refused: it does not address the configured API base (origin ${url?.origin ?? 'null'})`))
+  err.hypErrorKind = 'github_foreign_origin'
+  return err
 }
 
 /** @returns {HypError} */

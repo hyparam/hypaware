@@ -234,3 +234,194 @@ test('a commit whose file list hits the API cap is reported as truncated', async
   // `per_page` is not a parameter of the single-commit resource, so it is not sent.
   assert.doesNotMatch(urls[0], /per_page/)
 })
+
+test('a cross-origin Link header next page is refused, not fetched with the token', async () => {
+  /** @type {string[]} */
+  const urls = []
+  const client = createGithubClient({
+    tokenEnv: 'T',
+    env: { T: 'secret' },
+    baseUrl: 'https://api.github.test',
+    log: silentLog,
+    async fetchImpl(input) {
+      urls.push(String(input))
+      return new Response(JSON.stringify([{ full_name: 'o/r1' }]), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          link: '<https://evil.test/user/repos?page=2>; rel="next"',
+        },
+      })
+    },
+  })
+
+  await assert.rejects(client.listViewerRepos(), (error) => {
+    assert.ok(error instanceof Error)
+    assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+    assert.doesNotMatch(error.message, /secret/)
+    return true
+  })
+  assert.equal(urls.length, 1, 'the refused page must not be requested')
+  assert.doesNotMatch(urls[0], /evil/)
+})
+
+test('a persisted cursor page pointing off-origin is refused before the token is resolved', async () => {
+  let fetches = 0
+  let ghCalls = 0
+  const client = createGithubClient({
+    // No token env var, so resolving the credential would shell out to `gh`.
+    // A refused URL must not get that far: the origin pin runs first.
+    tokenEnv: 'T',
+    env: {},
+    baseUrl: 'https://api.github.test',
+    log: silentLog,
+    async ghToken() {
+      ghCalls += 1
+      return 'gh-secret'
+    },
+    async fetchImpl() {
+      fetches += 1
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+
+  await assert.rejects(
+    client.listIssuesPage('o', 'r', undefined, 'https://evil.test/repos/o/r/issues?page=3'),
+    (error) => {
+      assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+      return true
+    },
+  )
+  assert.equal(fetches, 0)
+  assert.equal(ghCalls, 0, 'a refused URL must not resolve the credential')
+})
+
+test('an Enterprise base keeps its own absolute continuations', async () => {
+  /** @type {string[]} */
+  const urls = []
+  const client = createGithubClient({
+    tokenEnv: 'T',
+    env: { T: 'secret' },
+    baseUrl: 'https://ghe.example.test:8443/api/v3',
+    log: silentLog,
+    async fetchImpl(input) {
+      urls.push(String(input))
+      const link = urls.length === 1
+        ? '<https://ghe.example.test:8443/api/v3/user/repos?page=2>; rel="next"'
+        : null
+      return new Response(JSON.stringify([{ full_name: `o/r${urls.length}` }]), {
+        status: 200,
+        headers: link ? { 'content-type': 'application/json', link } : { 'content-type': 'application/json' },
+      })
+    },
+  })
+
+  assert.deepEqual(await client.listViewerRepos(), ['o/r1', 'o/r2'])
+  assert.match(urls[0], /^https:\/\/ghe\.example\.test:8443\/api\/v3\/user\/repos\?/)
+  assert.equal(urls[1], 'https://ghe.example.test:8443/api/v3/user/repos?page=2')
+})
+
+// A continuation that is not a valid absolute URL still gets joined onto the
+// base, and `@host/...` turns everything before the `@` into userinfo: the
+// join `https://api.github.test` + `@evil.test/x` has authority `evil.test`.
+// Pinning only the absolute case let this one through with the token attached.
+for (const injected of ['@evil.test/repos/o/r/issues?page=3', ':@evil.test/repos/o/r/issues?page=3']) {
+  test(`a continuation injecting a foreign authority (${injected}) is refused, not joined onto the base`, async () => {
+    let fetches = 0
+    const client = createGithubClient({
+      tokenEnv: 'T',
+      env: { T: 'secret' },
+      baseUrl: 'https://api.github.test',
+      log: silentLog,
+      async fetchImpl() {
+        fetches += 1
+        return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+      },
+    })
+
+    await assert.rejects(client.listIssuesPage('o', 'r', undefined, injected), (error) => {
+      assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+      return true
+    })
+    assert.equal(fetches, 0)
+  })
+}
+
+test('a Link header injecting a foreign authority is refused before the next page is fetched', async () => {
+  /** @type {string[]} */
+  const urls = []
+  const client = createGithubClient({
+    tokenEnv: 'T',
+    env: { T: 'secret' },
+    baseUrl: 'https://api.github.test',
+    log: silentLog,
+    async fetchImpl(input) {
+      urls.push(String(input))
+      return new Response(JSON.stringify([{ full_name: 'o/r1' }]), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          link: '<@evil.test/user/repos?page=2>; rel="next"',
+        },
+      })
+    },
+  })
+
+  await assert.rejects(client.listViewerRepos(), (error) => {
+    assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+    return true
+  })
+  assert.equal(urls.length, 1, 'the refused page must not be requested')
+  assert.doesNotMatch(urls[0], /evil/)
+})
+
+// `URL.origin` is not the whole authority. A wrapper scheme reports the origin
+// of the URL it wraps, and userinfo survives into `href`, so both of these pass
+// an origin-only check while addressing something other than the configured
+// base. The pin covers the scheme and the credentials too.
+for (const sameOrigin of ['blob:https://api.github.test/repos/o/r/issues', 'https://u:p@api.github.test/repos/o/r/issues']) {
+  test(`a same-origin continuation that is not the configured base (${sameOrigin.split(':')[0]}) is refused`, async () => {
+    assert.equal(new URL(sameOrigin).origin, 'https://api.github.test', 'the case is only meaningful if the origin matches')
+    let fetches = 0
+    const client = createGithubClient({
+      tokenEnv: 'T',
+      env: { T: 'secret' },
+      baseUrl: 'https://api.github.test',
+      log: silentLog,
+      async fetchImpl() {
+        fetches += 1
+        return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+      },
+    })
+
+    await assert.rejects(client.listIssuesPage('o', 'r', undefined, sameOrigin), (error) => {
+      assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+      return true
+    })
+    assert.equal(fetches, 0)
+  })
+}
+
+// The pin is an origin equality, not a prefix or suffix test. A host that
+// merely starts or ends with the configured one is a different host.
+for (const lookalike of ['https://api.github.test.evil.test/user/repos?page=2', 'https://notapi.github.test/user/repos?page=2']) {
+  test(`a look-alike host (${new URL(lookalike).host}) is refused`, async () => {
+    let fetches = 0
+    const client = createGithubClient({
+      tokenEnv: 'T',
+      env: { T: 'secret' },
+      baseUrl: 'https://api.github.test',
+      log: silentLog,
+      async fetchImpl() {
+        fetches += 1
+        return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+      },
+    })
+
+    await assert.rejects(client.listIssuesPage('o', 'r', undefined, lookalike), (error) => {
+      assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+      return true
+    })
+    assert.equal(fetches, 0)
+  })
+}
