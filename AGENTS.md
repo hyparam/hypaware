@@ -173,6 +173,12 @@ Written acceptance procedures:
   still emits the event names, attributes, and raw body fields the telemetry
   listener reads, then checks the rows and the `hyp status` capture-health
   line agree. See `docs/ACCEPTANCE.md`.
+- `launchd_supervisor_env`: opt-in/manual, needs a real Mac with the daemon
+  installed and started as a LaunchAgent. Reads `XPC_SERVICE_NAME` out of the
+  running daemon's own environment and proves the shipped `detectSupervisor`
+  accepts it, so the automatic self-update lanes apply on macOS instead of
+  refusing every update as unsupervised. No fixture can settle this: a
+  hermetic test asserts the value it wrote itself. See `docs/ACCEPTANCE.md`.
 
 Good acceptance smoke candidates (no written procedure yet):
 
@@ -334,6 +340,15 @@ renamed an event, dropped a flag, or changed the raw body format, and the
 failure mode is silent (null columns, not an error). Record the observed
 `claude --version` and the full event-name list in the release notes so the
 next release has a baseline to diff against.
+
+If the release changed `detectSupervisor`, `LAUNCH_LABEL`, or the LaunchAgent
+plist the macOS installer writes, run
+[`launchd_supervisor_env`](docs/ACCEPTANCE.md#launchd_supervisor_env) on a real
+Mac. The launchd half of that gate rests on a value only a running LaunchAgent
+can supply, and getting it wrong stops every automatic update on macOS while
+`hyp status` and `hyp update` keep working, so nothing else reports it. Record
+the observed `XPC_SERVICE_NAME` line verbatim in the release notes as the
+baseline for the next release.
 
 <!-- neutral:llp-conventions -->
 ## LLP conventions
