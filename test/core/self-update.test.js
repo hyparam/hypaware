@@ -1888,6 +1888,41 @@ test('an offline restart-only hand-over still needs a supervisor', async () => {
   }
 })
 
+test('an offline hand-over is still refused onto a root already held as unstartable', async () => {
+  // The worst root there is: a version whose entrypoint could not start
+  // and whose rollback could not put the old one back, so `held_version`
+  // names what is on disk. Nothing reads as available, the daemon is
+  // (correctly) still on older code, and this is the lane that would
+  // otherwise restart it straight onto the broken root. Offline it is the
+  // only lane left, and no newer release can arrive to retire the hold.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-offline-held-'))
+  try {
+    const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
+    await fsp.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'hypaware', version: '1.1.0' }))
+    writeSelfUpdateState(dir, {
+      held_version: '1.1.0',
+      error: 'apply_failed: npm_install_failed',
+      error_since: '2026-08-01T00:00:00.000Z',
+    })
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const result = await runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, runner,
+      fetchImpl: offline, runningVersion: '1.0.0', force: true,
+    })
+    assert.deepEqual(result, { action: 'checked', reason: 'probe_failed' })
+    assert.equal(calls.some((c) => c[1] === '--version'), false, 'a held root is not even preflighted')
+    // The hold and the failure that wrote it both survive the probe
+    // failure; a probe that never answered cannot retire either.
+    const state = readSelfUpdateState(dir)
+    assert.equal(state.held_version, '1.1.0')
+    assert.equal(state.error, 'apply_failed: npm_install_failed')
+    assert.equal(state.error_since, '2026-08-01T00:00:00.000Z')
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('hyp status names a daemon still running older code than the root', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-stale-status-'))
   try {
