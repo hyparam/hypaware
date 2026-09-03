@@ -422,8 +422,6 @@ test('a throwing mirror write costs the warning, not the registration', () => {
  */
 function declaredOptionalMembers() {
   const types = readFileSync(new URL('../../hypaware-plugin-kernel-types.d.ts', import.meta.url), 'utf8')
-  const start = types.indexOf('export interface CommandRegistration {')
-  assert.notEqual(start, -1, 'interface CommandRegistration is not where the test looks for it')
   // Matched brace to brace, not cut at the first `\n}`: a member whose nested
   // object type closes in column 0 would end the slice early, and an early cut
   // is silent, because the warning then names the same short list the parse
@@ -432,6 +430,13 @@ function declaredOptionalMembers() {
   // string literal type would cut the slice just as early and just as quietly.
   const literal = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g
   const scan = types.replace(literal, (span) => span.replace(/[^\n]/g, ' '))
+  // Both anchors are found in the blanked copy, not in `types`, or the same
+  // hole reopens one step earlier: a JSDoc quoting the declaration line would
+  // put `start` inside a comment, where the opening brace is already a space,
+  // and the scan would go looking for its match in whatever real code came
+  // next. Every offset is shared, which is what the length preservation buys.
+  const start = scan.indexOf('export interface CommandRegistration {')
+  assert.notEqual(start, -1, 'interface CommandRegistration is not where the test looks for it')
   let depth = 0
   let end = -1
   // Only what the interface declares itself: a nested object type's own
@@ -439,7 +444,7 @@ function declaredOptionalMembers() {
   // regex still anchors per line, because an optional nested inside a member's
   // type is not an optional member of `CommandRegistration`.
   let body = ''
-  for (let i = types.indexOf('{', start); i < scan.length; i += 1) {
+  for (let i = scan.indexOf('{', start); i < scan.length; i += 1) {
     const char = scan[i]
     if (char === '{') depth += 1
     else if (char === '}' && --depth === 0) {
@@ -449,6 +454,16 @@ function declaredOptionalMembers() {
     body += depth > 1 && char !== '\n' ? ' ' : char
   }
   assert.notEqual(end, -1, 'interface CommandRegistration is never closed')
+  // Fail closed on the under-run the brace count cannot see. The masking is
+  // regex alternation over backtick pairs, so a region holding an odd number
+  // of them leaves whatever falls between two pairs unmasked, and a stray `}`
+  // there stops the scan inside the interface, silently, on the same short
+  // list the warning then names. A template literal type nested inside
+  // another whose own text holds a `}` does exactly that (`` `${`a}`}` ``),
+  // and `tsc` accepts it, so where the scan stopped is checked rather than
+  // trusted. Over-running stays loud on its own, because it makes `declared`
+  // a superset of what the warning names.
+  assert.equal(types[end - 1], '\n', 'interface CommandRegistration does not close in column 0: the parse stopped early, or the declaration was reformatted onto fewer lines')
   return [...body.matchAll(/^[ \t]*(?:readonly[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\?[ \t]*[:(]/gm)].map((match) => match[1])
 }
 
