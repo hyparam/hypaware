@@ -653,3 +653,27 @@ test('a failed all_visible enumeration is recorded, not thrown out of the tick',
     'an error is not bounded backlog: pending drives the poll cadence (LLP 0360#cadence)'
   )
 })
+
+test('a failed enumeration does not retire backlog the cursors still hold', async () => {
+  const client = fakeClient({ viewerRepos: ['owner/a'] })
+  client.listViewerRepos = async () => { throw new Error('rate limited') }
+  const cursors = freshCursors()
+  // A prior tick ran out of budget mid-repository and saved its continuation.
+  cursors.repos['owner/a'] = { work: { mode: 'poll', phase: 'issues' } }
+
+  const result = await captureRepos({
+    client,
+    config: cfg({ inventory: 'all_visible' }),
+    cursors,
+    append: async () => {},
+    log: { ...silentLog, error() {} },
+    mode: 'poll',
+  })
+
+  assert.equal(result.errors.length, 1)
+  assert.equal(
+    result.pending,
+    true,
+    'clearing pending here would push a saved continuation from the backlog cadence back to a full poll interval'
+  )
+})

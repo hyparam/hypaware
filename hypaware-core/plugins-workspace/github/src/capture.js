@@ -104,7 +104,14 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       error: message,
       ...errKind(err),
     })
-    return { repos: 0, events: 0, requests: 0, pending: false, errors }
+    // The failure itself is not backlog (LLP 0360#cadence), but it also did
+    // not retire any: a tick that never resolved its inventory captured
+    // nothing, so whatever bounded work the cursors held before it still
+    // waits. Reporting `false` unconditionally would CLEAR the source's
+    // backlog flag, sending saved continuations from the 15-minute backlog
+    // cadence back to a full poll interval (LLP 0361#budget). Read the answer
+    // off the durable cursors instead of inventing one.
+    return { repos: 0, events: 0, requests: 0, pending: hasSavedWork(cursors), errors }
   }
   // A positional `hyp github backfill owner/repo` narrows this one invocation.
   // The round-robin continuation is a property of the WHOLE inventory, so a
@@ -720,4 +727,16 @@ function errMessage(err) {
 function errKind(err) {
   const kind = /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind
   return kind ? { error_kind: kind } : {}
+}
+
+/**
+ * True when any repository cursor still holds a continuation, i.e. bounded
+ * work survives on disk independently of this tick. This is the same set the
+ * budget-exhausted log line counts as `pending_repos`.
+ *
+ * @param {CursorState} cursors
+ * @returns {boolean}
+ */
+function hasSavedWork(cursors) {
+  return Object.values(cursors.repos).some((cursor) => Boolean(cursor?.work))
 }
