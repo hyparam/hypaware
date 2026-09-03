@@ -424,7 +424,23 @@ function declaredOptionalMembers() {
   const types = readFileSync(new URL('../../hypaware-plugin-kernel-types.d.ts', import.meta.url), 'utf8')
   const start = types.indexOf('export interface CommandRegistration {')
   assert.notEqual(start, -1, 'interface CommandRegistration is not where the test looks for it')
-  const body = types.slice(start, types.indexOf('\n}', start))
+  // Matched brace to brace, not cut at the first `\n}`: a member whose nested
+  // object type closes in column 0 would end the slice early, and an early cut
+  // is silent, because the warning then names the same short list the parse
+  // found. Comments are blanked first (same length, so the offsets still index
+  // `types`), since a lone `}` in prose would cut it just as early.
+  const scan = types.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (comment) => comment.replace(/[^\n]/g, ' '))
+  let depth = 0
+  let end = -1
+  for (let i = types.indexOf('{', start); i < scan.length; i += 1) {
+    if (scan[i] === '{') depth += 1
+    else if (scan[i] === '}' && --depth === 0) {
+      end = i
+      break
+    }
+  }
+  assert.notEqual(end, -1, 'interface CommandRegistration is never closed')
+  const body = types.slice(start, end)
   return [...body.matchAll(/^[ \t]*(?:readonly[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\?[ \t]*[:(]/gm)].map((match) => match[1])
 }
 
