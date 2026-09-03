@@ -67,6 +67,11 @@ test('source never overlaps slow ticks', async (t) => {
   let active = 0
   let maxActive = 0
   let scans = 0
+  /** @type {() => void} */
+  let noteSecondScan = () => {}
+  const secondScanStarted = new Promise((resolve) => {
+    noteSecondScan = () => resolve(undefined)
+  })
 
   setGithubRuntime(/** @type {any} */ ({
     stateDir,
@@ -79,6 +84,7 @@ test('source never overlaps slow ticks', async (t) => {
     observedRepos: {
       async list() {
         scans += 1
+        if (scans === 2) noteSecondScan()
         active += 1
         maxActive = Math.max(maxActive, active)
         await new Promise((resolve) => setTimeout(resolve, 15))
@@ -95,7 +101,18 @@ test('source never overlaps slow ticks', async (t) => {
   }))
 
   const source = await startGithubSource()
-  await new Promise((resolve) => setTimeout(resolve, 48))
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timeout
+  try {
+    await Promise.race([
+      secondScanStarted,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('second GitHub scan did not start')), 1000)
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
   await source.stop()
 
   assert.ok(scans >= 2)
