@@ -418,10 +418,10 @@ test('a throwing mirror write costs the warning, not the registration', () => {
  * optional method is the member shape that always lives on a prototype, so it
  * is the one the copy drops.
  *
+ * @param {string} [types] the declaration text to read, the published file by default
  * @returns {string[]} the optional keys
  */
-function declaredOptionalMembers() {
-  const types = readFileSync(new URL('../../hypaware-plugin-kernel-types.d.ts', import.meta.url), 'utf8')
+function declaredOptionalMembers(types = readFileSync(new URL('../../hypaware-plugin-kernel-types.d.ts', import.meta.url), 'utf8')) {
   // Matched brace to brace, not cut at the first `\n}`: a member whose nested
   // object type closes in column 0 would end the slice early, and an early cut
   // is silent, because the warning then names the same short list the parse
@@ -430,6 +430,14 @@ function declaredOptionalMembers() {
   // string literal type would cut the slice just as early and just as quietly.
   const literal = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g
   const scan = types.replace(literal, (span) => span.replace(/[^\n]/g, ' '))
+  // Fail closed when the mask over-runs. A template literal is the one span
+  // here that crosses lines, so an unterminated one pairs with the next
+  // backtick anywhere in the file, blanking this interface's closing brace and
+  // a later interface's opening one: the scan then stops on that interface's
+  // column-0 `}`, satisfying the check below with members it never read. A
+  // terminated literal is consumed whole, so a backtick left in `scan` is the
+  // unterminated one.
+  assert.equal(scan.includes('`'), false, 'a template literal in hypaware-plugin-kernel-types.d.ts is never terminated: the mask ran past the interface, so the parse cannot be trusted')
   // Both anchors are found in the blanked copy, not in `types`, or the same
   // hole reopens one step earlier: a JSDoc quoting the declaration line would
   // put `start` inside a comment, where the opening brace is already a space,
@@ -466,6 +474,24 @@ function declaredOptionalMembers() {
   assert.equal(types[end - 1], '\n', 'interface CommandRegistration does not close in column 0: the parse stopped early, or the declaration was reformatted onto fewer lines')
   return [...body.matchAll(/^[ \t]*(?:readonly[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\?[ \t]*[:(]/gm)].map((match) => match[1])
 }
+
+// The stray backtick pairs with the one in the later JSDoc, blanking
+// `CommandRegistration`'s closing brace and `Other`'s opening one, so the scan
+// stops on `Other`'s column-0 `}`: past `probeZ`, and holding `gone`, which
+// `CommandRegistration` never declared.
+test('the interface parse fails closed on an unterminated template literal', () => {
+  const unterminated = [
+    'export interface CommandRegistration {',
+    '  sb: `',
+    '  probeZ?: string',
+    '}',
+    'export interface Other {',
+    '  /** prose with a `tick` */',
+    '  gone?: string',
+    '}',
+  ].join('\n')
+  assert.throws(() => declaredOptionalMembers(unterminated), /is never terminated/)
+})
 
 // `OPTIONAL_MEMBERS` is a hand-written copy of the optional keys of
 // `CommandRegistration`, and nothing keeps the two in step: `tsc` cannot see
