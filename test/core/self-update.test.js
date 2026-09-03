@@ -1896,6 +1896,32 @@ test('repeated failed boots on an installed version reinstall the one it replace
   }
 })
 
+test('a completed rollback is named by the very next status, not by the next daily probe', async () => {
+  // The rollback writes `available: false` while `latest_version` still
+  // names the version it undid, so a status line gated on that flag says
+  // nothing until the next probe, up to a day later.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-rollback-status-'))
+  try {
+    const { packageRoot, runner } = await failedBootAfterApply(dir)
+    const lane = () => runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: fetchStub('1.1.0').impl,
+    })
+    // One counted failure is not a rollback yet, nothing is held, and the
+    // healthy-looking machine really is on the version it booted.
+    assert.notEqual((await lane()).action, 'updated')
+    assert.equal(describeSelfUpdate({ stateRoot: dir, env: {}, packageRoot }).line, null)
+    assert.deepEqual(await lane(), { action: 'updated', reason: 'rolled_back', latest: '1.0.0' })
+    const described = describeSelfUpdate({ stateRoot: dir, env: {}, packageRoot })
+    assert.match(
+      String(described.line),
+      /1\.1\.0 was installed and could not start here.*rolled back to 1\.0\.0.*held until a newer release/
+    )
+    assert.equal(described.json.held_version, '1.1.0')
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
 /**
  * The state a rollback acts on: this updater installed 1.1.0 over 1.0.0,
  * and the boot on it died inside `bootKernel`.

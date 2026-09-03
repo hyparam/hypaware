@@ -1231,7 +1231,14 @@ export function describeSelfUpdate(opts) {
   // is gated on this same test), and the status line must not tell an
   // operator to do by hand the restart the updater will not do.
   const heldOnDisk = typeof state.held_version === 'string' && state.held_version === identity.version
-  const heldLatest = typeof state.held_version === 'string' && state.held_version === state.latest_version
+  // Derived from the two versions rather than `state.available`, for the
+  // same reason that flag is re-derived above: a completed rollback writes
+  // it false (there is no update left to apply) while `latest_version`
+  // still names the release it just undid, so reading it here would keep
+  // this line off `hyp status` until the next probe up to a day later, and
+  // a machine that had just rolled back would look healthy all the while.
+  const heldLatest = typeof state.held_version === 'string' && state.held_version === state.latest_version &&
+    compareSemver(state.held_version, identity.version) > 0
     ? state.held_version
     : undefined
   /** @type {Record<string, unknown>} */
@@ -1310,7 +1317,7 @@ export function describeSelfUpdate(opts) {
       json,
     }
   }
-  if (heldLatest && available) {
+  if (heldLatest) {
     return {
       line: `self-update: ${heldLatest} was installed and could not start here, so it was rolled back to ` +
         `${identity.version} and is held until a newer release publishes`,
