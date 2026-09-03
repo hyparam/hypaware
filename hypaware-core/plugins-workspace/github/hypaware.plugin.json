@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/github",
+  "version": "0.1.0",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "description": "GitHub source plugin built for the context-graph. Captures GitHub activity (issues, pull requests, commits, files, reviews, comments) into a thin append-only github_events skeleton and bundles a T0 projection contract that maps it into the node/edge graph with bridge-ready natural keys. Capture is poll/backfill/sync; projection is the graph plugin's `hyp graph project`.",
+  "permissions": ["network", "read_state", "write_state"],
+  "requires": {
+    "plugins": {
+      "@hypaware/context-graph": "^0.1.0"
+    },
+    "capabilities": {
+      "hypaware.context-graph": "^1.0.0"
+    }
+  },
+  "contributes": {
+    "datasets": [
+      { "name": "github_events", "summary": "Append-only GitHub activity skeleton (structural columns only; content stays in GitHub)" }
+    ],
+    "config_sections": [
+      { "section": "github", "summary": "Repository inventory mode, local exclusions, capture cadence, and token env-var name" }
+    ],
+    "sources": [
+      { "name": "github", "summary": "Poll session-observed repositories by default, or all visible repositories when configured" }
+    ],
+    "commands": [
+      { "name": "github", "summary": "GitHub capture" },
+      { "name": "github backfill", "summary": "Pull full history into github_events" },
+      { "name": "github sync", "summary": "Run one poll tick now" }
+    ]
+  }
+}

@@ -1,5 +1,6 @@
 // @ts-check
 
+import { createHash } from 'node:crypto'
 import nodeFs from 'node:fs'
 import path from 'node:path'
 
@@ -349,7 +350,31 @@ export function createUsagePolicyResolver({
     return resolve(cwd).class === 'ignore'
   }
 
-  return { resolve, isIgnored }
+  /**
+   * Cheap stable digest of this resolver's mutable machine-local input: the
+   * class-per-entry list file's bytes, hashed so no directory path leaves the
+   * store. Distinct sentinels for "no list configured", "list absent", and
+   * "list unreadable" so each transition reads as a change; the unreadable
+   * sentinel errs toward firing a revalidation, matching the fail-safe
+   * direction of the list readers above. Committable `.hypignore` dotfiles
+   * are deliberately outside the digest: they are unenumerable, and the
+   * consumer's age backstop covers them.
+   *
+   * @ref LLP 0367#policy-fingerprint [implements]: the usage-policy half of the export-policy fingerprint
+   * @returns {string}
+   */
+  function fingerprint() {
+    if (!localOnlyListPath) return 'no-list'
+    if (!existsSync(localOnlyListPath)) return 'absent'
+    try {
+      const raw = String(readFileSync(localOnlyListPath, 'utf8'))
+      return createHash('sha256').update(raw).digest('hex').slice(0, 16)
+    } catch {
+      return 'unreadable'
+    }
+  }
+
+  return { resolve, isIgnored, fingerprint }
 }
 
 /**

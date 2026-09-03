@@ -23,8 +23,8 @@ import { defaultConfigPath } from '../../../src/core/config/schema.js'
  *     reaches the OpenClaw adapter against a seeded OPENCLAW_HOME.
  *  4. `hyp status --json` emits a stable JSON document listing the
  *     configured sources, sinks, clients, and active plugins. Because
- *     neither `@hypaware/central` nor `@hypaware/gascity` is in this
- *     config, they must not appear as they are excluded from default
+ *     none of `@hypaware/central`, `@hypaware/gascity`, or
+ *     `@hypaware/github` is in this config, they must not appear as they are excluded from default
  *     activation but remain discoverable through the plugin catalog and
  *     activatable via explicit config or init presets.
  *
@@ -51,8 +51,8 @@ export async function run({ harness, expect }) {
   // `@hypaware/format-jsonl`, `@hypaware/s3`, `@hypaware/format-iceberg`,
   // `@hypaware/context-graph`, and `@hypaware/ai-gateway-graph` are
   // intentionally omitted so the smoke can assert the "skipped" log
-  // surface. `@hypaware/central` and
-  // `@hypaware/gascity` are not in this config, they are excluded from
+  // surface. `@hypaware/central`, `@hypaware/gascity`, and
+  // `@hypaware/github` are not in this config, they are excluded from
   // default activation but activatable via explicit config.
   const configPath = defaultConfigPath(harness.hypHome)
   await fs.mkdir(path.dirname(configPath), { recursive: true })
@@ -147,12 +147,13 @@ export async function run({ harness, expect }) {
     (rows) => Array.isArray(rows) && rows.every((/** @type {any} */ r) => r.source === 'bundled')
   )
   expect.that(
-    'plugins: unconfigured plugins (central/gascity) absent from active list',
+    'plugins: unconfigured opt-in plugins absent from active list',
     (listed.plugins ?? []).map((/** @type {any} */ p) => p.name),
     (v) =>
       Array.isArray(v) &&
       !v.includes('@hypaware/central') &&
-      !v.includes('@hypaware/gascity')
+      !v.includes('@hypaware/gascity') &&
+      !v.includes('@hypaware/github')
   )
 
   // ----- 2. hyp client attach claude --dry-run -----
@@ -296,6 +297,11 @@ export async function run({ harness, expect }) {
     'status: unconfigured @hypaware/gascity absent from status JSON',
     statusStdout.text(),
     (v) => typeof v === 'string' && !v.includes('@hypaware/gascity')
+  )
+  expect.that(
+    'status: unconfigured @hypaware/github absent from status JSON',
+    statusStdout.text(),
+    (v) => typeof v === 'string' && !v.includes('@hypaware/github')
   )
 
   await obs.shutdown()

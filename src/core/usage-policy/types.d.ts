@@ -37,6 +37,13 @@ export interface ResolveResult {
 export interface UsagePolicyResolver {
   resolve(cwd: string): ResolveResult
   isIgnored(cwd: string): boolean
+  /**
+   * Cheap stable digest of the resolver's mutable machine-local input (the
+   * LLP 0071/0103 list file), for consumers that must notice a policy change
+   * without re-reading history (LLP 0367 #policy-fingerprint). Optional so a
+   * hand-built test resolver without it behaves as a constant policy.
+   */
+  fingerprint?(): string
 }
 
 // On-disk shape of the machine-local `local-only` directory list

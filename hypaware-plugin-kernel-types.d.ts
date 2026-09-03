@@ -1738,6 +1738,17 @@ export interface QueryStorageService {
     | { row: Record<string, unknown>; after: SinkContinuation; dropped?: undefined }
     | { row?: undefined; after: SinkContinuation; dropped: true }
   >
+  /**
+   * Cheap stable digest of the mutable machine-local inputs behind
+   * `readRowsSince`'s withholding verdicts (the `local-only`/class list and
+   * the client sync opt-out set). A consumer that derives durable state from
+   * those verdicts compares this across ticks to detect a privacy-policy
+   * change without re-reading history, then revalidates what it derived
+   * (LLP 0367). No cache I/O; equal digests promise nothing about the cache's
+   * contents, only about the policy. Optional so hand-built test storage
+   * fakes read as a constant policy.
+   */
+  exportPolicyFingerprint?(): string
 }
 
 export interface CachePartitionMeta {

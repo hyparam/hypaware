@@ -568,6 +568,13 @@ export interface SourceWithholdResolver {
    * `shouldWithholdDataset`.
    */
   shouldWithholdUnattributed?(dataset: string): boolean
+  /**
+   * Cheap stable digest of the resolver's mutable input, the live withheld
+   * picker-source set, for consumers that must notice an opt-out change
+   * without re-reading history (LLP 0367 #policy-fingerprint). Optional for
+   * the same hand-built-resolver reason as `shouldWithholdDataset`.
+   */
+  fingerprint?(): string
 }
 
 export type ExtendedQueryStorageService = QueryStorageService & {

@@ -67,6 +67,11 @@ export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ (
  * is the consent gate that lets the scheduled Claude reader import Desktop's
  * local transcript trees (LLP 0358); selecting its picker row names it.
  *
+ * The GitHub source is bundled so its session-evidence contract evolves with
+ * `ai_gateway_messages`, but activation remains explicit because it performs
+ * credentialed outbound API capture. Once activated, its own inventory and
+ * cadence defaults apply.
+ *
  * @type {ReadonlySet<PluginName>}
  * @ref LLP 0024#embedding-is-a-separate-capability [constrained-by]: the embedder choice is an explicit plugins[] config decision, so neither plugin default-activates
  * @ref LLP 0358#onboarding [constrained-by]: Desktop is selectable but its transcript ownership plugin activates only when the user selects it
@@ -81,6 +86,7 @@ export const V1_EXCLUDED_FROM_DEFAULT = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/context-graph-enrich',
   '@hypaware/claude-account',
   '@hypaware/claude-desktop',
+  '@hypaware/github',
 ]))
 
 /**
