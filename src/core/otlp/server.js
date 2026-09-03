@@ -8,7 +8,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { isLoopbackHost } from '../util/loopback.js'
 
 /**
- * @import { IncomingMessage } from 'node:http'
+ * @import { IncomingMessage, Server } from 'node:http'
  * @import { PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
  * @import { OtlpJsonServerOptions, OtlpSignal } from '../../../src/core/otlp/types.js'
  */
@@ -36,11 +36,52 @@ const HOST_REFUSED_LOG_INTERVAL_MS = 60 * 1000
 // a real one is short.
 const LOGGED_HOST_MAX_CHARS = 128
 /**
- * Refusals so far, per listener name, for the bound above.
+ * Refusals so far, for the bound above, keyed by the server that refused them.
+ *
+ * Per server rather than per listener name, so the state lives exactly as long
+ * as the listener that filled it in: a listener restarted inside the interval
+ * accepts on a new server and so starts a fresh entry, rather than inheriting
+ * the stopped one's `loggedAt` and swallowing its own first refusals, and
+ * `refused_total` counts one listener's run. Two live listeners sharing a
+ * name cannot reach each other's tally either.
+ *
+ * Weak, because the key is the whole live server: a strong module global would
+ * pin every listener that ever refused, along with its request handler and
+ * everything that closure captures. Nothing iterates this map, only looks an
+ * entry up by its own server, so weakness costs nothing and spares the check a
+ * lifecycle hook: an entry cannot outlive its server whether or not that
+ * server ever emits `close` (a `stop()` that leaves a keep-alive socket open
+ * defers that event indefinitely).
+ *
+ * @type {WeakMap<Server, { total: number, loggedAt: number }>}
+ */
+const HOST_REFUSALS = new WeakMap()
+
+/**
+ * The same tally for a refusal with no accepting server behind it: a direct
+ * call to the check, or a request on a socket handed to a server by
+ * `emit('connection')` rather than accepted by it. Keyed by listener name and
+ * never cleared, so a restart inside the interval does inherit the stopped
+ * run's clock. No listener here refuses on such a request today.
  *
  * @type {Map<string, { total: number, loggedAt: number }>}
  */
-const HOST_REFUSALS = new Map()
+const HOST_REFUSALS_BY_NAME = new Map()
+
+/**
+ * The server that accepted `req`, or `undefined` for a request with none
+ * behind it. Read off the request rather than threaded through the listener
+ * API so it covers every host of this check, including the OpenCode listener,
+ * which builds its own server and borrows this one function.
+ *
+ * @param {IncomingMessage} req
+ * @returns {Server | undefined}
+ */
+function acceptingServer(req) {
+  // Node sets the accepting server on every server-side socket but does not
+  // declare it on `net.Socket`.
+  return /** @type {{ server?: Server }} */ (req.socket).server
+}
 
 /**
  * Read the hostname out of a `Host` header, dropping the optional port
@@ -106,9 +147,14 @@ export function isMisdirectedHost(req, opts) {
   if (!value) return false
   const hostname = hostnameOfHostHeader(value)
   if (hostname !== undefined && (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname))) return false
-  const refusals = HOST_REFUSALS.get(opts.name) ?? { total: 0, loggedAt: 0 }
+  const server = acceptingServer(req)
+  let refusals = server ? HOST_REFUSALS.get(server) : HOST_REFUSALS_BY_NAME.get(opts.name)
+  if (!refusals) {
+    refusals = { total: 0, loggedAt: 0 }
+    if (server) HOST_REFUSALS.set(server, refusals)
+    else HOST_REFUSALS_BY_NAME.set(opts.name, refusals)
+  }
   refusals.total += 1
-  HOST_REFUSALS.set(opts.name, refusals)
   const now = Date.now()
   if (now - refusals.loggedAt >= HOST_REFUSED_LOG_INTERVAL_MS) {
     refusals.loggedAt = now
@@ -120,7 +166,7 @@ export function isMisdirectedHost(req, opts) {
       [Attr.ERROR_KIND]: 'host_not_loopback',
       listener: opts.name,
       host: value.slice(0, LOGGED_HOST_MAX_CHARS),
-      // Every refusal since this process started, so a burst the interval
+      // Every refusal since this listener started, so a burst the interval
       // above swallowed is still legible from one line.
       refused_total: refusals.total,
     })
