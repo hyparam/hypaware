@@ -366,3 +366,27 @@ test('a Link header injecting a foreign authority is refused before the next pag
   assert.equal(urls.length, 1, 'the refused page must not be requested')
   assert.doesNotMatch(urls[0], /evil/)
 })
+
+// The pin is an origin equality, not a prefix or suffix test. A host that
+// merely starts or ends with the configured one is a different host.
+for (const lookalike of ['https://api.github.test.evil.test/user/repos?page=2', 'https://notapi.github.test/user/repos?page=2']) {
+  test(`a look-alike host (${new URL(lookalike).host}) is refused`, async () => {
+    let fetches = 0
+    const client = createGithubClient({
+      tokenEnv: 'T',
+      env: { T: 'secret' },
+      baseUrl: 'https://api.github.test',
+      log: silentLog,
+      async fetchImpl() {
+        fetches += 1
+        return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+      },
+    })
+
+    await assert.rejects(client.listIssuesPage('o', 'r', undefined, lookalike), (error) => {
+      assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+      return true
+    })
+    assert.equal(fetches, 0)
+  })
+}
