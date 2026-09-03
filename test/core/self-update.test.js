@@ -1882,7 +1882,9 @@ test('an offline restart-only hand-over still needs a supervisor', async () => {
       supervised: false, stateRoot: dir, env: {}, packageRoot, runner,
       fetchImpl: offline, runningVersion: '1.0.0',
     })
-    assert.equal(result.reason, 'unsupervised')
+    // No `latest`: the version this refusal is about came off this disk,
+    // and the probe that would have named a registry answer never landed.
+    assert.deepEqual(result, { action: 'checked', reason: 'unsupervised' })
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }

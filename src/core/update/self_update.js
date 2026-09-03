@@ -979,8 +979,18 @@ export async function runSelfUpdatePass(opts = {}) {
       // `detectSupervisor` is wrong about a host, every lane stops applying
       // and the only symptom left is the one this whole document is about,
       // so the refusal has to be legible wherever the lane logs.
-      log('self_update.unsupervised', { latest_version: latest, running_version: identity.version })
-      return { action: 'checked', reason: 'unsupervised', latest }
+      // The third gate that owes nothing local, and the last one the
+      // fabricated `latest` can reach: it names the version a hand-over
+      // was owed for, which offline is this disk answering for a registry
+      // that never spoke. The refusal itself is what has to stay legible,
+      // and `running_version` already carries the root it is refusing.
+      log('self_update.unsupervised', {
+        ...(probeFailed ? {} : { latest_version: latest }),
+        running_version: identity.version,
+      })
+      return probeFailed
+        ? { action: 'checked', reason: 'unsupervised' }
+        : { action: 'checked', reason: 'unsupervised', latest }
     }
     if (restartOnly) {
       // Nothing here installed what the root now holds - a hand-typed
