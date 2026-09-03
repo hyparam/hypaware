@@ -48,8 +48,12 @@ cannot be observed from.
 
 ## The known set is the diagnostic's, not the gate's {#known-set}
 
-`KNOWN_PLATFORMS` holds the values Node documents for `process.platform`
-(`aix`, `android`, `darwin`, `freebsd`, `linux`, `openbsd`, `sunos`, `win32`).
+`KNOWN_PLATFORMS` holds the values `process.platform` can report (`aix`,
+`android`, `cygwin`, `darwin`, `freebsd`, `haiku`, `linux`, `netbsd`,
+`openbsd`, `sunos`, `win32`): the `NodeJS.Platform` union, not the shorter
+list the prose docs give, because `netbsd`, `cygwin`, and `haiku` are real
+today and warning on a gate that is correct is the one cost this diagnostic
+must not pay.
 It is deliberately not consulted by the gate itself, only by the report, which
 is what makes it safe to be wrong: a platform Node adds later costs one
 spurious warning line on a manifest that is in fact correct, and the row still

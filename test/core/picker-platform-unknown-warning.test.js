@@ -83,7 +83,9 @@ test('a picker platforms value outside the known set warns on stderr and still l
 })
 
 test('a picker platforms gate naming real platforms warns about nothing', async (t) => {
-  for (const platforms of [['darwin', 'linux'], ['win32'], undefined]) {
+  // `netbsd` is in the set for the same reason the others are: it is a value
+  // `process.platform` reports, so gating on it is correct and must stay quiet.
+  for (const platforms of [['darwin', 'linux'], ['win32'], ['netbsd'], undefined]) {
     const dir = await pluginDirWithPickerPlatforms(platforms)
     t.after(() => fs.rm(dir, { recursive: true, force: true }))
 

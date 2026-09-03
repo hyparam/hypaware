@@ -25,8 +25,10 @@ const MANIFEST_BASENAME = 'hypaware.plugin.json'
  */
 export async function loadManifest(rootDir) {
   const manifestPath = path.join(rootDir, MANIFEST_BASENAME)
+  /** @type {PluginManifest} */
+  let manifest
   try {
-    const manifest = await withSpan(
+    manifest = await withSpan(
       'manifest.load',
       {
         [Attr.OPERATION]: 'manifest.load',
@@ -58,12 +60,10 @@ export async function loadManifest(rootDir) {
 
         span.setAttribute(Attr.PLUGIN, validation.manifest.name)
         span.setAttribute('status', 'ok')
-        warnUnrecognizedPickerPlatforms(validation.manifest, manifestPath)
         return validation.manifest
       },
       { component: 'manifest' }
     )
-    return { ok: true, manifest, manifestPath, rootDir }
   } catch (err) {
     const errorKind = /** @type {ManifestErrorKind} */ (
       (err && /** @type {{hypErrorKind?: string}} */ (err).hypErrorKind) || 'manifest_invalid'
@@ -76,18 +76,25 @@ export async function loadManifest(rootDir) {
     })
     return { ok: false, errorKind, message, manifestPath, rootDir }
   }
+  // Outside the try on purpose: inside it, anything the diagnostic threw
+  // would be caught as a manifest rejection and take the whole plugin with
+  // it, the outcome the warning exists to avoid.
+  warnUnrecognizedPickerPlatforms(manifest, manifestPath)
+  return { ok: true, manifest, manifestPath, rootDir }
 }
 
 /**
- * The `process.platform` values Node documents. A picker row's `platforms`
- * gate is matched against `process.platform` by string equality, so a value
- * outside this set names no running platform.
+ * The values `process.platform` can report (the `NodeJS.Platform` union, which
+ * is wider than the list the prose docs give). A picker row's `platforms` gate
+ * is matched against `process.platform` by string equality, so a value outside
+ * this set names no running platform.
  *
  * @ref LLP 0369#known-set: this list is the diagnostic's vocabulary, not the
  * gate's, so a value Node adds later costs a spurious warning and nothing more.
  */
 const KNOWN_PLATFORMS = new Set([
-  'aix', 'android', 'darwin', 'freebsd', 'linux', 'openbsd', 'sunos', 'win32',
+  'aix', 'android', 'cygwin', 'darwin', 'freebsd', 'haiku',
+  'linux', 'netbsd', 'openbsd', 'sunos', 'win32',
 ])
 
 /**
