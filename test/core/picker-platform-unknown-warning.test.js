@@ -82,6 +82,22 @@ test('a picker platforms value outside the known set warns on stderr and still l
   assert.equal(warned[0].includes('macos'), true)
 })
 
+test('a partly unrecognized gate is not reported as withholding the row everywhere', async (t) => {
+  // "darwin" still matches, so the row does render on macOS. The line has to
+  // name the half that is wrong without claiming the row went missing, or it
+  // sends the author looking for a row that is in front of them.
+  const dir = await pluginDirWithPickerPlatforms(['darwin', 'win'])
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+
+  const { ok, stderr } = await loadCapturingStderr(dir)
+
+  assert.equal(ok, true)
+  const warned = stderr.split('\n').filter((line) => line.includes(WARNING))
+  assert.equal(warned.length, 1, `expected one warning, got ${JSON.stringify(warned)}`)
+  assert.equal(warned[0].includes('win'), true)
+  assert.equal(warned[0].includes('offered nowhere'), false, warned[0])
+})
+
 test('a picker platforms gate naming real platforms warns about nothing', async (t) => {
   // `netbsd` is in the set for the same reason the others are: it is a value
   // `process.platform` reports, so gating on it is correct and must stay quiet.

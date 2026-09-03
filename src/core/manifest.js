@@ -76,10 +76,15 @@ export async function loadManifest(rootDir) {
     })
     return { ok: false, errorKind, message, manifestPath, rootDir }
   }
-  // Outside the try on purpose: inside it, anything the diagnostic threw
-  // would be caught as a manifest rejection and take the whole plugin with
-  // it, the outcome the warning exists to avoid.
-  warnUnrecognizedPickerPlatforms(manifest, manifestPath)
+  // Outside the try above on purpose, and inside one of its own. Inside that
+  // try a throw from the diagnostic is caught as a manifest rejection and
+  // takes the whole plugin with it; outside it with no guard at all, the same
+  // throw rejects a promise this function has never rejected, and
+  // `loadManifests` fans out over `Promise.all`, so it would fail every
+  // plugin rather than one. A diagnostic may cost neither.
+  try {
+    warnUnrecognizedPickerPlatforms(manifest, manifestPath)
+  } catch {}
   return { ok: true, manifest, manifestPath, rootDir }
 }
 
@@ -112,14 +117,22 @@ const KNOWN_PLATFORMS = new Set([
  */
 function warnUnrecognizedPickerPlatforms(manifest, manifestPath) {
   for (const row of manifest.contributes?.picker ?? []) {
-    const unrecognized = (row.platforms ?? []).filter((p) => !KNOWN_PLATFORMS.has(p))
+    const platforms = row.platforms ?? []
+    const unrecognized = platforms.filter((p) => !KNOWN_PLATFORMS.has(p))
     if (unrecognized.length === 0) continue
+    // Only a gate that is unrecognized end to end withholds the row
+    // everywhere. `["darwin", "win"]` carries the same typo but still renders
+    // on macOS, and telling that author the row is offered nowhere sends them
+    // hunting for a row they can see, which is the confusion this removes.
+    const detail = unrecognized.length === platforms.length
+      ? `picker row is gated to ${unrecognized.join(', ')}, which no platform reports, so the row is offered nowhere`
+      : `picker row names ${unrecognized.join(', ')} in its gate, which no platform reports, so the row is offered only where the rest of the gate matches`
     getLogger('manifest', { mirrorStderr: true }).warn('manifest.picker_platform_unrecognized', {
       [Attr.PLUGIN]: manifest.name,
       hyp_manifest_path: manifestPath,
       hyp_picker_row: row.name,
       hyp_unrecognized_platforms: unrecognized.join(','),
-      detail: `picker row is gated to ${unrecognized.join(', ')}, which no platform reports, so the row is offered nowhere`,
+      detail,
     })
   }
 }
