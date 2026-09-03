@@ -1419,7 +1419,7 @@ the baseline value later releases diff against.
 - The daemon installed and started as a LaunchAgent (`hyp daemon install`,
   `hyp daemon start`), not `hyp daemon run --foreground`. A foreground daemon
   is exactly the unsupervised case.
-- `jq` on `PATH`, and `sudo` if step 2 comes back empty.
+- `jq` and `node` on `PATH`, and `sudo` if step 2 comes back empty.
 
 **Related:**
 [LLP 0365#restart-needs-a-supervisor](../llp/0365-self-update-cannot-strand-the-daemon.decision.md#restart-needs-a-supervisor)
@@ -1434,7 +1434,7 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
    that its environment is launchd's work rather than ours:
 
    ```sh
-   hyp status
+   HYP_HOME="$HOME/.hyp" hyp status
    launchctl print "gui/$(id -u)/com.hyperparam.hypaware" | grep -E '[[:space:]](state|pid) = '
    DPID=$(jq -r .pid "$HOME/.hyp/hypaware/run/hypaware.pid")
    plutil -p ~/Library/LaunchAgents/com.hyperparam.hypaware.plist
@@ -1449,11 +1449,12 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
    the plist does set the variable, this procedure is reading a value HypAware
    wrote and is worthless; find out who added it before going on.
 
-   The paths above are `$HOME/.hyp` and not `$HYP_HOME` on purpose. The
-   installer renders no `EnvironmentVariables`, so the LaunchAgent inherits no
-   `HYP_HOME`, and the running daemon's state root and log dir are
-   home-anchored however your own shell is set. Reading them through
-   `HYP_HOME` would point an operator who exports it at an empty directory and
+   The paths above are `$HOME/.hyp` and not `$HYP_HOME` on purpose, and
+   `hyp status` is run with `HYP_HOME` pinned to the same value for the same
+   reason. The installer renders no `EnvironmentVariables`, so the LaunchAgent
+   inherits no `HYP_HOME`, and the running daemon's state root and log dir are
+   home-anchored however your own shell is set. Reading them through an
+   exported `HYP_HOME` would point an operator at an empty state root and
    then, by the paragraph above, at a healthy daemon as the culprit. The
    `launchctl print` output is filtered rather than truncated for the same
    reason: `pid` prints well past the `arguments` and `environment` blocks, so
@@ -1491,26 +1492,36 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
    OBSERVED_XPC=$(ps -Eww -p "$DPID" | tr ' ' '\n' | sed -n 's/^XPC_SERVICE_NAME=//p')
    DAEMON_BIN=$(plutil -convert json -o - \
      ~/Library/LaunchAgents/com.hyperparam.hypaware.plist | jq -r '.ProgramArguments[1]')
-   SELF_UPDATE_MODULE="$(cd "$(dirname "$DAEMON_BIN")/.." && pwd)/src/core/update/self_update.js"
-   OBSERVED_XPC="$OBSERVED_XPC" SELF_UPDATE_MODULE="$SELF_UPDATE_MODULE" \
+   OBSERVED_XPC="$OBSERVED_XPC" DAEMON_BIN="$DAEMON_BIN" \
      node --input-type=module -e '
+       const { realpathSync } = await import("node:fs")
+       const path = await import("node:path")
        const { pathToFileURL } = await import("node:url")
        const observed = process.env.OBSERVED_XPC
        if (!observed) throw new Error("OBSERVED_XPC is empty: a missing reading, not a false")
-       const mod = await import(pathToFileURL(process.env.SELF_UPDATE_MODULE).href)
+       const root = path.dirname(path.dirname(realpathSync(process.env.DAEMON_BIN)))
+       console.error("package root: " + root)
+       const mod = await import(pathToFileURL(path.join(root, "src/core/update/self_update.js")).href)
        console.log(mod.detectSupervisor({ XPC_SERVICE_NAME: observed }))
      '
    ```
 
-   Pass condition: `true`. A `false` here is the finding this whole procedure
-   exists to surface, and it blocks the release.
+   Pass condition: `true` on stdout. The `package root:` line goes to stderr so
+   the verdict stays a single word; read it to confirm the module came from the
+   install you meant. A `false` here is the finding this whole procedure exists
+   to surface, and it blocks the release.
 
-   Two details carry the step. `SELF_UPDATE_MODULE` is derived from the
-   plist's own `ProgramArguments` and not from `npm root -g`: the shell's
-   global root can be a different install than the one launchd runs (a version
-   manager, a second prefix), and importing that one would be exactly the drift
-   this step claims to rule out. And the snippet throws on an empty
-   `OBSERVED_XPC` rather than judging it, because
+   Three details carry the step. The module is derived from the plist's own
+   `ProgramArguments` and not from `npm root -g`: the shell's global root can
+   be a different install than the one launchd runs (a version manager, a
+   second prefix), and importing that one would be exactly the drift this step
+   claims to rule out. The derivation resolves that path with `realpathSync`
+   because the plist records `process.argv[1]`, which for any `npm install -g`
+   is the bin symlink (`<prefix>/bin/hyp`) and not the file it points at;
+   resolving it is what turns the recorded path into the package root the
+   daemon actually loads, and without it the import would look for
+   `<prefix>/src/core/update/self_update.js` and fail outright. And the snippet
+   throws on an empty `OBSERVED_XPC` rather than judging it, because
    `detectSupervisor({ XPC_SERVICE_NAME: '' })` is `false`, and a missing
    reading must not be recorded as a failing one.
 
@@ -1575,8 +1586,8 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
   from, so the daemon under test is not the packaged one and its provenance
   guard would refuse an apply long before the supervisor gate was consulted.
   Reinstall from the package under test (`npm install -g`, then
-  `hyp daemon install`) and start again; compare the path against
-  `npm root -g` if you are unsure which root it belongs to.
+  `hyp daemon install`) and start again; compare step 4's `package root:` line
+  against `npm root -g` if you are unsure which root it belongs to.
 
 ---
 
