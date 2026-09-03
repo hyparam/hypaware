@@ -14,6 +14,8 @@ export interface IdentityResponse {
   jwt: string
   /** Unix epoch second when the JWT expires. */
   expires_at: number
+  /** Stable server-assigned organization identifier. Empty in single-org mode. */
+  org: string
 }
 
 /** Persisted gateway identity on disk (`identity.json`, mode 0600). */
@@ -21,6 +23,12 @@ export interface PersistedIdentity {
   jwt: string
   expires_at: number
   gateway_id: string
+  /**
+   * Stable server-assigned organization identifier. Optional only while
+   * reading an identity written before destination-scoped export state; such
+   * an identity is refreshed once before the sink can start.
+   */
+  org?: string
   /**
    * Central base URL that minted this identity. Set since the
    * re-enrollment guard landed; absent on identities written by older
@@ -96,4 +104,30 @@ export interface DatasetRolloutStore {
     partitionKeys: string[],
     previous?: DatasetRolloutRecord | null,
   ): Promise<DatasetRolloutRecord>
+}
+
+/** Stable remote destination identity used to scope local export progress. */
+export interface RemoteDestination {
+  /** Canonical URL origin, including scheme and effective port. */
+  origin: string
+  /** Stable server-assigned organization identifier. */
+  org: string
+}
+
+/** Durable destination binding for one sink-instance state scope. */
+export interface DestinationBindingRecord {
+  v: 1
+  destination: RemoteDestination
+  phase: 'initializing-history' | 'ready'
+  createdAt: string
+  updatedAt: string
+}
+
+/** The state scope selected for the currently authenticated destination. */
+export interface BoundDestinationState {
+  stateDir: string
+  destination: RemoteDestination
+  phase: DestinationBindingRecord['phase']
+  /** True only when pre-destination state was adopted for the current org. */
+  adoptedLegacy: boolean
 }

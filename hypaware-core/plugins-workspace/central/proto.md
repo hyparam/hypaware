@@ -24,7 +24,7 @@ release that drops `/v1/` ships. Clients send no version header.
 
 The gateway holds one long-lived JWT issued by the central server. The
 JWT's `sub` is the gateway id; the kernel persists `{ jwt, expires_at,
-gateway_id }` to `<plugin.stateDir>/identity.json` (mode 0600,
+gateway_id, org }` to `<plugin.stateDir>/identity.json` (mode 0600,
 atomic tmp+rename).
 
 ### POST `/v1/identity/bootstrap`
@@ -43,10 +43,16 @@ Request:
 Response 200:
 
 ```json
-{ "jwt": "<base64url.signed.jwt>", "expires_at": 1814400000 }
+{
+  "jwt": "<base64url.signed.jwt>",
+  "expires_at": 1814400000,
+  "org": "acme.example"
+}
 ```
 
-`expires_at` is a Unix epoch second.
+`expires_at` is a Unix epoch second. `org` is the stable server-assigned
+organization identifier used with the server origin to scope export progress;
+it is an empty string for a single-org server without organization enforcement.
 
 Response 401 / 4xx: `{ "error": "<kind>" }`. Gateway aborts; operator
 must issue a new bootstrap token.

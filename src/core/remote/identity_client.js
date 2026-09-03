@@ -97,7 +97,7 @@ export async function exchangeCode({ identityBase, code, codeVerifier, host, fet
     expiresAt: expiryTimestamp(json.expires_at, 'expires_at'),
     org: str(json.org, 'org'),
   }
-  const gateway = gatewayCredential(json)
+  const gateway = gatewayCredential(json, session.org)
   if (gateway) session.gateway = gateway
   return session
 }
@@ -112,10 +112,11 @@ export async function exchangeCode({ identityBase, code, codeVerifier, host, fet
  * central sink's forward store.
  *
  * @param {Record<string, any>} json
+ * @param {string} org
  * @returns {LoginGatewayCredential | undefined}
  * @ref LLP 0061#d1 [implements]: capture the gateway_* triple off the authorization_code response; absent fields mean no gateway, partial fields fail loudly
  */
-function gatewayCredential(json) {
+function gatewayCredential(json, org) {
   if (json.gateway_jwt === undefined && json.gateway_expires_at === undefined && json.gateway_id === undefined) {
     return undefined
   }
@@ -123,6 +124,8 @@ function gatewayCredential(json) {
     jwt: str(json.gateway_jwt, 'gateway_jwt'),
     expiresAt: epochSecond(json.gateway_expires_at, 'gateway_expires_at'),
     gatewayId: str(json.gateway_id, 'gateway_id'),
+    // @ref LLP 0315#destination-identity [implements]: the login gateway carries the same server-assigned org as its enclosing authorization response
+    org,
   }
 }
 
@@ -320,4 +323,3 @@ function epochSecond(v, field) {
 export function trimSlash(base) {
   return base.replace(/\/+$/, '')
 }
-

@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import { atomicWriteJsonSync, isPlainObject, sha256Hex } from 'hypaware/core/util'
 
 /**
- * @import { AcquireSource, PersistedIdentity } from './types.js'
+ * @import { AcquireSource, PersistedIdentity, RemoteDestination } from './types.js'
  */
 
 /**
@@ -110,6 +110,14 @@ export class IdentityClient {
         )
       }
       this.identity = persisted
+      // An identity written before destination-scoped progress has no stable
+      // organization beside it. Refresh once against the upgraded server
+      // before any sink state is selected, then persist the authoritative org.
+      // @ref LLP 0315#destination-identity [implements]: legacy identities acquire the server-assigned org before export progress is bound to a destination
+      if (persisted.org === undefined) {
+        await this.refresh()
+        return 'refreshed'
+      }
       const remainingSec = persisted.expires_at - Math.floor(this.now() / 1000)
       if (remainingSec <= REFRESH_WINDOW_SECONDS) {
         await this.refresh()
@@ -200,13 +208,23 @@ export class IdentityClient {
       throw new Error(`identity refresh failed: ${await readErrorDetail(response)}`)
     }
     const parsed = await readJsonResponse(response, 'refresh')
-    const identity = identityFromPayload(parsed, this.identity.gateway_id)
+    const previous = this.identity
+    const identity = identityFromPayload(parsed, previous.gateway_id)
+    // A credential rotation must not silently move a running sink to another
+    // destination. A legacy identity has no prior org and adopts the response;
+    // every subsequent refresh must preserve it exactly.
+    // @ref LLP 0315#destination-identity [constrained-by]: credential refresh preserves destination identity; an org change requires a new enrollment and state scope
+    if (previous.org !== undefined && identity.org !== previous.org) {
+      throw new Error(
+        `identity refresh failed: central server changed organization from '${previous.org}' to '${identity.org}'`
+      )
+    }
     // Preserve the mint provenance across refresh; the bootstrap token is
     // typically absent in steady state, so re-derive it from the prior
     // persisted identity rather than recomputing.
-    identity.central_url = this.identity.central_url
-    identity.bootstrap_token_fp = this.identity.bootstrap_token_fp
-    if (this.identity.origin !== undefined) identity.origin = this.identity.origin
+    identity.central_url = previous.central_url
+    identity.bootstrap_token_fp = previous.bootstrap_token_fp
+    if (previous.origin !== undefined) identity.origin = previous.origin
     this.identity = identity
     writePersistedFile(this.persistedPath, identity)
   }
@@ -229,6 +247,21 @@ export class IdentityClient {
       throw new Error('identity refresh did not produce a JWT')
     }
     return this.identity.jwt
+  }
+
+  /**
+   * Return the authenticated destination identity used to scope export state.
+   * `acquire()` must run first so a legacy identity has already refreshed its
+   * missing organization.
+   *
+   * @returns {RemoteDestination}
+   */
+  getDestination() {
+    if (!this.identity || this.identity.org === undefined) {
+      throw new Error('identity destination not acquired - call acquire() first')
+    }
+    // @ref LLP 0315#destination-identity [implements]: progress keys on canonical server origin plus stable organization, never gateway credentials
+    return { origin: new URL(this.centralUrl).origin, org: this.identity.org }
   }
 }
 
@@ -255,7 +288,7 @@ function readPersistedFile(filePath) {
   if (!isPlainObject(parsed)) {
     throw new Error(`persisted identity ${filePath} must be an object`)
   }
-  const { jwt, expires_at, gateway_id, central_url, bootstrap_token_fp, origin } =
+  const { jwt, expires_at, gateway_id, org, central_url, bootstrap_token_fp, origin } =
     /** @type {Record<string, unknown>} */ (parsed)
   if (typeof jwt !== 'string' || jwt.length === 0) {
     throw new Error(`persisted identity ${filePath}: missing or invalid jwt`)
@@ -268,6 +301,10 @@ function readPersistedFile(filePath) {
   }
   /** @type {PersistedIdentity} */
   const identity = { jwt, expires_at, gateway_id }
+  if (org !== undefined && typeof org !== 'string') {
+    throw new Error(`persisted identity ${filePath}: invalid org`)
+  }
+  if (typeof org === 'string') identity.org = org
   if (typeof central_url === 'string') identity.central_url = central_url
   if (typeof bootstrap_token_fp === 'string') identity.bootstrap_token_fp = bootstrap_token_fp
   if (origin === 'login') identity.origin = origin
@@ -328,18 +365,21 @@ function identityFromPayload(parsed, fallbackGatewayId) {
   if (!isPlainObject(parsed)) {
     throw new Error('central server response is not an object')
   }
-  const { jwt, expires_at } = /** @type {Record<string, unknown>} */ (parsed)
+  const { jwt, expires_at, org } = /** @type {Record<string, unknown>} */ (parsed)
   if (typeof jwt !== 'string' || jwt.length === 0) {
     throw new Error('central server response missing jwt')
   }
   if (typeof expires_at !== 'number' || !Number.isInteger(expires_at)) {
     throw new Error('central server response missing expires_at')
   }
+  if (typeof org !== 'string') {
+    throw new Error('central server response missing org')
+  }
   const gateway_id = decodeJwtSub(jwt) ?? fallbackGatewayId
   if (typeof gateway_id !== 'string' || gateway_id.length === 0) {
     throw new Error('central server response missing gateway identity (sub claim)')
   }
-  return { jwt, expires_at, gateway_id }
+  return { jwt, expires_at, gateway_id, org }
 }
 
 /**

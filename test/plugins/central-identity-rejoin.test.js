@@ -29,7 +29,9 @@ function fakeJwt(sub) {
  * Fake central server that mints a fresh gateway id on each bootstrap and
  * counts how many times bootstrap/refresh were hit.
  */
-function makeFetch() {
+/** @param {{ org?: string, refreshOrg?: string }} [opts] */
+function makeFetch(opts = {}) {
+  const org = opts.org ?? 'acme.test'
   const calls = { bootstrap: 0, refresh: 0 }
   /** @type {typeof fetch} */
   const fetchFn = async (url) => {
@@ -37,14 +39,14 @@ function makeFetch() {
     if (u.endsWith('/v1/identity/bootstrap')) {
       calls.bootstrap += 1
       return new Response(
-        JSON.stringify({ jwt: fakeJwt(`gw-${calls.bootstrap}`), expires_at: NOW_SEC + 30 * DAY }),
+        JSON.stringify({ jwt: fakeJwt(`gw-${calls.bootstrap}`), expires_at: NOW_SEC + 30 * DAY, org }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       )
     }
     if (u.endsWith('/v1/identity/refresh')) {
       calls.refresh += 1
       return new Response(
-        JSON.stringify({ jwt: fakeJwt(`gw-refresh-${calls.refresh}`), expires_at: NOW_SEC + 60 * DAY }),
+        JSON.stringify({ jwt: fakeJwt(`gw-refresh-${calls.refresh}`), expires_at: NOW_SEC + 60 * DAY, org: opts.refreshOrg ?? org }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       )
     }
@@ -73,6 +75,7 @@ test('first join bootstraps and stamps the minting url + token fingerprint', asy
   assert.equal(calls.bootstrap, 1)
   const persisted = JSON.parse(fs.readFileSync(persistedPath, 'utf8'))
   assert.equal(persisted.gateway_id, 'gw-1')
+  assert.equal(persisted.org, 'acme.test')
   assert.equal(persisted.central_url, 'https://central-a.example')
   assert.equal(typeof persisted.bootstrap_token_fp, 'string')
   // Fingerprint, never the raw token.
@@ -93,6 +96,63 @@ test('reboot with the same mint reuses the persisted identity (no re-bootstrap)'
   }).acquire()
   assert.equal(source, 'loaded')
   assert.equal(second.calls.bootstrap, 0)
+})
+
+test('an identity from an older build with no org refreshes once before loading', async () => {
+  const persistedPath = tmpIdentityPath()
+  fs.writeFileSync(persistedPath, JSON.stringify({
+    jwt: fakeJwt('gw-legacy'),
+    expires_at: NOW_SEC + 30 * DAY,
+    gateway_id: 'gw-legacy',
+    central_url: 'https://central-a.example',
+  }))
+  const { fetchFn, calls } = makeFetch()
+  const client = new IdentityClient({
+    centralUrl: 'https://central-a.example', persistedPath, fetchFn, now,
+  })
+  assert.equal(await client.acquire(), 'refreshed')
+  assert.equal(calls.refresh, 1)
+  assert.equal(JSON.parse(fs.readFileSync(persistedPath, 'utf8')).org, 'acme.test')
+  assert.deepEqual(client.getDestination(), { origin: 'https://central-a.example', org: 'acme.test' })
+})
+
+test('a legacy identity refuses to open export state against a server that omits org', async () => {
+  const persistedPath = tmpIdentityPath()
+  fs.writeFileSync(persistedPath, JSON.stringify({
+    jwt: fakeJwt('gw-legacy'),
+    expires_at: NOW_SEC + 30 * DAY,
+    gateway_id: 'gw-legacy',
+    central_url: 'https://central-a.example',
+  }))
+  const fetchFn = /** @type {typeof fetch} */ (async () => new Response(
+    JSON.stringify({ jwt: fakeJwt('gw-refreshed'), expires_at: NOW_SEC + 60 * DAY }),
+    { status: 200, headers: { 'content-type': 'application/json' } }
+  ))
+  await assert.rejects(
+    new IdentityClient({ centralUrl: 'https://central-a.example', persistedPath, fetchFn, now }).acquire(),
+    /central server response missing org/
+  )
+  assert.equal(JSON.parse(fs.readFileSync(persistedPath, 'utf8')).org, undefined)
+})
+
+test('a refresh cannot silently change the destination organization', async () => {
+  const persistedPath = tmpIdentityPath()
+  const first = makeFetch()
+  await new IdentityClient({
+    centralUrl: 'https://central-a.example', bootstrapToken: 'token-a', persistedPath, fetchFn: first.fetchFn, now,
+  }).acquire()
+  const persisted = JSON.parse(fs.readFileSync(persistedPath, 'utf8'))
+  persisted.expires_at = NOW_SEC + 60
+  fs.writeFileSync(persistedPath, JSON.stringify(persisted))
+
+  const changed = makeFetch({ refreshOrg: 'beta.test' })
+  await assert.rejects(
+    new IdentityClient({
+      centralUrl: 'https://central-a.example', persistedPath, fetchFn: changed.fetchFn, now,
+    }).acquire(),
+    /changed organization from 'acme\.test' to 'beta\.test'/
+  )
+  assert.equal(JSON.parse(fs.readFileSync(persistedPath, 'utf8')).org, 'acme.test')
 })
 
 test('re-join with a different token re-bootstraps a fresh gateway identity', async () => {
