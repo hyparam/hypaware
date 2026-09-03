@@ -632,6 +632,26 @@ binds `127.0.0.1` and only its port is configurable, so it cannot reach the
 case above. It answers `{"error":"misdirected request"}` rather than the OTLP
 body, and its refusals are logged under `listener=@hypaware/opencode`.
 
+A fourth shares it, the AI gateway (`@hypaware/ai-gateway`, default
+`127.0.0.1:18521`), on one of its three doors: the direct origin-form requests
+addressed to the listener itself. A tunnelled (`CONNECT`) or absolute-form
+request names a third party in `Host` by design, so its `Host` is never
+judged; what contains those doors is the loopback-peers-only rule and the
+routing table. Refusals answer `{"error":"misdirected request"}` and are
+logged under `listener=@hypaware/ai-gateway`.
+
+The gateway is the one hosting listener whose address nobody types by hand.
+Its bind host is configurable (`listen`), and that same host is what
+`hyp client attach` writes into each client's base URL and what
+`hyp session ignore` posts to. So a `listen` naming a *hostname* that resolves
+to a loopback address refuses the gateway's own clients, and it takes their
+egress with it rather than only their capture, because the base URL they were
+handed stops answering. Pin `listen` to a loopback literal, to `0.0.0.0` or
+`::`, or to a routable address; all three are accepted, and the first is what
+a default install already uses. On a wildcard bind a client on another machine
+has the same constraint as a remote exporter: address the gateway by the
+routable interface literal, not by a name.
+
 ## Uninstalling
 
 To remove HypAware from a machine completely:
