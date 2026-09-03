@@ -57,9 +57,40 @@ test('withSpinner keeps a long label inside the terminal width', async () => {
   await withSpinner({ stdout, label, env: {}, intervalMs: 5 }, async () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
   })
-  for (const frame of stdout.text().split('\r\x1b[2K').filter(Boolean)) {
+  const frames = stdout.text().split('\r\x1b[2K').filter(Boolean)
+  // Without this the loop below asserts nothing when no frame was rendered.
+  assert.ok(frames.length > 0)
+  for (const frame of frames) {
     assert.ok(frame.length <= 19, `frame wider than the terminal: ${JSON.stringify(frame)}`)
   }
+})
+
+// A terminal that reports a width of 0 or 1 (a pty whose size ioctl did not
+// resolve) is a known tiny width, not an unknown one: clamp, do not wrap.
+test('withSpinner clamps at a degenerate terminal width', async () => {
+  const stdout = makeStdout({ isTTY: true, columns: 1 })
+  await withSpinner({ stdout, label: 'waiting for a long time', env: {}, intervalMs: 5 }, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  })
+  const frames = stdout.text().split('\r\x1b[2K').filter(Boolean)
+  assert.ok(frames.length > 0)
+  for (const frame of frames) {
+    assert.ok(frame.length <= 1, `frame wider than the terminal: ${JSON.stringify(frame)}`)
+  }
+})
+
+// The elapsed counter is the point of the spinner, so it is the label that
+// gives way to the width, not the tail.
+test('withSpinner keeps the elapsed counter when it clamps', async () => {
+  const stdout = makeStdout({ isTTY: true, columns: 24 })
+  const label = "Replaying 'claude-desktop' history to central-production..."
+  await withSpinner({ stdout, label, env: {}, intervalMs: 20 }, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+  })
+  const frames = stdout.text().split('\r\x1b[2K').filter(Boolean)
+  const last = frames[frames.length - 1]
+  assert.match(last, /^\S Replaying.*… \(1s\)$/)
+  assert.ok(last.length <= 23, `frame wider than the terminal: ${JSON.stringify(last)}`)
 })
 
 test('withSpinner clears the line and rethrows when the work fails', async () => {

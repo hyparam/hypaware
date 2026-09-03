@@ -46,8 +46,8 @@ export async function withSpinner(opts, work) {
   const render = () => {
     const elapsed = Math.floor((Date.now() - started) / 1000)
     const suffix = elapsed >= 1 ? ` (${elapsed}s)` : ''
-    const line = `${FRAMES[frame % FRAMES.length]} ${label}${suffix}`
-    stdout.write(`\r\x1b[2K${clampToWidth(line, stdout)}`)
+    const head = `${FRAMES[frame % FRAMES.length]} `
+    stdout.write(`\r\x1b[2K${clampToWidth(head, label, suffix, stdout)}`)
     frame += 1
   }
   render()
@@ -71,17 +71,37 @@ export async function withSpinner(opts, work) {
  * reach; `hyp sync` names a client and a destination in one label, which
  * wraps on any narrow pane.
  *
+ * The label is what gives way, never the tail. The animating frame and the
+ * elapsed seconds are the whole signal this helper exists to show, and
+ * clamping the composed line from the right would drop `(12s)` first, on
+ * every pane narrower than the label (about 53 columns for `hyp sync`, 66
+ * for a history replay). Slicing is by code point, so a cut never lands
+ * inside a surrogate pair.
+ *
+ * Labels are plain text by contract: an escape sequence inside one would be
+ * counted here as display columns and could be cut in half, leaving the
+ * terminal mid-sequence. No caller passes one.
+ *
  * A stream with no `columns` (a capture in a test, a pipe) is left alone:
  * there is no width to clamp to, and nothing wraps there anyway.
  *
- * @param {string} line
+ * @param {string} head
+ * @param {string} label
+ * @param {string} suffix
  * @param {{ columns?: number }} stdout
  * @returns {string}
  */
-function clampToWidth(line, stdout) {
+function clampToWidth(head, label, suffix, stdout) {
   const columns = stdout.columns
-  if (typeof columns !== 'number' || columns < 2) return line
+  const line = `${head}${label}${suffix}`
+  if (typeof columns !== 'number') return line
   // One column short of the edge: writing the last cell leaves the cursor in
-  // a state terminals disagree about (some wrap eagerly, some defer).
-  return line.length > columns - 1 ? line.slice(0, columns - 1) : line
+  // a state terminals disagree about (some wrap eagerly, some defer). A
+  // terminal that reports 0 or 1 column still gets clamped, not wrapped.
+  const width = Math.max(1, columns - 1)
+  const chars = [...line]
+  if (chars.length <= width) return line
+  const room = width - [...head].length - [...suffix].length
+  if (room < 1) return chars.slice(0, width).join('')
+  return `${head}${[...label].slice(0, room - 1).join('')}…${suffix}`
 }
