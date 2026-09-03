@@ -572,10 +572,11 @@ Useful follow-on commands when a diagnostic fires:
 The two OTLP listeners HypAware hosts each take a bind address from their own
 config section, and both default it to `127.0.0.1`: `listen_host` for the
 `otel` source, `telemetry.listen_host` for the Claude Code telemetry listener.
-Whatever they are bound to, the only `Host` values they answer to are the ones
-that name this machine without consulting a resolver: `localhost`, `::1`, any
-`127.x.y.z` address, and the bind literals `0.0.0.0` and `::`. A request whose
-`Host` is any other name gets no route at all:
+On their loopback side, whatever they are bound to, the only `Host` values
+they answer to are the ones that name this machine without consulting a
+resolver: `localhost`, `::1`, any `127.x.y.z` address, and the bind literals
+`0.0.0.0` and `::`. A request arriving there under any other name gets no
+route at all:
 
 ```
 HTTP/1.1 421 Misdirected Request
@@ -610,9 +611,13 @@ carrying `hyp_component=sources`, `hyp_operation=host_check`, `status=skipped`,
 `refused_total`, the refusals since that listener started. Refusals are always
 counted but logged at most once a minute per listener, so a burst is still
 legible from a single line. These warnings travel HypAware's own OTel log
-channel rather than `daemon.log`, so to read them run the daemon with
-`HYP_DEV_TELEMETRY=1` (JSONL under `<HYP_HOME>/hypaware/dev-telemetry/`) or
-with `OTEL_EXPORTER_OTLP_ENDPOINT` pointed at your own collector.
+channel, which an installed daemon exports nowhere by default: they reach none
+of `daemon.log`, `daemon.out.log`, or `daemon.err.log` under
+`<HYP_HOME>/hypaware/logs/`. To read one, reproduce the refusal against a
+daemon started with an exporter configured, either
+`HYP_DEV_TELEMETRY=1 hyp daemon run --foreground` (JSONL under
+`<HYP_HOME>/hypaware/dev-telemetry/`) or `OTEL_EXPORTER_OTLP_ENDPOINT`
+pointed at your own collector, not back at HypAware.
 
 ## Uninstalling
 
