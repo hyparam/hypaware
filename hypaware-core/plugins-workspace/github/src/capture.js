@@ -147,7 +147,20 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       // handler in `source.js` never sees it, so without this the kind is not
       // filterable exactly where it matters.
       const kind = /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind
-      log.error('github.repo_capture_failed', { repo, error: message, ...(kind ? { error_kind: kind } : {}) })
+      // A refused continuation is the one failure retrying cannot clear: the
+      // URL the client refused IS the durable work, so keeping it replays the
+      // same refusal every tick and the repository never captures again until
+      // `github-cursors.json` is hand-edited. Dropping it restarts from the
+      // last completed phase, which is what a lost work descriptor already
+      // means here (LLP 0360#cursoring).
+      const cleared = kind === 'github_foreign_origin' && cursor.work !== undefined
+      if (cleared) delete cursor.work
+      log.error('github.repo_capture_failed', {
+        repo,
+        error: message,
+        ...(kind ? { error_kind: kind } : {}),
+        ...(cleared ? { work_cleared: true } : {}),
+      })
     }
     events += repoEvents
     // Persist the advanced cursor onto the shared state after each repo.
