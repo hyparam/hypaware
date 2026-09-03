@@ -376,7 +376,11 @@ export async function runDaemon(opts = {}) {
       writeSelfUpdateState(stateRoot, {
         auto_update: autoUpdateEnabled,
         boot_failures: 0,
-        ...(runningVersion ? { running_version: runningVersion } : {}),
+        // Written unconditionally, so a boot that could not read its own
+        // version clears the field instead of leaving the previous
+        // daemon's there: a stale value reads as "installed X, running Y"
+        // against a live pid and earns a restart nothing needs.
+        running_version: runningVersion,
       })
     } catch (err) {
       fileLog.warn('self_update.flag_cache_failed', {
@@ -1032,23 +1036,6 @@ export async function runDaemon(opts = {}) {
   async function shutdown(reason) {
     if (shutdownInFlight) return done
     shutdownInFlight = true
-    // A restart that never finishes exiting is a dead daemon with a live
-    // pid: the listeners are closed below, so clients get refused, and the
-    // service manager sees a running process and relaunches nothing. Past
-    // the deadline the exit is forced with the restart code so the
-    // relaunch happens anyway. Only under a supervisor: unsupervised, a
-    // forced exit turns a wedged daemon into a missing one, and the
-    // timer is unref'd so it can never be what keeps the process alive.
-    // @ref LLP 0365#restart-exit-is-bounded [implements]: a restart shutdown that overruns is exited by force so the supervisor relaunches
-    if (reason === 'restart' && supervised) {
-      const forced = setTimeout(() => {
-        try {
-          fileLog.error('daemon.restart_exit_forced', { after_ms: RESTART_EXIT_DEADLINE_MS })
-        } catch { /* the log may already be closed */ }
-        process.exit(DAEMON_RESTART_EXIT_CODE)
-      }, RESTART_EXIT_DEADLINE_MS)
-      forced.unref()
-    }
     // Close the control watcher first: reconcile settle below can hold
     // shutdown open for minutes, and a reload.request landing in that window
     // must not dispatch reload() into sources that are being stopped (or log
@@ -1073,6 +1060,30 @@ export async function runDaemon(opts = {}) {
     // mid-import. Abandoning a pass would orphan the spawned `hyp backfill`
     // child and interrupt the marker write.
     await reconcileScheduler.settle()
+    // A restart that never finishes exiting is a dead daemon with a live
+    // pid: the listeners are closed below, so clients get refused, and the
+    // service manager sees a running process and relaunches nothing. Past
+    // the deadline the exit is forced with the restart code so the
+    // relaunch happens anyway. Only under a supervisor: unsupervised, a
+    // forced exit turns a wedged daemon into a missing one, and the
+    // timer is unref'd so it can never be what keeps the process alive.
+    //
+    // Armed here rather than at the top of shutdown, so the deadline
+    // covers the part that can wedge (a client stream holding a source's
+    // `server.close()` open) and not the reconcile pass the line above
+    // deliberately waits for: `hyp backfill` is a multi-minute import by
+    // design, and forcing an exit through it is the orphaned child and
+    // lost marker that settle exists to prevent.
+    // @ref LLP 0365#restart-exit-is-bounded [implements]: a restart shutdown that overruns is exited by force so the supervisor relaunches
+    if (reason === 'restart' && supervised) {
+      const forced = setTimeout(() => {
+        try {
+          fileLog.error('daemon.restart_exit_forced', { after_ms: RESTART_EXIT_DEADLINE_MS })
+        } catch { /* the log may already be closed */ }
+        process.exit(DAEMON_RESTART_EXIT_CODE)
+      }, RESTART_EXIT_DEADLINE_MS)
+      forced.unref()
+    }
     // Last chance to capture accruing source details: the sources are still
     // running here, and after `stopAllSources` below their probes are gone.
     // A daemon that never reached a tick (or stopped between ticks) would

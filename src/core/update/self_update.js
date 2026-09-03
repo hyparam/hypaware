@@ -823,10 +823,17 @@ export async function runSelfUpdatePass(opts = {}) {
     if (!opts.force) {
       const stuck = previousBootLooksStuck(stateRoot)
       // Before the TTL gate: a version this updater installed that cannot
-      // boot is undone on the spot, not on tomorrow's schedule.
-      const rollback = await maybeRollBack({
-        stateRoot, stuck, packageRoot: opts.packageRoot, env, runner: opts.runner, nowMs, log,
-      })
+      // boot is undone on the spot, not on tomorrow's schedule. Only under
+      // a supervisor, for the same reason an apply is: the rollback
+      // installs and then exits for a relaunch, and a hand-run
+      // `hyp daemon run --foreground` has nothing to relaunch it, so the
+      // operator would get a silent downgrade and no daemon.
+      // @ref LLP 0365#restart-needs-a-supervisor [constrained-by]: the rollback installs and exits, so it is gated like any other apply
+      const rollback = supervised
+        ? await maybeRollBack({
+          stateRoot, stuck, packageRoot: opts.packageRoot, env, runner: opts.runner, nowMs, log,
+        })
+        : null
       if (rollback) return rollback
       if (!shouldCheckNow({ state, nowMs, eager: stuck, jitter: opts.jitter })) {
         return { action: 'none' }
@@ -904,6 +911,12 @@ export async function runSelfUpdatePass(opts = {}) {
       available,
       error: undefined,
       error_since: undefined,
+      // The hold covers one version. Something newer on the registry
+      // retires it, so drop it here rather than leaving a version that
+      // stopped mattering on `hyp status --json` for good.
+      ...(typeof state.held_version === 'string' && compareSemver(latest, state.held_version) > 0
+        ? { held_version: undefined }
+        : {}),
     })
     log('self_update.checked', { latest_version: latest, available, ...(held ? { held: true } : {}) })
     // Two versions matter, not one. `identity.version` is what the global
@@ -914,7 +927,14 @@ export async function runSelfUpdatePass(opts = {}) {
     // that machine up to date and leave the daemon on old code for good.
     // @ref LLP 0365#running-version-is-tracked [implements]: a newer root than the running code is an update that still needs its restart
     const running = opts.runningVersion
-    const restartOnly = !available && typeof running === 'string' &&
+    // Never hand over to a version that failed its preflight. When the
+    // reinstall of the version it replaced also failed, the root is left
+    // holding the broken one, and this is the lane that would otherwise
+    // restart the daemon straight onto it: the registry and the disk
+    // agree, so nothing reads as available, and the only difference left
+    // is that the daemon is still (correctly) running older code.
+    const heldOnDisk = state.held_version === identity.version
+    const restartOnly = !available && !heldOnDisk && typeof running === 'string' &&
       compareSemver(identity.version, running) > 0
     if (!available && !restartOnly) return { action: 'checked', latest }
     if (provenance !== 'global-candidate') {
@@ -1000,10 +1020,22 @@ export async function runSelfUpdatePass(opts = {}) {
         ...(applied.detail ? { detail: applied.detail } : {}),
         ...(applied.rolledBack ? { rolled_back: true } : {}),
       },
-      ...(applied.applied ? { available: false } : { error: `apply_failed: ${applied.reason}` }),
       // A version that was installed and could not run is not tried again
-      // until the registry offers something newer.
-      ...(applied.rolledBack ? { held_version: latest } : {}),
+      // until the registry offers something newer. Held whether or not the
+      // reinstall of the previous version succeeded: when it failed, the
+      // root is still holding the broken version, and `restart_only` above
+      // is what must not hand the daemon over to it.
+      ...(applied.reason === 'preflight_failed' ? { held_version: latest } : {}),
+      // A completed rollback is an outcome, not a degraded updater, so it
+      // clears the error the same way the failed-boot lane does. Recording
+      // `apply_failed` here instead would put "run 'npm install -g
+      // <name>@latest'" on `hyp status` until the next probe, which is an
+      // instruction to reinstall by hand the exact version that was just
+      // rolled back for not starting. `held_version` and
+      // `last_apply.detail` carry the diagnosis.
+      ...(applied.applied ? { available: false } : applied.rolledBack
+        ? { error: undefined, error_since: undefined }
+        : { error: `apply_failed: ${applied.reason}` }),
     })
     if (!applied.applied) {
       log('self_update.apply_failed', {
@@ -1059,6 +1091,13 @@ async function maybeRollBack({ stateRoot, stuck, packageRoot, env, runner, nowMs
   if (!last || !last.ok || last.rolled_back || !last.from || last.from === last.to) return null
   const identity = readSelfPackageIdentity(packageRoot)
   if (identity.version !== last.to) return null
+  // `last_apply` never expires, so without this the failed boots do not
+  // have to be the update's fault: two in a row from a bad config edit
+  // months later would downgrade a version that has been serving all
+  // along, and then hold it. A daemon that reached its kernel on this
+  // version wrote it as `running_version`, which is the evidence that the
+  // update is not what is stopping the boot.
+  if (state.running_version === last.to) return null
   const failures = (typeof state.boot_failures === 'number' ? state.boot_failures : 0) + 1
   if (failures < ROLLBACK_AFTER_BOOT_FAILURES) {
     writeSelfUpdateState(stateRoot, { boot_failures: failures })

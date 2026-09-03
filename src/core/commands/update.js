@@ -117,6 +117,18 @@ export async function runUpdate(argv, ctx) {
     )
     return 1
   }
+  // Held, not failed: this version was already installed here once and
+  // its entrypoint could not run, so it was rolled back. The generic
+  // branch below would blame the install and hand the operator
+  // `npm install -g <name>@latest`, which reinstalls that exact version
+  // and undoes the rollback.
+  if (result.reason === 'held') {
+    ctx.stderr.write(
+      `hyp update: ${result.latest ?? 'that release'} was installed here and could not start, so it was ` +
+      `rolled back to ${identity.version} and is held until a newer release publishes.\n`
+    )
+    return 1
+  }
   if (result.reason === 'checkout' || result.reason === 'npx') {
     const how = result.reason === 'checkout' ? 'a source checkout' : 'an npx cache'
     ctx.stderr.write(

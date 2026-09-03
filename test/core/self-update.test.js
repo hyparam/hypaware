@@ -366,6 +366,7 @@ test('state writes merge instead of clobbering the cached flag', async () => {
  *   installWritesVersion?: boolean,
  *   installStderr?: string,
  *   preflightFails?: string,
+ *   installFailsVersion?: string,
  * }} [opts]
  */
 async function fakeGlobalInstall(dir, opts = {}) {
@@ -401,6 +402,12 @@ async function fakeGlobalInstall(dir, opts = {}) {
         return { exitCode: 1, stdout: '', stderr: 'SyntaxError: unexpected token' }
       }
       return { exitCode: 0, stdout: `hypaware ${version}\n`, stderr: '' }
+    }
+    // One version npm cannot install at all (`installFailsVersion`), so a
+    // rollback can be made to fail while the update that provoked it
+    // installed cleanly.
+    if (opts.installFailsVersion === String(args[args.length - 1]).split('@').pop()) {
+      return { exitCode: 1, stdout: '', stderr: 'npm error code EACCES' }
     }
     const exitCode = opts.installExit ?? 0
     // A real `npm install -g` replaces the package directory. The updater
@@ -1587,6 +1594,71 @@ test('a new version whose entrypoint cannot run is reinstalled over and held', a
     })
     assert.equal(newer.action, 'updated')
     assert.equal(newer.latest, '99.2.0')
+    // and the hold it retired leaves the state file, rather than sitting
+    // in `hyp status --json` for the life of the install.
+    assert.equal(readSelfUpdateState(dir).held_version, undefined)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a rollback leaves status naming the held version, not a degraded install', async () => {
+  // The generic degraded advice is `npm install -g hypaware@latest`,
+  // which reinstalls by hand the exact version the rollback just took
+  // off the machine for not starting.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-held-status-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir, { preflightFails: '99.1.0' })
+    const result = await runSelfUpdatePass({ supervised: true,
+      stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: fetchStub('99.1.0').impl,
+    })
+    assert.equal(result.reason, 'preflight_failed')
+    const state = readSelfUpdateState(dir)
+    assert.equal(state.error, undefined)
+    assert.equal(state.held_version, '99.1.0')
+    // The diagnosis is not lost, it just is not the status line.
+    assert.equal(state.last_apply?.error, 'preflight_failed')
+    assert.match(String(state.last_apply?.detail), /SyntaxError/)
+    const described = describeSelfUpdate({ stateRoot: dir, env: {} })
+    assert.doesNotMatch(String(described.line), /degraded/)
+    assert.match(String(described.line), /99\.1\.0 was installed and could not start.*held/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a version that failed preflight is never restarted onto, even when its rollback failed too', async () => {
+  // The reinstall of the previous version can fail on its own (EACCES, an
+  // unpublished version, a registry that went away), and then the root is
+  // left holding the version that could not start. The registry and the
+  // disk agree from there, so nothing reads as available and the only
+  // difference left is the daemon running older code, which is exactly
+  // the shape `restart_only` exists to act on.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-failed-rollback-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir, {
+      preflightFails: '99.1.0', installFailsVersion: '1.0.0',
+    })
+    const lane = (/** @type {boolean} */ force) => runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, runner,
+      fetchImpl: fetchStub('99.1.0').impl, runningVersion: '1.0.0', force,
+    })
+    const first = await lane(false)
+    assert.equal(first.reason, 'preflight_failed')
+    const state = readSelfUpdateState(dir)
+    assert.equal(state.last_apply?.rolled_back, undefined, 'the rollback did not restore anything')
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8')).version,
+      '99.1.0',
+      'the root is stuck on the version that cannot start'
+    )
+    // Held anyway: the hold is what keeps the next pass from handing over.
+    assert.equal(state.held_version, '99.1.0')
+    // The daemon stays on the code it is already serving from, and the
+    // hold survives the probe that follows.
+    const next = await lane(true)
+    assert.notEqual(next.action, 'updated')
+    assert.equal(readSelfUpdateState(dir).held_version, '99.1.0')
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
@@ -1660,15 +1732,9 @@ test('without a supervisor the automatic lanes install nothing, and hyp update s
 test('repeated failed boots on an installed version reinstall the one it replaced', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-rollback-'))
   try {
-    const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
-    // The daemon lane installed 1.1.0 and exited for its restart...
-    await fsp.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'hypaware', version: '1.1.0' }))
-    writeSelfUpdateState(dir, {
-      checked_at: new Date().toISOString(), latest_version: '1.1.0', available: false,
-      last_apply: { at: new Date().toISOString(), from: '1.0.0', to: '1.1.0', ok: true },
-    })
-    // ...and the boot on it died inside bootKernel.
-    fs.writeFileSync(path.join(dir, 'run', 'status.json'), JSON.stringify({ state: 'starting' }))
+    // The daemon lane installed 1.1.0 and exited for its restart, and the
+    // boot on it died inside bootKernel.
+    const { packageRoot, runner, calls } = await failedBootAfterApply(dir)
     /** @type {string[]} */
     const events = []
     const lane = () => runSelfUpdatePass({
@@ -1696,6 +1762,68 @@ test('repeated failed boots on an installed version reinstall the one it replace
     const third = await lane()
     assert.notEqual(third.action, 'updated')
     assert.equal(calls.filter((c) => c[1] === 'install').length, 1)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The state a rollback acts on: this updater installed 1.1.0 over 1.0.0,
+ * and the boot on it died inside `bootKernel`.
+ *
+ * @param {string} dir
+ * @param {Record<string, unknown>} [extraState]
+ */
+async function failedBootAfterApply(dir, extraState = {}) {
+  const built = await fakeGlobalInstall(dir)
+  await fsp.writeFile(
+    path.join(built.packageRoot, 'package.json'),
+    JSON.stringify({ name: 'hypaware', version: '1.1.0' })
+  )
+  writeSelfUpdateState(dir, {
+    checked_at: new Date().toISOString(), latest_version: '1.1.0', available: false,
+    last_apply: { at: new Date().toISOString(), from: '1.0.0', to: '1.1.0', ok: true },
+    ...extraState,
+  })
+  fs.mkdirSync(path.join(dir, 'run'), { recursive: true })
+  fs.writeFileSync(path.join(dir, 'run', 'status.json'), JSON.stringify({ state: 'starting' }))
+  return built
+}
+
+test('without a supervisor the rollback lane installs nothing and never exits', async () => {
+  // The rollback installs and then exits for a relaunch, so it needs the
+  // same service manager an apply does. Run by hand in a terminal, it
+  // would downgrade the global install and leave no daemon behind.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-rollback-unsup-'))
+  try {
+    const { packageRoot, runner, calls } = await failedBootAfterApply(dir)
+    const lane = () => runSelfUpdatePass({
+      stateRoot: dir, env: { XPC_SERVICE_NAME: '0' }, packageRoot, runner,
+      fetchImpl: fetchStub('1.1.0').impl,
+    })
+    assert.notEqual((await lane()).action, 'updated')
+    assert.notEqual((await lane()).action, 'updated')
+    assert.equal(calls.filter((c) => c[1] === 'install').length, 0)
+    assert.equal(readSelfUpdateState(dir).held_version, undefined)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a version that has already booted here is not rolled back by later failed boots', async () => {
+  // `last_apply` never expires. Two failed boots from a bad config edit
+  // months after the update landed are not evidence about the update, and
+  // the daemon that came up on it said so by recording `running_version`.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-rollback-booted-'))
+  try {
+    const { packageRoot, runner, calls } = await failedBootAfterApply(dir, { running_version: '1.1.0' })
+    const lane = () => runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: fetchStub('1.1.0').impl,
+    })
+    assert.notEqual((await lane()).action, 'updated')
+    assert.notEqual((await lane()).action, 'updated')
+    assert.equal(calls.filter((c) => c[1] === 'install').length, 0)
+    assert.equal(readSelfUpdateState(dir).held_version, undefined)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }

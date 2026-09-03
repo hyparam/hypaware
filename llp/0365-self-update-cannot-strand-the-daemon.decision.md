@@ -94,7 +94,18 @@ that the entrypoint itself cannot run", and it is caught while the old
 daemon is still serving. The version it replaced is reinstalled on the
 spot, the failed one is recorded as `held_version`, and nothing restarts.
 A held version is never installed again; the hold clears when the registry
-offers something newer.
+offers something newer, and is dropped from the state file at the same
+time so it cannot re-engage if `latest` ever moves back to it.
+
+The hold is recorded whether or not the reinstall of the previous version
+succeeded, because the failed reinstall is the worse case: the root is
+left holding the version that cannot start, the registry and the disk
+then agree, and the only difference left on the machine is a daemon
+correctly running older code, which is exactly the shape
+#running-version-is-tracked acts on. A held version on the root suppresses
+that restart, so the daemon keeps serving the code it already loaded and
+the failure stays a status notice rather than a hand-over into a crash
+loop.
 
 <a id="restart-needs-a-supervisor"></a>
 ## The automatic lanes never exit for a relaunch nobody will perform
@@ -108,18 +119,33 @@ restart is the stale-daemon state above, and a restart exit is a dead
 daemon. `hyp update` is exempt, because it restarts through the service
 manager itself or says that it cannot.
 
+The rollback of #rollback-after-failed-boots is gated the same way and for
+the same reason: it is an apply that ends in a restart exit. Run
+unsupervised (`hyp daemon run --foreground` in a terminal, which is what
+the CLI suggests when a daemon will not start) it would downgrade the
+operator's global install and then exit with nothing to relaunch it.
+
 <a id="restart-exit-is-bounded"></a>
 ## A restart exit is bounded
 
 When a supervised daemon shuts down for a restart, an unref'd timer forces
-`process.exit` with the restart code after `RESTART_EXIT_DEADLINE_MS`. The
-deadline is generous (two minutes, longer than the stop window of
-LLP 0343 and any single npm budget) so an in-flight reconcile import or a
-slow sink close is not cut short in the ordinary case. It exists for the
-case where shutdown never completes: the daemon has stopped listening,
-clients are being refused, and the only thing standing between them and
-a relaunch is a process that will not exit. Unsupervised daemons get no
-forced exit, for the same reason they get no automatic apply.
+`process.exit` with the restart code after `RESTART_EXIT_DEADLINE_MS`
+(two minutes, longer than the stop window of LLP 0343 and any single npm
+budget). It exists for the case where shutdown never completes: the daemon
+has stopped listening, clients are being refused, and the only thing
+standing between them and a relaunch is a process that will not exit.
+Unsupervised daemons get no forced exit, for the same reason they get no
+automatic apply.
+
+The clock starts *after* the in-flight reconcile pass settles, not at the
+top of shutdown. Shutdown waits on that pass on purpose (LLP 0041): the
+pass spawns `hyp backfill`, which is a multi-minute import by design, and
+abandoning it orphans the child and loses the marker write. A deadline
+that spanned the settle would cut exactly that short on a first run over
+a large history, trading the wedge this bounds for a corruption the
+existing shutdown order exists to prevent. Everything the wedge is about
+(a client stream holding a source's `server.close()` open) happens after
+the settle and is inside the deadline.
 
 <a id="rollback-after-failed-boots"></a>
 ## Repeated failed boots on an installed version roll it back
@@ -135,7 +161,12 @@ first relaunch after a power loss finds the same frozen status file.
 Only an update this updater applied is undone, and only while the root
 still holds it. A hand-installed version that will not boot is the
 operator's; a stuck boot on any other version says nothing about an
-update. The "next release fixes it" path of LLP 0309 is untouched: a held
+update. And only a version that has never booted here: `last_apply` does
+not expire, so without that guard two failed boots from a bad config edit
+months later would downgrade a version that has been serving the whole
+time and then hold it. The daemon that came up on it already recorded
+`running_version`, and that is the evidence the update is not what is
+stopping the boot. The "next release fixes it" path of LLP 0309 is untouched: a held
 version is skipped, the eager hourly probe keeps running, and a newer
 release installs as before.
 
@@ -150,6 +181,11 @@ daemon refuses every attached client until a human notices.
 - It does not make `npm install -g` succeed on a root-owned prefix. That
   install fails with `EACCES`, now with the reason in `last_apply.detail`
   and `hyp status`; the daemon stays on the old version and keeps serving.
+- It does not make a *failed* rollback loud for long. The daemon is kept
+  off the broken root, and `last_apply` and the log keep the diagnosis,
+  but the `apply_failed` notice on `hyp status` is cleared by the next
+  successful probe, the same way every other apply error already is. That
+  clearing is LLP 0309's behavior and is left alone here.
 - It does not drain client streams on shutdown (hyparam/hypaware#610).
   The forced exit bounds the damage; the drain is still the right fix.
 - It does not change the probe cadence or the DarkWake starvation of
