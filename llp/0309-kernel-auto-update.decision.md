@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-24
 **Related:** LLP 0007 (#install-root-and-lock-file: the plugin update-check policy this shares), LLP 0008 (the npm-install invariant this does not violate), LLP 0017 (#staged-restart-for-config-replacement: the restart path an applied update takes; #install-global-package-then-service-manager: the durable global binary this updates in place), LLP 0025 (#last-known-good-rollback: the rollback pattern considered and rejected here; the bundled-pin tension a central version pin would resolve), LLP 0010 (the config model the `auto_update` key joins)
+**Extended-by:** LLP 0365 (the disk decides `applied`, the running version is tracked beside the installed one, a new version is preflighted before the restart, the automatic lanes apply only under a supervisor, a restart exit is bounded, and #unstick-from-the-front's "no rollback" is narrowed: a version this updater installed that keeps failing to boot is rolled back and held)
 
 > The HypAware daemon runs unattended on fleet machines; a notify-only update
 > model leaves most installs stale. This settles that the daemon updates the

@@ -2,7 +2,7 @@
 
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { readSelfPackageIdentity, runSelfUpdatePass } from '../update/self_update.js'
+import { readSelfPackageIdentity, readSelfUpdateState, runSelfUpdatePass } from '../update/self_update.js'
 import { processIsAlive, readPidFile } from '../daemon/pid.js'
 
 /**
@@ -46,10 +46,19 @@ export async function runUpdate(argv, ctx) {
   // leaves the daemon on stale code with no message saying so.
   const daemonInstall = await import('../daemon/install.js')
 
+  // What the live daemon loaded, if there is one: the pass compares the
+  // registry against the running code as well as the disk, so a root that
+  // moved ahead without a restart still gets one here.
+  const livePid = readPidFile(stateRoot)
+  const runningVersion = livePid && processIsAlive(livePid.pid)
+    ? readSelfUpdateState(stateRoot).running_version
+    : undefined
+
   const result = await runSelfUpdatePass({
     stateRoot,
     env: ctx.env,
     force: true,
+    runningVersion,
     // The pass never throws: an unexpected failure (an unwritable run
     // directory, a lock this machine cannot take) collapses into a bare
     // `unexpected_error` reason that names nothing an operator can act
@@ -65,6 +74,13 @@ export async function runUpdate(argv, ctx) {
   if (result.action === 'checked' && !result.reason) {
     ctx.stdout.write(`hypaware ${identity.version} is up to date\n`)
     return 0
+  }
+  // The root is current but the daemon is not: a hand-typed
+  // `npm install -g`, or an apply that could not restart. The install is
+  // done; what is owed is the restart.
+  if (result.action === 'updated' && result.reason === 'restart_only') {
+    ctx.stdout.write(`hypaware ${identity.version} is installed but the daemon is still running an older version\n`)
+    return restartDaemonIfRunning(ctx, identity.version, daemonInstall)
   }
   if (result.reason === 'apply_locked') {
     ctx.stderr.write(

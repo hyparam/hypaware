@@ -12,7 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { daemonRunDir } from '../daemon/pid.js'
+import { daemonRunDir, processIsAlive, readPidFile } from '../daemon/pid.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { isLoopbackHost } from '../util/loopback.js'
 
@@ -63,6 +63,46 @@ export const SELF_UPDATE_RESTART_EXIT_CODE = 75
  * above; a test asserts the two stay in sync.
  */
 const CONFIG_BASENAME = 'hypaware-config.json'
+
+/**
+ * Must equal `LAUNCH_LABEL` in `src/core/daemon/platform.js`. Duplicated
+ * for the same import-light reason; a test asserts the two stay in sync.
+ */
+const LAUNCH_LABEL = 'com.hyperparam.hypaware'
+
+// How long the new install's entrypoint gets to print its version before
+// the apply is judged broken and rolled back.
+export const PREFLIGHT_TIMEOUT_MS = 30_000
+// How many consecutive boots on a freshly installed version may fail to
+// reach the kernel before the pre-boot lane reinstalls the version it
+// replaced. One is not enough: the first relaunch after a power loss
+// also finds `status.json` frozen at `starting`.
+export const ROLLBACK_AFTER_BOOT_FAILURES = 2
+// How much of npm's stderr is kept when an install fails. Enough for the
+// `npm error code EACCES` block that names the cause; not the whole
+// transcript.
+const NPM_DETAIL_CHARS = 600
+
+/**
+ * Is a service manager going to relaunch this process when it exits?
+ * A restart exit into nothing is a dead daemon, so the automatic lanes
+ * only apply (and only exit) when the answer is yes.
+ *
+ * Presence of `XPC_SERVICE_NAME` is not the test: macOS sets it in every
+ * process launchd spawned, including terminals (`0`) and GUI apps
+ * (`application.<bundle>...`), so a hand-run `hyp daemon run --foreground`
+ * carries one too. Only the daemon's own label counts. systemd sets
+ * `INVOCATION_ID` for the services it runs and for nothing interactive.
+ *
+ * @ref LLP 0365#restart-needs-a-supervisor [implements]: the automatic lanes never exit for a relaunch nobody will perform
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {boolean}
+ */
+export function detectSupervisor(env) {
+  const xpc = env.XPC_SERVICE_NAME
+  if (typeof xpc === 'string' && (xpc === LAUNCH_LABEL || xpc.startsWith(LAUNCH_LABEL + '.'))) return true
+  return typeof env.INVOCATION_ID === 'string' && env.INVOCATION_ID !== ''
+}
 
 /**
  * Which config file holds the off switch, by the same precedence
@@ -519,29 +559,50 @@ export function withNodeBinOnPath(env) {
 
 /**
  * Verify the running package root IS the npm global install, then run
- * `npm install -g <name>@<version>`. Returns rather than throws: every
+ * `npm install -g <name>@<version>`, then prove the installed entrypoint
+ * runs before anyone restarts onto it. Returns rather than throws: every
  * caller treats failure as "record and degrade to a status notice".
  *
+ * The filesystem is the verdict on the install, in both directions. An
+ * npm that returned 0 without replacing the global root must not report
+ * `applied` (that would be a restart loop on the same version), and an
+ * npm that returned non-zero *after* replacing it must not report failure:
+ * mise's `npm` wrapper runs the real npm and then `mise reshim`, which is
+ * not on the daemon's PATH, so the whole thing exits 127 with the new
+ * version already on disk. Trusting that exit code leaves the daemon on
+ * old code with a "failed" notice, and the next probe, reading the new
+ * version off disk, then calls the machine up to date forever.
+ *
+ * `previousVersion` is what the global root held before this call. When
+ * the new entrypoint cannot even print its version, that version is
+ * reinstalled on the spot, before the caller has restarted anything, so
+ * the running daemon never hands over to code that cannot start.
+ *
  * @ref LLP 0309#mechanism [implements]: npm install -g through the same lane setup uses; failure degrades, never loops
+ * @ref LLP 0365#disk-is-the-verdict [implements]: the installed version decides applied, never npm's exit code
+ * @ref LLP 0365#preflight-then-hand-over [implements]: the new entrypoint must run before the restart; a broken one is reinstalled over
  * @param {{
  *   name: string,
  *   version: string,
+ *   previousVersion?: string,
  *   packageRoot?: string,
  *   env?: NodeJS.ProcessEnv,
  *   runner?: CommandRunner,
  *   platform?: NodeJS.Platform,
+ *   log?: (event: string, fields?: Record<string, unknown>) => void,
  * }} opts
- * @returns {Promise<{ applied: boolean, reason?: string }>}
+ * @returns {Promise<{ applied: boolean, reason?: string, detail?: string, rolledBack?: boolean }>}
  */
 export async function applySelfUpdate(opts) {
   const env = withNodeBinOnPath(opts.env ?? process.env)
   const run = opts.runner ?? runCommand
   const packageRoot = path.resolve(opts.packageRoot ?? PACKAGE_ROOT)
   const platform = opts.platform ?? process.platform
+  const log = opts.log ?? (() => {})
 
   const prefixResult = await run('npm', ['config', 'get', 'prefix'], { env })
   if (prefixResult.exitCode !== 0) {
-    return { applied: false, reason: 'npm_prefix_failed' }
+    return { applied: false, reason: 'npm_prefix_failed', detail: npmDetail(prefixResult) }
   }
   const prefix = prefixResult.stdout.trim().split(/\r?\n/).filter(Boolean).pop()
   if (!prefix) return { applied: false, reason: 'npm_prefix_failed' }
@@ -553,17 +614,71 @@ export async function applySelfUpdate(opts) {
   }
 
   const install = await run('npm', ['install', '-g', `${opts.name}@${opts.version}`], { env })
+  const onDisk = readVersionAt(globalRoot)
+  if (onDisk !== opts.version) {
+    return install.exitCode === 0
+      ? { applied: false, reason: 'version_not_installed' }
+      : { applied: false, reason: 'npm_install_failed', detail: npmDetail(install) }
+  }
   if (install.exitCode !== 0) {
-    return { applied: false, reason: 'npm_install_failed' }
+    // The install landed; whatever npm did afterwards is not this
+    // update's problem, but an operator diagnosing a wrapper deserves
+    // the line it printed.
+    log('self_update.npm_exit_ignored', { exit_code: install.exitCode, detail: npmDetail(install) })
   }
-  // Believe the filesystem, not the exit code. Reporting `applied` is what
-  // makes the daemon exit for a restart, so an npm that returned 0 without
-  // replacing the global root would become a restart loop on the same
-  // version instead of a recorded failure.
-  if (readVersionAt(globalRoot) !== opts.version) {
-    return { applied: false, reason: 'version_not_installed' }
+
+  const preflight = await runPreflight({ globalRoot, version: opts.version, env, run })
+  if (preflight.ok) return { applied: true }
+  log('self_update.preflight_failed', { latest_version: opts.version, detail: preflight.detail })
+  if (!opts.previousVersion || opts.previousVersion === opts.version) {
+    return { applied: false, reason: 'preflight_failed', detail: preflight.detail }
   }
-  return { applied: true }
+  const back = await run('npm', ['install', '-g', `${opts.name}@${opts.previousVersion}`], { env })
+  const restored = readVersionAt(globalRoot) === opts.previousVersion
+  log(restored ? 'self_update.rolled_back' : 'self_update.rollback_failed', {
+    from: opts.version,
+    to: opts.previousVersion,
+    ...(restored ? {} : { detail: npmDetail(back) }),
+  })
+  return { applied: false, reason: 'preflight_failed', detail: preflight.detail, rolledBack: restored }
+}
+
+/**
+ * Run the just-installed entrypoint and require it to name the version
+ * it was installed as. Cheap (`--version` loads the CLI but activates no
+ * plugin) and it catches the failure LLP 0309 accepted as residual: a
+ * release whose entrypoint cannot run at all. Node is `process.execPath`
+ * rather than whatever `node` PATH finds, because that is the binary the
+ * service unit will relaunch with.
+ *
+ * @param {{ globalRoot: string, version: string, env: NodeJS.ProcessEnv, run: CommandRunner }} opts
+ * @returns {Promise<{ ok: boolean, detail?: string }>}
+ */
+async function runPreflight({ globalRoot, version, env, run }) {
+  const bin = path.join(globalRoot, 'bin', 'hypaware.js')
+  const result = await run(process.execPath, [bin, '--version'], { env, timeoutMs: PREFLIGHT_TIMEOUT_MS })
+  if (result.exitCode === 0 && result.stdout.includes(version)) return { ok: true }
+  const detail = result.exitCode === 0
+    ? `printed ${JSON.stringify(result.stdout.trim().slice(0, 80))} instead of ${version}`
+    : `exit ${result.exitCode}: ${npmDetail(result)}`
+  return { ok: false, detail }
+}
+
+/**
+ * The tail of a failed command's stderr, one line, redacted, bounded.
+ * Stderr rather than stdout because that is where npm puts `npm error`.
+ *
+ * @param {{ stdout: string, stderr: string }} result
+ * @returns {string}
+ */
+function npmDetail(result) {
+  const text = (result.stderr.trim() || result.stdout.trim())
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(' | ')
+  const tail = text.length > NPM_DETAIL_CHARS ? '...' + text.slice(-NPM_DETAIL_CHARS) : text
+  return redactUrls(tail)
 }
 
 /**
@@ -667,6 +782,8 @@ function realpathOrSelf(p) {
  *   configPath?: string,
  *   autoUpdate?: boolean,
  *   force?: boolean,
+ *   runningVersion?: string,
+ *   supervised?: boolean,
  *   packageRoot?: string,
  *   runner?: CommandRunner,
  *   fetchImpl?: typeof fetch,
@@ -702,9 +819,16 @@ export async function runSelfUpdatePass(opts = {}) {
       return { action: 'skipped', reason: provenance }
     }
 
+    const supervised = opts.supervised ?? detectSupervisor(env)
     if (!opts.force) {
-      const eager = previousBootLooksStuck(stateRoot)
-      if (!shouldCheckNow({ state, nowMs, eager, jitter: opts.jitter })) {
+      const stuck = previousBootLooksStuck(stateRoot)
+      // Before the TTL gate: a version this updater installed that cannot
+      // boot is undone on the spot, not on tomorrow's schedule.
+      const rollback = await maybeRollBack({
+        stateRoot, stuck, packageRoot: opts.packageRoot, env, runner: opts.runner, nowMs, log,
+      })
+      if (rollback) return rollback
+      if (!shouldCheckNow({ state, nowMs, eager: stuck, jitter: opts.jitter })) {
         return { action: 'none' }
       }
     }
@@ -773,6 +897,7 @@ export async function runSelfUpdatePass(opts = {}) {
     }
 
     const available = compareSemver(latest, identity.version) > 0
+    const held = available && state.held_version === latest
     writeSelfUpdateState(stateRoot, {
       checked_at: new Date(nowMs).toISOString(),
       latest_version: latest,
@@ -780,10 +905,34 @@ export async function runSelfUpdatePass(opts = {}) {
       error: undefined,
       error_since: undefined,
     })
-    log('self_update.checked', { latest_version: latest, available })
-    if (!available) return { action: 'checked', latest }
+    log('self_update.checked', { latest_version: latest, available, ...(held ? { held: true } : {}) })
+    // Two versions matter, not one. `identity.version` is what the global
+    // root holds; `runningVersion` is what the daemon loaded at boot. They
+    // drift apart whenever something replaces the root without a restart
+    // (a hand-typed `npm install -g`, or an apply whose exit code lied),
+    // and a pass that only compared the registry with the disk would call
+    // that machine up to date and leave the daemon on old code for good.
+    // @ref LLP 0365#running-version-is-tracked [implements]: a newer root than the running code is an update that still needs its restart
+    const running = opts.runningVersion
+    const restartOnly = !available && typeof running === 'string' &&
+      compareSemver(identity.version, running) > 0
+    if (!available && !restartOnly) return { action: 'checked', latest }
     if (provenance !== 'global-candidate') {
       return { action: 'checked', reason: provenance, latest }
+    }
+    if (held) {
+      log('self_update.held', { latest_version: latest, running_version: identity.version })
+      return { action: 'checked', reason: 'held', latest }
+    }
+    if (!supervised && !opts.force) {
+      // Installing without restarting is the stale-daemon state above, and
+      // restarting means exiting into nothing. Neither is an update.
+      log('self_update.skipped', { reason: 'unsupervised', latest_version: latest })
+      return { action: 'checked', reason: 'unsupervised', latest }
+    }
+    if (restartOnly) {
+      log('self_update.restart_pending', { running_version: running, installed_version: identity.version })
+      return { action: 'updated', reason: 'restart_only', latest: identity.version }
     }
     // A dropped override means this pass cannot say where the bytes
     // should come from, so it does not install at all.
@@ -820,12 +969,13 @@ export async function runSelfUpdatePass(opts = {}) {
       log('self_update.apply_locked', { latest_version: latest })
       return { action: 'checked', reason: 'apply_locked', latest }
     }
-    /** @type {{ applied: boolean, reason?: string }} */
+    /** @type {Awaited<ReturnType<typeof applySelfUpdate>>} */
     let applied
     try {
       applied = await applySelfUpdate({
         name: identity.name,
         version: latest,
+        previousVersion: identity.version,
         packageRoot: opts.packageRoot,
         // Untouched: the only override that reaches here is one the probe
         // believed, so npm resolving the tarball through it is the same
@@ -835,6 +985,7 @@ export async function runSelfUpdatePass(opts = {}) {
         // serving the install exactly as it always has.
         env,
         runner: opts.runner,
+        log,
       })
     } finally {
       releaseLock()
@@ -846,11 +997,20 @@ export async function runSelfUpdatePass(opts = {}) {
         to: latest,
         ok: applied.applied,
         ...(applied.reason ? { error: applied.reason } : {}),
+        ...(applied.detail ? { detail: applied.detail } : {}),
+        ...(applied.rolledBack ? { rolled_back: true } : {}),
       },
       ...(applied.applied ? { available: false } : { error: `apply_failed: ${applied.reason}` }),
+      // A version that was installed and could not run is not tried again
+      // until the registry offers something newer.
+      ...(applied.rolledBack ? { held_version: latest } : {}),
     })
     if (!applied.applied) {
-      log('self_update.apply_failed', { error_kind: applied.reason, latest_version: latest })
+      log('self_update.apply_failed', {
+        error_kind: applied.reason,
+        latest_version: latest,
+        ...(applied.detail ? { detail: applied.detail } : {}),
+      })
       return { action: 'checked', reason: applied.reason, latest }
     }
     log('self_update.applied', { from: identity.version, to: latest })
@@ -863,6 +1023,76 @@ export async function runSelfUpdatePass(opts = {}) {
     log('self_update.error', { error_kind: 'unexpected', detail: message })
     return { action: 'skipped', reason: 'unexpected_error' }
   }
+}
+
+/**
+ * Undo an update that cannot boot. Runs in the pre-boot lane, where a
+ * relaunch after a failed boot lands. The version this updater last
+ * installed is judged by the boots that followed it: once
+ * `ROLLBACK_AFTER_BOOT_FAILURES` consecutive boots on it never reached
+ * the kernel, the version it replaced is reinstalled, the failed one is
+ * held, and the lane exits for a relaunch onto the restored code. A
+ * healthy boot resets the count (the daemon writes `boot_failures: 0`
+ * once its kernel is up).
+ *
+ * Only an update this updater applied is undone: `last_apply.ok` with
+ * the global root still holding `last_apply.to`. A hand-installed
+ * version that will not boot is the operator's to fix, and a stuck boot
+ * on any other version is not evidence about an update at all.
+ *
+ * @ref LLP 0365#rollback-after-failed-boots [implements]: the previous version is reinstalled after repeated failed boots on the installed one
+ * @param {{
+ *   stateRoot: string,
+ *   stuck: boolean,
+ *   packageRoot?: string,
+ *   env: NodeJS.ProcessEnv,
+ *   runner?: CommandRunner,
+ *   nowMs: number,
+ *   log: (event: string, fields?: Record<string, unknown>) => void,
+ * }} opts
+ * @returns {Promise<SelfUpdatePassResult | null>}
+ */
+async function maybeRollBack({ stateRoot, stuck, packageRoot, env, runner, nowMs, log }) {
+  if (!stuck) return null
+  const state = readSelfUpdateState(stateRoot)
+  const last = state.last_apply
+  if (!last || !last.ok || last.rolled_back || !last.from || last.from === last.to) return null
+  const identity = readSelfPackageIdentity(packageRoot)
+  if (identity.version !== last.to) return null
+  const failures = (typeof state.boot_failures === 'number' ? state.boot_failures : 0) + 1
+  if (failures < ROLLBACK_AFTER_BOOT_FAILURES) {
+    writeSelfUpdateState(stateRoot, { boot_failures: failures })
+    log('self_update.boot_failure_counted', { version: last.to, boot_failures: failures })
+    return null
+  }
+  const releaseLock = acquireApplyLock(stateRoot)
+  if (!releaseLock) return null
+  /** @type {Awaited<ReturnType<typeof applySelfUpdate>>} */
+  let back
+  try {
+    back = await applySelfUpdate({ name: identity.name, version: last.from, packageRoot, env, runner, log })
+  } finally {
+    releaseLock()
+  }
+  if (!back.applied) {
+    writeSelfUpdateState(stateRoot, { boot_failures: failures, error: `rollback_failed: ${back.reason}` })
+    log('self_update.rollback_failed', {
+      error_kind: back.reason,
+      from: last.to,
+      to: last.from,
+      ...(back.detail ? { detail: back.detail } : {}),
+    })
+    return null
+  }
+  writeSelfUpdateState(stateRoot, {
+    boot_failures: 0,
+    held_version: last.to,
+    available: false,
+    error: undefined,
+    last_apply: { ...last, rolled_back: true, rolled_back_at: new Date(nowMs).toISOString() },
+  })
+  log('self_update.rolled_back', { from: last.to, to: last.from, after_boot_failures: failures })
+  return { action: 'updated', reason: 'rolled_back', latest: last.from }
 }
 
 /**
@@ -902,11 +1132,23 @@ export function describeSelfUpdate(opts) {
     ? undefined
     : Boolean(state.available && state.latest_version &&
       compareSemver(state.latest_version, identity.version) > 0)
+  // The daemon records what it loaded at boot; it only means something
+  // while that daemon is alive, so a leftover from a stopped one is not
+  // read as a stale daemon.
+  const runningVersion = typeof state.running_version === 'string' && daemonIsAlive(opts.stateRoot)
+    ? state.running_version
+    : undefined
+  const staleDaemon = runningVersion !== undefined && compareSemver(identity.version, runningVersion) > 0
+  const heldLatest = typeof state.held_version === 'string' && state.held_version === state.latest_version
+    ? state.held_version
+    : undefined
   /** @type {Record<string, unknown>} */
   const json = {
     version: identity.version,
     auto_update: autoUpdate,
     provenance,
+    ...(runningVersion !== undefined ? { running_version: runningVersion } : {}),
+    ...(state.held_version ? { held_version: state.held_version } : {}),
     ...(state.checked_at ? { checked_at: state.checked_at } : {}),
     ...(state.latest_version ? { latest_version: state.latest_version } : {}),
     ...(available !== undefined ? { available } : {}),
@@ -960,10 +1202,35 @@ export function describeSelfUpdate(opts) {
       : `run 'hyp update' or 'npm install -g ${identity.name}@latest'`
     return { line: `self-update: degraded (${state.error}); ${advice}`, json }
   }
+  // A root newer than the running daemon is the one state a probe can
+  // never notice on its own, because the probe reads the root.
+  if (staleDaemon) {
+    return {
+      line: `self-update: ${identity.version} is installed but the daemon is still running ${runningVersion}; ` +
+        "run 'hyp daemon restart'",
+      json,
+    }
+  }
+  if (heldLatest && available) {
+    return {
+      line: `self-update: ${heldLatest} was installed and could not start here, so it was rolled back to ` +
+        `${identity.version} and is held until a newer release publishes`,
+      json,
+    }
+  }
   if (available && state.latest_version) {
     return { line: `self-update: ${state.latest_version} available (running ${identity.version})`, json }
   }
   return { line: null, json }
+}
+
+/**
+ * @param {string} stateRoot
+ * @returns {boolean}
+ */
+function daemonIsAlive(stateRoot) {
+  const entry = readPidFile(stateRoot)
+  return entry !== null && processIsAlive(entry.pid)
 }
 
 /**
@@ -985,6 +1252,7 @@ function probeFailureIsEntrenched(state, nowMs) {
 
 /** @type {CommandRunner} */
 function runCommand(cmd, args, opts) {
+  const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : NPM_TIMEOUT_MS
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       env: opts.env,
@@ -1006,7 +1274,7 @@ function runCommand(cmd, args, opts) {
         finish(-1)
       }, NPM_KILL_GRACE_MS)
       hard.unref?.()
-    }, NPM_TIMEOUT_MS)
+    }, timeoutMs)
     timer.unref?.()
     /** @param {number} exitCode */
     function finish(exitCode) {
