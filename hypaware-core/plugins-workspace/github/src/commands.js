@@ -52,10 +52,19 @@ export async function runGithubBackfill(argv, ctx) {
     ctx.stdout.write(`github backfill: ${result.events} event(s) across ${result.repos} repo(s)\n`)
     if (result.pending) ctx.stdout.write('github backfill: bounded work remains and will resume on the next GitHub capture tick\n')
     reportErrors(ctx, result.errors)
-    if (only && result.repos === 0) {
+    // An empty selection means "these repositories are not in the inventory"
+    // only when the inventory actually resolved. When resolution itself failed
+    // the selection is unknown rather than empty, and `reportErrors` has just
+    // named the real cause: claiming the repositories are absent sends the
+    // reader to their config instead of the failure they were shown.
+    if (only && result.repos === 0 && result.errors.length === 0) {
       ctx.stderr.write(`hyp github backfill: none of [${only.join(', ')}] are in the active repository inventory\n`)
       return 1
     }
+    // The same ambiguity on the success tail: an unresolved inventory captured
+    // nothing at all, so the next step is retrying capture, not projecting a
+    // table this run never touched. `reportErrors` has already said why.
+    if (result.repos === 0 && result.errors.length > 0) return 1
     ctx.stdout.write("run 'hyp graph project' to project github_events into the graph\n")
     return result.errors.length > 0 ? 1 : 0
   } catch (err) {
