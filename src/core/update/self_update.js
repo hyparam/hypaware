@@ -948,15 +948,22 @@ export async function runSelfUpdatePass(opts = {}) {
     const heldOnDisk = state.held_version === identity.version
     const restartOnly = !available && !heldOnDisk && typeof running === 'string' &&
       compareSemver(identity.version, running) > 0
-    // A failed probe reports itself here, and only here: further down is
-    // the hand-over it has no bearing on, and stopping short of that one
-    // strands an offline operator on the stale daemon that
-    // #running-version-is-tracked exists to rescue.
+    // A failed probe reports itself at every gate that owes nothing
+    // local, and nowhere past them: below is the hand-over it has no
+    // bearing on, and stopping short of that one strands an offline
+    // operator on the stale daemon that #running-version-is-tracked
+    // exists to rescue.
     if (!available && !restartOnly) {
       return probeFailed ? { action: 'checked', reason: 'probe_failed' } : { action: 'checked', latest }
     }
+    // The same gate for the lane that never hands anything over. Reporting
+    // the provenance here would carry `latest` out with it, and after a
+    // failed probe that is the version on this disk, which `hyp update`
+    // renders as "<v> is available" - a registry answer nothing fetched.
     if (provenance !== 'global-candidate') {
-      return { action: 'checked', reason: provenance, latest }
+      return probeFailed
+        ? { action: 'checked', reason: 'probe_failed' }
+        : { action: 'checked', reason: provenance, latest }
     }
     if (held) {
       log('self_update.held', { latest_version: latest, running_version: identity.version })

@@ -1822,6 +1822,30 @@ test('an offline probe with nothing owed still reports probe_failed', async () =
   }
 })
 
+test('an offline probe does not report a checkout version as available', async () => {
+  // A checkout hands nothing over, so the disk version standing in for
+  // the registry answer must not travel out with the provenance reason:
+  // `hyp update` renders that `latest` as "<v> is available", which after
+  // a failed probe is a registry answer nothing fetched.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-offline-checkout-'))
+  try {
+    const packageRoot = path.join(dir, 'checkout')
+    await fsp.mkdir(packageRoot, { recursive: true })
+    await fsp.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'hypaware', version: '1.1.0' }))
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    /** @type {CommandRunner} */
+    const runner = async () => ({ exitCode: 0, stdout: '', stderr: '' })
+    const result = await runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, runner,
+      fetchImpl: offline, runningVersion: '1.0.0', force: true,
+    })
+    assert.deepEqual(result, { action: 'checked', reason: 'probe_failed' })
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('an offline restart-only hand-over is still blocked by a preflight that will not answer', async () => {
   // Offline is not a reason to skip the proof: a root that cannot start
   // crash-loops the daemon just as hard with the network down, and an
