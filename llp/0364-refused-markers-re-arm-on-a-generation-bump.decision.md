@@ -84,7 +84,7 @@ leave a store the next pass will read, while this one is the pass.
 
 <a id="one-retry-not-a-retry-loop"></a>
 
-### Exactly one retry, ever, whatever the refusal turns out to be
+### Exactly one retry for a refusal that is still a refusal
 
 Because the marker carries no error code, the re-arm cannot be selective: a
 JSONC refusal is re-armed alongside a floor refusal. It costs one
@@ -107,6 +107,19 @@ already required to be idempotent over its own output
 The re-armed pass is not exempt from anything else. It re-enters `perform()`
 through the normal forward gap, so the handler's own guards, the endpoint
 check, and the outcome branches all apply unchanged.
+
+The bound is stated against the `refused` outcome, and only that one, because
+`rearm_generation` is stamped in the `refused` write branch alone. A re-armed
+pass whose handler returns `failed` instead (an unmarked throw: a settings file
+that is malformed rather than JSONC, a read the OS refuses) writes LLP 0041's
+retryable marker, which nothing short-circuits, so that key is re-`perform()`ed
+on every later pass with `attempts` climbing. That is deliberate and is not
+LLP 0184's defect returning: it is the ordinary `failed` semantics every host
+that never recorded a refusal is already on, it is what LLP 0363 relies on to
+re-attach a below-floor machine the pass after Claude Code updates, and moving
+these hosts onto that normal path is the whole purpose of the re-arm. Bounding
+`attempts` on a `failed` marker stays out of scope here exactly as LLP 0186
+`#explicitly-out-of-scope` left it.
 
 <a id="why-not-the-alternatives"></a>
 

@@ -44,11 +44,14 @@ const CLIENT_ACTIONS_BASENAME = 'client-actions.json'
  *
  * A stored marker below it was written before a release that changed how some
  * refusal is classified, so what it records may no longer be a refusal at all.
- * It gets exactly one re-`perform()` and is terminal again at this generation,
- * whatever that pass decides. That single retry is the whole mechanism: the
- * marker carries no error code, so nothing on disk can tell a refusal a later
- * release made retryable (the LLP 0258 version floor) from one still true (a
- * JSONC settings file), and asking the handler once is the only way to know.
+ * It gets exactly one re-`perform()`, and a pass that refuses again stamps
+ * this generation and is terminal from there (a pass that *fails* instead
+ * writes LLP 0041's ordinary retryable marker, short-circuited by nothing, the
+ * same path a host that never recorded a refusal is already on). That single
+ * retry is the whole mechanism: the marker carries no error code, so nothing
+ * on disk can tell a refusal a later release made retryable (the LLP 0258
+ * version floor) from one still true (a JSONC settings file), and asking the
+ * handler once is the only way to know.
  *
  * Bump it in the same release that moves a throw site out of
  * `markActionRefused`, which is what makes the markers already on disk wrong.
