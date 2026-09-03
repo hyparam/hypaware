@@ -13,8 +13,9 @@ the carry unconditional), [LLP 0202](./0202-hidden-picker-rows.decision.md)
 keyed onto), [LLP 0276](./0276-hidden-rows-stay-off-the-sync-gate.decision.md)
 (#no-candidates the precedent for telling the truth about a row without naming
 it), [LLP 0289](./0289-sync-lane-asks-the-store-about-hidden-picks.decision.md)
-(#ask-the-store "the lane prints no hidden row", the invariant every narration
-option below has to price),
+(#ask-the-store "the lane prints no hidden row", stated of the sync-scope lane
+but the sharpest wording of the naming rule every narration option below has to
+price),
 [LLP 0297](./0297-claude-desktop-leaves-onboarding.decision.md)
 (#own-plugins the non-derivative read-back that makes the carry unconditional),
 [LLP 0011](./0011-setup-and-onboarding.decision.md) (#autodetect-vs-default a probe never
@@ -23,8 +24,9 @@ forces), hyparam/hypaware#1296, PR #1290, PR #1303
 > LLP 0368 gave a picker row a `platforms` gate and routed it through the one
 > display filter `hidden` already used, so a config that collects a gated row
 > survives a reconfigure on the platform that withholds it. That carry is
-> unconditional and silent. On Linux a config collecting
-> `@hypaware/claude-desktop` therefore rides through every interactive
+> unconditional and silent. On Linux a config that reads the Desktop row back
+> (every plugin of its `compose` block present, so `@hypaware/claude` as well
+> as `@hypaware/claude-desktop`) therefore rides through every interactive
 > `hyp init`: the row never renders, no screen says it was kept, and no answer
 > the user can give at the menu removes it. Unchecking every row still writes
 > it, and still writes `@hypaware/claude` with it, because that plugin is a
@@ -148,8 +150,10 @@ second classification that section declined, and `carried` is currently a flat
 
 **Offering a way to drop it** contradicts the carry itself. LLP 0368
 #display-only's whole argument for keying the carry on the display filter is
-that dropping the row on a menu walk is "a choice refused rather than an offer
-withheld". The behavior is pinned by a test that cites the section:
+that dropping the row on a menu walk refuses a choice rather than withholding
+an offer: "The gate withholds an offer, it does not refuse a choice", and the
+drop on a menu walk is "the choice refused that this section says the gate does
+not do". The behavior is pinned by a test that cites the section:
 
 ```
 test('runWizardPick: a Linux reconfigure carries the configured claude-desktop it cannot offer', ...)
