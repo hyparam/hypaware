@@ -1391,8 +1391,10 @@ hand-run `hyp daemon run --foreground` carries one. No hermetic test can settle
 which value launchd actually delivers, because every fixture asserts the value
 the test itself wrote. Only a running LaunchAgent can answer, and a wrong
 answer is quiet: `hyp status` keeps advertising the release and `hyp update`
-keeps applying, so the only symptom is the `self_update.unsupervised` event in
-the daemon log.
+keeps applying, so the only symptom is the `self_update.unsupervised` event.
+The daemon tick writes it to `daemon.log`; the pre-boot lane writes it to
+stderr, which under the LaunchAgent is `daemon.err.log`. Neither is anywhere a
+user looks.
 
 **What it does not prove:** anything about the systemd half of the same gate
 (`INVOCATION_ID` on Linux, which `tr '\0' '\n' < /proc/<pid>/environ` answers
@@ -1433,8 +1435,8 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
 
    ```sh
    hyp status
-   launchctl print "gui/$(id -u)/com.hyperparam.hypaware" | sed -n '1,12p'
-   DPID=$(jq -r .pid "${HYP_HOME:-$HOME/.hyp}/hypaware/run/hypaware.pid")
+   launchctl print "gui/$(id -u)/com.hyperparam.hypaware" | grep -E '[[:space:]](state|pid) = '
+   DPID=$(jq -r .pid "$HOME/.hyp/hypaware/run/hypaware.pid")
    plutil -p ~/Library/LaunchAgents/com.hyperparam.hypaware.plist
    echo "$DPID"
    ```
@@ -1446,6 +1448,16 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
    measure a terminal's environment. Stop the stray process and start again. If
    the plist does set the variable, this procedure is reading a value HypAware
    wrote and is worthless; find out who added it before going on.
+
+   The paths above are `$HOME/.hyp` and not `$HYP_HOME` on purpose. The
+   installer renders no `EnvironmentVariables`, so the LaunchAgent inherits no
+   `HYP_HOME`, and the running daemon's state root and log dir are
+   home-anchored however your own shell is set. Reading them through
+   `HYP_HOME` would point an operator who exports it at an empty directory and
+   then, by the paragraph above, at a healthy daemon as the culprit. The
+   `launchctl print` output is filtered rather than truncated for the same
+   reason: `pid` prints well past the `arguments` and `environment` blocks, so
+   a head of the first dozen lines never reaches it.
 
 2. Read `XPC_SERVICE_NAME` out of the running daemon's own environment:
 
@@ -1474,32 +1486,53 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
    this check cannot drift away from the code it is about:
 
    ```sh
+   # If step 2 came back empty, set OBSERVED_XPC by hand from step 3 instead
+   # of running this first line.
    OBSERVED_XPC=$(ps -Eww -p "$DPID" | tr ' ' '\n' | sed -n 's/^XPC_SERVICE_NAME=//p')
-   SELF_UPDATE_MODULE="$(npm root -g)/hypaware/src/core/update/self_update.js"
+   DAEMON_BIN=$(plutil -convert json -o - \
+     ~/Library/LaunchAgents/com.hyperparam.hypaware.plist | jq -r '.ProgramArguments[1]')
+   SELF_UPDATE_MODULE="$(cd "$(dirname "$DAEMON_BIN")/.." && pwd)/src/core/update/self_update.js"
    OBSERVED_XPC="$OBSERVED_XPC" SELF_UPDATE_MODULE="$SELF_UPDATE_MODULE" \
      node --input-type=module -e '
        const { pathToFileURL } = await import("node:url")
+       const observed = process.env.OBSERVED_XPC
+       if (!observed) throw new Error("OBSERVED_XPC is empty: a missing reading, not a false")
        const mod = await import(pathToFileURL(process.env.SELF_UPDATE_MODULE).href)
-       console.log(mod.detectSupervisor({ XPC_SERVICE_NAME: process.env.OBSERVED_XPC }))
+       console.log(mod.detectSupervisor({ XPC_SERVICE_NAME: observed }))
      '
    ```
 
-   Pass condition: `true`. Paste the value from step 3 into `OBSERVED_XPC` by
-   hand if step 2 was the empty one. A `false` here is the finding this whole
-   procedure exists to surface, and it blocks the release.
+   Pass condition: `true`. A `false` here is the finding this whole procedure
+   exists to surface, and it blocks the release.
+
+   Two details carry the step. `SELF_UPDATE_MODULE` is derived from the
+   plist's own `ProgramArguments` and not from `npm root -g`: the shell's
+   global root can be a different install than the one launchd runs (a version
+   manager, a second prefix), and importing that one would be exactly the drift
+   this step claims to rule out. And the snippet throws on an empty
+   `OBSERVED_XPC` rather than judging it, because
+   `detectSupervisor({ XPC_SERVICE_NAME: '' })` is `false`, and a missing
+   reading must not be recorded as a failing one.
 
 5. Check the daemon has not already refused an update on this host:
 
    ```sh
-   grep -c self_update.unsupervised "${HYP_HOME:-$HOME/.hyp}/hypaware/logs/daemon.log"
+   grep -c self_update.unsupervised "$HOME/.hyp/hypaware/logs/daemon.log"
+   grep -c self_update.unsupervised "$HOME/.hyp/hypaware/logs/daemon.err.log"
    ```
 
-   Pass condition: `0`. The event only fires when a newer version was
+   Pass condition: `0` from both. Both files are needed: the daemon tick logs
+   the event through the daemon logger into `daemon.log`, while the pre-boot
+   lane in `bin/hypaware.js` writes it to stderr, which the LaunchAgent
+   redirects to `daemon.err.log`. That lane runs on every relaunch launchd
+   performs, so it is the likelier of the two to be holding a refusal, and a
+   `daemon.log`-only check would report a clean `0` on a host that has been
+   refusing updates for weeks. The event only fires when a newer version was
    available, so a zero on an up-to-date machine says nothing by itself. A
-   nonzero count on a host that passed step 4 is the finding: the gate refused
-   under an environment other than the one you just read (a different login
-   session, or a relaunch launchd performed differently). File it before
-   release.
+   nonzero count in either file on a host that passed step 4 is the finding:
+   the gate refused under an environment other than the one you just read (a
+   different login session, or a relaunch launchd performed differently). File
+   it before release.
 
 6. Record in the release notes: the exact `XPC_SERVICE_NAME` line from step 2
    or 3, the host's `sw_vers -productVersion`, and the step 4 verdict. The
@@ -1523,17 +1556,27 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
   relaunch nobody will perform, which is the dead daemon
   [LLP 0365#restart-needs-a-supervisor](../llp/0365-self-update-cannot-strand-the-daemon.decision.md#restart-needs-a-supervisor)
   exists to prevent.
-- **Step 4 prints `true` but the value is not exactly the label.** The
-  dot-suffixed branch is doing the work, which is the design. Record the exact
-  value and leave the predicate alone; narrowing it to the bare label would
-  break the host you are standing on.
+- **Step 4 prints `true` but the value is not exactly the label.** Check which
+  job the suffix names before recording anything. HypAware installs a second
+  LaunchAgent, `com.hyperparam.hypaware.node-system-ca`, whose only program is
+  `launchctl setenv` and which carries `RunAtLoad` with no `KeepAlive`: it
+  satisfies the dot-suffixed branch but relaunches nothing, so observing that
+  value is a failure and not a pass, and it means `$DPID` was not the
+  daemon's. Go back to step 1. For any other suffixed value, confirm against
+  step 1 that the job it names is the daemon's own `KeepAlive` LaunchAgent.
+  Then the dot-suffixed branch is doing the work, which is the design: record
+  the exact value and leave the predicate alone, since narrowing it to the bare
+  label would break the host you are standing on.
 - **Step 1 reports the service is not loaded.** `hyp daemon install` was never
   run here, or `hyp daemon uninstall` removed it. There is nothing to measure
   until the LaunchAgent exists, and a foreground daemon is not a substitute.
-- **`npm root -g` names a directory with no `hypaware` in it.** The `hyp` on
-  your `PATH` is a checkout or an `npx` cache, so the daemon under test is not
-  the packaged one and its provenance guard would refuse an apply long before
-  the supervisor gate was consulted. Reinstall globally and start again.
+- **`DAEMON_BIN` names a checkout or an `npx` cache rather than a global
+  install.** The plist points launchd at whatever `hyp daemon install` was run
+  from, so the daemon under test is not the packaged one and its provenance
+  guard would refuse an apply long before the supervisor gate was consulted.
+  Reinstall from the package under test (`npm install -g`, then
+  `hyp daemon install`) and start again; compare the path against
+  `npm root -g` if you are unsure which root it belongs to.
 
 ---
 
