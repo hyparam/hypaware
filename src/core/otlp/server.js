@@ -5,6 +5,7 @@ import zlib from 'node:zlib'
 
 import { isControlPath } from '../control/session_ignore.js'
 import { Attr, getLogger } from '../observability/index.js'
+import { isLoopbackHost } from '../util/loopback.js'
 
 /**
  * @import { IncomingMessage } from 'node:http'
@@ -13,16 +14,6 @@ import { Attr, getLogger } from '../observability/index.js'
  */
 
 const JSON_CT = { 'Content-Type': 'application/json' }
-
-/**
- * The names a listener on the loopback interface answers to. Anything
- * else in `Host` means the request was addressed to some other name that
- * merely resolves here, which is what a DNS-rebinding page's request
- * looks like: the browser holds the attacker's origin same-origin with
- * this listener, so neither a preflight nor a content-type gate stands in
- * its way, and the `Host` it carries is what tells the two apart.
- */
-const LOOPBACK_HOST_NAMES = new Set(['localhost', '::1'])
 
 /**
  * The two wildcard binds, answered to as well when they arrive in `Host`.
@@ -50,12 +41,6 @@ const LOGGED_HOST_MAX_CHARS = 128
  * @type {Map<string, { total: number, loggedAt: number }>}
  */
 const HOST_REFUSALS = new Map()
-
-/** @param {string} hostname lowercased, with brackets and port removed */
-function isLoopbackHostName(hostname) {
-  if (LOOPBACK_HOST_NAMES.has(hostname)) return true
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname.replace(/^::ffff:/, ''))
-}
 
 /**
  * Read the hostname out of a `Host` header, dropping the optional port
@@ -86,6 +71,14 @@ function hostnameOfHostHeader(value) {
  * listener does not serve? Call it ahead of all routing, so one refusal
  * covers the control surface as well as the listener's own routes.
  *
+ * A listener on the loopback interface answers to the loopback names and
+ * to the wildcard binds. Anything else in `Host` means the request was
+ * addressed to some other name that merely resolves here, which is what a
+ * DNS-rebinding page's request looks like: the browser holds the
+ * attacker's origin same-origin with this listener, so neither a preflight
+ * nor a content-type gate stands in its way, and the `Host` it carries is
+ * what tells the two apart.
+ *
  * Only connections that arrived over loopback are judged. A listener
  * given a routable `listen_host` is reachable under whatever name
  * resolves to that address, and answering to that name is the point of
@@ -108,11 +101,11 @@ export function isMisdirectedHost(req, opts) {
   // this check is the whole barrier in front of these routes, so its unknown
   // case fails closed.
   const localAddress = (req.socket.localAddress ?? '').toLowerCase()
-  if (localAddress !== '' && !isLoopbackHostName(localAddress)) return false
+  if (localAddress !== '' && !isLoopbackHost(localAddress)) return false
   const value = req.headers.host
   if (!value) return false
   const hostname = hostnameOfHostHeader(value)
-  if (hostname !== undefined && (isLoopbackHostName(hostname) || WILDCARD_BIND_NAMES.has(hostname))) return false
+  if (hostname !== undefined && (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname))) return false
   const refusals = HOST_REFUSALS.get(opts.name) ?? { total: 0, loggedAt: 0 }
   refusals.total += 1
   HOST_REFUSALS.set(opts.name, refusals)

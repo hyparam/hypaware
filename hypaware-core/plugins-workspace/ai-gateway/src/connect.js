@@ -3,6 +3,8 @@
 import net from 'node:net'
 import tls from 'node:tls'
 
+import { isLoopbackHost } from '../../../../src/core/util/loopback.js'
+
 /**
  * The CONNECT front door: the second way into the same listener.
  *
@@ -59,23 +61,6 @@ export const CONNECT_PORT = Symbol('hypaware.connectPort')
  * client has its own, shorter timeouts.
  */
 const CONNECT_TIMEOUT_MS = 30_000
-
-/**
- * Whether a peer address is the machine itself.
- *
- * IPv4 loopback is the whole 127.0.0.0/8 block, not just 127.0.0.1, and a
- * dual-stack listener reports an IPv4 peer as an IPv4-mapped IPv6 address
- * (`::ffff:127.0.0.1`).
- *
- * @param {string | undefined} address
- * @returns {boolean}
- */
-export function isLoopbackAddress(address) {
-  if (!address) return false
-  const bare = address.startsWith('::ffff:') ? address.slice(7) : address
-  if (bare === '::1') return true
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare)
-}
 
 /**
  * Stamp the CONNECT target onto a terminated socket.
@@ -163,7 +148,7 @@ export function attachConnectFrontDoor(opts) {
     // client loses nothing.
     // @ref LLP 0233#loopback-peers-only [implements]: CONNECT from any peer that is not the machine itself is refused
     const peer = /** @type {net.Socket} */ (clientSocket).remoteAddress
-    if (!isLoopbackAddress(peer)) {
+    if (!isLoopbackHost(peer)) {
       log?.warn?.('aigw.connect_refused_remote_peer', { peer: peer ?? 'unknown' })
       clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
       return

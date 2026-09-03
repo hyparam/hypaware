@@ -6,8 +6,9 @@ import tls from 'node:tls'
 
 import { isControlPath } from '../../../../src/core/control/session_ignore.js'
 import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
+import { isLoopbackHost } from '../../../../src/core/util/loopback.js'
 import { parseListen } from './config.js'
-import { attachConnectFrontDoor, connectHostOf, connectPortOf, isLoopbackAddress, openUpstream } from './connect.js'
+import { attachConnectFrontDoor, connectHostOf, connectPortOf, openUpstream } from './connect.js'
 import { createNullExchange } from './recorder.js'
 
 export { isControlPath }
@@ -370,7 +371,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     // the same reason, as the CONNECT front door.
     // @ref LLP 0247#loopback-peers-only [implements]
     const peer = req.socket.remoteAddress
-    if (!isLoopbackAddress(peer)) {
+    if (!isLoopbackHost(peer)) {
       opts.log?.warn?.('aigw.absolute_form_refused_remote_peer', { peer: peer ?? 'unknown' })
       req.resume()
       sendJson(res, 403, { error: 'absolute-form is served to loopback peers only' })
