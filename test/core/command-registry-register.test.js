@@ -442,7 +442,19 @@ function declaredOptionalMembers(types = readFileSync(new URL('../../hypaware-pl
   // an unterminated backtick blanks nothing and simply survives, so asserting
   // that none survives holds at either parity. A template literal type written
   // across lines is refused along with it, and none is written that way here.
-  assert.equal(scan.includes('`'), false, 'a template literal in hypaware-plugin-kernel-types.d.ts is never terminated on its own line: the mask cannot be trusted, so neither can the parse')
+  //
+  // Asked of the two quotes and of `/*` as well, because bounding the quotes
+  // to a line is not by itself what makes them safe. A `/*` inside an
+  // unterminated quote is not consumed by that span, so the block-comment
+  // alternative, the one still free to cross lines, claims it and blanks
+  // forward to the next `*/`, over-running exactly as the unbounded backtick
+  // did: `sb: "/*` injected above a member of the real declaration file drops
+  // that member and `plugin` with it, and the guard says nothing. A `/*` with
+  // no `*/` after it anywhere reaches the same place from the other side,
+  // masking nothing and leaving its braces to be read as code. The mask blanks
+  // every comment and quoted span, so an opener still standing in `scan` is
+  // one it failed to close, whichever kind it is.
+  assert.equal(/['"`]|\/\*/.test(scan), false, 'a comment or quoted span in hypaware-plugin-kernel-types.d.ts is never terminated (a quote or a template literal must close on its own line): the mask cannot be trusted, so neither can the parse')
   // Both anchors are found in the blanked copy, not in `types`, or the same
   // hole reopens one step earlier: a JSDoc quoting the declaration line would
   // put `start` inside a comment, where the opening brace is already a space,
@@ -500,6 +512,29 @@ test('the interface parse fails closed on an unterminated template literal', () 
   ].join('\n')
   assert.throws(() => declaredOptionalMembers(unterminated('`')), /is never terminated/)
   assert.throws(() => declaredOptionalMembers(unterminated('')), /is never terminated/)
+})
+
+// The same under-run reached without a template literal, and the reason
+// bounding the quotes to a line does not by itself close it: an unterminated
+// quote leaves the `/*` inside it to the block-comment alternative, which
+// still crosses lines and blanks forward to the next `*/`, past the member
+// the guard was raised to name. Injected into the real
+// `hypaware-plugin-kernel-types.d.ts`, either quote returns that interface's
+// optionals minus `plugin` and minus the added member, with nothing said. The
+// third shape is the block comment nothing closes, which masks nothing at all.
+test('the interface parse fails closed on an unterminated quote or block comment', () => {
+  const unterminated = (opener, closer) => [
+    'export interface CommandRegistration {',
+    '  name: string',
+    `  ${opener}`,
+    '  probeZ?: string',
+    closer,
+    '  gone?: string',
+    '}',
+  ].join('\n')
+  assert.throws(() => declaredOptionalMembers(unterminated('sb: "/*', '  /** prose */')), /is never terminated/)
+  assert.throws(() => declaredOptionalMembers(unterminated("sb: '/*", '  /** prose */')), /is never terminated/)
+  assert.throws(() => declaredOptionalMembers(unterminated('/* nothing closes this', '  no closer here')), /is never terminated/)
 })
 
 // `OPTIONAL_MEMBERS` is a hand-written copy of the optional keys of
