@@ -621,3 +621,35 @@ test('staged phase watermarks survive the cursor sidecar round trip', (t) => {
   assert.equal(work?.commits_high, '2026-06-02T00:00:00Z')
   assert.equal(work?.comments_high, '2026-06-03T00:00:00Z')
 })
+
+test('a failed all_visible enumeration is recorded, not thrown out of the tick', async () => {
+  const client = fakeClient({ viewerRepos: ['owner/a'] })
+  const err = Object.assign(
+    new Error('GitHub continuation URL refused: it does not address the configured API base (origin https://evil.example)'),
+    { hypErrorKind: 'github_foreign_origin' },
+  )
+  client.listViewerRepos = async () => { throw err }
+  const cursors = freshCursors()
+  /** @type {Array<{ name: string, attrs: any }>} */
+  const logged = []
+  const result = await captureRepos({
+    client,
+    config: cfg({ inventory: 'all_visible' }),
+    cursors,
+    append: async () => {},
+    log: { ...silentLog, error(name, attrs) { logged.push({ name, attrs }) } },
+    mode: 'poll',
+  })
+
+  assert.equal(result.repos, 0)
+  assert.equal(result.events, 0)
+  assert.equal(result.errors.length, 1, 'the enumeration failure is reported as a tick error')
+  assert.match(result.errors[0].error, /continuation URL refused/)
+  assert.equal(logged[0].name, 'github.inventory_resolve_failed')
+  assert.equal(logged[0].attrs.error_kind, 'github_foreign_origin')
+  assert.equal(
+    result.pending,
+    false,
+    'an error is not bounded backlog: pending drives the poll cadence (LLP 0360#cadence)'
+  )
+})

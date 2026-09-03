@@ -85,7 +85,27 @@ export async function resolveRepos(config, client, log, observedRepos) {
  * @returns {Promise<{ repos: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>}
  */
 export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos, requestLimit = CAPTURE_REQUEST_LIMIT }) {
-  let repos = await resolveRepos(config, client, log, observedRepos)
+  /** @type {Array<{ repo: string, error: string }>} */
+  const errors = []
+  /** @type {string[]} */
+  let repos
+  try {
+    repos = await resolveRepos(config, client, log, observedRepos)
+  } catch (err) {
+    // `all_visible` enumeration is a network call, so it fails the way a
+    // repository pass does (a refused continuation, an API error). Escaping
+    // here would abort the whole tick, which is what the per-repo isolation
+    // below exists to prevent, so report it as one more captured failure. The
+    // inventory has no durable cursor: the next tick enumerates from scratch.
+    const message = errMessage(err)
+    errors.push({ repo: '(inventory)', error: message })
+    log.error('github.inventory_resolve_failed', {
+      mode: config.inventory ?? 'session_repos',
+      error: message,
+      ...errKind(err),
+    })
+    return { repos: 0, events: 0, requests: 0, pending: false, errors }
+  }
   // A positional `hyp github backfill owner/repo` narrows this one invocation.
   // The round-robin continuation is a property of the WHOLE inventory, so a
   // narrowed run must not publish a `next_repo` drawn from its subset: doing so
@@ -100,8 +120,6 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
 
   let events = 0
   const budget = requestBudget(requestLimit)
-  /** @type {Array<{ repo: string, error: string }>} */
-  const errors = []
   let pending = false
   let visited = 0
 
@@ -146,8 +164,7 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       // continuation lands (the tampered-sidecar vector), and the whole-tick
       // handler in `source.js` never sees it, so without this the kind is not
       // filterable exactly where it matters.
-      const kind = /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind
-      log.error('github.repo_capture_failed', { repo, error: message, ...(kind ? { error_kind: kind } : {}) })
+      log.error('github.repo_capture_failed', { repo, error: message, ...errKind(err) })
     }
     events += repoEvents
     // Persist the advanced cursor onto the shared state after each repo.
@@ -691,4 +708,16 @@ function updatedAt(pr) {
 /** @param {unknown} err @returns {string} */
 function errMessage(err) {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * The `error_kind` attribute for a thrown error. Spread into a log payload, so
+ * an error carrying no kind contributes no key at all.
+ *
+ * @param {unknown} err
+ * @returns {{ error_kind?: string }}
+ */
+function errKind(err) {
+  const kind = /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind
+  return kind ? { error_kind: kind } : {}
 }
