@@ -61,6 +61,7 @@ export async function activate(ctx) {
     observedRepos: createLocalObservedReposIndex({
       storage: ctx.storage,
       stateDir: ctx.paths.stateDir,
+      log: ctx.log,
     }),
   })
 

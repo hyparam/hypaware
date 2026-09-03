@@ -11,6 +11,10 @@ LLP 0121, LLP 0213, LLP 0350; hyparam/hypaware-server#413
 LLP 0032 and used as the comparison in LLP 0121
 **Extended-by:** [LLP 0361](./0361-github-capture-is-work-budgeted.decision.md)
 (capture is page-wise and resumable under a whole-tick request budget)
+**Extended-by:** [LLP 0367](./0367-observed-repos-revalidate-against-withholding.decision.md)
+(#inventory gains contraction: the sidecar revalidates against the current
+withholding policy, so a repository with no remaining permitted evidence stops
+future capture)
 
 > `@hypaware/github` ships under `hypaware-core/plugins-workspace/github`.
 > Bundling does not activate it by default: adding it to `plugins[]` remains the

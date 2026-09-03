@@ -427,6 +427,18 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       }
     },
 
+    // Cheap, no cache I/O: two small machine-local reads at most. Consumers
+    // that derive durable state from `readRowsSince`'s withholding verdicts
+    // (the GitHub observed-repos sidecar) compare this digest across ticks to
+    // notice a policy change without re-reading history; a machine with no
+    // resolver configured reads as a constant policy.
+    // @ref LLP 0367#policy-fingerprint [implements]: the storage seam that composes the resolver halves into one comparable digest
+    exportPolicyFingerprint() {
+      const usage = usagePolicyResolver?.fingerprint?.() ?? 'none'
+      const source = sourceWithholdResolver?.fingerprint?.() ?? 'none'
+      return `v1 usage:${usage} source:${source}`
+    },
+
     async dataSourceForTable(tablePath) {
       const source = await dataSourceForTable(resolveIcebergDir(tablePath))
       if (!source) return null

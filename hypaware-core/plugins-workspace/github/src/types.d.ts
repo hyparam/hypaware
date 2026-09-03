@@ -172,6 +172,12 @@ export type GithubConfigResult =
 
 export interface ObservedReposIndex {
   list(): Promise<string[]>
+  /**
+   * True when the last `list()` left a withholding revalidation pass
+   * incomplete (LLP 0367): `list()` served only the repositories re-confirmed
+   * so far, and bounded local work remains for the next tick.
+   */
+  revalidationPending(): boolean
 }
 
 export interface GithubRuntime {
@@ -193,6 +199,31 @@ export interface LocalObservedRepoState {
   repos: string[]
   partitions: Record<string, SinkContinuation>
   partition_versions: Record<string, string>
+  /** The export-policy fingerprint `repos` was last derived under (LLP 0367). */
+  policy_fingerprint?: string
+  /** When the last full derivation completed (ISO); drives the age backstop. */
+  revalidated_at?: string
+  /** Present only while a re-derivation pass is incomplete. */
+  revalidation?: ObservedRepoRevalidationState
+}
+
+/**
+ * Durable progress of one withholding-revalidation pass (LLP 0367
+ * #bounded-revalidation): everything a later tick or a restarted daemon needs
+ * to resume mid-partition. Bounded by the distinct repository inventory plus
+ * per-partition cursor state, never by transcript-row count.
+ */
+export interface ObservedRepoRevalidationState {
+  /** The policy fingerprint this pass validates against. */
+  fingerprint: string
+  /** Repositories re-confirmed so far; what `list()` serves while incomplete. */
+  repos: string[]
+  /** Per-partition pass continuations (resume point within each partition). */
+  partitions: Record<string, SinkContinuation>
+  /** Partitions the pass has read to exhaustion. */
+  done: string[]
+  /** `epoch:rowCount` observed before each completed partition was read. */
+  versions: Record<string, string>
 }
 
 // ---------------------------------------------------------------------------

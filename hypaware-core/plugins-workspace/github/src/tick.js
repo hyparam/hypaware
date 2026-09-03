@@ -28,6 +28,15 @@ export async function runCaptureTick(runtime, opts) {
       ? await runtime.observedRepos.list()
       : undefined
   )
+  // Incomplete inventory revalidation is bounded local work remaining, in
+  // exactly the LLP 0361#budget sense capture's own `pending` carries, so it
+  // rides the same backlog cadence instead of waiting a full poll interval to
+  // finish contracting (or re-admitting) repositories.
+  // @ref LLP 0367#bounded-revalidation [implements]: pending revalidation resumes on the backlog cadence
+  const inventoryPending =
+    opts.observedRepos === undefined &&
+    runtime.config.inventory === 'session_repos' &&
+    runtime.observedRepos.revalidationPending?.() === true
   const tablePath = githubEventsTablePath(runtime.storage)
   const columns = [...GITHUB_EVENTS_COLUMNS]
 
@@ -49,15 +58,17 @@ export async function runCaptureTick(runtime, opts) {
       observedRepos,
       requestLimit: runtime.captureRequestLimit,
     })
+    const pending = result.pending || inventoryPending
     runtime.log.info('github.capture_tick_completed', {
       mode: opts.mode,
       repos: result.repos,
       events: result.events,
       requests: result.requests,
-      pending: result.pending,
+      pending,
+      inventory_pending: inventoryPending,
       errors: result.errors.length,
     })
-    return result
+    return { ...result, pending }
   } finally {
     writeCursors(runtime.stateDir, cursors)
   }

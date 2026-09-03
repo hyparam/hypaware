@@ -128,5 +128,14 @@ export function createSourceWithholdResolver({
       const withheld = resolveWithheld()
       return owners.some((id) => withheld.has(id))
     },
+    // Only the withheld set is fingerprinted: the attribution and ownership
+    // maps are reduced from the plugin catalog at boot and cannot change
+    // within a process, while the withheld set is the TTL-re-read live input
+    // an opt-out mutates. A provider throw (the corrupt-store fail-safe)
+    // propagates, same as `shouldWithhold`.
+    // @ref LLP 0367#policy-fingerprint [implements]: the client-opt-out half of the export-policy fingerprint
+    fingerprint() {
+      return [...resolveWithheld()].sort().join(',')
+    },
   }
 }
