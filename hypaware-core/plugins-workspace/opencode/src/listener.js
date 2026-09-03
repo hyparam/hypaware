@@ -24,8 +24,11 @@ const MAX_BODY_BYTES = 16 * 1024 * 1024
 // the sender's to choose. A legitimate rejected body is not small: the
 // managed asset posts a whole session transcript, which `MAX_BODY_BYTES`
 // sizes at up to 16 MiB. The cap sits well under that on purpose, because
-// the answer is written before a byte is drained, so a rejected snapshot
-// still reads its own 415 back and only the rest of the upload is cut.
+// the answer is written before a byte is drained, so a caller that reads
+// its socket while it uploads (the asset's `fetch` does) has the 415 in
+// hand long before the cut. A caller that reads nothing until its upload
+// finishes loses the answer to the reset, which is the price of not
+// letting the sender decide how much this listener reads.
 const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
 // A rejected snapshot is always counted, but logged at most this often. The
 // route is unauthenticated and reachable by the same browser page the
