@@ -9,6 +9,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import net from 'node:net'
+import os from 'node:os'
 import zlib from 'node:zlib'
 
 import { createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../../src/core/otlp/server.js'
@@ -25,6 +26,7 @@ import { createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../..
  *
  * @param {{
  *   name?: string,
+ *   host?: string,
  *   signals?: readonly OtlpSignal[],
  *   onRequest?: (req: OtlpRequest) => void,
  *   onControlRequest?: OtlpJsonServerOptions['onControlRequest'],
@@ -44,7 +46,7 @@ async function startServer(options = {}) {
       },
     },
   })
-  const bound = await listenAndResolve(server, '127.0.0.1', 0, 'hypaware/test')
+  const bound = await listenAndResolve(server, options.host ?? '127.0.0.1', 0, 'hypaware/test')
   return {
     seen,
     bound,
@@ -85,14 +87,16 @@ function postWithoutContentType(port, path) {
  * Send a request with an explicit `Host` header, which `fetch` forbids.
  *
  * @param {number} port
- * @param {{ path: string, host: string, method?: string }} options
+ * @param {{ path: string, host: string, method?: string, connectTo?: string }} options
+ * `connectTo` is the address the request is sent to, and so the address it
+ * arrives on: a wildcard-bound listener is reachable on more than one.
  * @returns {Promise<{ status: number, body: string }>}
  */
 function requestWithHost(port, options) {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
-        host: '127.0.0.1',
+        host: options.connectTo ?? '127.0.0.1',
         port,
         path: options.path,
         method: options.method ?? 'POST',
@@ -484,6 +488,54 @@ test('loopback Hosts keep passing, with any port and in every spelling', async (
   }
 })
 
+/**
+ * A non-internal IPv4 address of this machine, or `undefined` on a host with
+ * no routable interface at all.
+ *
+ * @returns {string | undefined}
+ */
+function routableIpv4() {
+  for (const addresses of Object.values(os.networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.family === 'IPv4' && !address.internal) return address.address
+    }
+  }
+  return undefined
+}
+
+// A wildcard bind is reachable on every address of the machine, and the
+// routable ones are not a deliberate publication under a name: the operator
+// named no address, so nothing here is meant to answer to whatever resolves
+// there. The routable side is judged like the loopback side, and answers to
+// the address the request arrived on rather than to a name.
+test('a wildcard bind is judged on its routable side too', async (t) => {
+  const routable = routableIpv4()
+  if (!routable) return t.skip('no routable IPv4 interface on this host')
+  const s = await startServer({ host: '0.0.0.0' })
+  try {
+    const refused = await requestWithHost(s.bound.port, {
+      path: '/v1/logs',
+      host: 'attacker.example',
+      connectTo: routable,
+    })
+    assert.equal(refused.status, 421, 'a foreign Host is refused on the routable side')
+    assert.match(JSON.parse(refused.body).message, /Host/)
+    assert.equal(s.seen.length, 0, 'no export reached the handler')
+
+    // The exporter a wildcard bind exists for: a peer on the network posting
+    // to the address it reached the listener on.
+    const served = await requestWithHost(s.bound.port, {
+      path: '/v1/logs',
+      host: `${routable}:${s.bound.port}`,
+      connectTo: routable,
+    })
+    assert.equal(served.status, 200, 'the address the request arrived on still exports')
+    assert.equal(s.seen.length, 1)
+  } finally {
+    await s.close()
+  }
+})
+
 // The shared predicate this check now calls can be asked to accept the hex
 // form `URL` re-serializes an IPv4-mapped literal into, and the self-updater
 // does ask for it. This listener must not, and the flag is one argument away,
@@ -577,28 +629,51 @@ test('a request target new URL rejects is answered 400, not thrown out of the ha
   }
 })
 
-test('the Host check judges loopback connections only, and needs a Host to judge', () => {
+test('the Host check exempts an explicitly routable bind only, and needs a Host to judge', () => {
   /** @type {PluginLogger} */
   const log = { debug() {}, info() {}, warn() {}, error() {} }
-  /** @param {string} localAddress @param {string} [host] */
-  const misdirected = (localAddress, host) =>
+  /**
+   * @param {string} localAddress
+   * @param {string} [host]
+   * @param {string} [bind] what the accepting server is bound to; omitted for
+   * a request with no accepting server behind it
+   */
+  const misdirected = (localAddress, host, bind) =>
     isMisdirectedHost(
-      /** @type {any} */ ({ socket: { localAddress }, headers: host === undefined ? {} : { host } }),
+      /** @type {any} */ ({
+        socket: {
+          localAddress,
+          server: bind === undefined ? undefined : { address: () => ({ address: bind, family: 'IPv4', port: 4318 }) },
+        },
+        headers: host === undefined ? {} : { host },
+      }),
       { name: 'hypaware/test', log }
     )
 
-  assert.equal(misdirected('127.0.0.1', 'attacker.example'), true)
+  assert.equal(misdirected('127.0.0.1', 'attacker.example', '127.0.0.1'), true)
   // How a dual-stack bind reports an IPv4 loopback peer. Still loopback.
-  assert.equal(misdirected('::ffff:127.0.0.1', 'attacker.example'), true)
-  assert.equal(misdirected('::1', 'attacker.example'), true)
+  assert.equal(misdirected('::ffff:127.0.0.1', 'attacker.example', '::'), true)
+  assert.equal(misdirected('::1', 'attacker.example', '::1'), true)
   // Bound to a routable address, the listener is meant to answer to whatever
   // name resolves there, and a rebound request never lands on that address.
-  assert.equal(misdirected('203.0.113.5', 'collector.example'), false)
-  // A local address that cannot be read is not an exemption. Only a routable
-  // one is, so the unknown case is judged like a loopback one.
-  assert.equal(misdirected('', 'attacker.example'), true)
+  assert.equal(misdirected('203.0.113.5', 'collector.example', '203.0.113.5'), false)
+  // The routable side of a wildcard bind is not the same thing: the operator
+  // named no address to publish under, so the side is judged, and answers to
+  // the address the request arrived on rather than to a name.
+  assert.equal(misdirected('203.0.113.5', 'collector.example', '0.0.0.0'), true)
+  assert.equal(misdirected('203.0.113.5', '203.0.113.5:4318', '0.0.0.0'), false)
+  assert.equal(misdirected('::ffff:203.0.113.5', '203.0.113.5', '::'), false)
+  assert.equal(misdirected('2001:db8::5', '[2001:db8::5]:4318', '::'), false)
+  // A name that merely resolves to the arrival address is still a name.
+  assert.equal(misdirected('203.0.113.5', 'collector.example', '::'), true)
+  // A bind that cannot be read is no evidence of a deliberate publication, so
+  // it is judged with the wildcards rather than waved through.
+  assert.equal(misdirected('203.0.113.5', 'collector.example'), true)
+  // A local address that cannot be read is not an exemption either, so the
+  // unknown case is judged like a loopback one.
+  assert.equal(misdirected('', 'attacker.example', '0.0.0.0'), true)
   // No Host at all: HTTP/1.0 clients omit it and a browser never does.
-  assert.equal(misdirected('127.0.0.1'), false)
+  assert.equal(misdirected('127.0.0.1', undefined, '127.0.0.1'), false)
 
   // A `Host` no hostname can be read out of is refused with the foreign ones,
   // rather than half-read into a loopback name.

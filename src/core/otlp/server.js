@@ -84,6 +84,19 @@ function acceptingServer(req) {
 }
 
 /**
+ * The address the server that accepted `req` is bound to, or `undefined`
+ * when there is none to read: a request with no accepting server behind it, a
+ * server that is not listening, or a pipe bind, which has no routable side.
+ *
+ * @param {IncomingMessage} req
+ * @returns {string | undefined}
+ */
+function boundAddress(req) {
+  const bound = acceptingServer(req)?.address()
+  return typeof bound === 'object' && bound !== null ? bound.address.toLowerCase() : undefined
+}
+
+/**
  * Read the hostname out of a `Host` header, dropping the optional port
  * and the brackets an IPv6 literal is written in. Returns `undefined` for
  * a header no hostname can be read out of, which the caller refuses along
@@ -120,15 +133,15 @@ function hostnameOfHostHeader(value) {
  * nor a content-type gate stands in its way, and the `Host` it carries is
  * what tells the two apart.
  *
- * Only connections that arrived over loopback are judged. A listener
- * given a routable `listen_host` is reachable under whatever name
+ * One connection is not judged: one that arrived on a routable address a
+ * listener was bound to. Such a listener is reachable under whatever name
  * resolves to that address, and answering to that name is the point of
- * configuring it. A request rebound at a loopback listener, which is the
- * default bind and the one this guards, always lands on loopback; an
- * operator who deliberately published the listener on a routable address
- * is outside that guarantee and outside this check. A request with no
- * `Host` at all passes: HTTP/1.0 clients omit it and a browser never
- * does, so its absence is not the signal.
+ * pointing it there. A wildcard bind is not that, and earns no exemption on
+ * its routable side: it names no address to publish under, so what it
+ * answers to there is the address the request arrived on, a literal no
+ * resolver can point elsewhere. A request with no `Host` at all passes:
+ * HTTP/1.0 clients omit it and a browser never does, so its absence is not
+ * the signal.
  *
  * @param {IncomingMessage} req
  * @param {{ name: string, log?: PluginLogger }} opts `name` identifies the
@@ -137,16 +150,28 @@ function hostnameOfHostHeader(value) {
  * @returns {boolean}
  */
 export function isMisdirectedHost(req, opts) {
-  // Only a local address that reads as a routable one earns the exemption. An
-  // address that cannot be read at all is judged instead of waved through:
-  // this check is the whole barrier in front of these routes, so its unknown
-  // case fails closed.
+  // The address this request arrived on, spelled the way a `Host` naming it
+  // would be: libuv reports a dual-stack listener's IPv4 peer in the mapped
+  // form (`::ffff:198.51.100.7`), which no client writes.
   const localAddress = (req.socket.localAddress ?? '').toLowerCase()
-  if (localAddress !== '' && !isLoopbackHost(localAddress)) return false
+  const arrivedOn = localAddress.startsWith('::ffff:') ? localAddress.slice(7) : localAddress
+  // The exemption, and only it: a routable arrival address the listener was
+  // bound to. A wildcard bind never equals the address it was reached on, so
+  // its routable side is judged like its loopback side. An address that cannot
+  // be read, on either side, is judged instead of waved through: this check is
+  // the whole barrier in front of these routes, so its unknown cases fail
+  // closed.
+  const routable = arrivedOn !== '' && !isLoopbackHost(arrivedOn)
+  if (routable && arrivedOn === boundAddress(req)) return false
   const value = req.headers.host
   if (!value) return false
   const hostname = hostnameOfHostHeader(value)
-  if (hostname !== undefined && (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname))) return false
+  if (
+    hostname !== undefined &&
+    (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname) || (routable && hostname === arrivedOn))
+  ) {
+    return false
+  }
   const server = acceptingServer(req)
   let refusals = server ? HOST_REFUSALS.get(server) : HOST_REFUSALS_BY_NAME.get(opts.name)
   if (!refusals) {
