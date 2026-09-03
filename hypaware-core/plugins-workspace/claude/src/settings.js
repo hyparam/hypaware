@@ -273,13 +273,19 @@ export class ClaudeSettingsError extends Error {
  * @ref LLP 0258#version-floor [implements]: dry-run and real attach enforce one version floor before settings I/O
  */
 export function preflightOtelAttach({ claudeVersion, telemetryPort, spoolDir }) {
+  // Thrown unmarked, unlike the JSONC and CA refusals below: the floor is a
+  // fact about the installed client rather than about local state a retry
+  // cannot change, and it clears when Claude Code updates itself. A terminal
+  // `refused` marker would outlive that upgrade and keep the machine
+  // unattached until someone ran `hyp client attach claude` by hand.
+  // @ref LLP 0363#version-floor-is-retryable [implements]: the floor refusal stays a retryable failure, so the next reconcile pass after the upgrade attaches
   if (isBelowClaudeVersion(claudeVersion, CLAUDE_OTEL_MIN_VERSION)) {
-    throw markActionRefused(new ClaudeSettingsError(
+    throw new ClaudeSettingsError(
       `Claude Code ${String(claudeVersion)} is older than ${CLAUDE_OTEL_MIN_VERSION}, ` +
       'which is the first release that exports the telemetry HypAware captures; ' +
       `run '${CLAUDE_UPDATE_HINT}' and attach again`,
       { code: 'VERSION_FLOOR' }
-    ))
+    )
   }
   validateTelemetryPort(telemetryPort)
   validateSpoolDir(spoolDir)

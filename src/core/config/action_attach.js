@@ -285,12 +285,15 @@ export function createAttachHandler(opts = {}) {
      * requested client rather than from the adapter's best-effort payload, so a
      * report that fails to parse cannot leave the fresh marker stale.
      *
-     * One population this does NOT settle: a machine whose Claude Code is below
-     * the LLP 0258 version floor. Its marker is stale on every pass, `perform()`
-     * refuses (`VERSION_FLOOR`), and a `refused` marker short-circuits
-     * unconditionally (LLP 0186), so it stays refused until an explicit
-     * `hyp attach claude` even after the user upgrades. That is LLP 0186's named
-     * auto-re-arm gap, now reachable by more machines than before.
+     * A machine whose Claude Code is below the LLP 0258 version floor is stale
+     * on every pass and `perform()` refuses the mode switch (`VERSION_FLOOR`),
+     * leaving the existing attach untouched. That refusal is recorded as a
+     * retryable `failed` marker rather than a terminal `refused` one, so the
+     * first pass after the client is upgraded performs the migration with no
+     * manual `hyp client attach claude` (LLP 0363). A `refused` marker an
+     * earlier release already wrote is not migrated: it still short-circuits
+     * above, and only an explicit re-run clears it (LLP 0363
+     * `#markers-already-refused-are-not-migrated`).
      *
      * **A client that declares `requiresEndpoint: false`** attaches by writing
      * a managed file rather than by pointing at a bound port, so the endpoint
