@@ -37,9 +37,11 @@ function stateDir(hypHome) {
   return path.join(hypHome, 'hypaware')
 }
 
-function captureStream() {
+/** @param {boolean} [isTTY] */
+function captureStream(isTTY = false) {
   let buf = ''
   return {
+    isTTY,
     write(/** @type {string} */ chunk) { buf += String(chunk); return true },
     get text() { return buf },
   }
@@ -96,10 +98,14 @@ function fakeHistorySink(instanceName, config) {
 }
 
 /**
- * @param {{ hypHome: string, sinks: any[], tty?: boolean, answer?: string, remotes?: Record<string, { url: string }> }} args
+ * `stdoutTty` is separate from `tty` (which is stdin's): the prompt reads
+ * stdin and the spinner writes stdout, and most of these tests want an
+ * answerable prompt without an animating stdout.
+ *
+ * @param {{ hypHome: string, sinks: any[], tty?: boolean, stdoutTty?: boolean, answer?: string, remotes?: Record<string, { url: string }> }} args
  */
-function makeCtx({ hypHome, sinks, tty = false, answer, remotes }) {
-  const stdout = captureStream()
+function makeCtx({ hypHome, sinks, tty = false, stdoutTty = false, answer, remotes }) {
+  const stdout = captureStream(stdoutTty)
   const stderr = captureStream()
   const stdin = Object.assign(new PassThrough(), { isTTY: tty })
   if (answer !== undefined) stdin.write(`${answer}\n`)
@@ -207,6 +213,60 @@ test('--dry-run prints the plan, exports nothing, and keeps the window open', as
   assert.match(stdout.text, /\[dry-run\] nothing was sent/)
   assert.deepEqual(sink.exported, [])
   assert.ok(await holdExists(hypHome))
+})
+
+// Both previews are full scans that run before this verb has printed
+// anything, so a big backlog leaves the terminal blank for seconds between
+// the keystroke and the plan. Off a TTY that path stays byte-identical.
+test('the pending preview animates on a TTY and clears before the plan', async () => {
+  const hypHome = await makeHome('preview-spinner')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  // A TTY with no answer queued: `--dry-run` must not reach the prompt.
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], tty: true, stdoutTty: true })
+
+  assert.equal(await runSync(['--dry-run'], ctx), 0)
+
+  const text = stdout.text
+  assert.match(text, /\r\x1b\[2K\S Counting pending rows/, 'the preview wait animates')
+  // Transient: every frame is behind a line-clearing carriage return, and the
+  // plan renders after the last clear rather than under a leftover label.
+  assert.doesNotMatch(text, /Counting pending rows[^\r]*\n/)
+  assert.match(text.split('\r\x1b[2K').pop() ?? '', /destination/)
+})
+
+test('the pending preview writes nothing off a TTY', async () => {
+  const hypHome = await makeHome('preview-plain')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink] })
+
+  assert.equal(await runSync(['--dry-run'], ctx), 0)
+
+  assert.doesNotMatch(stdout.text, /Counting pending rows/)
+  assert.doesNotMatch(stdout.text, /\x1b\[2K/)
+})
+
+test('the --history preview animates per destination on a TTY', async () => {
+  const hypHome = await makeHome('history-preview-spinner')
+  const central = fakeHistorySink('central', { url: 'https://hypaware.example.com' })
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [central], tty: true, stdoutTty: true })
+
+  assert.equal(await runSync(['--history', 'claude', '--dry-run'], ctx), 0)
+
+  const text = stdout.text
+  assert.match(text, /\r\x1b\[2K\S Counting retained 'claude' history on central/)
+  assert.doesNotMatch(text, /Counting retained[^\r]*\n/)
+  assert.match(text.split('\r\x1b[2K').pop() ?? '', /12 rows retained and eligible/)
+})
+
+test('the --history preview writes nothing off a TTY', async () => {
+  const hypHome = await makeHome('history-preview-plain')
+  const central = fakeHistorySink('central', { url: 'https://hypaware.example.com' })
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [central] })
+
+  assert.equal(await runSync(['--history', 'claude', '--dry-run'], ctx), 0)
+
+  assert.doesNotMatch(stdout.text, /Counting retained/)
+  assert.doesNotMatch(stdout.text, /\x1b\[2K/)
 })
 
 // @ref LLP 0345#command [tests]: retained history has its own preview,
