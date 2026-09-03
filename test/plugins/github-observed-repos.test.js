@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { writeCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
 import { createLocalObservedReposIndex } from '../../hypaware-core/plugins-workspace/github/src/observed-repos.js'
 import { runCaptureTick } from '../../hypaware-core/plugins-workspace/github/src/tick.js'
 
@@ -355,4 +356,76 @@ test('an incomplete revalidation surfaces as bounded pending work on the capture
   )
   assert.equal(report.pending, true, 'revalidation work remaining rides the backlog cadence')
   assert.equal(report.repos, 0)
+})
+
+/**
+ * A `session_repos` runtime whose local inventory read fails. Nothing past
+ * that read may run: an unresolved inventory must neither enumerate GitHub nor
+ * append rows.
+ *
+ * @param {string} stateDir
+ * @param {unknown} err
+ * @param {(name: string, attrs: any) => void} [onError]
+ */
+function failingInventoryRuntime(stateDir, err, onError = () => {}) {
+  return /** @type {any} */ ({
+    stateDir,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
+    observedRepos: {
+      async list() { throw err },
+      revalidationPending() { return false },
+    },
+    clientFactory: () => ({
+      async listViewerRepos() { throw new Error('conservative inventory must not enumerate') },
+    }),
+    storage: {
+      cacheTablePath() { return '/cache/github_events' },
+      async appendRows() { throw new Error('an unresolved inventory must not append') },
+    },
+    log: { error: onError, info() {} },
+  })
+}
+
+test('a failed session_repos inventory read is recorded, not thrown out of the tick', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const err = Object.assign(new Error('cache partition unreadable'), { hypErrorKind: 'github_observed_repos_failed' })
+  /** @type {Array<{ name: string, attrs: any }>} */
+  const logged = []
+
+  const report = await runCaptureTick(
+    failingInventoryRuntime(stateDir, err, (name, attrs) => logged.push({ name, attrs })),
+    { mode: 'poll' },
+  )
+
+  assert.equal(report.repos, 0)
+  assert.equal(report.events, 0)
+  assert.equal(report.errors.length, 1, 'the inventory failure is reported as a tick error')
+  assert.match(report.errors[0].error, /cache partition unreadable/)
+  assert.equal(logged[0].name, 'github.inventory_resolve_failed')
+  assert.equal(logged[0].attrs.error_kind, 'github_observed_repos_failed')
+  assert.equal(
+    report.pending,
+    false,
+    'an error is not bounded backlog: pending drives the poll cadence (LLP 0360#cadence)',
+  )
+})
+
+test('a failed session_repos inventory read does not retire backlog the cursors still hold', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-backlog-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // A prior tick ran out of budget mid-repository and saved its continuation.
+  writeCursors(stateDir, { schema_version: 1, repos: { 'acme/widgets': { work: { mode: 'poll', phase: 'issues' } } } })
+
+  const report = await runCaptureTick(
+    failingInventoryRuntime(stateDir, new Error('cache partition unreadable')),
+    { mode: 'poll' },
+  )
+
+  assert.equal(report.errors.length, 1)
+  assert.equal(
+    report.pending,
+    true,
+    'clearing pending here would push a saved continuation from the backlog cadence back to a full poll interval',
+  )
 })
