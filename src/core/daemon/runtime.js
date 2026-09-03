@@ -37,7 +37,12 @@ import {
 } from './pid.js'
 import { openDaemonLog } from './logs.js'
 import { statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
-import { runSelfUpdatePass, writeSelfUpdateState } from '../update/self_update.js'
+import {
+  detectSupervisor,
+  readSelfPackageIdentity,
+  runSelfUpdatePass,
+  writeSelfUpdateState,
+} from '../update/self_update.js'
 
 /**
  * @import { AiGatewayCapability, ClientRegistry, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
@@ -82,6 +87,15 @@ export const DEFAULT_ACTION_HANDLERS = [attachHandler, backfillHandler]
  * @ref LLP 0017#staged-restart-for-config-replacement [implements]: a foreground daemon cannot relaunch itself; the invoker loops on this code
  */
 export const DAEMON_RESTART_EXIT_CODE = 75
+
+/**
+ * How long a restart shutdown may run before the process exits by force.
+ * Generous: an in-flight reconcile pass gets to finish its import and a
+ * slow sink close gets its budget. It is not a tuning knob for graceful
+ * shutdown, it is the ceiling on how long attached clients can be refused
+ * by a daemon that has stopped listening but not yet exited.
+ */
+export const RESTART_EXIT_DEADLINE_MS = 120_000
 
 /**
  * Boot the kernel, start every configured source, and run sink ticks
@@ -334,17 +348,40 @@ export async function runDaemon(opts = {}) {
   // config layers.
   // @ref LLP 0309#config-key [implements]: the booted daemon caches the effective flag for the pre-boot lane
   let autoUpdateEnabled = true
+  // What this process loaded. Read once, at boot: the global root can be
+  // replaced underneath a running daemon, and the updater has to compare
+  // the registry against the code that is actually running, not the code
+  // on disk, or a replaced root reads as "up to date" while the daemon
+  // stays on the old version.
+  // @ref LLP 0365#running-version-is-tracked [implements]: the daemon records the version it booted; the updater compares against it
+  /** @type {string | undefined} */
+  let runningVersion
+  try {
+    runningVersion = readSelfPackageIdentity().version
+  } catch { /* an install mid-replacement; the disk version stands in */ }
+  const supervised = detectSupervisor(env)
   /**
    * Re-derive the effective flag and re-cache it. Called at boot and
    * again after every reload: SIGHUP re-merges both config layers, and a
    * flag captured once at boot would leave the daily lane running (and
    * the cache advertising `true` to the pre-boot lane) after an operator
    * turned auto-update off and reloaded.
+   *
+   * The same write carries the running version and clears the failed-boot
+   * count: reaching this line means the kernel came up on this version.
    */
   function refreshAutoUpdateFlag() {
     autoUpdateEnabled = boot.config?.auto_update !== false
     try {
-      writeSelfUpdateState(stateRoot, { auto_update: autoUpdateEnabled })
+      writeSelfUpdateState(stateRoot, {
+        auto_update: autoUpdateEnabled,
+        boot_failures: 0,
+        // Written unconditionally, so a boot that could not read its own
+        // version clears the field instead of leaving the previous
+        // daemon's there: a stale value reads as "installed X, running Y"
+        // against a live pid and earns a restart nothing needs.
+        running_version: runningVersion,
+      })
     } catch (err) {
       fileLog.warn('self_update.flag_cache_failed', {
         message: err instanceof Error ? err.message : String(err),
@@ -719,6 +756,10 @@ export async function runDaemon(opts = {}) {
         stateRoot,
         env,
         autoUpdate: autoUpdateEnabled,
+        runningVersion,
+        // A restart exit is only an update when something relaunches us;
+        // hand-run in a terminal, the pass installs nothing and says why.
+        supervised,
         log: (event, fields) => fileLog.info(event, fields ?? {}),
       }).then((result) => {
         if (result.action === 'updated' && triggerShutdown) {
@@ -1019,6 +1060,39 @@ export async function runDaemon(opts = {}) {
     // mid-import. Abandoning a pass would orphan the spawned `hyp backfill`
     // child and interrupt the marker write.
     await reconcileScheduler.settle()
+    // A restart that never finishes exiting is a dead daemon with a live
+    // pid: the listeners are closed below, so clients get refused, and the
+    // service manager sees a running process and relaunches nothing. Past
+    // the deadline the exit is forced with the restart code so the
+    // relaunch happens anyway. Only under a supervisor: unsupervised, a
+    // forced exit turns a wedged daemon into a missing one, and the
+    // timer is unref'd so it can never be what keeps the process alive.
+    //
+    // Armed here rather than at the top of shutdown, so the deadline
+    // covers the part that can wedge (a client stream holding a source's
+    // `server.close()` open) and not the reconcile pass the line above
+    // deliberately waits for: `hyp backfill` is a multi-minute import by
+    // design, and forcing an exit through it is the orphaned child and
+    // lost marker that settle exists to prevent.
+    // @ref LLP 0365#restart-exit-is-bounded [implements]: a restart shutdown that overruns is exited by force so the supervisor relaunches
+    //
+    // Cleared once the shutdown reaches its end below. `unref` keeps it
+    // from holding *this* process open, but it does not make it harmless:
+    // a caller that runs the daemon in-process and outlives a restart stop
+    // (the join_flow_remote_config smoke boots a second daemon in the same
+    // process) has other handles keeping the loop alive, and an uncleared
+    // timer would exit that process out from under it.
+    /** @type {NodeJS.Timeout | null} */
+    let forcedExit = null
+    if (reason === 'restart' && supervised) {
+      forcedExit = setTimeout(() => {
+        try {
+          fileLog.error('daemon.restart_exit_forced', { after_ms: RESTART_EXIT_DEADLINE_MS })
+        } catch { /* the log may already be closed */ }
+        process.exit(DAEMON_RESTART_EXIT_CODE)
+      }, RESTART_EXIT_DEADLINE_MS)
+      forcedExit.unref()
+    }
     // Last chance to capture accruing source details: the sources are still
     // running here, and after `stopAllSources` below their probes are gone.
     // A daemon that never reached a tick (or stopped between ticks) would
@@ -1067,6 +1141,9 @@ export async function runDaemon(opts = {}) {
     if (installSignals) {
       removeSignalHandlers()
     }
+    // The shutdown finished inside its deadline, so the forced exit has
+    // nothing left to bound.
+    if (forcedExit) clearTimeout(forcedExit)
     // @ref LLP 0017#staged-restart-for-config-replacement [implements]: the daemon exits and the service manager (or looping invoker) relaunches it
     resolveDone?.(reason === 'restart' ? DAEMON_RESTART_EXIT_CODE : 0)
     return done

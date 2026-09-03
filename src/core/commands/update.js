@@ -2,7 +2,7 @@
 
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { readSelfPackageIdentity, runSelfUpdatePass } from '../update/self_update.js'
+import { readSelfPackageIdentity, readSelfUpdateState, runSelfUpdatePass } from '../update/self_update.js'
 import { processIsAlive, readPidFile } from '../daemon/pid.js'
 
 /**
@@ -46,10 +46,19 @@ export async function runUpdate(argv, ctx) {
   // leaves the daemon on stale code with no message saying so.
   const daemonInstall = await import('../daemon/install.js')
 
+  // What the live daemon loaded, if there is one: the pass compares the
+  // registry against the running code as well as the disk, so a root that
+  // moved ahead without a restart still gets one here.
+  const livePid = readPidFile(stateRoot)
+  const runningVersion = livePid && processIsAlive(livePid.pid)
+    ? readSelfUpdateState(stateRoot).running_version
+    : undefined
+
   const result = await runSelfUpdatePass({
     stateRoot,
     env: ctx.env,
     force: true,
+    runningVersion,
     // The pass never throws: an unexpected failure (an unwritable run
     // directory, a lock this machine cannot take) collapses into a bare
     // `unexpected_error` reason that names nothing an operator can act
@@ -65,6 +74,13 @@ export async function runUpdate(argv, ctx) {
   if (result.action === 'checked' && !result.reason) {
     ctx.stdout.write(`hypaware ${identity.version} is up to date\n`)
     return 0
+  }
+  // The root is current but the daemon is not: a hand-typed
+  // `npm install -g`, or an apply that could not restart. The install is
+  // done; what is owed is the restart.
+  if (result.action === 'updated' && result.reason === 'restart_only') {
+    ctx.stdout.write(`hypaware ${identity.version} is installed but the daemon is still running an older version\n`)
+    return restartDaemonIfRunning(ctx, identity.version, daemonInstall)
   }
   if (result.reason === 'apply_locked') {
     ctx.stderr.write(
@@ -98,6 +114,35 @@ export async function runUpdate(argv, ctx) {
       'different one instead.\n' +
       "  point it at a single https URL, or configure the registry in .npmrc, " +
       "then run 'hyp update' again\n"
+    )
+    return 1
+  }
+  // Held, not failed: this version was already installed here once and
+  // its entrypoint could not run, so it was rolled back. The generic
+  // branch below would blame the install and hand the operator
+  // `npm install -g <name>@latest`, which reinstalls that exact version
+  // and undoes the rollback.
+  if (result.reason === 'held') {
+    ctx.stderr.write(
+      `hyp update: ${result.latest ?? 'that release'} was installed here and could not start, so it was ` +
+      `rolled back to ${identity.version} and is held until a newer release publishes.\n`
+    )
+    return 1
+  }
+  // The entrypoint on disk could not be proven to start, so repeating the
+  // install is the one thing that cannot help: the generic branch below
+  // hands over `npm install -g <name>@latest`, which puts back the exact
+  // version that would not run. Reached from the apply lane (whose
+  // rollback has already restored the previous version, or tried to) and
+  // from the restart-only lane, which installed nothing at all.
+  if (result.reason === 'preflight_failed' || result.reason === 'preflight_inconclusive') {
+    const what = result.latest ?? 'that release'
+    ctx.stderr.write(
+      result.reason === 'preflight_inconclusive'
+        ? `hyp update: could not check whether ${what} starts on this machine, so the daemon was left on the ` +
+          'version it is already running. Try again.\n'
+        : `hyp update: ${what} could not start on this machine, so the daemon was left on the version it is ` +
+          "already running. It is held until a newer release publishes; 'hyp status' has the detail.\n"
     )
     return 1
   }

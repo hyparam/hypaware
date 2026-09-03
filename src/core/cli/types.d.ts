@@ -359,7 +359,7 @@ export interface CommandResult {
 export type CommandRunner = (
   cmd: string,
   args: string[],
-  opts: { env: NodeJS.ProcessEnv; cwd?: string },
+  opts: { env: NodeJS.ProcessEnv; cwd?: string; timeoutMs?: number },
 ) => Promise<CommandResult>
 
 export interface DurableBinResult {
