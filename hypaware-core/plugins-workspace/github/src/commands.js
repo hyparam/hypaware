@@ -61,6 +61,10 @@ export async function runGithubBackfill(argv, ctx) {
       ctx.stderr.write(`hyp github backfill: none of [${only.join(', ')}] are in the active repository inventory\n`)
       return 1
     }
+    // The same ambiguity on the success tail: an unresolved inventory captured
+    // nothing at all, so the next step is retrying capture, not projecting a
+    // table this run never touched. `reportErrors` has already said why.
+    if (result.repos === 0 && result.errors.length > 0) return 1
     ctx.stdout.write("run 'hyp graph project' to project github_events into the graph\n")
     return result.errors.length > 0 ? 1 : 0
   } catch (err) {

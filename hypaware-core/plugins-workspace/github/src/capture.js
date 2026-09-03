@@ -731,8 +731,13 @@ function errKind(err) {
 
 /**
  * True when any repository cursor still holds a continuation, i.e. bounded
- * work survives on disk independently of this tick. This is the same set the
- * budget-exhausted log line counts as `pending_repos`.
+ * work survives on disk independently of this tick. The durable cursors are
+ * the only evidence a tick that never resolved an inventory has, and they are
+ * approximate on both sides: they also carry work a *failed* repository left
+ * behind (which the per-repo path deliberately does not call backlog), and
+ * they say nothing about repositories a budget-exhausted rotation never
+ * reached. It is still the better answer than a flat `false`, which would
+ * discard a real continuation rather than merely mis-time a retry.
  *
  * @param {CursorState} cursors
  * @returns {boolean}
