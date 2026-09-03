@@ -427,20 +427,28 @@ function declaredOptionalMembers() {
   // Matched brace to brace, not cut at the first `\n}`: a member whose nested
   // object type closes in column 0 would end the slice early, and an early cut
   // is silent, because the warning then names the same short list the parse
-  // found. Comments are blanked first (same length, so the offsets still index
-  // `types`), since a lone `}` in prose would cut it just as early.
-  const scan = types.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (comment) => comment.replace(/[^\n]/g, ' '))
+  // found. Comments and quoted spans are blanked to spaces first, same length
+  // so the offsets still index `types`: a lone `}` in JSDoc prose or inside a
+  // string literal type would cut the slice just as early and just as quietly.
+  const literal = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g
+  const scan = types.replace(literal, (span) => span.replace(/[^\n]/g, ' '))
   let depth = 0
   let end = -1
+  // Only what the interface declares itself: a nested object type's own
+  // members are blanked as the scan passes them, newlines kept so the member
+  // regex still anchors per line, because an optional nested inside a member's
+  // type is not an optional member of `CommandRegistration`.
+  let body = ''
   for (let i = types.indexOf('{', start); i < scan.length; i += 1) {
-    if (scan[i] === '{') depth += 1
-    else if (scan[i] === '}' && --depth === 0) {
+    const char = scan[i]
+    if (char === '{') depth += 1
+    else if (char === '}' && --depth === 0) {
       end = i
       break
     }
+    body += depth > 1 && char !== '\n' ? ' ' : char
   }
   assert.notEqual(end, -1, 'interface CommandRegistration is never closed')
-  const body = types.slice(start, end)
   return [...body.matchAll(/^[ \t]*(?:readonly[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\?[ \t]*[:(]/gm)].map((match) => match[1])
 }
 
