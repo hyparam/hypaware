@@ -756,6 +756,13 @@ export interface RunInitWizardOptions {
   /** Pre-built catalog (tests); defaults to the bundled-plugin catalog. */
   catalog?: PluginCatalog
   /**
+   * Platform every screen gates its rows against, defaulting to
+   * `process.platform`. Threaded to the pick lane and to the row sets the
+   * orchestrator computes itself (the express gate, the sync-scope lists),
+   * so one run cannot gate two of its screens on different platforms.
+   */
+  platform?: string
+  /**
    * Override the first look's query seam (tests). Defaults to a runner
    * built from `ctx`; the step is skipped when neither is available.
    */

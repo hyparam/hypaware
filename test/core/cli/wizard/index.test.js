@@ -607,6 +607,71 @@ test('runInitWizard: a hidden picked row is not a sync-scope candidate', async (
   )
 })
 
+// The `platform` seam (LLP 0368 #testability) pins a row set that is
+// otherwise a function of the host. Every screen a run shows reads it, or
+// the run gates its picker on the caller's platform and its sync screen on
+// `process.platform`. Both platforms are asserted, so neither test can
+// pass by accident on a host that happens to match.
+// @ref LLP 0368#testability [tests]: the seam pins the whole run's row set, not just the picker's
+test('runInitWizard: the sync-scope screen gates rows on the wizard platform, not the host', async () => {
+  const lockedMac = { plugin: '@hypaware/a', id: 'locked-mac', label: 'Locked Mac', platforms: ['darwin'] }
+  const lockedLinux = { plugin: '@hypaware/b', id: 'locked-linux', label: 'Locked Linux', platforms: ['linux'] }
+  const pickedMac = { plugin: '@hypaware/c', id: 'picked-mac', label: 'Picked Mac', platforms: ['darwin'] }
+  const pickedLinux = { plugin: '@hypaware/d', id: 'picked-linux', label: 'Picked Linux', platforms: ['linux'] }
+  for (const [platform, on, off] of [['darwin', 'mac', 'linux'], ['linux', 'linux', 'mac']]) {
+    const catalog = emptyCatalog()
+    for (const d of [lockedMac, lockedLinux]) catalog.pickerDescriptors.set(d.id, d)
+    const { opts } = wizardOpts(await tmpHome(), {
+      fork: async () => 'team',
+      catalog,
+      platform,
+      pick: async (/** @type {any} */ o) => {
+        opts._pickOpts = o
+        return pickResult({
+          lockedSources: ['locked-mac', 'locked-linux'],
+          descriptors: [pickedMac, pickedLinux],
+        })
+      },
+    })
+    await runInitWizard(opts)
+    assert.equal(opts._pickOpts.platform, platform, 'the pick lane gates on the caller platform')
+    assert.deepEqual(
+      opts._syncOpts.locked.map((/** @type {any} */ d) => d.id),
+      [`locked-${on}`],
+      'the locked list gates on the same platform the picker did'
+    )
+    assert.deepEqual(
+      opts._syncOpts.candidates.map((/** @type {any} */ d) => d.id),
+      [`picked-${on}`],
+      'and so does the candidate list'
+    )
+    assert.deepEqual(
+      opts._syncOpts.candidatesHiddenIds,
+      [`picked-${off}`],
+      'the row the gate withheld crosses as an id, exactly as a hidden one does'
+    )
+  }
+})
+
+// The express gate names the pick lane's own default rows (LLP 0201
+// #gate), so it reads that row set through the same platform gate.
+// @ref LLP 0368#testability [tests]: the express gate reads the same pinned row set the picker does
+test('runInitWizard: the express gate lists rows for the wizard platform, not the host', async () => {
+  const mac = { plugin: '@hypaware/a', id: 'row-mac', label: 'Row Mac', platforms: ['darwin'] }
+  const linux = { plugin: '@hypaware/b', id: 'row-linux', label: 'Row Linux', platforms: ['linux'] }
+  for (const [platform, label] of [['darwin', 'Row Mac'], ['linux', 'Row Linux']]) {
+    const catalog = emptyCatalog()
+    for (const d of [mac, linux]) catalog.pickerDescriptors.set(d.id, d)
+    const { opts } = wizardOpts(await tmpHome(), {
+      catalog,
+      platform,
+      detect: async () => new Set(['row-mac', 'row-linux']),
+    })
+    await runInitWizard(opts)
+    assert.deepEqual(opts._expressOpts.rows, [label], 'the gate names what the picker would show on this platform')
+  }
+})
+
 // The sentence the empty-candidate branch prints when a hidden row was
 // withheld from the screen is a claim about the export seam, and the export
 // seam reads the client policy store (LLP 0188 #opt-out). A hidden picked
