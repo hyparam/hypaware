@@ -5,6 +5,7 @@ import https from 'node:https'
 import tls from 'node:tls'
 
 import { isControlPath } from '../../../../src/core/control/session_ignore.js'
+import { isMisdirectedHost } from '../../../../src/core/otlp/server.js'
 import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
 import { isLoopbackHost } from '../../../../src/core/util/loopback.js'
 import { parseListen } from './config.js'
@@ -377,6 +378,24 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
       sendJson(res, 403, { error: 'absolute-form is served to loopback peers only' })
       return
     }
+  }
+
+  // The rebinding barrier. A direct origin-form request is the one shape here
+  // addressed to this listener itself, so a `Host` naming anything else names
+  // something that merely resolves here: what a DNS-rebound page sends, which
+  // the browser holds same-origin with this port, so no preflight stands in
+  // its way. Refused ahead of both things it can reach: the unauthenticated
+  // `/_hypaware/` route below, and a catch-all upstream, where a rebound POST
+  // becomes a row.
+  //
+  // Scoped to the direct origin, like that control surface. The other two
+  // front doors are addressed to a third party by design, so their `Host` is
+  // that party's name and never this listener's; what contains them is the
+  // loopback-peers-only check above and the routing table.
+  if (!proxyMode && !absoluteForm && isMisdirectedHost(req, { name: '@hypaware/ai-gateway', log: opts.log })) {
+    req.resume()
+    sendJson(res, 421, { error: 'misdirected request' })
+    return
   }
 
   // @ref LLP 0066#control-path [implements]: the reserved `/_hypaware/`

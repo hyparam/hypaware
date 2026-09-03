@@ -106,10 +106,10 @@ async function bootProxyMode(opts = {}) {
 /**
  * CONNECT through the gateway, then make one HTTPS request over the tunnel.
  *
- * @param {{ port: number, connectPort: number, caPem: string, requestPath: string }} args
+ * @param {{ port: number, connectPort: number, caPem: string, requestPath: string, hostHeader?: string }} args
  * @returns {Promise<string>}
  */
-function requestThroughTunnel({ port, connectPort, caPem, requestPath }) {
+function requestThroughTunnel({ port, connectPort, caPem, requestPath, hostHeader = HOST }) {
   return new Promise((resolve, reject) => {
     const socket = net.connect(port, '127.0.0.1', () => {
       socket.write(`CONNECT ${HOST}:${connectPort} HTTP/1.1\r\nHost: ${HOST}:${connectPort}\r\n\r\n`)
@@ -129,7 +129,7 @@ function requestThroughTunnel({ port, connectPort, caPem, requestPath }) {
         { socket, servername: HOST, ca: [caPem], ALPNProtocols: ['http/1.1'] },
         () => {
           secure.write(
-            `GET ${requestPath} HTTP/1.1\r\nHost: ${HOST}\r\nConnection: close\r\n\r\n`
+            `GET ${requestPath} HTTP/1.1\r\nHost: ${hostHeader}\r\nConnection: close\r\n\r\n`
           )
         }
       )
@@ -802,4 +802,25 @@ test('an IP-only upstream set still mints the static-provider CA', async (t) => 
   assert.ok(warned, 'the skipped IP upstream is reported')
   assert.deepEqual(warned.attrs.hosts, ['10.0.0.5'])
   assert.equal(rig.logged.some((entry) => entry.event === 'aigw.interception_idle'), false)
+})
+
+// The Host check the direct origin-form door grew (issue #1238) stops at that
+// door. A tunnelled request is addressed to the host the client named in
+// CONNECT, so its `Host` is that third party's name and never this listener's:
+// judging it would refuse every proxy-mode request there is.
+test('a tunnelled request carrying a foreign Host is proxied and recorded', async (t) => {
+  const rig = await bootProxyMode()
+  t.after(() => rig.cleanup())
+
+  const body = await requestThroughTunnel({
+    port: rig.proxy.port,
+    connectPort: rig.connectPort,
+    caPem: rig.ca.certPem,
+    requestPath: '/v1/messages',
+    hostHeader: 'attacker.example',
+  })
+
+  assert.match(body, /^HTTP\/1\.1 200 /)
+  assert.deepEqual(rig.upstreamHits, ['/v1/messages'])
+  assert.equal(rig.started.length, 1)
 })
