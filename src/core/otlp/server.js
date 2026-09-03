@@ -84,6 +84,23 @@ function acceptingServer(req) {
 }
 
 /**
+ * One address in the single spelling a `Host` naming it would use:
+ * lowercased, with the IPv4-mapped prefix off. libuv writes an address that
+ * reached a dual-stack socket in the mapped form (`::ffff:198.51.100.7`) on
+ * both sides of the comparison below, and no client writes it in a `Host`,
+ * so both sides are read through this. Otherwise a bind spelled that way
+ * stops matching the address it is reached on, and an explicitly routable
+ * listener loses the exemption it is configured for.
+ *
+ * @param {string} address
+ * @returns {string}
+ */
+function hostSpelling(address) {
+  const lower = address.toLowerCase()
+  return lower.startsWith('::ffff:') ? lower.slice(7) : lower
+}
+
+/**
  * The address the server that accepted `req` is bound to, or `undefined`
  * when there is none to read: a request with no accepting server behind it, a
  * server that is not listening, or a pipe bind, which has no routable side.
@@ -93,7 +110,7 @@ function acceptingServer(req) {
  */
 function boundAddress(req) {
   const bound = acceptingServer(req)?.address()
-  return typeof bound === 'object' && bound !== null ? bound.address.toLowerCase() : undefined
+  return typeof bound === 'object' && bound !== null ? hostSpelling(bound.address) : undefined
 }
 
 /**
@@ -150,11 +167,9 @@ function hostnameOfHostHeader(value) {
  * @returns {boolean}
  */
 export function isMisdirectedHost(req, opts) {
-  // The address this request arrived on, spelled the way a `Host` naming it
-  // would be: libuv reports a dual-stack listener's IPv4 peer in the mapped
-  // form (`::ffff:198.51.100.7`), which no client writes.
-  const localAddress = (req.socket.localAddress ?? '').toLowerCase()
-  const arrivedOn = localAddress.startsWith('::ffff:') ? localAddress.slice(7) : localAddress
+  // The address this request arrived on, in the spelling the bind it is
+  // compared against is read in too.
+  const arrivedOn = hostSpelling(req.socket.localAddress ?? '')
   // The exemption, and only it: a routable arrival address the listener was
   // bound to. A wildcard bind never equals the address it was reached on, so
   // its routable side is judged like its loopback side. An address that cannot

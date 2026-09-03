@@ -657,6 +657,10 @@ test('the Host check exempts an explicitly routable bind only, and needs a Host 
   // Bound to a routable address, the listener is meant to answer to whatever
   // name resolves there, and a rebound request never lands on that address.
   assert.equal(misdirected('203.0.113.5', 'collector.example', '203.0.113.5'), false)
+  // libuv hands both the bind and the arrival address back in the mapped
+  // form when the bind was written that way, so the exemption survives the
+  // spelling: one address, one verdict.
+  assert.equal(misdirected('::ffff:203.0.113.5', 'collector.example', '::ffff:203.0.113.5'), false)
   // The routable side of a wildcard bind is not the same thing: the operator
   // named no address to publish under, so the side is judged, and answers to
   // the address the request arrived on rather than to a name.
