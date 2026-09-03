@@ -565,6 +565,7 @@ async function runGuardedInitWizard(opts, guard) {
           env: opts.env,
           ...(pickProgress ? { progress: pickProgress } : {}),
           ...(catalog ? { catalog } : {}),
+          ...(opts.platform ? { platform: opts.platform } : {}),
           ...(locked ? { locked } : {}),
           ...(managed ? { managed } : {}),
           ...(opts.picks ? { picks: opts.picks } : {}),
@@ -654,8 +655,8 @@ async function runGuardedInitWizard(opts, guard) {
             const allLockedDescriptors = picked.lockedSources
               .map((id) => catalog.pickerDescriptors.get(id))
               .filter((d) => d !== undefined)
-            const lockedDescriptors = visiblePickerDescriptors(allLockedDescriptors)
-            const candidateDescriptors = visiblePickerDescriptors(picked.descriptors)
+            const lockedDescriptors = visiblePickerDescriptors(allLockedDescriptors, opts.platform)
+            const candidateDescriptors = visiblePickerDescriptors(picked.descriptors, opts.platform)
             const visibleCandidateIds = new Set(candidateDescriptors.map((d) => d.id))
             const syncScope = await syncFn({
               stdout: opts.stdout,
@@ -1235,6 +1236,7 @@ async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
     const seeding = await resolvePickSeeding(/** @type {any} */ ({
       env: opts.env,
       catalog,
+      ...(opts.platform ? { platform: opts.platform } : {}),
       ...(locked ? { locked } : {}),
       ...(pickSeed ? { initialSelection: pickSeed } : {}),
       detect,
