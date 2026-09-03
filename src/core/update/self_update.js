@@ -13,6 +13,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { daemonRunDir, processIsAlive, readPidFile } from '../daemon/pid.js'
+import { LAUNCH_LABEL } from '../daemon/platform.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { isLoopbackHost } from '../util/loopback.js'
 
@@ -63,12 +64,6 @@ export const SELF_UPDATE_RESTART_EXIT_CODE = 75
  * above; a test asserts the two stay in sync.
  */
 const CONFIG_BASENAME = 'hypaware-config.json'
-
-/**
- * Must equal `LAUNCH_LABEL` in `src/core/daemon/platform.js`. Duplicated
- * for the same import-light reason; a test asserts the two stay in sync.
- */
-const LAUNCH_LABEL = 'com.hyperparam.hypaware'
 
 // How long the new install's entrypoint gets to print its version before
 // the apply is judged broken and rolled back.
@@ -1178,6 +1173,13 @@ export function describeSelfUpdate(opts) {
     ? state.running_version
     : undefined
   const staleDaemon = runningVersion !== undefined && compareSemver(identity.version, runningVersion) > 0
+  // The root holding the held version is the failed-rollback shape: the
+  // new version could not start, and the reinstall of the one it replaced
+  // did not land either, so the daemon is deliberately still on older
+  // code. `runSelfUpdatePass` refuses to hand over to it (`restart_only`
+  // is gated on this same test), and the status line must not tell an
+  // operator to do by hand the restart the updater will not do.
+  const heldOnDisk = typeof state.held_version === 'string' && state.held_version === identity.version
   const heldLatest = typeof state.held_version === 'string' && state.held_version === state.latest_version
     ? state.held_version
     : undefined
@@ -1243,6 +1245,13 @@ export function describeSelfUpdate(opts) {
   }
   // A root newer than the running daemon is the one state a probe can
   // never notice on its own, because the probe reads the root.
+  if (staleDaemon && heldOnDisk) {
+    return {
+      line: `self-update: ${identity.version} was installed here and could not start, so the daemon is still ` +
+        `running ${runningVersion}; it is held until a newer release publishes`,
+      json,
+    }
+  }
   if (staleDaemon) {
     return {
       line: `self-update: ${identity.version} is installed but the daemon is still running ${runningVersion}; ` +

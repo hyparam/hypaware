@@ -20,6 +20,7 @@ import {
   previousBootLooksStuck,
   PROBE_QUIET_MS,
   readLocalConfigAutoUpdate,
+  readSelfPackageIdentity,
   readSelfUpdateState,
   resolveRegistryUrl,
   runSelfUpdatePass,
@@ -1487,11 +1488,6 @@ test('a bare bracketed IPv6 origin survives the trailing-punctuation strip', asy
 
 // ----- LLP 0365: the daemon cannot be left stale, dead, or on a version that will not start -----
 
-test('the supervisor label the updater recognizes matches the daemon platform label', async () => {
-  const { LAUNCH_LABEL } = await import('../../src/core/daemon/platform.js')
-  assert.equal(detectSupervisor({ XPC_SERVICE_NAME: LAUNCH_LABEL }), true)
-})
-
 test('detectSupervisor believes the daemon label and systemd, not every launchd-spawned process', () => {
   assert.equal(detectSupervisor({ XPC_SERVICE_NAME: 'com.hyperparam.hypaware' }), true)
   assert.equal(detectSupervisor({ XPC_SERVICE_NAME: 'com.hyperparam.hypaware.node-system-ca' }), true)
@@ -1659,6 +1655,27 @@ test('a version that failed preflight is never restarted onto, even when its rol
     const next = await lane(true)
     assert.notEqual(next.action, 'updated')
     assert.equal(readSelfUpdateState(dir).held_version, '99.1.0')
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('status does not offer a restart onto a held version the failed rollback left on the root', async () => {
+  // The same shape from the outside. `hyp status` reads the root this
+  // process runs from, so the held version has to be that one: the root
+  // holds a version that could not start, and the daemon is deliberately
+  // still on older code. The pass refuses to hand over to it, and
+  // "run 'hyp daemon restart'" is that hand-over performed by hand.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-held-on-root-'))
+  try {
+    const { version } = readSelfPackageIdentity()
+    writeSelfUpdateState(dir, {
+      running_version: '1.0.0', held_version: version, latest_version: version, available: false,
+    })
+    writePidFile(dir, { pid: process.pid, startedAt: new Date().toISOString(), runId: 'test', mode: 'foreground' })
+    const line = String(describeSelfUpdate({ stateRoot: dir, env: {} }).line)
+    assert.doesNotMatch(line, /daemon restart/)
+    assert.match(line, /could not start.*still running 1\.0\.0.*held until a newer release/)
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
