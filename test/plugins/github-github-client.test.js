@@ -234,3 +234,81 @@ test('a commit whose file list hits the API cap is reported as truncated', async
   // `per_page` is not a parameter of the single-commit resource, so it is not sent.
   assert.doesNotMatch(urls[0], /per_page/)
 })
+
+test('a cross-origin Link header next page is refused, not fetched with the token', async () => {
+  /** @type {string[]} */
+  const urls = []
+  const client = createGithubClient({
+    tokenEnv: 'T',
+    env: { T: 'secret' },
+    baseUrl: 'https://api.github.test',
+    log: silentLog,
+    async fetchImpl(input) {
+      urls.push(String(input))
+      return new Response(JSON.stringify([{ full_name: 'o/r1' }]), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          link: '<https://evil.test/user/repos?page=2>; rel="next"',
+        },
+      })
+    },
+  })
+
+  await assert.rejects(client.listViewerRepos(), (error) => {
+    assert.ok(error instanceof Error)
+    assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+    assert.doesNotMatch(error.message, /secret/)
+    return true
+  })
+  assert.equal(urls.length, 1, 'the refused page must not be requested')
+  assert.doesNotMatch(urls[0], /evil/)
+})
+
+test('a persisted cursor page pointing off-origin is refused before any request', async () => {
+  let fetches = 0
+  const client = createGithubClient({
+    tokenEnv: 'T',
+    env: { T: 'secret' },
+    baseUrl: 'https://api.github.test',
+    log: silentLog,
+    async fetchImpl() {
+      fetches += 1
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+
+  await assert.rejects(
+    client.listIssuesPage('o', 'r', undefined, 'https://evil.test/repos/o/r/issues?page=3'),
+    (error) => {
+      assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+      return true
+    },
+  )
+  assert.equal(fetches, 0)
+})
+
+test('an Enterprise base keeps its own absolute continuations', async () => {
+  /** @type {string[]} */
+  const urls = []
+  const client = createGithubClient({
+    tokenEnv: 'T',
+    env: { T: 'secret' },
+    baseUrl: 'https://ghe.example.test:8443/api/v3',
+    log: silentLog,
+    async fetchImpl(input) {
+      urls.push(String(input))
+      const link = urls.length === 1
+        ? '<https://ghe.example.test:8443/api/v3/user/repos?page=2>; rel="next"'
+        : null
+      return new Response(JSON.stringify([{ full_name: `o/r${urls.length}` }]), {
+        status: 200,
+        headers: link ? { 'content-type': 'application/json', link } : { 'content-type': 'application/json' },
+      })
+    },
+  })
+
+  assert.deepEqual(await client.listViewerRepos(), ['o/r1', 'o/r2'])
+  assert.match(urls[0], /^https:\/\/ghe\.example\.test:8443\/api\/v3\/user\/repos\?/)
+  assert.equal(urls[1], 'https://ghe.example.test:8443/api/v3/user/repos?page=2')
+})

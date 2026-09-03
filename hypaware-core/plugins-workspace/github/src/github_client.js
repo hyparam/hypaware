@@ -89,7 +89,7 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     headers.Authorization = `Bearer ${authToken}`
     if (opts.etag) headers['If-None-Match'] = opts.etag
 
-    const url = pathAndQuery.startsWith('http') ? pathAndQuery : `${baseUrl}${pathAndQuery}`
+    const url = resolveUrl(baseUrl, pathAndQuery)
     const res = await doFetch(url, { headers })
 
     if (res.status === 304) return { notModified: true }
@@ -253,6 +253,36 @@ function githubCliPath(env) {
     ...(userHome ? [path.join(userHome, '.local', 'bin'), path.join(userHome, '.local', 'share', 'mise', 'shims')] : []),
   ].filter(Boolean)
   return [...new Set(entries)].join(path.delimiter)
+}
+
+/**
+ * Resolve one request URL against the configured API origin.
+ *
+ * A continuation URL arrives absolute, parsed out of a response `Link` header
+ * or read back as a page cursor from `github-cursors.json`, and the request
+ * that follows carries the bearer token. Neither source is trusted to choose
+ * the host, so pin the origin to `baseUrl` and refuse the rest. Refusing beats
+ * dropping the Authorization header: an origin nobody configured is not one to
+ * talk to at all.
+ *
+ * @param {string} baseUrl
+ * @param {string} pathAndQuery
+ * @returns {string}
+ */
+function resolveUrl(baseUrl, pathAndQuery) {
+  const absolute = URL.parse(pathAndQuery)
+  if (!absolute) return `${baseUrl}${pathAndQuery}`
+  if (absolute.origin !== new URL(baseUrl).origin) throw foreignOrigin(absolute)
+  return pathAndQuery
+}
+
+/** @param {URL} url @returns {HypError} */
+function foreignOrigin(url) {
+  // Origin only. The path and query of an untrusted URL stay out of the error,
+  // for the same reason a failed response body does.
+  const err = /** @type {HypError} */ (new Error(`GitHub continuation URL refused: origin ${url.origin} is not the configured API base`))
+  err.hypErrorKind = 'github_foreign_origin'
+  return err
 }
 
 /** @returns {HypError} */
