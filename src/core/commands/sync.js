@@ -1,6 +1,7 @@
 // @ts-check
 
 import { requireConfirmation } from '../cli/confirm.js'
+import { withSpinner } from '../cli/spinner.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -254,7 +255,14 @@ export async function runSync(argv, ctx) {
   /** @type {{ now: Date, force: true, source: 'manual', sinkInstance?: string }} */
   const tickOpts = { now: new Date(), force: true, source: 'manual' }
   if (instance) tickOpts.sinkInstance = instance
-  const report = await driver.tick(tickOpts)
+  // The tick is the long silent wait of this verb: one export per sink, each
+  // a network round trip, with nothing on screen between the user's "y" and
+  // the result lines. The driver reports per sink only once the whole tick
+  // settles, so an elapsed-time spinner is the progress that is available.
+  const report = await withSpinner(
+    { stdout: ctx.stdout, env: ctx.env, label: `Sending to ${describeScope(destinations)}...` },
+    () => driver.tick(tickOpts)
+  )
 
   // A hold that appeared between the check above and the tick (a concurrent
   // enrolling login) would otherwise print an empty report and exit 0.
@@ -421,7 +429,10 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
   for (const handle of capable) {
     let result
     try {
-      result = await handle.sink.replaySourceHistory?.({ source })
+      result = await withSpinner(
+        { stdout: ctx.stdout, env: ctx.env, label: `Replaying '${source}' history to ${handle.instanceName}...` },
+        async () => handle.sink.replaySourceHistory?.({ source })
+      )
     } catch (err) {
       failed = true
       ctx.stdout.write(
