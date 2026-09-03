@@ -265,13 +265,20 @@ test('a cross-origin Link header next page is refused, not fetched with the toke
   assert.doesNotMatch(urls[0], /evil/)
 })
 
-test('a persisted cursor page pointing off-origin is refused before any request', async () => {
+test('a persisted cursor page pointing off-origin is refused before the token is resolved', async () => {
   let fetches = 0
+  let ghCalls = 0
   const client = createGithubClient({
+    // No token env var, so resolving the credential would shell out to `gh`.
+    // A refused URL must not get that far: the origin pin runs first.
     tokenEnv: 'T',
-    env: { T: 'secret' },
+    env: {},
     baseUrl: 'https://api.github.test',
     log: silentLog,
+    async ghToken() {
+      ghCalls += 1
+      return 'gh-secret'
+    },
     async fetchImpl() {
       fetches += 1
       return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
@@ -286,6 +293,7 @@ test('a persisted cursor page pointing off-origin is refused before any request'
     },
   )
   assert.equal(fetches, 0)
+  assert.equal(ghCalls, 0, 'a refused URL must not resolve the credential')
 })
 
 test('an Enterprise base keeps its own absolute continuations', async () => {

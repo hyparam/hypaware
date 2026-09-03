@@ -79,6 +79,11 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
    * @returns {Promise<{ notModified: true } | { notModified: false, data: unknown, next: string | null, etag: string | null }>}
    */
   async function request(pathAndQuery, opts = {}) {
+    // Pin the origin before the credential exists. A refused continuation must
+    // not materialize the token at all, which for an install with no token env
+    // var means not spawning `gh auth token` (a subprocess with a 10s timeout)
+    // on behalf of a URL we are about to throw away.
+    const url = resolveUrl(baseUrl, pathAndQuery)
     const authToken = await token()
     /** @type {Record<string, string>} */
     const headers = {
@@ -89,7 +94,6 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     headers.Authorization = `Bearer ${authToken}`
     if (opts.etag) headers['If-None-Match'] = opts.etag
 
-    const url = resolveUrl(baseUrl, pathAndQuery)
     const res = await doFetch(url, { headers })
 
     if (res.status === 304) return { notModified: true }

@@ -104,6 +104,9 @@ test('hypaware.plugin.json declares the bundled-graph-source shape (LLP 0005/036
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'hypaware.plugin.json'), 'utf8'))
   assert.equal(manifest.name, '@hypaware/github')
   assert.equal(manifest.entrypoint, './src/index.js')
+  // The origin pin in `github_client.js` uses `URL.parse`, which is 20.13/22.1
+  // and later, so `>=20` would be a false declaration. Match the repo floor.
+  assert.equal(manifest.node_engine, '>=22.12')
   // Both dependency kinds are required (LLP 0001 §both-dependency-kinds): the
   // plugin dep pins activation order; the capability dep is the contract interface.
   assert.equal(manifest.requires.plugins['@hypaware/context-graph'], '^0.1.0')
