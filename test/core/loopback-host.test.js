@@ -1,9 +1,12 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
 import test from 'node:test'
 
 import { isLoopbackHost } from '../../src/core/util/loopback.js'
+import { trackedFiles } from '../helpers/tracked_files.js'
 
 // The one predicate behind three checks: the OTLP listener's `Host` guard,
 // the self-updater's registry-override trust, and the AI gateway's CONNECT
@@ -90,4 +93,34 @@ test('the hex-serialized mapped form counts only for the caller that asks for it
   assert.equal(isLoopbackHost('192.168.1.50', { hexMappedIpv4: true }), false)
   assert.equal(isLoopbackHost(undefined, { hexMappedIpv4: true }), false)
   assert.equal(isLoopbackHost('::ffff:7f00:1', {}), false)
+})
+
+// Brackets are matched punctuation, not noise to be stripped off either end
+// independently. `hostnameOfHostHeader` turns away a `Host` whose brackets are
+// unbalanced *around a port*, but `Host: localhost]` has no port and no
+// leading bracket, so it reaches this predicate whole. Answering it would have
+// widened the OTLP guard that closed the DNS-rebinding hole: on the tree
+// before this predicate existed, all four of these were refused with 421.
+test('a stray bracket is part of the name, not punctuation to strip', () => {
+  for (const host of ['localhost]', 'LOCALHOST]', '127.0.0.1]', '[[::1]', '[::1', '::1]', '[localhost', '[]']) {
+    assert.equal(isLoopbackHost(host), false, host)
+    assert.equal(isLoopbackHost(host, { hexMappedIpv4: true }), false, host)
+  }
+  // A matched pair still comes off, which is the form `URL` hands over.
+  assert.equal(isLoopbackHost('[::1]'), true)
+  assert.equal(isLoopbackHost('[127.0.0.1]'), true)
+})
+
+// The hex-mapped opt-in widens a check whose "no" is the whole barrier at
+// three of the four call sites, and it is one argument away at each of them.
+// Only the self-updater has a reason to pass it, and the reason is a `URL`
+// re-serialization no socket and no `Host` header produces. A new caller is a
+// decision to make on purpose, so it fails here first rather than silently.
+test('only the self-updater asks for the hex-mapped form', () => {
+  const root = path.resolve(import.meta.dirname, '..', '..')
+  const sources = trackedFiles(root, new Set(['.js']))
+    .filter(f => !f.startsWith('test/') && f !== 'src/core/util/loopback.js')
+  const askers = sources.filter(f => fs.readFileSync(path.join(root, f), 'utf8').includes('hexMappedIpv4'))
+  assert.deepEqual(askers, ['src/core/update/self_update.js'],
+    'a new caller of the hex-mapped opt-in: read why it is off by default at src/core/util/loopback.js before adding one here')
 })

@@ -23,6 +23,12 @@
  * every caller has it off already, and reading one here would be a second
  * parser to disagree with theirs.
  *
+ * Brackets come off only as a matched pair. A lone `]` is not punctuation to
+ * tidy away, it is part of the name, and a name does not become this machine
+ * because deleting a character from it would be: a `Host: localhost]` reaches
+ * the OTLP guard intact, and answering it would widen the refusal that closed
+ * the rebinding hole.
+ *
  * `hexMappedIpv4` opts into the hex-serialized mapped form as well, and only
  * the self-updater passes it: a registry override written
  * `http://[::ffff:127.0.0.1]:4873` reaches that check as `[::ffff:7f00:1]`,
@@ -40,7 +46,8 @@
  */
 export function isLoopbackHost(host, opts) {
   if (!host) return false
-  const bare = host.replace(/^\[|\]$/g, '').toLowerCase()
+  const bracketed = host.startsWith('[') && host.endsWith(']')
+  const bare = (bracketed ? host.slice(1, -1) : host).toLowerCase()
   if (bare === 'localhost' || bare === '::1') return true
   // IPv4 loopback is the whole 127.0.0.0/8 block, not just 127.0.0.1.
   const dotted = bare.startsWith('::ffff:') ? bare.slice(7) : bare

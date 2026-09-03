@@ -505,6 +505,24 @@ test('a Host in the hex-serialized IPv4-mapped spelling is refused', async () =>
   }
 })
 
+// `hostnameOfHostHeader` turns away unbalanced brackets only where a port
+// would follow them, so `Host: localhost]` arrives at the predicate whole. It
+// must not be read as `localhost` with the bracket tidied off: the header is
+// caller-chosen, and every spelling this guard admits is a spelling a rebound
+// page's request would be answered under.
+test('a Host carrying a stray bracket is refused, not tidied into a loopback name', async () => {
+  const s = await startServer()
+  try {
+    for (const host of ['localhost]', 'LOCALHOST]', '127.0.0.1]', '[[::1]']) {
+      const res = await requestWithHost(s.bound.port, { path: '/v1/logs', host })
+      assert.equal(res.status, 421, `Host: ${host} is refused`)
+    }
+    assert.equal(s.seen.length, 0, 'no export reached the handler')
+  } finally {
+    await s.close()
+  }
+})
+
 // A `Host` no hostname can be read out of is refused with the foreign ones.
 // Sent over a raw socket because an HTTP client will not put a space in a
 // header value.
