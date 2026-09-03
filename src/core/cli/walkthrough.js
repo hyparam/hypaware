@@ -664,8 +664,11 @@ export async function runPickerWalkthrough(opts) {
         title: 'What do you want to collect?',
         // Hidden and platform-gated rows are absent from the menu but still
         // pickable via `--source` (which takes the `opts.picks` path above and
-        // never reaches this prompt). They are never detected, so nothing is
-        // silently unchecked by leaving them out here.
+        // never reaches this prompt). A hidden row carries no probe, so nothing
+        // is silently unchecked by leaving it out. A platform-gated row may
+        // well be detected, and is withheld anyway: the gate answers a question
+        // about the integration that no probe about this machine can overturn
+        // (`@ref LLP 0368#platform-gate`).
         options: visiblePickerDescriptors(descriptorList, opts.platform).map((d) => ({
           value: d.id,
           label: detected.has(/** @type {PickerSource} */ (d.id)) ? `${d.label} · detected` : d.label,

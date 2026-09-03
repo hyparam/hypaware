@@ -84,6 +84,16 @@ two things for free:
   refuse a choice, which is the same escape hatch every hidden row has. The
   cost of being wrong stays a dead-end selection the user asked for by name.
 
+Withholding an offer and refusing a choice come apart at one place, the pick
+lane's carry-through. A row the menu cannot show is unpickable, so a
+reconfigure that re-derives the config from the menu drops it. LLP 0202
+`#carry-through` already solved that for `hidden` rows, and the carry is
+therefore keyed on what the display filter withheld rather than on `hidden`
+itself: a seeded, non-derivatively-read-back gated row (LLP 0297
+`#own-plugins`) rides through the selection. Without that, walking the menu
+again on Linux would silently un-compose a `--source claude-desktop` install,
+which is the choice refused that this section says the gate does not do.
+
 ## Testing a host-dependent menu {#testability}
 
 The visible row set is now a function of `process.platform`, so a test over
@@ -100,6 +110,9 @@ menu rows names the platform it counts on.
   array of non-empty strings.
 - `visiblePickerDescriptors(descriptors, platform)` filters on `hidden`, then
   on the gate.
+- The pick lane's carry-through is keyed on the rows that filter withheld,
+  not on `hidden`, so a reconfigure on the gating platform preserves a config
+  that already collects a gated row.
 - `@hypaware/claude-desktop`'s row declares `"platforms": ["darwin"]`.
 - Onboarding on Linux loses one row. macOS is unchanged, and no other bundled
   row declares a gate.

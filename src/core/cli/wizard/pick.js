@@ -74,7 +74,7 @@ export const NEEDS_SETUP_LABEL_SUFFIX = ' · needs extra setup'
  *
  * Hidden rows (LLP 0202) are resolved here for the same reason: `visibleList`
  * is the single display filter's output, `defaultRows` is drawn from it so
- * no screen can state a hidden row, and `carried` is the hidden-row
+ * no screen can state a hidden row, and `carried` is the withheld-row
  * carry-through, decided off `seedOrigin` before any screen renders, so the
  * express gate's auto-accept and the pick lane's menu preserve a
  * raw-only config the same way.
@@ -188,10 +188,10 @@ export async function resolvePickSeeding(opts) {
   const seedOrigin = opts.initialSelection ? 'selection' : configured !== undefined ? 'config' : 'detected'
 
   const visibleList = visiblePickerDescriptors(descriptorList, opts.platform)
-  // A hidden row never renders, so no screen downstream can return one.
+  // A withheld row never renders, so no screen downstream can return one.
   // Carrying one through the selection is right when the config on disk
   // collects nothing the menu can show: then every row it does collect is
-  // hidden, and an interactive pass would silently strip a setup the picker
+  // withheld, and an interactive pass would silently strip a setup the picker
   // has no way to represent (a `--source raw-anthropic` install being
   // reconfigured).
   //
@@ -231,12 +231,22 @@ export async function resolvePickSeeding(opts) {
   // @ref LLP 0191#re-entry-seeding [implements]: a re-entry starts from the answer previously confirmed, carried rows included
   // @ref LLP 0202#carry-through [implements]: it rides through the selection when the config collects nothing the menu can show, and stays there across a back-and-forward
   // @ref LLP 0297#carry-through [implements]: a hidden row with a non-derivative read-back carries off the config seed whatever else is checked
-  const seededHidden = descriptorList.filter((d) => d.hidden === true && seed.has(d.id))
+  //
+  // Keyed on what the display filter withheld rather than on `hidden` alone:
+  // a `platforms` gate removes a row from the same menu for the same kind of
+  // reason, so a config that already collects a gated row must survive a
+  // reconfigure on the platform that withholds it. Keyed on `hidden` this
+  // dropped `@hypaware/claude-desktop` out of a Linux config the moment the
+  // user walked the menu again, which is a choice refused rather than an
+  // offer withheld.
+  // @ref LLP 0368#display-only [implements]: a platform-gated row carries through a reconfigure exactly as a hidden one does
+  const visibleIds = new Set(visibleList.map((d) => d.id))
+  const seededWithheld = descriptorList.filter((d) => !visibleIds.has(d.id) && seed.has(d.id))
   const seededVisible = visibleList.some((d) => seed.has(d.id))
   const carried = seedOrigin === 'selection'
-    ? seededHidden.map((d) => d.id)
+    ? seededWithheld.map((d) => d.id)
     : seedOrigin === 'config'
-      ? seededHidden.filter((d) => !seededVisible || readsBackFromOwnPlugins(d)).map((d) => d.id)
+      ? seededWithheld.filter((d) => !seededVisible || readsBackFromOwnPlugins(d)).map((d) => d.id)
       : []
 
   return {

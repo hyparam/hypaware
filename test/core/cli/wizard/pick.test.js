@@ -185,6 +185,10 @@ test('runWizardPick: the defaults omit a detected needs_setup row, and autoAccep
     autoAccept: true,
     prompt: async () => { throw new Error('the express path must not prompt') },
     detect: async () => new Set(['codex', 'claude-desktop']),
+    // Pin the platform: the Desktop row is offered only on darwin, so on Linux
+    // the gate alone keeps it out of the narration and the assertion below
+    // would hold with nothing to do with `needs_setup`.
+    platform: 'darwin',
   }))
   assert.doesNotMatch(stdout.text(), /Claude Desktop/, 'the narration must not promise a row the user never ticked')
   assert.deepEqual(result.sourcesPicked, ['codex'])
@@ -212,6 +216,7 @@ test('runWizardPick: a reconfigure reports carried picks in previouslyConfigured
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     prompt: capturingPrompt(['claude-desktop']).prompt,
     detect: async () => new Set(),
+    platform: 'darwin',
     confirmOverwrite: async () => true,
   }))
   assert.ok(result.sourcesPicked.includes('claude-desktop'))
@@ -1312,6 +1317,34 @@ test('runWizardPick: claude-desktop is withheld from the Linux menu', async () =
   assert.equal(written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/claude-desktop'), undefined)
 })
 
+// A gated row the config already collects is unpickable on the gating
+// platform, so a reconfigure that re-derived the config from the menu alone
+// would delete it. The carry is keyed on what the display filter withheld,
+// not on `hidden`, so the `--source claude-desktop` install survives.
+// @ref LLP 0368#display-only [tests]: the gate withholds the offer, so the choice already recorded must outlive a menu walk on Linux
+test('runWizardPick: a Linux reconfigure carries the configured claude-desktop it cannot offer', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  await seedLocalConfig(tmp, {
+    version: 2,
+    plugins: DESKTOP_PLUGINS,
+    query: { cache: { retention: { default_days: 90 } } },
+  })
+  const { prompt, state } = capturingPrompt(['claude'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    detect: async () => new Set(),
+    platform: 'linux',
+    confirmOverwrite: async () => true,
+  }))
+  const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
+  assert.ok(!rendered.includes('claude-desktop'), 'the menu still cannot offer it')
+  assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'claude-desktop'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  const names = written.plugins.map((/** @type {any} */ p) => p.name)
+  assert.ok(names.includes('@hypaware/claude-desktop'), 'the recorded choice is not un-composed')
+})
+
 test('runWizardPick: a configured claude-desktop stays selected when the user keeps it', async () => {
   const tmp = await mkTmp()
   const catalog = await realCatalog()
@@ -1324,6 +1357,7 @@ test('runWizardPick: a configured claude-desktop stays selected when the user ke
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog,
     prompt: capturingPrompt(['claude', 'claude-desktop']).prompt,
     detect: async () => new Set(),
+    platform: 'darwin',
     confirmOverwrite: async () => true,
   }))
   assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'claude-desktop'])
