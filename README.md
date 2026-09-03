@@ -589,13 +589,14 @@ carries, and the `Host` header is what tells that page apart from a local
 exporter, so a name is never enough.
 
 **The consequence on Debian and Ubuntu**, which ship `127.0.1.1 <hostname>` in
-`/etc/hosts`: an exporter pointed at `http://<hostname>:4318` is refused. It
-connects to `127.0.1.1`, a loopback address, so the guard judges the request,
-and the machine's own hostname is not one of the accepted names. Addressing a
-local listener by the machine hostname is not supported, and no config key
-widens the accepted set. This is only reachable on a `listen_host` other than
-the default: a listener bound to `127.0.0.1` never receives a connection
-addressed to `127.0.1.1` in the first place.
+`/etc/hosts`: an exporter pointed at `http://<hostname>:<port>` is refused
+(the default port is 4318 for the `otel` source, 4319 for the Claude Code
+telemetry listener). It connects to `127.0.1.1`, a loopback address, so the
+guard judges the request, and the machine's own hostname is not one of the
+accepted names. Addressing a local listener by the machine hostname is not
+supported, and no config key widens the accepted set. This is only reachable
+on a `listen_host` other than the default: a listener bound to `127.0.0.1`
+never receives a connection addressed to `127.0.1.1` in the first place.
 
 Point the exporter at `localhost` or `127.0.0.1` instead. On a wildcard bind
 (`0.0.0.0` or `::`) a remote exporter should use the routable interface
@@ -618,6 +619,11 @@ daemon started with an exporter configured, either
 `HYP_DEV_TELEMETRY=1 hyp daemon run --foreground` (JSONL under
 `<HYP_HOME>/hypaware/dev-telemetry/`) or `OTEL_EXPORTER_OTLP_ENDPOINT`
 pointed at your own collector, not back at HypAware.
+
+A third listener shares this guard, the OpenCode snapshot receiver, but it
+binds `127.0.0.1` and only its port is configurable, so it cannot reach the
+case above. It answers `{"error":"misdirected request"}` rather than the OTLP
+body, and its refusals are logged under `listener=@hypaware/opencode`.
 
 ## Uninstalling
 
