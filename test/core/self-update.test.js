@@ -223,7 +223,8 @@ test('dropping an untrusted registry override is logged, not silent', async () =
     // An override that is dropped: the probe silently asks a different
     // registry than the operator configured, and the answer decides
     // whether this install ever updates. That decision belongs in a log.
-    await runSelfUpdatePass({ supervised: true,
+    await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir,
       env: { npm_config_registry: 'http://npm.corp.example:8080' },
       packageRoot,
@@ -240,7 +241,8 @@ test('dropping an untrusted registry override is logged, not silent', async () =
     // Credentials in the override never reach the log line.
     const withSecret = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-secret-'))
     logged.length = 0
-    await runSelfUpdatePass({ supervised: true,
+    await runSelfUpdatePass({
+      supervised: true,
       stateRoot: withSecret,
       env: { npm_config_registry: 'http://bot:hunter2@npm.corp.example' },
       packageRoot,
@@ -258,7 +260,8 @@ test('dropping an untrusted registry override is logged, not silent', async () =
     const honored = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-registry-ok-'))
     logged.length = 0
     urls.length = 0
-    await runSelfUpdatePass({ supervised: true,
+    await runSelfUpdatePass({
+      supervised: true,
       stateRoot: honored,
       env: { npm_config_registry: 'http://localhost:4873/' },
       packageRoot,
@@ -450,7 +453,8 @@ test('runSelfUpdatePass applies a newer release from a global install', async ()
   try {
     const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
     const probe = fetchStub('1.1.0')
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir,
       env: {},
       packageRoot,
@@ -476,12 +480,14 @@ test('runSelfUpdatePass records an up-to-date probe and respects the TTL after i
   try {
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     const probe = fetchStub('1.0.0')
-    const first = await runSelfUpdatePass({ supervised: true,
+    const first = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: probe.impl, jitter: 0,
     })
     assert.equal(first.action, 'checked')
     assert.equal(readSelfUpdateState(dir).available, false)
-    const second = await runSelfUpdatePass({ supervised: true,
+    const second = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: probe.impl, jitter: 0,
     })
     assert.equal(second.action, 'none')
@@ -501,7 +507,8 @@ test('runSelfUpdatePass never probes from a checkout, and the off switch holds',
       JSON.stringify({ name: 'hypaware', version: '1.0.0' })
     )
     const probe = fetchStub('9.9.9')
-    const skipped = await runSelfUpdatePass({ supervised: true,
+    const skipped = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot: checkoutRoot, fetchImpl: probe.impl,
     })
     assert.equal(skipped.action, 'skipped')
@@ -509,7 +516,8 @@ test('runSelfUpdatePass never probes from a checkout, and the off switch holds',
     assert.equal(probe.calledCount(), 0)
 
     writeSelfUpdateState(dir, { auto_update: false })
-    const off = await runSelfUpdatePass({ supervised: true,
+    const off = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot: checkoutRoot, fetchImpl: probe.impl,
     })
     assert.equal(off.action, 'skipped')
@@ -531,7 +539,8 @@ test('before the first boot caches the flag, auto_update: false in the local con
 
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     const probe = fetchStub('9.9.9')
-    const off = await runSelfUpdatePass({ supervised: true,
+    const off = await runSelfUpdatePass({
+      supervised: true,
       stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl,
     })
     assert.equal(off.action, 'skipped')
@@ -541,7 +550,8 @@ test('before the first boot caches the flag, auto_update: false in the local con
     // The daemon-cached effective flag wins over the local file: central
     // may have overridden a local false, and the cache carries the merge.
     writeSelfUpdateState(stateRoot, { auto_update: true })
-    const on = await runSelfUpdatePass({ supervised: true,
+    const on = await runSelfUpdatePass({
+      supervised: true,
       stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl,
     })
     assert.equal(on.action, 'updated')
@@ -575,7 +585,8 @@ test('the pre-boot lane honors the --config the service unit was launched with',
 
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     const probe = fetchStub('9.9.9')
-    const off = await runSelfUpdatePass({ supervised: true,
+    const off = await runSelfUpdatePass({
+      supervised: true,
       stateRoot, env: {}, configPath: unitConfig, packageRoot, runner, fetchImpl: probe.impl,
     })
     assert.equal(off.action, 'skipped')
@@ -594,7 +605,8 @@ test('the pre-boot lane honors the --config the service unit was launched with',
 
     // Without the flag the lane looks beside the state root, finds nothing,
     // and the default carries the pass through to an apply.
-    const on = await runSelfUpdatePass({ supervised: true,
+    const on = await runSelfUpdatePass({
+      supervised: true,
       stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl,
     })
     assert.equal(on.action, 'updated')
@@ -624,7 +636,8 @@ test('an unreadable config or status file is no answer, never a throw', async ()
 
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     const probe = fetchStub('9.9.9')
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl,
     })
     assert.equal(result.action, 'updated')
@@ -758,7 +771,8 @@ test('a probe failure degrades to a recorded error, never a throw', async () => 
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     /** @type {typeof fetch} */
     const failing = async () => { throw new Error('boom') }
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: failing,
     })
     assert.equal(result.action, 'checked')
@@ -789,7 +803,8 @@ test('a failed npm install lands on the state file as a degraded notice', async 
   try {
     const { packageRoot, runner } = await fakeGlobalInstall(dir, { installExit: 1 })
     const probe = fetchStub('1.1.0')
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: probe.impl,
     })
     assert.equal(result.action, 'checked')
@@ -855,7 +870,8 @@ test('a held apply lock stops a second process from racing npm install -g', asyn
 
     const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
     const probe = fetchStub('1.1.0')
-    const blocked = await runSelfUpdatePass({ supervised: true,
+    const blocked = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: probe.impl,
     })
     assert.equal(blocked.action, 'checked')
@@ -877,7 +893,8 @@ test('an offline probe failure stays out of the status text and in the json', as
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     /** @type {typeof fetch} */
     const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: offline,
     })
     assert.equal(result.reason, 'probe_failed')
@@ -984,7 +1001,8 @@ test('a probe that has been failing for a week stops being quiet', async () => {
     /** @type {typeof fetch} */
     const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
     const start = new Date('2026-01-01T00:00:00.000Z')
-    await runSelfUpdatePass({ supervised: true,
+    await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: offline, now: () => start,
     })
     assert.equal(readSelfUpdateState(dir).error_since, start.toISOString())
@@ -992,7 +1010,8 @@ test('a probe that has been failing for a week stops being quiet', async () => {
     // A second failure a day later does not restart the clock: `checked_at`
     // moves, `error_since` does not, and the line stays quiet.
     const day = new Date(start.getTime() + 24 * 60 * 60 * 1000)
-    await runSelfUpdatePass({ supervised: true,
+    await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: offline, force: true, now: () => day,
     })
     assert.equal(readSelfUpdateState(dir).error_since, start.toISOString())
@@ -1012,7 +1031,8 @@ test('a probe that has been failing for a week stops being quiet', async () => {
     // And a probe that comes back clears the run, so the next failure
     // starts its own reprieve rather than inheriting this one.
     const probe = fetchStub('1.0.0')
-    await runSelfUpdatePass({ supervised: true,
+    await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: probe.impl, force: true, now: () => later,
     })
     assert.equal(readSelfUpdateState(dir).error_since, undefined)
@@ -1051,7 +1071,8 @@ test('an ignored registry override cannot steer the install either', async () =>
     // build there, and a pinned install would silently swap it for the
     // public one. Not knowing where the bytes belong means not
     // installing.
-    const applied = await runSelfUpdatePass({ supervised: true,
+    const applied = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir,
       env: { npm_config_registry: 'http://npm.corp.example' },
       packageRoot,
@@ -1080,7 +1101,8 @@ test('an ignored registry override cannot steer the install either', async () =>
       path.join(packageRoot, 'package.json'),
       JSON.stringify({ name: 'hypaware', version: '1.0.0' })
     )
-    await runSelfUpdatePass({ supervised: true,
+    await runSelfUpdatePass({
+      supervised: true,
       stateRoot: plain, env: {}, packageRoot, runner, fetchImpl: fetchStub('1.1.0').impl,
     })
     assert.ok(envs.length > 0)
@@ -1123,7 +1145,8 @@ test('a trusted override is honored end to end, and its credentials never reach 
       /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
       const logged = []
       urls.length = 0
-      await runSelfUpdatePass({ supervised: true,
+      await runSelfUpdatePass({
+        supervised: true,
         stateRoot: root,
         env: { npm_config_registry: spelling },
         packageRoot,
@@ -1190,7 +1213,8 @@ test('npm reads the registry override case-insensitively, and so does the guard'
         urls.push(String(url))
         return { ok: true, status: 200, json: async () => ({ version: '1.1.0' }) }
       }
-      const result = await runSelfUpdatePass({ supervised: true,
+      const result = await runSelfUpdatePass({
+        supervised: true,
         stateRoot: root, env, packageRoot, runner, fetchImpl: probe,
       })
       await fsp.rm(root, { recursive: true, force: true })
@@ -1260,7 +1284,8 @@ test('going offline does not silence an apply failure that was already speaking'
       return { exitCode: 1, stdout: '', stderr: 'EACCES' }
     }
     const start = new Date('2026-01-01T00:00:00.000Z')
-    await runSelfUpdatePass({ supervised: true,
+    await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir,
       env: {},
       packageRoot,
@@ -1279,7 +1304,8 @@ test('going offline does not silence an apply failure that was already speaking'
     /** @type {typeof fetch} */
     const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
     const later = new Date(start.getTime() + 60 * 60 * 1000)
-    await runSelfUpdatePass({ supervised: true,
+    await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir,
       env: {},
       packageRoot,
@@ -1305,7 +1331,8 @@ test('going offline does not silence an apply failure that was already speaking'
       JSON.stringify({ name: 'hypaware', version: '1.0.0' })
     )
     const { runner: workingInstall } = await fakeGlobalInstall(dir)
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: healed,
       env: {},
       packageRoot,
@@ -1335,7 +1362,8 @@ test("a credentialed registry's token does not survive a failed probe into state
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
     const logged = []
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir,
       env: { npm_config_registry: 'https://bot:hunter2@npm.corp.example' },
       packageRoot,
@@ -1413,7 +1441,8 @@ test('redacting a probe error takes the credential, not the rest of the message'
     const probe = async () => {
       throw new Error('refused {"registry":"https://bot:hunter2@npm.corp.example/x","attempt":2}')
     }
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir,
       env: {},
       packageRoot,
@@ -1444,7 +1473,8 @@ test('an apostrophe in the registry password does not cut the redaction short', 
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     // Pinned: the whole finding is that this survives serialization.
     assert.match(new URL("https://bot:hunter2'tail@npm.corp.example").href, /hunter2'tail/)
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir,
       env: { npm_config_registry: "https://bot:hunter2'tail@npm.corp.example" },
       packageRoot,
@@ -1474,7 +1504,8 @@ test('a bare bracketed IPv6 origin survives the trailing-punctuation strip', asy
     const { packageRoot, runner } = await fakeGlobalInstall(dir)
     /** @type {typeof fetch} */
     const probe = async () => { throw new Error('connect ECONNREFUSED http://[::1]') }
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir,
       env: {},
       packageRoot,
@@ -1608,7 +1639,8 @@ test('a rollback leaves status naming the held version, not a degraded install',
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-held-status-'))
   try {
     const { packageRoot, runner } = await fakeGlobalInstall(dir, { preflightFails: '99.1.0' })
-    const result = await runSelfUpdatePass({ supervised: true,
+    const result = await runSelfUpdatePass({
+      supervised: true,
       stateRoot: dir, env: {}, packageRoot, runner, fetchImpl: fetchStub('99.1.0').impl,
     })
     assert.equal(result.reason, 'preflight_failed')
