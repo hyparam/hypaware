@@ -21,8 +21,11 @@ const MAX_BODY_BYTES = 16 * 1024 * 1024
 // How much of a rejected request's body is read before the connection is cut.
 // A rejected body a caller is still uploading has to be read for the answer to
 // reach it at all, so the read cannot be skipped; left unbounded, its length is
-// the sender's to choose. A legitimate rejected body is a snapshot header or
-// smaller, so nothing this listener serves comes near the cap.
+// the sender's to choose. A legitimate rejected body is not small: the
+// managed asset posts a whole session transcript, which `MAX_BODY_BYTES`
+// sizes at up to 16 MiB. The cap sits well under that on purpose, because
+// the answer is written before a byte is drained, so a rejected snapshot
+// still reads its own 415 back and only the rest of the upload is cut.
 const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
 // A rejected snapshot is always counted, but logged at most this often. The
 // route is unauthenticated and reachable by the same browser page the
@@ -324,6 +327,11 @@ function rejectJson(req, res, status, body) {
     closeIfAnswered()
   })
   res.on('finish', closeIfAnswered)
+  // Past the cap this connection is reset, so it must not be answered as a
+  // reusable one. A client that reads a keep-alive header and returns the
+  // socket to its pool meets the reset on a request it has already finished,
+  // where its own error handler is gone and the throw is nobody's.
+  res.setHeader('connection', 'close')
   sendJson(res, status, body)
 }
 

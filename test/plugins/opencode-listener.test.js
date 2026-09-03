@@ -635,10 +635,13 @@ test('a rejected snapshot body is drained only up to a cap, while a small one st
     })
     assert.ok(sent < body.length, `the listener read all ${body.length} bytes of a rejected body`)
     assert.match(received, /^HTTP\/1\.1 415 /, `the oversized sender got ${JSON.stringify(received.slice(0, 80))}`)
+    // The reset must not be answered as a reusable connection, or a pooling
+    // client meets it on a request it already considers finished.
+    assert.match(received, /\r\nconnection: close\r\n/i, `the oversized sender got ${JSON.stringify(received.slice(0, 200))}`)
 
-    // The cap must not cost the callers the 415 is written for: a real header
-    // regression in the managed asset sends a small body and has to read the
-    // whole answer back to name itself.
+    // The cap must not cost the callers the 415 is written for: the answer
+    // flushes before the connection is closed, so a body under the cap still
+    // reads back the whole JSON naming the offending header.
     const small = await fetch(`${listener.endpoint}/snapshot`, {
       method: 'POST',
       headers: { 'content-type': 'text/plain' },
