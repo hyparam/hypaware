@@ -17,11 +17,12 @@ default port the endpoint plumbing serves)
 
 > LLP 0233 #loopback-peers-only says "attach always writes
 > `http://127.0.0.1:<port>` whatever the bind host says". That is false as a
-> universal: two attach surfaces write the configured bind host verbatim. The
-> decision it justified still stands, because the writers that feed the doors
-> the peer rule gates do hardcode loopback. This document replaces the
-> overstated parenthetical with the per-writer facts and the rationale they
-> actually support (issue #1277, deferred from PR #1271's triage).
+> universal: the openclaw attach writer and the Desktop install profile both
+> point a client at the configured bind host verbatim. The decision it
+> justified still stands, because the writers that feed the doors the peer
+> rule gates do hardcode loopback. This document replaces the overstated
+> parenthetical with the per-writer facts and the rationale they actually
+> support (issue #1277, deferred from PR #1271's triage).
 
 ## Context {#context}
 
@@ -69,18 +70,24 @@ rewrites a non-loopback host to `127.0.0.1`.
 - The **openclaw** writer takes the endpoint *verbatim* (trimmed only) and
   writes it into both provider `baseUrl` fields
   (`hypaware-core/plugins-workspace/openclaw/src/attach.js`).
-- The **claude-desktop** profile renders `http://<listen>` verbatim from the
-  configured `listen`, by design and for the same reason as openclaw: a
+- The **claude-desktop** profile is not an attach writer at all: Desktop
+  registers no client (LLP 0115 #no-attach-on-join), so nothing hands it an
+  endpoint. The attended `hyp client claude-desktop install` reads the
+  configured `listen` out of the config itself, and a `claude_desktop.endpoint`
+  override, when set, wins over `listen` outright. What it renders is
+  `http://<listen>` verbatim, by design and for the same reason as openclaw: a
   deliberately non-loopback bind is one Desktop should be able to reach. Its
   one guard is on the *port*, refusing an ephemeral `:0` that a managed config
   could not chase; it does not judge the host
   (`hypaware-core/plugins-workspace/claude-desktop/src/profile.js`).
 
 So "attach always writes `http://127.0.0.1:<port>`" is true of the claude and
-codex writers, false of the openclaw writer and the Desktop profile, and not a
-statement about opencode, which is handed no endpoint to write. "Whatever the
-bind host says" was never a property of the plumbing, only of the two writers
-that take the endpoint and discard its host.
+codex writers and false of openclaw, the one attach writer that passes the
+host through. It is not a statement about opencode, which is handed no
+endpoint, nor about the Desktop install profile, which is not attach at all
+but is the other surface that points a client at the configured host.
+"Whatever the bind host says" was never a property of the plumbing, only of
+the two writers that take the endpoint and discard its host.
 
 ## Decision {#decision}
 
@@ -91,18 +98,20 @@ the `CONNECT` door (LLP 0233) and the absolute-form door (LLP 0247). Origin-form
 reverse-proxy traffic is not gated by it. The only clients that send `CONNECT`
 or absolute-form requests are proxy-mode attached, and the proxy-mode writer
 hardcodes `HTTPS_PROXY=http://127.0.0.1:<port>`, so those clients always
-arrive from a loopback peer. The writers that do pass the configured host
-through (openclaw, the Desktop profile) attach base-URL clients, whose
-origin-form requests the peer rule never judges. Refusing the peer therefore
-still costs the machine's own attached clients nothing, on any bind, and still
-closes the relay to the network. Nothing about the check changes.
+arrive from a loopback peer. The surfaces that do pass the configured host
+through (openclaw's writer and the Desktop install profile) point base-URL
+clients at the gateway, and the peer rule never judges an origin-form
+request. Refusing the peer therefore still costs the machine's own attached
+clients nothing, on any bind, and still closes the relay to the network.
+Nothing about the check changes.
 
 <a id="what-the-old-sentence-overstated"></a>**What LLP 0233's parenthetical
-overstated, in two ways, for the record.** First, "always": two attach
-surfaces write the configured host verbatim, as listed above. Second, "keeps
-that install working unchanged for its own client": that holds for the
-wildcard binds the section was actually worried about (`0.0.0.0`, `::`, the
-open-relay case), where loopback still answers and a hardcoded
+overstated, in two ways, for the record.** First, "always": openclaw's writer
+and the Desktop install profile write the configured host verbatim, as listed
+above. Second, "keeps that install working unchanged for its own client":
+that holds for the wildcard binds the section was actually worried about
+(`0.0.0.0`, `::`, the open-relay case), where loopback still answers and a
+hardcoded
 `127.0.0.1:<port>` still connects. On a *specific* routable bind
 (`192.168.1.5:18521`, say) nothing listens on loopback at all, so the two
 writers that hardcode loopback from the gateway endpoint (claude and codex)
@@ -122,11 +131,13 @@ premise anyway.
 ## What this does not settle {#not-settled}
 
 **The writers do not agree on host handling, and a specific routable bind
-half-breaks attach.** Of the four writers handed the gateway endpoint, two
-hardcode loopback and two pass the configured host through, and on a specific
-non-loopback bind the hardcoded two emit URLs nothing answers. Whether attach
-should warn or refuse there, or the writers should converge on one host
-policy, is a behavior change with its own trade-offs and is not decided here.
+half-breaks attach.** Of the three attach writers handed the gateway
+endpoint, two hardcode loopback (claude, codex) and one passes the configured
+host through (openclaw), as does the Desktop install profile, and on a
+specific non-loopback bind the hardcoded two emit URLs nothing answers.
+Whether attach should warn or refuse there, or the writers should converge on
+one host policy, is a behavior change with its own trade-offs and is not
+decided here.
 
 **README's mechanism sentence inherits the mirror-image overstatement.** The
 README section on the gateway's bind ("that same host is what `hyp client

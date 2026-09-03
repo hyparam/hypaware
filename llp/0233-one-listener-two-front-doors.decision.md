@@ -12,8 +12,9 @@ has attach write it into an existing config behind an explicit consent
 prompt); LLP 0247 (#one-listener-two-front-doors: absolute-form
 request-targets become a third front door, host-routed and restricted to
 intercepted hosts); LLP 0366 (#loopback-peers-only: the parenthetical about
-what attach writes is overstated, two attach surfaces write the configured
-host verbatim; 0366 records the per-writer facts and re-derives the rationale)
+what attach writes is overstated, the openclaw attach writer and the Desktop
+install profile write the configured host verbatim; 0366 records the
+per-writer facts and re-derives the rationale)
 
 > `CONNECT` tunnels and ordinary origin-form requests are served by the same
 > listener on the same port. Proxy mode is off unless a config explicitly turns
