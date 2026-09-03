@@ -1807,6 +1807,156 @@ test('a root newer than the running daemon is an update that only needs its rest
   }
 })
 
+test('an offline probe does not block the restart-only hand-over, which is entirely local', async () => {
+  // The root is ahead of the running daemon (a hand-typed
+  // `npm install -g` that landed while the network was down), and nothing
+  // the hand-over needs is on the network: the version comparison is two
+  // local strings and the preflight runs the entrypoint on disk. Stopping
+  // at `probe_failed` told an operator with a stale daemon the wrong
+  // reason and left them no offline way to recover it.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-offline-restart-'))
+  try {
+    const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
+    await fsp.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'hypaware', version: '1.1.0' }))
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const stale = await runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, runner,
+      fetchImpl: offline, runningVersion: '1.0.0', force: true,
+    })
+    assert.deepEqual(stale, { action: 'updated', reason: 'restart_only', latest: '1.1.0' })
+    assert.equal(calls.filter((c) => c[1] === 'install').length, 0, 'nothing to install offline')
+    // The hand-over is still preceded by the preflight of the root.
+    assert.deepEqual(calls.at(-1), [process.execPath, path.join(packageRoot, 'bin', 'hypaware.js'), '--version'])
+    // The probe still failed, and still says so.
+    assert.match(readSelfUpdateState(dir).error ?? '', /^probe_failed/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an offline probe with nothing owed still reports probe_failed', async () => {
+  // The reprieve is only for the lane that needs no network. A daemon
+  // already on the root version has nothing to hand over, so the probe
+  // failure is the whole answer.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-offline-current-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const result = await runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, runner,
+      fetchImpl: offline, runningVersion: '1.0.0', force: true,
+    })
+    assert.deepEqual(result, { action: 'checked', reason: 'probe_failed' })
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an offline probe does not report a checkout version as available', async () => {
+  // A checkout hands nothing over, so the disk version standing in for
+  // the registry answer must not travel out with the provenance reason:
+  // `hyp update` renders that `latest` as "<v> is available", which after
+  // a failed probe is a registry answer nothing fetched.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-offline-checkout-'))
+  try {
+    const packageRoot = path.join(dir, 'checkout')
+    await fsp.mkdir(packageRoot, { recursive: true })
+    await fsp.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'hypaware', version: '1.1.0' }))
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    /** @type {CommandRunner} */
+    const runner = async () => ({ exitCode: 0, stdout: '', stderr: '' })
+    const result = await runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, runner,
+      fetchImpl: offline, runningVersion: '1.0.0', force: true,
+    })
+    assert.deepEqual(result, { action: 'checked', reason: 'probe_failed' })
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an offline restart-only hand-over is still blocked by a preflight that will not answer', async () => {
+  // Offline is not a reason to skip the proof: a root that cannot start
+  // crash-loops the daemon just as hard with the network down, and an
+  // inconclusive answer holds nothing and hands nothing over.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-offline-preflight-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir, {
+      preflightFails: '1.1.0', preflightExitCode: -1,
+    })
+    await fsp.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'hypaware', version: '1.1.0' }))
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const result = await runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, runner,
+      fetchImpl: offline, runningVersion: '1.0.0', force: true,
+    })
+    assert.deepEqual(result, { action: 'checked', reason: 'preflight_inconclusive', latest: '1.1.0' })
+    assert.equal(readSelfUpdateState(dir).held_version, undefined, 'an inconclusive preflight holds nothing')
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an offline restart-only hand-over still needs a supervisor', async () => {
+  // The automatic lanes exit for a relaunch; unsupervised there is
+  // nothing to relaunch them, offline or not.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-offline-unsupervised-'))
+  try {
+    const { packageRoot, runner } = await fakeGlobalInstall(dir)
+    await fsp.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'hypaware', version: '1.1.0' }))
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const result = await runSelfUpdatePass({
+      supervised: false, stateRoot: dir, env: {}, packageRoot, runner,
+      fetchImpl: offline, runningVersion: '1.0.0',
+    })
+    // No `latest`: the version this refusal is about came off this disk,
+    // and the probe that would have named a registry answer never landed.
+    assert.deepEqual(result, { action: 'checked', reason: 'unsupervised' })
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an offline hand-over is still refused onto a root already held as unstartable', async () => {
+  // The worst root there is: a version whose entrypoint could not start
+  // and whose rollback could not put the old one back, so `held_version`
+  // names what is on disk. Nothing reads as available, the daemon is
+  // (correctly) still on older code, and this is the lane that would
+  // otherwise restart it straight onto the broken root. Offline it is the
+  // only lane left, and no newer release can arrive to retire the hold.
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-offline-held-'))
+  try {
+    const { packageRoot, runner, calls } = await fakeGlobalInstall(dir)
+    await fsp.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'hypaware', version: '1.1.0' }))
+    writeSelfUpdateState(dir, {
+      held_version: '1.1.0',
+      error: 'apply_failed: npm_install_failed',
+      error_since: '2026-08-01T00:00:00.000Z',
+    })
+    /** @type {typeof fetch} */
+    const offline = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+    const result = await runSelfUpdatePass({
+      supervised: true, stateRoot: dir, env: {}, packageRoot, runner,
+      fetchImpl: offline, runningVersion: '1.0.0', force: true,
+    })
+    assert.deepEqual(result, { action: 'checked', reason: 'probe_failed' })
+    assert.equal(calls.some((c) => c[1] === '--version'), false, 'a held root is not even preflighted')
+    // The hold and the failure that wrote it both survive the probe
+    // failure; a probe that never answered cannot retire either.
+    const state = readSelfUpdateState(dir)
+    assert.equal(state.held_version, '1.1.0')
+    assert.equal(state.error, 'apply_failed: npm_install_failed')
+    assert.equal(state.error_since, '2026-08-01T00:00:00.000Z')
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('hyp status names a daemon still running older code than the root', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-stale-status-'))
   try {

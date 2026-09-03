@@ -869,6 +869,13 @@ export async function runSelfUpdatePass(opts = {}) {
     }
     /** @type {string} */
     let latest
+    // A failed probe no longer ends the pass. The restart-only lane below
+    // is entirely local - two versions this machine already holds, and a
+    // preflight that runs the entrypoint on disk - and an offline machine
+    // whose root is ahead of its daemon is exactly the one that needs it.
+    // The disk version stands in for the answer the registry did not give,
+    // so nothing reads as available and no lane that installs is reached.
+    let probeFailed = false
     try {
       latest = await fetchLatestVersion({
         name: identity.name,
@@ -902,25 +909,28 @@ export async function runSelfUpdatePass(opts = {}) {
         ...(sticky ? {} : { error: `probe_failed: ${message}`, error_since: since }),
       })
       log('self_update.probe_failed', { error_kind: 'probe_failed', detail: message })
-      return { action: 'checked', reason: 'probe_failed' }
+      probeFailed = true
+      latest = identity.version
     }
 
     const available = compareSemver(latest, identity.version) > 0
     const held = available && state.held_version === latest
-    writeSelfUpdateState(stateRoot, {
-      checked_at: new Date(nowMs).toISOString(),
-      latest_version: latest,
-      available,
-      error: undefined,
-      error_since: undefined,
-      // The hold covers one version. Something newer on the registry
-      // retires it, so drop it here rather than leaving a version that
-      // stopped mattering on `hyp status --json` for good.
-      ...(typeof state.held_version === 'string' && compareSemver(latest, state.held_version) > 0
-        ? { held_version: undefined }
-        : {}),
-    })
-    log('self_update.checked', { latest_version: latest, available, ...(held ? { held: true } : {}) })
+    if (!probeFailed) {
+      writeSelfUpdateState(stateRoot, {
+        checked_at: new Date(nowMs).toISOString(),
+        latest_version: latest,
+        available,
+        error: undefined,
+        error_since: undefined,
+        // The hold covers one version. Something newer on the registry
+        // retires it, so drop it here rather than leaving a version that
+        // stopped mattering on `hyp status --json` for good.
+        ...(typeof state.held_version === 'string' && compareSemver(latest, state.held_version) > 0
+          ? { held_version: undefined }
+          : {}),
+      })
+      log('self_update.checked', { latest_version: latest, available, ...(held ? { held: true } : {}) })
+    }
     // Two versions matter, not one. `identity.version` is what the global
     // root holds; `runningVersion` is what the daemon loaded at boot. They
     // drift apart whenever something replaces the root without a restart
@@ -938,9 +948,22 @@ export async function runSelfUpdatePass(opts = {}) {
     const heldOnDisk = state.held_version === identity.version
     const restartOnly = !available && !heldOnDisk && typeof running === 'string' &&
       compareSemver(identity.version, running) > 0
-    if (!available && !restartOnly) return { action: 'checked', latest }
+    // A failed probe reports itself at every gate that owes nothing
+    // local, and nowhere past them: below is the hand-over it has no
+    // bearing on, and stopping short of that one strands an offline
+    // operator on the stale daemon that #running-version-is-tracked
+    // exists to rescue.
+    if (!available && !restartOnly) {
+      return probeFailed ? { action: 'checked', reason: 'probe_failed' } : { action: 'checked', latest }
+    }
+    // The same gate for the lane that never hands anything over. Reporting
+    // the provenance here would carry `latest` out with it, and after a
+    // failed probe that is the version on this disk, which `hyp update`
+    // renders as "<v> is available" - a registry answer nothing fetched.
     if (provenance !== 'global-candidate') {
-      return { action: 'checked', reason: provenance, latest }
+      return probeFailed
+        ? { action: 'checked', reason: 'probe_failed' }
+        : { action: 'checked', reason: provenance, latest }
     }
     if (held) {
       log('self_update.held', { latest_version: latest, running_version: identity.version })
@@ -956,8 +979,18 @@ export async function runSelfUpdatePass(opts = {}) {
       // `detectSupervisor` is wrong about a host, every lane stops applying
       // and the only symptom left is the one this whole document is about,
       // so the refusal has to be legible wherever the lane logs.
-      log('self_update.unsupervised', { latest_version: latest, running_version: identity.version })
-      return { action: 'checked', reason: 'unsupervised', latest }
+      // The third gate that owes nothing local, and the last one the
+      // fabricated `latest` can reach: it names the version a hand-over
+      // was owed for, which offline is this disk answering for a registry
+      // that never spoke. The refusal itself is what has to stay legible,
+      // and `running_version` already carries the root it is refusing.
+      log('self_update.unsupervised', {
+        ...(probeFailed ? {} : { latest_version: latest }),
+        running_version: identity.version,
+      })
+      return probeFailed
+        ? { action: 'checked', reason: 'unsupervised' }
+        : { action: 'checked', reason: 'unsupervised', latest }
     }
     if (restartOnly) {
       // Nothing here installed what the root now holds - a hand-typed
