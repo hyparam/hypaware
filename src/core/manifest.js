@@ -237,7 +237,7 @@ const PICKER_PROBE_KEYS = ['settings_file', 'app_bundle', 'path']
  * an array of picker rows, each with a `name` (the picker source id
  * that keys the row) and `label` string, and, optionally, a `summary`
  * string, a single-variant `detect` probe, a `hidden` boolean, a
- * `needs_setup` boolean, and
+ * `platforms` gate, a `needs_setup` boolean, and
  * a `configure_command` string. Unknown fields are accepted (kept
  * opaque like the rest of the `contributes` block) so later additions
  * such as `compose` pass through untouched.
@@ -266,6 +266,10 @@ function validatePickerContributions(picker) {
     }
     if (r.hidden !== undefined && typeof r.hidden !== 'boolean') {
       return invalid('contributes.picker hidden must be a boolean when present')
+    }
+    // @ref LLP 0368#platform-gate [implements]: a row may name the platforms it is offered on, which `detect` cannot say because a probe may only pre-check
+    if (r.platforms !== undefined && !(Array.isArray(r.platforms) && r.platforms.length > 0 && r.platforms.every(isNonEmptyString))) {
+      return invalid('contributes.picker platforms must be a non-empty array of process.platform values when present')
     }
     if (r.needs_setup !== undefined && typeof r.needs_setup !== 'boolean') {
       return invalid('contributes.picker needs_setup must be a boolean when present')

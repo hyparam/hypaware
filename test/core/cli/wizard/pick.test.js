@@ -167,6 +167,7 @@ test('runWizardPick: a detected needs_setup row arrives unchecked, labeled detec
   const { prompt, state } = capturingPrompt(['codex'])
   const result = await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    platform: 'darwin',
     detect: async () => new Set(['codex', 'claude-desktop']),
   }))
   const desktopRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude-desktop')
@@ -243,6 +244,7 @@ test('runWizardPick: a seeded needs_setup row is narrated with the needs-extra-s
     autoAccept: true,
     prompt: async () => { throw new Error('the express path must not prompt') },
     detect: async () => new Set(),
+    platform: 'darwin',
     initialSelection: ['codex', 'claude-desktop'],
   }))
   assert.match(
@@ -363,6 +365,9 @@ test('runWizardPick: options come from catalog.pickerDescriptors, not a hardcode
   const { prompt, state } = capturingPrompt([])
   await runWizardPick(/** @type {any} */ ({
     stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    // On macOS no bundled row is platform-gated out, so the menu is
+    // exactly the non-hidden catalog and the comparison below stays honest.
+    platform: 'darwin',
     detect: async () => new Set(),
   }))
   const ids = state.question.options.map((/** @type {any} */ o) => o.value).sort()
@@ -1271,6 +1276,7 @@ test('runWizardPick: detected claude-desktop is offered and pre-checked', async 
   const stdout = makeBuf()
   const result = await runWizardPick(/** @type {any} */ ({
     stdout, stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    platform: 'darwin',
     detect: async () => new Set(['claude-desktop']),
     confirmOverwrite: async () => true,
   }))
@@ -1284,6 +1290,26 @@ test('runWizardPick: detected claude-desktop is offered and pre-checked', async 
   assert.ok(written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/claude-desktop'))
   assert.ok(written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/claude'))
   assert.equal(written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/claude-account'), undefined)
+})
+
+// @ref LLP 0368#platform-gate [tests]: the row Desktop is offered on macOS is
+// withheld on Linux, where its session roots cannot exist.
+test('runWizardPick: claude-desktop is withheld from the Linux menu', async () => {
+  const tmp = await mkTmp()
+  const catalog = await realCatalog()
+  const { prompt, state } = capturingPrompt(['claude'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), env: hermeticEnv(tmp), catalog, prompt,
+    platform: 'linux',
+    detect: async () => new Set(['claude-desktop']),
+    confirmOverwrite: async () => true,
+  }))
+  const rendered = state.question.options.map((/** @type {any} */ o) => o.value)
+  assert.ok(!rendered.includes('claude-desktop'), 'absent from the menu')
+  assert.ok(rendered.includes('claude'), 'the ungated rows still render')
+  assert.deepEqual(result.sourcesPicked, ['claude'])
+  const written = JSON.parse(await fs.readFile(result.configPath, 'utf8'))
+  assert.equal(written.plugins.find((/** @type {any} */ p) => p.name === '@hypaware/claude-desktop'), undefined)
 })
 
 test('runWizardPick: a configured claude-desktop stays selected when the user keeps it', async () => {

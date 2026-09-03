@@ -137,6 +137,7 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
           if (typeof row.summary === 'string') descriptor.summary = row.summary
           if (row.detect) descriptor.detect = row.detect
           if (typeof row.hidden === 'boolean') descriptor.hidden = row.hidden
+          if (Array.isArray(row.platforms)) descriptor.platforms = row.platforms
           if (typeof row.needs_setup === 'boolean') descriptor.needsSetup = row.needs_setup
           if (typeof row.configure_command === 'string') descriptor.configureCommand = row.configure_command
           if (row.compose && typeof row.compose === 'object') descriptor.compose = row.compose

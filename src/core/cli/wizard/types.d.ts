@@ -484,6 +484,12 @@ export interface RunWizardPickOptions {
    */
   catalog?: Pick<PluginCatalog, 'pickerDescriptors' | 'clientDescriptors' | 'composeWith'>
   /**
+   * Platform the menu gates rows against, defaulting to `process.platform`.
+   * The row set is otherwise a function of the host, so a test over it would
+   * answer differently on a Mac and on CI.
+   */
+  platform?: string
+  /**
    * Central-layer-locked source ids from the join phase (LLP 0129
    * #join-before-picker). Each renders checked and disabled with the
    * `· managed by your fleet` label suffix, and is filtered out of the

@@ -187,7 +187,7 @@ export async function resolvePickSeeding(opts) {
   /** @type {SeedOrigin} */
   const seedOrigin = opts.initialSelection ? 'selection' : configured !== undefined ? 'config' : 'detected'
 
-  const visibleList = visiblePickerDescriptors(descriptorList)
+  const visibleList = visiblePickerDescriptors(descriptorList, opts.platform)
   // A hidden row never renders, so no screen downstream can return one.
   // Carrying one through the selection is right when the config on disk
   // collects nothing the menu can show: then every row it does collect is

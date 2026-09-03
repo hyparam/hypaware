@@ -662,11 +662,11 @@ export async function runPickerWalkthrough(opts) {
       const sourceRaw = await ask({
         pickType: 'sources',
         title: 'What do you want to collect?',
-        // Hidden rows are absent from the menu but still pickable via
-        // `--source` (which takes the `opts.picks` path above and never
-        // reaches this prompt). They are never detected, so nothing is
+        // Hidden and platform-gated rows are absent from the menu but still
+        // pickable via `--source` (which takes the `opts.picks` path above and
+        // never reaches this prompt). They are never detected, so nothing is
         // silently unchecked by leaving them out here.
-        options: visiblePickerDescriptors(descriptorList).map((d) => ({
+        options: visiblePickerDescriptors(descriptorList, opts.platform).map((d) => ({
           value: d.id,
           label: detected.has(/** @type {PickerSource} */ (d.id)) ? `${d.label} · detected` : d.label,
           ...(d.summary ? { summary: d.summary } : {}),
@@ -2365,7 +2365,14 @@ export function ridersInDefaultSet(composeWith) {
 
 /**
  * The descriptors the interactive picker menu renders: everything except
- * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`).
+ * the rows whose manifest marks them `hidden` (`@ref LLP 0202#hidden-rows`)
+ * and the rows whose manifest `platforms` gate does not name the platform
+ * we are running on.
+ *
+ * The gate does what `detect` cannot. A probe may only pre-check (LLP 0011
+ * #autodetect-vs-default), and an unchecked box is still an offer, so a row
+ * whose integration has no path on this operating system is withheld rather
+ * than merely left unticked.
  *
  * Display is the ONLY thing this filters. A hidden row keeps every other
  * property of a picker source, and each one is load-bearing somewhere:
@@ -2379,11 +2386,16 @@ export function ridersInDefaultSet(composeWith) {
  * both withhold rules read as "never withhold": a privacy guard turned off
  * by what looks like a UI cleanup.
  *
+ * @ref LLP 0368#display-only [implements]: the platform gate filters this menu and nothing else, so a gated row keeps its `--source`, read-back, and dataset-owner identity
  * @param {Iterable<PickerDescriptor>} descriptors
+ * @param {string} [platform] defaults to the running `process.platform`
  * @returns {PickerDescriptor[]}
  */
-export function visiblePickerDescriptors(descriptors) {
-  return [...descriptors].filter((d) => d.hidden !== true)
+export function visiblePickerDescriptors(descriptors, platform = process.platform) {
+  return [...descriptors].filter((d) => {
+    if (d.hidden === true) return false
+    return d.platforms === undefined || d.platforms.includes(platform)
+  })
 }
 
 /**

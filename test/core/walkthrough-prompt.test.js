@@ -27,6 +27,8 @@ test('picker prompt prints context under source options and defaults export to l
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),
+    // Pin the platform: the row numbers below are only stable once the test says which platform it counts on.
+    platform: 'darwin',
     env: {
       HOME: tmp,
       HYP_HOME: path.join(tmp, '.hyp'),
