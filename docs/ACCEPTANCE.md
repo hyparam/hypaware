@@ -1375,6 +1375,168 @@ evidence about the version it was run on.
 
 ---
 
+## `launchd_supervisor_env`
+
+**What it proves:** that a real installed LaunchAgent hands the daemon process
+an `XPC_SERVICE_NAME` the shipped `detectSupervisor` accepts, so the automatic
+self-update lanes on macOS (the daemon tick, and the pre-boot lane in
+`bin/hypaware.js` that unsticks a machine from the front) actually apply
+instead of refusing every update as unsupervised.
+
+`detectSupervisor` believes launchd only when `XPC_SERVICE_NAME` equals the
+daemon's own label, `com.hyperparam.hypaware`, or begins with that label
+followed by a dot. Presence alone is deliberately not the test: macOS sets the
+variable in terminals (`0`) and GUI apps (`application.<bundle>...`) too, so a
+hand-run `hyp daemon run --foreground` carries one. No hermetic test can settle
+which value launchd actually delivers, because every fixture asserts the value
+the test itself wrote. Only a running LaunchAgent can answer, and a wrong
+answer is quiet: `hyp status` keeps advertising the release and `hyp update`
+keeps applying, so the only symptom is the `self_update.unsupervised` event in
+the daemon log.
+
+**What it does not prove:** anything about the systemd half of the same gate
+(`INVOCATION_ID` on Linux, which `tr '\0' '\n' < /proc/<pid>/environ` answers
+directly and which needs no procedure of its own); that an apply succeeds, that
+its preflight passes, or that the relaunch lands; behavior on any macOS version
+other than the one you ran it on; or the system-domain LaunchDaemon form, which
+HypAware does not install.
+
+**Required when:** a release changes `detectSupervisor`, `LAUNCH_LABEL`, or the
+LaunchAgent plist the macOS installer writes (its `Label`,
+`ProgramArguments`, or `EnvironmentVariables`). It is also required once
+before the first release that ships the supervisor gate at all, to establish
+the baseline value later releases diff against.
+
+**Requires:**
+
+- A real Mac, with the environment launchd builds. There is no substitute.
+- HypAware installed globally from the package under test (`npm install -g`),
+  not run from a checkout and not through `npx`. The self-update lanes refuse
+  a non-global provenance before they ever reach the supervisor gate, so a
+  checkout would pass this procedure while proving nothing.
+- The daemon installed and started as a LaunchAgent (`hyp daemon install`,
+  `hyp daemon start`), not `hyp daemon run --foreground`. A foreground daemon
+  is exactly the unsupervised case.
+- `jq` on `PATH`, and `sudo` if step 2 comes back empty.
+
+**Related:**
+[LLP 0365#restart-needs-a-supervisor](../llp/0365-self-update-cannot-strand-the-daemon.decision.md#restart-needs-a-supervisor)
+(the gate this confirms),
+[LLP 0309#unstick-from-the-front](../llp/0309-kernel-auto-update.decision.md#unstick-from-the-front)
+(the pre-boot lane the gate also governs),
+hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
+
+### Steps
+
+1. Confirm the process you are about to read is the installed LaunchAgent, and
+   that its environment is launchd's work rather than ours:
+
+   ```sh
+   hyp status
+   launchctl print "gui/$(id -u)/com.hyperparam.hypaware" | sed -n '1,12p'
+   DPID=$(jq -r .pid "${HYP_HOME:-$HOME/.hyp}/hypaware/run/hypaware.pid")
+   plutil -p ~/Library/LaunchAgents/com.hyperparam.hypaware.plist
+   echo "$DPID"
+   ```
+
+   Pass condition: `hyp status` shows a running daemon; `launchctl print`
+   reports `state = running` and a `pid` equal to `$DPID`; and the plist has no
+   `EnvironmentVariables` entry naming `XPC_SERVICE_NAME`. If the two pids
+   differ, the pid file belongs to a hand-run daemon and every step below would
+   measure a terminal's environment. Stop the stray process and start again. If
+   the plist does set the variable, this procedure is reading a value HypAware
+   wrote and is worthless; find out who added it before going on.
+
+2. Read `XPC_SERVICE_NAME` out of the running daemon's own environment:
+
+   ```sh
+   ps -Eww -p "$DPID" | tr ' ' '\n' | grep '^XPC_SERVICE_NAME='
+   ```
+
+   Pass condition: exactly one line, reading
+   `XPC_SERVICE_NAME=com.hyperparam.hypaware`, or that label followed by a dot
+   and more. That line is the baseline: copy it into the release notes verbatim.
+
+3. Only if step 2 printed nothing. `ps -E` reads another process's environment
+   through the kernel and a restricted host can refuse it, which is an absent
+   answer and not a failing one. Ask launchd instead:
+
+   ```sh
+   sudo launchctl procinfo "$DPID" | grep XPC_SERVICE_NAME
+   ```
+
+   Pass condition: a line naming `com.hyperparam.hypaware`. `procinfo` prints
+   the job's configured environment as well as the process's, so if two lines
+   come back, take the one inside the `environment` block; step 1 already
+   established the plist configures nothing here.
+
+4. Judge the observed value with the shipped predicate rather than by eye, so
+   this check cannot drift away from the code it is about:
+
+   ```sh
+   OBSERVED_XPC=$(ps -Eww -p "$DPID" | tr ' ' '\n' | sed -n 's/^XPC_SERVICE_NAME=//p')
+   SELF_UPDATE_MODULE="$(npm root -g)/hypaware/src/core/update/self_update.js"
+   OBSERVED_XPC="$OBSERVED_XPC" SELF_UPDATE_MODULE="$SELF_UPDATE_MODULE" \
+     node --input-type=module -e '
+       const { pathToFileURL } = await import("node:url")
+       const mod = await import(pathToFileURL(process.env.SELF_UPDATE_MODULE).href)
+       console.log(mod.detectSupervisor({ XPC_SERVICE_NAME: process.env.OBSERVED_XPC }))
+     '
+   ```
+
+   Pass condition: `true`. Paste the value from step 3 into `OBSERVED_XPC` by
+   hand if step 2 was the empty one. A `false` here is the finding this whole
+   procedure exists to surface, and it blocks the release.
+
+5. Check the daemon has not already refused an update on this host:
+
+   ```sh
+   grep -c self_update.unsupervised "${HYP_HOME:-$HOME/.hyp}/hypaware/logs/daemon.log"
+   ```
+
+   Pass condition: `0`. The event only fires when a newer version was
+   available, so a zero on an up-to-date machine says nothing by itself. A
+   nonzero count on a host that passed step 4 is the finding: the gate refused
+   under an environment other than the one you just read (a different login
+   session, or a relaunch launchd performed differently). File it before
+   release.
+
+6. Record in the release notes: the exact `XPC_SERVICE_NAME` line from step 2
+   or 3, the host's `sw_vers -productVersion`, and the step 4 verdict. The
+   value is the baseline the next release diffs against; a bare "passed" makes
+   the next run start from nothing.
+
+### If it fails
+
+- **Steps 2 and 3 both come back empty.** You have no reading, not a failed
+  one. Do not record a pass. Confirm `$DPID` is alive (`ps -p "$DPID"`) and
+  that it is the LaunchAgent's pid from step 1, then retry step 3 with `sudo`.
+  A host where neither works cannot run this procedure; say so in the release
+  notes rather than inferring the value.
+- **Step 4 prints `false` and the observed value is `0` or
+  `application.<bundle>...`.** That is a terminal's or a GUI app's value, so
+  the pid was almost certainly not the LaunchAgent's. Go back to step 1. If
+  the pid does check out, launchd genuinely is not naming this job in
+  `XPC_SERVICE_NAME`, and the gate refuses every automatic apply on macOS.
+  Hold the release and widen `detectSupervisor` against the value you actually
+  observed. Do not remove the gate: without it the automatic lanes exit for a
+  relaunch nobody will perform, which is the dead daemon
+  [LLP 0365#restart-needs-a-supervisor](../llp/0365-self-update-cannot-strand-the-daemon.decision.md#restart-needs-a-supervisor)
+  exists to prevent.
+- **Step 4 prints `true` but the value is not exactly the label.** The
+  dot-suffixed branch is doing the work, which is the design. Record the exact
+  value and leave the predicate alone; narrowing it to the bare label would
+  break the host you are standing on.
+- **Step 1 reports the service is not loaded.** `hyp daemon install` was never
+  run here, or `hyp daemon uninstall` removed it. There is nothing to measure
+  until the LaunchAgent exists, and a foreground daemon is not a substitute.
+- **`npm root -g` names a directory with no `hypaware` in it.** The `hyp` on
+  your `PATH` is a checkout or an `npx` cache, so the daemon under test is not
+  the packaged one and its provenance guard would refuse an apply long before
+  the supervisor gate was consulted. Reinstall globally and start again.
+
+---
+
 ## Other candidates
 
 `CLAUDE.md` lists further acceptance candidates that have no written
