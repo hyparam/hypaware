@@ -142,7 +142,12 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       // (LLP 0360#cadence); the error itself is reported by `errors`.
       const message = errMessage(err)
       errors.push({ repo, error: message })
-      log.error('github.repo_capture_failed', { repo, error: message })
+      // Carry the error kind, not only the message. This is where a refused
+      // continuation lands (the tampered-sidecar vector), and the whole-tick
+      // handler in `source.js` never sees it, so without this the kind is not
+      // filterable exactly where it matters.
+      const kind = /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind
+      log.error('github.repo_capture_failed', { repo, error: message, ...(kind ? { error_kind: kind } : {}) })
     }
     events += repoEvents
     // Persist the advanced cursor onto the shared state after each repo.

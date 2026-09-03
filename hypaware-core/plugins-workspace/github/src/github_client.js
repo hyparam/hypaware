@@ -281,9 +281,17 @@ function githubCliPath(env) {
  * @returns {string}
  */
 function resolveUrl(baseUrl, pathAndQuery) {
+  const base = new URL(baseUrl)
   const url = URL.parse(pathAndQuery) ?? URL.parse(`${baseUrl}${pathAndQuery}`)
-  if (!url || url.origin !== new URL(baseUrl).origin) throw foreignOrigin(url)
-  // The parsed href, not the input: what was checked is what gets fetched.
+  // A matching `origin` is not on its own a matching authority. `blob:` and
+  // the other wrapper schemes report the origin of the URL they wrap, so
+  // `blob:https://api.github.com/x` passes an origin-only check while
+  // addressing something else entirely, and userinfo survives into `href`.
+  // Pin the scheme and refuse credentials too: what was checked has to be the
+  // whole of what gets fetched.
+  const ok = url && url.origin === base.origin && url.protocol === base.protocol && !url.username && !url.password
+  if (!ok) throw foreignOrigin(url)
+  // The parsed href, not the input.
   return url.href
 }
 
@@ -292,7 +300,7 @@ function foreignOrigin(url) {
   // Origin only. The path and query of an untrusted URL stay out of the error,
   // for the same reason a failed response body does. An opaque or unparseable
   // authority reports as `null`, which is what `URL.origin` already calls it.
-  const err = /** @type {HypError} */ (new Error(`GitHub continuation URL refused: origin ${url?.origin ?? 'null'} is not the configured API base`))
+  const err = /** @type {HypError} */ (new Error(`GitHub continuation URL refused: it does not address the configured API base (origin ${url?.origin ?? 'null'})`))
   err.hypErrorKind = 'github_foreign_origin'
   return err
 }

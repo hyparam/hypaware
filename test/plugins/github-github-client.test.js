@@ -375,6 +375,33 @@ test('a Link header injecting a foreign authority is refused before the next pag
   assert.doesNotMatch(urls[0], /evil/)
 })
 
+// `URL.origin` is not the whole authority. A wrapper scheme reports the origin
+// of the URL it wraps, and userinfo survives into `href`, so both of these pass
+// an origin-only check while addressing something other than the configured
+// base. The pin covers the scheme and the credentials too.
+for (const sameOrigin of ['blob:https://api.github.test/repos/o/r/issues', 'https://u:p@api.github.test/repos/o/r/issues']) {
+  test(`a same-origin continuation that is not the configured base (${sameOrigin.split(':')[0]}) is refused`, async () => {
+    assert.equal(new URL(sameOrigin).origin, 'https://api.github.test', 'the case is only meaningful if the origin matches')
+    let fetches = 0
+    const client = createGithubClient({
+      tokenEnv: 'T',
+      env: { T: 'secret' },
+      baseUrl: 'https://api.github.test',
+      log: silentLog,
+      async fetchImpl() {
+        fetches += 1
+        return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+      },
+    })
+
+    await assert.rejects(client.listIssuesPage('o', 'r', undefined, sameOrigin), (error) => {
+      assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+      return true
+    })
+    assert.equal(fetches, 0)
+  })
+}
+
 // The pin is an origin equality, not a prefix or suffix test. A host that
 // merely starts or ends with the configured one is a different host.
 for (const lookalike of ['https://api.github.test.evil.test/user/repos?page=2', 'https://notapi.github.test/user/repos?page=2']) {

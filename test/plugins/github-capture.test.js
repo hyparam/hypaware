@@ -251,18 +251,26 @@ test('a failed PR subresource does not publish the pulls cursor', async () => {
 
 test('a repo failure retries on the ordinary cadence, not the backlog cadence', async () => {
   const client = fakeClient({})
-  client.listIssuesPage = async () => { throw new Error('404 for GET /repos/o/r/issues') }
+  const err = Object.assign(new Error('404 for GET /repos/o/r/issues'), { hypErrorKind: 'github_api_error' })
+  client.listIssuesPage = async () => { throw err }
   const cursors = freshCursors()
+  /** @type {Array<{ name: string, attrs: any }>} */
+  const errors = []
   const result = await captureRepos({
     client,
     config: cfg(),
     cursors,
     append: async () => {},
-    log: silentLog,
+    log: { ...silentLog, error(name, attrs) { errors.push({ name, attrs }) } },
     mode: 'poll',
     observedRepos: ['o/r'],
   })
   assert.equal(result.errors.length, 1)
+  // The per-repo handler is where a refused continuation lands, and the
+  // whole-tick handler in source.js never sees it, so the kind has to be on
+  // this log line to be filterable at all.
+  assert.equal(errors[0].name, 'github.repo_capture_failed')
+  assert.equal(errors[0].attrs.error_kind, 'github_api_error')
   assert.equal(
     result.pending,
     false,
