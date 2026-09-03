@@ -291,10 +291,11 @@ function droppedOptionals(command, record) {
  * it. Every symptom is an absence - the alias index gets nothing, a command
  * that asked to be `hidden` lists in `hyp --help`, and a lost `plugin`
  * re-derives `category` from the command's own name and `audience` from
- * that - which is exactly the shape LLP 0329 settled must reach a channel
- * that exists with no telemetry configured, so the warning takes the stderr
- * mirror. It fires only on a registration that lost something, so an ordinary
- * one stays as quiet as it was.
+ * that - which is the shape LLP 0329 settled must reach a channel that
+ * exists with no telemetry configured, and LLP 0362 admits on a site that
+ * refuses nothing, so the warning takes the stderr mirror. It fires only on
+ * a registration that lost something, so an ordinary one stays as quiet as
+ * it was.
  *
  * Said once the command is in both indexes, never before: everything this
  * line asserts is about a registration that happened, and a refusal for a
@@ -318,7 +319,7 @@ function droppedOptionals(command, record) {
  *
  * @param {string} name the registered command's name
  * @param {string[]} dropped what {@link droppedOptionals} found, possibly none
- * @ref LLP 0329#stderr-mirror [implements]: a degradation observable only as an absence opts into the mirror
+ * @ref LLP 0362#absence-not-refusal [implements]: the mirror opt-in is admitted on a site that refuses nothing, because the symptom is only the absence
  */
 function warnDroppedOptionals(name, dropped) {
   if (dropped.length === 0) return
