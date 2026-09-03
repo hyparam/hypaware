@@ -567,6 +567,53 @@ Useful follow-on commands when a diagnostic fires:
 - `hyp setup --from-file <path>`: rebuild the config from a known-good
   file without re-running the interactive picker
 
+### An OTLP exporter is refused with `421 Misdirected Request`
+
+The two OTLP listeners HypAware hosts each take a bind address from their own
+config section, and both default it to `127.0.0.1`: `listen_host` for the
+`otel` source, `telemetry.listen_host` for the Claude Code telemetry listener.
+Whatever they are bound to, the only `Host` values they answer to are the ones
+that name this machine without consulting a resolver: `localhost`, `::1`, any
+`127.x.y.z` address, and the bind literals `0.0.0.0` and `::`. A request whose
+`Host` is any other name gets no route at all:
+
+```
+HTTP/1.1 421 Misdirected Request
+{"code":7,"message":"Misdirected request: Host is not a loopback name"}
+```
+
+That is a DNS-rebinding guard, not a bug. A name that merely resolves to a
+loopback address is exactly what a browser page rebound onto this listener
+carries, and the `Host` header is what tells that page apart from a local
+exporter, so a name is never enough.
+
+**The consequence on Debian and Ubuntu**, which ship `127.0.1.1 <hostname>` in
+`/etc/hosts`: an exporter pointed at `http://<hostname>:4318` is refused. It
+connects to `127.0.1.1`, a loopback address, so the guard judges the request,
+and the machine's own hostname is not one of the accepted names. Addressing a
+local listener by the machine hostname is not supported, and no config key
+widens the accepted set. This is only reachable on a `listen_host` other than
+the default: a listener bound to `127.0.0.1` never receives a connection
+addressed to `127.0.1.1` in the first place.
+
+Point the exporter at `localhost` or `127.0.0.1` instead. On a wildcard bind
+(`0.0.0.0` or `::`) a remote exporter should use the routable interface
+address as the literal it puts in `Host`; a listener bound to a specific
+routable address answers under any name pointed at that address, since serving
+that name is the point of binding there.
+
+The listener also records each refusal as a `listener.host_refused` warning,
+carrying `hyp_component=sources`, `hyp_operation=host_check`, `status=skipped`,
+`error_kind=host_not_loopback`, `listener` (`hypaware/otel` or
+`hypaware/claude-telemetry`), `host` (the refused header, truncated), the
+`arrived_on` address and the `bind` it was compared against, and
+`refused_total`, the refusals since that listener started. Refusals are always
+counted but logged at most once a minute per listener, so a burst is still
+legible from a single line. These warnings travel HypAware's own OTel log
+channel rather than `daemon.log`, so to read them run the daemon with
+`HYP_DEV_TELEMETRY=1` (JSONL under `<HYP_HOME>/hypaware/dev-telemetry/`) or
+with `OTEL_EXPORTER_OTLP_ENDPOINT` pointed at your own collector.
+
 ## Uninstalling
 
 To remove HypAware from a machine completely:
