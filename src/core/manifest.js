@@ -25,8 +25,10 @@ const MANIFEST_BASENAME = 'hypaware.plugin.json'
  */
 export async function loadManifest(rootDir) {
   const manifestPath = path.join(rootDir, MANIFEST_BASENAME)
+  /** @type {PluginManifest} */
+  let manifest
   try {
-    const manifest = await withSpan(
+    manifest = await withSpan(
       'manifest.load',
       {
         [Attr.OPERATION]: 'manifest.load',
@@ -62,7 +64,6 @@ export async function loadManifest(rootDir) {
       },
       { component: 'manifest' }
     )
-    return { ok: true, manifest, manifestPath, rootDir }
   } catch (err) {
     const errorKind = /** @type {ManifestErrorKind} */ (
       (err && /** @type {{hypErrorKind?: string}} */ (err).hypErrorKind) || 'manifest_invalid'
@@ -74,6 +75,65 @@ export async function loadManifest(rootDir) {
       message,
     })
     return { ok: false, errorKind, message, manifestPath, rootDir }
+  }
+  // Outside the try above on purpose, and inside one of its own. Inside that
+  // try a throw from the diagnostic is caught as a manifest rejection and
+  // takes the whole plugin with it; outside it with no guard at all, the same
+  // throw rejects a promise this function has never rejected, and
+  // `loadManifests` fans out over `Promise.all`, so it would fail every
+  // plugin rather than one. A diagnostic may cost neither.
+  try {
+    warnUnrecognizedPickerPlatforms(manifest, manifestPath)
+  } catch {}
+  return { ok: true, manifest, manifestPath, rootDir }
+}
+
+/**
+ * The values `process.platform` can report (the `NodeJS.Platform` union, which
+ * is wider than the list the prose docs give). A picker row's `platforms` gate
+ * is matched against `process.platform` by string equality, so a value outside
+ * this set names no running platform.
+ *
+ * @ref LLP 0369#known-set: this list is the diagnostic's vocabulary, not the
+ * gate's, so a value Node adds later costs a spurious warning and nothing more.
+ */
+const KNOWN_PLATFORMS = new Set([
+  'aix', 'android', 'cygwin', 'darwin', 'freebsd', 'haiku',
+  'linux', 'netbsd', 'openbsd', 'sunos', 'win32',
+])
+
+/**
+ * Report picker `platforms` entries that name no known platform.
+ *
+ * Validation accepts them, because a rejection is fatal to the whole plugin
+ * and one mistyped display gate is not worth that. Unreported, the typo is
+ * invisible: the row is offered on no platform, and an absent row is what a
+ * row the author never wrote looks like too. The warning mirrors to stderr
+ * because the reader is a plugin author with no telemetry configured.
+ *
+ * @ref LLP 0369#warn-not-reject [implements]: an unrecognized platform is a load-time warning, never a refusal.
+ * @param {PluginManifest} manifest
+ * @param {string} manifestPath
+ */
+function warnUnrecognizedPickerPlatforms(manifest, manifestPath) {
+  for (const row of manifest.contributes?.picker ?? []) {
+    const platforms = row.platforms ?? []
+    const unrecognized = platforms.filter((p) => !KNOWN_PLATFORMS.has(p))
+    if (unrecognized.length === 0) continue
+    // Only a gate that is unrecognized end to end withholds the row
+    // everywhere. `["darwin", "win"]` carries the same typo but still renders
+    // on macOS, and telling that author the row is offered nowhere sends them
+    // hunting for a row they can see, which is the confusion this removes.
+    const detail = unrecognized.length === platforms.length
+      ? `picker row is gated to ${unrecognized.join(', ')}, which no platform reports, so the row is offered nowhere`
+      : `picker row names ${unrecognized.join(', ')} in its gate, which no platform reports, so the row is offered only where the rest of the gate matches`
+    getLogger('manifest', { mirrorStderr: true }).warn('manifest.picker_platform_unrecognized', {
+      [Attr.PLUGIN]: manifest.name,
+      hyp_manifest_path: manifestPath,
+      hyp_picker_row: row.name,
+      hyp_unrecognized_platforms: unrecognized.join(','),
+      detail,
+    })
   }
 }
 
@@ -268,6 +328,7 @@ function validatePickerContributions(picker) {
       return invalid('contributes.picker hidden must be a boolean when present')
     }
     // @ref LLP 0368#platform-gate [implements]: a row may name the platforms it is offered on, which `detect` cannot say because a probe may only pre-check
+    // @ref LLP 0369#warn-not-reject [constrained-by]: the string values stay unchecked here; an unrecognized one is reported by `warnUnrecognizedPickerPlatforms`, not refused
     if (r.platforms !== undefined && !(Array.isArray(r.platforms) && r.platforms.length > 0 && r.platforms.every(isNonEmptyString))) {
       return invalid('contributes.picker platforms must be a non-empty array of process.platform values when present')
     }
