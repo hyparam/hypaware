@@ -643,20 +643,23 @@ what `hyp session ignore` posts to, what the openclaw attach writer builds
 both provider `baseUrl` fields from, and what `hyp client claude-desktop
 install` renders verbatim; the claude and codex attach writers take only the
 port from that endpoint and hardcode `127.0.0.1`, and opencode is handed no
-gateway endpoint. So a `listen` naming a *hostname* other than `localhost`
-refuses the clients that were handed that name, and it takes their egress with
-it rather than only their capture, because the base URL they were handed stops
-answering. Separately, the claude and codex clients hardcode `127.0.0.1`, so
-any bind that leaves nothing listening there answers their base URLs with
-`ECONNREFUSED`: a routable address, another loopback literal, or a hostname
-resolving to one. Pin `listen` to `127.0.0.1`, or to `0.0.0.0` or `[::]` (an
-IPv6 host is bracketed, since `listen` is a `host:port` string and `::18521`
-would read the last colon as the port separator); a default install already
-uses the first. The loopback-peers-only rule on `CONNECT` and absolute-form
-costs an attached client nothing on any bind, because proxy-mode attach points
-its client at loopback rather than at the bind host. On a wildcard bind a
-client on another machine has the same constraint as a remote exporter:
-address the gateway by the routable interface literal, not by a name.
+gateway endpoint. So a `listen` naming a *hostname* that resolves to a
+loopback address, `localhost` aside, refuses the clients that were handed that
+name, and it takes their egress with it rather than only their capture,
+because the base URL they were handed stops answering. A hostname pointed at a
+routable address is served under that name instead, on the same exemption a
+name-based LAN exporter relies on above. Separately, the claude and codex
+clients hardcode `127.0.0.1`, so any bind that leaves nothing listening there
+answers their base URLs with `ECONNREFUSED`: a routable address, another
+loopback literal, or a hostname resolving to one. Pin `listen` to `127.0.0.1`,
+or to `0.0.0.0` or `[::]` (an IPv6 host is bracketed, since `listen` is a
+`host:port` string and `::18521` would read the last colon as the port
+separator); a default install already uses the first. The loopback-peers-only
+rule on `CONNECT` and absolute-form costs an attached client nothing on any
+bind, because proxy-mode attach points its client at loopback rather than at
+the bind host. On a wildcard bind a client on another machine has the same
+constraint as a remote exporter: address the gateway by the routable interface
+literal, not by a name.
 
 ## Uninstalling
 
