@@ -43,14 +43,30 @@ const LOGGED_HOST_MAX_CHARS = 128
  * accepts on a new server and so starts a fresh entry, rather than inheriting
  * the stopped one's `loggedAt` and swallowing its own first refusals, and
  * `refused_total` counts one listener's run. Two live listeners sharing a
- * name cannot reach each other's tally either. The entry is dropped when its
- * server closes, which is what a listener's `stop()` does. A direct call with
- * no server behind it (a test) falls back to the listener name and keeps its
- * entry for the life of the process.
+ * name cannot reach each other's tally either.
  *
- * @type {Map<Server | string, { total: number, loggedAt: number }>}
+ * Weak, because the key is the whole live server: a strong module global would
+ * pin every listener that ever refused, along with its request handler and
+ * everything that closure captures. Nothing iterates this map, only looks an
+ * entry up by its own server, so weakness costs nothing and spares the check a
+ * lifecycle hook: an entry cannot outlive its server whether or not that
+ * server ever emits `close` (a `stop()` that leaves a keep-alive socket open
+ * defers that event indefinitely).
+ *
+ * @type {WeakMap<Server, { total: number, loggedAt: number }>}
  */
-const HOST_REFUSALS = new Map()
+const HOST_REFUSALS = new WeakMap()
+
+/**
+ * The same tally for a refusal with no accepting server behind it: a direct
+ * call to the check, or a request on a socket handed to a server by
+ * `emit('connection')` rather than accepted by it. Keyed by listener name and
+ * never cleared, so a restart inside the interval does inherit the stopped
+ * run's clock. No listener here refuses on such a request today.
+ *
+ * @type {Map<string, { total: number, loggedAt: number }>}
+ */
+const HOST_REFUSALS_BY_NAME = new Map()
 
 /**
  * The server that accepted `req`, or `undefined` for a request with none
@@ -132,15 +148,11 @@ export function isMisdirectedHost(req, opts) {
   const hostname = hostnameOfHostHeader(value)
   if (hostname !== undefined && (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname))) return false
   const server = acceptingServer(req)
-  const key = server ?? opts.name
-  let refusals = HOST_REFUSALS.get(key)
+  let refusals = server ? HOST_REFUSALS.get(server) : HOST_REFUSALS_BY_NAME.get(opts.name)
   if (!refusals) {
     refusals = { total: 0, loggedAt: 0 }
-    HOST_REFUSALS.set(key, refusals)
-    // One hook per entry, and the entry is this server's alone, so the
-    // listener's next run starts its own and no live listener sharing the
-    // name loses a tally.
-    server?.once('close', () => HOST_REFUSALS.delete(server))
+    if (server) HOST_REFUSALS.set(server, refusals)
+    else HOST_REFUSALS_BY_NAME.set(opts.name, refusals)
   }
   refusals.total += 1
   const now = Date.now()
