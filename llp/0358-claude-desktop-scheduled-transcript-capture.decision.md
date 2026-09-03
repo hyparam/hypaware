@@ -108,6 +108,25 @@ repair message; plugin activation and transcript capture continue.
   not the capture prerequisite. LLP 0297's reason for hiding the row no longer
   applies because onboarding invokes no browser, plist, residue, or sudo work.
 
+### Selecting Desktop also enables Claude Code {#claude-code-consequences}
+
+Composing `@hypaware/claude` carries two consequences for Claude Code itself.
+Recording them here, and stating them in the picker row's summary and
+`docs/CLI_REFERENCE.md` before the user selects the row, is the disclosure
+half of the PR #1231 B1 ruling: keep the composition, state it plainly.
+
+- **History import.** `@hypaware/claude` owns the `cli` and `sdk-cli`
+  transcript entrypoints, and unknown or absent entrypoints fail open
+  (LLP 0140), so a Desktop-only selection imports the user's existing Claude
+  Code CLI transcript tree under `client_name = 'claude'` on the same
+  five-minute schedule. `backfill.on_join: false` withholds it, as
+  §scheduled-sweep records.
+- **Attach.** `@hypaware/claude` carries an `attach_probe` and a runtime
+  adapter, and the attach reconciler desires every enabled client plugin, so
+  a Desktop-only selection may attach Claude Code by writing its settings
+  (`~/.claude/settings.json`). `attach.on_join: false` on the plugin's entry
+  withholds it (LLP 0041 §Consent gating).
+
 ## Verification {#verification}
 
 - Unit tests pin the default and configured cron plus malformed config.
@@ -116,3 +135,5 @@ repair message; plugin activation and transcript capture continue.
 - The `backfill_claude_fixture` smoke runs the real Claude provider through the
   generic driver, observes Desktop-attributed transcript rows on the first
   tick, and observes zero new rows on the second tick.
+- The picker-disclosure test asserts the Desktop row's summary admits the
+  Claude Code capture, history-import, and attach consequences.

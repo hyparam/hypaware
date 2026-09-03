@@ -631,7 +631,17 @@ Plugin: `@hypaware/claude-desktop`.
 Desktop capture is transcript-only by default (LLP 0358). Select Claude
 Desktop in `hyp init`; the daemon reruns the Claude history provider every
 five minutes. This needs no Claude account credential and makes no changes to
-the Desktop app. The resulting config has this capture set:
+the Desktop app.
+
+Selecting Claude Desktop also enables Claude Code capture: the capture set
+below includes `@hypaware/claude`, the shared transcript reader, so a
+Desktop-only selection imports existing Claude Code CLI history from
+`~/.claude/projects` under `client_name = 'claude'` and may attach Claude
+Code by updating `~/.claude/settings.json`. Set `attach.on_join: false` on
+the `@hypaware/claude` entry to withhold the attach; `backfill.on_join:
+false` (below) withholds the history import.
+
+The resulting config has this capture set:
 
 ```json
 {

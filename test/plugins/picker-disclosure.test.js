@@ -109,6 +109,16 @@ test('claude-desktop picker summary states that capture makes no Desktop changes
   assert.match(summary, /needs no sign-in or admin approval/i)
 })
 
+// @ref LLP 0358#claude-code-consequences [tests]: a Desktop-only pick also
+// captures Claude Code, and the row must admit it before selection (PR #1231
+// B1, resolved by disclosure: keep the composition, state it plainly).
+test('claude-desktop picker summary discloses the Claude Code capture, history import, and attach', async () => {
+  const summary = await pickerSummary('claude-desktop', 'claude-desktop')
+  assert.match(summary, /Claude Code capture/i)
+  assert.match(summary, /Claude Code CLI history/i)
+  assert.match(summary, /attach Claude Code/i)
+})
+
 // The shared ai-gateway plugin supplies the backfill materializer and also
 // binds its listener, so the transcript-only row still discloses that local
 // side effect even though no Desktop traffic is redirected through it.
