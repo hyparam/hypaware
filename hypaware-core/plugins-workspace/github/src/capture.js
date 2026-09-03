@@ -127,9 +127,14 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       })
       if (!complete) pending = true
     } catch (err) {
+      // A failed repo leaves durable work behind, but a failure is NOT bounded
+      // backlog: `pending` drives the source's cadence, and treating an error
+      // as pending pins a daily source at the 15-minute backlog cadence for as
+      // long as one repository keeps failing (a rename, an archive, a scope
+      // the token lost). Failures retry on the ordinary cadence instead
+      // (LLP 0360#cadence); the error itself is reported by `errors`.
       const message = errMessage(err)
       errors.push({ repo, error: message })
-      if (cursor.work) pending = true
       log.error('github.repo_capture_failed', { repo, error: message })
     }
     events += repoEvents
@@ -210,7 +215,8 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
         continue
       }
       if (!budget.take()) return false
-      const page = await client.listPullRequestsPage(owner, name, cursor.etag?.pulls, pageUrl(work.page))
+      const requestedPage = pageUrl(work.page)
+      const page = await client.listPullRequestsPage(owner, name, cursor.etag?.pulls, requestedPage)
       if (page.notModified) {
         work.page = null
         continue
@@ -222,7 +228,11 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
       cursor.pull_numbers = sortedNumbers(prNumbers)
       work.pull_tasks = changed.map((pr) => ({ number: pr.number, created_at: pr.created_at, phase: 'files' }))
       work.pulls_high = newestPullTime(work.pulls_high, page.items)
-      if (page.etag) work.pulls_etag = page.etag
+      // Only the first page's ETag is a usable `If-None-Match` for the next
+      // poll: the client sends the saved etag on page one only, so recording a
+      // later page's etag here would guarantee a miss and silently retire the
+      // 304 shortcut.
+      if (page.etag && requestedPage === undefined) work.pulls_etag = page.etag
       const reachedHighWater = work.mode === 'poll' && baseline !== undefined && page.items.some((pr) => olderThan(pr, baseline))
       work.page = reachedHighWater ? null : page.next
       continue

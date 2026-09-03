@@ -44,17 +44,6 @@ export function readCursors(stateDir) {
 }
 
 /**
- * The cursor for one repo (`owner/repo`), or an empty cursor when unseen.
- *
- * @param {CursorState} state
- * @param {string} repo
- * @returns {RepoCursor}
- */
-export function cursorFor(state, repo) {
-  return state.repos[repo] ?? {}
-}
-
-/**
  * @param {string} stateDir
  * @param {CursorState} state
  */

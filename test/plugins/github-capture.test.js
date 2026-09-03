@@ -249,6 +249,52 @@ test('a failed PR subresource does not publish the pulls cursor', async () => {
   assert.equal(cursors.repos['o/r'].work?.pull_tasks?.[0].number, 7)
 })
 
+test('a repo failure retries on the ordinary cadence, not the backlog cadence', async () => {
+  const client = fakeClient({})
+  client.listIssuesPage = async () => { throw new Error('404 for GET /repos/o/r/issues') }
+  const cursors = freshCursors()
+  const result = await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async () => {},
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+  assert.equal(result.errors.length, 1)
+  assert.equal(
+    result.pending,
+    false,
+    'an error is not bounded backlog: pending drives the poll cadence (LLP 0360#cadence)'
+  )
+  assert.equal(cursors.repos['o/r'].work?.phase, 'issues', 'the durable work is still there to resume')
+})
+
+test('only the first pull page publishes an etag for the next poll', async () => {
+  /** @type {Array<string | undefined>} */
+  const sentEtags = []
+  const client = fakeClient({})
+  client.listPullRequestsPage = async (_owner, _repo, etag, page) => {
+    sentEtags.push(etag)
+    return page
+      ? { items: [], next: null, etag: 'etag-page-2' }
+      : { items: [], next: 'https://api.github.test/repos/o/r/pulls?page=2', etag: 'etag-page-1' }
+  }
+  const cursors = freshCursors()
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async () => {},
+    log: silentLog,
+    mode: 'backfill',
+    observedRepos: ['o/r'],
+  })
+  assert.deepEqual(sentEtags, [undefined, undefined])
+  assert.equal(cursors.repos['o/r'].etag?.pulls, 'etag-page-1')
+})
+
 test('whole-tick budget resumes a backfill without replaying completed pages', async () => {
   const calls = []
   const client = fakeClient({
