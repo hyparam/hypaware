@@ -412,8 +412,9 @@ test('a throwing mirror write costs the warning, not the registration', () => {
 /**
  * The optional members of `CommandRegistration`, read out of the published
  * declaration file rather than restated here. Both spellings the file uses
- * for one, `foo?: T` and the optional method `foo?(...): T`, and the
- * `readonly` prefix either may carry, with the whitespace TypeScript allows
+ * for one, `foo?: T` and the optional method `foo?(...): T`, the type
+ * parameters that method may declare (`foo?<T>(...): T`), and the `readonly`
+ * prefix either may carry, with the whitespace TypeScript allows
  * around the `?` (nothing formats this file, so no spelling is ruled out): an
  * optional method is the member shape that always lives on a prototype, so it
  * is the one the copy drops.
@@ -466,17 +467,26 @@ function declaredOptionalMembers(types = readFileSync(new URL('../../hypaware-pl
   let end = -1
   // Only what the interface declares itself: a nested object type's own
   // members are blanked as the scan passes them, newlines kept so the member
-  // regex still anchors per line, because an optional nested inside a member's
-  // type is not an optional member of `CommandRegistration`.
+  // regex still anchors per line. A parameter list and a bracketed span are
+  // blanked with them, because an optional standing in a member's parameters
+  // (`run(argv, ctx?: Ctx)`) or in a labelled tuple (`[a: string, b?: X]`) is
+  // no more a member of `CommandRegistration` than one nested in an object
+  // type is. Their delimiters are kept: `foo?(): T` is one of the two member
+  // spellings and the reader knows it by that `(`, and a computed name is
+  // left as the `[    ]` the check below refuses rather than vanishing.
   let body = ''
-  for (let i = scan.indexOf('{', start); i < scan.length; i += 1) {
+  let nested = 0
+  const bodyStart = scan.indexOf('{', start)
+  for (let i = bodyStart; i < scan.length; i += 1) {
     const char = scan[i]
     if (char === '{') depth += 1
     else if (char === '}' && --depth === 0) {
       end = i
       break
     }
-    body += depth > 1 && char !== '\n' ? ' ' : char
+    if (char === ')' || char === ']') nested -= 1
+    body += (depth > 1 || nested > 0) && char !== '\n' ? ' ' : char
+    if (char === '(' || char === '[') nested += 1
   }
   assert.notEqual(end, -1, 'interface CommandRegistration is never closed')
   // Fail closed on the under-run the brace count cannot see. The masking is
@@ -489,7 +499,52 @@ function declaredOptionalMembers(types = readFileSync(new URL('../../hypaware-pl
   // trusted. Over-running stays loud on its own, because it makes `declared`
   // a superset of what the warning names.
   assert.equal(types[end - 1], '\n', 'interface CommandRegistration does not close in column 0: the parse stopped early, or the declaration was reformatted onto fewer lines')
-  return [...body.matchAll(/^[ \t]*(?:readonly[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\?[ \t]*[:(]/gm)].map((match) => match[1])
+  // A member per `;` and per `,` and per the interface's own `{` as well as
+  // per line, because TypeScript accepts all of those before a member:
+  // anchored at line start alone, this returns `hidden` and nothing else from
+  // `hidden?: boolean; probeZ?: string`, and the under-run is silent, because
+  // the warning then names the same short list the parse found. `,` is the one
+  // separator that also separates a method member's parameters, so it is safe
+  // to anchor on only because the parameter list is blanked above: without
+  // that, `run(argv: string[], ctx?: Ctx)` reports a parameter as a member.
+  // The `{` is the interface's own opening brace and only ever that, since a
+  // nested type's brace is blanked with the type; a first member written on
+  // that line is a reformat the column-0 check above already anticipates, and
+  // read from line start alone it takes the brace into the name and stops the
+  // parse on a member that is spelled perfectly well.
+  //
+  // The name is taken as whatever precedes the `?` and then required to be a
+  // bare identifier, rather than only being matched when it is one. A quoted
+  // member name is legal TypeScript and the mask has already blanked it to
+  // spaces, so an identifier-only pattern matches nothing there and drops the
+  // member just as quietly. The blanked copy cannot give the name back, so an
+  // unreadable one stops the parse rather than shortening its answer.
+  //
+  // The candidate name stops at `:`, and at the `{`, for the same reason it
+  // stops at a separator: neither can stand inside a member name, and past a
+  // `:` the text is a type, where an optional is not a member. Left to run
+  // through the `:`, a conditional type's parenthesised branch reads as a
+  // member name and is refused as unspellable, which breaks the guard on a
+  // declaration file that is perfectly good.
+  //
+  // A conditional type broken across lines still reaches that refusal, and is
+  // left there: `? (c: D) => E` on its own line is the same three characters
+  // as the second line of a member whose name sits on the first
+  // (`hidden` / `?: boolean`), so nothing on that line says which it is.
+  // Refusing is the ambiguity resolved toward noise; reading it as a type is
+  // the same ambiguity resolved toward dropping a member and saying nothing,
+  // which is the failure this guard exists to catch.
+  //
+  // The `?` is followed by `:`, `(`, or `<`: the last is an optional method
+  // that declares type parameters (`foo?<T>(x: T): T`), which `tsc` accepts
+  // and which the two-character form would drop with nothing said.
+  const declared = []
+  for (const match of body.matchAll(/(?:^|[;,{])[ \t]*(?:readonly[ \t]+)?([^\n;,?:{]*?)[ \t]*\?[ \t]*[:(<]/gm)) {
+    const spelled = types.slice(bodyStart + match.index, bodyStart + match.index + match[0].length).trim()
+    assert.match(match[1], /^[A-Za-z_$][\w$]*$/, `an optional member of CommandRegistration is not a bare identifier (${JSON.stringify(spelled)}): a quoted or computed name is blanked by the mask before the member reader runs, so the parse cannot name it`)
+    declared.push(match[1])
+  }
+  return declared
 }
 
 // Left free to pair across lines, the stray backtick joins one in the later
@@ -535,6 +590,79 @@ test('the interface parse fails closed on an unterminated quote or block comment
   assert.throws(() => declaredOptionalMembers(unterminated('sb: "/*', '  /** prose */')), /is never terminated/)
   assert.throws(() => declaredOptionalMembers(unterminated("sb: '/*", '  /** prose */')), /is never terminated/)
   assert.throws(() => declaredOptionalMembers(unterminated('/* nothing closes this', '  no closer here')), /is never terminated/)
+})
+
+// TypeScript separates interface members with `;` or `,` as readily as with
+// a newline, and the same declaration file already writes them that way (the
+// inline `opts` object type of `readRowsSince`), so nothing stops a future
+// edit spelling two of `CommandRegistration`'s optionals on one line. Read
+// per line only, the second is dropped and the guard passes on the short
+// list it was handed: the under-run of #1248 and #1250 reached through the
+// member reader rather than the mask. Asked of both separators, because
+// closing one and leaving the other leaves the same silent under-run a
+// single character away.
+test('the interface parse reads every optional member sharing a line', () => {
+  const shared = (line) => ['export interface CommandRegistration {', `  ${line}`, '}'].join('\n')
+  assert.deepEqual(declaredOptionalMembers(shared('hidden?: boolean; probeZ?: string')), ['hidden', 'probeZ'])
+  assert.deepEqual(declaredOptionalMembers(shared('hidden?: boolean, probeZ?: string')), ['hidden', 'probeZ'])
+  // The other member spellings the reader accepts, all on the one line: the
+  // `readonly` prefix, the optional method, and the whitespace around `?`.
+  assert.deepEqual(declaredOptionalMembers(shared('readonly a?: string; b ?(): void; c?: string')), ['a', 'b', 'c'])
+  assert.deepEqual(declaredOptionalMembers(shared('readonly a?: string, b ?(): void, c?: string')), ['a', 'b', 'c'])
+  // The interface's own opening brace separates a member too. The column-0
+  // check above already anticipates the declaration being reformatted onto
+  // fewer lines, and this is what that reformat looks like from the reader's
+  // side: read per line, the brace is taken into the first member's name and
+  // the parse stops on a declaration file that is perfectly good.
+  assert.deepEqual(declaredOptionalMembers('export interface CommandRegistration { hidden?: boolean; probeZ?: string\n}'), ['hidden', 'probeZ'])
+})
+
+// An optional that is not a member: a parameter of a method member, a
+// parameter of a function-typed one, or an element of a labelled tuple. Each
+// carries the `?:` the reader looks for, and the first two carry the `,` it
+// now anchors on, so each is a way to read a type as though it were the
+// interface's own member list. Nothing is claimed from them and nothing is
+// refused: they are legal spellings of the declaration file, and a guard
+// that throws on those breaks the suite on good input, naming a mask
+// problem that is not there.
+test('the interface parse claims no optional standing inside a member type', () => {
+  const around = (member) => ['export interface CommandRegistration {', `  ${member}`, '  hidden?: boolean', '}'].join('\n')
+  assert.deepEqual(declaredOptionalMembers(around('run(argv: string[], ctx?: Ctx): Promise<number>')), ['hidden'])
+  assert.deepEqual(declaredOptionalMembers(around('handler: (a: string, b?: number) => void')), ['hidden'])
+  assert.deepEqual(declaredOptionalMembers(around('span: [a: string, b?: number]')), ['hidden'])
+  // The member spellings that do carry one of those, and still read whole.
+  assert.deepEqual(declaredOptionalMembers(around('probeZ?(a: string, b?: number): void')), ['probeZ', 'hidden'])
+  assert.deepEqual(declaredOptionalMembers(around('aliases?: string[]')), ['aliases', 'hidden'])
+  // The same member declaring type parameters: `tsc` accepts it, and looking
+  // only for `?:` or `?(` reads straight past it, dropping an optional method
+  // (the member shape the copy always drops) with nothing said.
+  assert.deepEqual(declaredOptionalMembers(around('probeZ?<T>(a: T, b?: T): void')), ['probeZ', 'hidden'])
+})
+
+// An optional whose `?` opens a line, with nothing before it on that line,
+// is the one shape the reader cannot resolve: the second line of a member
+// whose name sits on the first and the branch line of a conditional type
+// broken across lines are the same characters. It refuses both. Pinned here
+// because the refusal costs a false alarm on the type, and the other
+// resolution costs a dropped member and total silence, which is the failure
+// the guard exists to catch: a later loosening should have to argue with this
+// test rather than pass it by accident.
+test('the interface parse fails closed on an optional whose name is not on its line', () => {
+  const split = ['export interface CommandRegistration {', '  hidden', '    ?: boolean', '}'].join('\n')
+  const conditional = ['export interface CommandRegistration {', '  x: A extends B', '    ? (c: D) => E', '    : F', '  hidden?: boolean', '}'].join('\n')
+  assert.throws(() => declaredOptionalMembers(split), /not a bare identifier/)
+  assert.throws(() => declaredOptionalMembers(conditional), /not a bare identifier/)
+})
+
+// A quoted member name is legal TypeScript and is the one member spelling the
+// mask destroys before the reader sees it: the quoted span is blanked to
+// spaces, leaving no identifier to match, so the member returned nothing and
+// the guard read an interface with one fewer optional. The name cannot be
+// recovered from the blanked copy, so it is refused out loud instead.
+test('the interface parse fails closed on an optional member name the mask blanks', () => {
+  const named = (member) => ['export interface CommandRegistration {', '  name: string', `  ${member}`, '}'].join('\n')
+  assert.throws(() => declaredOptionalMembers(named("'probe-z'?: string")), /not a bare identifier/)
+  assert.throws(() => declaredOptionalMembers(named('"probe-z"?: string')), /not a bare identifier/)
 })
 
 // `OPTIONAL_MEMBERS` is a hand-written copy of the optional keys of
