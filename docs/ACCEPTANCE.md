@@ -1538,12 +1538,13 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
    redirects to `daemon.err.log`. That lane runs on every relaunch launchd
    performs, so it is the likelier of the two to be holding a refusal, and a
    `daemon.log`-only check would report a clean `0` on a host that has been
-   refusing updates for weeks. The event only fires when a newer version was
-   available, so a zero on an up-to-date machine says nothing by itself. A
-   nonzero count in either file on a host that passed step 4 is the finding:
-   the gate refused under an environment other than the one you just read (a
-   different login session, or a relaunch launchd performed differently). File
-   it before release.
+   refusing updates for weeks. The event fires only when there was something
+   to hand over: a newer version on the registry, or an installed root already
+   ahead of the running one, so a zero on a machine that has had neither says
+   nothing by itself. A nonzero count in either file on a host that passed
+   step 4 is the finding: the gate refused under an environment other than the
+   one you just read (a different login session, or a relaunch launchd
+   performed differently). File it before release.
 
 6. Record in the release notes: the exact `XPC_SERVICE_NAME` line from step 2
    or 3, the host's `sw_vers -productVersion`, and the step 4 verdict. The
@@ -1586,8 +1587,10 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
   from, so the daemon under test is not the packaged one and its provenance
   guard would refuse an apply long before the supervisor gate was consulted.
   Reinstall from the package under test (`npm install -g`, then
-  `hyp daemon install`) and start again; compare step 4's `package root:` line
-  against `npm root -g` if you are unsure which root it belongs to.
+  `hyp daemon install`) and start again. If you are unsure which root it
+  belongs to, step 4's `package root:` line for a global install sits directly
+  under `npm root -g`; `DAEMON_BIN` itself never does, since it is the bin
+  symlink beside that directory's parent.
 
 ---
 
