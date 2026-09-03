@@ -205,7 +205,7 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
       for (const issue of page.items) if (issue.pull_request) prNumbers.add(issue.number)
       await flush(page.items.filter((it) => !it.pull_request).map((it) => issueRow(repo, it)))
       cursor.pull_numbers = sortedNumbers(prNumbers)
-      advanceSince(cursor, 'issues', page.items)
+      work.issues_high = newestItemTime(work.issues_high ?? cursor.since?.issues, page.items)
       work.page = page.next
       if (page.next === null) beginPulls(work, cursor)
       continue
@@ -258,14 +258,13 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
         continue
       }
       if (work.page === null) {
-        work.phase = 'comments'
-        delete work.page
+        finishCommits(work, cursor)
         continue
       }
       if (!budget.take()) return false
       const page = await client.listCommitsPage(owner, name, cursor.since?.commits, pageUrl(work.page))
       await flush(page.items.map((c) => commitRow(repo, c, null)))
-      advanceCommitSince(cursor, page.items)
+      work.commits_high = newestCommitTime(work.commits_high ?? cursor.since?.commits, page.items)
       work.commit_tasks = page.items.map((c) => ({ sha: c.sha, created_at: commitDate(c) ?? undefined }))
       work.page = page.next
       continue
@@ -274,10 +273,11 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
     if (!budget.take()) return false
     const page = await client.listIssueCommentsPage(owner, name, cursor.since?.comments, pageUrl(work.page))
     await flush(page.items.map((c) => commentRow(repo, c, prNumbers)).filter((r) => r !== null))
-    advanceSince(cursor, 'comments', page.items)
+    work.comments_high = newestItemTime(work.comments_high ?? cursor.since?.comments, page.items)
     work.page = page.next
     if (page.next === null) {
       cursor.pull_numbers = sortedNumbers(prNumbers)
+      if (work.comments_high) setSince(cursor, 'comments', work.comments_high)
       delete cursor.work
       return true
     }
@@ -326,8 +326,27 @@ async function drainPullTask({ client, owner, name, repo, tasks, budget, flush }
   return true
 }
 
-/** @param {GithubRepoWork} work @param {RepoCursor} cursor */
+/**
+ * Publish the issues watermark and open the pulls phase.
+ *
+ * A phase stages its high-water on `work` and publishes to `cursor.since`
+ * only here, at the phase boundary, once every page of the phase has appended.
+ * Publishing per page would advance the durable watermark past pages 2..N that
+ * have not been fetched yet, so any later loss of `work` (a sidecar rewritten
+ * by a concurrent process, a downgrade whose `readWork` rejects an unknown
+ * phase) skips that range permanently and silently. Staging trades that for a
+ * re-fetch, which LLP 0360#cursoring chooses explicitly: "retries from the last
+ * completed phase rather than skipping the missing range", and "rows appended
+ * by an earlier attempt remain valid snapshots". The pulls phase always worked
+ * this way (`pulls_high`); issues, commits, and comments now do too.
+ *
+ * @ref LLP 0360#cursoring [implements]: publish a phase's cursor only after its rows and sub-resources append
+ *
+ * @param {GithubRepoWork} work @param {RepoCursor} cursor
+ */
 function beginPulls(work, cursor) {
+  if (work.issues_high) setSince(cursor, 'issues', work.issues_high)
+  delete work.issues_high
   work.phase = 'pulls'
   delete work.page
   work.baseline_pulls = cursor.since?.pulls
@@ -349,6 +368,20 @@ function finishPulls(work, cursor) {
   delete work.pulls_etag
   delete work.pull_tasks
   work.commit_tasks = []
+}
+
+/**
+ * Publish the commits watermark and open the comments phase. Reached only with
+ * `commit_tasks` drained, so the commit-file sub-resources of every commit the
+ * watermark covers have appended (LLP 0360#cursoring).
+ *
+ * @param {GithubRepoWork} work @param {RepoCursor} cursor
+ */
+function finishCommits(work, cursor) {
+  if (work.commits_high) setSince(cursor, 'commits', work.commits_high)
+  delete work.commits_high
+  work.phase = 'comments'
+  delete work.page
 }
 
 /* ---------------------------------------------------------------- row builders */
@@ -578,27 +611,31 @@ function newestPullTime(high, pulls) {
 }
 
 /**
- * @param {RepoCursor} cursor
- * @param {'issues' | 'comments'} key
+ * @param {string | undefined} high
  * @param {Array<GithubIssue | GithubComment>} rows
+ * @returns {string | undefined}
  */
-function advanceSince(cursor, key, rows) {
-  let max = cursor.since?.[key]
+function newestItemTime(high, rows) {
+  let max = high
   for (const row of rows) {
     const value = row.updated_at ?? row.created_at
     if (value && (!max || value > max)) max = value
   }
-  if (max) setSince(cursor, key, max)
+  return max
 }
 
-/** @param {RepoCursor} cursor @param {GithubCommit[]} commits */
-function advanceCommitSince(cursor, commits) {
-  let max = cursor.since?.commits
+/**
+ * @param {string | undefined} high
+ * @param {GithubCommit[]} commits
+ * @returns {string | undefined}
+ */
+function newestCommitTime(high, commits) {
+  let max = high
   for (const commit of commits) {
     const value = commit.commit?.committer?.date ?? commit.commit?.author?.date
     if (value && (!max || value > max)) max = value
   }
-  if (max) setSince(cursor, 'commits', max)
+  return max
 }
 
 /** @param {RepoCursor} cursor @param {'issues' | 'pulls' | 'commits' | 'comments'} key @param {string} value */

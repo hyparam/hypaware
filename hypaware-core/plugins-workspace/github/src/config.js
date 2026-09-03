@@ -27,6 +27,16 @@ const CONFIG_KEYS = new Set(['ignore', 'poll_interval', 'inventory', 'token_env'
 const REPO_SLUG = /^[^/\s]+\/[^/\s]+$/
 /** A POSIX env-var name (what `token_env` holds - the NAME, not the secret). */
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+/**
+ * Every GitHub credential format is `<prefix>_<base62>`, and base62 plus the
+ * underscore is a strict subset of `ENV_NAME`: `ghp_aaaa...` is a legal POSIX
+ * identifier, so the name check alone accepts a pasted secret and persists it
+ * verbatim into `hypaware.toml`. The prefix is the discriminator that the
+ * character class cannot be: `ghp_` classic, `gho_` OAuth, `ghu_`
+ * user-to-server, `ghs_` server-to-server, `ghr_` refresh, `github_pat_`
+ * fine-grained.
+ */
+const GITHUB_CREDENTIAL = /^(gh[pousr]_|github_pat_)/i
 /** A duration like `10m`, `30s`, `1h`, `500ms`. */
 const DURATION = /^(\d+)(ms|s|m|h)$/
 export const MIN_POLL_INTERVAL_MS = 5 * 60_000
@@ -137,6 +147,12 @@ function readArray(raw, key, errors) {
 }
 
 /**
+ * Read `token_env`. It must be an env-var NAME and must not itself be a
+ * credential: the name check is a superset of every GitHub token format, so
+ * the prefix check is what actually keeps a pasted secret out of config.
+ *
+ * @ref LLP 0360#authentication [constrained-by]: config carries the env-var name, never the token value
+ *
  * @param {Record<string, unknown>} raw
  * @param {string} key
  * @param {GithubConfigError[]} errors
@@ -145,7 +161,7 @@ function readArray(raw, key, errors) {
 function readEnvName(raw, key, errors) {
   const v = raw[key]
   if (v === undefined) return undefined
-  if (typeof v !== 'string' || !ENV_NAME.test(v)) {
+  if (typeof v !== 'string' || !ENV_NAME.test(v) || GITHUB_CREDENTIAL.test(v)) {
     errors.push(invalid(`/${key}`, `${key} must be an environment variable NAME (e.g. "GITHUB_TOKEN"), not a token`))
     return undefined
   }

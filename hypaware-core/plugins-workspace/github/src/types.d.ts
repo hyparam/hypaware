@@ -236,7 +236,13 @@ export interface GithubRepoWork {
   phase: 'issues' | 'pulls' | 'commits' | 'comments'
   page?: string | null
   baseline_pulls?: string
+  // Per-phase high-water staging. A phase accumulates here and publishes into
+  // `RepoCursor.since` only at its boundary, so a dropped `work` re-fetches
+  // rather than skipping the un-fetched pages (LLP 0360#cursoring).
+  issues_high?: string
   pulls_high?: string
+  commits_high?: string
+  comments_high?: string
   pulls_etag?: string
   pull_tasks?: GithubPullTask[]
   commit_tasks?: GithubCommitTask[]

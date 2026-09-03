@@ -11,8 +11,8 @@
  * another domain (the LLM-session graph) lands on the same id and merges.
  *
  * Changing any recipe here orphans every committed graph row that used the old
- * key; `test/graph-ids.test.js` digest-pins the outputs so a change can only
- * happen deliberately, with a migration.
+ * key; `test/plugins/github-graph-ids.test.js` digest-pins the outputs so a
+ * change can only happen deliberately, with a migration.
  *
  * @ref LLP 0032#shared-key-vocabulary [implements]: owner/repo/login lowercased; relpath POSIX; sha full-40-hex lowercase
  */
@@ -126,9 +126,19 @@ export function actorKey(login) {
 }
 
 /**
- * `Commit` key - full 40-hex `sha`, lowercased; never abbreviated. The sha is
- * globally unique across git, so it is NOT repo-qualified - that is what makes
- * it the cleanest bridge key and lets it converge across forks (LLP 0032).
+ * `Commit` key - the `sha` lowercased. The sha is globally unique across git,
+ * so it is NOT repo-qualified: that is what makes it the cleanest bridge key
+ * and lets it converge across forks (LLP 0032).
+ *
+ * Deliberately **not** length-validated. The host-side twin
+ * (`ai-gateway-graph/src/graph-keys.js`) rejects anything but 40 hex, because
+ * it keys off a captured `latest_git_commit_hash` that may be abbreviated and
+ * an abbreviated key would mint a dangling node. This side reads the GitHub
+ * API, which returns full shas, so it trusts them. LLP 0032 settles the
+ * asymmetry in as many words: "stricter than the GitHub side, which trusts the
+ * API for full shas". For a full sha the two outputs are byte-identical.
+ *
+ * @ref LLP 0032#abbreviated-sha-guard [constrained-by]: the guard is the host side's, not this one's
  *
  * @param {unknown} sha
  * @returns {string | null}

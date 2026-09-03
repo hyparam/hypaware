@@ -26,6 +26,8 @@ const API_VERSION = '2022-11-28'
 const PER_PAGE = 100
 /** The explicit all-visible inventory is normalized into small strings. */
 const MAX_PAGES = 50
+/** GitHub embeds at most this many entries in a single commit's `files`. */
+const COMMIT_FILES_CAP = 300
 
 /**
  * @param {object} opts
@@ -48,11 +50,21 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     if (fromEnv) return fromEnv
     if (!resolvedToken) {
       const resolveGhToken = ghToken ?? (() => tokenFromGh(env, execFileImpl))
+      // Cache the resolved token, never the failure. `gh auth token` fails for
+      // ordinary transient reasons (gh not yet on PATH under launchd, a
+      // credential store still locked after login), and a retained rejected
+      // promise poisons the client for the life of the daemon: every repo of
+      // every later tick still spends a budget unit before the cached rejection
+      // throws, and reports one error apiece. Dropping it retries on the next
+      // call, which is the ordinary cadence (LLP 0360#cadence).
       resolvedToken = resolveGhToken().then((value) => {
         const clean = value.trim()
         if (!clean) throw authUnavailable()
         log.info('github.auth_resolved', { source: 'gh_cli' })
         return clean
+      }).catch((err) => {
+        resolvedToken = null
+        throw err
       })
     }
     return resolvedToken
@@ -169,13 +181,21 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
       return listingPage(url, commitOf)
     },
 
+    // Changed files come from the single-commit resource, which is not a
+    // listing: it embeds at most `COMMIT_FILES_CAP` entries, sends no Link
+    // header, and ignores `per_page`. So `next` is always null and a commit
+    // touching more files silently loses the remainder. Say so in the log
+    // rather than reporting a short list as complete, matching the
+    // `github.listing_truncated` signal the all-visible enumeration emits.
     async listCommitFilesPage(owner, repo, sha, page) {
-      const result = await request(page ?? `/repos/${enc(owner)}/${enc(repo)}/commits/${enc(sha)}?per_page=${PER_PAGE}`)
+      const result = await request(page ?? `/repos/${enc(owner)}/${enc(repo)}/commits/${enc(sha)}`)
       if (result.notModified) return { items: [], next: null, notModified: true }
       const data = /** @type {Record<string, unknown>} */ (result.data)
-      const items = Array.isArray(data.files)
-        ? /** @type {Record<string, unknown>[]} */ (data.files).map(filename).filter((x) => x !== null)
-        : []
+      const files = Array.isArray(data.files) ? /** @type {Record<string, unknown>[]} */ (data.files) : []
+      if (files.length >= COMMIT_FILES_CAP) {
+        log.warn('github.listing_truncated', { label: 'commits/files', max_files: COMMIT_FILES_CAP })
+      }
+      const items = files.map(filename).filter((x) => x !== null)
       return { items, next: result.next, etag: result.etag }
     },
 
@@ -370,11 +390,14 @@ function positiveInt(value) {
  */
 function parseNextLink(link) {
   if (!link) return null
-  for (const part of link.split(',')) {
-    const m = /<([^>]+)>\s*;\s*rel="next"/.exec(part)
-    if (m) return m[1]
-  }
-  return null
+  // Match over the whole header. Splitting on "," first assumed no URL in it
+  // contains one, which the all-visible enumeration's
+  // `affiliation=owner,collaborator,organization_member` does: it holds only
+  // while GitHub echoes that query percent-encoded, and a decoded echo would
+  // make `next` null and truncate the enumeration at page one, silently. The
+  // angle brackets already delimit the URL, so no split is needed.
+  const m = /<([^>]+)>\s*;\s*rel="next"/.exec(link)
+  return m ? m[1] : null
 }
 
 /**

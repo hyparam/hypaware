@@ -501,3 +501,115 @@ function groupBy(rows, key) {
   }
   return out
 }
+
+test('a phase publishes its since watermark only once every page has appended', async () => {
+  // An issues list that never ends: the phase can never complete, so its
+  // watermark must stay staged on `work` and out of the durable cursor.
+  const client = fakeClient({})
+  let issuePages = 0
+  client.listIssuesPage = async () => {
+    issuePages += 1
+    return {
+      items: [{ number: issuePages, state: 'open', updated_at: `2026-03-0${issuePages}T00:00:00Z` }],
+      next: 'https://api.github.test/repos/o/r/issues?page=next',
+    }
+  }
+  const cursors = freshCursors()
+  const result = await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async () => {},
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+    requestLimit: 3,
+  })
+
+  assert.equal(result.pending, true)
+  assert.equal(issuePages, 3)
+  const cursor = cursors.repos['o/r']
+  assert.equal(cursor.since?.issues, undefined, 'an unfinished phase must not publish its watermark')
+  assert.equal(cursor.work?.phase, 'issues')
+  assert.equal(cursor.work?.issues_high, '2026-03-03T00:00:00Z', 'the high-water is staged on the work descriptor')
+})
+
+test('a failed commit subresource does not publish the commits cursor', async () => {
+  const client = fakeClient({})
+  client.listCommitsPage = async () => ({
+    items: [{ sha: 'a'.repeat(40), commit: { author: { date: '2026-04-01T00:00:00Z' } } }],
+    next: null,
+  })
+  client.listCommitFilesPage = async () => { throw new Error('rate limited') }
+  const cursors = freshCursors()
+  const result = await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async () => {},
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.equal(result.errors.length, 1)
+  const cursor = cursors.repos['o/r']
+  assert.equal(cursor.since?.commits, undefined, 'the commit-file sub-resource had not appended yet')
+  assert.equal(cursor.work?.phase, 'commits')
+  assert.equal(cursor.work?.commits_high, '2026-04-01T00:00:00Z')
+})
+
+test('a completed repo publishes every phase watermark and drops its work descriptor', async () => {
+  const client = fakeClient({
+    repos: {
+      'o/r': {
+        issues: [{ number: 1, state: 'open', updated_at: '2026-05-01T00:00:00Z' }],
+        pulls: [{ number: 2, state: 'open', updated_at: '2026-05-02T00:00:00Z' }],
+        commits: [{ sha: 'b'.repeat(40), commit: { author: { date: '2026-05-03T00:00:00Z' } } }],
+        comments: [{ id: 3, issue_url: 'https://api.github.com/repos/o/r/issues/1', updated_at: '2026-05-04T00:00:00Z' }],
+      },
+    },
+  })
+  const cursors = freshCursors()
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async () => {},
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  const cursor = cursors.repos['o/r']
+  assert.equal(cursor.work, undefined)
+  assert.deepEqual(cursor.since, {
+    issues: '2026-05-01T00:00:00Z',
+    pulls: '2026-05-02T00:00:00Z',
+    commits: '2026-05-03T00:00:00Z',
+    comments: '2026-05-04T00:00:00Z',
+  })
+})
+
+test('staged phase watermarks survive the cursor sidecar round trip', (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-staged-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  writeCursors(stateDir, /** @type {any} */ ({
+    schema_version: 1,
+    repos: {
+      'o/r': {
+        work: {
+          mode: 'poll',
+          phase: 'commits',
+          issues_high: '2026-06-01T00:00:00Z',
+          commits_high: '2026-06-02T00:00:00Z',
+          comments_high: '2026-06-03T00:00:00Z',
+        },
+      },
+    },
+  }))
+  const work = readCursors(stateDir).repos['o/r'].work
+  assert.equal(work?.issues_high, '2026-06-01T00:00:00Z')
+  assert.equal(work?.commits_high, '2026-06-02T00:00:00Z')
+  assert.equal(work?.comments_high, '2026-06-03T00:00:00Z')
+})

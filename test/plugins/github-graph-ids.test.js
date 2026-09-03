@@ -11,8 +11,11 @@ import {
   issueKey,
   pullRequestKey,
   repoKey,
+  repoKeyFromRemote,
   reviewKey,
 } from '../../hypaware-core/plugins-workspace/github/src/keys.js'
+
+import * as hostKeys from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph-keys.js'
 
 /**
  * Assert a key helper produced a non-null key (these test inputs are all
@@ -60,4 +63,57 @@ test('edge ids pin for representative relations', () => {
 test('case-insensitive inputs converge on one id (the whole point of normalization)', () => {
   assert.equal(nodeId('Repo', req(repoKey('OCTOCAT/HELLO-WORLD'))), nodeId('Repo', req(repoKey('octocat/hello-world'))))
   assert.equal(nodeId('Commit', req(commitKey('6DCB09B5'))), nodeId('Commit', req(commitKey('6dcb09b5'))))
+})
+
+/**
+ * The two in-repo key modules are hand-synced copies (LLP 0032
+ * §shared-key-vocabulary). Until this PR they lived in separate repositories
+ * and only independent digest pins on either side could catch a drift, which
+ * meant a drift showed up as two pins disagreeing about nothing in particular.
+ * Now that both are here, assert directly that the shared recipes agree: a
+ * divergence is a silent orphaning of every already-projected node, so it must
+ * be a failing test rather than a discovery.
+ *
+ * @ref LLP 0032#shared-key-vocabulary [tests]: the host twin and the GitHub side must normalize identically
+ */
+test('the GitHub and host key modules agree on every shared recipe', () => {
+  const repos = [
+    'Octocat/Hello-World',
+    'octocat/hello-world',
+    'ACME/Widgets.js',
+    'a/b',
+    'no-slash',
+    '',
+  ]
+  for (const value of repos) {
+    assert.equal(repoKey(value), hostKeys.repoKey(value), `repoKey(${JSON.stringify(value)})`)
+  }
+
+  const remotes = [
+    'git@github.com:Acme/Widgets.git',
+    'https://github.com/Acme/Widgets.git',
+    'https://www.github.com/Acme/Widgets/',
+    'ssh://git@github.com:22/Acme/Widgets.git',
+    'https://gitlab.com/acme/widgets.git',
+    '',
+  ]
+  for (const value of remotes) {
+    assert.equal(repoKeyFromRemote(value), hostKeys.repoKeyFromRemote(value), `repoKeyFromRemote(${JSON.stringify(value)})`)
+  }
+
+  const paths = ['src/a.js', './src/a.js', '/src/a.js', 'src\\a.js', '']
+  for (const value of paths) {
+    assert.equal(fileKey('Acme/Widgets', value), hostKeys.fileKey('Acme/Widgets', value), `fileKey(${JSON.stringify(value)})`)
+  }
+
+  // Full shas are byte-identical, which is the half convergence depends on.
+  for (const sha of ['6dcb09b5b57875f334f61aebed695e2e4193db5e', '6DCB09B5B57875F334F61AEBED695E2E4193DB5E']) {
+    assert.equal(commitKey(sha), hostKeys.commitKey(sha), `commitKey(${sha})`)
+  }
+
+  // The one settled divergence: the host refuses to key an abbreviated sha so
+  // it cannot mint a node the GitHub side will never converge with; the GitHub
+  // side trusts its API for full shas (LLP 0032#abbreviated-sha-guard).
+  assert.equal(commitKey('6dcb09b5'), '6dcb09b5')
+  assert.equal(hostKeys.commitKey('6dcb09b5'), null)
 })

@@ -49,12 +49,28 @@ test('ignore entries must be owner/repo and retired inventory lists are rejected
 })
 
 test('token_env must be an env-var NAME, never a token value', () => {
-  // A literal secret (contains characters illegal in an env name) is rejected:
-  // the config carries the NAME, the client resolves the value at call time.
-  const r = validateGithubConfig({ token_env: 'ghp_aaaabbbbccccddddeeee' })
-  assert.ok(r.ok, 'a valid identifier-shaped value is accepted')
+  // The config carries the NAME; the client resolves the value at call time.
+  // A GitHub credential is base62 plus underscores, so it satisfies the POSIX
+  // env-name character class: the name check alone would let a pasted secret
+  // be written verbatim into hypaware.toml. Every credential prefix is
+  // rejected outright.
+  for (const secret of [
+    'ghp_aaaabbbbccccddddeeeeffff0000111122',
+    'gho_16C7e42F292c6912E7710c838347Ae178B4a',
+    'ghu_abcdefghijklmnopqrstuvwxyz0123456789',
+    'ghs_abcdefghijklmnopqrstuvwxyz0123456789',
+    'ghr_abcdefghijklmnopqrstuvwxyz0123456789',
+    'github_pat_11ABCDE0Y0abcdefghijkl_xYz0123456789',
+    'GHP_UPPERCASED0000111122223333444455',
+  ]) {
+    assert.equal(validateGithubConfig({ token_env: secret }).ok, false, secret)
+  }
   assert.equal(validateGithubConfig({ token_env: 'has space' }).ok, false)
   assert.equal(validateGithubConfig({ token_env: 'ghp-with-dashes!' }).ok, false)
+  // Ordinary names, including ones that merely mention github, still pass.
+  for (const name of ['GITHUB_TOKEN', 'GH_PAT', 'GITHUB_PAT', 'MY_GH_TOKEN']) {
+    assert.equal(validateGithubConfig({ token_env: name }).ok, true, name)
+  }
 })
 
 test('poll_interval must be a duration', () => {

@@ -113,7 +113,10 @@ function readWork(value) {
   const work = { mode: v.mode, phase: v.phase }
   if (v.page === null || typeof v.page === 'string') work.page = v.page
   if (typeof v.baseline_pulls === 'string') work.baseline_pulls = v.baseline_pulls
+  if (typeof v.issues_high === 'string') work.issues_high = v.issues_high
   if (typeof v.pulls_high === 'string') work.pulls_high = v.pulls_high
+  if (typeof v.commits_high === 'string') work.commits_high = v.commits_high
+  if (typeof v.comments_high === 'string') work.comments_high = v.comments_high
   if (typeof v.pulls_etag === 'string') work.pulls_etag = v.pulls_etag
   if (Array.isArray(v.pull_tasks)) work.pull_tasks = v.pull_tasks.map(readPullTask).filter((x) => x !== null).slice(0, 100)
   if (Array.isArray(v.commit_tasks)) work.commit_tasks = v.commit_tasks.map(readCommitTask).filter((x) => x !== null).slice(0, 100)
