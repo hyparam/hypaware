@@ -18,6 +18,20 @@ import { projectOpenCodeSnapshot } from './projector.js'
 const PLUGIN_NAME = '@hypaware/opencode'
 const HOST = '127.0.0.1'
 const MAX_BODY_BYTES = 16 * 1024 * 1024
+// How much of a rejected request's body is counted before the read is paused.
+// The socket read already in the parser when the pause lands is delivered too,
+// so the bytes actually read settle at about twice this, not exactly at it.
+// A rejected body a caller is still uploading has to be read for the answer to
+// reach it at all, so the read cannot be skipped; left unbounded, its length is
+// the sender's to choose. A legitimate rejected body is not small: the
+// managed asset posts a whole session transcript, which `MAX_BODY_BYTES`
+// sizes at up to 16 MiB. The cap sits well under that on purpose, because
+// the answer is written before a byte is drained, so a caller that reads
+// its socket while it uploads (the asset's `fetch` does) has the 415 in
+// hand long before the cut. A caller that reads nothing until its upload
+// finishes loses the answer to the reset, which is the price of not
+// letting the sender decide how much this listener reads.
+const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
 // A rejected snapshot is always counted, but logged at most this often. The
 // route is unauthenticated and reachable by the same browser page the
 // content-type gate exists to refuse, so a line per rejection would trade
@@ -64,8 +78,7 @@ export function createStartOpenCodeSource(deps) {
 
     const server = http.createServer((req, res) => {
       if (isMisdirectedHost(req, { name: PLUGIN_NAME, log: ctx.log })) {
-        req.resume()
-        sendJson(res, 421, { error: 'misdirected request' })
+        rejectJson(req, res, 421, { error: 'misdirected request' })
         return
       }
       // Shared with the OTLP listener: a constant base keeps `Host` out of the
@@ -73,8 +86,7 @@ export function createStartOpenCodeSource(deps) {
       // thrown out of this handler, where nothing would catch it.
       const url = requestUrlOf(req)
       if (!url) {
-        req.resume()
-        sendJson(res, 400, { error: 'invalid request target' })
+        rejectJson(req, res, 400, { error: 'invalid request target' })
         return
       }
       if (isControlPath(url.pathname)) {
@@ -86,8 +98,7 @@ export function createStartOpenCodeSource(deps) {
         return
       }
       if (req.method !== 'POST' || url.pathname !== '/snapshot') {
-        req.resume()
-        sendJson(res, 404, { error: 'not found' })
+        rejectJson(req, res, 404, { error: 'not found' })
         return
       }
       // A page in the user's browser cannot preflight its way in here, but it
@@ -122,8 +133,7 @@ export function createStartOpenCodeSource(deps) {
             status: 'rejected',
           })
         }
-        req.resume()
-        sendJson(res, 415, {
+        rejectJson(req, res, 415, {
           error: `unsupported content-type: expected application/json, got '${contentType || 'none'}'`,
         })
         return
@@ -292,6 +302,42 @@ async function readJson(req) {
     chunks.push(chunk)
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+/**
+ * Answer a request this listener refuses, discarding at most
+ * MAX_REJECTED_DRAIN_BYTES of its body.
+ *
+ * Past the cap the request is paused, which is what bounds the read, and the
+ * connection is closed once the answer is on the wire. Closing as soon as the
+ * cap is hit would race the answer out and truncate it for a caller reading
+ * the status it needs.
+ *
+ * @param {http.IncomingMessage} req
+ * @param {http.ServerResponse} res
+ * @param {number} status
+ * @param {unknown} body
+ */
+function rejectJson(req, res, status, body) {
+  let drained = 0
+  let overCap = false
+  function closeIfAnswered() {
+    if (overCap && res.writableFinished) req.destroy()
+  }
+  req.on('data', (chunk) => {
+    drained += chunk.length
+    if (drained <= MAX_REJECTED_DRAIN_BYTES) return
+    overCap = true
+    req.pause()
+    closeIfAnswered()
+  })
+  res.on('finish', closeIfAnswered)
+  // Past the cap this connection is reset, so it must not be answered as a
+  // reusable one. A client that reads a keep-alive header and returns the
+  // socket to its pool meets the reset on a request it has already finished,
+  // where its own error handler is gone and the throw is nobody's.
+  res.setHeader('connection', 'close')
+  sendJson(res, status, body)
 }
 
 /** @param {http.ServerResponse} res @param {number} status @param {unknown} body */
