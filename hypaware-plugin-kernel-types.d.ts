@@ -348,6 +348,18 @@ export interface PluginPickerContribution {
    */
   hidden?: boolean
   /**
+   * The `process.platform` values this row is offered on, for a client
+   * whose integration only exists on some of them. Absent means every
+   * platform, which is what almost every row wants.
+   *
+   * Like `hidden`, this gates DISPLAY only: `hyp init --source <id>`
+   * still composes the row, read-back still recognizes it, and the id
+   * keeps its dataset-owner identity. It differs from `detect` in being
+   * a fact about the integration rather than about this machine, so it
+   * can withhold a row instead of merely leaving its box unchecked.
+   */
+  platforms?: string[]
+  /**
    * True when picking this row is not sufficient on its own: an
    * attended `configure_command` must run to place the integration
    * (e.g. Claude Desktop's managed-preferences plist). Absent/false

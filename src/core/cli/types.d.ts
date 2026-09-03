@@ -188,6 +188,12 @@ export interface PickerFinaleActions {
 export interface RunPickerWalkthroughOptions {
   capabilities: CapabilityRegistry
   /**
+   * Platform the picker gates rows against, defaulting to `process.platform`.
+   * The menu is otherwise a function of the host, so a test over it would
+   * answer differently on a Mac and on CI.
+   */
+  platform?: string
+  /**
    * Kernel-owned client registry. The superset of attachable clients: the
    * gateway capability's `getClient`/`listClients` filter to registrations
    * with a gateway upstream, so an endpoint-free adapter (LLP 0306) is only

@@ -25,6 +25,7 @@
         "label": "Claude Desktop",
         "summary": "Imports local Claude Desktop transcripts on a five-minute daemon schedule and starts a local gateway listener for projection. Makes no changes to Claude Desktop and needs no sign-in or admin approval, but it also enables Claude Code capture: it imports existing Claude Code CLI history and may attach Claude Code by updating its settings.",
         "detect": { "app_bundle": "/Applications/Claude.app" },
+        "platforms": ["darwin"],
         "compose": {
           "requires_gateway": true,
           "plugins": [

@@ -78,6 +78,8 @@ test('runPickerWalkthrough drives the TUI multiselect end-to-end when stdin+stdo
       // (e.g. /Applications/Claude.app), which would pre-check rows and
       // change the picks depending on the host running the test.
       detect: async () => new Set(),
+      // Pin the platform: the row numbers below are only stable once the test says which platform it counts on.
+      platform: 'darwin',
       env: {
         HOME: tmp,
         HYP_HOME: path.join(tmp, '.hyp'),
@@ -191,6 +193,8 @@ test('runPickerWalkthrough falls back to the legacy numbered prompt under HYP_NO
     stdout,
     stderr,
     stdin: /** @type {any} */ (input),
+    // Pin the platform: the row numbers below are only stable once the test says which platform it counts on.
+    platform: 'darwin',
     env: {
       HOME: tmp,
       HYP_HOME: path.join(tmp, '.hyp'),

@@ -70,6 +70,11 @@ export interface PickerDescriptor {
    * `PluginPickerContribution.hidden`.
    */
   hidden?: boolean
+  /**
+   * The `process.platform` values this row is offered on. Absent means
+   * every platform. See `PluginPickerContribution.platforms`.
+   */
+  platforms?: string[]
   needsSetup?: boolean
   configureCommand?: string
   /**
