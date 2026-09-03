@@ -143,9 +143,10 @@ export function attachConnectFrontDoor(opts) {
     // The peer, not the bind. `listen` may legitimately be non-loopback for
     // reverse-proxy traffic, but a CONNECT relay that answers the network is an
     // open forward proxy into any host and port, so tunnels are only ever
-    // opened for the machine's own processes. Attach writes
-    // `http://127.0.0.1:<port>` regardless of the bind host, so the documented
-    // client loses nothing.
+    // opened for the machine's own processes. Proxy-mode attach hardcodes
+    // `HTTPS_PROXY=http://127.0.0.1:<port>` regardless of the bind host, so
+    // the clients this door serves always arrive from loopback and lose
+    // nothing (LLP 0366).
     // @ref LLP 0233#loopback-peers-only [implements]: CONNECT from any peer that is not the machine itself is refused
     const peer = /** @type {net.Socket} */ (clientSocket).remoteAddress
     if (!isLoopbackHost(peer)) {
