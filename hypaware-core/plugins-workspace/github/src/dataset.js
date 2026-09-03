@@ -2,6 +2,8 @@
 
 import path from 'node:path'
 
+import { emptySource, unionSources } from 'hypaware/core/query'
+
 /**
  * @import { ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, QueryPartition, QueryStorageService, ExtendedQueryStorageService, ScannableDataSource } from './types.js'
  */
@@ -89,13 +91,26 @@ export async function refreshPartition() {
  * `github_events` rows. Returns an empty source when nothing is materialized so
  * a query on a cold cache still succeeds.
  *
- * The kernel cache service writes capture rows in its **source-table** layout
- * (`datasets/github_events/source=<src>/table/…`), not under the bare
- * `PARTITION_LABEL` path `discoverParts` hand-rolls - so reading
- * `partition.tablePath` directly finds an empty directory and the contract
- * projects nothing. Re-discover through the service (the same path
- * `@hypaware/ai-gateway` uses for its live-ingested rows) and union whatever it
- * surfaces, so flushed events are visible to queries and `graph project`.
+ * `discoverParts` hand-rolls the one `PARTITION_LABEL` path this source writes
+ * to, which is enough on the happy path but is not the whole truth of what the
+ * cache holds: it cannot see a partition the service materialized under any
+ * other segment (a future source split, or a layout the service changes
+ * underneath us). Re-discover through the service as well - the same path
+ * `@hypaware/ai-gateway` and `@hypaware/gascity` take - and union whatever it
+ * surfaces, so flushed events stay visible to queries and `graph project`.
+ *
+ * `unionSources` and `emptySource` are imported, never rebuilt here. LLP 0015
+ * records that five drifted copies of this helper already existed and that two
+ * of them had un-stripped the pagination hints, which lost rows from every
+ * paginated multi-partition query; centralizing the pair is what closed that.
+ * The canonical union strips `limit`/`offset` before forwarding a sub-scan
+ * (they do not distribute across a concatenation), pads short rows out to the
+ * advertised column list (LLP 0241 §alignment), forwards `where` only to a
+ * partition that advertises every column the predicate names, and reports an
+ * unknown `numRows` as `undefined` rather than 0 - which is what a partition
+ * carrying position deletes returns after `hyp purge` (LLP 0104).
+ *
+ * @ref LLP 0015#multi-partition-union [constrained-by]: every plugin imports the canonical union/empty pair instead of re-implementing the concatenation
  *
  * @param {QueryPartition[]} partitions
  * @param {DatasetDataSourceContext} ctx
@@ -121,49 +136,9 @@ export async function createDataSource(partitions, ctx) {
     if (source && source.numRows !== 0) sources.push(source)
   }
 
-  if (sources.length === 0) return emptySource()
+  if (sources.length === 0) return emptySource(GITHUB_EVENTS_COLUMNS.map((c) => c.name))
   if (sources.length === 1) return sources[0]
   return unionSources(sources)
-}
-
-/**
- * Concatenate multiple partition sources into one. `github_events` is
- * single-source today (everything lands under `source=unknown`), but keep this
- * total so a future source split stays queryable without another silent
- * zero-row read.
- *
- * @param {ScannableDataSource[]} sources
- * @returns {ScannableDataSource}
- */
-function unionSources(sources) {
-  const columns = Array.from(new Set(sources.flatMap((s) => s.columns)))
-  const numRows = sources.reduce((n, s) => n + (s.numRows ?? 0), 0)
-  return {
-    columns,
-    numRows,
-    scan(options) {
-      return {
-        appliedWhere: false,
-        appliedLimitOffset: false,
-        async *rows() {
-          for (const s of sources) {
-            for await (const row of s.scan(options).rows()) yield row
-          }
-        },
-      }
-    },
-  }
-}
-
-/** @returns {ScannableDataSource} */
-function emptySource() {
-  return {
-    columns: GITHUB_EVENTS_COLUMNS.map((c) => c.name),
-    numRows: 0,
-    scan() {
-      return { appliedWhere: false, appliedLimitOffset: false, async *rows() {} }
-    },
-  }
 }
 
 /**

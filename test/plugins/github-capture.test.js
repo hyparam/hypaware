@@ -295,6 +295,34 @@ test('only the first pull page publishes an etag for the next poll', async () =>
   assert.equal(cursors.repos['o/r'].etag?.pulls, 'etag-page-1')
 })
 
+test('a narrowed backfill does not move the global round-robin position', async () => {
+  const calls = []
+  const client = fakeClient({ calls })
+  const cursors = freshCursors()
+  cursors.next_repo = 'o/b'
+  const base = {
+    client,
+    config: cfg(),
+    cursors,
+    append: async () => {},
+    log: silentLog,
+    observedRepos: ['o/a', 'o/b', 'o/c'],
+  }
+
+  await captureRepos({ ...base, mode: 'backfill', only: ['o/a'] })
+  assert.equal(
+    cursors.next_repo,
+    'o/b',
+    'a one-repo backfill must not rewind the repositories that were next in line'
+  )
+  assert.deepEqual(calls.filter((call) => call.startsWith('listIssues')), ['listIssues:o/a'])
+
+  // The guard suppresses the write only for a narrowed run: an ordinary tick
+  // that stops early still hands the next repository to the tick after it.
+  await captureRepos({ ...base, mode: 'poll', requestLimit: 1 })
+  assert.equal(cursors.next_repo, 'o/c', 'an ordinary tick still advances the rotation')
+})
+
 test('whole-tick budget resumes a backfill without replaying completed pages', async () => {
   const calls = []
   const client = fakeClient({

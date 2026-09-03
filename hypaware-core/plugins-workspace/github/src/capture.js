@@ -86,8 +86,15 @@ export async function resolveRepos(config, client, log, observedRepos) {
  */
 export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos, requestLimit = CAPTURE_REQUEST_LIMIT }) {
   let repos = await resolveRepos(config, client, log, observedRepos)
-  if (only && only.length > 0) {
-    const onlySet = new Set(only.map((r) => r.toLowerCase()))
+  // A positional `hyp github backfill owner/repo` narrows this one invocation.
+  // The round-robin continuation is a property of the WHOLE inventory, so a
+  // narrowed run must not publish a `next_repo` drawn from its subset: doing so
+  // rewinds the repositories that were genuinely next in line by a full
+  // rotation (LLP 0361#budget - the continuation exists so one repository
+  // cannot starve the rest).
+  const narrowed = Boolean(only && only.length > 0)
+  if (narrowed) {
+    const onlySet = new Set(/** @type {string[]} */ (only).map((r) => r.toLowerCase()))
     repos = repos.filter((r) => onlySet.has(r))
   }
 
@@ -140,7 +147,7 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
     events += repoEvents
     // Persist the advanced cursor onto the shared state after each repo.
     cursors.repos[repo] = cursor
-    cursors.next_repo = repos[(i + 1) % repos.length]
+    if (!narrowed) cursors.next_repo = repos[(i + 1) % repos.length]
   }
 
   if (visited < repos.length) pending = true
