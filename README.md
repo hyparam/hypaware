@@ -646,11 +646,16 @@ Its bind host is configurable (`listen`), and that same host is what
 `hyp session ignore` posts to. So a `listen` naming a *hostname* that resolves
 to a loopback address refuses the gateway's own clients, and it takes their
 egress with it rather than only their capture, because the base URL they were
-handed stops answering. Pin `listen` to a loopback literal, to `0.0.0.0` or
-`::`, or to a routable address; all three are accepted, and the first is what
-a default install already uses. On a wildcard bind a client on another machine
-has the same constraint as a remote exporter: address the gateway by the
-routable interface literal, not by a name.
+handed stops answering. Pin `listen` to a loopback literal, or to `0.0.0.0` or
+`[::]` (an IPv6 host is bracketed, since `listen` is a `host:port` string and
+`::18521` would read the last colon as the port separator); a default install
+already uses the first. A routable address clears this guard too, but only
+this one: `CONNECT` and absolute-form are served to loopback peers only, and a
+client handed a routable base URL connects from that interface rather than
+from loopback, so a proxy-mode client is refused `403` there instead. On a
+wildcard bind a client on another machine has the same constraint as a remote
+exporter: address the gateway by the routable interface literal, not by a
+name.
 
 ## Uninstalling
 
