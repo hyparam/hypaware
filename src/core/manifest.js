@@ -58,6 +58,7 @@ export async function loadManifest(rootDir) {
 
         span.setAttribute(Attr.PLUGIN, validation.manifest.name)
         span.setAttribute('status', 'ok')
+        warnUnrecognizedPickerPlatforms(validation.manifest, manifestPath)
         return validation.manifest
       },
       { component: 'manifest' }
@@ -74,6 +75,45 @@ export async function loadManifest(rootDir) {
       message,
     })
     return { ok: false, errorKind, message, manifestPath, rootDir }
+  }
+}
+
+/**
+ * The `process.platform` values Node documents. A picker row's `platforms`
+ * gate is matched against `process.platform` by string equality, so a value
+ * outside this set names no running platform.
+ *
+ * @ref LLP 0369#known-set: this list is the diagnostic's vocabulary, not the
+ * gate's, so a value Node adds later costs a spurious warning and nothing more.
+ */
+const KNOWN_PLATFORMS = new Set([
+  'aix', 'android', 'darwin', 'freebsd', 'linux', 'openbsd', 'sunos', 'win32',
+])
+
+/**
+ * Report picker `platforms` entries that name no known platform.
+ *
+ * Validation accepts them, because a rejection is fatal to the whole plugin
+ * and one mistyped display gate is not worth that. Unreported, the typo is
+ * invisible: the row is offered on no platform, and an absent row is what a
+ * row the author never wrote looks like too. The warning mirrors to stderr
+ * because the reader is a plugin author with no telemetry configured.
+ *
+ * @ref LLP 0369#warn-not-reject [implements]: an unrecognized platform is a load-time warning, never a refusal.
+ * @param {PluginManifest} manifest
+ * @param {string} manifestPath
+ */
+function warnUnrecognizedPickerPlatforms(manifest, manifestPath) {
+  for (const row of manifest.contributes?.picker ?? []) {
+    const unrecognized = (row.platforms ?? []).filter((p) => !KNOWN_PLATFORMS.has(p))
+    if (unrecognized.length === 0) continue
+    getLogger('manifest', { mirrorStderr: true }).warn('manifest.picker_platform_unrecognized', {
+      [Attr.PLUGIN]: manifest.name,
+      hyp_manifest_path: manifestPath,
+      hyp_picker_row: row.name,
+      hyp_unrecognized_platforms: unrecognized.join(','),
+      detail: `picker row is gated to ${unrecognized.join(', ')}, which no platform reports, so the row is offered nowhere`,
+    })
   }
 }
 
@@ -268,6 +308,7 @@ function validatePickerContributions(picker) {
       return invalid('contributes.picker hidden must be a boolean when present')
     }
     // @ref LLP 0368#platform-gate [implements]: a row may name the platforms it is offered on, which `detect` cannot say because a probe may only pre-check
+    // @ref LLP 0369#warn-not-reject [constrained-by]: the string values stay unchecked here; an unrecognized one is reported by `warnUnrecognizedPickerPlatforms`, not refused
     if (r.platforms !== undefined && !(Array.isArray(r.platforms) && r.platforms.length > 0 && r.platforms.every(isNonEmptyString))) {
       return invalid('contributes.picker platforms must be a non-empty array of process.platform values when present')
     }
