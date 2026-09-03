@@ -86,9 +86,11 @@ function acceptingServer(req) {
 /**
  * One address in the single spelling a `Host` naming it would use:
  * lowercased, with the IPv4-mapped prefix off. libuv writes an address that
- * reached a dual-stack socket in the mapped form (`::ffff:198.51.100.7`) on
- * both sides of the comparison below, and no client writes it in a `Host`,
- * so both sides are read through this. Otherwise a bind spelled that way
+ * reached a dual-stack socket in the mapped form (`::ffff:198.51.100.7`), and
+ * a client that copied its endpoint back out of such a tool writes that same
+ * form in a `Host`. So every string the check below compares is read through
+ * this: the arrival address, the bind, and the `Host` hostname. Otherwise one
+ * address in two spellings collects two verdicts. A bind spelled that way
  * stops matching the address it is reached on, and an explicitly routable
  * listener loses the exemption it is configured for.
  *
@@ -206,6 +208,15 @@ export function isMisdirectedHost(req, opts) {
       [Attr.ERROR_KIND]: 'host_not_loopback',
       listener: opts.name,
       host: value.slice(0, LOGGED_HOST_MAX_CHARS),
+      // Which side refused and under what bind, because the rule is no longer
+      // 'loopback only' everywhere: a wildcard bind answers on its routable
+      // side to the address the request arrived on and to no other routable
+      // name. Without these, an operator whose name-based LAN exporter starts
+      // refusing reads a line indistinguishable from a rebinding attempt on
+      // the loopback side. Empty for an address that could not be read, the
+      // case that is judged rather than exempted.
+      arrived_on: arrivedOn,
+      bind: boundAddress(req) ?? '',
       // Every refusal since this listener started, so a burst the interval
       // above swallowed is still legible from one line.
       refused_total: refusals.total,

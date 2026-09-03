@@ -489,18 +489,22 @@ test('loopback Hosts keep passing, with any port and in every spelling', async (
 })
 
 /**
- * A non-internal IPv4 address of this machine, or `undefined` on a host with
- * no routable interface at all.
+ * Every non-internal IPv4 address of this machine, in the order the OS lists
+ * them. All of them rather than the first, because the first is often the one
+ * that will not serve: a container bridge, a VPN tunnel, or a link-local
+ * autoconfigured address. Skipping on that one alone would skip a regression
+ * test another interface on the same host can run.
  *
- * @returns {string | undefined}
+ * @returns {string[]}
  */
-function routableIpv4() {
+function routableIpv4s() {
+  const found = []
   for (const addresses of Object.values(os.networkInterfaces())) {
     for (const address of addresses ?? []) {
-      if (address.family === 'IPv4' && !address.internal) return address.address
+      if (address.family === 'IPv4' && !address.internal) found.push(address.address)
     }
   }
-  return undefined
+  return found
 }
 
 /**
@@ -534,13 +538,20 @@ function canReach(address, port) {
 // there. The routable side is judged like the loopback side, and answers to
 // the address the request arrived on rather than to a name.
 test('a wildcard bind is judged on its routable side too', async (t) => {
-  const routable = routableIpv4()
-  if (!routable) return t.skip('no routable IPv4 interface on this host')
+  const candidates = routableIpv4s()
+  if (candidates.length === 0) return t.skip('no routable IPv4 interface on this host')
   const s = await startServer({ host: '0.0.0.0' })
   try {
-    if (!(await canReach(routable, s.bound.port))) {
-      return t.skip('this host does not accept connections on its routable address')
+    // Bounded by `canReach` per candidate, so a host that drops on every one
+    // of them still ends the test rather than hanging it.
+    let routable
+    for (const candidate of candidates) {
+      if (await canReach(candidate, s.bound.port)) {
+        routable = candidate
+        break
+      }
     }
+    if (!routable) return t.skip('no routable address of this host accepts connections')
     const refused = await requestWithHost(s.bound.port, {
       path: '/v1/logs',
       host: 'attacker.example',
@@ -761,6 +772,41 @@ test('a refusal is always counted but logged at most once an interval, with the 
   const logged = String(lines[0]?.fields?.host)
   assert.equal(logged.length, 128)
   assert.ok(host.startsWith(logged))
+})
+
+// The rule the refusal enforces is no longer 'loopback only' everywhere, so a
+// line that says only which `Host` was refused cannot tell an operator which
+// rule refused it. A wildcard bind's routable side and a loopback side produce
+// the same message and the same `error_kind`; the two addresses are what
+// separate a rebinding attempt from an exporter naming the listener by a name
+// the wildcard bind never published.
+test('the refusal line names the address the request arrived on and the bind', () => {
+  /** @type {{ event: string, fields: Record<string, unknown> }[]} */
+  const lines = []
+  /** @type {PluginLogger} */
+  const log = {
+    debug() {},
+    info() {},
+    error() {},
+    warn(event, fields) {
+      lines.push({ event, fields: fields ?? {} })
+    },
+  }
+  // A server of its own, so the tally is the WeakMap entry for it rather than
+  // one shared by listener name with another test.
+  const server = { address: () => ({ address: '0.0.0.0', family: 'IPv4', port: 4318 }) }
+  const refused = isMisdirectedHost(
+    /** @type {any} */ ({
+      socket: { localAddress: '::ffff:203.0.113.5', server },
+      headers: { host: 'lan.example' },
+    }),
+    { name: 'hypaware/refusal-fields', log }
+  )
+
+  assert.equal(refused, true)
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0]?.fields?.arrived_on, '203.0.113.5', 'the arrival address, in the one spelling')
+  assert.equal(lines[0]?.fields?.bind, '0.0.0.0', 'the bind, which is what denied the exemption')
 })
 
 test('a listener can serve a subset of the signals', async () => {
