@@ -48,7 +48,7 @@ async function bootGateway({ mode = 'intercepting' } = {}) {
   const started = []
   /** @type {URL[]} */
   const controlCalls = []
-  /** @type {string[]} */
+  /** @type {{ message: string, fields: Record<string, unknown> }[]} */
   const warns = []
 
   const proxy = await startProxy({
@@ -62,7 +62,7 @@ async function bootGateway({ mode = 'intercepting' } = {}) {
       }
       : {}),
     ...(mode === 'degraded' ? { tunnelOnly: true } : {}),
-    log: { warn: (message) => { warns.push(message) } },
+    log: { warn: (message, fields) => { warns.push({ message, fields: fields ?? {} }) } },
     upstreams: [{
       name: 'fake-anthropic',
       base_url: `http://${HOST}:${upstreamPort}`,
@@ -274,7 +274,7 @@ test('an absolute-form request from a non-loopback peer is refused', async (t) =
 
   assert.match(response, /^HTTP\/1\.1 403 /)
   assert.match(response, /loopback peers only/)
-  assert.equal(rig.warns.includes('aigw.absolute_form_refused_remote_peer'), true)
+  assert.ok(rig.warns.some((w) => w.message === 'aigw.absolute_form_refused_remote_peer'))
   assert.deepEqual(rig.upstreamHits, [])
   assert.equal(rig.started.length, 0)
 })
@@ -321,4 +321,112 @@ test('a degraded tunnel-only listener forwards absolute-form unrecorded', async 
   assert.match(body, /^HTTP\/1\.1 200 /)
   assert.deepEqual(rig.upstreamHits, ['/v1/messages?beta=true'])
   assert.equal(rig.started.length, 0)
+})
+
+// The rebinding barrier on the third loopback listener (issue #1238). A direct
+// origin-form request is the one shape here addressed to this listener itself,
+// so a `Host` naming anything else is what a DNS-rebound page's request
+// carries, and it must not reach the unauthenticated control surface.
+test('a direct origin-form request carrying a foreign Host is refused ahead of the control route', async (t) => {
+  const rig = await bootGateway()
+  t.after(() => rig.cleanup())
+
+  const body = await rawRequest({
+    port: rig.proxy.port,
+    target: '/_hypaware/ignore/session',
+    host: 'attacker.example',
+  })
+
+  assert.match(body, /^HTTP\/1\.1 421 /)
+  assert.deepEqual(rig.controlCalls, [])
+  const refusal = rig.warns.find((w) => w.message === 'listener.host_refused')
+  assert.ok(refusal, 'the refusal is observable')
+  assert.equal(refusal?.fields?.error_kind, 'host_not_loopback')
+  assert.equal(refusal?.fields?.listener, '@hypaware/ai-gateway')
+})
+
+// The other half of the same request: routing, where a catch-all upstream
+// (`path_prefix: "/"`) turns a rebound POST into a row in
+// `ai_gateway_messages`. The refusal lands ahead of the match.
+test('a direct origin-form request carrying a foreign Host never reaches an upstream', async (t) => {
+  const rig = await bootGateway()
+  t.after(() => rig.cleanup())
+
+  const body = await rawRequest({
+    port: rig.proxy.port,
+    target: '/v1/messages',
+    host: 'attacker.example',
+  })
+
+  assert.match(body, /^HTTP\/1\.1 421 /)
+  assert.deepEqual(rig.upstreamHits, [])
+  assert.equal(rig.started.length, 0)
+})
+
+// The traffic the barrier must not touch: an attached client addresses the
+// listener by a loopback name, on both the control surface and the routed
+// paths.
+test('loopback-named origin-form traffic is unaffected', async (t) => {
+  const rig = await bootGateway()
+  t.after(() => rig.cleanup())
+
+  const control = await rawRequest({
+    port: rig.proxy.port,
+    target: '/_hypaware/ignore/session',
+    host: `127.0.0.1:${rig.proxy.port}`,
+  })
+  assert.match(control, /^HTTP\/1\.1 204 /)
+  assert.equal(rig.controlCalls.length, 1)
+
+  const proxied = await rawRequest({
+    port: rig.proxy.port,
+    target: '/v1/messages',
+    host: `localhost:${rig.proxy.port}`,
+  })
+  assert.match(proxied, /^HTTP\/1\.1 200 /)
+  assert.deepEqual(rig.upstreamHits, ['/v1/messages'])
+  assert.equal(rig.started.length, 1)
+})
+
+// `Host` is load-bearing for the other two front doors, which are addressed to
+// a third party by design: an absolute-form request routes by the authority its
+// request line names, and the `Host` beside it is the client's business.
+test('an absolute-form request carrying a foreign Host is unaffected', async (t) => {
+  const rig = await bootGateway()
+  t.after(() => rig.cleanup())
+
+  const authority = `${HOST}:${rig.upstreamPort}`
+  const body = await rawRequest({
+    port: rig.proxy.port,
+    target: `https://${authority}/v1/messages`,
+    host: 'attacker.example',
+  })
+
+  assert.match(body, /^HTTP\/1\.1 200 /)
+  assert.deepEqual(rig.upstreamHits, ['/v1/messages'])
+  assert.equal(rig.started.length, 1)
+})
+
+// The barrier's absolute-form exemption is scoped by shape, not by the door.
+// A pure reverse-proxy listener never opens the forward-proxy door, so
+// `absoluteForm` is false there, but it still answers the shape by path
+// routing, and LLP 0233 promises it behaves exactly as it always has. Judging
+// the `Host` beside a request line that already named its destination would
+// break that promise with a 421.
+// @ref LLP 0247#only-forward-proxy-listeners-serve-it [tests]
+test('a reverse-proxy-only listener still path-routes absolute-form under a foreign Host', async (t) => {
+  const rig = await bootGateway({ mode: 'reverse-proxy' })
+  t.after(() => rig.cleanup())
+
+  const authority = `${HOST}:${rig.upstreamPort}`
+  const body = await rawRequest({
+    port: rig.proxy.port,
+    target: `https://${authority}/v1/messages`,
+    host: 'api.anthropic.com',
+  })
+
+  assert.match(body, /^HTTP\/1\.1 200 /)
+  assert.deepEqual(rig.upstreamHits, ['/v1/messages'])
+  assert.equal(rig.started.length, 1)
+  assert.equal(rig.warns.some((w) => w.message === 'listener.host_refused'), false)
 })

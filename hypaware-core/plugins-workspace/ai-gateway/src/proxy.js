@@ -5,6 +5,7 @@ import https from 'node:https'
 import tls from 'node:tls'
 
 import { isControlPath } from '../../../../src/core/control/session_ignore.js'
+import { isMisdirectedHost } from '../../../../src/core/otlp/server.js'
 import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
 import { isLoopbackHost } from '../../../../src/core/util/loopback.js'
 import { parseListen } from './config.js'
@@ -363,8 +364,14 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   // always has (LLP 0233 #proxy-mode-is-explicit).
   // @ref LLP 0247#only-forward-proxy-listeners-serve-it [implements]: absolute-form is served beside CONNECT or not at all
   const forwardProxyDoor = Boolean(opts.interception) || Boolean(opts.tunnelOnly)
+  // The shape, held apart from the door. A request line carrying an absolute
+  // URL names its own destination whatever this listener then does with it, so
+  // the `Host` beside it is that destination's name and not a claim about us.
+  // The door decides whether we route by that name; the barrier below only
+  // needs to know the claim was never made.
+  const absoluteFormShape = !proxyMode && /^https?:\/\//i.test(requestUrl)
   // @ref LLP 0247#route-by-the-named-host [implements]: the request line names the destination, so routing is by host, not path
-  const absoluteForm = !proxyMode && forwardProxyDoor && /^https?:\/\//i.test(requestUrl)
+  const absoluteForm = absoluteFormShape && forwardProxyDoor
   if (absoluteForm) {
     // An absolute-form request is addressed to a third party, so serving it
     // to non-loopback peers would relay for the network: the same rule, for
@@ -377,6 +384,34 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
       sendJson(res, 403, { error: 'absolute-form is served to loopback peers only' })
       return
     }
+  }
+
+  // The rebinding barrier. A direct origin-form request is the one shape here
+  // addressed to this listener itself, so a `Host` naming anything else names
+  // something that merely resolves here: what a DNS-rebound page sends, which
+  // the browser holds same-origin with this port, so no preflight stands in
+  // its way. Refused ahead of both things it can reach: the unauthenticated
+  // `/_hypaware/` route below, and a catch-all upstream, where a rebound POST
+  // becomes a row.
+  //
+  // Scoped to the direct origin. The other two front doors are addressed to a
+  // third party by design, so their `Host` is that party's name and never this
+  // listener's; what contains them is the loopback-peers-only check above and
+  // the routing table.
+  //
+  // The absolute-form arm is scoped by SHAPE, not by the door the control
+  // check below is scoped by. A pure reverse-proxy listener opens no such
+  // door, yet it still answers the shape, by letting it fall through to path
+  // routing exactly as it always has (LLP 0247
+  // #only-forward-proxy-listeners-serve-it, LLP 0233 #proxy-mode-is-explicit).
+  // Judging a `Host` the client never aimed at this listener would turn that
+  // promise into a 421. Nothing is given up: a browser cannot put an absolute
+  // URL on a request line, so the shape is out of reach of the rebinding this
+  // refuses.
+  if (!proxyMode && !absoluteFormShape && isMisdirectedHost(req, { name: '@hypaware/ai-gateway', log: opts.log })) {
+    req.resume()
+    sendJson(res, 421, { error: 'misdirected request' })
+    return
   }
 
   // @ref LLP 0066#control-path [implements]: the reserved `/_hypaware/`

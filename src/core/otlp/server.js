@@ -163,9 +163,11 @@ function hostnameOfHostHeader(value) {
  * the signal.
  *
  * @param {IncomingMessage} req
- * @param {{ name: string, log?: PluginLogger }} opts `name` identifies the
- * listener in the refusal log line; `log` lets a hosting plugin stamp its
- * own logger on it, the way the control handler does.
+ * @param {{ name: string, log?: Partial<PluginLogger> }} opts `name` identifies
+ * the listener in the refusal log line; `log` lets a hosting plugin stamp its
+ * own logger on it, the way the control handler does. Partial, because a
+ * plugin may hold its logger under a type declaring only the methods it calls;
+ * a logger with no `warn` still has its refusals counted.
  * @returns {boolean}
  */
 export function isMisdirectedHost(req, opts) {
@@ -201,7 +203,7 @@ export function isMisdirectedHost(req, opts) {
   if (now - refusals.loggedAt >= HOST_REFUSED_LOG_INTERVAL_MS) {
     refusals.loggedAt = now
     const log = opts.log ?? getLogger('otlp')
-    log.warn('listener.host_refused', {
+    log.warn?.('listener.host_refused', {
       [Attr.COMPONENT]: 'sources',
       [Attr.OPERATION]: 'host_check',
       [Attr.STATUS]: 'skipped',
