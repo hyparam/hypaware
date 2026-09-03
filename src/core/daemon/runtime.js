@@ -1075,14 +1075,23 @@ export async function runDaemon(opts = {}) {
     // design, and forcing an exit through it is the orphaned child and
     // lost marker that settle exists to prevent.
     // @ref LLP 0365#restart-exit-is-bounded [implements]: a restart shutdown that overruns is exited by force so the supervisor relaunches
+    //
+    // Cleared once the shutdown reaches its end below. `unref` keeps it
+    // from holding *this* process open, but it does not make it harmless:
+    // a caller that runs the daemon in-process and outlives a restart stop
+    // (the join_flow_remote_config smoke boots a second daemon in the same
+    // process) has other handles keeping the loop alive, and an uncleared
+    // timer would exit that process out from under it.
+    /** @type {NodeJS.Timeout | null} */
+    let forcedExit = null
     if (reason === 'restart' && supervised) {
-      const forced = setTimeout(() => {
+      forcedExit = setTimeout(() => {
         try {
           fileLog.error('daemon.restart_exit_forced', { after_ms: RESTART_EXIT_DEADLINE_MS })
         } catch { /* the log may already be closed */ }
         process.exit(DAEMON_RESTART_EXIT_CODE)
       }, RESTART_EXIT_DEADLINE_MS)
-      forced.unref()
+      forcedExit.unref()
     }
     // Last chance to capture accruing source details: the sources are still
     // running here, and after `stopAllSources` below their probes are gone.
@@ -1132,6 +1141,9 @@ export async function runDaemon(opts = {}) {
     if (installSignals) {
       removeSignalHandlers()
     }
+    // The shutdown finished inside its deadline, so the forced exit has
+    // nothing left to bound.
+    if (forcedExit) clearTimeout(forcedExit)
     // @ref LLP 0017#staged-restart-for-config-replacement [implements]: the daemon exits and the service manager (or looping invoker) relaunches it
     resolveDone?.(reason === 'restart' ? DAEMON_RESTART_EXIT_CODE : 0)
     return done

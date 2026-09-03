@@ -39,11 +39,11 @@ export const NPM_KILL_GRACE_MS = 5000
 // An apply lock this old belonged to a process that died mid-install;
 // honoring it forever would wedge updates permanently. The floor is the
 // longest a live holder can legitimately hold it: `applySelfUpdate` runs
-// two npm commands, each bounded by the timeout plus the kill grace. Two
-// of those again is the margin - reclaiming a lock its owner still holds
-// starts the second concurrent `npm install -g` this lock exists to
-// prevent, so erring long costs a slower recovery and erring short costs
-// the machine.
+// up to three npm commands (prefix, install, and the rollback install)
+// plus the preflight, each bounded by its own timeout, which is about
+// 390s of the 500s here. Reclaiming a lock its owner still holds starts
+// the second concurrent `npm install -g` this lock exists to prevent, so
+// erring long costs a slower recovery and erring short costs the machine.
 export const APPLY_LOCK_STALE_MS = 4 * (NPM_TIMEOUT_MS + NPM_KILL_GRACE_MS)
 const DAILY_CHECK_MS = 24 * 60 * 60 * 1000
 // One hour when the previous boot never reached healthy: a machine
@@ -624,9 +624,10 @@ export async function applySelfUpdate(opts) {
 
   const preflight = await runPreflight({ globalRoot, version: opts.version, env, run })
   if (preflight.ok) return { applied: true }
-  log('self_update.preflight_failed', { latest_version: opts.version, detail: preflight.detail })
+  const reason = preflight.inconclusive ? 'preflight_inconclusive' : 'preflight_failed'
+  log('self_update.preflight_failed', { error_kind: reason, latest_version: opts.version, detail: preflight.detail })
   if (!opts.previousVersion || opts.previousVersion === opts.version) {
-    return { applied: false, reason: 'preflight_failed', detail: preflight.detail }
+    return { applied: false, reason, detail: preflight.detail }
   }
   const back = await run('npm', ['install', '-g', `${opts.name}@${opts.previousVersion}`], { env })
   const restored = readVersionAt(globalRoot) === opts.previousVersion
@@ -635,7 +636,7 @@ export async function applySelfUpdate(opts) {
     to: opts.previousVersion,
     ...(restored ? {} : { detail: npmDetail(back) }),
   })
-  return { applied: false, reason: 'preflight_failed', detail: preflight.detail, rolledBack: restored }
+  return { applied: false, reason, detail: preflight.detail, rolledBack: restored }
 }
 
 /**
@@ -647,7 +648,7 @@ export async function applySelfUpdate(opts) {
  * service unit will relaunch with.
  *
  * @param {{ globalRoot: string, version: string, env: NodeJS.ProcessEnv, run: CommandRunner }} opts
- * @returns {Promise<{ ok: boolean, detail?: string }>}
+ * @returns {Promise<{ ok: boolean, inconclusive?: boolean, detail?: string }>}
  */
 async function runPreflight({ globalRoot, version, env, run }) {
   const bin = path.join(globalRoot, 'bin', 'hypaware.js')
@@ -656,7 +657,13 @@ async function runPreflight({ globalRoot, version, env, run }) {
   const detail = result.exitCode === 0
     ? `printed ${JSON.stringify(result.stdout.trim().slice(0, 80))} instead of ${version}`
     : `exit ${result.exitCode}: ${npmDetail(result)}`
-  return { ok: false, detail }
+  // `runCommand` reports a timeout and a failure to spawn as the same -1,
+  // and neither is the release answering for itself: a loaded host, or a
+  // node that moved between the install and this check. It still blocks
+  // the hand-over, but it must not *hold* the version, because a hold is
+  // only lifted by a newer release and refusing a good one for good on a
+  // hiccup is the worse failure.
+  return { ok: false, inconclusive: result.exitCode === -1, detail }
 }
 
 /**
@@ -942,10 +949,46 @@ export async function runSelfUpdatePass(opts = {}) {
     if (!supervised && !opts.force) {
       // Installing without restarting is the stale-daemon state above, and
       // restarting means exiting into nothing. Neither is an update.
-      log('self_update.skipped', { reason: 'unsupervised', latest_version: latest })
+      //
+      // Its own event, not `self_update.skipped`: the pre-boot lane in
+      // `bin/hypaware.js` filters that one out as routine (a dev checkout,
+      // the off switch), and this is the opposite of routine. If
+      // `detectSupervisor` is wrong about a host, every lane stops applying
+      // and the only symptom left is the one this whole document is about,
+      // so the refusal has to be legible wherever the lane logs.
+      log('self_update.unsupervised', { latest_version: latest, running_version: identity.version })
       return { action: 'checked', reason: 'unsupervised', latest }
     }
     if (restartOnly) {
+      // Nothing here installed what the root now holds - a hand-typed
+      // `npm install -g` is the likely author - so no preflight has ever
+      // run against it. #preflight-then-hand-over is a rule about the
+      // hand-over, not about the apply: this lane exits the daemon for a
+      // relaunch onto that code, which is the same hand-over an apply
+      // performs, and a release that cannot start would crash-loop with
+      // no `last_apply` for the rollback lane to act on.
+      // @ref LLP 0365#preflight-then-hand-over [implements]: the restart-only lane proves the root runs before it hands the daemon over
+      const proof = await runPreflight({
+        globalRoot: path.resolve(opts.packageRoot ?? PACKAGE_ROOT),
+        version: identity.version,
+        env: withNodeBinOnPath(env),
+        run: opts.runner ?? runCommand,
+      })
+      if (!proof.ok) {
+        const reason = proof.inconclusive ? 'preflight_inconclusive' : 'preflight_failed'
+        log('self_update.preflight_failed', {
+          error_kind: reason,
+          latest_version: identity.version,
+          running_version: running,
+          detail: proof.detail,
+        })
+        // A definite refusal is held, which is what stops the next pass
+        // from asking the same question and what makes `hyp status` name
+        // the version instead of advertising a restart onto it. An
+        // inconclusive one is left alone and asked again next pass.
+        if (reason === 'preflight_failed') writeSelfUpdateState(stateRoot, { held_version: identity.version })
+        return { action: 'checked', reason, latest: identity.version }
+      }
       log('self_update.restart_pending', { running_version: running, installed_version: identity.version })
       return { action: 'updated', reason: 'restart_only', latest: identity.version }
     }
@@ -1136,11 +1179,11 @@ async function maybeRollBack({ stateRoot, stuck, packageRoot, env, runner, nowMs
  * carries the full picture for `--json`.
  *
  * @ref LLP 0309#cli-surface [implements]: an install that cannot self-update says so in status, never only in logs
- * @param {{ stateRoot: string, env: NodeJS.ProcessEnv, now?: () => Date }} opts
+ * @param {{ stateRoot: string, env: NodeJS.ProcessEnv, packageRoot?: string, now?: () => Date }} opts
  * @returns {{ line: string | null, json: Record<string, unknown> }}
  */
 export function describeSelfUpdate(opts) {
-  const provenance = classifySelfProvenance({ env: opts.env })
+  const provenance = classifySelfProvenance({ packageRoot: opts.packageRoot, env: opts.env })
   const state = readSelfUpdateState(opts.stateRoot)
   // `hyp status` must survive its own updater. An in-flight
   // `npm install -g` briefly leaves this package root without a
@@ -1149,7 +1192,7 @@ export function describeSelfUpdate(opts) {
   /** @type {{ name: string, version: string }} */
   let identity
   try {
-    identity = readSelfPackageIdentity()
+    identity = readSelfPackageIdentity(opts.packageRoot)
   } catch {
     identity = { name: 'hypaware', version: 'unknown' }
   }
@@ -1172,7 +1215,15 @@ export function describeSelfUpdate(opts) {
   const runningVersion = typeof state.running_version === 'string' && daemonIsAlive(opts.stateRoot)
     ? state.running_version
     : undefined
-  const staleDaemon = runningVersion !== undefined && compareSemver(identity.version, runningVersion) > 0
+  // Gated on provenance, unlike every other comparison here: this one
+  // reads `identity.version` as "the version installed on this machine",
+  // which it only is when the process rendering status IS that install. A
+  // maintainer running `hyp status` from a source checkout beside a
+  // global daemon would otherwise be told the checkout is installed and
+  // that 'hyp daemon restart' will load it, which is false and which
+  // restarting can never clear.
+  const staleDaemon = provenance === 'global-candidate' &&
+    runningVersion !== undefined && compareSemver(identity.version, runningVersion) > 0
   // The root holding the held version is the failed-rollback shape: the
   // new version could not start, and the reinstall of the one it replaced
   // did not land either, so the daemon is deliberately still on older

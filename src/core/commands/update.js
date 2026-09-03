@@ -129,6 +129,23 @@ export async function runUpdate(argv, ctx) {
     )
     return 1
   }
+  // The entrypoint on disk could not be proven to start, so repeating the
+  // install is the one thing that cannot help: the generic branch below
+  // hands over `npm install -g <name>@latest`, which puts back the exact
+  // version that would not run. Reached from the apply lane (whose
+  // rollback has already restored the previous version, or tried to) and
+  // from the restart-only lane, which installed nothing at all.
+  if (result.reason === 'preflight_failed' || result.reason === 'preflight_inconclusive') {
+    const what = result.latest ?? 'that release'
+    ctx.stderr.write(
+      result.reason === 'preflight_inconclusive'
+        ? `hyp update: could not check whether ${what} starts on this machine, so the daemon was left on the ` +
+          'version it is already running. Try again.\n'
+        : `hyp update: ${what} could not start on this machine, so the daemon was left on the version it is ` +
+          "already running. It is held until a newer release publishes; 'hyp status' has the detail.\n"
+    )
+    return 1
+  }
   if (result.reason === 'checkout' || result.reason === 'npx') {
     const how = result.reason === 'checkout' ? 'a source checkout' : 'an npx cache'
     ctx.stderr.write(
