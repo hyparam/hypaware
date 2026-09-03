@@ -283,6 +283,41 @@ test('a request carrying a foreign Host reaches neither /snapshot nor the contro
   }
 })
 
+// The refusal tally is module state keyed by listener name. Unless stopping
+// hands it back, a listener the daemon restarts inside the log interval
+// inherits the stopped one's `loggedAt` and writes nothing for its own first
+// refusals, and every test in this file that refuses shares one tally.
+test('a restarted listener logs its first refusal rather than inheriting the stopped one', async () => {
+  const first = await startListener()
+  try {
+    const before = await postWithHost(first.endpoint, {
+      path: '/snapshot',
+      host: 'attacker.example',
+      body: snapshot('ses_before_restart', first.root),
+    })
+    assert.equal(before.status, 421)
+    assert.equal(first.logs.filter((entry) => entry.event === 'listener.host_refused').length, 1)
+  } finally {
+    await first.cleanup()
+  }
+
+  const second = await startListener()
+  try {
+    const after = await postWithHost(second.endpoint, {
+      path: '/snapshot',
+      host: 'attacker.example',
+      body: snapshot('ses_after_restart', second.root),
+    })
+    assert.equal(after.status, 421)
+    const refused = second.logs.filter((entry) => entry.event === 'listener.host_refused')
+    assert.equal(refused.length, 1, 'the restarted listener wrote its own first refusal')
+    // And counts its own run, so the line is not read as a burst of two.
+    assert.equal(refused[0]?.fields?.refused_total, 1)
+  } finally {
+    await second.cleanup()
+  }
+})
+
 // The handler here is synchronous, so a throw out of it is an
 // `uncaughtException`, and this repo installs no handler for one.
 test('a request target new URL rejects is answered 400 rather than ending the daemon', async () => {

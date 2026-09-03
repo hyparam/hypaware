@@ -8,7 +8,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { isLoopbackHost } from '../util/loopback.js'
 
 /**
- * @import { IncomingMessage } from 'node:http'
+ * @import { IncomingMessage, Server } from 'node:http'
  * @import { PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
  * @import { OtlpJsonServerOptions, OtlpSignal } from '../../../src/core/otlp/types.js'
  */
@@ -38,9 +38,33 @@ const LOGGED_HOST_MAX_CHARS = 128
 /**
  * Refusals so far, per listener name, for the bound above.
  *
+ * Keyed by name, not held per server, because the check runs ahead of any
+ * listener state. `forgetRefusalsOnClose` drops the entry when the refusing
+ * server closes, so a listener restarted inside the interval does not inherit
+ * the stopped one's `loggedAt` and swallow its own first refusals, and
+ * `refused_total` counts one listener's run.
+ *
  * @type {Map<string, { total: number, loggedAt: number }>}
  */
 const HOST_REFUSALS = new Map()
+
+/**
+ * Drop `name`'s refusal state when the server that received `req` closes,
+ * which is what a listener's `stop()` does. Taken off the request rather than
+ * registered at server construction so it covers every host of this check,
+ * including the OpenCode listener, which builds its own server and borrows
+ * this one function. A request with no server behind it (a direct call from a
+ * test) leaves its entry for the life of the process.
+ *
+ * @param {IncomingMessage} req
+ * @param {string} name
+ */
+function forgetRefusalsOnClose(req, name) {
+  // Node sets the accepting server on every server-side socket but does not
+  // declare it on `net.Socket`.
+  const server = /** @type {{ server?: Server }} */ (req.socket).server
+  server?.once('close', () => HOST_REFUSALS.delete(name))
+}
 
 /**
  * Read the hostname out of a `Host` header, dropping the optional port
@@ -106,9 +130,15 @@ export function isMisdirectedHost(req, opts) {
   if (!value) return false
   const hostname = hostnameOfHostHeader(value)
   if (hostname !== undefined && (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname))) return false
-  const refusals = HOST_REFUSALS.get(opts.name) ?? { total: 0, loggedAt: 0 }
+  let refusals = HOST_REFUSALS.get(opts.name)
+  if (!refusals) {
+    refusals = { total: 0, loggedAt: 0 }
+    HOST_REFUSALS.set(opts.name, refusals)
+    // One hook per entry, and the entry goes when the server does, so the
+    // listener's next run registers its own.
+    forgetRefusalsOnClose(req, opts.name)
+  }
   refusals.total += 1
-  HOST_REFUSALS.set(opts.name, refusals)
   const now = Date.now()
   if (now - refusals.loggedAt >= HOST_REFUSED_LOG_INTERVAL_MS) {
     refusals.loggedAt = now
@@ -120,7 +150,7 @@ export function isMisdirectedHost(req, opts) {
       [Attr.ERROR_KIND]: 'host_not_loopback',
       listener: opts.name,
       host: value.slice(0, LOGGED_HOST_MAX_CHARS),
-      // Every refusal since this process started, so a burst the interval
+      // Every refusal since this listener started, so a burst the interval
       // above swallowed is still legible from one line.
       refused_total: refusals.total,
     })
