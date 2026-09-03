@@ -36,34 +36,35 @@ const HOST_REFUSED_LOG_INTERVAL_MS = 60 * 1000
 // a real one is short.
 const LOGGED_HOST_MAX_CHARS = 128
 /**
- * Refusals so far, per listener name, for the bound above.
+ * Refusals so far, for the bound above, keyed by the server that refused them.
  *
- * Keyed by name, not held per server, because the check runs ahead of any
- * listener state. `forgetRefusalsOnClose` drops the entry when the refusing
- * server closes, so a listener restarted inside the interval does not inherit
- * the stopped one's `loggedAt` and swallow its own first refusals, and
- * `refused_total` counts one listener's run.
+ * Per server rather than per listener name, so the state lives exactly as long
+ * as the listener that filled it in: a listener restarted inside the interval
+ * accepts on a new server and so starts a fresh entry, rather than inheriting
+ * the stopped one's `loggedAt` and swallowing its own first refusals, and
+ * `refused_total` counts one listener's run. Two live listeners sharing a
+ * name cannot reach each other's tally either. The entry is dropped when its
+ * server closes, which is what a listener's `stop()` does. A direct call with
+ * no server behind it (a test) falls back to the listener name and keeps its
+ * entry for the life of the process.
  *
- * @type {Map<string, { total: number, loggedAt: number }>}
+ * @type {Map<Server | string, { total: number, loggedAt: number }>}
  */
 const HOST_REFUSALS = new Map()
 
 /**
- * Drop `name`'s refusal state when the server that received `req` closes,
- * which is what a listener's `stop()` does. Taken off the request rather than
- * registered at server construction so it covers every host of this check,
- * including the OpenCode listener, which builds its own server and borrows
- * this one function. A request with no server behind it (a direct call from a
- * test) leaves its entry for the life of the process.
+ * The server that accepted `req`, or `undefined` for a request with none
+ * behind it. Read off the request rather than threaded through the listener
+ * API so it covers every host of this check, including the OpenCode listener,
+ * which builds its own server and borrows this one function.
  *
  * @param {IncomingMessage} req
- * @param {string} name
+ * @returns {Server | undefined}
  */
-function forgetRefusalsOnClose(req, name) {
+function acceptingServer(req) {
   // Node sets the accepting server on every server-side socket but does not
   // declare it on `net.Socket`.
-  const server = /** @type {{ server?: Server }} */ (req.socket).server
-  server?.once('close', () => HOST_REFUSALS.delete(name))
+  return /** @type {{ server?: Server }} */ (req.socket).server
 }
 
 /**
@@ -130,13 +131,16 @@ export function isMisdirectedHost(req, opts) {
   if (!value) return false
   const hostname = hostnameOfHostHeader(value)
   if (hostname !== undefined && (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname))) return false
-  let refusals = HOST_REFUSALS.get(opts.name)
+  const server = acceptingServer(req)
+  const key = server ?? opts.name
+  let refusals = HOST_REFUSALS.get(key)
   if (!refusals) {
     refusals = { total: 0, loggedAt: 0 }
-    HOST_REFUSALS.set(opts.name, refusals)
-    // One hook per entry, and the entry goes when the server does, so the
-    // listener's next run registers its own.
-    forgetRefusalsOnClose(req, opts.name)
+    HOST_REFUSALS.set(key, refusals)
+    // One hook per entry, and the entry is this server's alone, so the
+    // listener's next run starts its own and no live listener sharing the
+    // name loses a tally.
+    server?.once('close', () => HOST_REFUSALS.delete(server))
   }
   refusals.total += 1
   const now = Date.now()

@@ -318,6 +318,45 @@ test('a restarted listener logs its first refusal rather than inheriting the sto
   }
 })
 
+// Every listener this plugin starts carries the same name, so name-keyed
+// refusal state would let one live listener's stop wipe another's tally and
+// rate-limit clock. The state is per server instead, and this is what says so.
+test('two live listeners sharing a name keep their own refusal state', async () => {
+  const a = await startListener()
+  const b = await startListener()
+  let aStopped = false
+  /** @param {{ endpoint: string, root: string, logs: Array<{ event: string }> }} listener @param {string} id */
+  const refusedBy = async (listener, id) => {
+    const res = await postWithHost(listener.endpoint, {
+      path: '/snapshot',
+      host: 'attacker.example',
+      body: snapshot(id, listener.root),
+    })
+    assert.equal(res.status, 421)
+    return listener.logs.filter((entry) => entry.event === 'listener.host_refused')
+  }
+  try {
+    assert.equal((await refusedBy(a, 'ses_a_first')).length, 1)
+    // Not swallowed by the other listener's clock, which is what one shared
+    // tally would do inside the one-minute interval.
+    assert.equal((await refusedBy(b, 'ses_b_first')).length, 1, 'b wrote its own first refusal')
+
+    await a.cleanup()
+    aStopped = true
+
+    // And that stop took only a's entry: this refusal is still inside b's
+    // interval, so it is counted and not written a second time.
+    assert.equal(
+      (await refusedBy(b, 'ses_b_after_a_stopped')).length,
+      1,
+      "the other listener's stop did not reset b's rate limit"
+    )
+  } finally {
+    if (!aStopped) await a.cleanup()
+    await b.cleanup()
+  }
+})
+
 // The handler here is synchronous, so a throw out of it is an
 // `uncaughtException`, and this repo installs no handler for one.
 test('a request target new URL rejects is answered 400 rather than ending the daemon', async () => {
