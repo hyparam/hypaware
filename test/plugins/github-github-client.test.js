@@ -128,7 +128,7 @@ test('list methods return one normalized page and discard content bodies', async
         status: 200,
         headers: {
           'content-type': 'application/json',
-          link: '<https://api.github.test/repos/o/r/issues?page=2>; rel="next"',
+          link: '<https://api.github.com/repos/o/r/issues?page=2>; rel="next"',
         },
       })
     },
@@ -136,7 +136,7 @@ test('list methods return one normalized page and discard content bodies', async
 
   const page = await client.listIssuesPage('o', 'r', undefined)
   assert.equal(fetches, 1)
-  assert.equal(page.next, 'https://api.github.test/repos/o/r/issues?page=2')
+  assert.equal(page.next, 'https://api.github.com/repos/o/r/issues?page=2')
   assert.deepEqual(page.items, [{ number: 7, state: 'open', user: { login: 'Octocat', type: 'User' } }])
   assert.ok(!Object.hasOwn(page.items[0], 'body'))
 })
@@ -425,3 +425,36 @@ for (const lookalike of ['https://api.github.test.evil.test/user/repos?page=2', 
     assert.equal(fetches, 0)
   })
 }
+
+test('a foreign Link header is refused on the response that carried it, so it never reaches the cursor sidecar', async () => {
+  let fetches = 0
+  const client = createGithubClient({
+    tokenEnv: 'T',
+    env: { T: 'secret' },
+    baseUrl: 'https://api.github.test',
+    log: silentLog,
+    async fetchImpl() {
+      fetches += 1
+      return new Response(JSON.stringify([{ number: 1, state: 'open', user: { login: 'a' } }]), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          link: '<https://evil.test/repos/o/r/issues?page=2>; rel="next"',
+        },
+      })
+    },
+  })
+
+  // Returning this page with its foreign `next` would persist a URL that can
+  // never be fetched into `github-cursors.json`. Capture then clears that
+  // poisoned work and restarts the phase from its unpublished watermark, so
+  // page one's rows are appended again on every later tick. Refuse the page
+  // instead: the stall stays loud and `github_events` gains no duplicates.
+  await assert.rejects(client.listIssuesPage('o', 'r', undefined, undefined), (error) => {
+    assert.ok(error instanceof Error)
+    assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+    assert.doesNotMatch(error.message, /secret/)
+    return true
+  })
+  assert.equal(fetches, 1, 'only the page that carried the header is requested')
+})

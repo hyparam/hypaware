@@ -625,8 +625,9 @@ test('staged phase watermarks survive the cursor sidecar round trip', (t) => {
 test('a refused continuation clears the poisoned work so the next tick captures the repo again', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-foreign-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
-  // A hand-tampered sidecar, or a hostile `Link` header an earlier tick wrote
-  // through: the persisted continuation addresses an origin the client refuses.
+  // A hand-tampered sidecar: the persisted continuation addresses an origin the
+  // client refuses. A live `Link` header cannot get here any more, because the
+  // client pins `next` on the response that carried it.
   writeCursors(stateDir, /** @type {any} */ ({
     schema_version: 1,
     repos: {
