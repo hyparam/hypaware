@@ -594,15 +594,22 @@ exporter, so a name is never enough.
 telemetry listener). It connects to `127.0.1.1`, a loopback address, so the
 guard judges the request, and the machine's own hostname is not one of the
 accepted names. Addressing a local listener by the machine hostname is not
-supported, and no config key widens the accepted set. This is only reachable
-on a `listen_host` other than the default: a listener bound to `127.0.0.1`
-never receives a connection addressed to `127.0.1.1` in the first place.
+supported, and no config key widens the accepted set. Reaching the listener
+by `127.0.1.1` needs a `listen_host` other than the default, since one bound to
+`127.0.0.1` never receives a connection addressed to `127.0.1.1`. The refusal
+itself does not: any other name that resolves to `127.0.0.1`, an
+`/etc/hosts` alias on that line or a `*.localhost` subdomain, is refused on
+the default bind too.
 
-Point the exporter at `localhost` or `127.0.0.1` instead. On a wildcard bind
-(`0.0.0.0` or `::`) a remote exporter should use the routable interface
-address as the literal it puts in `Host`; a listener bound to a specific
-routable address answers under any name pointed at that address, since serving
-that name is the point of binding there.
+Point the exporter at `localhost` or `127.0.0.1` instead. When `listen_host`
+is itself a non-default loopback address, address the listener by that
+literal, since every `127.x.y.z` one is accepted: a `listen_host` of the
+machine hostname binds to `127.0.1.1` on Debian and Ubuntu, so only
+`http://127.0.1.1:<port>` reaches it and `localhost` would not connect at all.
+On a wildcard bind (`0.0.0.0` or `::`) a remote exporter should use the
+routable interface address as the literal it puts in `Host`; a listener bound
+to a specific routable address answers under any name pointed at that address,
+since serving that name is the point of binding there.
 
 The listener also records each refusal as a `listener.host_refused` warning,
 carrying `hyp_component=sources`, `hyp_operation=host_check`, `status=skipped`,
