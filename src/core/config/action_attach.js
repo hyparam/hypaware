@@ -136,7 +136,8 @@ export function createAttachHandler(opts = {}) {
      * (file not writable, malformed settings) becomes a `failed` outcome the
      * reconciler records and retries next pass, unless the adapter marked it
      * a permanent refusal (LLP 0186), which becomes a `refused` outcome the
-     * reconciler short-circuits unconditionally instead.
+     * reconciler short-circuits instead, until a release bumps the re-arm
+     * generation past the marker and this hook is asked once more (LLP 0364).
      *
      * @param {DesiredAction} action
      * @param {ActionContext} ctx

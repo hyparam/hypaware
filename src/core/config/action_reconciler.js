@@ -469,8 +469,10 @@ export function createActionReconciler(opts) {
  * so it degrades to the pre-LLP-0086 level-triggered behavior.
  *
  * Only `done` markers reach here. A `refused` marker short-circuits before this
- * is consulted (LLP 0186): its gate is the user fixing the precondition and
- * re-running `hyp attach`, which no freshness predicate can observe.
+ * is consulted (LLP 0186), or, when it is stamped below this build's
+ * `REFUSAL_REARM_GENERATION`, is re-performed by the forward gap without any
+ * freshness predicate being consulted (LLP 0364). Either way its gate is the
+ * user's precondition, which no `isCurrent` can observe.
  *
  * @param {ActionHandler} handler
  * @param {ActionMarker} marker

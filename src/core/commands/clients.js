@@ -471,8 +471,9 @@ async function runClientLifecycle(action, argv, ctx) {
               // installed asset), and a throw there lands in the loop's outer
               // catch: with the re-arm second, an asset-tail failure would
               // leave the `refused` marker short-circuiting the reconciler
-              // forever after exactly the explicit re-run that is its only
-              // trigger. The re-arm cannot fail the other way round, since it
+              // after exactly the explicit re-run the user reached for, until
+              // some later release bumps the re-arm generation past it (LLP
+              // 0364). The re-arm cannot fail the other way round, since it
               // logs and swallows its own marker error.
               // @ref LLP 0295#both-success-exits [implements]: the re-arm runs at whichever success exit the explicit re-run takes, ahead of the asset tail so an asset failure cannot swallow it
               rearmRefusedAttachMarker({ name, ctx, dryRun: false })
