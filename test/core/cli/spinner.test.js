@@ -6,12 +6,13 @@ import { test } from 'node:test'
 import { withSpinner } from '../../../src/core/cli/spinner.js'
 
 /**
- * @param {{ isTTY?: boolean }} [opts]
+ * @param {{ isTTY?: boolean, columns?: number }} [opts]
  */
-function makeStdout({ isTTY = false } = {}) {
+function makeStdout({ isTTY = false, columns = undefined } = {}) {
   let text = ''
   return {
     isTTY,
+    columns,
     /** @param {string} chunk */
     write(chunk) {
       text += String(chunk)
@@ -46,6 +47,19 @@ test('withSpinner on a TTY animates in place and clears the line when done', asy
   assert.doesNotMatch(text, /waiting\n/)
   // The last write is the clear, leaving a clean line for the caller.
   assert.ok(text.endsWith('\r\x1b[2K'))
+})
+
+// A frame wider than the terminal wraps, and `\x1b[2K` cannot erase the row
+// it wrapped from: the spinner would walk down the screen a row per frame.
+test('withSpinner keeps a long label inside the terminal width', async () => {
+  const stdout = makeStdout({ isTTY: true, columns: 20 })
+  const label = "Replaying 'claude-desktop' history to central-production..."
+  await withSpinner({ stdout, label, env: {}, intervalMs: 5 }, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  })
+  for (const frame of stdout.text().split('\r\x1b[2K').filter(Boolean)) {
+    assert.ok(frame.length <= 19, `frame wider than the terminal: ${JSON.stringify(frame)}`)
+  }
 })
 
 test('withSpinner clears the line and rethrows when the work fails', async () => {

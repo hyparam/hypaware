@@ -16,14 +16,16 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  * work settles, so whatever the caller prints next (a result line, the
  * next prompt) lands on a clean line. Off a TTY - and under `HYP_NO_TUI=1`,
  * same as every other TUI surface - the label is written once as a plain
- * line and the output is byte-identical to what the callers printed before
- * the spinner existed, which is what keeps the scripted transcripts stable.
+ * line, never an animation, which is what keeps the scripted transcripts
+ * stable. For a caller whose label restates a line it already printed (the
+ * wizard's waits) that output is byte-identical to the pre-spinner run; a
+ * caller that printed nothing there (`hyp sync`) gains this one line.
  *
  * The timer never outlives the work: errors clear the line and rethrow.
  *
  * @template T
  * @param {{
- *   stdout: { write(chunk: string): unknown },
+ *   stdout: { write(chunk: string): unknown, columns?: number },
  *   label: string,
  *   env?: NodeJS.ProcessEnv,
  *   intervalMs?: number,
@@ -44,7 +46,8 @@ export async function withSpinner(opts, work) {
   const render = () => {
     const elapsed = Math.floor((Date.now() - started) / 1000)
     const suffix = elapsed >= 1 ? ` (${elapsed}s)` : ''
-    stdout.write(`\r\x1b[2K${FRAMES[frame % FRAMES.length]} ${label}${suffix}`)
+    const line = `${FRAMES[frame % FRAMES.length]} ${label}${suffix}`
+    stdout.write(`\r\x1b[2K${clampToWidth(line, stdout)}`)
     frame += 1
   }
   render()
@@ -55,4 +58,30 @@ export async function withSpinner(opts, work) {
     clearInterval(timer)
     stdout.write('\r\x1b[2K')
   }
+}
+
+/**
+ * Keep one frame to one terminal row.
+ *
+ * `\x1b[2K` erases the row the cursor sits on and nothing above it, so a
+ * frame wider than the terminal is unrecoverable: it wraps, the cursor ends
+ * on the row below, the next frame clears only that row and wraps again, and
+ * the spinner walks down the screen leaving a trail of half-erased labels
+ * behind it. The wizard's labels are short enough to make that hard to
+ * reach; `hyp sync` names a client and a destination in one label, which
+ * wraps on any narrow pane.
+ *
+ * A stream with no `columns` (a capture in a test, a pipe) is left alone:
+ * there is no width to clamp to, and nothing wraps there anyway.
+ *
+ * @param {string} line
+ * @param {{ columns?: number }} stdout
+ * @returns {string}
+ */
+function clampToWidth(line, stdout) {
+  const columns = stdout.columns
+  if (typeof columns !== 'number' || columns < 2) return line
+  // One column short of the edge: writing the last cell leaves the cursor in
+  // a state terminals disagree about (some wrap eagerly, some defer).
+  return line.length > columns - 1 ? line.slice(0, columns - 1) : line
 }
