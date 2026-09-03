@@ -406,3 +406,27 @@ test('an absolute-form request carrying a foreign Host is unaffected', async (t)
   assert.deepEqual(rig.upstreamHits, ['/v1/messages'])
   assert.equal(rig.started.length, 1)
 })
+
+// The barrier's absolute-form exemption is scoped by shape, not by the door.
+// A pure reverse-proxy listener never opens the forward-proxy door, so
+// `absoluteForm` is false there, but it still answers the shape by path
+// routing, and LLP 0233 promises it behaves exactly as it always has. Judging
+// the `Host` beside a request line that already named its destination would
+// break that promise with a 421.
+// @ref LLP 0247#only-forward-proxy-listeners-serve-it [tests]
+test('a reverse-proxy-only listener still path-routes absolute-form under a foreign Host', async (t) => {
+  const rig = await bootGateway({ mode: 'reverse-proxy' })
+  t.after(() => rig.cleanup())
+
+  const authority = `${HOST}:${rig.upstreamPort}`
+  const body = await rawRequest({
+    port: rig.proxy.port,
+    target: `https://${authority}/v1/messages`,
+    host: 'api.anthropic.com',
+  })
+
+  assert.match(body, /^HTTP\/1\.1 200 /)
+  assert.deepEqual(rig.upstreamHits, ['/v1/messages'])
+  assert.equal(rig.started.length, 1)
+  assert.equal(rig.warns.some((w) => w.message === 'listener.host_refused'), false)
+})
