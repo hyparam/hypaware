@@ -503,6 +503,31 @@ function routableIpv4() {
   return undefined
 }
 
+/**
+ * Can this machine open a TCP connection to its own routable address? Having
+ * the interface is not a promise of it: a default-drop INPUT chain or a
+ * desktop firewall swallows the SYN, and a request sent into that would never
+ * settle, hanging the test rather than failing it (`node:test` sets no
+ * per-test timeout).
+ *
+ * @param {string} address
+ * @param {number} port
+ * @returns {Promise<boolean>}
+ */
+function canReach(address, port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: address, port })
+    /** @param {boolean} answer */
+    const settle = (answer) => {
+      socket.destroy()
+      resolve(answer)
+    }
+    socket.setTimeout(2000, () => settle(false))
+    socket.once('connect', () => settle(true))
+    socket.once('error', () => settle(false))
+  })
+}
+
 // A wildcard bind is reachable on every address of the machine, and the
 // routable ones are not a deliberate publication under a name: the operator
 // named no address, so nothing here is meant to answer to whatever resolves
@@ -513,6 +538,9 @@ test('a wildcard bind is judged on its routable side too', async (t) => {
   if (!routable) return t.skip('no routable IPv4 interface on this host')
   const s = await startServer({ host: '0.0.0.0' })
   try {
+    if (!(await canReach(routable, s.bound.port))) {
+      return t.skip('this host does not accept connections on its routable address')
+    }
     const refused = await requestWithHost(s.bound.port, {
       path: '/v1/logs',
       host: 'attacker.example',
@@ -667,6 +695,10 @@ test('the Host check exempts an explicitly routable bind only, and needs a Host 
   assert.equal(misdirected('203.0.113.5', 'collector.example', '0.0.0.0'), true)
   assert.equal(misdirected('203.0.113.5', '203.0.113.5:4318', '0.0.0.0'), false)
   assert.equal(misdirected('::ffff:203.0.113.5', '203.0.113.5', '::'), false)
+  // The same address in the mapped spelling a client reaches it under when it
+  // copies the endpoint back out of a dual-stack tool. One address, one
+  // verdict, on the `Host` side as well as the two socket sides.
+  assert.equal(misdirected('::ffff:203.0.113.5', '[::ffff:203.0.113.5]:4318', '::'), false)
   assert.equal(misdirected('2001:db8::5', '[2001:db8::5]:4318', '::'), false)
   // A name that merely resolves to the arrival address is still a name.
   assert.equal(misdirected('203.0.113.5', 'collector.example', '::'), true)

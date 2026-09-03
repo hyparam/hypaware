@@ -183,7 +183,7 @@ export function isMisdirectedHost(req, opts) {
   const hostname = hostnameOfHostHeader(value)
   if (
     hostname !== undefined &&
-    (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname) || (routable && hostname === arrivedOn))
+    (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname) || (routable && hostSpelling(hostname) === arrivedOn))
   ) {
     return false
   }
