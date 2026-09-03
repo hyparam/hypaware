@@ -146,6 +146,9 @@ proxy-mode client on a routable bind) generalizes from the verbatim writers
 the way LLP 0233 generalized from the hardcoded ones. Its operator-facing
 conclusion (pin `listen` to loopback or a wildcard) is right either way.
 
+*Resolved by issue #1291:* the README paragraph now carries the per-writer
+facts above, and the `403` it predicted is unreachable.
+
 ## Consequences {#consequences}
 
 - LLP 0233 #loopback-peers-only keeps its decision and its `Extended-by:`
