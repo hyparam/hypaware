@@ -59,20 +59,28 @@ rewrites a non-loopback host to `127.0.0.1`.
 - The **codex** writer does the same: `base_url =
   http://127.0.0.1:<port>/backend-api/codex`
   (`hypaware-core/plugins-workspace/codex/src/index.js`).
-- The **opencode** writer builds `http://127.0.0.1:<port>` itself from the
-  configured port and never sees the bind host
-  (`hypaware-core/plugins-workspace/opencode/src/index.js`).
+- The **opencode** writer is not handed the gateway endpoint at all. It is
+  registered `requiresEndpoint: false` (LLP 0306 endpoint-free clients) and
+  builds `http://127.0.0.1:<port>` from its own `opencode.listen_port`, the
+  separate loopback SDK snapshot listener this plugin starts, so no gateway
+  `listen` reaches it in any form
+  (`hypaware-core/plugins-workspace/opencode/src/index.js`,
+  `opencode/src/config.js`, `opencode/src/listener.js`).
 - The **openclaw** writer takes the endpoint *verbatim* (trimmed only) and
   writes it into both provider `baseUrl` fields
   (`hypaware-core/plugins-workspace/openclaw/src/attach.js`).
 - The **claude-desktop** profile renders `http://<listen>` verbatim from the
-  configured `listen`, by design, since a managed profile cannot chase a
-  moving port (`hypaware-core/plugins-workspace/claude-desktop/src/profile.js`).
+  configured `listen`, by design and for the same reason as openclaw: a
+  deliberately non-loopback bind is one Desktop should be able to reach. Its
+  one guard is on the *port*, refusing an ephemeral `:0` that a managed config
+  could not chase; it does not judge the host
+  (`hypaware-core/plugins-workspace/claude-desktop/src/profile.js`).
 
-So "attach always writes `http://127.0.0.1:<port>`" is true of the claude,
-codex, and opencode writers and false of the openclaw writer and the Desktop
-profile, and "whatever the bind host says" was never a property of the
-plumbing, only of three writers that discard the host.
+So "attach always writes `http://127.0.0.1:<port>`" is true of the claude and
+codex writers, false of the openclaw writer and the Desktop profile, and not a
+statement about opencode, which is handed no endpoint to write. "Whatever the
+bind host says" was never a property of the plumbing, only of the two writers
+that take the endpoint and discard its host.
 
 ## Decision {#decision}
 
@@ -96,28 +104,29 @@ that install working unchanged for its own client": that holds for the
 wildcard binds the section was actually worried about (`0.0.0.0`, `::`, the
 open-relay case), where loopback still answers and a hardcoded
 `127.0.0.1:<port>` still connects. On a *specific* routable bind
-(`192.168.1.5:18521`, say) nothing listens on loopback at all, so the three
-hardcoded-loopback writers produce URLs that refuse the connection outright.
-That breakage is a consequence of the bind, not of the peer rule: the rule
-neither causes it (the connection never reaches the door) nor cures it. The
-old sentence folded the two apart.
+(`192.168.1.5:18521`, say) nothing listens on loopback at all, so the two
+writers that hardcode loopback from the gateway endpoint (claude and codex)
+produce URLs that refuse the connection outright; opencode is untouched,
+because it never reads the gateway `listen`. That breakage is a consequence
+of the bind, not of the peer rule: the rule neither causes it (the connection
+never reaches the door) nor cures it. The old sentence folded the two apart.
 
 <a id="record-not-behavior"></a>**This document records; it changes no
 behavior.** The alternative reading of issue #1277's acceptance condition,
 making every writer actually hardcode `127.0.0.1` so the old sentence becomes
-true, is rejected here: it would break the Desktop profile's one job (a
-stable URL for a managed config) and openclaw installs that rely on a
-non-default `listen`, to rescue a parenthetical whose conclusion survives on
-the corrected premise anyway.
+true, is rejected here: it would cut off both surfaces that deliberately honour
+a non-loopback bind, the Desktop profile and openclaw installs configured with
+one, to rescue a parenthetical whose conclusion survives on the corrected
+premise anyway.
 
 ## What this does not settle {#not-settled}
 
 **The writers do not agree on host handling, and a specific routable bind
-half-breaks attach.** Three writers hardcode loopback, two pass the configured
-host through, and on a specific non-loopback bind the hardcoded three emit
-URLs nothing answers. Whether attach should warn or refuse there, or the
-writers should converge on one host policy, is a behavior change with its own
-trade-offs and is not decided here.
+half-breaks attach.** Of the four writers handed the gateway endpoint, two
+hardcode loopback and two pass the configured host through, and on a specific
+non-loopback bind the hardcoded two emit URLs nothing answers. Whether attach
+should warn or refuse there, or the writers should converge on one host
+policy, is a behavior change with its own trade-offs and is not decided here.
 
 **README's mechanism sentence inherits the mirror-image overstatement.** The
 README section on the gateway's bind ("that same host is what `hyp client
