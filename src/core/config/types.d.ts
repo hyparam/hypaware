@@ -297,7 +297,9 @@ export interface CreateConfigControlOptions {
  * - `failed`: not terminal; the next reconcile pass retries it.
  * - `refused`: terminal, but not the same short-circuit rule as `done` -
  *   the forward-gap loop skips it unconditionally, with no `markerIsCurrent()`
- *   consultation. Only an explicit `hyp attach` re-run clears it (LLP 0186).
+ *   consultation. An explicit `hyp attach` re-run clears it (LLP 0186), and
+ *   so does one reconcile pass when the marker's `rearm_generation` is below
+ *   the build's own (LLP 0364).
  * - `applied`: current applied state of a reconciled/reversible handler
  *   (attach, future); `reverse()` runs on leave when the config stops
  *   naming the effect.
@@ -385,6 +387,17 @@ export interface ActionMarker {
    * "no prior done" and keep master's behaviour.
    */
   prior_done?: boolean
+  /**
+   * The re-arm generation this `refused` marker was written at (recorded only
+   * on a `refused` marker). A stored marker below the build's own
+   * `REFUSAL_REARM_GENERATION` was written by a release that classified some
+   * refusal wrongly, so the forward gap re-`perform()`s it once instead of
+   * short-circuiting, and the marker that pass writes carries the current
+   * generation. Absent on pre-LLP-0364 markers, which read as generation 0 and
+   * are therefore re-armed exactly once (LLP 0364, extending LLP 0186's
+   * unconditional short-circuit and LLP 0363's unmigrated population).
+   */
+  rearm_generation?: number
   /** Handler-specific extra fields merged from `ActionOutcome.detail`. */
   [extra: string]: unknown
 }

@@ -40,6 +40,25 @@ const CONTROL_DIRNAME = 'config-control'
 const CLIENT_ACTIONS_BASENAME = 'client-actions.json'
 
 /**
+ * The re-arm generation this build stamps on every `refused` marker it writes.
+ *
+ * A stored marker below it was written before a release that changed how some
+ * refusal is classified, so what it records may no longer be a refusal at all.
+ * It gets exactly one re-`perform()` and is terminal again at this generation,
+ * whatever that pass decides. That single retry is the whole mechanism: the
+ * marker carries no error code, so nothing on disk can tell a refusal a later
+ * release made retryable (the LLP 0258 version floor) from one still true (a
+ * JSONC settings file), and asking the handler once is the only way to know.
+ *
+ * Bump it in the same release that moves a throw site out of
+ * `markActionRefused`, which is what makes the markers already on disk wrong.
+ * Generation 1 is the LLP 0363 reclassification of the Claude version floor.
+ *
+ * @ref LLP 0364#the-generation-bit [implements]: one integer, bumped by the release that reclassifies a refusal, is what re-arms the markers already on disk
+ */
+export const REFUSAL_REARM_GENERATION = 1
+
+/**
  * Build the generic, daemon-constructed action reconciler. It is the
  * run-once / reconcile-on-config machinery and knows nothing about Claude
  * vs Codex: only the {@link ActionHandler} interface. The daemon wires
@@ -71,7 +90,8 @@ export function createActionReconciler(opts) {
   /**
    * Level-triggered reconcile (LLP 0036): for each handler, diff `desired()`
    * against the persisted markers and act only on the gap. A `done` marker
-   * short-circuits (and a `refused` one unconditionally, LLP 0186), so the pass
+   * short-circuits, and so does a `refused` one at this build's re-arm
+   * generation (LLP 0186, LLP 0364), so the pass
    * is safe to call repeatedly and a run missed while probation was outstanding
    * is recovered on the next call.
    *
@@ -138,19 +158,37 @@ export function createActionReconciler(opts) {
       // @ref LLP 0086#re-attach-on-drift [implements]: a done marker the handler reports stale is a forward gap, not a permanent skip
       for (const action of desired) {
         const existing = markers[action.requestKey]
-        // A `refused` marker skips FIRST and unconditionally: it records a
-        // precondition only the user can fix (a conflicting provider entry, a
-        // JSONC settings file), so re-`perform()`ing it every pass is the
-        // forever-retry LLP 0184 reports. `markerIsCurrent()` is deliberately
-        // not consulted here - the freshness hook answers "did the input
-        // drift?", which says nothing about whether the refusal was resolved.
-        // Only an explicit `hyp attach` re-run (which clears the marker) re-arms
-        // it in this pass; the `isCurrent`-style auto re-arm is a named
-        // follow-up, not built.
+        // A `refused` marker skips FIRST: it records a precondition only the
+        // user can fix (a conflicting provider entry, a JSONC settings file),
+        // so re-`perform()`ing it every pass is the forever-retry LLP 0184
+        // reports. `markerIsCurrent()` is deliberately not consulted - the
+        // freshness hook answers "did the input drift?", which says nothing
+        // about whether the refusal was resolved.
         // @ref LLP 0186#how-the-reconciler-distinguishes-it-from-done [implements]: refused short-circuits unconditionally, done short-circuits through markerIsCurrent()
+        //
+        // The skip is unconditional against the machine, not against the build.
+        // A marker below `REFUSAL_REARM_GENERATION` was written by a release
+        // that classified some refusal wrongly, so it is re-`perform()`ed once
+        // here, and the marker that pass writes carries the current generation:
+        // a refusal that is still true costs one retry ever, not one per boot.
+        // An explicit `hyp attach` re-run still clears one at any generation.
+        // @ref LLP 0364#the-generation-bit [implements]: a refused marker below this build's generation is re-armed by the pass itself, with no manual command
         if (existing && existing.status === 'refused') {
-          results.push({ kind, requestKey: action.requestKey, outcome: 'skipped' })
-          continue
+          const generation = markerRearmGeneration(existing)
+          if (generation >= REFUSAL_REARM_GENERATION) {
+            results.push({ kind, requestKey: action.requestKey, outcome: 'skipped' })
+            continue
+          }
+          log.info('client_action.refusal_rearmed', {
+            [Attr.COMPONENT]: 'action-reconciler',
+            [Attr.OPERATION]: 'client_action.rearm',
+            kind,
+            request_key: action.requestKey,
+            [Attr.STATUS]: 'ok',
+            from_generation: generation,
+            to_generation: REFUSAL_REARM_GENERATION,
+            detail: typeof existing.reason === 'string' ? existing.reason : 'unknown',
+          })
         }
         if (existing && existing.status === 'done' && markerIsCurrent(handler, existing, action, ctx)) {
           results.push({ kind, requestKey: action.requestKey, outcome: 'skipped' })
@@ -215,6 +253,9 @@ export function createActionReconciler(opts) {
             reason,
             at,
             ...(outcome.detail ?? {}),
+            // After the detail spread, like `prior_done` below: a handler's
+            // detail must not erase the bit that makes this marker terminal.
+            rearm_generation: REFUSAL_REARM_GENERATION,
           }
           // Same carry-forward the `done` and `failed` branches make: a refusal
           // on a re-`perform()` does not un-install what an earlier successful
@@ -527,6 +568,22 @@ export function readInstalledAssets(marker) {
   const raw = marker?.installed_assets
   if (!Array.isArray(raw)) return []
   return raw.filter((dest) => typeof dest === 'string' && dest.length > 0)
+}
+
+/**
+ * The re-arm generation a stored `refused` marker was written at, defensively:
+ * the store is persisted JSON, and every marker written before LLP 0364 lacks
+ * the field entirely. Absent (or anything that is not a finite number) reads as
+ * generation 0, the pre-LLP-0364 fleet, which is below every generation this
+ * build stamps and is therefore re-armed once.
+ *
+ * @param {ActionMarker} [marker]
+ * @returns {number}
+ * @ref LLP 0364#the-generation-bit [implements]: a missing field is generation 0, so the shipped fleet re-arms without any migration step
+ */
+export function markerRearmGeneration(marker) {
+  const raw = marker?.rearm_generation
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0
 }
 
 /**

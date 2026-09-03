@@ -8,6 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
+  REFUSAL_REARM_GENERATION,
   createActionReconciler,
   readClientActionStatus,
   clearClientActionMarker,
@@ -760,6 +761,72 @@ test('a refused marker short-circuits unconditionally, unlike a done marker the 
     await control.reconcile(INPUT)
     await control.reconcile(INPUT)
     assert.equal(succeeding.performCalls, 2, 'a stale done marker still re-performs')
+  } finally {
+    await fsp.rm(tmp, { recursive: true, force: true })
+  }
+})
+
+// The shipped fleet's escape hatch. A `refused` marker written before this
+// build carries no re-arm generation, so it reads as generation 0 and is below
+// the one this build stamps: the pass re-arms it exactly once instead of
+// short-circuiting. If the refusal is still true the fresh marker is stamped at
+// the current generation and every later pass skips it again, which is what
+// keeps LLP 0184's forever-retry closed.
+// @ref LLP 0364#the-generation-bit [tests]: a stale-generation refused marker is re-performed once; the marker the retry writes is terminal again
+// @ref LLP 0364#one-retry-not-a-retry-loop [tests]: a refusal the re-arm cannot fix costs one re-perform, not one per boot
+test('a refused marker below the build re-arm generation is re-performed exactly once (LLP 0364)', async () => {
+  const { tmp, stateRoot } = await makeFixture()
+  try {
+    let refuse = true
+    /** @type {ActionHandler & { performCalls: number }} */
+    const handler = {
+      kind: 'attach',
+      performCalls: 0,
+      desired() {
+        return [{ requestKey: 'openclaw' }]
+      },
+      async perform() {
+        handler.performCalls += 1
+        return refuse ? { status: 'refused', reason: 'openclaw.json is not ours' } : { status: 'done' }
+      },
+    }
+    const reconciler = createActionReconciler({ stateRoot, handlers: [handler], log: NOOP_LOG })
+
+    // The marker an earlier release wrote: terminal, and with no generation.
+    fs.mkdirSync(path.join(stateRoot, 'config-control'), { recursive: true })
+    fs.writeFileSync(
+      path.join(stateRoot, 'config-control', 'client-actions.json'),
+      JSON.stringify({
+        attach: {
+          openclaw: { status: 'refused', request_key: 'openclaw', reason: 'legacy', at: 'T0' },
+        },
+      })
+    )
+
+    // Still refusing: one re-perform, then terminal again at this generation.
+    const p1 = await reconciler.reconcile(INPUT)
+    assert.deepEqual(p1.results.map((r) => r.outcome), ['refused'])
+    assert.equal(handler.performCalls, 1)
+    assert.equal(readMarkerFile(stateRoot).attach.openclaw.rearm_generation, REFUSAL_REARM_GENERATION)
+    await reconciler.reconcile(INPUT)
+    await reconciler.reconcile(INPUT)
+    assert.equal(handler.performCalls, 1, 'a re-armed refusal that refuses again is not retried per boot')
+
+    // A second legacy marker, this time over a precondition that has cleared:
+    // the one re-perform is what lands the effect the host has been missing.
+    fs.writeFileSync(
+      path.join(stateRoot, 'config-control', 'client-actions.json'),
+      JSON.stringify({
+        attach: {
+          openclaw: { status: 'refused', request_key: 'openclaw', reason: 'legacy', at: 'T0' },
+        },
+      })
+    )
+    refuse = false
+    const p2 = await reconciler.reconcile(INPUT)
+    assert.deepEqual(p2.results.map((r) => r.outcome), ['done'])
+    assert.equal(handler.performCalls, 2)
+    assert.equal(readMarkerFile(stateRoot).attach.openclaw.status, 'done')
   } finally {
     await fsp.rm(tmp, { recursive: true, force: true })
   }

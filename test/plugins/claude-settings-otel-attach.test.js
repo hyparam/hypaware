@@ -702,18 +702,43 @@ test('a below-floor machine attaches on the first pass after the client is upgra
   assert.equal(doneMarker.mode, MODE_OTEL)
 })
 
-// The limit of the reclassification, made executable: it decides how the NEXT
-// floor refusal is classified and migrates nothing already on disk. A host
-// that recorded `refused` under v1.24.0-v1.30.0 keeps short-circuiting however
-// new its client becomes, because the marker is consulted before `isCurrent`
-// and no error code is persisted to tell a floor refusal from a JSONC one.
-// When the automatic re-arm #999 asks for lands, this test is what fails.
-// @ref LLP 0363#markers-already-refused-are-not-migrated [tests]: a refused marker an earlier release wrote is not migrated, so only an explicit re-run clears it
-test('a marker an earlier release refused is not migrated by the reclassification', async (t) => {
-  const r = await rig()
-  t.after(() => r.cleanup())
+/**
+ * A reconciler + input pair over one temp state root, with the claude client
+ * registration the pass will call. Every marker test below drives the real
+ * attach handler, so what it proves is the shipped forward gap, not a stub of
+ * it.
+ *
+ * @param {{ stateRoot: string }} r
+ * @param {any} registration
+ */
+function reconcilerOver(r, registration) {
+  const reconciler = createActionReconciler({
+    stateRoot: r.stateRoot,
+    handlers: [createAttachHandler()],
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+  })
+  const input = {
+    config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/claude', enabled: true }] }),
+    backfills: /** @type {any} */ ({ register() {}, get() { return undefined }, list() { return [] } }),
+    env: process.env,
+    clientDescriptors: new Map([['claude', /** @type {any} */ (CLAUDE_DESCRIPTOR)]]),
+    clients: /** @type {any} */ ({
+      getClient(/** @type {string} */ name) { return name === 'claude' ? registration : undefined },
+    }),
+    endpoint: `http://127.0.0.1:${PORT}`,
+  }
+  return { reconcile: () => reconciler.reconcile(input) }
+}
 
-  // The marker a below-floor host wrote when the throw was still marked.
+/**
+ * The marker a below-floor host wrote when the floor throw was still marked as
+ * a permanent refusal: v1.24.0 through v1.30.0 shape, with no re-arm
+ * generation because no release that wrote one had the field.
+ *
+ * @param {{ stateRoot: string }} r
+ * @param {string} reason
+ */
+async function seedLegacyRefusedMarker(r, reason) {
   await fsp.mkdir(path.join(r.stateRoot, 'config-control'), { recursive: true })
   await fsp.writeFile(
     path.join(r.stateRoot, 'config-control', 'client-actions.json'),
@@ -723,10 +748,25 @@ test('a marker an earlier release refused is not migrated by the reclassificatio
           status: 'refused',
           request_key: 'claude',
           at: '2026-08-20T10:00:00.000Z',
-          reason: "Claude Code 2.1.150 is older than the floor; run 'claude update' and attach again",
+          reason,
         },
       },
     })
+  )
+}
+
+// The population LLP 0363 could not reach: a host that recorded the floor
+// refusal under v1.24.0-v1.30.0, upgraded its client, and was still skipped on
+// every boot. One daemon pass now re-arms the stale marker, re-`perform()`s,
+// and lands the real OTEL block - no `hyp client attach claude` in between.
+// @ref LLP 0364#the-generation-bit [tests]: a refused marker below the build's re-arm generation is re-performed once, so the shipped fleet self-heals
+test('a marker an earlier release refused is re-armed on the next reconcile pass', async (t) => {
+  const r = await rig({})
+  t.after(() => r.cleanup())
+
+  await seedLegacyRefusedMarker(
+    r,
+    "Claude Code 2.1.150 is older than the floor; run 'claude update' and attach again"
   )
 
   /** @type {any} */
@@ -735,43 +775,87 @@ test('a marker an earlier release refused is not migrated by the reclassificatio
     defaultUpstream: 'anthropic',
     /** @param {any} attachCtx */
     async attach(attachCtx) {
-      // The client is well past the floor by now, so nothing here refuses.
-      preflightOtelAttach({
-        claudeVersion: '2.1.233',
-        telemetryPort: TELEMETRY_PORT,
-        spoolDir: r.spoolDir,
-      })
+      // The real writer, at a client well past the floor: nothing refuses.
+      const result = await otelAttach(r, { claudeVersion: '2.1.233' })
       attachCtx.stdout.write(JSON.stringify({
         status: 'attached',
         action: 'attach',
         client: 'claude',
         dry_run: false,
-        changed: true,
+        changed: result.changed,
         settings_path: r.settingsPath,
       }))
     },
   }
-  const reconciler = createActionReconciler({
-    stateRoot: r.stateRoot,
-    handlers: [createAttachHandler()],
-    log: { debug() {}, info() {}, warn() {}, error() {} },
-  })
-  const report = await reconciler.reconcile({
-    config: /** @type {any} */ ({ version: 2, plugins: [{ name: '@hypaware/claude', enabled: true }] }),
-    backfills: /** @type {any} */ ({ register() {}, get() { return undefined }, list() { return [] } }),
-    env: process.env,
-    clientDescriptors: new Map([['claude', /** @type {any} */ (CLAUDE_DESCRIPTOR)]]),
-    clients: /** @type {any} */ ({
-      getClient(/** @type {string} */ name) { return name === 'claude' ? registration : undefined },
-    }),
-    endpoint: `http://127.0.0.1:${PORT}`,
-  })
 
+  const report = await reconcilerOver(r, registration).reconcile()
   assert.deepEqual(
     report.results.map((entry) => entry.outcome),
-    ['skipped'],
-    'the pre-existing refused marker still short-circuits before the handler is asked'
+    ['done'],
+    'the legacy refused marker is re-armed by the pass itself, with no manual command'
   )
+
+  const marker = readClientActionStatus({ stateRoot: r.stateRoot }).byKind.attach.claude
+  assert.equal(marker.status, 'done')
+  assert.equal(marker.mode, MODE_OTEL)
+
+  // The observable half: the managed block is really on disk, written by the
+  // adapter the pass called.
+  const settings = await r.read()
+  assert.equal(settings.env.CLAUDE_CODE_ENABLE_TELEMETRY, '1')
+  assert.equal(settings.env.OTEL_EXPORTER_OTLP_ENDPOINT, `http://127.0.0.1:${TELEMETRY_PORT}`)
+  assert.deepEqual(
+    settings._hypaware.managed.env,
+    Object.fromEntries(
+      otelModeEnv({ telemetryPort: TELEMETRY_PORT, spoolDir: r.spoolDir })
+        .map(({ key, value }) => [key, value])
+    )
+  )
+})
+
+// The other half of the same bit, and the LLP 0184 guard: a refusal the
+// re-arm cannot fix costs exactly one re-`perform()`, ever. The re-armed pass
+// refuses again, the fresh marker is stamped at this build's generation, and
+// every later pass short-circuits on it as before.
+// @ref LLP 0364#one-retry-not-a-retry-loop [tests]: a still-true JSONC refusal is re-armed once and is terminal again at the new generation
+test('a JSONC refusal an earlier release recorded is re-armed once and then stays terminal', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  // The precondition the re-arm cannot clear: a settings file the user must
+  // convert back to plain JSON (LLP 0163).
+  await fsp.writeFile(r.settingsPath, '{\n  // a comment\n  "env": {}\n}\n')
+
+  await seedLegacyRefusedMarker(r, `${r.settingsPath} appears to be JSONC; refuse to modify`)
+
+  let attachCalls = 0
+  /** @type {any} */
+  const registration = {
+    name: 'claude',
+    defaultUpstream: 'anthropic',
+    async attach() {
+      attachCalls += 1
+      await otelAttach(r, { claudeVersion: '2.1.233' })
+    },
+  }
+  const reconciler = reconcilerOver(r, registration)
+
+  const rearmed = await reconciler.reconcile()
+  assert.deepEqual(
+    rearmed.results.map((entry) => entry.outcome),
+    ['refused'],
+    'the re-armed pass asks the handler again and is refused again'
+  )
+  assert.equal(attachCalls, 1)
+  const refreshed = readClientActionStatus({ stateRoot: r.stateRoot }).byKind.attach.claude
+  assert.equal(refreshed.status, 'refused')
+  assert.match(String(refreshed.reason), /JSONC/)
+
+  // Terminal again: two more passes ask the handler nothing.
+  for (let i = 0; i < 2; i += 1) {
+    const later = await reconciler.reconcile()
+    assert.deepEqual(later.results.map((entry) => entry.outcome), ['skipped'])
+  }
+  assert.equal(attachCalls, 1, 'a refusal the re-arm cannot fix is not retried on every boot')
   assert.equal(
     readClientActionStatus({ stateRoot: r.stateRoot }).byKind.attach.claude.status,
     'refused'
