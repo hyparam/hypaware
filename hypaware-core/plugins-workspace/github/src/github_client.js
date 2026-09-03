@@ -258,29 +258,37 @@ function githubCliPath(env) {
 /**
  * Resolve one request URL against the configured API origin.
  *
- * A continuation URL arrives absolute, parsed out of a response `Link` header
- * or read back as a page cursor from `github-cursors.json`, and the request
- * that follows carries the bearer token. Neither source is trusted to choose
- * the host, so pin the origin to `baseUrl` and refuse the rest. Refusing beats
- * dropping the Authorization header: an origin nobody configured is not one to
- * talk to at all.
+ * A continuation URL is parsed out of a response `Link` header or read back as
+ * a page cursor from `github-cursors.json`, and the request that follows
+ * carries the bearer token. Neither source is trusted to choose the host, so
+ * pin the origin to `baseUrl` and refuse the rest. Refusing beats dropping the
+ * Authorization header: an origin nobody configured is not one to talk to at
+ * all.
+ *
+ * The pin has to be applied to the **built** URL, not only to a continuation
+ * that already parses as absolute. `@evil.test/repos/o/r/issues` is not an
+ * absolute URL, so it joins onto the base, and the join reads back as
+ * `https://api.github.com@evil.test/...`: everything before the `@` is
+ * userinfo and the authority is `evil.test`. Pinning only the absolute case
+ * would hand the token to exactly the origin this is here to refuse.
  *
  * @param {string} baseUrl
  * @param {string} pathAndQuery
  * @returns {string}
  */
 function resolveUrl(baseUrl, pathAndQuery) {
-  const absolute = URL.parse(pathAndQuery)
-  if (!absolute) return `${baseUrl}${pathAndQuery}`
-  if (absolute.origin !== new URL(baseUrl).origin) throw foreignOrigin(absolute)
-  return pathAndQuery
+  const url = URL.parse(pathAndQuery) ?? URL.parse(`${baseUrl}${pathAndQuery}`)
+  if (!url || url.origin !== new URL(baseUrl).origin) throw foreignOrigin(url)
+  // The parsed href, not the input: what was checked is what gets fetched.
+  return url.href
 }
 
-/** @param {URL} url @returns {HypError} */
+/** @param {URL | null} url @returns {HypError} */
 function foreignOrigin(url) {
   // Origin only. The path and query of an untrusted URL stay out of the error,
-  // for the same reason a failed response body does.
-  const err = /** @type {HypError} */ (new Error(`GitHub continuation URL refused: origin ${url.origin} is not the configured API base`))
+  // for the same reason a failed response body does. An opaque or unparseable
+  // authority reports as `null`, which is what `URL.origin` already calls it.
+  const err = /** @type {HypError} */ (new Error(`GitHub continuation URL refused: origin ${url?.origin ?? 'null'} is not the configured API base`))
   err.hypErrorKind = 'github_foreign_origin'
   return err
 }

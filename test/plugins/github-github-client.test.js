@@ -312,3 +312,57 @@ test('an Enterprise base keeps its own absolute continuations', async () => {
   assert.match(urls[0], /^https:\/\/ghe\.example\.test:8443\/api\/v3\/user\/repos\?/)
   assert.equal(urls[1], 'https://ghe.example.test:8443/api/v3/user/repos?page=2')
 })
+
+// A continuation that is not a valid absolute URL still gets joined onto the
+// base, and `@host/...` turns everything before the `@` into userinfo: the
+// join `https://api.github.test` + `@evil.test/x` has authority `evil.test`.
+// Pinning only the absolute case let this one through with the token attached.
+for (const injected of ['@evil.test/repos/o/r/issues?page=3', ':@evil.test/repos/o/r/issues?page=3']) {
+  test(`a continuation injecting a foreign authority (${injected}) is refused, not joined onto the base`, async () => {
+    let fetches = 0
+    const client = createGithubClient({
+      tokenEnv: 'T',
+      env: { T: 'secret' },
+      baseUrl: 'https://api.github.test',
+      log: silentLog,
+      async fetchImpl() {
+        fetches += 1
+        return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+      },
+    })
+
+    await assert.rejects(client.listIssuesPage('o', 'r', undefined, injected), (error) => {
+      assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+      return true
+    })
+    assert.equal(fetches, 0)
+  })
+}
+
+test('a Link header injecting a foreign authority is refused before the next page is fetched', async () => {
+  /** @type {string[]} */
+  const urls = []
+  const client = createGithubClient({
+    tokenEnv: 'T',
+    env: { T: 'secret' },
+    baseUrl: 'https://api.github.test',
+    log: silentLog,
+    async fetchImpl(input) {
+      urls.push(String(input))
+      return new Response(JSON.stringify([{ full_name: 'o/r1' }]), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          link: '<@evil.test/user/repos?page=2>; rel="next"',
+        },
+      })
+    },
+  })
+
+  await assert.rejects(client.listViewerRepos(), (error) => {
+    assert.equal(/** @type {HypError} */ (error).hypErrorKind, 'github_foreign_origin')
+    return true
+  })
+  assert.equal(urls.length, 1, 'the refused page must not be requested')
+  assert.doesNotMatch(urls[0], /evil/)
+})
