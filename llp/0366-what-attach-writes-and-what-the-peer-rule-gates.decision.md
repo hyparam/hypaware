@@ -146,6 +146,13 @@ proxy-mode client on a routable bind) generalizes from the verbatim writers
 the way LLP 0233 generalized from the hardcoded ones. Its operator-facing
 conclusion (pin `listen` to loopback or a wildcard) is right either way.
 
+*Resolved by issue #1291.* The README paragraph now scopes the pass-through to
+the openclaw writer and the `claude-desktop` install profile, and names the
+reachable failure on a specific routable bind: `ECONNREFUSED` against a
+loopback port nothing bound. The `403` it predicted is unreachable, because a
+proxy-mode client never connects from the routable interface in the first
+place.
+
 ## Consequences {#consequences}
 
 - LLP 0233 #loopback-peers-only keeps its decision and its `Extended-by:`

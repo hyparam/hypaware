@@ -638,21 +638,25 @@ routing table. Refusals answer `{"error":"misdirected request"}` and are
 logged under `listener=@hypaware/ai-gateway`.
 
 The gateway is the one hosting listener whose address nobody types by hand.
-Its bind host is configurable (`listen`), and that same host is what
-`hyp client attach` writes into each client's base URL and what
-`hyp session ignore` posts to. So a `listen` naming a *hostname* that resolves
-to a loopback address refuses the gateway's own clients, and it takes their
+Its bind host is configurable (`listen`), and the endpoint derived from it is
+what `hyp session ignore` posts to, what the openclaw attach writer puts in
+both provider `baseUrl` fields, and what `hyp client claude-desktop install`
+renders verbatim; the claude and codex attach writers take only the port from
+that endpoint and hardcode `127.0.0.1`, and opencode is handed no gateway
+endpoint. So a `listen` naming a *hostname* that resolves to a loopback
+address refuses the clients that were handed that name, and it takes their
 egress with it rather than only their capture, because the base URL they were
 handed stops answering. Pin `listen` to a loopback literal, or to `0.0.0.0` or
 `[::]` (an IPv6 host is bracketed, since `listen` is a `host:port` string and
 `::18521` would read the last colon as the port separator); a default install
-already uses the first. A routable address clears this guard too, but only
-this one: `CONNECT` and absolute-form are served to loopback peers only, and a
-client handed a routable base URL connects from that interface rather than
-from loopback, so a proxy-mode client is refused `403` there instead. On a
-wildcard bind a client on another machine has the same constraint as a remote
-exporter: address the gateway by the routable interface literal, not by a
-name.
+already uses the first. A *specific* routable address clears this guard but
+costs the other clients instead: nothing is listening on loopback, so the base
+URLs hardcoded to `127.0.0.1` answer `ECONNREFUSED`. The loopback-peers-only
+rule on `CONNECT` and absolute-form costs an attached client nothing on any
+bind, because proxy-mode attach points its client at loopback rather than at
+the bind host. On a wildcard bind a client on another machine has the same
+constraint as a remote exporter: address the gateway by the routable interface
+literal, not by a name.
 
 ## Uninstalling
 
