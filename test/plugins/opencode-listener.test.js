@@ -593,7 +593,20 @@ test('OpenCode listener rejects a snapshot whose content-type a browser could se
 // sender. So the drain is capped, and a body past the cap has its connection
 // closed once the rejection is on the wire.
 test('a rejected snapshot body is drained only up to a cap, while a small one still reads the whole 415', async () => {
-  const listener = await startListener()
+  // The cap is only visible as bytes the server read off the socket: a sender
+  // cannot tell a paused read from a socket buffer that swallowed its write.
+  // The listener does not hand its server back, so capture the connections.
+  /** @type {net.Socket[]} */
+  const serverSockets = []
+  const createServer = http.createServer
+  http.createServer = (/** @type {any[]} */ ...args) => {
+    const server = createServer(...args)
+    server.on('connection', (socket) => serverSockets.push(socket))
+    return server
+  }
+  const listener = await startListener().finally(() => {
+    http.createServer = createServer
+  })
   try {
     // Far larger than the cap, and larger than any socket buffer either side
     // could swallow whole, so a server that stops reading stalls the write.
@@ -649,6 +662,27 @@ test('a rejected snapshot body is drained only up to a cap, while a small one st
     })
     assert.equal(small.status, 415)
     assert.match(String(/** @type {any} */ (await small.json()).error), /unsupported content-type/)
+
+    // What the cap itself is worth: a body the sender delivers in one write,
+    // small enough that both socket buffers take it whole, so nothing but the
+    // cap can stop the listener reading all of it. The read settles at the cap
+    // plus the socket read already in the parser when the pause lands.
+    const overCap = Buffer.alloc(256 * 1024, 'x')
+    serverSockets.length = 0
+    const capped = await fetch(`${listener.endpoint}/snapshot`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: overCap,
+    })
+    assert.equal(capped.status, 415)
+    await capped.text()
+    const [served] = serverSockets
+    assert.ok(served, 'the rejected upload opened no server connection to measure')
+    if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+    assert.ok(
+      served.bytesRead < 3 * 64 * 1024,
+      `the listener read ${served.bytesRead} of the ${overCap.length} bytes it refused`
+    )
   } finally {
     await listener.cleanup()
   }

@@ -18,7 +18,9 @@ import { projectOpenCodeSnapshot } from './projector.js'
 const PLUGIN_NAME = '@hypaware/opencode'
 const HOST = '127.0.0.1'
 const MAX_BODY_BYTES = 16 * 1024 * 1024
-// How much of a rejected request's body is read before the connection is cut.
+// How much of a rejected request's body is counted before the read is paused.
+// The socket read already in the parser when the pause lands is delivered too,
+// so the bytes actually read settle at about twice this, not exactly at it.
 // A rejected body a caller is still uploading has to be read for the answer to
 // reach it at all, so the read cannot be skipped; left unbounded, its length is
 // the sender's to choose. A legitimate rejected body is not small: the
