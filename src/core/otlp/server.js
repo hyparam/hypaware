@@ -84,6 +84,38 @@ function acceptingServer(req) {
 }
 
 /**
+ * One address in the single spelling a `Host` naming it would use:
+ * lowercased, with the IPv4-mapped prefix off. libuv writes an address that
+ * reached a dual-stack socket in the mapped form (`::ffff:198.51.100.7`), and
+ * a client that copied its endpoint back out of such a tool writes that same
+ * form in a `Host`. So every string the check below compares is read through
+ * this: the arrival address, the bind, and the `Host` hostname. Otherwise one
+ * address in two spellings collects two verdicts. A bind spelled that way
+ * stops matching the address it is reached on, and an explicitly routable
+ * listener loses the exemption it is configured for.
+ *
+ * @param {string} address
+ * @returns {string}
+ */
+function hostSpelling(address) {
+  const lower = address.toLowerCase()
+  return lower.startsWith('::ffff:') ? lower.slice(7) : lower
+}
+
+/**
+ * The address the server that accepted `req` is bound to, or `undefined`
+ * when there is none to read: a request with no accepting server behind it, a
+ * server that is not listening, or a pipe bind, which has no routable side.
+ *
+ * @param {IncomingMessage} req
+ * @returns {string | undefined}
+ */
+function boundAddress(req) {
+  const bound = acceptingServer(req)?.address()
+  return typeof bound === 'object' && bound !== null ? hostSpelling(bound.address) : undefined
+}
+
+/**
  * Read the hostname out of a `Host` header, dropping the optional port
  * and the brackets an IPv6 literal is written in. Returns `undefined` for
  * a header no hostname can be read out of, which the caller refuses along
@@ -120,15 +152,15 @@ function hostnameOfHostHeader(value) {
  * nor a content-type gate stands in its way, and the `Host` it carries is
  * what tells the two apart.
  *
- * Only connections that arrived over loopback are judged. A listener
- * given a routable `listen_host` is reachable under whatever name
+ * One connection is not judged: one that arrived on a routable address a
+ * listener was bound to. Such a listener is reachable under whatever name
  * resolves to that address, and answering to that name is the point of
- * configuring it. A request rebound at a loopback listener, which is the
- * default bind and the one this guards, always lands on loopback; an
- * operator who deliberately published the listener on a routable address
- * is outside that guarantee and outside this check. A request with no
- * `Host` at all passes: HTTP/1.0 clients omit it and a browser never
- * does, so its absence is not the signal.
+ * pointing it there. A wildcard bind is not that, and earns no exemption on
+ * its routable side: it names no address to publish under, so what it
+ * answers to there is the address the request arrived on, a literal no
+ * resolver can point elsewhere. A request with no `Host` at all passes:
+ * HTTP/1.0 clients omit it and a browser never does, so its absence is not
+ * the signal.
  *
  * @param {IncomingMessage} req
  * @param {{ name: string, log?: PluginLogger }} opts `name` identifies the
@@ -137,16 +169,26 @@ function hostnameOfHostHeader(value) {
  * @returns {boolean}
  */
 export function isMisdirectedHost(req, opts) {
-  // Only a local address that reads as a routable one earns the exemption. An
-  // address that cannot be read at all is judged instead of waved through:
-  // this check is the whole barrier in front of these routes, so its unknown
-  // case fails closed.
-  const localAddress = (req.socket.localAddress ?? '').toLowerCase()
-  if (localAddress !== '' && !isLoopbackHost(localAddress)) return false
+  // The address this request arrived on, in the spelling the bind it is
+  // compared against is read in too.
+  const arrivedOn = hostSpelling(req.socket.localAddress ?? '')
+  // The exemption, and only it: a routable arrival address the listener was
+  // bound to. A wildcard bind never equals the address it was reached on, so
+  // its routable side is judged like its loopback side. An address that cannot
+  // be read, on either side, is judged instead of waved through: this check is
+  // the whole barrier in front of these routes, so its unknown cases fail
+  // closed.
+  const routable = arrivedOn !== '' && !isLoopbackHost(arrivedOn)
+  if (routable && arrivedOn === boundAddress(req)) return false
   const value = req.headers.host
   if (!value) return false
   const hostname = hostnameOfHostHeader(value)
-  if (hostname !== undefined && (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname))) return false
+  if (
+    hostname !== undefined &&
+    (isLoopbackHost(hostname) || WILDCARD_BIND_NAMES.has(hostname) || (routable && hostSpelling(hostname) === arrivedOn))
+  ) {
+    return false
+  }
   const server = acceptingServer(req)
   let refusals = server ? HOST_REFUSALS.get(server) : HOST_REFUSALS_BY_NAME.get(opts.name)
   if (!refusals) {
@@ -166,6 +208,15 @@ export function isMisdirectedHost(req, opts) {
       [Attr.ERROR_KIND]: 'host_not_loopback',
       listener: opts.name,
       host: value.slice(0, LOGGED_HOST_MAX_CHARS),
+      // Which side refused and under what bind, because the rule is no longer
+      // 'loopback only' everywhere: a wildcard bind answers on its routable
+      // side to the address the request arrived on and to no other routable
+      // name. Without these, an operator whose name-based LAN exporter starts
+      // refusing reads a line indistinguishable from a rebinding attempt on
+      // the loopback side. Empty for an address that could not be read, the
+      // case that is judged rather than exempted.
+      arrived_on: arrivedOn,
+      bind: boundAddress(req) ?? '',
       // Every refusal since this listener started, so a burst the interval
       // above swallowed is still legible from one line.
       refused_total: refusals.total,
