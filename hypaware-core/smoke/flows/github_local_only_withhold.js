@@ -34,21 +34,29 @@ const WITHHELD_REPO = 'acme/secrets'
  *
  * Two kernel lifetimes over one install. A revalidation's trigger and its row
  * verdicts read different sources: `exportPolicyFingerprint()` re-reads the
- * list file every tick, so the trigger fires at once, while the drop verdicts
- * the pass consumes come from the usage-policy resolver's per-cwd cache
- * (`src/core/usage-policy/matcher.js`, 5s TTL). Within one lifetime the pass
- * therefore fires on the new policy but re-confirms the repository from stale
- * `full` verdicts and stamps the new fingerprint, latching the missed
- * retirement until the seven-day `stale` backstop (issue #1317). A second
- * lifetime gets a fresh resolver, which is both the deterministic way to
- * observe a policy written after the first tick and the realistic one: a
- * daemon restart is how the field reaches the same state. This flow asserts
- * the restart path only; #1317 is the uncovered one.
+ * list file uncached every tick, so the trigger fires at once, while the drop
+ * verdicts the pass consumes come from the usage-policy resolver's per-cwd
+ * cache (`src/core/usage-policy/matcher.js`, 5s TTL, one resolver per kernel).
+ * A tick landing inside that 5s window therefore fires on the new policy but
+ * re-confirms the repository from stale `full` verdicts, and stamps the new
+ * fingerprint as it completes. Stamping is what makes the wrong answer stick:
+ * the trigger compares fingerprints, so once it matches nothing re-fires until
+ * the seven-day `stale` backstop. That race is issue #1317, and 5s is its whole
+ * window, not a seven-day condition: a tick landing after the entries expire
+ * retires correctly on its own, with no restart. Both halves were checked by
+ * running this flow with `second = first`, which fails at the retirement
+ * assertion with no wait and passes in full with a 6.5s one.
+ *
+ * So the second lifetime is not the field's only route to the correct state,
+ * and this flow does not claim it is. It is the deterministic route: a fresh
+ * resolver has an empty cache, which pins the assertions below to the policy
+ * change rather than to how long the preceding steps happened to take. #1317
+ * itself stays uncovered here, since reproducing it means racing a 5s clock.
  *
  * @param {{ harness: any, expect: any }} args
  * @ref LLP 0360#inventory [tests]: withheld evidence does not expand the inventory, so no forwardable row is written for its repository
  * @ref LLP 0367#triggers [tests]: a machine-local policy change fires a re-derivation, which retires a repository whose only evidence is now withheld
- * @ref LLP 0367#conservative [tests]: retirement stops future capture only; rows already written are not retracted
+ * @ref LLP 0367#conservative [tests]: only the non-retraction half. Rows written before retirement survive it; the section's mid-pass rule (serve only what the pass has re-confirmed) is not reachable here, because a 2-row fixture always completes inside the 50k-row budget
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
@@ -116,22 +124,32 @@ export async function run({ harness, expect }) {
     )
     expect.that('github_events: the admitted repository captured one row', cleanEvents, (value) => value === 1)
 
-    // `local-only` withholds at the export seam, it does not stop recording.
-    // Pinning both sides is what separates this flow from an `ignore` one:
-    // every assertion above reads the same if the evidence were never stored.
+    // `local-only` withholds, it does not stop recording. Pinning both sides is
+    // what separates this flow from an `ignore` one: every assertion above reads
+    // the same if the evidence had never been stored at all.
+    //
+    // Two distinct seams say so, and the two reads below are one of each. The
+    // count with `--include-local-only` proves the row is on disk. The count
+    // without it goes through the LLP 0105 query-visibility lattice
+    // (`cwdWithheldFromCaller`, src/core/query/visibility.js), which compares
+    // the row's class against the caller's: an ordinary local CLI caller
+    // resolves to `full` here, so the row is hidden and counted in the notice.
+    // That is a different seam from the export/forwarding one the inventory hit
+    // above (src/core/cache/storage.js), which is what withheld the same row
+    // from admitting its repository.
     const withheldSession = `select count(*) as n from ai_gateway_messages where cwd = '${withheldCwd}'`
     expect.that(
       'ai_gateway_messages: the withheld session is still recorded locally',
       await sqlCount(withheldSession, first),
       (value) => value === 1
     )
-    const exportView = await dispatchText(
+    const defaultView = await dispatchText(
       ['query', 'sql', withheldSession, '--refresh', 'always', '--format', 'json'],
       first
     )
     expect.that(
-      'ai_gateway_messages: an export-stance caller sees no row and is told one was withheld',
-      exportView,
+      'ai_gateway_messages: a default-stance caller sees no row and is told one was withheld',
+      defaultView,
       (value) =>
         value.code === 0 &&
         Number(JSON.parse(value.stdout)[0]?.n) === 0 &&
