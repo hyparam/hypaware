@@ -572,8 +572,14 @@ the next sweep take it.
 ```
 
 With no `window_days`, the sweep is still bounded, by the cache retention
-window: `query.cache.retention.default_days` if set, otherwise 90 days. To
-stop a scheduled sweep entirely, set the same block's `on_join` to false.
+window: `query.cache.retention.default_days` if set, otherwise 90 days.
+
+Setting the same block's `on_join` to false stops `@hypaware/claude`'s
+scheduled sweep as well as its join-time import: that adapter contributes no
+schedule at all when the flag is off. It does not stop `@hypaware/openclaw`'s.
+That adapter contributes its Lane B schedule unconditionally, so an OpenClaw
+entry with `backfill.on_join: false` still sweeps on its `sweep_cron` cadence;
+today the only way to bound it is `window_days`.
 
 ### Client skill commands
 
