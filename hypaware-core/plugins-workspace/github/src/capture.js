@@ -810,7 +810,8 @@ function commentEventId(c) {
  * What the gate does drop: an item re-updated inside the same second it was
  * captured keeps its `updated_at`, so the floor refuses it by identity and the
  * newer snapshot never lands. That is the trade `pullChangedSince` already
- * makes; curing it needs a content fingerprint, not a bare event id.
+ * makes; curing it needs a content fingerprint, not a bare event id. Whether
+ * to pay for one, and on which passes, is the open request LLP 0373.
  *
  * @ref LLP 0360#resource-bounds [constrained-by]: identity carried across ticks is one watermark second's worth, not a repository's history
  *

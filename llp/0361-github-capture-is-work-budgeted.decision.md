@@ -7,6 +7,11 @@
 **Date:** 2026-09-02
 **Related:** LLP 0032, LLP 0095, LLP 0096, LLP 0360
 **Extends:** LLP 0360
+**Extended-by:** [LLP 0373](./0373-boundary-identity-is-the-id-not-the-snapshot.rfc.md)
+(the request covering the identity behind #page-work's equal-timestamp rule:
+`pullChangedSince` recognizes a boundary pull by its number and the other three
+passes by their event id, so an item updated twice inside one second never has
+its second snapshot captured)
 
 > A GitHub capture tick has one fixed request budget across its repository
 > inventory. API pages are normalized and appended as they arrive, unfinished
