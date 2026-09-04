@@ -1136,6 +1136,42 @@ test('the cross-page guard survives a pulls phase the request budget splits acro
   assert.equal(new Set(ids).size, ids.length, 'and the resumed page fans out no duplicate sub-resources either')
 })
 
+test('a pulls phase begun this tick does not inherit a staged set from before it', async () => {
+  // `beginPulls` resets `pulls_emitted` for the phase it opens. A guard read
+  // once per tick would be seeded above that reset, so a descriptor carrying
+  // the field on some other phase would suppress pulls this phase never
+  // emitted, dropping the row and its fan-out with nothing to show for it.
+  const newer = '2026-02-01T00:00:00Z'
+  const bumped = { number: 12, state: 'open', created_at: '2026-01-30T00:00:00Z', updated_at: newer, merged_at: null, user: { login: 'Bob' } }
+  const client = fakeClient({ repos: { 'o/r': { pulls: [], prFiles: { 12: ['a.js'] } } } })
+  client.listIssuesPage = async () => ({ items: [], next: null })
+  client.listPullRequestsPage = async () => ({ items: [bumped], next: null })
+
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = {
+    since: { issues: '2026-01-01T00:00:00Z', pulls: '2026-01-31T00:00:00Z' },
+    pull_numbers: [],
+    work: { mode: 'poll', phase: 'issues', pulls_emitted: [12] },
+  }
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [12],
+    'the phase this tick opened guards only what this tick emitted',
+  )
+})
+
 test('a pulls phase resumed from a pre-field work descriptor publishes no partial captured set', async () => {
   const TIE = '2026-02-01T00:00:00Z'
   const older = '2026-01-31T00:00:00Z'

@@ -223,9 +223,10 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
   // request budget splits a pulls phase across ticks, and a set that restarted
   // empty on the resumed page would leave the duplicate exactly where the
   // reshuffle has had the longest to produce one. Dropped by `finishPulls`, so
-  // it stays bounded by the phase rather than by repository history.
-  /** @type {Set<number>} */
-  const emittedPulls = new Set(work.pulls_emitted ?? [])
+  // it lives no longer than one phase; a backfill's phase is the whole
+  // repository, which is the order `cursor.pull_numbers` beside it already is.
+  /** @type {Set<number> | null} */
+  let emittedPulls = null
 
   /** @param {Record<string, unknown>[]} rows */
   async function flush(rows) {
@@ -263,6 +264,11 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
     }
 
     if (work.phase === 'pulls') {
+      // Seeded on entry to the phase, not on entry to the tick: `beginPulls`
+      // can run earlier in this same call, and a set seeded above it would
+      // carry a stale descriptor's numbers into a phase that has emitted none
+      // of them, dropping those pulls and their fan-out with no row to show it.
+      emittedPulls ??= new Set(work.pulls_emitted ?? [])
       const tasks = work.pull_tasks ?? (work.pull_tasks = [])
       if (tasks.length > 0) {
         if (!await drainPullTask({ client, owner, name, repo, tasks, budget, flush })) return false
