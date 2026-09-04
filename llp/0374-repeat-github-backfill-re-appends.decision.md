@@ -6,7 +6,7 @@
 **Author:** Phil / Codex
 **Generated-by:** neutral
 **Date:** 2026-09-04
-**Related:** LLP 0032, LLP 0360, LLP 0361; hyparam/hypaware#1284,
+**Related:** LLP 0023, LLP 0032, LLP 0360, LLP 0361; hyparam/hypaware#1284,
 hyparam/hypaware#1330, hyparam/hypaware#1334 (acceptance condition, clause 2,
 option a)
 **Extends:** LLP 0360, LLP 0361
@@ -50,11 +50,19 @@ as the bug that was just fixed next door.
 
 A repeat backfill re-appends, by design.
 
-A second backfill over unchanged history writes a second row for every event
-the first captured. `github_events` carries no capture-time column and
-`event_id` is deterministic, so those rows are the same observation appended
-twice: `count(*)` grows, roughly doubling for the repositories the run
+A second backfill invoked after the first has **completed** writes a second row
+for every event the first captured. `github_events` carries no capture-time
+column and `event_id` is deterministic, so those rows are the same observation
+appended twice: `count(*)` grows, roughly doubling for the repositories the run
 visited, while `count(distinct event_id)` does not move.
+
+Completion is the condition LLP 0361#budget sets, and it is load-bearing rather
+than decorative. A backfill that exhausts its request budget leaves its work on
+the cursor, and the next invocation continues that backfill instead of
+resetting the cursor. The same is true of a poll or `hyp github sync` tick that
+finds the unfinished work: it resumes the backfill. Growth measured across
+either is first capture, not re-capture, and only a completed-then-repeated
+backfill demonstrates this decision.
 
 Neither the daemon poll nor `hyp github sync` behaves this way. They resume
 from the durable cursor and append only what it has not already published,
@@ -63,11 +71,19 @@ at the watermark second.
 
 The dataset is where the redundancy stops mattering. `github_events` is an
 append-only structural log (LLP 0360#concrete-columns), and the T0 projection
-reads it into node and edge rows keyed by the byte-compatible natural keys
-settled by LLP 0032. Two snapshots of one pull request converge onto one
-PullRequest node. `hyp graph project` after a repeat backfill therefore does
-not double the graph, and a query over `github_events` that wants current state
-rather than capture history groups by the natural key.
+reads it into node and edge rows whose ids are content-addressed over the
+normalized natural key, then drops every row whose id is already committed
+before it writes (LLP 0023#content-addressed-ids, LLP 0023#pre-write-dedup).
+Two snapshots of one pull request build the same PullRequest node id, so the
+second is dropped rather than appended. `hyp graph project` after a repeat
+backfill therefore does not double the graph, and a query over `github_events`
+that wants current state rather than capture history groups by the natural key.
+
+LLP 0032 is a narrower guarantee and is not what saves the graph here: it makes
+the `Repo`, `Commit`, and `File` keys byte-compatible with the ones local
+session capture mints, so those nodes converge **across domains**. `Issue`,
+`PullRequest`, and `Review` are GitHub-internal types outside that vocabulary,
+and they converge for the ordinary reason every T0 node does.
 
 ## Why not a committed-row dedup {#no-committed-dedup}
 

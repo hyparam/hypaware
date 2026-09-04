@@ -1675,18 +1675,27 @@ hyparam/hypaware#1334 (the deferred finding that asked for this procedure).
    for exactly that window and look for the same issue coming back:
 
    ```sh
-   T=$(gh api "repos/$REPO/issues?state=all&sort=updated&direction=desc&per_page=1" --jq '.[0].updated_at')
-   N=$(gh api "repos/$REPO/issues?state=all&sort=updated&direction=desc&per_page=1" --jq '.[0].number')
+   B=$(gh api "repos/$REPO/issues?state=all&sort=updated&direction=desc&per_page=1" \
+     --jq '.[0] | "\(.number) \(.updated_at)"')
+   N=${B%% *}
+   T=${B##* }
    echo "boundary issue #$N at $T"
    gh api "repos/$REPO/issues?state=all&since=$T&per_page=100" \
      | jq --arg n "$N" '[.[] | select((.number|tostring) == $n)] | length'
    ```
 
+   Take the number and the timestamp from the one response, as above. Two
+   separate requests can describe two different issues, and the reading is then
+   about neither.
+
    Read the last number: `1` means `since` is **inclusive** of the boundary
    second, `0` means **exclusive**. Either is a result; neither is a failure.
 
-   Before recording a `0`, run the guard, because an issue updated between the
-   two requests would leave the window legitimately:
+   Run the guard before recording **either** reading, because an issue updated
+   between the two requests invalidates both directions. It can leave the
+   window legitimately (a false `0`), or rise strictly above `$T` and come
+   back even under exclusive semantics (a false `1`, which is the answer the
+   code already assumes and so the easier one to accept without noticing):
 
    ```sh
    gh api "repos/$REPO/issues/$N" --jq .updated_at
@@ -1698,19 +1707,21 @@ hyparam/hypaware#1334 (the deferred finding that asked for this procedure).
 3. Probe `/issues/comments`, the same shape on the comments listing:
 
    ```sh
-   CT=$(gh api "repos/$REPO/issues/comments?sort=updated&direction=desc&per_page=1" --jq '.[0].updated_at')
-   CID=$(gh api "repos/$REPO/issues/comments?sort=updated&direction=desc&per_page=1" --jq '.[0].id')
+   B=$(gh api "repos/$REPO/issues/comments?sort=updated&direction=desc&per_page=1" \
+     --jq '.[0] | "\(.id) \(.updated_at)"')
+   CID=${B%% *}
+   CT=${B##* }
    echo "boundary comment $CID at $CT"
    gh api "repos/$REPO/issues/comments?since=$CT&per_page=100" \
      | jq --arg id "$CID" '[.[] | select((.id|tostring) == $id)] | length'
    ```
 
-   Same reading as step 2, and the same guard
+   Same reading as step 2, and the same guard on either reading
    (`gh api "repos/$REPO/issues/comments/$CID" --jq .updated_at`).
 
 4. Probe `/commits`, which windows on the committer date rather than
-   `updated_at`. The listing is reverse-chronological, so take the maximum over
-   the first page rather than the first element:
+   `updated_at`. The listing is not ordered on that date, so take the maximum
+   over the first page rather than the first element:
 
    ```sh
    ST=$(gh api "repos/$REPO/commits?per_page=100" --jq '[.[].commit.committer.date] | max')
@@ -1746,16 +1757,25 @@ measurement. Add a dated row here on the first run.
 
 ### Repeat backfill re-appends (by design)
 
-A release reviewer who runs `hyp github backfill` twice over unchanged history
-will see `count(*)` on `github_events` grow, roughly doubling for the
+A release reviewer who runs `hyp github backfill` twice over a **completed**
+history will see `count(*)` on `github_events` grow, roughly doubling for the
 repositories the run visited. That is the design and not a regression:
 
 ```sh
+# Complete the first backfill: repeat until it stops reporting pending work.
+hyp github backfill owner/repo   # rerun while it prints "bounded work remains"
 hyp query sql "select count(*) from github_events"
 hyp github backfill owner/repo
 hyp query sql "select count(*) from github_events"   # larger
-hyp query sql "select count(distinct event_id) from github_events"
+hyp query sql "select count(distinct event_id) from github_events"   # unchanged
 ```
+
+Completing the first backfill is what makes the second one a re-append rather
+than a continuation. A backfill that exhausts its request budget leaves its
+work on the cursor and prints `bounded work remains and will resume on the next
+GitHub capture tick`; the next `hyp github backfill` then continues it instead
+of resetting the cursor, and the growth you measure is first capture, not
+re-capture.
 
 `hyp github backfill` resets each selected repository's cursor and re-fetches
 its available history into an append-only dataset
@@ -1771,9 +1791,14 @@ The idempotent trigger is the other one: `hyp github sync` and the daemon poll
 resume from the durable cursor and append only what is new, including at the
 watermark second, which is the property #1330 fixed and the hermetic tests
 hold. A second `hyp graph project` after a repeat backfill does not double the
-graph either, because the T0 contract keys on the natural keys settled by
-LLP 0032. If a run of `hyp github sync` grows the row count over unchanged
-history, that is a real regression and this is not the explanation.
+graph either: node and edge ids are content-addressed, and projection drops
+every row whose id is already committed before it writes
+([LLP 0023#pre-write-dedup](../llp/0023-context-graph-projection.decision.md#pre-write-dedup)).
+If a run of `hyp github sync` grows the row count over unchanged history **with
+no backfill work outstanding**, that is a real regression and this is not the
+explanation. Check the qualifier first: a sync or poll tick that finds an
+unfinished backfill on the cursor continues it, so it appends historical rows
+over unchanged history by design too.
 
 ### If it fails
 
@@ -1781,13 +1806,16 @@ history, that is a real regression and this is not the explanation.
   `gh` is logged into the wrong host. Fix the credential before reading
   anything into a `0`: an empty listing and an excluded boundary item look
   identical at the jq layer.
-- **Step 2 or 3 prints `0` and the guard shows the timestamp moved.** Not a
-  reading. The repository was updated between the two requests. Repeat on a
-  quieter repository rather than recording the result.
-- **A probe listing comes back empty (`.[0]` is null and `T` is empty).** The
-  repository has no issues, no comments, or no commits, so `since=` would carry
-  an empty value and the probe would measure nothing. Pick a repository that
-  has the resource, and do not record an absent reading as an exclusive one.
+- **The guard shows the timestamp moved.** Not a reading, in either direction.
+  The repository was updated between the two requests, which can fake a `0`
+  (the item left the window) or a `1` (the item rose above `$T` and returns
+  even under exclusive semantics). Repeat on a quieter repository rather than
+  recording the result.
+- **A probe listing comes back empty.** The `boundary` echo line prints `null`
+  for the id and the timestamp (steps 2 and 3), or `ST` is empty (step 4): the
+  repository has no issues, no comments, or no commits, so `since=` carries no
+  usable value and the probe measures nothing. Pick a repository that has the
+  resource, and do not record an absent reading as an exclusive one.
 - **`hyp github backfill` reports the repository is not in the active
   inventory.** The default `inventory = "session_repos"` selects only
   repositories evidenced by local agent sessions
