@@ -61,6 +61,43 @@ test('source runs shortly after boot and reports structured completion-relative 
     && entry.attrs.events === 0))
 })
 
+test('status reports the repositories the last tick reached, and the inventory it drew them from', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-status-budget-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+
+  // A three-repo inventory with room for exactly one request: the tick reaches
+  // the first repository and the budget stops it there.
+  setGithubRuntime(/** @type {any} */ ({
+    stateDir,
+    config: {
+      ignore: [],
+      token_env: 'GITHUB_TOKEN',
+      poll_interval: '10ms',
+      inventory: 'session_repos',
+    },
+    captureRequestLimit: 1,
+    observedRepos: { async list() { return ['o/a', 'o/b', 'o/c'] } },
+    clientFactory: () => fakeClient({
+      repos: { 'o/a': { issues: [{ number: 1, state: 'open', created_at: '2026-01-01T00:00:00Z', user: { login: 'a' } }] } },
+    }),
+    storage: {
+      cacheTablePath() { return '/cache/github_events' },
+      async appendRows() {},
+    },
+    log: { info() {}, error() {} },
+  }))
+
+  const source = await startGithubSource()
+  await new Promise((resolve) => setTimeout(resolve, 35))
+  assert.ok(source.status)
+  const status = await source.status()
+  await source.stop()
+
+  assert.equal(status.details?.last_repo_count, 1, 'a budget-stopped tick reached one repository')
+  assert.equal(status.details?.last_inventory_repos, 3, 'the inventory it was drawn from stays visible beside it')
+  assert.equal(status.details?.backlog_pending, true)
+})
+
 test('source never overlaps slow ticks', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-no-overlap-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
