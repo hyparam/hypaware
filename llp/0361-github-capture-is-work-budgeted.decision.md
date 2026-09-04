@@ -12,6 +12,9 @@
 `pullChangedSince` recognizes a boundary pull by its number and the other three
 passes by their event id, so an item updated twice inside one second never has
 its second snapshot captured)
+**Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
+(#budget's deliberate new backfill is recorded there as re-appending rows,
+with the committed-row dedup alternative refused)
 
 > A GitHub capture tick has one fixed request budget across its repository
 > inventory. API pages are normalized and appended as they arrive, unfinished

@@ -20,6 +20,9 @@ future capture)
 that keeps an inclusive `since` from re-appending the watermark second
 recognizes an item by its event id, so an item updated twice inside one second
 never has its second snapshot captured)
+**Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
+(#capture-regimes and #cursoring together entail that a repeat backfill
+re-appends; 0374 records that as the design and refuses a committed-row dedup)
 
 > `@hypaware/github` ships under `hypaware-core/plugins-workspace/github`.
 > Bundling does not activate it by default: adding it to `plugins[]` remains the
