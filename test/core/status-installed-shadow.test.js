@@ -97,7 +97,7 @@ test('hyp status warns about an installed plugin the bundled copy shadows, with 
     }
     const listOut = makeBuf()
     await dispatch(['plugin', 'list'], { stdout: listOut, stderr: makeBuf(), env })
-    assert.match(listOut.text(), /@hypaware\/github@0\.9\.0.*shadowed: the bundled copy runs; hyp plugin remove @hypaware\/github/)
+    assert.match(listOut.text(), /@hypaware\/github@0\.9\.0.*shadowed by the bundled copy; hyp plugin remove @hypaware\/github/)
 
     const removeOut = makeBuf()
     const removeErr = makeBuf()

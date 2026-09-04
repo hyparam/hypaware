@@ -213,6 +213,26 @@ function parsePluginInstallArgs(argv) {
 }
 
 /**
+ * Every plugin name the package ships, both buckets. An installed copy of one
+ * of these never runs: boot activates the bundled copy and skips the lock
+ * entry (LLP 0380). Read from the manifests rather than from what this boot
+ * activated, so the list agrees with the `installed_plugin_shadowed`
+ * diagnostic `hyp status` raises from the same rule under every profile.
+ * Discovery failure degrades to empty (no marks), never throws: a listing is
+ * not the place to fail.
+ *
+ * @returns {Promise<Set<string>>}
+ */
+async function discoverBundledNames() {
+  try {
+    const bundled = await discoverBundledPlugins()
+    return new Set([...bundled.loaded, ...bundled.excluded].map((m) => m.manifest.name))
+  } catch {
+    return new Set()
+  }
+}
+
+/**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -223,6 +243,7 @@ export async function runPluginList(argv, ctx) {
   const stateDir = pluginStateDir(ctx)
   const installed = await listInstalledPlugins(stateDir)
   const active = ctx.plugins ?? []
+  const bundledNames = await discoverBundledNames()
 
   if (json) {
     const installedByName = new Map(installed.map((e) => [e.name, e]))
@@ -240,10 +261,15 @@ export async function runPluginList(argv, ctx) {
       // Provenance is what runs, read off the active plugin's root directory:
       // an installed copy of a bundled name is in the lock but never active
       // (boot runs the bundled copy), so the name reports the bundled source
-      // and carries `shadowed` for the idle lock entry.
+      // when it is active and carries `shadowed` for the idle lock entry.
+      // `shadowed` is decided by the bundled manifest set, not by what this
+      // boot happens to have activated: `plugin list` boots the `config`
+      // profile, so a lock entry whose bundled twin the config does not
+      // enable (the ordinary state for the V1-excluded names this rule is
+      // about) is inert all the same, and `hyp status` already says so.
       // @ref LLP 0380#bundled-copy-wins [implements]: the list says which copy runs, by root directory, not by lock membership
       const runsInstalled = !!act && !!inst && act.rootDir === inst.install_dir
-      const shadowed = !!act && !!inst && !runsInstalled
+      const shadowed = !!inst && bundledNames.has(name)
       plugins.push({
         name,
         version,
@@ -269,7 +295,6 @@ export async function runPluginList(argv, ctx) {
   // bundled name sits in the lock while the bundled copy is what runs.
   // Printing "(bundled)" for every active plugin hid that copy entirely.
   const installDirs = new Map(installed.map((e) => [e.name, e.install_dir]))
-  const activeRoots = new Map(active.map((p) => [p.name, p.rootDir]))
   if (active.length > 0) {
     ctx.stdout.write('Active plugins (from current boot):\n')
     for (const p of active) {
@@ -281,9 +306,8 @@ export async function runPluginList(argv, ctx) {
     ctx.stdout.write('Installed plugins:\n')
     for (const entry of installed) {
       const available = entry.update?.available ? '  (update available)' : ''
-      const activeRoot = activeRoots.get(entry.name)
-      const shadowed = activeRoot !== undefined && activeRoot !== entry.install_dir
-        ? `  (shadowed: the bundled copy runs; hyp plugin remove ${entry.name})`
+      const shadowed = bundledNames.has(entry.name)
+        ? `  (shadowed by the bundled copy; hyp plugin remove ${entry.name})`
         : ''
       ctx.stdout.write(`  ${entry.name}@${entry.version}${available}${shadowed}\n`)
     }

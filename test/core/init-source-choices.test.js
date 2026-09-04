@@ -58,6 +58,36 @@ test('every `hyp setup --client` value is a picker row whose plugin contributes 
   assert.ok(INIT_CLIENT_CHOICES.includes('claude-desktop'))
 })
 
+// The converse, which is what actually closes #1301 for `--client`: the
+// one-way check above still lets a new client row join the picker without
+// joining the flag, exactly the way `claude-desktop` did. Every row whose
+// plugin contributes a client is a `--client` value unless it is named here,
+// and the one name here is the open question the branch deliberately leaves
+// open: whether OpenClaw belongs in `--client` at all. Adding a client row
+// now forces that answer instead of silently repeating the gap.
+const CLIENT_ROWS_WITHOUT_A_FLAG = new Set(['openclaw'])
+
+test('every picker row whose plugin contributes a client is a `--client` value, or a named exception', async () => {
+  const catalog = await realCatalog()
+  const clientPlugins = new Set([...catalog.clientDescriptors.values()].map((d) => d.plugin))
+  const rowsWithAClient = [...catalog.pickerDescriptors.entries()]
+    .filter(([, row]) => clientPlugins.has(row.plugin))
+    .map(([name]) => name)
+  for (const name of rowsWithAClient) {
+    if (CLIENT_ROWS_WITHOUT_A_FLAG.has(name)) continue
+    assert.ok(
+      INIT_CLIENT_CHOICES.includes(/** @type {InitFlags['clients'][number]} */ (name)),
+      `picker row ${name} contributes a client but is not a --client value; add it or name it an exception`
+    )
+  }
+  // The exception list itself must stay honest: a name that stops being a
+  // client row (or becomes a flag) has to leave it.
+  for (const name of CLIENT_ROWS_WITHOUT_A_FLAG) {
+    assert.ok(rowsWithAClient.includes(name), `${name} is no longer a client picker row`)
+    assert.equal(INIT_CLIENT_CHOICES.includes(/** @type {InitFlags['clients'][number]} */ (name)), false, name)
+  }
+})
+
 test('--client claude-desktop folds into the claude-desktop source pick the picker row makes', () => {
   // The fold is what makes `--client` sufficient on its own; the Desktop row
   // then composes `@hypaware/claude` + `@hypaware/claude-desktop` exactly as

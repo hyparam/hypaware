@@ -264,7 +264,7 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'plugin list',
-      summary: 'List active (bundled) and installed plugins',
+      summary: 'List active plugins and their provenance, plus installed plugins',
       usage: coreUsage('plugin list'),
       run: runPluginList,
     },

@@ -90,3 +90,10 @@ transcripts along with Claude Code's.
   registration from a plugin that declared `false`; that mismatch is a
   packaging mistake for `hyp plugin doctor` to grow a check for, not a
   runtime decision.
+- This closes the over-reporting half of the gate only. The default-on
+  derivation still keys off "this enabled plugin contributes a client", so a
+  plugin that registers a provider and contributes no client block
+  (`@hypaware/hermes`) is a target `desired()` names and status derives no
+  line for until a marker lands. Unchanged here and not a permanent `pending`
+  (the row appears `done` once the import runs), but the client-descriptor
+  proxy is still not the provider gate in that direction.

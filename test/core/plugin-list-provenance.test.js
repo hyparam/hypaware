@@ -116,7 +116,7 @@ test('plugin list marks an installed copy the bundled plugin shadows, and labels
     assert.equal(await runPluginList([], ctx), 0)
     const text = ctx.stdout.text()
     assert.match(text, /^  @hypaware\/github@1\.31\.0  \(bundled\)$/m)
-    assert.match(text, /^  @hypaware\/github@0\.9\.0  \(shadowed: the bundled copy runs; hyp plugin remove @hypaware\/github\)$/m)
+    assert.match(text, /^  @hypaware\/github@0\.9\.0  \(shadowed by the bundled copy; hyp plugin remove @hypaware\/github\)$/m)
 
     ctx.stdout = makeBuf()
     assert.equal(await runPluginList(['--json'], ctx), 0)
@@ -126,6 +126,108 @@ test('plugin list marks an installed copy the bundled plugin shadows, and labels
     assert.equal(github.version, '1.31.0')
     assert.equal(github.active, true)
     assert.equal(github.shadowed, true)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// `plugin list` boots the `config` profile, so the bundled twin of a shadowed
+// lock entry is only active when the config names it. It usually does not:
+// both V1-excluded names this rule is about (`@hypaware/github`,
+// `@hypaware/claude-desktop`) activate only on an explicit opt-in, and the
+// operator following the `hyp status` repair has often already taken the name
+// out of `plugins[]`. Deriving the mark from what happened to activate left
+// `plugin list` calling that entry an ordinary install while `hyp status`
+// called it code that never runs, and `plugin list` is the surface the repair
+// sends the operator to. The bundled manifest set decides, under every profile.
+// @ref LLP 0380#surfaced-not-fatal [tests]: the list marks the idle lock entry whether or not this boot activated its bundled twin
+test('plugin list marks a shadowed lock entry even when the bundled twin is not active', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-plugin-list-idle-shadow-'))
+  try {
+    const stateDir = path.join(hypHome, 'hypaware')
+    await fs.mkdir(stateDir, { recursive: true })
+    const installDir = path.join(stateDir, 'plugins', '@hypaware', 'github')
+    await writeLock(stateDir, {
+      schema_version: 1,
+      plugins: {
+        '@hypaware/github': {
+          name: '@hypaware/github',
+          version: '0.9.0',
+          source: { kind: 'local-dir', raw: installDir, path: installDir },
+          install_dir: installDir,
+          content_hash: 'a'.repeat(64),
+          manifest_hash: 'b'.repeat(64),
+          installed_at: '2026-08-31T00:00:00.000Z',
+        },
+      },
+    })
+    // Nothing active: the config does not name the excluded bundled plugin.
+    const ctx = /** @type {any} */ ({
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+      stdout: makeBuf(),
+      stderr: makeBuf(),
+      plugins: [],
+    })
+
+    assert.equal(await runPluginList([], ctx), 0)
+    assert.match(
+      ctx.stdout.text(),
+      /^  @hypaware\/github@0\.9\.0  \(shadowed by the bundled copy; hyp plugin remove @hypaware\/github\)$/m
+    )
+
+    ctx.stdout = makeBuf()
+    assert.equal(await runPluginList(['--json'], ctx), 0)
+    const json = JSON.parse(ctx.stdout.text())
+    const github = json.plugins.find((/** @type {{ name: string }} */ p) => p.name === '@hypaware/github')
+    assert.equal(github.shadowed, true)
+    assert.equal(github.active, false)
+    // Nothing ran, so the row still reports where its own code came from.
+    assert.equal(github.source, 'installed')
+    assert.equal(github.version, '0.9.0')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// A third-party plugin the package does not ship is never shadowed, whether
+// or not this boot activated it: the mark must key off the bundled manifest
+// set, not merely off "in the lock and not active".
+test('plugin list does not mark an inactive third-party install as shadowed', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-plugin-list-third-party-'))
+  try {
+    const stateDir = path.join(hypHome, 'hypaware')
+    await fs.mkdir(stateDir, { recursive: true })
+    const installDir = path.join(stateDir, 'plugins', '@third-party', 'echo')
+    await writeLock(stateDir, {
+      schema_version: 1,
+      plugins: {
+        '@third-party/echo': {
+          name: '@third-party/echo',
+          version: '0.2.0',
+          source: { kind: 'local-dir', raw: installDir, path: installDir },
+          install_dir: installDir,
+          content_hash: 'a'.repeat(64),
+          manifest_hash: 'b'.repeat(64),
+          installed_at: '2026-09-01T00:00:00.000Z',
+        },
+      },
+    })
+    const ctx = /** @type {any} */ ({
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+      stdout: makeBuf(),
+      stderr: makeBuf(),
+      plugins: [],
+    })
+
+    assert.equal(await runPluginList([], ctx), 0)
+    assert.equal(ctx.stdout.text().includes('shadowed'), false)
+
+    ctx.stdout = makeBuf()
+    assert.equal(await runPluginList(['--json'], ctx), 0)
+    const json = JSON.parse(ctx.stdout.text())
+    const echo = json.plugins.find((/** @type {{ name: string }} */ p) => p.name === '@third-party/echo')
+    assert.equal(echo.shadowed, undefined)
+    assert.equal(echo.source, 'installed')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

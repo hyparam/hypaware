@@ -484,12 +484,16 @@ export function resolveConfigPath({ explicit, env, hypHome }) {
  * install kept running stale code across every release that shipped a fix
  * to the bundled copy.
  *
- * @param {{ discovered: { loaded: LoadedManifest[], excluded?: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }} args
+ * `excluded` is required, not optional: an allowlist-only comparison is
+ * exactly the bug this fixes, and a caller that omitted the bucket would
+ * reintroduce it silently. `discoverBundledPlugins` always returns both.
+ *
+ * @param {{ discovered: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }} args
  * @returns {PluginName[]}
  */
 export function detectShadowedPlugins({ discovered, installed }) {
   const bundledNames = new Set(
-    [...discovered.loaded, ...(discovered.excluded ?? [])].map((m) => m.manifest.name)
+    [...discovered.loaded, ...discovered.excluded].map((m) => m.manifest.name)
   )
   /** @type {PluginName[]} */
   const shadowing = []
@@ -588,7 +592,8 @@ export function selectBootPlugins({ discovered, installed, config, bootProfile =
  *   config (`enabled !== false`). Excluded and installed plugins are
  *   honoured when they appear in the config: typing the name is the
  *   explicit opt-in. The installed plugin is never preferred over a
- *   bundled one (shadow collisions are rejected before this point).
+ *   bundled one: `selectBootPlugins` dropped the shadow from this pool
+ *   before it got here (LLP 0380).
  *
  * Plugins in the config that aren't bundled (or aren't installed)
  * are skipped silently here. The cross-plugin validator surfaces
