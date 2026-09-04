@@ -253,7 +253,22 @@ export interface RepoCursor {
    */
   boundary?: { issues?: string[]; commits?: string[]; comments?: string[] }
   etag?: Record<string, string>
+  /**
+   * Numbers known to be pull requests, from either listing: what discriminates
+   * a PR conversation comment from an issue comment.
+   */
   pull_numbers?: number[]
+  /**
+   * Pull numbers already captured at exactly `since.pulls`, which is a
+   * different question from `pull_numbers` (the issues listing returns PRs the
+   * pulls pass has not captured yet). Only the boundary second is kept, since
+   * that is the only one the equal-timestamp tie guard consults. Absent while
+   * no pulls phase has observed that second (a sidecar written before this
+   * field existed, or one whose phases have all ended on a 304), and the guard
+   * then falls back to `pull_numbers`; never written empty, since an empty
+   * answer would retire that fallback.
+   */
+  pulls_high_numbers?: number[]
   work?: GithubRepoWork
 }
 
@@ -286,6 +301,13 @@ export interface GithubRepoWork {
   // rather than skipping the un-fetched pages (LLP 0360#cursoring).
   issues_high?: string
   pulls_high?: string
+  /**
+   * Staged `RepoCursor.pulls_high_numbers` for the in-flight `pulls_high`.
+   * Absent only on a phase resumed from a work descriptor written before this
+   * field existed, which stages nothing rather than the partial answer its
+   * remaining pages would give.
+   */
+  pulls_high_numbers?: number[]
   commits_high?: string
   comments_high?: string
   // The boundary identities staged alongside each `*_high`, published into

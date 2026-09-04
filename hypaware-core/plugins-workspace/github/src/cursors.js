@@ -106,9 +106,12 @@ function readRepoCursor(value) {
     }
     if (Object.keys(etag).length > 0) cursor.etag = etag
   }
-  if (Array.isArray(v.pull_numbers)) {
-    cursor.pull_numbers = [...new Set(v.pull_numbers.filter((n) => Number.isSafeInteger(n) && n > 0))]
-  }
+  const pullNumbers = readNumbers(v.pull_numbers)
+  if (pullNumbers) cursor.pull_numbers = pullNumbers
+  // Absent on a sidecar written before the tie guard had its own set, which
+  // capture reads as a fallback to `pull_numbers`.
+  const highNumbers = readNumbers(v.pulls_high_numbers)
+  if (highNumbers) cursor.pulls_high_numbers = highNumbers
   const work = readWork(v.work)
   if (work) cursor.work = work
   return cursor
@@ -126,6 +129,8 @@ function readWork(value) {
   if (typeof v.baseline_pulls === 'string') work.baseline_pulls = v.baseline_pulls
   if (typeof v.issues_high === 'string') work.issues_high = v.issues_high
   if (typeof v.pulls_high === 'string') work.pulls_high = v.pulls_high
+  const highNumbers = readNumbers(v.pulls_high_numbers)
+  if (highNumbers) work.pulls_high_numbers = highNumbers
   if (typeof v.commits_high === 'string') work.commits_high = v.commits_high
   if (typeof v.comments_high === 'string') work.comments_high = v.comments_high
   if (typeof v.pulls_etag === 'string') work.pulls_etag = v.pulls_etag
@@ -138,6 +143,12 @@ function readWork(value) {
   if (Array.isArray(v.pull_tasks)) work.pull_tasks = v.pull_tasks.map(readPullTask).filter((x) => x !== null).slice(0, 100)
   if (Array.isArray(v.commit_tasks)) work.commit_tasks = v.commit_tasks.map(readCommitTask).filter((x) => x !== null).slice(0, 100)
   return work
+}
+
+/** A deduped list of positive integers, or null when the value is not one. @param {unknown} value @returns {number[] | null} */
+function readNumbers(value) {
+  if (!Array.isArray(value)) return null
+  return [...new Set(value.filter((n) => Number.isSafeInteger(n) && n > 0))]
 }
 
 /**

@@ -518,6 +518,127 @@ test('incremental pulls include unseen PRs tied at the high-water timestamp', as
   assert.deepEqual(cursors.repos['o/r'].pull_numbers, [9, 10, 11])
 })
 
+test('a PR the same tick discovers on the issues page is captured when it ties the pulls high-water', async () => {
+  const TIE = '2026-02-01T00:00:00Z'
+  const client = fakeClient({
+    repos: {
+      'o/r': {
+        // `/issues` returns PRs too, so this tick learns #12 is a PR before the pulls pass runs.
+        issues: [{ number: 12, pull_request: {}, state: 'open', created_at: TIE, updated_at: TIE, user: { login: 'Bob' } }],
+        pulls: [{ number: 12, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Bob', type: 'User' } }],
+        comments: [{ id: 21, created_at: TIE, user: { login: 'Eve' }, issue_url: 'https://api.github.com/repos/o/r/issues/12' }],
+      },
+    },
+  })
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z', pulls: TIE }, pull_numbers: [7] }
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [12],
+    'the unseen tied pull is captured, not swallowed by its own issues-page sighting',
+  )
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request_comment').map((row) => row.number),
+    [12],
+    'its comment projects onto a pull node the same tick minted',
+  )
+  assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [12], 'the captured tie is remembered as captured, apart from pull_numbers')
+})
+
+test('an older sidecar with no captured-pull set still suppresses a tie it already captured', async () => {
+  const TIE = '2026-02-01T00:00:00Z'
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-cursors-old-'))
+  // The pre-`pulls_high_numbers` sidecar shape, written by hand: what an
+  // installed release leaves behind.
+  fs.writeFileSync(
+    path.join(stateDir, 'github-cursors.json'),
+    JSON.stringify({ schema_version: 1, repos: { 'o/r': { since: { issues: '2026-01-01T00:00:00Z', pulls: TIE }, pull_numbers: [10] } } }, null, 2),
+    'utf8',
+  )
+  const cursors = readCursors(stateDir)
+  fs.rmSync(stateDir, { recursive: true, force: true })
+  assert.equal(cursors.repos['o/r'].pulls_high_numbers, undefined)
+  assert.deepEqual(cursors.repos['o/r'].pull_numbers, [10])
+
+  const client = fakeClient({
+    repos: {
+      'o/r': {
+        pulls: [
+          { number: 10, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Bob' } },
+          { number: 11, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Ada' } },
+        ],
+      },
+    },
+  })
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [11],
+    'the absent set falls back to pull_numbers, so an already-captured tie is not re-emitted',
+  )
+  assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [10, 11], 'the tick publishes the dedicated set the next tick reads')
+})
+
+test('a 304 pulls phase does not retire an older sidecar fallback by publishing an empty captured set', async () => {
+  const TIE = '2026-02-01T00:00:00Z'
+  const pull = { number: 10, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Bob' } }
+  const client = fakeClient({ repos: { 'o/r': { pulls: [pull] } } })
+  let notModified = true
+  client.listPullRequestsPage = async () => (notModified
+    ? { items: [], next: null, notModified: true }
+    : { items: [pull], next: null, etag: 'etag-2' })
+
+  // The pre-`pulls_high_numbers` shape, with the saved etag an installed
+  // release leaves behind: the first tick after the upgrade sees a 304 and so
+  // observes no pull at the boundary second at all.
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z', pulls: TIE }, etag: { pulls: 'etag-1' }, pull_numbers: [10] }
+  /** @param {Record<string, unknown>[]} into */
+  const tick = (into) => captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { into.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  await tick([])
+  assert.equal(cursors.repos['o/r'].pulls_high_numbers, undefined, 'no evidence about the boundary second is not evidence of none')
+
+  notModified = false
+  const rows = []
+  await tick(rows)
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [],
+    'the fallback survived the 304, so the already-captured tie is still suppressed',
+  )
+  assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [10], 'and the listing tick publishes the dedicated set')
+})
+
 test('page and task continuations survive the cursor sidecar round trip', (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-cursors-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
@@ -881,4 +1002,81 @@ test('a refused continuation clears the poisoned work so the next tick captures 
   assert.deepEqual(settled.rows, [])
   const ids = [...refused.rows, ...recovered.rows, ...settled.rows].map((row) => row.event_id)
   assert.equal(new Set(ids).size, ids.length, 'no duplicate event ids across the three ticks')
+})
+
+test('a boundary pull re-listed on a later page of the same phase is captured once', async () => {
+  const TIE = '2026-02-01T00:00:00Z'
+  const older = '2026-01-31T00:00:00Z'
+  const tied = { number: 12, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Bob' } }
+  const stale = { number: 9, state: 'open', created_at: older, updated_at: older, merged_at: null, user: { login: 'Ada' } }
+  const client = fakeClient({ repos: { 'o/r': { pulls: [] } } })
+  // `sort=updated&direction=desc` reshuffles under pagination: a pull updated
+  // mid-traversal pushes an item back across the page boundary, so one phase
+  // can list #12 twice.
+  client.listPullRequestsPage = async (owner, name, etag, page) => (page === undefined
+    ? { items: [tied], next: 'p2' }
+    : { items: [tied, stale], next: null })
+
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z', pulls: TIE }, pull_numbers: [] }
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [12],
+    'the second sighting is suppressed by the page that captured it, not re-emitted',
+  )
+})
+
+test('a pulls phase resumed from a pre-field work descriptor publishes no partial captured set', async () => {
+  const TIE = '2026-02-01T00:00:00Z'
+  const older = '2026-01-31T00:00:00Z'
+  const at = (number) => ({ number, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Bob' } })
+  const stale = { number: 9, state: 'open', created_at: older, updated_at: older, merged_at: null, user: { login: 'Ada' } }
+  const client = fakeClient({ repos: { 'o/r': { pulls: [] } } })
+  client.listPullRequestsPage = async (owner, name, etag, page) => (page === 'p2'
+    ? { items: [at(11), stale], next: null }
+    : { items: [at(13), at(12), at(11), stale], next: null })
+
+  // What the previous release leaves behind when its request budget runs out
+  // mid-pulls-phase: `pulls_high` staged, no `pulls_high_numbers`. Pages 1..N-1
+  // already captured #13 and #12 at the boundary second, and nothing on the
+  // remaining pages can say so.
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = {
+    since: { issues: '2026-01-01T00:00:00Z', pulls: TIE },
+    pull_numbers: [11, 12, 13],
+    work: { mode: 'poll', phase: 'pulls', page: 'p2', baseline_pulls: TIE, pulls_high: TIE, pull_tasks: [] },
+  }
+  /** @param {Record<string, unknown>[]} into */
+  const tick = (into) => captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { into.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  await tick([])
+  assert.equal(cursors.repos['o/r'].pulls_high_numbers, undefined, 'half a phase is not an answer about the boundary second')
+
+  const rows = []
+  await tick(rows)
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [],
+    'the pull_numbers fallback still covers the pulls the interrupted phase captured',
+  )
+  assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [11, 12, 13], 'and a whole phase publishes the dedicated set')
 })
