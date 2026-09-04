@@ -101,7 +101,7 @@ Other init flags:
 | `--yes` / `-y`             | Accept defaults; do not prompt                          |
 | `--no-daemon`              | Skip daemon install and restart                         |
 | `--dry-run`                | Render the config + planned actions, write nothing      |
-| `--client claude\|codex\|opencode` | Attach a client (repeatable)                   |
+| `--client claude\|claude-desktop\|codex\|opencode` | Capture a client (repeatable)      |
 | `--source <id>`            | Add a capture source (repeatable)                       |
 | `--export <choice>`        | `keep-local`, `local-parquet`, or `configure-later`     |
 | `--retention-days <N>`     | Override the default 90-day retention window            |

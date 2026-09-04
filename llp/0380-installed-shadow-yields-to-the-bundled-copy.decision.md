@@ -93,8 +93,13 @@ closed.
   how to remove it, and the daemon never enters the restart loop.
 - `installed_shadows_bundled` is no longer thrown anywhere. `hypErrorKind`
   consumers that matched on it match nothing.
-- The `hyp plugin list --json` entry for a shadowed name reports the bundled
-  `version` and `source` and carries `shadowed: true`; the lock's
-  `installed_at` and `update` fields still ride on it.
+- The `hyp plugin list --json` entry for a shadowed name carries
+  `shadowed: true` under every profile, and the lock's `installed_at` and
+  `update` fields still ride on it. `version` and `source` report what runs:
+  the bundled copy when this boot activated it, and the idle lock entry's own
+  installed version when the config did not name it. `plugin list` boots the
+  `config` profile, so the excluded names this rule is about are usually not
+  active, and the mark comes from the bundled manifest set rather than from
+  what happened to activate.
 - `hyp plugin install` still accepts a bundled name. Refusing it at install
   time is a sensible follow-up; it is not part of this decision.
