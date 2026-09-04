@@ -211,7 +211,15 @@ export function createBackfillSweepDriver(opts) {
     const abandoned = new Promise((resolve) => {
       timer = setTimeout(() => resolve(true), runTimeoutMs)
       // Unref'd: a budget still counting must not hold the daemon's exit open.
-      timer.unref()
+      // Guarded the way `probeSourceDetails` guards its own budget timer in
+      // `src/core/daemon/runtime.js`, because this is the only expression in
+      // `awaitQueued` that can throw. A throw inside this executor rejects
+      // `abandoned`, so the race rejects and the queue's total tail swallows
+      // it: the queue would advance immediately and silently, with no
+      // `sweep_queue_abandoned` record, losing the serialization LLP
+      // 0359#serialized-providers holds. Keeping this step total leaves the
+      // bounded handoff as the only way the queue advances early.
+      if (typeof timer.unref === 'function') timer.unref()
     })
     // Which way `pending` settled is the fire site's business, not the
     // queue's: both hand the queue on the same way.
