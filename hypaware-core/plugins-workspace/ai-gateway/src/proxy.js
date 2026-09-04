@@ -872,9 +872,12 @@ function sanitizeResponseHeaders(headers) {
  * can be answered as a reusable one.
  *
  * The upstream-failure site is the one here that refuses a request already
- * handed to a pipe, and it still arrives flowing: the pipe tears down first,
- * because `stream.pipe()` registers its dest-`error` handler with
- * `prependListener`. So the drain's resume finds nothing paused to undo.
+ * handed to a pipe, and it arrives PAUSED: `stream.pipe()` prepends its
+ * dest-`error` handler, so the pipe tears down before this runs, and unpiping
+ * the last destination pauses the source. Attaching a `data` listener does not
+ * undo that, because the implicit resume it performs is skipped on a stream
+ * already paused, so the explicit `req.resume()` inside `drainRequestBody` is
+ * the only thing that reads this body at all.
  *
  * @param {IncomingMessage} req
  * @param {ServerResponse} res

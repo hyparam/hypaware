@@ -72,9 +72,11 @@ export function drainRequestBody(req, res) {
   })
   // Asked for rather than left to the implicit resume that attaching a `data`
   // listener performs, because that one is skipped on a stream already paused.
-  // Every site reaches this flowing or not yet started, so the call is a no-op
-  // today. It is what keeps the drain honest at a site that hands over a
-  // paused request.
+  // The control routes and the OpenCode listener reach this not yet started,
+  // where the call is a no-op. The gateway's upstream-failure refusal does
+  // not: it hands over a request the collapsing pipe already paused, because
+  // unpiping the last destination pauses the source. There this line is the
+  // only thing that drains the body, so it is not removable.
   req.resume()
   res.on('finish', closeIfAnswered)
   if (!fitsUnderCap(req)) res.setHeader('connection', 'close')
