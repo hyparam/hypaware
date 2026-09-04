@@ -116,7 +116,12 @@ column set (LLP 0360#concrete-columns) and each pass fills a known subset:
   correction for as long as the comment sits on the watermark second. Narrow: it
   needs a pull absent from `cursor.pull_numbers` and from both listings of the
   capturing tick, and the loss is a misclassification rather than a stale
-  snapshot.
+  snapshot. A tick that resumes straight into a budget-split comments phase is
+  the easiest way to reach it, because it runs neither listing that would have
+  sighted the pull. Not cosmetic downstream: the `commented` edge is built off
+  the event type (`graph_contract.js:201-202`, `actorTo('commented', 'Issue',
+  'issue_comment', ...)` and its `PullRequest` twin), so the actor is attached
+  to the wrong node kind.
 
 The observable defect is therefore `state` (and the pull `payload`) on the
 issues and pulls passes, plus a comment's `event_type` discriminator, in the
@@ -130,11 +135,15 @@ the earliest `first_seen` wins, and equal times tie-break on the stable JSON
 encoding. `Issue` and `PullRequest` nodes take `firstSeen: r.created_at`, the
 item's creation time, which is identical across every snapshot of that item, so
 the state prop always resolves by the lexicographic tie-break: `closed` beats
-`open`, `closed` beats `merged` beats `open`. A landed second snapshot changes
-the graph only when the tie-break disagrees with recency (a reopen), and the
-loss is fully visible only in raw SQL over `github_events`. That is an
-observation about the value of each option, not a proposal to change the merge
-policy, which LLP 0023 settled.
+`open`, `closed` beats `merged` beats `open`. So landing a second snapshot
+changes the graph exactly when the tie-break agrees with recency, which is the
+issue's own example: `open` then `closed` inside one second leaves the node
+reading `open` today and reading `closed` once the refused snapshot lands. The
+case it does not change is the reopen (`closed` then `open`), where the
+tie-break keeps `closed` either way. The defect is therefore visible in the
+graph, not only in raw SQL over `github_events`, for precisely the transition
+#1333 reports. That is an observation about the value of each option, not a
+proposal to change the merge policy, which LLP 0023 settled.
 
 ## What the corpus already settles {#constraints}
 
@@ -171,12 +180,22 @@ makes existing durable values unrecognizable in kind rather than in shape:
 `cursor.boundary[pass]` holds event-id strings that will never match a
 fingerprint, and `cursor.pulls_high_numbers` holds integers a fingerprint
 cannot be written into at all without changing that field's type or minting a
-sibling. The choices are to bump the schema version (discarding every cursor,
-so every repository re-polls from its configured horizon), to accept one
-transitional tick in which the boundary second is re-admitted once (duplicate
-rows for that second, plus a re-spend of the boundary pulls' and commits'
-sub-resource requests), or to read both shapes for a release. Whichever arm is
-chosen below, this has to be chosen with it.
+sibling. The choices are to bump the schema version, to accept one transitional
+tick in which the boundary second is re-admitted once (duplicate rows for that
+second, plus a re-spend of the boundary pulls' and commits' sub-resource
+requests), or to read both shapes for a release.
+
+The schema bump is the expensive one, and more expensive than it looks. A
+discarded cursor leaves a repository with no `since` at all, and
+`sinceQuery(undefined)` emits no window, so the next poll re-walks the whole
+repository rather than resuming from a horizon. `baseline_pulls` goes with it,
+so `reachedHighWater` never fires and every pull is re-emitted with its files,
+reviews and commits re-queued against the tick budget. That is the duplication
+#1284 reported, paid deliberately and once. (There is no configured poll
+horizon in the plugin: `readCursors`' own comment says a fresh poll re-reads
+from one, and nothing in `config.js` backs it.)
+
+Whichever arm is chosen below, this has to be chosen with it.
 
 ## Options {#options}
 
@@ -237,12 +256,14 @@ rejection stays on the record rather than being rediscovered.
 ### D. Accept and document {#option-accept}
 
 The window is two updates inside one second on one item with no later activity
-on it, the loss is one stale snapshot rather than a dropped item, the graph
-result is usually unchanged (see #reach), and the next update on that item
-recovers the current state. It also accepts the comment `event_type` case,
-which is narrower still. `openGate`'s doc comment already names the trade
-explicitly. Promote that comment to a decided position, note it on LLP 0361, and
-close the issue. This is the honest null option and it costs nothing.
+on it, the loss is one stale snapshot rather than a dropped item, and the next
+update on that item recovers the current state in `github_events` and in the
+graph alike. It is not free: for the transition #1333 reports the node reads
+`open` until that next update (see #reach), and it also accepts the comment
+`event_type` case. `openGate`'s doc comment already names the trade explicitly.
+Promote that comment to a decided position, note it on LLP 0361, and close the
+issue. This is the honest null option, and its cost is bounded by how long an
+affected item stays quiet.
 
 ## Decision requested {#decision}
 
