@@ -820,7 +820,8 @@ function commentEventId(c) {
  * What the gate does drop: an item re-updated inside the same second it was
  * captured keeps its `updated_at`, so the floor refuses it by identity and the
  * newer snapshot never lands. That is the trade `pullChangedSince` already
- * makes; curing it needs a content fingerprint, not a bare event id.
+ * makes; curing it needs a content fingerprint, not a bare event id. Whether
+ * to pay for one, and on which passes, is the open request LLP 0373.
  *
  * Neither set answers for the page *below* the running high water, which is
  * where pagination puts a re-listing: an item created mid-traversal shifts
