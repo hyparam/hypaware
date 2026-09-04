@@ -255,8 +255,11 @@ export interface RepoCursor {
    * Pull numbers already captured at exactly `since.pulls`, which is a
    * different question from `pull_numbers` (the issues listing returns PRs the
    * pulls pass has not captured yet). Only the boundary second is kept, since
-   * that is the only one the equal-timestamp tie guard consults. Absent on a
-   * sidecar written before this field existed.
+   * that is the only one the equal-timestamp tie guard consults. Absent while
+   * no pulls phase has observed that second (a sidecar written before this
+   * field existed, or one whose phases have all ended on a 304), and the guard
+   * then falls back to `pull_numbers`; never written empty, since an empty
+   * answer would retire that fallback.
    */
   pulls_high_numbers?: number[]
   work?: GithubRepoWork

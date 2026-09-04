@@ -600,6 +600,45 @@ test('an older sidecar with no captured-pull set still suppresses a tie it alrea
   assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [10, 11], 'the tick publishes the dedicated set the next tick reads')
 })
 
+test('a 304 pulls phase does not retire an older sidecar fallback by publishing an empty captured set', async () => {
+  const TIE = '2026-02-01T00:00:00Z'
+  const pull = { number: 10, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Bob' } }
+  const client = fakeClient({ repos: { 'o/r': { pulls: [pull] } } })
+  let notModified = true
+  client.listPullRequestsPage = async () => (notModified
+    ? { items: [], next: null, notModified: true }
+    : { items: [pull], next: null, etag: 'etag-2' })
+
+  // The pre-`pulls_high_numbers` shape, with the saved etag an installed
+  // release leaves behind: the first tick after the upgrade sees a 304 and so
+  // observes no pull at the boundary second at all.
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z', pulls: TIE }, etag: { pulls: 'etag-1' }, pull_numbers: [10] }
+  /** @param {Record<string, unknown>[]} into */
+  const tick = (into) => captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { into.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  await tick([])
+  assert.equal(cursors.repos['o/r'].pulls_high_numbers, undefined, 'no evidence about the boundary second is not evidence of none')
+
+  notModified = false
+  const rows = []
+  await tick(rows)
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [],
+    'the fallback survived the 304, so the already-captured tie is still suppressed',
+  )
+  assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [10], 'and the listing tick publishes the dedicated set')
+})
+
 test('page and task continuations survive the cursor sidecar round trip', (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-cursors-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))

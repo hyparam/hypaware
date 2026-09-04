@@ -393,7 +393,13 @@ function finishPulls(work, cursor) {
   if (work.pulls_high) {
     // Published with the watermark it describes; the two only mean anything together.
     setSince(cursor, 'pulls', work.pulls_high)
-    cursor.pulls_high_numbers = work.pulls_high_numbers ?? []
+    // An empty staged set is not the claim "nothing was captured at that
+    // second", it is the absence of evidence: a phase that ends on a 304 sees
+    // no page at all, and a phase that does raise the watermark always observes
+    // the pull that raised it. Publishing empty would retire an old sidecar's
+    // `pull_numbers` fallback for good and re-capture every tie on the next
+    // poll, so leave whatever answer the cursor already carries.
+    if (work.pulls_high_numbers?.length) cursor.pulls_high_numbers = work.pulls_high_numbers
   }
   if (work.pulls_etag) {
     if (!cursor.etag) cursor.etag = {}
