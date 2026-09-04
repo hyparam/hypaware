@@ -333,6 +333,57 @@ test('retained state is bounded by the distinct inventory, not transcript-row co
   assert.ok(final.length < 2048)
 })
 
+test('lastKnown() serves the last persisted inventory when a derivation throws part-way through', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-last-known-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // The failure path in `tick.js` reads `lastKnown()` precisely because the
+  // read it would rather have made just threw, so the whole fix rests on
+  // `update()` swapping state on success alone. Assert that against the real
+  // index rather than a stub: here the first partition of the failing pass
+  // completes and observes a new repository before the second one dies, so a
+  // derivation that committed its progress partition by partition would
+  // publish `gamma/lib` and be caught here.
+  let failing = false
+  const storage = /** @type {QueryStorageService} */ (/** @type {unknown} */ ({
+    async discoverCachePartitions() {
+      return [
+        { dataset: 'ai_gateway_messages', path: '/cache/messages/a', epoch: 0, rowCount: failing ? 9 : 3, partition: {} },
+        { dataset: 'ai_gateway_messages', path: '/cache/messages/b', epoch: 0, rowCount: failing ? 7 : 2, partition: {} },
+      ]
+    },
+    async *readRowsSince(/** @type {string} */ tablePath) {
+      if (!failing) {
+        if (tablePath.endsWith('/a')) yield { row: { git_remote: 'https://github.com/Acme/Widgets.git' }, after: { v: 1, seq: '1' } }
+        return
+      }
+      if (tablePath.endsWith('/a')) {
+        yield { row: { git_remote: 'https://github.com/gamma/lib.git' }, after: { v: 1, seq: '2' } }
+        return
+      }
+      throw new Error('cache partition unreadable')
+    },
+  }))
+
+  const index = createLocalObservedReposIndex({ storage, stateDir })
+  assert.deepEqual(await index.list(), ['acme/widgets'])
+
+  failing = true
+  await assert.rejects(index.list(), /cache partition unreadable/)
+
+  assert.deepEqual(
+    index.lastKnown(),
+    ['acme/widgets'],
+    'a thrown derivation leaves the inventory the last successful one derived, not a partial or empty set',
+  )
+  const persisted = fs.readFileSync(path.join(stateDir, 'github-observed-repos.json'), 'utf8')
+  assert.doesNotMatch(persisted, /gamma\/lib/, 'a derivation that threw persists nothing the pass had already read')
+  assert.deepEqual(
+    createLocalObservedReposIndex({ storage, stateDir }).lastKnown(),
+    ['acme/widgets'],
+    'lastKnown() reads persisted state without deriving, so it never triggers the read that failed',
+  )
+})
+
 test('an incomplete revalidation surfaces as bounded pending work on the capture tick', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-pending-tick-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
