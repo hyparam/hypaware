@@ -2,10 +2,8 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import process from 'node:process'
 
-import { Attr, installObservability, runRoot } from '../../../src/core/observability/index.js'
-import { dispatch } from '../../../src/core/cli/dispatch.js'
+import { installObservability } from '../../../src/core/observability/index.js'
 import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
@@ -20,6 +18,13 @@ import {
   requireGithubRuntime,
   setGithubRuntime,
 } from '../../plugins-workspace/github/src/runtime.js'
+import {
+  dispatchText,
+  fakeGithubClient,
+  githubSessionRow,
+  makeStep,
+  sqlCount,
+} from '../lib/github_fixture.js'
 
 const WORKSPACE = path.resolve(import.meta.dirname, '..', '..', 'plugins-workspace')
 const PLUGINS = ['@hypaware/ai-gateway', '@hypaware/context-graph', '@hypaware/github']
@@ -60,6 +65,7 @@ const WITHHELD_REPO = 'acme/secrets'
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
+  const step = makeStep(harness)
   const cacheRoot = path.join(harness.stateDir, 'cache')
   const tmpRoot = path.join(harness.tmpDir, 'plugin-temp')
   await fs.mkdir(tmpRoot, { recursive: true })
@@ -81,8 +87,8 @@ export async function run({ harness, expect }) {
       tablePath,
       [...AI_GATEWAY_SCHEMA_COLUMNS],
       [
-        sessionRow({ id: 'clean', cwd: cleanCwd, remote: 'git@github.com:Acme/Widgets.git' }),
-        sessionRow({ id: 'withheld', cwd: withheldCwd, remote: 'git@github.com:Acme/Secrets.git' }),
+        withholdSessionRow({ id: 'clean', cwd: cleanCwd, remote: 'git@github.com:Acme/Widgets.git' }),
+        withholdSessionRow({ id: 'withheld', cwd: withheldCwd, remote: 'git@github.com:Acme/Secrets.git' }),
       ]
     )
     await first.kernel.storage.flushTable(tablePath, { force: true, reason: 'smoke_seed' })
@@ -278,7 +284,7 @@ export async function run({ harness, expect }) {
     )
     // Keep the real observed-repository index and cache storage the activation
     // installed, replacing only the network client.
-    setGithubRuntime({ ...requireGithubRuntime(), clientFactory: () => fakeGithubClient() })
+    setGithubRuntime({ ...requireGithubRuntime(), clientFactory: () => fakeGithubClient({ assertRepo }) })
     return { kernel, registry }
   }
 
@@ -293,22 +299,6 @@ export async function run({ harness, expect }) {
       (value) => value.includes(dir) && value.includes('local-only')
     )
   }
-
-  /** @param {string} smokeStep @param {() => Promise<any>} fn */
-  function step(smokeStep, fn) {
-    return runRoot(
-      `smoke.step.${smokeStep}`,
-      {
-        [Attr.COMPONENT]: 'smoke',
-        [Attr.OPERATION]: 'smoke.step',
-        [Attr.SMOKE_NAME]: harness.smokeName,
-        [Attr.SMOKE_STEP]: smokeStep,
-        [Attr.DEV_RUN_ID]: harness.devRunId,
-        status: 'ok',
-      },
-      fn
-    )
-  }
 }
 
 /** Read the persisted observed-repos sidecar, the durable inventory itself. */
@@ -318,28 +308,6 @@ async function readInventory(harness) {
     'github-observed-repos.json'
   )
   return JSON.parse(await fs.readFile(file, 'utf8'))
-}
-
-function fakeGithubClient() {
-  return {
-    async listViewerRepos() { throw new Error('session inventory must not enumerate GitHub') },
-    async listIssuesPage(owner, name) {
-      assertRepo(owner, name)
-      return { items: [{
-        number: 7,
-        state: 'open',
-        created_at: '2026-09-02T12:00:00.000Z',
-        user: { login: 'octocat', type: 'User' },
-      }], next: null }
-    },
-    async listPullRequestsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
-    async listPullRequestFilesPage() { return { items: [], next: null } },
-    async listPullRequestReviewsPage() { return { items: [], next: null } },
-    async listPullRequestCommitsPage() { return { items: [], next: null } },
-    async listCommitsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
-    async listCommitFilesPage() { return { items: [], next: null } },
-    async listIssueCommentsPage() { return { items: [], next: null } },
-  }
 }
 
 /**
@@ -355,69 +323,11 @@ function assertRepo(owner, name) {
   }
 }
 
-/** @param {{ id: string, cwd: string, remote: string }} args */
-function sessionRow({ id, cwd, remote }) {
-  const ts = '2026-09-02T12:00:00.000Z'
-  return {
-    gateway_id: 'gw-github-withhold-smoke',
-    schema_version: 1,
-    session_id: `github-withhold-${id}`,
-    conversation_id: `github-withhold-${id}`,
-    provider: 'openai',
-    model: 'gpt-5',
-    client_name: 'codex',
-    cwd,
-    git_remote: remote,
-    git_branch: 'main',
-    head_sha: '0123456789abcdef0123456789abcdef01234567',
-    repo_root: cwd,
-    user_id: 'user-smoke',
-    conversation_started_at: ts,
-    message_created_at: ts,
-    message_id: `github-withhold-${id}-message`,
-    message_index: 0,
-    role: 'user',
-    part_type: 'text',
-    part_index: 0,
-    part_id: `github-withhold-${id}-message#0`,
-    content_text: 'test fixture',
-    date: '2026-09-02',
-  }
-}
-
-async function sqlCount(sql, lifetime) {
-  const result = await dispatchText(
-    ['query', 'sql', sql, '--refresh', 'always', '--include-local-only', '--format', 'json'],
-    lifetime
-  )
-  if (result.code !== 0 || result.stderr !== '') {
-    throw new Error(`query failed: ${result.stderr || result.stdout}`)
-  }
-  const rows = JSON.parse(result.stdout)
-  return Number(rows[0]?.n)
-}
-
-/** @param {string[]} argv @param {{ kernel: any, registry: any }} lifetime */
-async function dispatchText(argv, { kernel, registry }) {
-  const stdout = makeBuf()
-  const stderr = makeBuf()
-  const code = await dispatch(argv, {
-    stdout,
-    stderr,
-    kernel,
-    registry,
-    env: { ...process.env, HYP_HOME: process.env.HYP_HOME },
-  })
-  return { code, stdout: stdout.text(), stderr: stderr.text() }
-}
-
-function makeBuf() {
-  const chunks = []
-  return {
-    write(chunk) {
-      chunks.push(typeof chunk === 'string' ? chunk : String(chunk))
-      return true
-    },
-    text() { return chunks.join('') },
-  }
+/**
+ * Both evidence rows share a gateway and an id prefix; only `id` separates them.
+ *
+ * @param {{ id: string, cwd: string, remote: string }} args
+ */
+function withholdSessionRow({ id, cwd, remote }) {
+  return githubSessionRow({ gatewayId: 'gw-github-withhold-smoke', id: `github-withhold-${id}`, cwd, remote })
 }

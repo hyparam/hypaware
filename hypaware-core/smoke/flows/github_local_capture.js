@@ -2,10 +2,8 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import process from 'node:process'
 
-import { Attr, installObservability, runRoot } from '../../../src/core/observability/index.js'
-import { dispatch } from '../../../src/core/cli/dispatch.js'
+import { Attr, installObservability } from '../../../src/core/observability/index.js'
 import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
 import { createCommandRegistry } from '../../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
@@ -19,6 +17,13 @@ import {
   requireGithubRuntime,
   setGithubRuntime,
 } from '../../plugins-workspace/github/src/runtime.js'
+import {
+  dispatchText,
+  fakeGithubClient,
+  githubSessionRow,
+  makeStep,
+  sqlCount,
+} from '../lib/github_fixture.js'
 
 /**
  * Hermetic proof that the bundled source discovers a repository from local
@@ -30,12 +35,14 @@ import {
  */
 export async function run({ harness, expect }) {
   const obs = installObservability()
+  const step = makeStep(harness)
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
   const kernel = createKernelRuntime({
     commandRegistry: registry,
     cacheRoot: path.join(harness.stateDir, 'cache'),
   })
+  const lifetime = { kernel, registry }
   const workspace = path.resolve(import.meta.dirname, '..', '..', 'plugins-workspace')
   const tmpRoot = path.join(harness.tmpDir, 'plugin-temp')
   await fs.mkdir(tmpRoot, { recursive: true })
@@ -78,7 +85,12 @@ export async function run({ harness, expect }) {
     await kernel.storage.appendRows(
       tablePath,
       [...AI_GATEWAY_SCHEMA_COLUMNS],
-      [sessionRow()]
+      [githubSessionRow({
+        gatewayId: 'gw-github-smoke',
+        id: 'github-smoke-session',
+        cwd: '/work/widgets',
+        remote: 'git@github.com:Acme/Widgets.git',
+      })]
     )
     await kernel.storage.flushTable(tablePath, { force: true, reason: 'smoke_seed' })
   })
@@ -89,7 +101,7 @@ export async function run({ harness, expect }) {
   setGithubRuntime({ ...activatedRuntime, clientFactory: () => fakeGithubClient() })
 
   await step('capture', async () => {
-    const result = await dispatchText(['github', 'sync'], kernel, registry)
+    const result = await dispatchText(['github', 'sync'], lifetime)
     expect.that('github sync: command exited 0', result.code, (value) => value === 0)
     expect.that('github sync: no stderr', result.stderr, (value) => value === '')
     expect.that(
@@ -100,22 +112,20 @@ export async function run({ harness, expect }) {
   })
 
   await step('project', async () => {
-    const result = await dispatchText(['graph', 'project'], kernel, registry)
+    const result = await dispatchText(['graph', 'project'], lifetime)
     expect.that('graph project: command exited 0', result.code, (value) => value === 0)
     expect.that('graph project: no stderr', result.stderr, (value) => value === '')
   })
 
   const eventCount = await sqlCount(
     "select count(*) as n from github_events where repo = 'acme/widgets'",
-    kernel,
-    registry
+    lifetime
   )
   expect.that('github_events: captured one issue row', eventCount, (value) => value === 1)
 
   const repoCount = await sqlCount(
     "select count(*) as n from node where node_type = 'Repo' and natural_key = 'acme/widgets'",
-    kernel,
-    registry
+    lifetime
   )
   expect.that(
     'graph: session and GitHub contracts converge on one Repo node',
@@ -125,8 +135,7 @@ export async function run({ harness, expect }) {
 
   const issueCount = await sqlCount(
     "select count(*) as n from node where node_type = 'Issue' and natural_key = 'acme/widgets#7'",
-    kernel,
-    registry
+    lifetime
   )
   expect.that('graph: GitHub issue node was projected', issueCount, (value) => value === 1)
 
@@ -161,107 +170,4 @@ export async function run({ harness, expect }) {
       row.attributes?.pending === false
     )
   )
-
-  /** @param {string} smokeStep @param {() => Promise<void>} fn */
-  async function step(smokeStep, fn) {
-    await runRoot(
-      `smoke.step.${smokeStep}`,
-      {
-        [Attr.COMPONENT]: 'smoke',
-        [Attr.OPERATION]: 'smoke.step',
-        [Attr.SMOKE_NAME]: harness.smokeName,
-        [Attr.SMOKE_STEP]: smokeStep,
-        [Attr.DEV_RUN_ID]: harness.devRunId,
-        status: 'ok',
-      },
-      fn
-    )
-  }
-}
-
-function fakeGithubClient() {
-  return {
-    async listViewerRepos() { throw new Error('session inventory must not enumerate GitHub') },
-    async listIssuesPage() {
-      return { items: [{
-        number: 7,
-        state: 'open',
-        created_at: '2026-09-02T12:00:00.000Z',
-        user: { login: 'octocat', type: 'User' },
-      }], next: null }
-    },
-    async listPullRequestsPage() { return { items: [], next: null } },
-    async listPullRequestFilesPage() { return { items: [], next: null } },
-    async listPullRequestReviewsPage() { return { items: [], next: null } },
-    async listPullRequestCommitsPage() { return { items: [], next: null } },
-    async listCommitsPage() { return { items: [], next: null } },
-    async listCommitFilesPage() { return { items: [], next: null } },
-    async listIssueCommentsPage() { return { items: [], next: null } },
-  }
-}
-
-function sessionRow() {
-  const ts = '2026-09-02T12:00:00.000Z'
-  return {
-    gateway_id: 'gw-github-smoke',
-    schema_version: 1,
-    session_id: 'github-smoke-session',
-    conversation_id: 'github-smoke-session',
-    provider: 'openai',
-    model: 'gpt-5',
-    client_name: 'codex',
-    cwd: '/work/widgets',
-    git_remote: 'git@github.com:Acme/Widgets.git',
-    git_branch: 'main',
-    head_sha: '0123456789abcdef0123456789abcdef01234567',
-    repo_root: '/work/widgets',
-    user_id: 'user-smoke',
-    conversation_started_at: ts,
-    message_created_at: ts,
-    message_id: 'github-smoke-message',
-    message_index: 0,
-    role: 'user',
-    part_type: 'text',
-    part_index: 0,
-    part_id: 'github-smoke-message#0',
-    content_text: 'test fixture',
-    date: '2026-09-02',
-  }
-}
-
-async function sqlCount(sql, kernel, registry) {
-  const result = await dispatchText(
-    ['query', 'sql', sql, '--refresh', 'always', '--include-local-only', '--format', 'json'],
-    kernel,
-    registry
-  )
-  if (result.code !== 0 || result.stderr !== '') {
-    throw new Error(`query failed: ${result.stderr || result.stdout}`)
-  }
-  const rows = JSON.parse(result.stdout)
-  return Number(rows[0]?.n)
-}
-
-async function dispatchText(argv, kernel, registry) {
-  const stdout = makeBuf()
-  const stderr = makeBuf()
-  const code = await dispatch(argv, {
-    stdout,
-    stderr,
-    kernel,
-    registry,
-    env: { ...process.env, HYP_HOME: process.env.HYP_HOME },
-  })
-  return { code, stdout: stdout.text(), stderr: stderr.text() }
-}
-
-function makeBuf() {
-  const chunks = []
-  return {
-    write(chunk) {
-      chunks.push(typeof chunk === 'string' ? chunk : String(chunk))
-      return true
-    },
-    text() { return chunks.join('') },
-  }
 }
