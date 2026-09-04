@@ -248,7 +248,7 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
   while (true) {
     if (work.phase === 'issues') {
       if (!budget.take()) return false
-      const gate = openGate(work.issues_high, work.issues_high_ids, cursor.since?.issues, cursor.boundary?.issues)
+      const gate = openGate(work.issues_high, work.issues_high_ids, cursor.since?.issues, cursor.boundary?.issues, work.gate_emitted)
       const page = await client.listIssuesPage(owner, name, cursor.since?.issues, pageUrl(work.page))
       for (const issue of page.items) if (issue.pull_request) prNumbers.add(issue.number)
       // A pull carried by the issues feed still raises the watermark, but it
@@ -258,6 +258,7 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
       cursor.pull_numbers = sortedNumbers(prNumbers)
       work.issues_high = gate.high
       work.issues_high_ids = gate.ids
+      work.gate_emitted = gate.emitted
       work.page = page.next
       if (page.next === null) beginPulls(work, cursor)
       continue
@@ -341,12 +342,13 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
         continue
       }
       if (!budget.take()) return false
-      const gate = openGate(work.commits_high, work.commits_high_ids, cursor.since?.commits, cursor.boundary?.commits)
+      const gate = openGate(work.commits_high, work.commits_high_ids, cursor.since?.commits, cursor.boundary?.commits, work.gate_emitted)
       const page = await client.listCommitsPage(owner, name, cursor.since?.commits, pageUrl(work.page))
       const fresh = page.items.filter((c) => gate.admit(commitTime(c), commitEventId(c, null)))
       await flush(fresh.map((c) => commitRow(repo, c, null)))
       work.commits_high = gate.high
       work.commits_high_ids = gate.ids
+      work.gate_emitted = gate.emitted
       // Only the appended commits queue their file sub-resource: re-queueing a
       // boundary commit re-appends its `commit_file` rows and re-spends a
       // request, every tick.
@@ -356,12 +358,13 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
     }
 
     if (!budget.take()) return false
-    const gate = openGate(work.comments_high, work.comments_high_ids, cursor.since?.comments, cursor.boundary?.comments)
+    const gate = openGate(work.comments_high, work.comments_high_ids, cursor.since?.comments, cursor.boundary?.comments, work.gate_emitted)
     const page = await client.listIssueCommentsPage(owner, name, cursor.since?.comments, pageUrl(work.page))
     const fresh = page.items.filter((c) => gate.admit(itemTime(c), commentEventId(c)))
     await flush(fresh.map((c) => commentRow(repo, c, prNumbers)).filter((r) => r !== null))
     work.comments_high = gate.high
     work.comments_high_ids = gate.ids
+    work.gate_emitted = gate.emitted
     work.page = page.next
     if (page.next === null) {
       cursor.pull_numbers = sortedNumbers(prNumbers)
@@ -442,6 +445,11 @@ function beginPulls(work, cursor) {
   }
   delete work.issues_high
   delete work.issues_high_ids
+  // Cleared at every phase transition, which is what lets issues, commits and
+  // comments share one field: a set carried into a phase that appended none of
+  // its items would drop those rows outright, which is worse than the duplicate
+  // it exists to suppress.
+  delete work.gate_emitted
   work.phase = 'pulls'
   delete work.page
   work.baseline_pulls = cursor.since?.pulls
@@ -478,6 +486,7 @@ function finishPulls(work, cursor) {
   delete work.pulls_emitted
   delete work.pulls_etag
   delete work.pull_tasks
+  delete work.gate_emitted
   work.commit_tasks = []
 }
 
@@ -495,6 +504,7 @@ function finishCommits(work, cursor) {
   }
   delete work.commits_high
   delete work.commits_high_ids
+  delete work.gate_emitted
   work.phase = 'comments'
   delete work.page
 }
@@ -812,23 +822,54 @@ function commentEventId(c) {
  * newer snapshot never lands. That is the trade `pullChangedSince` already
  * makes; curing it needs a content fingerprint, not a bare event id.
  *
- * @ref LLP 0360#resource-bounds [constrained-by]: identity carried across ticks is one watermark second's worth, not a repository's history
+ * Neither set answers for the page *below* the running high water, which is
+ * where pagination puts a re-listing: an item created mid-traversal shifts
+ * every later offset, so a page-boundary item is listed again on the next page,
+ * at a timestamp strictly between the floor and the running high. `flush`
+ * deduplicates one batch, not a phase, and an event id carries no timestamp, so
+ * that second sighting is a durable duplicate row and, for commits, a repeat
+ * `commit_file` fan-out. `emitted` answers for the whole phase, the gate-side
+ * twin of the pulls pass's `pulls_emitted`, and rides on `work` for the same
+ * reason: the request budget splits a phase across ticks, and a set that
+ * restarted empty would leave the duplicate on exactly the resumed page.
+ *
+ * `emitted` recognizes "already appended" by the same bare event id the two
+ * boundary sets use, so it widens the trade above rather than escaping it: an
+ * item edited between two sightings of one phase is refused on the second, and
+ * that newer snapshot never lands either. The window grows from one wall-clock
+ * second to the phase's whole traversal, which a budget split can spread across
+ * ticks. Only the issues pass can lose anything by it, through `state`: a
+ * commit's date and sha are immutable, and a comment stores no column its own
+ * edit can move. The cure is the same one, and is still not this change: a
+ * content fingerprint, not a bare event id.
+ *
+ * Capped like the boundary set and by the same constant, since an unbounded one
+ * would carry a whole backfill's ids in the sidecar. Overflow drops the oldest
+ * admissions, because a re-listing surfaces near the page just read, and
+ * degrades to the duplicate rather than to a lost row.
+ *
+ * @ref LLP 0360#resource-bounds [constrained-by]: identity carried across ticks stays capped, never a repository's history
  *
  * @param {string | undefined} staged
  * @param {string[] | undefined} stagedIds
  * @param {string | undefined} published
  * @param {string[] | undefined} publishedIds
+ * @param {string[] | undefined} phaseEmitted  ids this phase has already appended
  */
-function openGate(staged, stagedIds, published, publishedIds) {
+function openGate(staged, stagedIds, published, publishedIds, phaseEmitted) {
   let high = staged ?? published
   let ids = new Set(staged === undefined ? publishedIds : stagedIds)
   const floorIds = new Set(publishedIds)
+  const emitted = new Set(phaseEmitted)
   return {
     get high() {
       return high
     },
     get ids() {
       return ids.size > 0 ? [...ids].slice(0, MAX_BOUNDARY_IDS) : undefined
+    },
+    get emitted() {
+      return emitted.size > 0 ? [...emitted].slice(-MAX_BOUNDARY_IDS) : undefined
     },
     /**
      * A null `id` raises the watermark only: the caller emits no row for that
@@ -845,9 +886,19 @@ function openGate(staged, stagedIds, published, publishedIds) {
       }
       if (id === null) return true
       if (published !== undefined && at === published && floorIds.has(id)) return false
-      if (!at || at !== high) return true
-      if (ids.has(id)) return false
-      ids.add(id)
+      // The boundary set is claimed before `emitted` answers, not after. An item
+      // re-listed AT the watermark second was appended earlier in this phase at
+      // an older one, so `emitted` is about to refuse it; skipping the claim
+      // would publish a boundary that omits it, and the next tick's inclusive
+      // `since` would re-list it against an empty floor and append the row the
+      // refusal just saved. Only the watermark second's identities are published,
+      // so an item below it still joins `emitted` alone.
+      if (at && at === high) {
+        if (ids.has(id)) return false
+        ids.add(id)
+      }
+      if (emitted.has(id)) return false
+      emitted.add(id)
       return true
     },
   }

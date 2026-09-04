@@ -318,6 +318,15 @@ export interface GithubRepoWork {
   pulls_emitted?: number[]
   commits_high?: string
   comments_high?: string
+  /**
+   * Event ids the in-flight gate phase has already appended a row for, so a
+   * re-listing produced by the listing reshuffling under pagination emits
+   * nothing a second time. One of issues/commits/comments is live at a time, so
+   * the three share the field and every phase transition clears it. Staged
+   * because the request budget splits a phase across ticks, and capped like the
+   * boundary sets, so overflow degrades to the duplicate, not to a lost row.
+   */
+  gate_emitted?: string[]
   // The boundary identities staged alongside each `*_high`, published into
   // `RepoCursor.boundary` at the same phase boundary.
   issues_high_ids?: string[]
