@@ -44,9 +44,10 @@ export async function runCaptureTick(runtime, opts) {
       // retired none either. A flat `false` would clear the source's backlog
       // flag, sending saved continuations back to a full poll interval
       // (LLP 0361#budget), so read the answer off the state the failed read
-      // left behind: an unfinished revalidation (its bounded slice runs inside
-      // this same `list()`, so a throw leaves the pass still reported as
-      // pending) and the durable per-repo cursors.
+      // left behind: a revalidation an earlier tick already persisted, and the
+      // durable per-repo cursors. Only a persisted pass counts: `update()`
+      // swaps its state on success alone, so a pass this failing call started
+      // is discarded and reports nothing.
       const pending =
         runtime.observedRepos.revalidationPending?.() === true ||
         Object.values(cursors.repos).some((cursor) => Boolean(cursor?.work))

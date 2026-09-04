@@ -6,8 +6,10 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { runGithubBackfill } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
 import { writeCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
 import { createLocalObservedReposIndex } from '../../hypaware-core/plugins-workspace/github/src/observed-repos.js'
+import { setGithubRuntime } from '../../hypaware-core/plugins-workspace/github/src/runtime.js'
 import { runCaptureTick } from '../../hypaware-core/plugins-workspace/github/src/tick.js'
 
 /** @import { QueryStorageService } from '../../hypaware-core/plugins-workspace/github/src/types.d.ts' */
@@ -433,9 +435,11 @@ test('a failed session_repos inventory read does not retire backlog the cursors 
 test('a failed session_repos inventory read keeps an unfinished revalidation on the backlog cadence', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-reval-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
-  // `list()` runs the bounded revalidation slice, so a throw from it leaves the
-  // pass unfinished and still reported by `revalidationPending()` (the index
-  // only swaps its state after a completed `update()`). No cursor holds work.
+  // A revalidation an earlier tick persisted is still reported after this
+  // tick's `list()` throws: `update()` swaps its state on success alone, so the
+  // failed call leaves that earlier pass exactly as it found it. (A pass this
+  // call started is discarded instead, and reports nothing.) No cursor holds
+  // work, so `revalidationPending()` is the only thing keeping this pending.
   const runtime = failingInventoryRuntime(stateDir, new Error('cache partition unreadable'))
   runtime.observedRepos.revalidationPending = () => true
 
@@ -446,5 +450,32 @@ test('a failed session_repos inventory read keeps an unfinished revalidation on 
     report.pending,
     true,
     'an unfinished revalidation is bounded work the failed tick did not retire (LLP 0361#budget)',
+  )
+})
+
+test('hyp github backfill reports the inventory failure without contradicting it', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backfill-cli-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  setGithubRuntime(failingInventoryRuntime(stateDir, new Error('cache partition unreadable')))
+  let out = ''
+  let err = ''
+  const ctx = /** @type {any} */ ({
+    stdout: { write(/** @type {string} */ s) { out += s } },
+    stderr: { write(/** @type {string} */ s) { err += s } },
+  })
+
+  const code = await runGithubBackfill(['acme/widgets'], ctx)
+
+  assert.equal(code, 1, 'an unresolved inventory is a failed backfill')
+  assert.match(err, /! \(inventory\): cache partition unreadable/, 'the real cause is reported')
+  assert.doesNotMatch(
+    err,
+    /active repository inventory/,
+    'the inventory never resolved, so blaming the configured selection would be a false claim',
+  )
+  assert.doesNotMatch(
+    out,
+    /hyp graph project/,
+    'nothing was captured, so the next-step advice would dress a failure up as progress',
   )
 })

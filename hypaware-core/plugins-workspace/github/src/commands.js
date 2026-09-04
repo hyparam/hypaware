@@ -59,7 +59,11 @@ export async function runGithubBackfill(argv, ctx) {
       ctx.stderr.write(`hyp github backfill: none of [${only.join(', ')}] are in the active repository inventory\n`)
       return 1
     }
-    ctx.stdout.write("run 'hyp graph project' to project github_events into the graph\n")
+    // Nothing captured because the run errored leaves nothing new to project,
+    // so the next-step advice would only dress up a failure as progress.
+    if (result.repos > 0 || result.errors.length === 0) {
+      ctx.stdout.write("run 'hyp graph project' to project github_events into the graph\n")
+    }
     return result.errors.length > 0 ? 1 : 0
   } catch (err) {
     ctx.stderr.write(`hyp github backfill: ${errMessage(err)}\n`)
