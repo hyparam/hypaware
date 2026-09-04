@@ -22,6 +22,7 @@ import {
   fakeGithubClient,
   githubSessionRow,
   makeStep,
+  noWithheldRepo,
   sqlCount,
 } from '../lib/github_fixture.js'
 
@@ -97,8 +98,10 @@ export async function run({ harness, expect }) {
 
   // Keep the real observed-repository index and cache storage installed by
   // activate(), replacing only the network client with a deterministic fake.
+  // Every session this half seeds is export-eligible, so it has no repository
+  // to refuse at the seam; the sibling `github_local_only_withhold` owns that.
   const activatedRuntime = requireGithubRuntime()
-  setGithubRuntime({ ...activatedRuntime, clientFactory: () => fakeGithubClient() })
+  setGithubRuntime({ ...activatedRuntime, clientFactory: () => fakeGithubClient({ assertRepo: noWithheldRepo }) })
 
   await step('capture', async () => {
     const result = await dispatchText(['github', 'sync'], lifetime)

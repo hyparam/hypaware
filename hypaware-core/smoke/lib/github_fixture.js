@@ -56,6 +56,14 @@ export function githubSessionRow({ gatewayId, id, cwd, remote }) {
 }
 
 /**
+ * The guard for a flow that withholds no repository: it admits everything its
+ * evidence names, so there is nothing to refuse at the network seam. Named,
+ * rather than an inline `() => {}`, so a call site tells a flow with nothing
+ * to withhold apart from one that lost its guard.
+ */
+export function noWithheldRepo() {}
+
+/**
  * A deterministic stand-in for the GitHub network client: one open issue on
  * every repository the source asks about, and nothing else.
  *
@@ -64,11 +72,20 @@ export function githubSessionRow({ gatewayId, id, cwd, remote }) {
  *
  * `assertRepo` is the caller's own guard, run on the reads that name a
  * repository, so a flow proving a repository is withheld fails at the network
- * seam rather than only in a row count. It defaults to a no-op.
+ * seam rather than only in a row count. It is required because an omitted one
+ * is lost silently: the seam stops being tested and every other assertion in
+ * the flow still passes (issue #1327). A flow with nothing to withhold passes
+ * `noWithheldRepo`.
  *
- * @param {{ assertRepo?: (owner: string, name: string) => void }} [args]
+ * @param {{ assertRepo: (owner: string, name: string) => void }} args
  */
-export function fakeGithubClient({ assertRepo = () => {} } = {}) {
+export function fakeGithubClient(args) {
+  const assertRepo = args?.assertRepo
+  if (typeof assertRepo !== 'function') {
+    throw new TypeError(
+      "fakeGithubClient: assertRepo is required - pass the flow's guard, or noWithheldRepo when the flow withholds no repository"
+    )
+  }
   return {
     async listViewerRepos() { throw new Error('session inventory must not enumerate GitHub') },
     async listIssuesPage(owner, name) {
