@@ -367,6 +367,12 @@ test('large spool envelopes scan each chunk once and preserve UTF-8 resume offse
   assert.deepEqual(batches.map(batch => batch.chunk.rows[0].id), [1, 2])
   assert.equal(batches[0].resumeOffset, Buffer.byteLength(first))
   assert.equal(batches[1].resumeOffset, Buffer.byteLength(first + second))
+  // Lower bound as well as upper: the counter only sees work done through
+  // String#indexOf, so a reader that split lines some other way would score
+  // zero and pass this vacuously. Every input character must be searched at
+  // least once, and no more than a small constant times that.
+  assert.ok(scannedCharacters >= first.length,
+    `newline search only saw ${scannedCharacters} characters, so it is no longer measuring the splitter`)
   assert.ok(scannedCharacters < (first.length + second.length) * 3,
     `newline search revisited ${scannedCharacters} characters for ${first.length + second.length} input characters`)
 })
