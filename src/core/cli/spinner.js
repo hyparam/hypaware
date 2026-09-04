@@ -19,6 +19,11 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  * line and the output is byte-identical to what the callers printed before
  * the spinner existed, which is what keeps the scripted transcripts stable.
  *
+ * `quietWhenPlain` writes nothing at all on that plain path. It is for a
+ * wait sitting in front of the caller's own first output, where the label
+ * would be all a script ever saw of a delay only a person can perceive, and
+ * where the elapsed time already reaches the structured log.
+ *
  * The timer never outlives the work: errors clear the line and rethrow.
  *
  * @template T
@@ -27,15 +32,16 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  *   label: string,
  *   env?: NodeJS.ProcessEnv,
  *   intervalMs?: number,
+ *   quietWhenPlain?: boolean,
  * }} opts
  * @param {() => Promise<T>} work
  * @returns {Promise<T>}
  */
 export async function withSpinner(opts, work) {
-  const { stdout, label, env, intervalMs = 120 } = opts
+  const { stdout, label, env, intervalMs = 120, quietWhenPlain = false } = opts
   const animate = isTty(stdout) && (env ?? process.env).HYP_NO_TUI !== '1'
   if (!animate) {
-    stdout.write(`${label}\n`)
+    if (!quietWhenPlain) stdout.write(`${label}\n`)
     return work()
   }
 

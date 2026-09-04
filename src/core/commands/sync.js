@@ -1,6 +1,7 @@
 // @ts-check
 
 import { requireConfirmation } from '../cli/confirm.js'
+import { withSpinner } from '../cli/spinner.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
@@ -161,15 +162,29 @@ export async function runSync(argv, ctx) {
   // Counted here rather than inside `renderPlan` so the renderer stays a pure
   // function of what it prints, and so a count that fails degrades to "unknown"
   // instead of taking the whole prompt down with it.
+  //
+  // The count scans every pending partition and runs before this verb has
+  // printed a character, so a large backlog leaves the terminal blank between
+  // the keystroke and the plan. `quietWhenPlain` keeps the plan the first
+  // thing a script sees: there is nobody off a TTY to reassure, and the
+  // elapsed time is in the log line below.
   // @ref LLP 0101#no-release [implements]: the "prints what would leave" half, in rows rather than only in destination names
   const previewStartedAt = Date.now()
-  const volumes = await previewPendingRows({
-    handles,
-    query: ctx.query,
-    storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
-    stateRoot: stateDir,
-    config: ctx.config,
-  })
+  const volumes = await withSpinner(
+    {
+      stdout: ctx.stdout,
+      env: ctx.env,
+      quietWhenPlain: true,
+      label: 'Counting pending rows...',
+    },
+    () => previewPendingRows({
+      handles,
+      query: ctx.query,
+      storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+      stateRoot: stateDir,
+      config: ctx.config,
+    })
+  )
   // The elapsed time is the point of this line as much as the counts are: the
   // preview sits between the user's keystroke and the prompt, so if `hyp sync`
   // ever feels hung again the log says whether the count was the reason.
@@ -332,7 +347,18 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
   const previewStartedAt = Date.now()
   for (const handle of capable) {
     try {
-      const preview = await handle.sink.previewSourceHistory?.({ source })
+      // A full scan of the client's retained history, once per destination,
+      // and like the ordinary plan's count it runs before anything is on
+      // screen. Quiet off a TTY for the same reason.
+      const preview = await withSpinner(
+        {
+          stdout: ctx.stdout,
+          env: ctx.env,
+          quietWhenPlain: true,
+          label: `Counting retained '${source}' history on ${handle.instanceName}...`,
+        },
+        async () => handle.sink.previewSourceHistory?.({ source })
+      )
       if (!preview) throw new Error('history preview became unavailable')
       previews.set(handle.instanceName, preview)
     } catch (err) {
