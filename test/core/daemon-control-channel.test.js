@@ -321,6 +321,16 @@ test('a running daemon stops end-to-end on a stop.request control file', { timeo
   const stateRoot = path.join(hypHome, 'hypaware')
   /** @type {Awaited<ReturnType<typeof runDaemon>> | undefined} */
   let handle
+  // The daemon under test holds nothing that keeps the event loop alive: no
+  // plugins, so no listeners, and `tickIntervalMs: 0` installs no tick timer.
+  // The control channel's own timers are deliberately unref'd (the poller and
+  // the non-persistent fs.watch must never hold a real daemon open), so once
+  // the stop request is written the loop can drain before the watch event is
+  // delivered, and the runner cancels the test with "Promise resolution is
+  // still pending". macOS under node 22 delivers late enough to hit that
+  // every time; Linux and node 24 happen not to. A real daemon always holds a
+  // ref'd handle (its listeners, the tick timer), so hold one on its behalf.
+  const keepAlive = setInterval(() => {}, 1_000)
   try {
     const configPath = defaultConfigPath(hypHome)
     await fs.mkdir(path.dirname(configPath), { recursive: true })
@@ -343,6 +353,7 @@ test('a running daemon stops end-to-end on a stop.request control file', { timeo
     assert.equal(fsSync.existsSync(pidFilePath(stateRoot)), false)
     assert.equal(fsSync.existsSync(controlRequestPath(stateRoot, 'stop')), false)
   } finally {
+    clearInterval(keepAlive)
     if (handle) {
       await handle.stop()
       await handle.done

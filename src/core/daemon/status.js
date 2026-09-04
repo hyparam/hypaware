@@ -24,6 +24,7 @@ import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { detectShadowedPlugins } from '../runtime/boot.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
@@ -976,7 +977,15 @@ export async function collectHypAwareStatus(opts = {}) {
   // validates local additions against the same plugin set the daemon
   // runs. A local plugin that invalidates the merge (capability tie,
   // unknown plugin) is dropped here, not surfaced as a config error.
-  const catalog = await buildStatusCatalog({ stateDir: stateRoot })
+  const manifests = await discoverStatusManifests({ stateDir: stateRoot })
+  const catalog = catalogFromManifests(manifests)
+  // Installed plugins a bundled name shadows: boot activates the bundled
+  // copy and skips these, so they are idle code in the lock. Read off the
+  // same discovery pass, by the same rule boot applies.
+  const shadowedInstalled = detectShadowedPlugins({
+    discovered: manifests.bundled,
+    installed: manifests.installed,
+  })
 
   // @ref LLP 0031#central-layer-is-sacrosanct [implements]: Same merge + validation pruning as boot, so status shows exactly what runs
   const merged = resolveLayeredConfig({
@@ -1118,6 +1127,20 @@ export async function collectHypAwareStatus(opts = {}) {
         pointer: err.pointer,
       })
     }
+  }
+
+  // An installed plugin in a bundled name is code that never runs: boot
+  // activates the bundled copy and warns once in the daemon log. This is the
+  // surface that names it and the one command that clears it, and it is a
+  // warning, never an outage: the machine is running the right code.
+  // @ref LLP 0380#surfaced-not-fatal [implements]: the shadow is a repairable warning on `hyp status`, not a boot failure
+  for (const name of shadowedInstalled) {
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'installed_plugin_shadowed',
+      message: `installed plugin ${name} is shadowed by the bundled copy of the same name; the installed code never runs`,
+      repair: [`hyp plugin remove ${name}`],
+    })
   }
 
   // V1 advisory diagnostics layered on top.
@@ -2252,10 +2275,22 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
   // Client-adapter plugins (claude/codex), derived statically from the catalog
   // descriptors: the set the backfill default-on derivation needs ("this
   // enabled plugin imports on join") and, via the descriptors themselves, the
-  // universe of attach targets below.
-  const clientAdapterPlugins = new Set(
-    [...(clientDescriptors?.values() ?? [])].map((d) => d.plugin)
-  )
+  // universe of attach targets below. Each maps to whether the reconciler's
+  // `desired()` would ever name it: it enumerates the runtime backfill
+  // registry, so a client whose manifest declares it registers no provider
+  // (`backfill_provider: false`, Claude Desktop) is a target it never emits,
+  // and no marker will ever clear a `pending` derived for it. That is the
+  // backfill twin of the probe-less attach gate (LLP 0229): status derives
+  // by the reconciler's own gate or reports `n/a`.
+  // @ref LLP 0379#status-derives-by-the-provider-gate [implements]: a provider-less client adapter is inert for backfill, never pending
+  /** @type {Map<string, boolean>} */
+  const clientAdapterPlugins = new Map()
+  for (const d of clientDescriptors?.values() ?? []) {
+    const inert = d.backfillProvider === false
+    // A plugin can own several clients; it is inert only if none of them
+    // brings a provider.
+    clientAdapterPlugins.set(d.plugin, (clientAdapterPlugins.get(d.plugin) ?? true) && inert)
+  }
 
   // Declared backfill targets: enabled plugin entries that drive
   // backfill-on-join (LLP 0037, policy rides the owning plugin). Keyed by
@@ -2267,21 +2302,24 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
   //      the default-on case was invisible. It is gated on `hasCentral` so a
   //      non-joined host (where the reconciler never runs) keeps its
   //      V1-unchanged surface. A bare `claude`/`codex` install shows nothing.
-  /** @type {Map<string, { onJoin: boolean }>} */
+  /** @type {Map<string, { onJoin: boolean, inert?: boolean }>} */
   const declared = new Map()
   for (const entry of config?.plugins ?? []) {
     if (entry.enabled === false) continue
     const raw = entry.config?.backfill
     const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
+    // Known only for client adapters. An explicit block on any other plugin
+    // keeps its previous answer (declared, so pending until a marker lands).
+    const inert = clientAdapterPlugins.get(entry.name) === true
     if (hasBlock) {
       // Use the shared tri-state read so status can never disagree with the
       // reconciler about what a block means: a malformed `on_join` (e.g. the
       // string "false") is an opt-out, not default-on. `onJoin: undefined`
       // (block present, `on_join` absent) is default-on → not suppressed.
       const onJoin = readBackfillPolicy(entry).onJoin !== false
-      declared.set(entry.name, { onJoin })
+      declared.set(entry.name, { onJoin, inert })
     } else if (hasCentral && clientAdapterPlugins.has(entry.name)) {
-      declared.set(entry.name, { onJoin: true })
+      declared.set(entry.name, { onJoin: true, inert })
     }
   }
 
@@ -2877,20 +2915,40 @@ function parseIsoMs(value) {
  * @returns {Promise<PluginCatalog | undefined>}
  */
 async function buildStatusCatalog({ stateDir }) {
+  return catalogFromManifests(await discoverStatusManifests({ stateDir }))
+}
+
+/**
+ * The one discovery pass behind {@link buildStatusCatalog}, exposed so the
+ * collector can also ask the manifests a question the catalog cannot answer:
+ * which installed plugins are shadowed by a bundled name. The catalog is
+ * first-writer-wins, so a shadowed installed manifest leaves no trace in it.
+ * Each discovery failure degrades to empty, never throws.
+ *
+ * @param {{ stateDir: string }} args
+ * @returns {Promise<{ bundled: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }>}
+ */
+async function discoverStatusManifests({ stateDir }) {
+  /** @type {{ loaded: LoadedManifest[], excluded: LoadedManifest[] }} */
+  let bundled = { loaded: [], excluded: [] }
+  /** @type {{ loaded: LoadedManifest[] }} */
+  let installed = { loaded: [] }
   try {
-    /** @type {LoadedManifest[]} */
-    let bundledLoaded = []
-    /** @type {LoadedManifest[]} */
-    let installedLoaded = []
-    try {
-      const bundled = await discoverBundledPlugins()
-      bundledLoaded = [...bundled.loaded, ...bundled.excluded]
-    } catch { /* bundled discovery failure is non-fatal */ }
-    try {
-      const installed = await discoverInstalledPlugins({ stateDir })
-      installedLoaded = installed.loaded
-    } catch { /* installed discovery failure is non-fatal */ }
-    return buildPluginCatalog(bundledLoaded, installedLoaded)
+    bundled = await discoverBundledPlugins()
+  } catch { /* bundled discovery failure is non-fatal */ }
+  try {
+    installed = await discoverInstalledPlugins({ stateDir })
+  } catch { /* installed discovery failure is non-fatal */ }
+  return { bundled, installed }
+}
+
+/**
+ * @param {Awaited<ReturnType<typeof discoverStatusManifests>>} manifests
+ * @returns {PluginCatalog | undefined}
+ */
+function catalogFromManifests({ bundled, installed }) {
+  try {
+    return buildPluginCatalog([...bundled.loaded, ...bundled.excluded], installed.loaded)
   } catch {
     return undefined
   }

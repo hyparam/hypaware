@@ -361,28 +361,31 @@ async function stageInstalledPlugin({ hypHome, name, commands, requires }) {
   })
 }
 
-test('top-level help lists the installed plugin that replaces an excluded bundled skeleton, not the skeleton it shadows', async () => {
+// @ref LLP 0380#bundled-copy-wins [tests]: help advertises the bundled copy's commands, never the installed shadow's
+test('top-level help lists the bundled commands when an installed plugin shadows a V1-excluded bundled name', async () => {
   // Regression: help must replicate boot's plugin SELECTION. An installed
-  // plugin whose name matches an excluded bundled skeleton (`@hypaware/gascity`)
-  // *replaces* it in the boot pool, so dispatch runs the installed plugin's
-  // commands. A hand-rolled help pool that kept both would advertise the
-  // skeleton's commands as phantoms that never dispatch.
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-replace-'))
+  // plugin whose name matches a V1-excluded bundled plugin (`@hypaware/gascity`)
+  // used to *replace* it in the boot pool; now the bundled copy is what a
+  // config-named boot activates, so its commands are the ones that dispatch
+  // and the installed copy's are phantoms that never run.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-excluded-shadow-'))
   const workspaceDir = path.join(hypHome, 'bundled-workspace')
   await stageBundledPlugin({
     workspaceDir,
     name: '@hypaware/gascity',
     commands: [
-      { name: 'gascity attach', summary: 'attach (bundled skeleton)' },
-      { name: 'gascity phantom', summary: 'only the skeleton declares this' },
+      { name: 'gascity attach', summary: 'attach (bundled excluded)' },
+      { name: 'gascity phantom', summary: 'only the bundled copy declares this' },
     ],
   })
+  // Help lists top-level namespaces, so the installed copy declares its own:
+  // which namespace shows is which copy help is reading.
   await stageInstalledPlugin({
     hypHome,
     name: '@hypaware/gascity',
     commands: [
-      { name: 'gascity attach', summary: 'attach (installed winner)' },
-      { name: 'gascity real', summary: 'only the installed plugin declares this' },
+      { name: 'shadowgas attach', summary: 'attach (installed shadow)' },
+      { name: 'shadowgas real', summary: 'only the installed plugin declares this' },
     ],
   })
   await fs.writeFile(
@@ -402,29 +405,30 @@ test('top-level help lists the installed plugin that replaces an excluded bundle
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
   const out = stdout.text()
-  // The installed plugin is the boot winner, so its top-level namespace
-  // appears in Additional commands.
+  // The bundled plugin is the boot winner, so its top-level namespace
+  // appears in Additional commands and the installed copy's does not.
   assert.match(out, /Additional commands:\n  .*\bgascity\b/)
-  // The replaced skeleton's commands never dispatch: they must not appear.
-  assert.equal(out.includes('phantom'), false)
-  assert.equal(out.includes('bundled skeleton'), false)
+  assert.equal(out.includes('shadowgas'), false)
 })
 
-test('top-level help advertises no commands for an installed plugin that shadows a bundled first-party name', async () => {
+test('top-level help lists the bundled commands when an installed plugin shadows a bundled first-party name', async () => {
   // Regression: an installed plugin shadowing a bundled first-party plugin
-  // makes real boot reject before any command dispatches. Help must not
-  // advertise either side's commands: none of them will ever run.
+  // used to make real boot reject before any command dispatched, and help
+  // advertised nothing. Now the bundled copy activates; help must advertise
+  // its commands and not the installed copy's, which never run.
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-shadow-'))
   const workspaceDir = path.join(hypHome, 'bundled-workspace')
+  // Help lists top-level namespaces, so each copy declares its own: which
+  // namespace shows is which copy help is reading.
   await stageBundledPlugin({
     workspaceDir,
     name: '@hypaware/ai-gateway',
-    commands: [{ name: 'gateway bundled', summary: 'bundled gateway command' }],
+    commands: [{ name: 'bundledgw hello', summary: 'bundled gateway command' }],
   })
   await stageInstalledPlugin({
     hypHome,
     name: '@hypaware/ai-gateway',
-    commands: [{ name: 'gateway installed', summary: 'installed gateway command' }],
+    commands: [{ name: 'installedgw hello', summary: 'installed gateway command' }],
   })
   await fs.writeFile(
     path.join(hypHome, 'hypaware-config.json'),
@@ -443,8 +447,8 @@ test('top-level help advertises no commands for an installed plugin that shadows
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
   const out = stdout.text()
-  assert.equal(out.includes('gateway bundled'), false)
-  assert.equal(out.includes('gateway installed'), false)
+  assert.match(out, /Additional commands:\n  .*\bbundledgw\b/)
+  assert.equal(out.includes('installedgw'), false)
 })
 
 function groupKernelAndRegistry() {

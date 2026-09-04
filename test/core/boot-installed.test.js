@@ -208,9 +208,13 @@ test('bootKernel does not activate installed plugins under all-bundled', async (
   }
 })
 
-test('bootKernel rejects installed plugins that shadow bundled first-party names', async () => {
+// @ref LLP 0380#bundled-copy-wins [tests]: the bundled copy activates, the installed shadow never does, and boot does not reject
+test('bootKernel activates the bundled copy when an installed plugin shadows a bundled first-party name', async () => {
   // Use a tiny synthetic "bundled" workspace so we control collision
-  // surface without depending on the real V1 set.
+  // surface without depending on the real V1 set. Boot used to reject here;
+  // the reject stopped every command (dispatch boots first, `hyp plugin
+  // remove` included) and respawned the supervised daemon into the same
+  // throw forever, so the bundled copy now wins and the shadow is reported.
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-boot-installed-shadow-'))
   try {
     const workspaceDir = path.join(hypHome, 'bundled-workspace')
@@ -232,90 +236,108 @@ test('bootKernel rejects installed plugins that shadow bundled first-party names
       'export async function activate() {}\n'
     )
 
-    // Install a shadowing copy of @hypaware/ai-gateway.
+    // Install a shadowing copy of @hypaware/ai-gateway whose code must never run.
     const { installDir } = await stageInstalledPlugin({
       hypHome,
       name: '@hypaware/ai-gateway',
       version: '0.2.0',
+      entrypointBody: 'export async function activate() { throw new Error("the installed shadow must never activate") }\n',
     })
     await writeFixtureLock(hypHome, [
       { name: '@hypaware/ai-gateway', version: '0.2.0', installDir },
     ])
 
-    await assert.rejects(
-      bootKernel({
-        hypHome,
-        mode: 'smoke',
-        runId: 'test-shadow',
-        bootProfile: 'config',
-        workspaceDir,
-        env: { ...process.env, HYP_HOME: hypHome },
-      }),
-      (err) => {
-        assert.equal(
-          /** @type {{hypErrorKind?: string}} */ (err).hypErrorKind,
-          'installed_shadows_bundled'
-        )
-        assert.match(
-          /** @type {Error} */ (err).message,
-          /@hypaware\/ai-gateway/
-        )
-        return true
-      }
-    )
+    // `all-bundled` is the profile that used to be fooled twice over: the
+    // name was "installed", so the bundled plugin was dropped from the
+    // default surface as well.
+    const boot = await bootKernel({
+      hypHome,
+      mode: 'smoke',
+      runId: 'test-shadow',
+      bootProfile: 'all-bundled',
+      workspaceDir,
+      env: { ...process.env, HYP_HOME: hypHome },
+    })
+    const gateway = boot.activePlugins.find((p) => p.name === '@hypaware/ai-gateway')
+    assert.ok(gateway, 'the bundled plugin activates')
+    assert.equal(gateway.rootDir, bundledDir)
+    assert.equal(gateway.version, '0.0.1')
+    assert.equal(boot.activePlugins.filter((p) => p.name === '@hypaware/ai-gateway').length, 1)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
 })
 
-test('bootKernel lets installed plugins replace excluded bundled skeletons and exposes their init presets', async () => {
+// @ref LLP 0380#bundled-copy-wins [tests]: an excluded bundled name is a bundled name; the installed copy never activates under any profile
+test('bootKernel activates the bundled copy when an installed plugin shadows a V1-excluded bundled plugin', async () => {
+  // Regression: the shadow rule compared installed names only against the
+  // allowlisted bundled bucket, so an installed copy of a bundled plugin in
+  // `V1_EXCLUDED_FROM_DEFAULT` (`@hypaware/github`, `@hypaware/claude-desktop`)
+  // replaced the bundled code silently. A pre-bundling install of the GitHub
+  // source then kept running months-old code across every release that fixed
+  // the bundled copy, with nothing on any surface saying so. An excluded
+  // bundled name is a bundled name: the bundled copy is what activates when
+  // the config names it, and the installed copy activates under no profile,
+  // `all-available` included (it used to select every installed name).
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-boot-installed-excluded-shadow-'))
   try {
     const workspaceDir = path.join(hypHome, 'bundled-workspace')
-    const bundledDir = path.join(workspaceDir, 'gascity')
+    const bundledDir = path.join(workspaceDir, 'github')
     await fs.mkdir(bundledDir, { recursive: true })
     await fs.writeFile(
       path.join(bundledDir, 'hypaware.plugin.json'),
       JSON.stringify({
         schema_version: 1,
-        name: '@hypaware/gascity',
+        name: '@hypaware/github',
         version: '0.0.1',
         hypaware_api: '^1.0.0',
         runtime: 'node',
         entrypoint: './index.js',
       })
     )
-    await fs.writeFile(
-      path.join(bundledDir, 'index.js'),
-      'export async function activate() { throw new Error("excluded bundled skeleton should not activate") }\n'
-    )
+    await fs.writeFile(path.join(bundledDir, 'index.js'), 'export async function activate() {}\n')
 
     const { installDir } = await stageInstalledPlugin({
       hypHome,
-      name: '@hypaware/gascity',
+      name: '@hypaware/github',
       version: '1.0.0',
-      entrypointBody:
-        "export async function activate(ctx) {\n" +
-        "  ctx.initPresets.register({ name: 'gascity', plugin: '@hypaware/gascity', summary: 'fixture preset', async run() { return 0 } })\n" +
-        "}\n",
+      entrypointBody: 'export async function activate() { throw new Error("the installed shadow must never activate") }\n',
     })
     await writeFixtureLock(hypHome, [
-      { name: '@hypaware/gascity', version: '1.0.0', installDir },
+      { name: '@hypaware/github', version: '1.0.0', installDir },
     ])
+    // Named in config, the way an operator who installed it pre-bundling has it.
+    await fs.writeFile(
+      defaultConfigPath(hypHome),
+      JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/github' }] })
+    )
 
-    const boot = await bootKernel({
+    // `config`: the config names the excluded plugin, so the bundled copy is
+    // the explicit opt-in that activates, from the bundled root.
+    const configBoot = await bootKernel({
       hypHome,
-      mode: 'init',
-      runId: 'test-excluded-shadow',
+      mode: 'smoke',
+      runId: 'test-excluded-shadow-config',
+      bootProfile: 'config',
+      workspaceDir,
+      env: { ...process.env, HYP_HOME: hypHome },
+    })
+    const github = configBoot.activePlugins.find((p) => p.name === '@hypaware/github')
+    assert.ok(github, 'the bundled excluded plugin activates when the config names it')
+    assert.equal(github.rootDir, bundledDir)
+    assert.equal(github.version, '0.0.1')
+
+    // `all-available`: an excluded plugin stays out of the default surface,
+    // and the installed shadow must not smuggle it back in as "installed".
+    const allAvailable = await bootKernel({
+      hypHome,
+      mode: 'smoke',
+      runId: 'test-excluded-shadow-all-available',
       bootProfile: 'all-available',
       workspaceDir,
       env: { ...process.env, HYP_HOME: hypHome },
     })
-
-    assert.equal(boot.activePlugins.length, 1)
-    assert.equal(boot.activePlugins[0].name, '@hypaware/gascity')
-    assert.equal(boot.activePlugins[0].rootDir, installDir)
-    assert.equal(boot.runtime.initPresets.get('gascity')?.plugin, '@hypaware/gascity')
+    assert.equal(allAvailable.activePlugins.find((p) => p.name === '@hypaware/github'), undefined)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

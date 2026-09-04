@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-08-14
 **Related:** LLP 0044 (#status-surface: the attach-on-join loop and the surface this constrains), LLP 0045 (the attach design `desired()` implements), LLP 0115 (#no-attach-on-join: Claude Desktop, the probe-less client this is derived from), LLP 0139 (#repair-must-be-runnable: the repair rule this leaves standing), LLP 0224 (#repair-surface: why the `client_attach_missing` diagnostic is deliberately outside this gate), LLP 0143 (superseded; made the same observation about OpenClaw, before LLP 0169 gave OpenClaw a probe back), LLP 0169 (the attach surface OpenClaw regained), [#544](https://github.com/hyparam/hypaware/issues/544)
-**Extended-by:** LLP 0358 (#diagnostic-is-out-of-scope is retired: Desktop capture no longer depends on attach, so the probe-less gate now covers the `client_attach_missing` diagnostic too)
+**Extended-by:** LLP 0358 (#diagnostic-is-out-of-scope is retired: Desktop capture no longer depends on attach, so the probe-less gate now covers the `client_attach_missing` diagnostic too), LLP 0379 (the backfill twin: status derives backfill state by the reconciler's provider gate, declared on the client block as `backfill_provider: false`)
 
 > `hyp status` and the attach reconciler answered "is this client an attach
 > target?" by two different rules, so a client the reconciler will never act on

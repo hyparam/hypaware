@@ -213,6 +213,26 @@ function parsePluginInstallArgs(argv) {
 }
 
 /**
+ * Every plugin name the package ships, both buckets. An installed copy of one
+ * of these never runs: boot activates the bundled copy and skips the lock
+ * entry (LLP 0380). Read from the manifests rather than from what this boot
+ * activated, so the list agrees with the `installed_plugin_shadowed`
+ * diagnostic `hyp status` raises from the same rule under every profile.
+ * Discovery failure degrades to empty (no marks), never throws: a listing is
+ * not the place to fail.
+ *
+ * @returns {Promise<Set<string>>}
+ */
+async function discoverBundledNames() {
+  try {
+    const bundled = await discoverBundledPlugins()
+    return new Set([...bundled.loaded, ...bundled.excluded].map((m) => m.manifest.name))
+  } catch {
+    return new Set()
+  }
+}
+
+/**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -223,6 +243,7 @@ export async function runPluginList(argv, ctx) {
   const stateDir = pluginStateDir(ctx)
   const installed = await listInstalledPlugins(stateDir)
   const active = ctx.plugins ?? []
+  const bundledNames = await discoverBundledNames()
 
   if (json) {
     const installedByName = new Map(installed.map((e) => [e.name, e]))
@@ -231,17 +252,30 @@ export async function runPluginList(argv, ctx) {
       ...installedByName.keys(),
       ...activeByName.keys(),
     ])
-    /** @type {Array<{name: string, version: string, source: 'bundled'|'installed', active: boolean, installed_at?: string, update?: unknown}>} */
+    /** @type {Array<{name: string, version: string, source: 'bundled'|'installed', active: boolean, shadowed?: true, installed_at?: string, update?: unknown}>} */
     const plugins = []
     for (const name of Array.from(allNames).sort()) {
       const inst = installedByName.get(name)
       const act = activeByName.get(name)
       const version = act?.version ?? inst?.version ?? ''
+      // Provenance is what runs, read off the active plugin's root directory:
+      // an installed copy of a bundled name is in the lock but never active
+      // (boot runs the bundled copy), so the name reports the bundled source
+      // when it is active and carries `shadowed` for the idle lock entry.
+      // `shadowed` is decided by the bundled manifest set, not by what this
+      // boot happens to have activated: `plugin list` boots the `config`
+      // profile, so a lock entry whose bundled twin the config does not
+      // enable (the ordinary state for the V1-excluded names this rule is
+      // about) is inert all the same, and `hyp status` already says so.
+      // @ref LLP 0380#bundled-copy-wins [implements]: the list says which copy runs, by root directory, not by lock membership
+      const runsInstalled = !!act && !!inst && act.rootDir === inst.install_dir
+      const shadowed = !!inst && bundledNames.has(name)
       plugins.push({
         name,
         version,
-        source: inst ? 'installed' : 'bundled',
+        source: act ? (runsInstalled ? 'installed' : 'bundled') : 'installed',
         active: !!act,
+        ...(shadowed ? { shadowed: true } : {}),
         ...(inst ? { installed_at: inst.installed_at } : {}),
         ...(inst?.update !== undefined ? { update: inst.update } : {}),
       })
@@ -254,17 +288,28 @@ export async function runPluginList(argv, ctx) {
     ctx.stdout.write('No plugins active or installed.\n')
     return 0
   }
+  // Provenance is what runs, matched by root directory the same way the
+  // `--json` branch does: an active plugin whose root is a lock entry's
+  // install_dir runs the installed copy; everything else is bundled. Name
+  // membership in the lock is not enough, since an installed copy of a
+  // bundled name sits in the lock while the bundled copy is what runs.
+  // Printing "(bundled)" for every active plugin hid that copy entirely.
+  const installDirs = new Map(installed.map((e) => [e.name, e.install_dir]))
   if (active.length > 0) {
     ctx.stdout.write('Active plugins (from current boot):\n')
     for (const p of active) {
-      ctx.stdout.write(`  ${p.name}@${p.version}  (bundled)\n`)
+      const source = installDirs.get(p.name) === p.rootDir ? 'installed' : 'bundled'
+      ctx.stdout.write(`  ${p.name}@${p.version}  (${source})\n`)
     }
   }
   if (installed.length > 0) {
     ctx.stdout.write('Installed plugins:\n')
     for (const entry of installed) {
       const available = entry.update?.available ? '  (update available)' : ''
-      ctx.stdout.write(`  ${entry.name}@${entry.version}${available}\n`)
+      const shadowed = bundledNames.has(entry.name)
+        ? `  (shadowed by the bundled copy; hyp plugin remove ${entry.name})`
+        : ''
+      ctx.stdout.write(`  ${entry.name}@${entry.version}${available}${shadowed}\n`)
     }
   }
   return 0

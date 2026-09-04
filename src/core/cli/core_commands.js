@@ -264,7 +264,7 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'plugin list',
-      summary: 'List active (bundled) and installed plugins',
+      summary: 'List active plugins and their provenance, plus installed plugins',
       usage: coreUsage('plugin list'),
       run: runPluginList,
     },
@@ -341,7 +341,8 @@ function buildCoreCommands(registry) {
         '',
         '  --yes, -y              accept the defaults (captures claude + otel',
         '                         when no --source and no --client is given)',
-        '  --client <name>        client to attach: claude, codex, opencode (repeatable)',
+        '  --client <name>        client to capture: claude, claude-desktop, codex,',
+        '                         opencode (repeatable)',
         '  --source <name>        source to capture (repeatable)',
         '  --export <choice>      keep-local | local-parquet | configure-later',
         '  --retention-days <n>   how long to keep cached rows',

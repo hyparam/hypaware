@@ -15,7 +15,7 @@ import { isTty } from '../cli/stdio.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
- * @import { InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin } from '../../../src/core/cli/types.js'
+ * @import { InitFlags, PickerBackfillRunner, PickerExport, PickerExportOrigin, PickerSource } from '../../../src/core/cli/types.js'
  */
 
 /**
@@ -161,6 +161,36 @@ function hasInitFlags(argv) {
 }
 
 /**
+ * The picker source ids `hyp setup --source` accepts: every row the bundled
+ * picker catalog contributes, hidden and platform-gated rows included. A
+ * platform gate filters the interactive menu and nothing else, so a gated
+ * row keeps its `--source` identity (LLP 0368 #display-only), and a hidden
+ * row is reachable only here. Exported so a test can hold this list against
+ * the real catalog: the list is a second copy of the manifest data, and the
+ * copy is what let `claude-desktop` join the picker without joining this
+ * flag (#1301).
+ *
+ * @type {readonly PickerSource[]}
+ * @ref LLP 0368#display-only [constrained-by]: a platform-gated row keeps its `--source` identity
+ */
+export const INIT_SOURCE_CHOICES = Object.freeze(/** @type {PickerSource[]} */ ([
+  'claude', 'claude-desktop', 'codex', 'opencode', 'openclaw', 'hermes', 'raw-anthropic', 'raw-openai', 'otel',
+]))
+
+/**
+ * The names `hyp setup --client` accepts. Each is a picker row whose owning
+ * plugin contributes a client, so `--client <name>` folds into the same
+ * source pick the interactive row makes (`resolveInitSources`). Claude
+ * Desktop composes `@hypaware/claude` + `@hypaware/claude-desktop` exactly
+ * as its picker row does.
+ *
+ * @type {readonly InitFlags['clients'][number][]}
+ */
+export const INIT_CLIENT_CHOICES = Object.freeze(/** @type {InitFlags['clients'][number][]} */ ([
+  'claude', 'claude-desktop', 'codex', 'opencode',
+]))
+
+/**
  * @param {string[]} argv
  * @returns {{ flags: InitFlags, error?: string }}
  */
@@ -183,8 +213,8 @@ function parseInitFlags(argv) {
       'no-daemon': { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       force: { type: 'boolean', default: false },
-      client: { type: 'array', items: { type: 'string', enum: ['claude', 'codex', 'opencode'] } },
-      source: { type: 'array', items: { type: 'string', enum: ['claude', 'codex', 'opencode', 'openclaw', 'hermes', 'raw-anthropic', 'raw-openai', 'otel'] } },
+      client: { type: 'array', items: { type: 'string', enum: [...INIT_CLIENT_CHOICES] } },
+      source: { type: 'array', items: { type: 'string', enum: [...INIT_SOURCE_CHOICES] } },
       export: { type: 'string', enum: ['keep-local', 'local-parquet', 'configure-later'] },
       'retention-days': { type: 'integer', minimum: 0, default: DEFAULT_RETENTION_DAYS },
       'from-file': { type: 'string' },

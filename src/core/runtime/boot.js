@@ -95,30 +95,29 @@ export async function bootKernel(opts = {}) {
         span.setAttribute('installed_failed', installed.failed.length)
       }
 
-      // An installed plugin must not shadow a bundled first-party
-      // plugin by name. The override policy is intentionally deferred
-      // (see hy-gh-2 design): reject boot with a clear, telemetry-tagged
-      // error so the operator removes the installed copy before booting.
-      // The same detection feeds the shared `selectBootPlugins` so help
-      // knows to advertise no commands when boot would reject.
+      // An installed plugin never runs in a bundled first-party plugin's
+      // name: the bundled copy is activated and the installed one sits
+      // idle in the lock. Boot used to reject here instead, and the reject
+      // was the hazard: dispatch boots before every command, `hyp plugin
+      // remove` included, so the operator could not run the repair the error
+      // named, and under launchd/systemd `KeepAlive` the daemon respawned
+      // into the same throw every few seconds, appending to a log that never
+      // rotates. One warning per name per boot; `hyp status` carries the
+      // repair and `hyp plugin list` marks the shadowed entry.
+      // @ref LLP 0380#bundled-copy-wins [implements]: the bundled copy activates, the installed shadow is logged and skipped, boot never rejects
       const shadowing = detectShadowedPlugins({ discovered, installed })
       if (shadowing.length > 0) {
         span.setAttribute('installed_shadow_collisions', shadowing.length)
-        span.setAttribute('error_kind', 'installed_shadows_bundled')
         const log = getLogger('kernel')
         for (const name of shadowing) {
-          log.error('plugin.shadow_collision', {
+          log.warn('plugin.shadow_collision', {
             [Attr.PLUGIN]: name,
-            [Attr.ERROR_KIND]: 'installed_shadows_bundled',
+            [Attr.COMPONENT]: 'kernel',
+            status: 'skipped',
             hyp_reason: 'installed_plugin_name_collides_with_bundled',
+            hyp_repair: `hyp plugin remove ${name}`,
           })
         }
-        const message =
-          `installed plugin(s) shadow bundled first-party plugin(s): ${shadowing.sort().join(', ')}. ` +
-          `Remove the installed copy with 'hyp plugin remove <name>' before booting.`
-        const shadowErr = /** @type {Error & { hypErrorKind?: string }} */ (new Error(message))
-        shadowErr.hypErrorKind = 'installed_shadows_bundled'
-        throw shadowErr
       }
 
       // Two-layer config resolution (LLP 0031): the effective config is
@@ -192,10 +191,11 @@ export async function bootKernel(opts = {}) {
       // Full plugin pool + selection (shared with help so `hyp --help`
       // advertises exactly the command set this boot would activate and
       // dispatch): V1 allowlist + excluded-from-default set + installed
-      // plugins, with an installed plugin replacing a same-named excluded
-      // bundled skeleton. Excluded plugins are in the pool so they activate
-      // when named in config or an init preset, the allowlist only governs
-      // default activation, not discoverability.
+      // plugins (an installed copy of a bundled name, excluded or not, is
+      // dropped from the pool: the warning above named it). Excluded plugins
+      // are in the pool so they activate when named in config or an init
+      // preset, the allowlist only governs default activation, not
+      // discoverability.
       const { installedNames, pool, selected, selectedManifests } = selectBootPlugins({
         discovered,
         installed,
@@ -470,14 +470,31 @@ export function resolveConfigPath({ explicit, env, hypHome }) {
 /**
  * Detect installed plugins that shadow a bundled first-party plugin by
  * name. Pure (manifests only: no I/O, telemetry, or throw). Shared
- * between `bootKernel`'s hard reject guard and `selectBootPlugins` so the
- * shadow rule has a single definition.
+ * between `bootKernel`'s warning, `selectBootPlugins`' pool (which drops
+ * the shadows so the bundled copy is what activates), and the `hyp status`
+ * diagnostic, so the shadow rule has a single definition.
  *
- * @param {{ discovered: { loaded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }} args
+ * Both bundled buckets count. The V1-excluded set once held only developer
+ * skeletons (`@hypaware/central`, `@hypaware/gascity`) that an installed
+ * copy was allowed to replace; it now holds complete first-party plugins
+ * whose only difference from the allowlist is that activation is an explicit
+ * config choice (`@hypaware/github`, `@hypaware/claude-desktop`). An
+ * installed copy of one of those activated silently in place of the bundled
+ * code, with `hyp plugin list` still saying "(bundled)", so a pre-bundling
+ * install kept running stale code across every release that shipped a fix
+ * to the bundled copy.
+ *
+ * `excluded` is required, not optional: an allowlist-only comparison is
+ * exactly the bug this fixes, and a caller that omitted the bucket would
+ * reintroduce it silently. `discoverBundledPlugins` always returns both.
+ *
+ * @param {{ discovered: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }} args
  * @returns {PluginName[]}
  */
 export function detectShadowedPlugins({ discovered, installed }) {
-  const bundledNames = new Set(discovered.loaded.map((m) => m.manifest.name))
+  const bundledNames = new Set(
+    [...discovered.loaded, ...discovered.excluded].map((m) => m.manifest.name)
+  )
   /** @type {PluginName[]} */
   const shadowing = []
   for (const m of installed.loaded) {
@@ -502,11 +519,12 @@ export function detectShadowedPlugins({ discovered, installed }) {
  * encodes the two selection rules help must not skip:
  *
  *  - `shadowing`: installed plugins whose name collides with a bundled
- *    first-party plugin. Boot rejects on these; help advertises no plugin
- *    commands rather than phantoms that will never dispatch.
- *  - excluded-bundled-vs-installed: an installed plugin replaces a
- *    same-named excluded bundled skeleton in the pool, so its commands
- *    (not the skeleton's) are what dispatch sees.
+ *    first-party plugin, allowlisted or V1-excluded alike. They are dropped
+ *    from the pool and from `installedNames`, so the bundled manifest is
+ *    the one selected and its commands are the ones help advertises. (An
+ *    installed copy used to replace a same-named excluded bundled skeleton
+ *    in the pool; see `detectShadowedPlugins` for why that carve-out is
+ *    gone.) The list is returned so surfaces can name the idle copy.
  *
  * @param {{
  *   discovered: { loaded: LoadedManifest[], excluded: LoadedManifest[] },
@@ -524,13 +542,19 @@ export function detectShadowedPlugins({ discovered, installed }) {
  */
 export function selectBootPlugins({ discovered, installed, config, bootProfile = 'config' }) {
   const shadowing = detectShadowedPlugins({ discovered, installed })
+  const shadowed = new Set(shadowing)
+  // A shadowed installed copy is invisible to selection: it leaves the pool,
+  // so no name appears twice, and it leaves `installedNames`, so the
+  // `all-bundled` / `all-available` profiles keep treating the bundled
+  // plugin as bundled instead of dropping it as "installed".
+  // @ref LLP 0380#bundled-copy-wins [implements]: selection never sees the installed shadow
+  const installedUnshadowed = installed.loaded.filter(
+    (m) => !shadowed.has(/** @type {PluginName} */ (m.manifest.name))
+  )
   const installedNames = new Set(
-    installed.loaded.map((m) => /** @type {PluginName} */ (m.manifest.name))
+    installedUnshadowed.map((m) => /** @type {PluginName} */ (m.manifest.name))
   )
-  const excludedAvailable = discovered.excluded.filter(
-    (m) => !installedNames.has(/** @type {PluginName} */ (m.manifest.name))
-  )
-  const pool = [...discovered.loaded, ...excludedAvailable, ...installed.loaded]
+  const pool = [...discovered.loaded, ...discovered.excluded, ...installedUnshadowed]
   const selected = computeSelectedPlugins({
     bootProfile,
     config,
@@ -568,7 +592,8 @@ export function selectBootPlugins({ discovered, installed, config, bootProfile =
  *   config (`enabled !== false`). Excluded and installed plugins are
  *   honoured when they appear in the config: typing the name is the
  *   explicit opt-in. The installed plugin is never preferred over a
- *   bundled one (shadow collisions are rejected before this point).
+ *   bundled one: `selectBootPlugins` dropped the shadow from this pool
+ *   before it got here (LLP 0380).
  *
  * Plugins in the config that aren't bundled (or aren't installed)
  * are skipped silently here. The cross-plugin validator surfaces

@@ -81,6 +81,10 @@ export function buildPluginCatalog(bundledManifests, installedManifests = []) {
           }
           if (typeof client.agent_dir === 'string') descriptor.agentDir = client.agent_dir
           if (client.attach_probe) descriptor.attachProbe = client.attach_probe
+          // Only the explicit opt-out is carried: absent stays absent, so a
+          // reader cannot mistake "not declared" for "declared true".
+          // @ref LLP 0379#manifest-declares-no-provider [implements]: the opt-out flag rides the client block into the descriptor
+          if (client.backfill_provider === false) descriptor.backfillProvider = false
           if (Array.isArray(client.required_upstreams)) {
             descriptor.requiredUpstreams = client.required_upstreams
           }
