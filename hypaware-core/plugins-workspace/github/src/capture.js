@@ -876,13 +876,18 @@ function openGate(staged, stagedIds, published, publishedIds, phaseEmitted) {
       }
       if (id === null) return true
       if (published !== undefined && at === published && floorIds.has(id)) return false
-      if (emitted.has(id)) return false
-      // Only the watermark second's identities are published as the boundary
-      // set, so an item below it joins `emitted` alone.
+      // The boundary set is claimed before `emitted` answers, not after. An item
+      // re-listed AT the watermark second was appended earlier in this phase at
+      // an older one, so `emitted` is about to refuse it; skipping the claim
+      // would publish a boundary that omits it, and the next tick's inclusive
+      // `since` would re-list it against an empty floor and append the row the
+      // refusal just saved. Only the watermark second's identities are published,
+      // so an item below it still joins `emitted` alone.
       if (at && at === high) {
         if (ids.has(id)) return false
         ids.add(id)
       }
+      if (emitted.has(id)) return false
       emitted.add(id)
       return true
     },

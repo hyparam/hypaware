@@ -1415,3 +1415,54 @@ test('a gate phase begun this tick does not inherit the staged set of the phase 
     'the phase this tick opened guards only what this tick appended',
   )
 })
+
+test('an item re-listed at the phase watermark second still claims its place in the published boundary', async () => {
+  // The half the phase-scoped set cannot answer for on its own. An issue edited
+  // mid-traversal is re-listed at a NEWER `updated_at` than the sighting that
+  // appended it, and that timestamp is the watermark the phase publishes. The
+  // guard refuses the second sighting, so if the refusal also skipped the
+  // boundary claim the cursor would publish a watermark whose floor set omits
+  // the one item sitting on it, and the next tick's inclusive `since` would
+  // append exactly the row the refusal saved.
+  const older = '2026-02-01T00:00:00Z'
+  const newer = '2026-02-03T00:00:00Z'
+  /** @param {string} at */
+  const issue = (at) => ({ number: 3, state: 'open', created_at: older, updated_at: at, user: { login: 'Ada' } })
+  const client = fakeClient({ repos: { 'o/r': {} } })
+  let reshuffled = false
+  client.listIssuesPage = async (_owner, _name, _since, page) => {
+    if (reshuffled) return { items: [issue(newer)], next: null }
+    return page === undefined ? { items: [issue(older)], next: 'p2' } : { items: [issue(newer)], next: null }
+  }
+
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z' } }
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  const tick = () => captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  await tick()
+  assert.deepEqual(
+    cursors.repos['o/r'].boundary?.issues,
+    ['issue:o/r#3'],
+    'the watermark second publishes the identity that sits on it',
+  )
+
+  // The next poll asks from that watermark, which is inclusive, so the issue
+  // comes back and only the floor set can refuse it.
+  reshuffled = true
+  await tick()
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'issue').map((row) => row.number),
+    [3],
+    'one issue, one row, across both ticks',
+  )
+})

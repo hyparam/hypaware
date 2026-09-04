@@ -135,8 +135,9 @@ function readWork(value) {
   // a budget-split phase resumes through this reader.
   const emitted = readNumbers(v.pulls_emitted)
   if (emitted) work.pulls_emitted = emitted
-  // The gate phases' twin of it, staged for the same reason. `readBoundaryIds`
-  // caps it exactly as `openGate` caps it on the way out.
+  // The gate phases' twin of it, staged for the same reason. `openGate` caps it
+  // on the way out, keeping the newest window rather than this reader's oldest
+  // one, so a set this writer produced is never truncated on the way back in.
   const gateEmitted = readBoundaryIds(v.gate_emitted)
   if (gateEmitted) work.gate_emitted = gateEmitted
   if (typeof v.commits_high === 'string') work.commits_high = v.commits_high
