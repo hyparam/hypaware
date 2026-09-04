@@ -351,10 +351,10 @@ test('scheduled passes skip unchanged transcript files and revisit an append', a
   }
 })
 
-// @ref LLP 0359#file-fingerprints [tests]: a fingerprint advances only after
-// the file's rows landed, so the three non-throwing runner failures (missing
-// materializer, dataset mismatch, unregistered dataset) leave the file
-// eligible instead of hiding it until the daemon restarts.
+// @ref LLP 0359#file-fingerprints [tests]: the map is deliberately not durable,
+// so a file the runner dropped on one of its three non-throwing failures
+// (missing materializer, dataset mismatch, unregistered dataset) stays eligible
+// instead of staying hidden until the daemon restarts.
 test('a scheduled pass the runner could not write re-reads the file next tick', async () => {
   const env = await stageEnv()
   try {

@@ -2876,7 +2876,10 @@ export interface BackfillRunContext extends BackfillPlanContext {
    * generator is resumed. It counts the non-throwing write failures only
    * (no materializer for the item's `kind`, a materializer targeting a
    * different dataset, an unregistered target dataset); a throwing write
-   * aborts the run, so the generator never resumes to read the count.
+   * aborts the run, so the generator never resumes to read the count. An
+   * item whose materializer emitted no rows is not counted, because an
+   * already imported item legitimately materializes to nothing: an
+   * unchanged count means no enumerated failure, not proof of a write.
    *
    * Resuming a provider generator says the runner consumed the item, not
    * that its rows landed. A provider that records per-input progress reads

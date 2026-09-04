@@ -408,7 +408,8 @@ async function* runClaudeBackfill(args) {
     // the append and resume us anyway. They are misconfigurations an operator
     // repairs without restarting the daemon, and this map lives for the
     // process, so a stamp there would hide the file until a restart.
-    // @ref LLP 0359#file-fingerprints [implements]: a fingerprint advances only after the file's sessions landed
+    // @ref LLP 0359#file-fingerprints [constrained-by]: the map is deliberately
+    // not durable, so stamping a file nothing wrote hides it until a restart
     if (ctx.sweep && fingerprint && (ctx.itemsFailed ?? 0) === failedBefore) {
       sweepFingerprints.set(filePath, fingerprint)
     }

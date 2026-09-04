@@ -364,7 +364,9 @@ function markProviderFailed(result, error) {
  * against rows nothing wrote. A throwing write needs no signal: it aborts the
  * run before the generator resumes.
  *
- * @ref LLP 0359#file-fingerprints [implements]: per-input progress advances only when the input's rows landed
+ * @ref LLP 0359#file-fingerprints [constrained-by]: the provider's skip map is
+ *   process-local and not durable, so an item the runner drops needs a signal
+ *   before the generator resumes
  * @param {BackfillRunContext} runCtx
  * @param {BackfillProviderResult} result
  * @param {string} error
