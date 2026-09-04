@@ -13,6 +13,11 @@ import {
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createClaudeBackfillProvider } from '../../hypaware-core/plugins-workspace/claude/src/backfill.js'
 import { appendSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
+import { runBackfillProvider } from '../../src/core/commands/backfill.js'
+import {
+  createBackfillMaterializerRegistry,
+  createBackfillRegistry,
+} from '../../src/core/registry/backfills.js'
 
 /**
  * End-to-end tests for the `@hypaware/claude` backfill provider. They
@@ -21,7 +26,7 @@ import { appendSessionContext } from '../../hypaware-core/plugins-workspace/clau
  * `ai_gateway.projected_exchange` materializer, so the assertions cover
  * the exact path `hyp backfill claude` exercises in production.
  *
- * @import { BackfillEvent, BackfillItem, BackfillRunContext } from '../../hypaware-plugin-kernel-types.js'
+ * @import { BackfillContribution, BackfillEvent, BackfillItem, BackfillRunContext, CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  * @import { UsagePolicyResolver } from '../../src/core/usage-policy/types.js'
  */
 
@@ -130,6 +135,51 @@ function runContext(overrides = {}) {
     ...(overrides.sweep !== undefined ? { sweep: overrides.sweep } : {}),
   }
   return { ctx, entries }
+}
+
+/**
+ * Drive the provider through the real kernel runner, so a tick takes the same
+ * scan -> materialize -> write path the daemon sweep takes. The materializer
+ * registry starts empty; registering it between ticks stands in for an
+ * operator repairing a plugin misconfiguration without a daemon restart.
+ *
+ * @param {{ homeDir: string }} env
+ * @param {BackfillContribution} provider
+ */
+function stageRunner(env, provider) {
+  const backfills = createBackfillRegistry()
+  backfills.register(provider)
+  const materializers = createBackfillMaterializerRegistry()
+  /** @type {Record<string, unknown>[]} */
+  const appended = []
+  const storage = {
+    cacheRoot: path.join(env.homeDir, 'cache'),
+    /** @param {string} dataset @param {string[]} segs */
+    cacheTablePath: (dataset, segs) => path.join(env.homeDir, 'cache', dataset, ...segs),
+    /** @param {string} _tablePath @param {unknown} _columns @param {Record<string, unknown>[]} rows */
+    async appendRows(_tablePath, _columns, rows) { appended.push(...rows) },
+    async flushTable() {},
+  }
+  const query = {
+    /** @param {string} name */
+    getDataset(name) {
+      if (name !== DATASET_NAME) return undefined
+      return { name, plugin: '@hypaware/ai-gateway', schema: { columns: [] } }
+    },
+    registerDataset() {},
+    listDatasets() { return [] },
+  }
+  const ctx = /** @type {CommandRunContext} */ (/** @type {unknown} */ ({
+    env: { HYP_HOME: env.homeDir },
+    config: {},
+    stdout: { write: () => true },
+    stderr: { write: () => true },
+    backfills,
+    backfillMaterializers: materializers,
+    query,
+    storage,
+  }))
+  return { ctx, appended, materializers }
 }
 
 /**
@@ -296,6 +346,42 @@ test('scheduled passes skip unchanged transcript files and revisit an append', a
     const thirdDone = third.entries.find((entry) => entry.message === 'claude.backfill.scan_complete')
     assert.equal(thirdDone?.fields?.files_read, 1)
     assert.equal(thirdDone?.fields?.files_unchanged, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// @ref LLP 0359#file-fingerprints [tests]: a fingerprint advances only after
+// the file's rows landed, so the three non-throwing runner failures (missing
+// materializer, dataset mismatch, unregistered dataset) leave the file
+// eligible instead of hiding it until the daemon restarts.
+test('a scheduled pass the runner could not write re-reads the file next tick', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'repo-a', 'sess-1', conversationRows('sess-1'))
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const runner = stageRunner(env, provider)
+
+    // Tick 1: no materializer is registered for the yielded kind, so the
+    // runner logs, marks the provider failed, and resumes the generator
+    // without appending a row.
+    const first = await runBackfillProvider({
+      ctx: runner.ctx, provider: 'claude', dryRun: false, sweep: true,
+    })
+    assert.equal(first.ok, false)
+    assert.equal(first.scanned, 1)
+    assert.equal(runner.appended.length, 0)
+
+    // The operator registers the missing materializer. No daemon restart, so
+    // the provider still holds the fingerprint map from tick 1.
+    runner.materializers.register(aiGatewayBackfillMaterializer())
+
+    const second = await runBackfillProvider({
+      ctx: runner.ctx, provider: 'claude', dryRun: false, sweep: true,
+    })
+    assert.equal(second.ok, true)
+    assert.equal(second.scanned, 1, 'the unwritten file must be read again')
+    assert.ok(runner.appended.length > 0, 'the retried tick must land the rows')
   } finally {
     await env.cleanup()
   }

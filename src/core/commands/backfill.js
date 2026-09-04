@@ -358,6 +358,23 @@ function markProviderFailed(result, error) {
 }
 
 /**
+ * Fail one yielded item on a path that does not throw, and tell the provider
+ * its rows did not land before resuming its generator. A provider that
+ * recorded per-input progress on resume would otherwise mark the input done
+ * against rows nothing wrote. A throwing write needs no signal: it aborts the
+ * run before the generator resumes.
+ *
+ * @ref LLP 0359#file-fingerprints [implements]: per-input progress advances only when the input's rows landed
+ * @param {BackfillRunContext} runCtx
+ * @param {BackfillProviderResult} result
+ * @param {string} error
+ */
+function markItemFailed(runCtx, result, error) {
+  markProviderFailed(result, error)
+  runCtx.itemsFailed = (runCtx.itemsFailed ?? 0) + 1
+}
+
+/**
  * Run a single provider end-to-end: scan -> materialize -> write -> flush.
  * Emits `backfill.provider_*` / `backfill.scan` / `backfill.materialize`
  * / `backfill.write` / `backfill.flush` lifecycle spans, all carrying
@@ -459,7 +476,7 @@ async function runProvider(args) {
               kind: yielded.kind,
               [Attr.DATASET]: yielded.dataset,
             })
-            markProviderFailed(result, `missing materializer for kind ${yielded.kind}`)
+            markItemFailed(runCtx, result, `missing materializer for kind ${yielded.kind}`)
             result.rows_skipped += 1
             continue
           }
@@ -471,7 +488,8 @@ async function runProvider(args) {
               [Attr.DATASET]: yielded.dataset,
               materializer_dataset: materializer.dataset,
             })
-            markProviderFailed(
+            markItemFailed(
+              runCtx,
               result,
               `materializer for kind ${yielded.kind} targets dataset ${materializer.dataset}, not ${yielded.dataset}`
             )
@@ -511,7 +529,7 @@ async function runProvider(args) {
           })
           result.rows_written += written.rowsWritten
           if (written.status === 'failed') {
-            markProviderFailed(result, written.error ?? `failed to write dataset ${yielded.dataset}`)
+            markItemFailed(runCtx, result, written.error ?? `failed to write dataset ${yielded.dataset}`)
           }
         }
 
@@ -768,6 +786,7 @@ function buildRunContext(args) {
     ...(args.isPluginConfigured !== undefined ? { isPluginConfigured: args.isPluginConfigured } : {}),
     ...(args.sweep !== undefined ? { sweep: args.sweep } : {}),
     dryRun: args.dryRun,
+    itemsFailed: 0,
     log: args.log,
   }
 }

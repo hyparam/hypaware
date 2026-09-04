@@ -287,6 +287,9 @@ async function* runClaudeBackfill(args) {
   for (const { filePath, inContainer, fingerprint } of candidates) {
     if (ctx.signal?.aborted) break
     filesRead += 1
+    // Read before this file yields anything, so the stamp below can tell a
+    // written session from a consumed and dropped one.
+    const failedBefore = ctx.itemsFailed ?? 0
     /** @type {TranscriptEntry[]} */
     let entries
     try {
@@ -400,7 +403,15 @@ async function* runClaudeBackfill(args) {
     // The generator resumes here only after the runner has consumed every
     // session yielded from this file. A file that changed while it was read
     // retains the pre-read size/mtime and is therefore eligible next tick.
-    if (ctx.sweep && fingerprint) sweepFingerprints.set(filePath, fingerprint)
+    //
+    // Consumed is not written: the runner's non-throwing failure paths skip
+    // the append and resume us anyway. They are misconfigurations an operator
+    // repairs without restarting the daemon, and this map lives for the
+    // process, so a stamp there would hide the file until a restart.
+    // @ref LLP 0359#file-fingerprints [implements]: a fingerprint advances only after the file's sessions landed
+    if (ctx.sweep && fingerprint && (ctx.itemsFailed ?? 0) === failedBefore) {
+      sweepFingerprints.set(filePath, fingerprint)
+    }
   }
 
   log.info('claude.backfill.scan_complete', {
