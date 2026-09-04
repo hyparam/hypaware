@@ -6,6 +6,7 @@ import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { SESSION_IGNORE_ROUTE, createControlHandler, isControlPath } from '../../../../src/core/control/session_ignore.js'
 import { isMisdirectedHost, listenAndResolve, requestUrlOf } from '../../../../src/core/otlp/server.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
+import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
 import { createProjectedExchangeWriter } from '../../ai-gateway/src/exchange_writer.js'
 import { opencodeListenPort } from './config.js'
 import { projectOpenCodeSnapshot } from './projector.js'
@@ -18,20 +19,6 @@ import { projectOpenCodeSnapshot } from './projector.js'
 const PLUGIN_NAME = '@hypaware/opencode'
 const HOST = '127.0.0.1'
 const MAX_BODY_BYTES = 16 * 1024 * 1024
-// How much of a rejected request's body is counted before the read is paused.
-// The socket read already in the parser when the pause lands is delivered too,
-// so the bytes actually read settle at about twice this, not exactly at it.
-// A rejected body a caller is still uploading has to be read for the answer to
-// reach it at all, so the read cannot be skipped; left unbounded, its length is
-// the sender's to choose. A legitimate rejected body is not small: the
-// managed asset posts a whole session transcript, which `MAX_BODY_BYTES`
-// sizes at up to 16 MiB. The cap sits well under that on purpose, because
-// the answer is written before a byte is drained, so a caller that reads
-// its socket while it uploads (the asset's `fetch` does) has the 415 in
-// hand long before the cut. A caller that reads nothing until its upload
-// finishes loses the answer to the reset, which is the price of not
-// letting the sender decide how much this listener reads.
-const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
 // A rejected snapshot is always counted, but logged at most this often. The
 // route is unauthenticated and reachable by the same browser page the
 // content-type gate exists to refuse, so a line per rejection would trade
@@ -305,13 +292,17 @@ async function readJson(req) {
 }
 
 /**
- * Answer a request this listener refuses, discarding at most
- * MAX_REJECTED_DRAIN_BYTES of its body.
+ * Answer a request this listener refuses, discarding its body under the
+ * shared drain cap.
  *
- * Past the cap the request is paused, which is what bounds the read, and the
- * connection is closed once the answer is on the wire. Closing as soon as the
- * cap is hit would race the answer out and truncate it for a caller reading
- * the status it needs.
+ * A legitimate rejected body is not small here: the managed asset posts a
+ * whole session transcript, which `MAX_BODY_BYTES` sizes at up to 16 MiB.
+ * The cap sits well under that on purpose, because the answer is written
+ * before a byte is drained, so a caller that reads its socket while it
+ * uploads (the asset's `fetch` does) has the 415 in hand long before the
+ * cut. A caller that reads nothing until its upload finishes loses the answer
+ * to the reset, which is the price of not letting the sender decide how much
+ * this listener reads.
  *
  * @param {http.IncomingMessage} req
  * @param {http.ServerResponse} res
@@ -319,24 +310,7 @@ async function readJson(req) {
  * @param {unknown} body
  */
 function rejectJson(req, res, status, body) {
-  let drained = 0
-  let overCap = false
-  function closeIfAnswered() {
-    if (overCap && res.writableFinished) req.destroy()
-  }
-  req.on('data', (chunk) => {
-    drained += chunk.length
-    if (drained <= MAX_REJECTED_DRAIN_BYTES) return
-    overCap = true
-    req.pause()
-    closeIfAnswered()
-  })
-  res.on('finish', closeIfAnswered)
-  // Past the cap this connection is reset, so it must not be answered as a
-  // reusable one. A client that reads a keep-alive header and returns the
-  // socket to its pool meets the reset on a request it has already finished,
-  // where its own error handler is gone and the throw is nobody's.
-  res.setHeader('connection', 'close')
+  drainRequestBody(req, res)
   sendJson(res, status, body)
 }
 

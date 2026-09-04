@@ -2,12 +2,14 @@
 
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import net from 'node:net'
 import test from 'node:test'
 
 import { createControlHandler, isControlPath } from '../../src/core/control/session_ignore.js'
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
+ * @import { Socket } from 'node:net'
  */
 
 // @ref LLP 0066#control-path [tests] / LLP 0066#requirements: the reserved
@@ -164,6 +166,60 @@ test('a control request emits a structured ignore log carrying the running total
   })
 })
 
+// A discarded body still has to be read for the answer to reach a caller
+// mid-upload, and reading it without a bound hands the length of that read to
+// the sender.
+// @ref LLP 0066#control-path [tests]: the reserved control surface is
+// reachable by anything that can reach the listener, so what it reads off a
+// request it is refusing is bounded by the handler, not by the sender.
+for (const refusal of [
+  { name: 'the unknown-control-path 404', method: 'POST', path: '/_hypaware/unknown/thing', status: 404 },
+  { name: 'the GET read path', method: 'GET', path: '/_hypaware/ignore/session?session_id=s', status: 200 },
+  { name: 'the method-not-allowed 405', method: 'PUT', path: '/_hypaware/ignore/session', status: 405 },
+  { name: 'the body-too-large 413', method: 'POST', path: '/_hypaware/ignore/session', status: 413 },
+]) {
+  test(`${refusal.name} discards an oversized body only up to a cap`, async () => {
+    const set = /** @type {Set<string>} */ (new Set())
+    await withControlSockets(set, async (port, sockets) => {
+      const out = await streamOversizedBody(port, refusal.method, refusal.path)
+      assert.ok(
+        out.sent < out.total,
+        `${refusal.name} read all ${out.total} bytes of the body it discarded`
+      )
+      const [served] = sockets
+      assert.ok(served, 'the upload opened no server connection to measure')
+      if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+      // The handler buffers at most MAX_BODY_BYTES (64 KiB) and then discards
+      // at most MAX_REJECTED_DRAIN_BYTES (64 KiB) more, plus whatever read was
+      // already in the parser when the pause landed.
+      assert.ok(
+        served.bytesRead < 512 * 1024,
+        `${refusal.name} read ${served.bytesRead} of the ${out.total} bytes it refused`
+      )
+      // The answer is written before a byte is discarded, so a caller reading
+      // its socket while it uploads still gets the status, and the reset it
+      // meets past the cap is announced rather than handed to a connection
+      // pool.
+      if (out.received) {
+        assert.match(out.received, new RegExp(`^HTTP/1\\.1 ${refusal.status} `), out.received.slice(0, 80))
+        assert.match(out.received, /\r\nconnection: close\r\n/i, out.received.slice(0, 200))
+      }
+    })
+  })
+}
+
+test('a request with no body keeps its connection reusable', async () => {
+  // The cap must not cost the ordinary caller its keep-alive: with no framing
+  // there is no body to read, nothing to bound, and nothing to reset.
+  const set = new Set(['sess-live'])
+  await withControlSockets(set, async (port) => {
+    const received = await rawExchange(port, 'GET /_hypaware/ignore/session?session_id=sess-live HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n')
+    assert.match(received, /^HTTP\/1\.1 200 /)
+    assert.equal(/\r\nconnection: close\r\n/i.test(received), false, received.slice(0, 200))
+    assert.match(received, /"ignored":true/)
+  })
+})
+
 test('isControlPath recognizes the reserved prefix at segment boundaries only', () => {
   assert.equal(isControlPath('/_hypaware'), true)
   assert.equal(isControlPath('/_hypaware/ignore/session'), true)
@@ -214,6 +270,130 @@ async function withHandler(handler, body) {
       server.close((err) => (err ? reject(err) : resolve(undefined)))
     })
   }
+}
+
+/**
+ * Start the same control server as `withControlServer`, but hand the body the
+ * bound port and the sockets the server accepted. The cap is only visible as
+ * bytes the server read off the socket: a sender cannot tell a paused read
+ * from a socket buffer that swallowed its write.
+ *
+ * @param {Set<string>} set
+ * @param {(port: number, sockets: Socket[]) => Promise<void>} body
+ */
+async function withControlSockets(set, body) {
+  const handler = createControlHandler({ ignoredSessions: set })
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://placeholder')
+    handler(req, res, url)
+  })
+  /** @type {Socket[]} */
+  const sockets = []
+  server.on('connection', (socket) => sockets.push(socket))
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve(undefined))
+  })
+  const address = server.address()
+  assert.ok(address && typeof address === 'object')
+  try {
+    await body(address.port, sockets)
+  } finally {
+    for (const socket of sockets) socket.destroy()
+    await new Promise((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve(undefined)))
+    })
+  }
+}
+
+/**
+ * Announce a body far larger than any cap and push it until the server stops
+ * reading. Resolves when the connection closes (the bounded outcome) or when
+ * the whole body went out (the unbounded one, which the caller asserts
+ * against).
+ *
+ * @param {number} port
+ * @param {string} method
+ * @param {string} path
+ */
+function streamOversizedBody(port, method, path) {
+  // Larger than any socket buffer either side could swallow whole, so a
+  // server that stops reading stalls the write rather than absorbing it.
+  const body = Buffer.alloc(8 * 1024 * 1024, 'x')
+  let received = ''
+  let sent = 0
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1')
+    const timer = setTimeout(() => {
+      socket.destroy()
+      reject(new Error(`the handler read ${sent} bytes and left the connection open`))
+    }, 10000)
+    function settle() {
+      clearTimeout(timer)
+      socket.destroy()
+      resolve({ sent, total: body.length, received })
+    }
+    function pump() {
+      while (sent < body.length && !socket.destroyed) {
+        const end = Math.min(sent + 64 * 1024, body.length)
+        const chunk = body.subarray(sent, end)
+        sent = end
+        if (!socket.write(chunk)) {
+          socket.once('drain', pump)
+          return
+        }
+      }
+      // Everything went out, so nothing bounded the read. Settle rather than
+      // wait for a close that a keep-alive answer will never send.
+      if (sent >= body.length) setTimeout(settle, 50)
+    }
+    socket.on('connect', () => {
+      socket.write(
+        `${method} ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\n` +
+          `content-type: application/json\r\ncontent-length: ${body.length}\r\n\r\n`
+      )
+      pump()
+    })
+    socket.on('data', (chunk) => { received += chunk.toString('utf8') })
+    // The close is the point of the test, so a reset counts as one rather
+    // than as a failure.
+    socket.on('error', () => {})
+    socket.on('close', () => {
+      clearTimeout(timer)
+      resolve({ sent, total: body.length, received })
+    })
+  })
+}
+
+/**
+ * Send one raw request and read what comes back, without a client that might
+ * normalize hop-by-hop headers away.
+ *
+ * @param {number} port
+ * @param {string} request
+ * @returns {Promise<string>}
+ */
+function rawExchange(port, request) {
+  return new Promise((resolve, reject) => {
+    let received = ''
+    const socket = net.connect(port, '127.0.0.1')
+    const timer = setTimeout(() => {
+      socket.destroy()
+      reject(new Error(`no response after ${JSON.stringify(request)}`))
+    }, 10000)
+    socket.on('connect', () => socket.write(request))
+    socket.on('data', (chunk) => {
+      received += chunk.toString('utf8')
+      if (!received.includes('\r\n\r\n')) return
+      const [head, rest] = received.split('\r\n\r\n')
+      const match = /\r\ncontent-length: (\d+)/i.exec(head)
+      if (match && rest.length < Number(match[1])) return
+      clearTimeout(timer)
+      socket.destroy()
+      resolve(received)
+    })
+    socket.on('error', reject)
+  })
 }
 
 /** @param {string} base @param {string} sessionId */

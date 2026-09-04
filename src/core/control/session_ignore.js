@@ -1,5 +1,7 @@
 // @ts-check
 
+import { drainRequestBody } from '../util/reject_body.js'
+
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
  * @import { PluginLogger } from '../../../hypaware-plugin-kernel-types.js'
@@ -36,7 +38,8 @@ export const SESSION_IGNORE_ROUTE = 'ignore/session'
  * Max request-body size for a control request. The skill sends a tiny
  * `{"session_id":"..."}` object; anything larger is rejected with 413
  * rather than buffered, so a stray large body cannot grow the hosting
- * process's memory.
+ * process's memory. The discard of what was refused is bounded too, by
+ * `drainRequestBody`.
  */
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -109,7 +112,7 @@ export function createControlHandler(opts) {
    */
   return function onControlRequest(req, res, url) {
     if (url.pathname !== SESSION_IGNORE_CONTROL_PATH) {
-      req.resume()
+      drainRequestBody(req, res)
       sendJson(res, 404, { error: 'unknown control path', path: url.pathname })
       return
     }
@@ -125,7 +128,7 @@ export function createControlHandler(opts) {
     // read has no body; `URLSearchParams` round-trips the token byte-exactly,
     // so the R5 raw-token discipline below holds for reads too.
     if (method === 'GET') {
-      req.resume()
+      drainRequestBody(req, res)
       const raw = url.searchParams.get('session_id')
       if (typeof raw !== 'string' || raw.trim().length === 0) {
         sendJson(res, 400, { error: 'session_id is required and must be a non-empty string' })
@@ -140,7 +143,7 @@ export function createControlHandler(opts) {
     }
 
     if (method !== 'POST' && method !== 'DELETE') {
-      req.resume()
+      drainRequestBody(req, res)
       res.setHeader('allow', 'GET, POST, DELETE')
       sendJson(res, 405, { error: 'method not allowed', method })
       return
@@ -148,6 +151,9 @@ export function createControlHandler(opts) {
 
     readJsonBody(req, (result) => {
       if (result.status === 'too_large') {
+        // The sender is still uploading, so the rest is discarded under the
+        // drain cap rather than read to whatever length the sender chose.
+        drainRequestBody(req, res)
         sendJson(res, 413, { error: 'request body too large', max_bytes: MAX_BODY_BYTES })
         return
       }
@@ -218,6 +224,9 @@ function extractSessionId(body) {
  * control request always carries an object), `{ status: 'too_large' }`
  * (exceeded `MAX_BODY_BYTES`), or `{ status: 'error' }` (transport error).
  *
+ * A `too_large` result is reported while the sender is still uploading, so
+ * the caller owns discarding what is left (see `drainRequestBody`).
+ *
  * @param {IncomingMessage} req
  * @param {(result: { status: 'ok', body: unknown } | { status: 'too_large' } | { status: 'error' }) => void} done
  */
@@ -231,9 +240,10 @@ function readJsonBody(req, done) {
   function finish(result) {
     if (settled) return
     settled = true
-    // Drain any remaining body into the void so the socket is not left
-    // half-read (matters for the too_large / early-return paths).
-    req.resume()
+    // No drain here: `ok` is only reported after `end` and `error` has no
+    // readable stream left. Only `too_large` settles mid-upload, and the
+    // caller discards the rest through `drainRequestBody`, which bounds the
+    // read and can close the connection it is answering on.
     done(result)
   }
 
