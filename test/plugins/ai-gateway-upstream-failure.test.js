@@ -15,8 +15,49 @@ import { startProxy } from '../../hypaware-core/plugins-workspace/ai-gateway/src
 // into the paused stream, so a follow-up request on the same socket is
 // answered with or without the resume and proves nothing either way.
 
+// The dead upstream. `127.0.0.1:1` refuses instantly and stays refusing: it
+// is below the ephemeral range no `listen(0)` in this process draws from and
+// no unprivileged process can bind, so the forward can never reach a listener
+// - not the proxy itself, handed its own upstream's port back by the next
+// bind, and not another test process that took a port this one released. The
+// same address, for the same reason, as the budget tests in
+// `test/core/observability-shutdown-budget.test.js`.
+const DEAD_UPSTREAM = 'http://127.0.0.1:1'
+
 const UNDER_CAP_BYTES = 60000
 const OVER_CAP_BYTES = 200000
+
+// How long any one wait on a socket event gets before it is reported as a
+// failure. `scripts/run-tests.js` runs `node --test` without
+// `--test-timeout`, so a test that waits forever waits forever and the only
+// thing that ends the run is the CI job's own clock: a bare timeout, with no
+// failing assertion to say what stalled.
+const GIVE_UP_MS = 5000
+
+/**
+ * Reject with `what` rather than hang, so every wait in this file reports
+ * itself.
+ *
+ * @template T
+ * @param {Promise<T>} settling
+ * @param {string} what
+ * @returns {Promise<T>}
+ */
+function bounded(settling, what) {
+  return new Promise((resolve, reject) => {
+    const giveUp = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), GIVE_UP_MS)
+    settling.then(
+      (value) => {
+        clearTimeout(giveUp)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(giveUp)
+        reject(error)
+      }
+    )
+  })
+}
 
 /**
  * Run `body` against a gateway whose only upstream is a port nobody listens
@@ -31,7 +72,6 @@ const OVER_CAP_BYTES = 200000
  * }) => Promise<void>} body
  */
 async function withDeadUpstream(body) {
-  const deadPort = await unusedPort()
   let requestBytes = 0
   /** @type {(() => void) | undefined} */
   let onChunk
@@ -39,7 +79,7 @@ async function withDeadUpstream(body) {
     listen: '127.0.0.1:0',
     upstreams: [{
       name: 'dead-anthropic',
-      base_url: `http://127.0.0.1:${deadPort}`,
+      base_url: DEAD_UPSTREAM,
       path_prefix: '/v1/messages',
     }],
     startExchange: () => /** @type {any} */ ({
@@ -64,7 +104,7 @@ async function withDeadUpstream(body) {
         const giveUp = setTimeout(() => {
           onChunk = undefined
           reject(new Error(`the 502 drained ${requestBytes} of ${bytes} declared body bytes`))
-        }, 5000)
+        }, GIVE_UP_MS)
         onChunk = () => {
           if (requestBytes < bytes) return
           onChunk = undefined
@@ -75,22 +115,8 @@ async function withDeadUpstream(body) {
       }),
     })
   } finally {
-    await proxy.stop()
+    await bounded(proxy.stop(), 'the proxy to stop')
   }
-}
-
-/** A loopback port that was bound and released, so connecting to it is refused. */
-async function unusedPort() {
-  const probe = net.createServer()
-  await new Promise((resolve, reject) => {
-    probe.once('error', reject)
-    probe.listen(0, '127.0.0.1', () => resolve(undefined))
-  })
-  const address = probe.address()
-  assert.ok(address && typeof address === 'object')
-  const { port } = address
-  await new Promise((resolve) => probe.close(() => resolve(undefined)))
-  return port
 }
 
 /**
@@ -135,7 +161,7 @@ test('the upstream-failure 502 drains a declared body that arrives after the pip
   await withDeadUpstream(async (rig) => {
     const { socket, head } = sendHead({ port: rig.port, length: UNDER_CAP_BYTES })
     try {
-      const received = /** @type {string} */ (await head)
+      const received = /** @type {string} */ (await bounded(head, 'the 502 head'))
       assert.match(received, /^HTTP\/1\.1 502 /, received.slice(0, 120))
       assert.match(received, /"upstream connection failed"/, received.slice(0, 400))
       // A declared body that fits under the cap is drained to its end and can
@@ -158,7 +184,7 @@ test('the upstream-failure 502 never answers an over-cap declared body as a reus
   await withDeadUpstream(async (rig) => {
     const { socket, head } = sendHead({ port: rig.port, length: OVER_CAP_BYTES })
     try {
-      const received = /** @type {string} */ (await head)
+      const received = /** @type {string} */ (await bounded(head, 'the 502 head'))
       assert.match(received, /^HTTP\/1\.1 502 /, received.slice(0, 120))
       // A body this long is not known to fit, so the drain could reach its cap
       // and reset. Announcing the close keeps that reset off a socket a
@@ -166,7 +192,7 @@ test('the upstream-failure 502 never answers an over-cap declared body as a reus
       assert.match(received, /\r\nconnection: close\r\n/i, received.slice(0, 200))
       // Announced and then done: the sender sees its socket close rather than
       // an invitation to finish an upload nobody is going to read.
-      await new Promise((resolve) => socket.on('close', resolve))
+      await bounded(new Promise((resolve) => socket.on('close', resolve)), 'the announced close')
       assert.equal(rig.requestBytes(), 0, 'the refused body was read after all')
     } finally {
       socket.destroy()
