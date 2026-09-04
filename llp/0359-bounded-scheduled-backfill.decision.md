@@ -6,6 +6,9 @@
 **Author:** Phil / Codex
 **Date:** 2026-08-31
 **Related:** LLP 0027, LLP 0170, LLP 0172, LLP 0311, LLP 0358
+**Extended-by:** LLP 0372 (#bounded-handoff: the queue's wait on the run at
+its head is bounded, so a run that settles neither way hands the queue on
+instead of holding every provider behind it until the daemon restarts)
 
 > A scheduled transcript sweep does work proportional to changed transcript
 > input, not to all transcript history or all committed gateway rows. Due

@@ -927,6 +927,12 @@ export interface BackfillSweepDriverOptions {
   config?: HypAwareV2Config
   /** Test seam: defaults to `runBackfillProvider`. */
   runBackfill?: BackfillSweepRunner
+  /**
+   * How long one queued run may hold the shared background queue before the
+   * driver stops waiting on it. Test seam: defaults to 30 minutes, which no
+   * healthy sweep reaches.
+   */
+  runTimeoutMs?: number
 }
 
 export interface BackfillSweepTickOptions {

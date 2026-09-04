@@ -44,7 +44,7 @@ function registry(contributions) {
 }
 
 /**
- * @param {{ contributions: any[], runBackfill: any, config?: any }} args
+ * @param {{ contributions: any[], runBackfill: any, config?: any, runTimeoutMs?: number }} args
  */
 function driverFor(args) {
   return createBackfillSweepDriver({
@@ -55,6 +55,7 @@ function driverFor(args) {
     query: /** @type {any} */ ({ getDataset: () => undefined }),
     config: args.config,
     runBackfill: args.runBackfill,
+    runTimeoutMs: args.runTimeoutMs,
   })
 }
 
@@ -139,6 +140,75 @@ test('providers due together run serially without blocking the tick', async () =
   await firstPending
   await new Promise((resolve) => { setImmediate(resolve) })
   assert.deepEqual(started, ['openclaw', 'claude'])
+})
+
+// The queue is what makes one provider's hang everybody's hang: `runProvider`
+// is plugin code reading a user's transcript tree, so a stalled network mount or
+// a wedged storage read gives it neither settlement, and an unbounded wait on
+// the head of the chain never starts anything behind it again. A daemon restart
+// was the only recovery.
+// @ref LLP 0372#bounded-handoff [tests]: a run that never settles hands the
+// queue on at its bound, and the providers behind it still sweep
+test('a run that never settles hands the queue on so the providers behind it still run', async () => {
+  /** @type {string[]} */
+  const started = []
+  const driver = driverFor({
+    contributions: [
+      contribution({ name: 'openclaw', sweep: { cron: '* * * * *' } }),
+      contribution({ name: 'claude', plugin: '@hypaware/claude', sweep: { cron: '* * * * *' } }),
+    ],
+    runTimeoutMs: 5,
+    runBackfill: (args) => {
+      started.push(args.provider)
+      // Never settles, either way: the pathological external hang.
+      if (args.provider === 'openclaw') return /** @type {any} */ (new Promise(() => {}))
+      return /** @type {any} */ (Promise.resolve(OK))
+    },
+  })
+
+  const report = await driver.tick({ now: at('2026-08-01T10:00:00.000Z') })
+  assert.deepEqual(report.fired, ['openclaw', 'claude'])
+
+  await new Promise((resolve) => { setImmediate(resolve) })
+  assert.deepEqual(started, ['openclaw'], 'the queue is still serial while the head is inside its budget')
+
+  await new Promise((resolve) => setTimeout(resolve, 25))
+  assert.deepEqual(started, ['openclaw', 'claude'], 'the hung run never released the queue')
+})
+
+// The other half of the bound: handing the queue on is not the same as
+// forgetting the run. It cannot be cancelled, so re-firing it would put a
+// second pass on the datasets and the mid-flush spool the first one may still
+// be writing.
+// @ref LLP 0372#bounded-handoff [tests]: an abandoned provider stays in flight
+// and is skipped, while a provider due later still fires
+test('an abandoned run keeps its own in-flight guard while later providers still fire', async () => {
+  /** @type {string[]} */
+  const started = []
+  const driver = driverFor({
+    contributions: [
+      contribution({ name: 'openclaw', sweep: { cron: '* * * * *' } }),
+      contribution({ name: 'hourly', plugin: '@hypaware/hourly', sweep: { cron: '0 * * * *' } }),
+    ],
+    runTimeoutMs: 5,
+    runBackfill: (args) => {
+      started.push(args.provider)
+      if (args.provider === 'openclaw') return /** @type {any} */ (new Promise(() => {}))
+      return /** @type {any} */ (Promise.resolve(OK))
+    },
+  })
+
+  // :01 is not the top of the hour, so only the every-minute provider fires.
+  assert.deepEqual((await driver.tick({ now: at('2026-08-01T10:01:00.000Z') })).fired, ['openclaw'])
+  await new Promise((resolve) => setTimeout(resolve, 25))
+
+  // The hung provider is still its own run's owner: skipped, never doubled.
+  assert.deepEqual((await driver.tick({ now: at('2026-08-01T10:02:00.000Z') })).fired, [])
+
+  // A different provider coming due later is not held by it.
+  assert.deepEqual((await driver.tick({ now: at('2026-08-01T11:00:00.000Z') })).fired, ['hourly'])
+  await new Promise((resolve) => setTimeout(resolve, 25))
+  assert.deepEqual(started, ['openclaw', 'hourly'])
 })
 
 test('the fired run gets the narrowed runner context, built from the daemon runtime fields', async () => {
