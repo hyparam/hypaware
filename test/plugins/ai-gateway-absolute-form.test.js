@@ -540,17 +540,27 @@ test('a body refused with 421 is drained only up to a cap', async (t) => {
 // drains nothing, can never reach the cap, and is never reset, so it must keep
 // the connection: on this listener that is the common refusal, and it arrives
 // on the socket an attached client forwards everything else over.
-test('a bodyless refusal keeps the connection a pooling client is reusing', async (t) => {
+test('a refusal whose body fits under the cap keeps the pooled connection', async (t) => {
   const rig = await bootGateway()
   t.after(() => rig.cleanup())
   const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
   t.after(() => agent.destroy())
 
-  /** @param {string} path */
-  function get(path) {
+  /**
+   * @param {string} path
+   * @param {string} [body]
+   */
+  function refuse(path, body) {
     return new Promise((resolve, reject) => {
       const request = http.request(
-        { host: '127.0.0.1', port: rig.proxy.port, path, agent, method: 'GET' },
+        {
+          host: '127.0.0.1',
+          port: rig.proxy.port,
+          path,
+          agent,
+          method: body === undefined ? 'GET' : 'POST',
+          ...(body === undefined ? {} : { headers: { 'content-length': Buffer.byteLength(body) } }),
+        },
         (res) => {
           const port = res.socket.localPort
           res.resume()
@@ -558,16 +568,31 @@ test('a bodyless refusal keeps the connection a pooling client is reusing', asyn
         }
       )
       request.on('error', reject)
-      request.end()
+      request.end(body)
     })
   }
 
-  const first = await get('/nope')
-  const second = await get('/nope')
+  const first = await refuse('/nope')
+  const second = await refuse('/nope')
   assert.equal(first.status, 404)
   assert.equal(second.status, 404)
   assert.notEqual(first.connection, 'close')
   // The same local port both times is the pool surviving the refusal.
   assert.equal(second.port, first.port, 'the bodyless refusal cost the client its pooled socket')
+
+  // A declared body the drain will read to its end never crosses the cap, so
+  // no reset is coming and the socket is still the client's to reuse. Only a
+  // body that is not known to fit has to be answered as a closing connection.
+  const small = await refuse('/nope', 'x'.repeat(120))
+  const after = await refuse('/nope', 'x'.repeat(120))
+  assert.equal(small.status, 404)
+  assert.notEqual(small.connection, 'close')
+  assert.equal(after.port, small.port, 'a refused body that fits under the cap cost the client its pooled socket')
+
+  // Past the cap the connection is reset, so that one must say so.
+  const oversized = await refuse('/nope', 'x'.repeat(128 * 1024))
+  assert.equal(oversized.status, 404)
+  assert.equal(oversized.connection, 'close')
+
   assert.deepEqual(rig.upstreamHits, [])
 })

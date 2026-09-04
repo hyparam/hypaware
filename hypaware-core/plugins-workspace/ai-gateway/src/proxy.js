@@ -917,14 +917,21 @@ function rejectJson(req, res, status, body) {
   // socket to its pool meets the reset on a request it has already finished,
   // where its own error handler is gone and the throw is nobody's.
   //
-  // A request that declares no body is the exception: nothing is drained, so
-  // the cap cannot be crossed and no reset is coming. Closing it would cost a
-  // pooling client its socket for nothing, and on this listener that is the
-  // common refusal - a bodyless GET at a path or host nobody registered, on
-  // the connection an attached client forwards everything else over.
+  // A body the request declares to fit under the cap is the exception: it is
+  // drained to its end, the cap is never crossed, and no reset is coming.
+  // Closing it would cost a pooling client its socket for nothing, and the
+  // refusals on this listener are mostly that shape - a bodyless GET, or a
+  // small POST, at a path or host nobody registered, on the connection an
+  // attached client forwards everything else over. Under a terminated CONNECT
+  // that socket is a decrypted tunnel, so the needless close bills the client
+  // a fresh handshake too.
+  //
+  // A chunked body declares no length, so it is never known to fit.
   const length = req.headers['content-length']
-  const bodyless = req.headers['transfer-encoding'] === undefined && (length === undefined || length === '0')
-  if (!bodyless) res.setHeader('connection', 'close')
+  const declared = length === undefined ? 0 : Number(length)
+  const fitsUnderCap =
+    req.headers['transfer-encoding'] === undefined && declared <= MAX_REJECTED_DRAIN_BYTES
+  if (!fitsUnderCap) res.setHeader('connection', 'close')
   sendJson(res, status, body)
 }
 
