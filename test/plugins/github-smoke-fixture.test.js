@@ -22,23 +22,43 @@ test('fakeGithubClient refuses to build without a guard', () => {
   assert.ok(fakeGithubClient({ assertRepo: noWithheldRepo }))
 })
 
-test('every read that names a repository runs the guard it was given', async () => {
-  /** @type {string[]} */
-  const seen = []
-  const client = fakeGithubClient({ assertRepo: (owner, name) => { seen.push(`${owner}/${name}`) } })
-  await client.listIssuesPage('Acme', 'Widgets')
-  await client.listPullRequestsPage('Acme', 'Widgets')
-  await client.listCommitsPage('Acme', 'Widgets')
-  assert.deepEqual(seen, ['Acme/Widgets', 'Acme/Widgets', 'Acme/Widgets'])
+// Enumerated rather than listed by hand, so a read added to the fake without
+// the guard fails here instead of quietly widening the hole the guard closes.
+// Every `GithubClient` method but `listViewerRepos` takes `(owner, repo)`
+// first (github/src/types.d.ts), and the arguments after those two are
+// ignored by the fake, so one call shape covers them all.
+const repoReads = Object.keys(/** @type {any} */ (fakeGithubClient({ assertRepo: noWithheldRepo })))
+  .filter((name) => name !== 'listViewerRepos')
 
-  // A refusal has to reach the caller rather than being swallowed into an
-  // empty page, which would read as a repository that was simply never asked
-  // about.
-  const guarded = fakeGithubClient({
-    assertRepo: (owner, name) => { throw new Error(`withheld repository reached the GitHub client: ${owner}/${name}`) },
-  })
-  await assert.rejects(
-    () => guarded.listIssuesPage('acme', 'secrets'),
-    /withheld repository reached the GitHub client: acme\/secrets/
-  )
+test('every read that names a repository runs the guard it was given', async () => {
+  assert.ok(repoReads.length >= 8, `expected the fake to serve the repo-naming reads, got ${repoReads}`)
+  for (const read of repoReads) {
+    /** @type {string[]} */
+    const seen = []
+    const client = /** @type {any} */ (fakeGithubClient({
+      assertRepo: (owner, name) => { seen.push(`${owner}/${name}`) },
+    }))
+    await client[read]('Acme', 'Widgets', 7)
+    assert.deepEqual(seen, ['Acme/Widgets'], `${read} did not run the guard`)
+  }
+})
+
+test('a refusal reaches the caller of every repo-naming read', async () => {
+  // A refusal has to propagate rather than be swallowed into an empty page,
+  // which would read as a repository that was simply never asked about.
+  for (const read of repoReads) {
+    const client = /** @type {any} */ (fakeGithubClient({
+      assertRepo: (owner, name) => { throw new Error(`withheld repository reached the GitHub client: ${owner}/${name}`) },
+    }))
+    await assert.rejects(
+      () => client[read]('acme', 'secrets', 7),
+      /withheld repository reached the GitHub client: acme\/secrets/,
+      read
+    )
+  }
+})
+
+test('the viewer-repository read is the one method with no repository to guard', async () => {
+  const client = fakeGithubClient({ assertRepo: noWithheldRepo })
+  await assert.rejects(() => client.listViewerRepos(), /must not enumerate GitHub/)
 })

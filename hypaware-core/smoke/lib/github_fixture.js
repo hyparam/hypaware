@@ -70,12 +70,16 @@ export function noWithheldRepo() {}
  * `listViewerRepos` throws because a session-evidence inventory reaching for
  * the viewer's repository list is the failure the pair exists to catch.
  *
- * `assertRepo` is the caller's own guard, run on the reads that name a
- * repository, so a flow proving a repository is withheld fails at the network
- * seam rather than only in a row count. It is required because an omitted one
- * is lost silently: the seam stops being tested and every other assertion in
- * the flow still passes (issue #1327). A flow with nothing to withhold passes
- * `noWithheldRepo`.
+ * `assertRepo` is the caller's own guard, so a flow proving a repository is
+ * withheld fails at the network seam rather than only in a row count. It runs
+ * on every read that names a repository, which is every `GithubClient` method
+ * but `listViewerRepos`: guarding only the reads this fixture's pages happen
+ * to lead to would leave the seam open on the rest, and `github sync` already
+ * calls `listIssueCommentsPage` on every repository it captures.
+ *
+ * It is required because an omitted guard is lost silently: the seam stops
+ * being tested and every other assertion in the flow still passes (issue
+ * #1327). A flow with nothing to withhold passes `noWithheldRepo`.
  *
  * @param {{ assertRepo: (owner: string, name: string) => void }} args
  */
@@ -98,12 +102,12 @@ export function fakeGithubClient(args) {
       }], next: null }
     },
     async listPullRequestsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
-    async listPullRequestFilesPage() { return { items: [], next: null } },
-    async listPullRequestReviewsPage() { return { items: [], next: null } },
-    async listPullRequestCommitsPage() { return { items: [], next: null } },
+    async listPullRequestFilesPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
+    async listPullRequestReviewsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
+    async listPullRequestCommitsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
     async listCommitsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
-    async listCommitFilesPage() { return { items: [], next: null } },
-    async listIssueCommentsPage() { return { items: [], next: null } },
+    async listCommitFilesPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
+    async listIssueCommentsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
   }
 }
 
