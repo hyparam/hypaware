@@ -32,11 +32,18 @@ const WITHHELD_REPO = 'acme/secrets'
  * repository already admitted is retired once its evidence becomes withheld.
  * The sibling `github_local_capture` proves the admitted half.
  *
- * Two kernel lifetimes over one install, because the withholding verdict a
- * revalidation reads comes from the usage-policy resolver's per-cwd cache
- * (`src/core/usage-policy/matcher.js`, 5s TTL). A second lifetime is both the
- * deterministic way to observe a policy written after the first tick and the
- * realistic one: a daemon restart is how the field reaches the same state.
+ * Two kernel lifetimes over one install. A revalidation's trigger and its row
+ * verdicts read different sources: `exportPolicyFingerprint()` re-reads the
+ * list file every tick, so the trigger fires at once, while the drop verdicts
+ * the pass consumes come from the usage-policy resolver's per-cwd cache
+ * (`src/core/usage-policy/matcher.js`, 5s TTL). Within one lifetime the pass
+ * therefore fires on the new policy but re-confirms the repository from stale
+ * `full` verdicts and stamps the new fingerprint, latching the missed
+ * retirement until the seven-day `stale` backstop (issue #1317). A second
+ * lifetime gets a fresh resolver, which is both the deterministic way to
+ * observe a policy written after the first tick and the realistic one: a
+ * daemon restart is how the field reaches the same state. This flow asserts
+ * the restart path only; #1317 is the uncovered one.
  *
  * @param {{ harness: any, expect: any }} args
  * @ref LLP 0360#inventory [tests]: withheld evidence does not expand the inventory, so no forwardable row is written for its repository
@@ -104,12 +111,37 @@ export async function run({ harness, expect }) {
       first
     )
     expect.that('github_events: the admitted repository captured one row', cleanEvents, (value) => value === 1)
+
+    // `local-only` withholds at the export seam, it does not stop recording.
+    // Pinning both sides is what separates this flow from an `ignore` one:
+    // every assertion above reads the same if the evidence were never stored.
+    const withheldSession = `select count(*) as n from ai_gateway_messages where cwd = '${withheldCwd}'`
+    expect.that(
+      'ai_gateway_messages: the withheld session is still recorded locally',
+      await sqlCount(withheldSession, first),
+      (value) => value === 1
+    )
+    const exportView = await dispatchText(
+      ['query', 'sql', withheldSession, '--refresh', 'always', '--format', 'json'],
+      first
+    )
+    expect.that(
+      'ai_gateway_messages: an export-stance caller sees no row and is told one was withheld',
+      exportView,
+      (value) =>
+        value.code === 0 &&
+        Number(JSON.parse(value.stdout)[0]?.n) === 0 &&
+        /local-only: withheld 1 row\(s\)/.test(value.stderr)
+    )
   })
 
   // Marking the remaining session's directory leaves the inventory with no
   // export-eligible evidence at all.
   await step('flip_policy', () => markLocalOnly(first, cleanCwd))
 
+  // `first` stays in scope but must not be dispatched through again: its
+  // observed-repos index still holds the pre-retirement repository set over
+  // the same sidecar `second` rewrites, and would write it back.
   const second = await step('restart', () => bootLifetime())
 
   await step('retire_on_policy_change', async () => {
