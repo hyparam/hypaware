@@ -391,10 +391,22 @@ function rawExchange(port, request) {
     socket.on('connect', () => socket.write(request))
     socket.on('data', (chunk) => {
       received += chunk.toString('utf8')
-      if (!received.includes('\r\n\r\n')) return
-      const [head, rest] = received.split('\r\n\r\n')
-      const match = /\r\ncontent-length: (\d+)/i.exec(head)
-      if (match && rest.length < Number(match[1])) return
+      const headEnd = received.indexOf('\r\n\r\n')
+      if (headEnd === -1) return
+      const head = received.slice(0, headEnd)
+      const body = received.slice(headEnd + 4)
+      // `sendJson` is `writeHead` plus `res.end(string)`, which cannot compute
+      // a length, so Node frames every one of these replies
+      // `transfer-encoding: chunked` and sends no `content-length` at all.
+      // A chunked body is complete at its zero-length terminator; returning on
+      // the head alone would race a body that lands in a second TCP read and
+      // fail the body assertions spuriously.
+      if (/\r\ntransfer-encoding: chunked/i.test(head)) {
+        if (!body.endsWith('0\r\n\r\n')) return
+      } else {
+        const match = /\r\ncontent-length: (\d+)/i.exec(head)
+        if (match && body.length < Number(match[1])) return
+      }
       clearTimeout(timer)
       socket.destroy()
       resolve(received)

@@ -36,8 +36,10 @@ const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
  * reset and must not be answered as a reusable one. A client that reads a
  * keep-alive header and returns the socket to its pool meets the reset on a
  * request it has already finished, where its own error handler is gone and
- * the throw is nobody's. A request with no body drains nothing and keeps its
- * connection reusable.
+ * the throw is nobody's. A request that declares no body drains nothing and
+ * keeps its connection reusable. Chunked framing always counts as declaring
+ * one, even when the body turns out to be empty: its length is unknowable
+ * until it ends, and the header has to be set before the answer is written.
  *
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
