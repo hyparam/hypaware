@@ -19,17 +19,25 @@ event ids are built from), [LLP 0023](./0023-context-graph-projection.decision.m
 (#merge-policy the order-independent props merge and #pre-write-dedup the
 committed-id filter in front of it: together they decide what a second snapshot
 is worth downstream), hyparam/hypaware#1333,
-hyparam/hypaware#1284 (the unguarded behavior this guard replaced), PR #1330
+hyparam/hypaware#1284 (the unguarded behavior this guard replaced), PR #1330,
+hyparam/hypaware#1335 and PR #1340 (where `work.pulls_emitted` landed),
+hyparam/hypaware#1345 and PR #1347 (where `work.gate_emitted` landed),
+hyparam/hypaware#1353 (the loss they widen, with a verified probe),
+hyparam/hypaware#1354 (the invariant the `openGate` docstring leaves unstated)
 
 > Every incremental GitHub capture pass refuses an item it has already
-> captured at exactly the watermark second, and it recognizes "already
-> captured" by the item's stable event id. An item updated twice inside one
-> wall-clock second therefore keeps the identity it was first captured under,
-> and its second snapshot never lands; for a pull, neither do the reviews and
-> changed files of that second. Curing that means keying the guard on the row's
-> content rather than its identity, across four passes whose durable boundary
-> state has two different shapes and one of which (`pullChangedSince`) settled
-> this trade before the guard existed. This document states the defect,
+> captured, and it recognizes "already captured" by the item's stable event id.
+> At the watermark second that means an item updated twice inside one wall-clock
+> second keeps the identity it was first captured under, and its second snapshot
+> never lands; for a pull, neither do the reviews and changed files of that
+> second. Within a phase the same bare id also drives the per-phase `emitted`
+> sets added for the pagination duplicate (#1335, #1345), so an item that
+> changes between two sightings of one traversal can lose that snapshot too.
+> Curing either means keying on the row's content rather than its identity,
+> across four passes and the four identity sets they use, which come in two
+> shapes (event-id strings and PR numbers) and two lifetimes (durable cursor
+> state and in-flight work state), and one of which (`pullChangedSince`) settled
+> this trade before the others existed. This document states the defect,
 > measures which passes it can actually damage, and lists the options. It
 > decides nothing.
 
@@ -47,18 +55,21 @@ The issue's own acceptance condition says this is only actionable together with
 the pulls pass, and that curing it needs "a design decision (LLP) [that] chooses
 a content-aware identity ... for all four `since`-windowed passes". That is what
 this document asks for. The trade is not a bug that a patch can quietly fix: the
-identity is durable sidecar state, its pulls-pass half is a decided property of
-LLP 0361#page-work, and the two halves are not even the same type.
+identity is sidecar state, half of it published and half of it in-flight work,
+its pulls-pass half is a decided property of LLP 0361#page-work, and the halves
+are not even the same type. Since #1333 was filed, PR #1340 and PR #1347 have
+added a third and a fourth set of the same identity at a wider scope (#guard),
+so the window this asks about is no longer only the watermark second (#reach).
 
 ## The guard, precisely {#guard}
 
-Affected code at `origin/master` (`610aacfc`):
+Affected code at `origin/master` (`245ab780`):
 
-- `capture.js`, `openGate(staged, stagedIds, published, publishedIds)`: the
-  high-water gate for the issues, commits, and comments passes. `admit(at, id)`
-  refuses when `at === published && floorIds.has(id)`, and refuses a repeat
-  within the running maximum's own set. The ids are event ids
-  (`issue:owner/repo#N`, `commit:<sha>`, `comment:<id>`), published to
+- `capture.js`, `openGate(staged, stagedIds, published, publishedIds,
+  phaseEmitted)`: the high-water gate for the issues, commits, and comments
+  passes. `admit(at, id)` refuses when `at === published && floorIds.has(id)`,
+  and refuses a repeat within the running maximum's own set. The ids are event
+  ids (`issue:owner/repo#N`, `commit:<sha>`, `comment:<id>`), published to
   `cursor.boundary[pass]` as `string[]` and capped at `MAX_BOUNDARY_IDS`
   (`cursors.js`).
 - `capture.js`, `pullChangedSince(pr, high, capturedAtHigh)`: the same guard for
@@ -66,9 +77,32 @@ Affected code at `origin/master` (`610aacfc`):
   `updated === high && capturedAtHigh.has(pr.number)`, and its durable half is
   `cursor.pulls_high_numbers`, a `number[]` of PR numbers validated by
   `readNumbers` as positive integers.
+- `capture.js`, the `emitted` set inside that same `openGate`, carried on
+  `work.gate_emitted`: the event ids the in-flight gate phase has already
+  appended a row for, consulted after the floor and after the running maximum's
+  own set. It exists for a different failure, the pagination reshuffle that
+  re-lists an item on a later page of one traversal (#1345, PR #1347), but it
+  recognizes "already appended" by the same bare event id, so it is this
+  document's identity at a wider scope. It is staged after the page's rows
+  flush, read back by `readWork` through the same `readBoundaryIds` the boundary
+  sets use, and capped by the same `MAX_BOUNDARY_IDS`, keeping the newest
+  admissions (`slice(-MAX_BOUNDARY_IDS)`) where the boundary sets keep the
+  first. Issues, commits and comments share the one field because exactly one of
+  them is live at a time, and every phase transition clears it: `beginPulls`,
+  `finishPulls` and `finishCommits` each `delete work.gate_emitted`, and the
+  comments phase ends by deleting `cursor.work` outright.
+- `capture.js`, `emittedPulls` in the pulls phase, carried on
+  `work.pulls_emitted`: the same phase-scoped shape one pass over, a `number[]`
+  of PR numbers seeded on entry to the phase, consulted before
+  `pullChangedSince` is ever reached (`if (emittedPulls.has(pr.number))
+  continue`), staged after the flush, and dropped by `finishPulls`. It predates
+  `gate_emitted` and was already on `master` at the SHA this document first
+  cited, unnamed. It refuses a pull, not a sighting of one, which is why it
+  belongs here. Nothing caps it on either side; its own comment puts a
+  backfill's phase at "the order `cursor.pull_numbers` beside it already is".
 
-Both exist because GitHub's timestamps are second-granular and every tick
-re-reads the watermark second. For issues, commits and comments that is the
+The first two exist because GitHub's timestamps are second-granular and every
+tick re-reads the watermark second. For issues, commits and comments that is the
 server's inclusive `since`. The pulls listing takes no `since` at all
 (`github_client.js`, `listPullRequestsPage`: `sort=updated&direction=desc`
 plus an `If-None-Match`); it is windowed client-side by `work.baseline_pulls`
@@ -84,9 +118,21 @@ and "new activity does not drag the already-captured boundary rows back in"
 issue #1284, already closed: the unguarded passes re-appended every boundary row
 on every idle tick.
 
-So the guard is right and the identity it uses is the question.
+The two pairs differ in lifetime. The boundary sets are durable cursor state,
+published with a watermark and consulted on every later tick; the two `emitted`
+sets are work-descriptor state that lives one phase and is deleted at its end.
+Neither pair subsumes the other: the boundary sets answer for the watermark
+second across ticks, the `emitted` sets for everything a single traversal has
+already appended, at any timestamp between the floor and the running high.
+
+So the guards are right and the identity all four of them use is the question.
 
 ## How far the defect actually reaches {#reach}
+
+Two questions, not one: what a refusal loses, and over what window a refusal
+happens. The four identity sets differ on both.
+
+### What a refusal loses {#reach-loss}
 
 The four passes do not share the exposure. What a refusal loses is what the
 captured row would have recorded differently, plus, on the pulls pass, what the
@@ -144,10 +190,103 @@ set (LLP 0360#concrete-columns) and each pass fills a known subset:
   id-addressed too a later corrected row mints the right edge beside the wrong
   one rather than replacing it.
 
+### Over what window {#reach-window}
+
+The boundary sets refuse only at the watermark second: two updates inside one
+wall-clock second, which is the window issue #1333 measured and the one this
+document was first written against. The two `emitted` sets refuse anywhere in a
+single phase traversal, at any timestamp between the floor and the running high,
+because the id they key on carries no timestamp. So the same trade also costs a
+snapshot whenever an item changes between two sightings of one traversal.
+`openGate`'s own docstring says as much: the set "widens the trade above rather
+than escaping it".
+
+How wide a traversal is depends on the mode. A poll's issues phase walks the
+pages an inclusive `since` returns; a backfill's phase is the repository's whole
+history, and the pulls phase's set is scoped the same way. The request budget
+splits either across ticks, and both sets are staged on the work descriptor
+precisely so they survive that resume, so the window is as long as the traversal
+takes in wall-clock time, not as long as one tick. The set itself is bounded
+only for the gate half: `openGate` is opened afresh for every page and stages
+the newest `MAX_BOUNDARY_IDS` (1000) admissions after each one, so
+`gate_emitted` is a sliding window of recent ids inside a tick as much as across
+a resume, and a long backfill forgets an id once 1000 later admissions have
+pushed it out. Within a tick that bound is the stager's alone: the next page
+re-seeds from the work descriptor in memory, and `readBoundaryIds` runs only on
+a resume, where it caps the opposite end (`slice(0, MAX_BOUNDARY_IDS)`, #guard)
+and is a no-op because the staged set already fits. That bounds the set, not the
+window: a pagination re-listing surfaces near the page just read, so the ids
+that matter are still in it. `work.pulls_emitted` is
+capped at neither end.
+
+Two of the four passes change under that wider window and two do not:
+
+- **issues**: `state` becomes losable on any re-listing within a traversal, not
+  only on the watermark second. Issue #1353 records the verified probe: #3 is
+  listed `open` at `2026-02-01`, closed mid-traversal, and re-listed `closed` at
+  `2026-02-03` on the page a newly created issue shifted it onto; the floor does
+  not match, `at !== high` skips the boundary block, and `emitted` refuses it.
+  The traversal ends with `since.issues` at `2026-02-05`, above the refused
+  snapshot, so no later tick lists that item again at all.
+- **pulls**: `work.pulls_emitted` widens the pass that carries the fan-out, but
+  far less than the gate set widens issues, and the listing's own order is why.
+  Once a number is in the set, every later sighting in that phase is skipped
+  before `pullChangedSince` is consulted, so a refused sighting loses its
+  `state`/`payload` snapshot and is not re-queued into `work.pull_tasks`, the
+  only route `review` and `pull_request_file` rows have into the table. What a
+  reshuffle actually puts on a later page, though, is not the changed pull:
+  `/pulls` is `sort=updated&direction=desc`, so a pull updated mid-traversal
+  jumps to offset zero, on a page the traversal has already consumed, so that
+  move alone never puts it back in front of the traversal. (Absent the push-down
+  below, it is picked up by the next poll instead, since its new `updated_at` is
+  above the baseline that traversal publishes.) The item a reshuffle does
+  re-list is the one pushed back across a page boundary, whose
+  own `updated_at` did not move and whose row is therefore identical: exactly
+  the duplicate #1335 reported and the set exists for. `pulls_emitted` refuses a
+  genuinely newer snapshot only when enough other pulls are updated after it to
+  push it back down into a page the traversal has not reached yet, a page's
+  worth (100) per page of distance. Reachable in a long backfill on a busy
+  repository, not in a poll. `/issues` sends no `sort` and so orders on
+  `created`, where position is independent of `updated_at`, which is why the
+  probe above holds there and this reasoning does not carry over to it.
+- **commits**: unchanged. A changed commit is a different sha and therefore a
+  different event id, so no re-listing under one id can carry different commit
+  content. The `actor_login` caveat above is unchanged too, and no likelier
+  inside one traversal than across ticks.
+- **comments**: unchanged, for a reason worth stating because it is not obvious.
+  The exposed column is `event_type`, decided by `prNumbers`, which is seeded
+  once per `captureRepo` call before any page runs and grown only by the issues
+  and pulls phases, both strictly earlier in the sequential phase machine; a
+  budget-split resume re-seeds it from `cursor.pull_numbers`, which no comments
+  page writes until the phase ends. Both sightings of a comment within one phase
+  therefore compute the same `event_type`, so the misclassification stays what
+  it was, an effect of the cross-tick boundary set. (That `openGate`'s docstring
+  asserts this scoping without stating the invariant it rests on is #1354.)
+
 The observable defect is therefore `state` (and the pull `payload`) on the
-issues and pulls passes, the reviews and changed files of a refused pull's
-boundary second, and a comment's `event_type` discriminator, in the window
-where two updates land inside one second with no later activity on the item.
+issues and pulls passes, the reviews and changed files of a refused pull, and a
+comment's `event_type` discriminator, across two windows: two updates inside one
+watermark second with no later activity on the item, and, on the issues pass,
+any change to an item between two sightings of one phase traversal (on the pulls
+pass only in the push-down case above). The second window runs as long as the
+traversal does, which in a backfill is a whole repository history, less whatever
+the gate set has forgotten to its 1000-id window.
+
+Neither refusal is recoverable without a further update. A boundary refusal
+repeats on every tick while the watermark sits on that second, and the item
+stops being listed at all once something newer moves it past. A traversal
+refusal is not re-offered even once: if the re-listing carried a timestamp above
+the running high, `admit` raises the watermark and claims the id into the
+boundary set before `emitted` answers, so the next tick's floor refuses the same
+item on the same id; if it did not, the traversal ends with the watermark above
+it and an inclusive `since` never returns it again. The pulls pass reaches the
+same end by its own route: a pushed-down re-listing is observed even though it
+is refused, so `advancePullsHigh` raises `work.pulls_high` to its new timestamp
+and claims its number, `finishPulls` publishes both, and the next poll refuses
+it again on `updated === high && capturedAtHigh.has(number)`. So both windows
+heal on the item's next update and neither heals without one.
+
+### What a landed snapshot would be worth {#reach-value}
 
 One measurement bounds what any arm can buy before the question of downstream
 value arises. `github_events` has no capture-time column
@@ -204,10 +343,20 @@ the dedup in front of it, both of which LLP 0023 settled.
   so it needs this document (or its successor), not a patch.
 - **Identity carried across ticks is budgeted.** LLP 0360#resource-bounds caps
   what capture may retain, and `openGate` is annotated `[constrained-by]`
-  against it: one watermark second's worth of identity, never a repository's
-  history. `MAX_BOUNDARY_IDS` (1000) is that cap made concrete. A fingerprint
-  is the same count of strings, so the bound survives any option here, but the
-  cap's own documented failure mode (overflow re-appends every tick until the
+  against it: identity carried across ticks stays capped, never a repository's
+  history. `MAX_BOUNDARY_IDS` (1000) is that cap made concrete, and since
+  PR #1347 it bounds two identity sets rather than one, and not the same amount
+  of history each: the boundary sets hold one watermark second's worth, and
+  `work.gate_emitted` a sliding window of one traversal's most recent
+  admissions. The other two sit outside the cap entirely: `work.pulls_emitted`
+  is bounded only by the pull count of the phase it lives in, and
+  `cursor.pulls_high_numbers` by nothing this constant reaches (`readNumbers`
+  slices nothing, and neither does `advancePullsHigh` or `finishPulls`). The
+  durable one keeps the rule by another mechanism: `advancePullsHigh` retains
+  only the numbers sitting on the boundary second, so it holds what a boundary
+  set holds without being capped to it. A fingerprint is the same count of
+  strings, so the bound survives any option here, but the cap's own documented
+  failure mode (overflow re-appends every tick until the
   watermark moves) is unchanged by all of them and is not what this asks about.
 - **Cursors are sidecar control state.** LLP 0360#cursoring puts them beside
   the table, not in `github_events`. Every option below changes the meaning of
@@ -230,6 +379,16 @@ sibling. The choices are to bump the schema version, to accept one transitional
 tick in which the boundary second is re-admitted once (duplicate rows for that
 second, plus a re-spend of the boundary pulls' and commits' sub-resource
 requests), or to read both shapes for a release.
+
+The two `emitted` sets cost less here, and that is worth separating out. They
+live in `cursor.work`, not in the published cursor, so re-keying one costs at
+most the phase in flight when the release lands: `readWork` drops a value it
+cannot read and the phase resumes with an empty set, which re-admits whatever
+that traversal had already appended (the #1345 duplicate for the gate half,
+the #1335 one for the pulls half, once each). Neither needs a schema bump.
+`work.pulls_emitted` does share `pulls_high_numbers`' type problem: it is a
+`number[]` and `readNumbers` rejects anything that is not a positive integer,
+so a fingerprint cannot be written into it either.
 
 The schema bump is the expensive one, and more expensive than it looks. A
 discarded cursor leaves a repository with no `since` at all, and
@@ -256,6 +415,12 @@ arm that makes the four passes consistent in mechanism.
 
 Costs and open sub-decisions:
 
+- "All four passes" is now four passes and four identity sets. A fingerprint on
+  `cursor.boundary[pass]` and `pulls_high_numbers` alone leaves `gate_emitted`
+  and `pulls_emitted` id-keyed, so the mid-traversal half of #reach survives the
+  arm untouched and the arm buys only the one-second window it was first written
+  for. Covering the `emitted` sets as well is what makes A cure the defect as it
+  now stands, and it is the cheaper half: they carry no #migration.
 - It buys nothing on commits, and on comments it does not buy the `event_type`
   case either: rows are append-only and an edge id varies with its destination
   node, so admitting the corrected row adds a `pull_request_comment` row and a
@@ -267,8 +432,14 @@ Costs and open sub-decisions:
   column is added to `github_events` later (a changed input silently re-admits
   every boundary item once).
 - The pulls fan-out means a flapping pull at the boundary second can re-spend
-  its files, reviews, and commits requests each tick it flaps.
-- Carries #migration.
+  its files, reviews, and commits requests each tick it flaps. Re-keying
+  `pulls_emitted` extends that inside one traversal: every changed re-listing
+  re-queues the pull's files, reviews and commits against the LLP 0361 budget,
+  which is part of what the id-keyed set was buying. Priced against the
+  listing's order that is the narrow push-down case #reach-window records, not
+  every page, so the cost is real but small; B weighs the same half the same
+  way.
+- Carries #migration for the two published sets; the two `emitted` sets do not.
 
 ### B. A content fingerprint only where a snapshot field exists {#option-narrow}
 
@@ -282,6 +453,13 @@ appended"), just recognized to be a no-op on two passes.
 
 Costs and open sub-decisions:
 
+- The same set question as A, one pass narrower, and on the issues pass it is
+  not optional: `gate_emitted` is what widens the exposure B exists to cure, so
+  B has to re-key it or it cures the sub-second window and leaves the
+  traversal-long one, which is the larger. `pulls_emitted` is the open half.
+  Under the listing's order it refuses a changed pull only in the narrow
+  push-down case (#reach-window), so re-keying it buys little and still buys A's
+  re-spent pulls fan-out, on the same terms.
 - It leaves the comment `event_type` case in #reach uncured, because that is
   not an item field: covering it means fingerprinting the built row rather than
   the item, which is arm A's mechanism on a pass arm B keeps id-keyed.
@@ -301,31 +479,52 @@ Costs and open sub-decisions:
 Drop the identity entirely and re-append the boundary second on every tick,
 deduplicating in the query and graph layers instead. This is exactly the
 behavior issue #1284 reported and PR #1330 replaced, recorded here so its
-rejection stays on the record rather than being rediscovered.
+rejection stays on the record rather than being rediscovered. It is dearer now
+than when it was rejected: dropping the identity drops the `emitted` sets with
+it, which returns the pagination duplicates and the repeat `commit_file`
+fan-out that #1345 reported and PR #1347 closed, on top of #1284's per-tick
+boundary re-append.
 
 ### D. Accept and document {#option-accept}
 
-The window is two updates inside one second on one item with no later activity
-on it. On the issues pass the loss is one stale snapshot rather than a dropped
+Accepting means accepting both windows in #reach, not only the one this document
+was first written against. The boundary window is two updates inside one second
+on one item with no later activity on it. The `emitted` window is a change to an
+issue between two sightings of one phase traversal, which a budget split spreads
+across ticks and which in a backfill runs as long as the repository's whole
+history; that second window is this arm's real price, and it is the larger of
+the two. The pulls pass reaches it only in the narrow push-down case
+#reach-window records, so what is accepted there is chiefly `state` on issues.
+On the issues pass the loss is still one stale snapshot rather than a dropped
 item, and the next update on that item lands the current state in
-`github_events`. It is not free, and three of its costs are not stale-snapshot
-shaped (all from #reach): a pull refused at the boundary second withholds that
-second's reviews and changed files, permanently when the update was the pull's
-last; a graph projected between the two ticks commits the stale `state` and can
-never revise it; and the comment `event_type` misclassification is accepted
-with its `commented` edge. `openGate`'s doc comment already names the trade
-explicitly. Promote that comment to a decided position, note it on LLP 0361,
-and close the issue. This is the honest null option, and its cost is bounded by
-how long an affected item stays quiet - except for a pull whose refused update
-was its last, where the boundary second's reviews and files are lost for good.
+`github_events`. Three of its costs are not stale-snapshot shaped (all
+from #reach): a pull refused at either window withholds the reviews and changed
+files of the sighting it was refused on, permanently when that update was the
+pull's last; a graph projected before the eventual correction commits the stale
+`state` and can never revise it; and the comment `event_type`
+misclassification, a boundary-window effect only, is accepted with its
+`commented` edge. `openGate`'s doc comment already names both windows
+explicitly, and #1353 measures the wider one with a verified probe. Promote that
+comment to a decided position, note it on LLP 0361, and close #1333 and #1353
+against it. This is the
+honest null option, and its cost is bounded by how long an affected item stays
+quiet, except for a pull whose refused update was its last, where that
+sighting's reviews and files are lost for good.
 
 ## Decision requested {#decision}
 
 1. Which arm: a fingerprint on all four passes (A), a fingerprint only where a
    captured field can change (B), or explicit acceptance (D). C is on the
    record as already rejected.
-2. If A or B: the exact fingerprint input (columns and encoding), and whether
-   the pulls pass's `pulls_high_numbers` is replaced, extended, or paired.
+2. If A or B: the exact fingerprint input (columns and encoding); whether the
+   pulls pass's `pulls_high_numbers` is replaced, extended, or paired; and
+   whether the two phase-scoped `emitted` sets are re-keyed with them. The last
+   is what decides which of #reach's two windows the arm actually closes. #1353
+   records the minimal form for the gate set, a sighting key
+   (`emitted.add(id + '\0' + at)`), which still refuses a byte-identical
+   pagination re-listing while admitting a genuinely newer snapshot;
+   `pulls_emitted` needs the equivalent or it keeps refusing the pull rather
+   than the sighting.
 3. The #migration arm: schema bump and full re-poll, one transitional
    re-admission of the boundary second, or a dual-shape read for one release.
 
@@ -335,16 +534,30 @@ following tick, exercised across the passes the chosen arm claims to cover, and
 the existing boundary tests in `test/plugins/github-capture.test.js` still
 green. An arm covering the pulls pass owes one more: that the boundary second's
 `review` and `pull_request_file` rows land too, since those are dropped rather
-than staled (#reach) and a snapshot-only assertion would pass without them.
+than staled (#reach) and a snapshot-only assertion would pass without them. An
+arm claiming #reach's traversal-long window owes the #1353 probe as well: a
+two-page traversal in which an item changes between its two sightings appends
+both snapshots, with the pagination-duplicate tests still green, PR #1340's for
+the pulls lane as well as PR #1347's for the gate lane, since those pin the case
+the `emitted` sets exist for.
 
 ## References
 
 - hyparam/hypaware#1333 (deferred finding, PR #1330 triage)
 - hyparam/hypaware#1284 (the unguarded behavior, closed by PR #1330)
+- hyparam/hypaware#1335 (the pulls-lane pagination duplicate) and PR #1340
+  (where `work.pulls_emitted` landed)
+- hyparam/hypaware#1345 (the gate-lane pagination duplicate) and PR #1347 (where
+  `work.gate_emitted` landed)
+- hyparam/hypaware#1353 (the traversal-long loss, with the probe #reach cites)
+  and hyparam/hypaware#1354 (the `prNumbers` invariant behind the comments case)
 - `hypaware-core/plugins-workspace/github/src/capture.js`
-  (`openGate`, `pullChangedSince`, `advancePullsHigh`, the row builders)
+  (`openGate` and its `emitted` set, `pullChangedSince`, `emittedPulls`,
+  `advancePullsHigh`, `beginPulls`/`finishPulls`/`finishCommits`, the row
+  builders)
 - `hypaware-core/plugins-workspace/github/src/cursors.js`
-  (`SCHEMA_VERSION`, `MAX_BOUNDARY_IDS`, `readBoundaryIds`, `readNumbers`)
+  (`SCHEMA_VERSION`, `MAX_BOUNDARY_IDS`, `readWork`, `readBoundaryIds`,
+  `readNumbers`)
 - `hypaware-core/plugins-workspace/github/src/graph_contract.js`
   (the `commented` edge rules keyed on `event_type`)
 - `hypaware-core/plugins-workspace/context-graph/src/project.js`
