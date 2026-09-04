@@ -15,6 +15,9 @@ LLP 0032 and used as the comparison in LLP 0121
 (#inventory gains contraction: the sidecar revalidates against the current
 withholding policy, so a repository with no remaining permitted evidence stops
 future capture)
+**Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
+(#capture-regimes and #cursoring together entail that a repeat backfill
+re-appends; 0374 records that as the design and refuses a committed-row dedup)
 
 > `@hypaware/github` ships under `hypaware-core/plugins-workspace/github`.
 > Bundling does not activate it by default: adding it to `plugins[]` remains the

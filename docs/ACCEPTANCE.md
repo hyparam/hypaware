@@ -1601,6 +1601,202 @@ hyparam/hypaware#1257 (the deferred finding that asked for this procedure).
   under `npm root -g`; `DAEMON_BIN` itself never does, since it is the bin
   symlink beside that directory's parent.
 
+## `github_since_inclusivity`
+
+**What it proves:** whether GitHub's issues-family `since` window really is
+inclusive of items whose windowed timestamp equals the `since` value, measured
+against a real repository with a real token. It also records, for a release
+reviewer counting rows, that a repeat `hyp github backfill` re-appends by
+design.
+
+The GitHub source polls three endpoints with `since`: `/issues` and
+`/issues/comments` (windowed on `updated_at`) and `/commits` (windowed on the
+committer date). Its watermark is the newest captured item's own
+second-granularity timestamp, so under inclusive semantics every later tick
+re-receives whatever sits exactly on that second. `openGate` in
+`hypaware-core/plugins-workspace/github/src/capture.js` carries a boundary
+floor that refuses those items by identity, and the hermetic fake in
+`test/plugins/github-fake-client.js` models the inclusive case because it is
+the strictly harder one. **No run against real GitHub has ever confirmed that
+premise, and nothing in this repository records one.** The gate is correct
+either way: under exclusive semantics the boundary items never come back at
+all and the floor refuses nothing. So this procedure buys knowledge rather
+than safety, before a later change is tempted to lean on the assumption.
+
+**What it does not prove:** that the boundary floor may be removed. A confirmed
+"exclusive" answer would make it inert on today's endpoints, not wrong, and
+removing it would stake the no-duplicates property on a semantic GitHub has
+never documented as stable. It also says nothing about the pulls pass, which
+carries no `since` at all (it pages `sort=updated&direction=desc` and stops on
+the high-water mark), nothing about GraphQL, and nothing about any endpoint
+other than the three probed here.
+
+**Required when:** once, to establish the fact, since it is unrecorded today.
+Again if a release changes which endpoints carry `since`, or proposes to narrow
+or remove the boundary floor on the strength of the answer.
+
+**Requires:**
+
+- A GitHub token with read access to the probe repository, exported as
+  `GITHUB_TOKEN`, or a logged-in `gh` (`gh auth status`). The source resolves
+  the same two, in that order.
+- A repository with recent issue, comment, and commit activity, quiet enough
+  that nothing is updated during the two requests of a probe. Your own fork is
+  a good choice; a busy upstream is not.
+- `gh` and `jq` on `PATH`.
+
+**Related:**
+[LLP 0360#cursoring](../llp/0360-github-source-is-bundled.decision.md#cursoring)
+(the watermark this windows on),
+[LLP 0361#page-work](../llp/0361-github-capture-is-work-budgeted.decision.md#page-work)
+(equal-timestamp items are captured rather than skipped),
+[LLP 0374](../llp/0374-repeat-github-backfill-re-appends.decision.md) (the
+repeat-backfill half, settled),
+hyparam/hypaware#1284 (the duplicate-row report),
+hyparam/hypaware#1330 (the boundary floor),
+hyparam/hypaware#1334 (the deferred finding that asked for this procedure).
+
+### Steps
+
+1. Name the repository and confirm the credential the source would use:
+
+   ```sh
+   REPO=owner/repo
+   gh auth status
+   gh api "repos/$REPO" --jq '.full_name + " pushed_at=" + .pushed_at'
+   ```
+
+   Pass condition: `gh auth status` reports a logged-in host, and the repo line
+   prints. A `pushed_at` older than a few months usually means the commits
+   probe in step 4 has nothing recent to stand on, which is fine, but pick a
+   repo you know has issues and comments.
+
+2. Probe `/issues`. Take the newest `updated_at` in the repository, then ask
+   for exactly that window and look for the same issue coming back:
+
+   ```sh
+   T=$(gh api "repos/$REPO/issues?state=all&sort=updated&direction=desc&per_page=1" --jq '.[0].updated_at')
+   N=$(gh api "repos/$REPO/issues?state=all&sort=updated&direction=desc&per_page=1" --jq '.[0].number')
+   echo "boundary issue #$N at $T"
+   gh api "repos/$REPO/issues?state=all&since=$T&per_page=100" \
+     | jq --arg n "$N" '[.[] | select((.number|tostring) == $n)] | length'
+   ```
+
+   Read the last number: `1` means `since` is **inclusive** of the boundary
+   second, `0` means **exclusive**. Either is a result; neither is a failure.
+
+   Before recording a `0`, run the guard, because an issue updated between the
+   two requests would leave the window legitimately:
+
+   ```sh
+   gh api "repos/$REPO/issues/$N" --jq .updated_at
+   ```
+
+   If that no longer equals `$T`, the repository moved under the probe. Discard
+   the reading and repeat step 2 on a quieter repository.
+
+3. Probe `/issues/comments`, the same shape on the comments listing:
+
+   ```sh
+   CT=$(gh api "repos/$REPO/issues/comments?sort=updated&direction=desc&per_page=1" --jq '.[0].updated_at')
+   CID=$(gh api "repos/$REPO/issues/comments?sort=updated&direction=desc&per_page=1" --jq '.[0].id')
+   echo "boundary comment $CID at $CT"
+   gh api "repos/$REPO/issues/comments?since=$CT&per_page=100" \
+     | jq --arg id "$CID" '[.[] | select((.id|tostring) == $id)] | length'
+   ```
+
+   Same reading as step 2, and the same guard
+   (`gh api "repos/$REPO/issues/comments/$CID" --jq .updated_at`).
+
+4. Probe `/commits`, which windows on the committer date rather than
+   `updated_at`. The listing is reverse-chronological, so take the maximum over
+   the first page rather than the first element:
+
+   ```sh
+   ST=$(gh api "repos/$REPO/commits?per_page=100" --jq '[.[].commit.committer.date] | max')
+   SHA=$(gh api "repos/$REPO/commits?per_page=100" \
+     | jq -r --arg t "$ST" '[.[] | select(.commit.committer.date == $t)][0].sha')
+   echo "boundary commit $SHA at $ST"
+   gh api "repos/$REPO/commits?since=$ST&per_page=100" \
+     | jq --arg s "$SHA" '[.[] | select(.sha == $s)] | length'
+   ```
+
+   Commits are immutable once pushed, so this probe needs no re-read guard. A
+   force-push during the probe is the only way to invalidate it, and it would
+   change the sha.
+
+5. Record the three readings verbatim in this file, under **Observed**, with
+   the date and the repository you probed (or its visibility, if the name is
+   private). A bare "passed" records nothing: the point of the procedure is the
+   answer, not the exit status.
+
+   If any probe answers **exclusive**, that is the more interesting result and
+   it needs a second repository before it is believed: a per-endpoint
+   difference is plausible, a global one would contradict the model every
+   caller of `openGate` is written against. Two agreeing repositories is enough
+   to record it. Nothing in the adapter changes on either answer; open an issue
+   describing the observation and leave the floor in place.
+
+### Observed
+
+Nothing recorded yet. The three readings above are unconfirmed as of
+2026-09-04: no run against a real token has been made, and the "inclusive"
+statement in `openGate`'s note is the model the code was written to, not a
+measurement. Add a dated row here on the first run.
+
+### Repeat backfill re-appends (by design)
+
+A release reviewer who runs `hyp github backfill` twice over unchanged history
+will see `count(*)` on `github_events` grow, roughly doubling for the
+repositories the run visited. That is the design and not a regression:
+
+```sh
+hyp query sql "select count(*) from github_events"
+hyp github backfill owner/repo
+hyp query sql "select count(*) from github_events"   # larger
+hyp query sql "select count(distinct event_id) from github_events"
+```
+
+`hyp github backfill` resets each selected repository's cursor and re-fetches
+its available history into an append-only dataset
+([LLP 0360#capture-regimes](../llp/0360-github-source-is-bundled.decision.md#capture-regimes)),
+invoking it after a completed backfill starts a deliberate new one
+([LLP 0361#budget](../llp/0361-github-capture-is-work-budgeted.decision.md#budget)),
+and rows an earlier attempt appended stay as valid snapshots
+([LLP 0360#cursoring](../llp/0360-github-source-is-bundled.decision.md#cursoring)).
+[LLP 0374](../llp/0374-repeat-github-backfill-re-appends.decision.md) records
+that entailment and refuses a dedup against already-committed rows.
+
+The idempotent trigger is the other one: `hyp github sync` and the daemon poll
+resume from the durable cursor and append only what is new, including at the
+watermark second, which is the property #1330 fixed and the hermetic tests
+hold. A second `hyp graph project` after a repeat backfill does not double the
+graph either, because the T0 contract keys on the natural keys settled by
+LLP 0032. If a run of `hyp github sync` grows the row count over unchanged
+history, that is a real regression and this is not the explanation.
+
+### If it fails
+
+- **`gh api` returns 401 or 403.** The token cannot read the repository, or
+  `gh` is logged into the wrong host. Fix the credential before reading
+  anything into a `0`: an empty listing and an excluded boundary item look
+  identical at the jq layer.
+- **Step 2 or 3 prints `0` and the guard shows the timestamp moved.** Not a
+  reading. The repository was updated between the two requests. Repeat on a
+  quieter repository rather than recording the result.
+- **A probe listing comes back empty (`.[0]` is null and `T` is empty).** The
+  repository has no issues, no comments, or no commits, so `since=` would carry
+  an empty value and the probe would measure nothing. Pick a repository that
+  has the resource, and do not record an absent reading as an exclusive one.
+- **`hyp github backfill` reports the repository is not in the active
+  inventory.** The default `inventory = "session_repos"` selects only
+  repositories evidenced by local agent sessions
+  ([LLP 0360#inventory](../llp/0360-github-source-is-bundled.decision.md#inventory)),
+  and a positional argument narrows that set without expanding it. Set
+  `inventory = "all_visible"` in the `[github]` config section for the probe
+  run, keep the positional `owner/repo` so only that repository is captured,
+  and put it back afterwards.
+
 ---
 
 ## Other candidates

@@ -179,6 +179,13 @@ Written acceptance procedures:
   accepts it, so the automatic self-update lanes apply on macOS instead of
   refusing every update as unsupervised. No fixture can settle this: a
   hermetic test asserts the value it wrote itself. See `docs/ACCEPTANCE.md`.
+- `github_since_inclusivity`: opt-in/manual, needs a GitHub token and a real
+  repository. Probes whether the issues-family `since` window is inclusive of
+  items sitting exactly on the boundary second, which is the premise the
+  capture gate and its hermetic fake are written to and which no fixture can
+  check. Also records that a repeat `hyp github backfill` re-appends by design
+  (LLP 0374), so a row-count check is not read as a regression. See
+  `docs/ACCEPTANCE.md`.
 
 Good acceptance smoke candidates (no written procedure yet):
 

@@ -7,6 +7,9 @@
 **Date:** 2026-09-02
 **Related:** LLP 0032, LLP 0095, LLP 0096, LLP 0360
 **Extends:** LLP 0360
+**Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
+(#budget's deliberate new backfill is recorded there as re-appending rows,
+with the committed-row dedup alternative refused)
 
 > A GitHub capture tick has one fixed request budget across its repository
 > inventory. API pages are normalized and appended as they arrive, unfinished
