@@ -43,8 +43,13 @@ export async function runCaptureTick(runtime, opts) {
       // the ordinary cadence), but a tick that never resolved its inventory
       // retired none either. A flat `false` would clear the source's backlog
       // flag, sending saved continuations back to a full poll interval
-      // (LLP 0361#budget), so read the answer off the durable cursors.
-      const pending = Object.values(cursors.repos).some((cursor) => Boolean(cursor?.work))
+      // (LLP 0361#budget), so read the answer off the state the failed read
+      // left behind: an unfinished revalidation (its bounded slice runs inside
+      // this same `list()`, so a throw leaves the pass still reported as
+      // pending) and the durable per-repo cursors.
+      const pending =
+        runtime.observedRepos.revalidationPending?.() === true ||
+        Object.values(cursors.repos).some((cursor) => Boolean(cursor?.work))
       return { repos: 0, events: 0, requests: 0, pending, errors: [{ repo: '(inventory)', error: message }] }
     }
   }

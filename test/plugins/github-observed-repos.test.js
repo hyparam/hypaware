@@ -429,3 +429,22 @@ test('a failed session_repos inventory read does not retire backlog the cursors 
     'clearing pending here would push a saved continuation from the backlog cadence back to a full poll interval',
   )
 })
+
+test('a failed session_repos inventory read keeps an unfinished revalidation on the backlog cadence', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-reval-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // `list()` runs the bounded revalidation slice, so a throw from it leaves the
+  // pass unfinished and still reported by `revalidationPending()` (the index
+  // only swaps its state after a completed `update()`). No cursor holds work.
+  const runtime = failingInventoryRuntime(stateDir, new Error('cache partition unreadable'))
+  runtime.observedRepos.revalidationPending = () => true
+
+  const report = await runCaptureTick(runtime, { mode: 'poll' })
+
+  assert.equal(report.errors.length, 1)
+  assert.equal(
+    report.pending,
+    true,
+    'an unfinished revalidation is bounded work the failed tick did not retire (LLP 0361#budget)',
+  )
+})
