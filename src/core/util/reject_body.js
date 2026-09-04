@@ -74,6 +74,8 @@ function declaresBody(req) {
   if (req.headers['transfer-encoding']) return true
   const length = req.headers['content-length']
   if (typeof length !== 'string') return false
-  const value = length.trim()
-  return value !== '' && value !== '0'
+  // Compared as a number, not as text: the parser has already refused a
+  // content-length that is not digits, and `00` frames no body even though it
+  // is not the string `0`.
+  return Number.parseInt(length, 10) > 0
 }

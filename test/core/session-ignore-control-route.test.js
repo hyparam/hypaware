@@ -213,10 +213,17 @@ test('a request with no body keeps its connection reusable', async () => {
   // there is no body to read, nothing to bound, and nothing to reset.
   const set = new Set(['sess-live'])
   await withControlSockets(set, async (port) => {
-    const received = await rawExchange(port, 'GET /_hypaware/ignore/session?session_id=sess-live HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n')
-    assert.match(received, /^HTTP\/1\.1 200 /)
-    assert.equal(/\r\nconnection: close\r\n/i.test(received), false, received.slice(0, 200))
-    assert.match(received, /"ignored":true/)
+    // `content-length: 0` and its zero-padded spelling frame no body either,
+    // so they are the same bodiless request as the one that sends no framing.
+    for (const framing of ['', 'content-length: 0\r\n', 'content-length: 00\r\n']) {
+      const received = await rawExchange(
+        port,
+        `GET /_hypaware/ignore/session?session_id=sess-live HTTP/1.1\r\nHost: 127.0.0.1\r\n${framing}\r\n`
+      )
+      assert.match(received, /^HTTP\/1\.1 200 /)
+      assert.equal(/\r\nconnection: close\r\n/i.test(received), false, `${framing}${received.slice(0, 200)}`)
+      assert.match(received, /"ignored":true/)
+    }
   })
 })
 
