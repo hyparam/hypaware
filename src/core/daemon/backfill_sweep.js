@@ -17,6 +17,28 @@ const SWEEP_COMPONENT = 'backfill-sweep'
 const SWEEP_OPERATION = 'backfill.sweep'
 
 /**
+ * How long one queued run may hold the shared background queue before the
+ * driver stops waiting on it and lets the next provider start.
+ *
+ * LLP 0359's queue hands off on either settlement, which is every settlement a
+ * provider has - unless it has none. A `runBackfill` that never settles (a
+ * stalled network mount under a transcript root, a wedged storage read) leaves
+ * the chain pending for the life of the daemon: every other scheduled provider
+ * waits behind it, stays in `inFlight`, and every later tick can only log
+ * `already_running` at it. Nothing recovers that short of a daemon restart, so
+ * the wait carries a bound.
+ *
+ * Six times the tightest cadence any shipped contribution sweeps on (every
+ * five minutes), so a slow cold scan that outruns its own interval is not what
+ * this clips: in practice only a run with no settlement left in it reaches the
+ * bound. The run cannot be cancelled, so an abandoned provider keeps its
+ * `inFlight` entry until its promise really settles, the same rule
+ * `probeSourceDetails` applies to a hung source `status()` probe in
+ * `src/core/daemon/runtime.js`.
+ */
+const SWEEP_RUN_TIMEOUT_MS = 30 * 60 * 1000
+
+/**
  * @import { BackfillContribution, HypAwareV2Config } from '../../../hypaware-plugin-kernel-types.js'
  * @import {
  *   BackfillSweepDriver,
@@ -44,7 +66,9 @@ const SWEEP_OPERATION = 'backfill.sweep'
  * those behind a provider's disk walk. Every queued promise is still handled,
  * so a failing run is a logged
  * `backfill.sweep_failed` record rather than an unhandled rejection that takes
- * the daemon process down.
+ * the daemon process down. The queue's wait on the run at its head is bounded
+ * by {@link SWEEP_RUN_TIMEOUT_MS}, so a run that settles neither way costs the
+ * sweep that one provider rather than every provider behind it.
  *
  * Not blocking is what makes the re-entrancy guard necessary: a provider whose
  * run outlives its own cron interval is due again while the first pass is still
@@ -63,6 +87,7 @@ export function createBackfillSweepDriver(opts) {
   if (!storage) throw new Error('createBackfillSweepDriver: storage required')
   if (!query) throw new Error('createBackfillSweepDriver: query required')
   const runBackfill = opts.runBackfill ?? runBackfillProvider
+  const runTimeoutMs = opts.runTimeoutMs ?? SWEEP_RUN_TIMEOUT_MS
   const log = getLogger('backfill-sweep')
   // Due providers share the gateway materializer and backfill spool. Keep the
   // daemon tick non-blocking, but serialize the background work itself so two
@@ -70,6 +95,9 @@ export function createBackfillSweepDriver(opts) {
   // scan/write the shared cache concurrently.
   // @ref LLP 0359#serialized-providers [implements]: one background queue for
   //   every scheduled provider, while tick() still resolves after enqueue
+  // @ref LLP 0372#bounded-handoff [implements]: the queue's wait on the run at
+  //   its head is bounded, so a run that never settles cannot hold it forever
+  /** @type {Promise<void>} */
   let queue = Promise.resolve()
 
   /**
@@ -126,7 +154,8 @@ export function createBackfillSweepDriver(opts) {
         status: 'ok',
       })
       const effectiveConfig = config ?? { version: 2 }
-      const pending = queue.then(() => runBackfill({
+      const head = queue
+      const pending = head.then(() => runBackfill({
         ctx: { env, config: effectiveConfig, storage, query, backfills, backfillMaterializers },
         provider: provider.name,
         dryRun: false,
@@ -134,9 +163,21 @@ export function createBackfillSweepDriver(opts) {
         retentionDays: sweepRetentionDays(provider, effectiveConfig),
         sweep: true,
       }))
-      // Keep the queue live after either settlement. `pending` itself retains
-      // the provider result for its telemetry handlers below.
-      queue = pending.then(() => undefined, () => undefined)
+      // Keep the queue live after either settlement, and after a run that
+      // reaches neither. Both continuations hang off `head`, so a provider
+      // that waited its turn behind a long predecessor starts its own budget
+      // when it starts running, not when it was enqueued. `pending` itself
+      // retains the provider result for its telemetry handlers below.
+      //
+      // The tail is total, the way the spool's own lock chains are
+      // (`withWriteLock` / `withFlushLock` in `src/core/cache/spool.js`). A
+      // queue promise that could reject would short-circuit every `head.then`
+      // enqueued after it, so no provider would ever run again and each would
+      // log `sweep_failed` without being tried: the same permanent wedge, from
+      // the handoff that exists to prevent it.
+      queue = head
+        .then(() => awaitQueued(provider, devRunId, pending))
+        .then(() => undefined, () => undefined)
       // Fire-and-forget, with both settlements handled: `void` here means "not
       // awaited", never "not observed".
       void pending.then(
@@ -145,6 +186,46 @@ export function createBackfillSweepDriver(opts) {
       )
     }
     return { fired }
+  }
+
+  /**
+   * Wait for one queued run, but no longer than `runTimeoutMs`, and resolve
+   * either way so the provider behind it in the queue starts.
+   *
+   * Abandoning the wait is not abandoning the run: `pending` keeps its own
+   * settlement handlers, so a run that comes back late still clears
+   * `inFlight` and still logs its outcome, and the provider is skipped by
+   * every tick in between rather than fired a second time onto the datasets
+   * and spool the first one may still be writing.
+   *
+   * @ref LLP 0372#bounded-handoff [implements]: one hung provider costs the
+   *   sweep that provider, not every provider behind it
+   * @param {BackfillContribution} provider
+   * @param {string} devRunId
+   * @param {Promise<unknown>} pending
+   * @returns {Promise<void>}
+   */
+  async function awaitQueued(provider, devRunId, pending) {
+    /** @type {NodeJS.Timeout | undefined} */
+    let timer
+    const abandoned = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(true), runTimeoutMs)
+      // Unref'd: a budget still counting must not hold the daemon's exit open.
+      // Guarded the way `probeSourceDetails` guards its own budget timer in
+      // `src/core/daemon/runtime.js`, because this is the only expression in
+      // `awaitQueued` that can throw. A throw inside this executor rejects
+      // `abandoned`, so the race rejects and the queue's total tail swallows
+      // it: the queue would advance immediately and silently, with no
+      // `sweep_queue_abandoned` record, losing the serialization LLP
+      // 0359#serialized-providers holds. Keeping this step total leaves the
+      // bounded handoff as the only way the queue advances early.
+      if (typeof timer.unref === 'function') timer.unref()
+    })
+    // Which way `pending` settled is the fire site's business, not the
+    // queue's: both hand the queue on the same way.
+    const timedOut = await Promise.race([pending.then(() => false, () => false), abandoned])
+    clearTimeout(timer)
+    if (timedOut) logAbandoned(provider, devRunId)
   }
 
   /**
@@ -194,6 +275,27 @@ export function createBackfillSweepDriver(opts) {
       items_seen: result.scanned,
       rows_written: result.rowsWritten,
       rows_skipped: result.skipped,
+    })
+  }
+
+  /**
+   * The run at the head of the queue outlived its budget. Distinct from
+   * `sweep_run_rejected`: nothing failed, nothing finished, and the run is
+   * still out there holding its `inFlight` entry.
+   *
+   * @param {BackfillContribution} provider
+   * @param {string} devRunId
+   */
+  function logAbandoned(provider, devRunId) {
+    log.warn('backfill.sweep_queue_abandoned', {
+      [Attr.COMPONENT]: SWEEP_COMPONENT,
+      [Attr.OPERATION]: SWEEP_OPERATION,
+      [Attr.ERROR_KIND]: 'run_timed_out',
+      [Attr.PLUGIN]: provider.plugin,
+      [Attr.DEV_RUN_ID]: devRunId,
+      provider: provider.name,
+      status: 'failed',
+      after_ms: runTimeoutMs,
     })
   }
 
