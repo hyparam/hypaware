@@ -1649,7 +1649,9 @@ or remove the boundary floor on the strength of the answer.
 [LLP 0360#cursoring](../llp/0360-github-source-is-bundled.decision.md#cursoring)
 (the watermark this windows on),
 [LLP 0361#page-work](../llp/0361-github-capture-is-work-budgeted.decision.md#page-work)
-(equal-timestamp items are captured rather than skipped),
+(GitHub timestamps have second granularity, which is what makes a boundary
+second ambiguous at all; the equal-timestamp rule stated there is the pulls
+pass's, which this procedure does not probe),
 [LLP 0374](../llp/0374-repeat-github-backfill-re-appends.decision.md) (the
 repeat-backfill half, settled),
 hyparam/hypaware#1284 (the duplicate-row report),
@@ -1691,18 +1693,22 @@ hyparam/hypaware#1334 (the deferred finding that asked for this procedure).
    Read the last number: `1` means `since` is **inclusive** of the boundary
    second, `0` means **exclusive**. Either is a result; neither is a failure.
 
-   Run the guard before recording **either** reading, because an issue updated
-   between the two requests invalidates both directions. It can leave the
-   window legitimately (a false `0`), or rise strictly above `$T` and come
-   back even under exclusive semantics (a false `1`, which is the answer the
-   code already assumes and so the easier one to accept without noticing):
+   Run the guard before recording **either** reading. `updated_at` only moves
+   forward, so an issue updated between the two requests cannot fall out of the
+   window: it rises strictly above `$T` and comes back even under exclusive
+   semantics. The race therefore fakes a `1`, which is the answer the code
+   already assumes and so the easier one to accept without noticing:
 
    ```sh
    gh api "repos/$REPO/issues/$N" --jq .updated_at
    ```
 
    If that no longer equals `$T`, the repository moved under the probe. Discard
-   the reading and repeat step 2 on a quieter repository.
+   the reading and repeat step 2 on a quieter repository. The guard does not
+   cover the one way movement can fake a `0`: enough newer issues to push the
+   boundary issue off the single page the probe reads. That needs a repository
+   quiet enough to keep the window well under 100 items, which is what
+   **Requires** asks for.
 
 3. Probe `/issues/comments`, the same shape on the comments listing:
 
@@ -1724,13 +1730,20 @@ hyparam/hypaware#1334 (the deferred finding that asked for this procedure).
    over the first page rather than the first element:
 
    ```sh
-   ST=$(gh api "repos/$REPO/commits?per_page=100" --jq '[.[].commit.committer.date] | max')
-   SHA=$(gh api "repos/$REPO/commits?per_page=100" \
-     | jq -r --arg t "$ST" '[.[] | select(.commit.committer.date == $t)][0].sha')
+   PAGE=$(gh api "repos/$REPO/commits?per_page=100")
+   B=$(printf '%s' "$PAGE" \
+     | jq -r '[.[] | { sha, t: .commit.committer.date }] | max_by(.t) | "\(.sha) \(.t)"')
+   SHA=${B%% *}
+   ST=${B##* }
    echo "boundary commit $SHA at $ST"
    gh api "repos/$REPO/commits?since=$ST&per_page=100" \
      | jq --arg s "$SHA" '[.[] | select(.sha == $s)] | length'
    ```
+
+   Both values come from the one response, for the reason step 2 gives: a
+   second listing request can describe a different commit, and `SHA` would then
+   be the literal `null` that makes the probe answer `0` for the wrong reason.
+   Stop if the echo line prints `null` and see **If it fails**.
 
    Commits are immutable once pushed, so this probe needs no re-read guard. A
    force-push during the probe is the only way to invalidate it, and it would
@@ -1765,6 +1778,7 @@ repositories the run visited. That is the design and not a regression:
 # Complete the first backfill: repeat until it stops reporting pending work.
 hyp github backfill owner/repo   # rerun while it prints "bounded work remains"
 hyp query sql "select count(*) from github_events"
+hyp query sql "select count(distinct event_id) from github_events"   # baseline
 hyp github backfill owner/repo
 hyp query sql "select count(*) from github_events"   # larger
 hyp query sql "select count(distinct event_id) from github_events"   # unchanged
@@ -1803,27 +1817,34 @@ over unchanged history by design too.
 ### If it fails
 
 - **`gh api` returns 401 or 403.** The token cannot read the repository, or
-  `gh` is logged into the wrong host. Fix the credential before reading
-  anything into a `0`: an empty listing and an excluded boundary item look
-  identical at the jq layer.
-- **The guard shows the timestamp moved.** Not a reading, in either direction.
-  The repository was updated between the two requests, which can fake a `0`
-  (the item left the window) or a `1` (the item rose above `$T` and returns
-  even under exclusive semantics). Repeat on a quieter repository rather than
-  recording the result.
+  `gh` is logged into the wrong host. `gh api` writes the error object to
+  stdout, so the `jq` filter fails on it instead of printing a count. Fix the
+  credential and rerun; never read a failed request as a `0`.
+- **The guard shows the timestamp moved.** Not a reading. The repository was
+  updated between the two requests, which fakes a `1`: the item rose above
+  `$T` and returns even under exclusive semantics. `updated_at` never moves
+  backwards, so that race cannot fake a `0`. Repeat on a quieter repository
+  rather than recording the result.
 - **A probe listing comes back empty.** The `boundary` echo line prints `null`
-  for the id and the timestamp (steps 2 and 3), or `ST` is empty (step 4): the
-  repository has no issues, no comments, or no commits, so `since=` carries no
-  usable value and the probe measures nothing. Pick a repository that has the
-  resource, and do not record an absent reading as an exclusive one.
+  for the id and the timestamp (steps 2 and 3), or for the sha and the date
+  (step 4): the repository has no issues, no comments, or no commits, so
+  `since=` carries no usable value and the probe measures nothing. Pick a
+  repository that has the resource, and do not record an absent reading as an
+  exclusive one.
 - **`hyp github backfill` reports the repository is not in the active
   inventory.** The default `inventory = "session_repos"` selects only
   repositories evidenced by local agent sessions
   ([LLP 0360#inventory](../llp/0360-github-source-is-bundled.decision.md#inventory)),
-  and a positional argument narrows that set without expanding it. Set
-  `inventory = "all_visible"` in the `[github]` config section for the probe
-  run, keep the positional `owner/repo` so only that repository is captured,
-  and put it back afterwards.
+  and a positional argument narrows that set without expanding it. Stop the
+  daemon (`hyp daemon stop`), set `inventory = "all_visible"` in the
+  `[github]` config section for the probe run, keep the positional
+  `owner/repo` so only that repository is captured, and put it back
+  afterwards. Run nothing un-narrowed while the setting is wide: the widening
+  is global and `github_events` is append-only with forward-only `ignore[]`
+  ([LLP 0360#three-invariants](../llp/0360-github-source-is-bundled.decision.md#three-invariants)),
+  so a poll tick or a bare `hyp github backfill` in that window permanently
+  records every repository the token can see, and putting the setting back does
+  not retract those rows.
 
 ---
 
