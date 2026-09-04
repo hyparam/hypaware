@@ -2887,6 +2887,11 @@ export interface BackfillRunContext extends BackfillPlanContext {
    * that progress when the count moved, so the input is retried rather
    * than marked done against rows that were never written.
    *
+   * The count is meaningless under `dryRun`: that mode skips materialize
+   * and write entirely, so it lands no rows and enumerates no failure. A
+   * provider must gate per-input progress on `dryRun` as well, or a
+   * dry run would mark inputs done against a write that never happened.
+   *
    * Optional so an older host that supplies no count keeps the previous
    * behavior: snapshot and comparison then read the same absent value.
    */
