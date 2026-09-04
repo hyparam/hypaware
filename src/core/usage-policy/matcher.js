@@ -216,11 +216,13 @@ export function createUsagePolicyResolver({
   /**
    * Check `cwd` against the machine-local class-per-entry list (LLP 0103),
    * re-reading and re-parsing the list file at most once per `ttlMs` window
-   * (independent of how many distinct `cwd`s are resolved in that window). A
-   * missing file is "no exclusions" (`[]`); a present-but-unparseable file
-   * throws, matching the fail-safe the store (`local_only.js`) applies, so a
-   * corrupt list fails the caller loudly rather than silently resolving to
-   * "nothing excluded" (LLP 0080 #fail-safe). When more than one entry
+   * (independent of how many distinct `cwd`s are resolved in that window),
+   * and once more in a window where a {@link fingerprint} read observed new
+   * bytes and dropped the memo. A missing file is "no exclusions" (`[]`); a
+   * present-but-unparseable file throws, matching the fail-safe the store
+   * (`local_only.js`) applies, so a corrupt list fails the caller loudly
+   * rather than silently resolving to "nothing excluded" (LLP 0080
+   * #fail-safe). When more than one entry
    * governs `cwd` (nested entries), the most specific (longest `dir`) wins,
    * mirroring the `.hypignore` walk's nearest-governs rule; a tie is broken
    * by the more restrictive class.
@@ -403,10 +405,17 @@ export function createUsagePolicyResolver({
    * consumer's age backstop covers them.
    *
    * Reading the bytes is also where the resolver notices that its memos
-   * predate them ({@link noteListBytes}), so the digest and the verdicts
-   * cannot describe two different policies. A consumer that will act on the
-   * verdicts must therefore read the digest from this same resolver first,
-   * the order the export seam's caller already uses.
+   * predate them ({@link noteListBytes}), so a digest reporting a policy
+   * change is never handed out while the seam still answers from the policy
+   * it replaced. A consumer that will act on the verdicts must therefore read
+   * the digest from this same resolver first, the order the export seam's
+   * caller already uses.
+   *
+   * The `unreadable` sentinel is the one digest that can name a state the
+   * verdicts do not: a transient read failure reports it while a later
+   * successful read serves the unchanged bytes. That costs one extra
+   * revalidation and never confirms a stale verdict, the same direction the
+   * sentinel already errs in.
    *
    * @ref LLP 0367#policy-fingerprint [implements]: the usage-policy half of the export-policy fingerprint
    * @returns {string}
