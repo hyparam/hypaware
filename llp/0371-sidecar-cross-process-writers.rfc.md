@@ -92,12 +92,15 @@ full recovery.
   `withPartitionMutationLock` (`src/core/cache/partition.js`) is a promise
   chain keyed by partition dir in a module-level `Map`. It serializes flush
   against compaction inside one daemon process (LLP 0301#requirements). It
-  cannot see a second process. The one cross-process file lock in `src/core`
-  is `withCredentialsLock` (`src/core/remote/credentials.js`): an `O_EXCL`
-  lock file with an age-stale break and a nonce-guarded release, settled by
-  LLP 0065#d1 for the remote credentials store. It is private to that module
-  and sized for a bounded token refresh, not a minutes-long tick, so a
-  state-dir lock plugins can use is still new public surface, but the
+  cannot see a second process. `src/core` does hold cross-process file
+  locks, though none a plugin can reach: `withCredentialsLock`
+  (`src/core/remote/credentials.js`), an `O_EXCL` lock file with an
+  age-stale break and a nonce-guarded release, settled by LLP 0065#d1 for
+  the remote credentials store, and `acquireApplyLock`
+  (`src/core/update/self_update.js`), the same `O_EXCL` age-stale shape
+  with fail-fast contention around `npm install -g`. Both are scoped to
+  their own subsystems and sized for bounded holds, not a budgeted tick, so
+  a state-dir lock plugins can use is still new public surface, but the
   lock-file protocol, staleness policy, and contention shape have in-repo
   precedent to adapt rather than design from scratch.
 - **The plugin contract has no seam to hang it on.** Plugins receive a bare
@@ -208,4 +211,5 @@ demonstrably refuses or queues while the daemon holds the tick.
 - `hypaware-core/plugins-workspace/context-graph-enrich/src/state.js`
 - `src/core/cache/partition.js` (`withPartitionMutationLock`)
 - `src/core/remote/credentials.js` (`withCredentialsLock`, LLP 0065#d1)
+- `src/core/update/self_update.js` (`acquireApplyLock`)
 - `hypaware-plugin-kernel-types.d.ts` (plugin contract, `stateDir`)
