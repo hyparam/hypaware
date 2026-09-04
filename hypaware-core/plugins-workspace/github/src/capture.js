@@ -841,8 +841,16 @@ function commentEventId(c) {
  * second to the phase's whole traversal, which a budget split can spread across
  * ticks. Only the issues pass can lose anything by it, through `state`: a
  * commit's date and sha are immutable, and a comment stores no column its own
- * edit can move. The cure is the same one, and is still not this change: a
- * content fingerprint, not a bare event id.
+ * edit can move. That last half is true on its own but does not bound the
+ * loss: `event_type` is not read off the comment, `commentRow` types it from
+ * `prNumbers`, which is seeded at `captureRepo` entry and grown only by the
+ * issues and pulls passes, both of which complete before the comments phase.
+ * The comments phase only reads that set, and a budget split re-seeds it from
+ * `cursor.pull_numbers`, which no comments page writes until the phase ends.
+ * So `prNumbers` does not change within one comments-phase traversal, and a
+ * refused re-sighting always carries the type already appended. The cure is the
+ * same one, and is still not this change: a content fingerprint, not a bare
+ * event id.
  *
  * Capped like the boundary set and by the same constant, since an unbounded one
  * would carry a whole backfill's ids in the sidecar. Overflow drops the oldest
