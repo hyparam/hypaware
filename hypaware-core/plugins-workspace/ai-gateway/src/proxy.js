@@ -21,6 +21,19 @@ export { isControlPath }
  * @import { Exchange } from './recorder.js'
  */
 
+// How much of a refused request's body is counted before the read is paused.
+// The socket read already in the parser when the pause lands is delivered too,
+// so the bytes actually read settle at about twice this, not exactly at it.
+// A refused body a caller is still uploading has to be read for the answer to
+// reach it at all, so the read cannot be skipped; left unbounded, its length is
+// the sender's to choose, and the shapes refused here (a DNS-rebound page, a
+// remote peer, a caller naming a host nobody registered) are the ones that
+// would choose a large one. The answer is written before a byte is drained, so
+// a caller reading its socket while it uploads has the refusal in hand long
+// before the cut; one that reads nothing until its upload finishes loses the
+// answer to the reset, which is the price of the bound.
+const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
+
 /**
  * Hop-by-hop headers per RFC 7230 §6.1. These are scoped to one
  * transport connection and must not be forwarded by intermediaries.
@@ -380,8 +393,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     const peer = req.socket.remoteAddress
     if (!isLoopbackHost(peer)) {
       opts.log?.warn?.('aigw.absolute_form_refused_remote_peer', { peer: peer ?? 'unknown' })
-      req.resume()
-      sendJson(res, 403, { error: 'absolute-form is served to loopback peers only' })
+      rejectJson(req, res, 403, { error: 'absolute-form is served to loopback peers only' })
       return
     }
   }
@@ -409,8 +421,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   // URL on a request line, so the shape is out of reach of the rebinding this
   // refuses.
   if (!proxyMode && !absoluteFormShape && isMisdirectedHost(req, { name: '@hypaware/ai-gateway', log: opts.log })) {
-    req.resume()
-    sendJson(res, 421, { error: 'misdirected request' })
+    rejectJson(req, res, 421, { error: 'misdirected request' })
     return
   }
 
@@ -434,8 +445,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
       opts.onControlRequest(req, res, parsedUrl)
       return
     }
-    req.resume()
-    sendJson(res, 404, { error: 'no control handler registered', path: parsedUrl.pathname })
+    rejectJson(req, res, 404, { error: 'no control handler registered', path: parsedUrl.pathname })
     return
   }
 
@@ -450,14 +460,13 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
       ? matchUpstreamByHost(upstreams, parsedUrl.hostname, absoluteFormPort)
       : matchUpstream(upstreams, req.method ?? 'GET', parsedUrl.pathname, req.headers)
   if (!upstream) {
-    req.resume()
     // Under a CONNECT the client named a host we agreed to decrypt, so failing
     // to resolve it is our bug, not a routing miss: say so rather than
     // reporting a path that was never the question.
     if (proxyMode) {
       // The port is named too: it is half of both the trust decision and the
       // routing key, so a report that omits it cannot describe this miss.
-      sendJson(res, 502, {
+      rejectJson(req, res, 502, {
         error: 'no upstream matches connect host',
         host: connectHost,
         port: connectPortOf(req.socket) ?? 443,
@@ -473,14 +482,14 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
         host: parsedUrl.hostname,
         port: absoluteFormPort,
       })
-      sendJson(res, 403, {
+      rejectJson(req, res, 403, {
         error: 'no upstream matches absolute-form host',
         host: parsedUrl.hostname,
         port: absoluteFormPort,
       })
       return
     }
-    sendJson(res, 404, { error: 'no upstream matches path', path: parsedUrl.pathname })
+    rejectJson(req, res, 404, { error: 'no upstream matches path', path: parsedUrl.pathname })
     return
   }
 
@@ -585,11 +594,13 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
   upstreamReq.on('error', (err) => {
     failed = true
     if (!res.headersSent) {
-      sendJson(res, 502, { error: 'upstream connection failed', detail: errorDetail(err) })
+      // The forward is over, so the rest of the upload is read for one reason
+      // only: to get this 502 to a caller still sending. The `else` needs no
+      // drain at all, because destroying the response destroys the socket.
+      rejectJson(req, res, 502, { error: 'upstream connection failed', detail: errorDetail(err) })
     } else {
       res.destroy(err)
     }
-    req.resume()
     if (!exchange.response) {
       exchange.setResponseStart({ status: 502, headers: {} })
     }
@@ -864,6 +875,45 @@ function sanitizeResponseHeaders(headers) {
     out[key] = value
   }
   return out
+}
+
+/**
+ * Answer a request this listener will not forward, discarding at most
+ * MAX_REJECTED_DRAIN_BYTES of its body.
+ *
+ * Past the cap the request is paused, which is what bounds the read, and the
+ * connection is closed once the answer is on the wire. Closing as soon as the
+ * cap is hit would race the answer out and truncate it for a caller reading
+ * the status it needs.
+ *
+ * @param {IncomingMessage} req
+ * @param {ServerResponse} res
+ * @param {number} status
+ * @param {object} body
+ */
+function rejectJson(req, res, status, body) {
+  let drained = 0
+  let overCap = false
+  function closeIfAnswered() {
+    if (overCap && res.writableFinished) req.destroy()
+  }
+  req.on('data', (chunk) => {
+    drained += chunk.length
+    if (drained <= MAX_REJECTED_DRAIN_BYTES) return
+    overCap = true
+    req.pause()
+    closeIfAnswered()
+  })
+  // A request unpiped from a failed upstream is left not-flowing, and adding a
+  // `data` listener does not restart one: the drain has to ask.
+  req.resume()
+  res.on('finish', closeIfAnswered)
+  // Past the cap this connection is reset, so it must not be answered as a
+  // reusable one. A client that reads a keep-alive header and returns the
+  // socket to its pool meets the reset on a request it has already finished,
+  // where its own error handler is gone and the throw is nobody's.
+  res.setHeader('connection', 'close')
+  sendJson(res, status, body)
 }
 
 /**
