@@ -200,6 +200,14 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
 async function captureRepo({ client, repo, cursor, requestedMode, budget, append }) {
   const [owner, name] = repo.split('/')
   const prNumbers = new Set(cursor.pull_numbers ?? [])
+  // `prNumbers` answers "is this number a PR?" for comment discrimination, so
+  // the issues pass adds the PRs `/issues` returns. The tie guard asks "has the
+  // pulls listing already captured it?", and answering that from `prNumbers`
+  // drops a genuinely new pull tied at the high-water second the moment the
+  // same tick's issues pass has sighted it. A sidecar predating the dedicated
+  // set falls back to `pull_numbers` read here, before the issues pass mutates
+  // it, which is the pre-fix answer rather than a re-capture of every tie.
+  const capturedAtHigh = new Set(cursor.pulls_high_numbers ?? cursor.pull_numbers ?? [])
 
   if (!cursor.work) cursor.work = { mode: requestedMode, phase: 'issues' }
   const work = cursor.work
@@ -252,12 +260,12 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
         continue
       }
       const baseline = work.baseline_pulls
-      const changed = work.mode === 'backfill' ? page.items : page.items.filter((pr) => pullChangedSince(pr, baseline, prNumbers))
+      const changed = work.mode === 'backfill' ? page.items : page.items.filter((pr) => pullChangedSince(pr, baseline, capturedAtHigh))
       for (const pr of page.items) prNumbers.add(pr.number)
       await flush(changed.map((pr) => pullRow(repo, pr)))
       cursor.pull_numbers = sortedNumbers(prNumbers)
       work.pull_tasks = changed.map((pr) => ({ number: pr.number, created_at: pr.created_at, phase: 'files' }))
-      work.pulls_high = newestPullTime(work.pulls_high, page.items)
+      advancePullsHigh(work, page.items)
       // Only the first page's ETag is a usable `If-None-Match` for the next
       // poll: the client sends the saved etag on page one only, so recording a
       // later page's etag here would guarantee a miss and silently retire the
@@ -374,12 +382,19 @@ function beginPulls(work, cursor) {
   delete work.page
   work.baseline_pulls = cursor.since?.pulls
   work.pulls_high = cursor.since?.pulls
+  // Carried, not restarted: a phase that ends on a 304 observes no pulls and
+  // must still republish what the previous one captured at that same second.
+  work.pulls_high_numbers = cursor.pulls_high_numbers ?? []
   work.pull_tasks = []
 }
 
 /** @param {GithubRepoWork} work @param {RepoCursor} cursor */
 function finishPulls(work, cursor) {
-  if (work.pulls_high) setSince(cursor, 'pulls', work.pulls_high)
+  if (work.pulls_high) {
+    // Published with the watermark it describes; the two only mean anything together.
+    setSince(cursor, 'pulls', work.pulls_high)
+    cursor.pulls_high_numbers = work.pulls_high_numbers ?? []
+  }
   if (work.pulls_etag) {
     if (!cursor.etag) cursor.etag = {}
     cursor.etag.pulls = work.pulls_etag
@@ -388,6 +403,7 @@ function finishPulls(work, cursor) {
   delete work.page
   delete work.baseline_pulls
   delete work.pulls_high
+  delete work.pulls_high_numbers
   delete work.pulls_etag
   delete work.pull_tasks
   work.commit_tasks = []
@@ -599,24 +615,43 @@ function numberFromIssueUrl(issueUrl) {
 /**
  * @param {GithubPull} pr
  * GitHub timestamps have second granularity. An unseen pull at exactly the
- * saved high-water is new work; a pull already in `seen` is not. Page traversal
- * still continues through the whole equal-time boundary and stops only after
- * reaching an older pull.
+ * saved high-water is new work; a pull the previous phase already captured at
+ * that second is not. Page traversal still continues through the whole
+ * equal-time boundary and stops only after reaching an older pull.
  *
  * @param {string | undefined} high
- * @param {Set<number>} seen
+ * @param {Set<number>} capturedAtHigh  pulls already captured at exactly `high`
  * @returns {boolean}
  */
-function pullChangedSince(pr, high, seen) {
+function pullChangedSince(pr, high, capturedAtHigh) {
   if (!high) return true
   const updated = updatedAt(pr)
-  return updated == null || updated > high || (updated === high && !seen.has(pr.number))
+  return updated == null || updated > high || (updated === high && !capturedAtHigh.has(pr.number))
 }
 
 /** @param {GithubPull} pr @param {string} high */
 function olderThan(pr, high) {
   const updated = updatedAt(pr)
   return updated !== null && updated < high
+}
+
+/**
+ * Advance the staged pull high-water over one page, and with it the numbers
+ * observed at exactly that second. A page that raises the high water replaces
+ * them; one that ties extends them. Only the boundary second is retained: it is
+ * the only one the next poll's tie guard can ask about, so this stays bounded
+ * by the pulls sharing one second rather than growing with repository history.
+ *
+ * @param {GithubRepoWork} work
+ * @param {GithubPull[]} pulls
+ */
+// @ref LLP 0361#page-work [implements]: equal-timestamp unseen pulls are still captured, so the boundary second's numbers are what the next poll needs
+function advancePullsHigh(work, pulls) {
+  const high = newestPullTime(work.pulls_high, pulls)
+  const numbers = new Set(high === work.pulls_high ? work.pulls_high_numbers ?? [] : [])
+  for (const pr of pulls) if (updatedAt(pr) === high) numbers.add(pr.number)
+  work.pulls_high = high
+  work.pulls_high_numbers = sortedNumbers(numbers)
 }
 
 /**

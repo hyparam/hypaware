@@ -518,6 +518,88 @@ test('incremental pulls include unseen PRs tied at the high-water timestamp', as
   assert.deepEqual(cursors.repos['o/r'].pull_numbers, [9, 10, 11])
 })
 
+test('a PR the same tick discovers on the issues page is captured when it ties the pulls high-water', async () => {
+  const TIE = '2026-02-01T00:00:00Z'
+  const client = fakeClient({
+    repos: {
+      'o/r': {
+        // `/issues` returns PRs too, so this tick learns #12 is a PR before the pulls pass runs.
+        issues: [{ number: 12, pull_request: {}, state: 'open', created_at: TIE, updated_at: TIE, user: { login: 'Bob' } }],
+        pulls: [{ number: 12, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Bob', type: 'User' } }],
+        comments: [{ id: 21, created_at: TIE, user: { login: 'Eve' }, issue_url: 'https://api.github.com/repos/o/r/issues/12' }],
+      },
+    },
+  })
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z', pulls: TIE }, pull_numbers: [7] }
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [12],
+    'the unseen tied pull is captured, not swallowed by its own issues-page sighting',
+  )
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request_comment').map((row) => row.number),
+    [12],
+    'its comment projects onto a pull node the same tick minted',
+  )
+  assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [12], 'the captured tie is remembered as captured, apart from pull_numbers')
+})
+
+test('an older sidecar with no captured-pull set still suppresses a tie it already captured', async () => {
+  const TIE = '2026-02-01T00:00:00Z'
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-cursors-old-'))
+  // The pre-`pulls_high_numbers` sidecar shape, written by hand: what an
+  // installed release leaves behind.
+  fs.writeFileSync(
+    path.join(stateDir, 'github-cursors.json'),
+    JSON.stringify({ schema_version: 1, repos: { 'o/r': { since: { issues: '2026-01-01T00:00:00Z', pulls: TIE }, pull_numbers: [10] } } }, null, 2),
+    'utf8',
+  )
+  const cursors = readCursors(stateDir)
+  fs.rmSync(stateDir, { recursive: true, force: true })
+  assert.equal(cursors.repos['o/r'].pulls_high_numbers, undefined)
+  assert.deepEqual(cursors.repos['o/r'].pull_numbers, [10])
+
+  const client = fakeClient({
+    repos: {
+      'o/r': {
+        pulls: [
+          { number: 10, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Bob' } },
+          { number: 11, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Ada' } },
+        ],
+      },
+    },
+  })
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [11],
+    'the absent set falls back to pull_numbers, so an already-captured tie is not re-emitted',
+  )
+  assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [10, 11], 'the tick publishes the dedicated set the next tick reads')
+})
+
 test('page and task continuations survive the cursor sidecar round trip', (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-cursors-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))

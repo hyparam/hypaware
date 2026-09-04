@@ -246,7 +246,19 @@ export interface ObservedRepoRevalidationState {
 export interface RepoCursor {
   since?: { issues?: string; commits?: string; comments?: string; pulls?: string }
   etag?: Record<string, string>
+  /**
+   * Numbers known to be pull requests, from either listing: what discriminates
+   * a PR conversation comment from an issue comment.
+   */
   pull_numbers?: number[]
+  /**
+   * Pull numbers already captured at exactly `since.pulls`, which is a
+   * different question from `pull_numbers` (the issues listing returns PRs the
+   * pulls pass has not captured yet). Only the boundary second is kept, since
+   * that is the only one the equal-timestamp tie guard consults. Absent on a
+   * sidecar written before this field existed.
+   */
+  pulls_high_numbers?: number[]
   work?: GithubRepoWork
 }
 
@@ -279,6 +291,8 @@ export interface GithubRepoWork {
   // rather than skipping the un-fetched pages (LLP 0360#cursoring).
   issues_high?: string
   pulls_high?: string
+  /** Staged `RepoCursor.pulls_high_numbers` for the in-flight `pulls_high`. */
+  pulls_high_numbers?: number[]
   commits_high?: string
   comments_high?: string
   pulls_etag?: string
