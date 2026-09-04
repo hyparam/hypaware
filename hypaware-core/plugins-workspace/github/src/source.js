@@ -46,10 +46,11 @@ export async function startGithubSource() {
       const result = await runCaptureTick(runtime, { mode: 'poll' })
       rowsWritten += result.events
       backlogPending = result.pending
-      // What the last tick reached, not the inventory: a budget-stopped tick
-      // covers only a prefix of it (LLP 0361#budget). The inventory it was
+      // What the last tick reached, not the inventory: an exhausted budget can
+      // stop a tick partway through it (LLP 0361#budget). The inventory it was
       // drawn from is published beside it, so a low count reads as the budget
-      // stopping early rather than as a shrunken inventory.
+      // stopping early rather than as a shrunken inventory. The two being equal
+      // does not mean the tick finished, though - `backlog_pending` says that.
       lastRepoCount = result.visited
       lastInventoryRepos = result.repos
       lastError = result.errors[0]?.error
