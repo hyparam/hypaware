@@ -268,54 +268,70 @@ test('bootKernel rejects installed plugins that shadow bundled first-party names
   }
 })
 
-test('bootKernel lets installed plugins replace excluded bundled skeletons and exposes their init presets', async () => {
+test('bootKernel rejects an installed plugin that shadows a V1-excluded bundled plugin', async () => {
+  // Regression: the shadow guard compared installed names only against the
+  // allowlisted bundled bucket, so an installed copy of a bundled plugin in
+  // `V1_EXCLUDED_FROM_DEFAULT` (`@hypaware/github`, `@hypaware/claude-desktop`)
+  // replaced the bundled code silently. A pre-bundling install of the GitHub
+  // source then kept running months-old code across every release that fixed
+  // the bundled copy, with nothing on any surface saying so. An excluded
+  // bundled name is a bundled name: the installed copy is refused the same
+  // way an installed `@hypaware/ai-gateway` is.
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-boot-installed-excluded-shadow-'))
   try {
     const workspaceDir = path.join(hypHome, 'bundled-workspace')
-    const bundledDir = path.join(workspaceDir, 'gascity')
+    const bundledDir = path.join(workspaceDir, 'github')
     await fs.mkdir(bundledDir, { recursive: true })
     await fs.writeFile(
       path.join(bundledDir, 'hypaware.plugin.json'),
       JSON.stringify({
         schema_version: 1,
-        name: '@hypaware/gascity',
+        name: '@hypaware/github',
         version: '0.0.1',
         hypaware_api: '^1.0.0',
         runtime: 'node',
         entrypoint: './index.js',
       })
     )
-    await fs.writeFile(
-      path.join(bundledDir, 'index.js'),
-      'export async function activate() { throw new Error("excluded bundled skeleton should not activate") }\n'
-    )
+    await fs.writeFile(path.join(bundledDir, 'index.js'), 'export async function activate() {}\n')
 
     const { installDir } = await stageInstalledPlugin({
       hypHome,
-      name: '@hypaware/gascity',
+      name: '@hypaware/github',
       version: '1.0.0',
-      entrypointBody:
-        "export async function activate(ctx) {\n" +
-        "  ctx.initPresets.register({ name: 'gascity', plugin: '@hypaware/gascity', summary: 'fixture preset', async run() { return 0 } })\n" +
-        "}\n",
+      entrypointBody: 'export async function activate() { throw new Error("the installed shadow must never activate") }\n',
     })
     await writeFixtureLock(hypHome, [
-      { name: '@hypaware/gascity', version: '1.0.0', installDir },
+      { name: '@hypaware/github', version: '1.0.0', installDir },
     ])
+    // Named in config, the way an operator who installed it pre-bundling has it.
+    await fs.writeFile(
+      defaultConfigPath(hypHome),
+      JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/github' }] })
+    )
 
-    const boot = await bootKernel({
-      hypHome,
-      mode: 'init',
-      runId: 'test-excluded-shadow',
-      bootProfile: 'all-available',
-      workspaceDir,
-      env: { ...process.env, HYP_HOME: hypHome },
-    })
-
-    assert.equal(boot.activePlugins.length, 1)
-    assert.equal(boot.activePlugins[0].name, '@hypaware/gascity')
-    assert.equal(boot.activePlugins[0].rootDir, installDir)
-    assert.equal(boot.runtime.initPresets.get('gascity')?.plugin, '@hypaware/gascity')
+    for (const bootProfile of /** @type {const} */ (['config', 'all-available'])) {
+      await assert.rejects(
+        bootKernel({
+          hypHome,
+          mode: 'smoke',
+          runId: `test-excluded-shadow-${bootProfile}`,
+          bootProfile,
+          workspaceDir,
+          env: { ...process.env, HYP_HOME: hypHome },
+        }),
+        (err) => {
+          assert.equal(
+            /** @type {{hypErrorKind?: string}} */ (err).hypErrorKind,
+            'installed_shadows_bundled',
+            `${bootProfile} boot must reject the excluded-name shadow`
+          )
+          assert.match(/** @type {Error} */ (err).message, /@hypaware\/github/)
+          assert.match(/** @type {Error} */ (err).message, /hyp plugin remove/)
+          return true
+        }
+      )
+    }
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

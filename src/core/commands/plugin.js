@@ -255,9 +255,16 @@ export async function runPluginList(argv, ctx) {
     return 0
   }
   if (active.length > 0) {
+    // Provenance is read off the install lock, the same way the `--json`
+    // branch labels `source`: an active plugin that is in the lock runs the
+    // installed copy, everything else is bundled. Printing "(bundled)" for
+    // every active plugin hid an installed copy running in a bundled name's
+    // place.
+    const installedNames = new Set(installed.map((e) => e.name))
     ctx.stdout.write('Active plugins (from current boot):\n')
     for (const p of active) {
-      ctx.stdout.write(`  ${p.name}@${p.version}  (bundled)\n`)
+      const source = installedNames.has(p.name) ? 'installed' : 'bundled'
+      ctx.stdout.write(`  ${p.name}@${p.version}  (${source})\n`)
     }
   }
   if (installed.length > 0) {

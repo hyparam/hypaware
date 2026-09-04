@@ -361,27 +361,27 @@ async function stageInstalledPlugin({ hypHome, name, commands, requires }) {
   })
 }
 
-test('top-level help lists the installed plugin that replaces an excluded bundled skeleton, not the skeleton it shadows', async () => {
+test('top-level help advertises no commands for an installed plugin that shadows a V1-excluded bundled name', async () => {
   // Regression: help must replicate boot's plugin SELECTION. An installed
-  // plugin whose name matches an excluded bundled skeleton (`@hypaware/gascity`)
-  // *replaces* it in the boot pool, so dispatch runs the installed plugin's
-  // commands. A hand-rolled help pool that kept both would advertise the
-  // skeleton's commands as phantoms that never dispatch.
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-replace-'))
+  // plugin whose name matches a V1-excluded bundled plugin (`@hypaware/gascity`)
+  // used to *replace* it in the boot pool; now it is a shadow collision like
+  // any other bundled name, so real boot rejects before any command
+  // dispatches. Help must advertise neither side's commands: none will run.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-help-excluded-shadow-'))
   const workspaceDir = path.join(hypHome, 'bundled-workspace')
   await stageBundledPlugin({
     workspaceDir,
     name: '@hypaware/gascity',
     commands: [
-      { name: 'gascity attach', summary: 'attach (bundled skeleton)' },
-      { name: 'gascity phantom', summary: 'only the skeleton declares this' },
+      { name: 'gascity attach', summary: 'attach (bundled excluded)' },
+      { name: 'gascity phantom', summary: 'only the bundled copy declares this' },
     ],
   })
   await stageInstalledPlugin({
     hypHome,
     name: '@hypaware/gascity',
     commands: [
-      { name: 'gascity attach', summary: 'attach (installed winner)' },
+      { name: 'gascity attach', summary: 'attach (installed shadow)' },
       { name: 'gascity real', summary: 'only the installed plugin declares this' },
     ],
   })
@@ -402,12 +402,10 @@ test('top-level help lists the installed plugin that replaces an excluded bundle
   assert.equal(code, 0)
   assert.equal(stderr.text(), '')
   const out = stdout.text()
-  // The installed plugin is the boot winner, so its top-level namespace
-  // appears in Additional commands.
-  assert.match(out, /Additional commands:\n  .*\bgascity\b/)
-  // The replaced skeleton's commands never dispatch: they must not appear.
   assert.equal(out.includes('phantom'), false)
-  assert.equal(out.includes('bundled skeleton'), false)
+  assert.equal(out.includes('bundled excluded'), false)
+  assert.equal(out.includes('gascity real'), false)
+  assert.equal(out.includes('installed shadow'), false)
 })
 
 test('top-level help advertises no commands for an installed plugin that shadows a bundled first-party name', async () => {
