@@ -295,12 +295,24 @@ export function createLocalObservedReposIndex({ storage, stateDir, log, revalida
     }
   }
 
+  /**
+   * The inventory the last persisted derivation left behind, with no read of
+   * its own: `update()` swaps state on success alone, so this is what
+   * `list()` served last, and it survives a call whose read threw.
+   *
+   * @returns {string[]}
+   */
+  function lastKnown() {
+    return state.revalidation ? [...state.revalidation.repos] : [...state.repos]
+  }
+
   return {
     async list() {
       if (!updating) updating = update().finally(() => { updating = null })
       await updating
-      return state.revalidation ? [...state.revalidation.repos] : [...state.repos]
+      return lastKnown()
     },
+    lastKnown,
     revalidationPending() {
       return state.revalidation !== undefined
     },
