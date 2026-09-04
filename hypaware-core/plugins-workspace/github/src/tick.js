@@ -23,11 +23,37 @@ import { getClient } from './runtime.js'
 export async function runCaptureTick(runtime, opts) {
   const cursors = readCursors(runtime.stateDir)
   const client = getClient(runtime)
-  const observedRepos = opts.observedRepos ?? (
-    runtime.config.inventory === 'session_repos'
-      ? await runtime.observedRepos.list()
-      : undefined
-  )
+  /** @type {string[] | undefined} */
+  let observedRepos = opts.observedRepos
+  if (observedRepos === undefined && runtime.config.inventory === 'session_repos') {
+    try {
+      observedRepos = await runtime.observedRepos.list()
+    } catch (err) {
+      // Escaping here aborts the whole tick, which is what the per-repo
+      // isolation inside `captureRepos` exists to prevent, so report the
+      // unresolved inventory as one more captured failure instead.
+      const message = err instanceof Error ? err.message : String(err)
+      const kind = /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind
+      runtime.log.error('github.inventory_resolve_failed', {
+        mode: 'session_repos',
+        error: message,
+        ...(kind ? { error_kind: kind } : {}),
+      })
+      // The failure itself is not backlog (LLP 0360#cadence: failures retry on
+      // the ordinary cadence), but a tick that never resolved its inventory
+      // retired none either. A flat `false` would clear the source's backlog
+      // flag, sending saved continuations back to a full poll interval
+      // (LLP 0361#budget), so read the answer off the state the failed read
+      // left behind: a revalidation an earlier tick already persisted, and the
+      // durable per-repo cursors. Only a persisted pass counts: `update()`
+      // swaps its state on success alone, so a pass this failing call started
+      // is discarded and reports nothing.
+      const pending =
+        runtime.observedRepos.revalidationPending?.() === true ||
+        Object.values(cursors.repos).some((cursor) => Boolean(cursor?.work))
+      return { repos: 0, events: 0, requests: 0, pending, errors: [{ repo: '(inventory)', error: message }] }
+    }
+  }
   // Incomplete inventory revalidation is bounded local work remaining, in
   // exactly the LLP 0361#budget sense capture's own `pending` carries, so it
   // rides the same backlog cadence instead of waiting a full poll interval to

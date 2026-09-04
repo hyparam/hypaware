@@ -52,11 +52,18 @@ export async function runGithubBackfill(argv, ctx) {
     ctx.stdout.write(`github backfill: ${result.events} event(s) across ${result.repos} repo(s)\n`)
     if (result.pending) ctx.stdout.write('github backfill: bounded work remains and will resume on the next GitHub capture tick\n')
     reportErrors(ctx, result.errors)
-    if (only && result.repos === 0) {
+    // Zero repos with an error reported is an inventory that never resolved,
+    // not a selection that missed: `reportErrors` already printed the real
+    // cause, so do not contradict it with a claim about the user's config.
+    if (only && result.repos === 0 && result.errors.length === 0) {
       ctx.stderr.write(`hyp github backfill: none of [${only.join(', ')}] are in the active repository inventory\n`)
       return 1
     }
-    ctx.stdout.write("run 'hyp graph project' to project github_events into the graph\n")
+    // Nothing captured because the run errored leaves nothing new to project,
+    // so the next-step advice would only dress up a failure as progress.
+    if (result.repos > 0 || result.errors.length === 0) {
+      ctx.stdout.write("run 'hyp graph project' to project github_events into the graph\n")
+    }
     return result.errors.length > 0 ? 1 : 0
   } catch (err) {
     ctx.stderr.write(`hyp github backfill: ${errMessage(err)}\n`)
