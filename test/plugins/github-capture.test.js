@@ -746,6 +746,53 @@ test('an item tied at the watermark but not yet captured is still captured next 
   ])
 })
 
+test('new activity does not drag the already-captured boundary rows back in', async () => {
+  const AT = '2026-05-01T00:00:00Z'
+  const LATER = '2026-05-02T00:00:00Z'
+  const repo = {
+    /** @type {any[]} */
+    issues: [{ number: 1, state: 'open', created_at: AT, updated_at: AT }],
+    /** @type {any[]} */
+    commits: [{ sha: 'a'.repeat(40), commit: { author: { date: AT } } }],
+    /** @type {any[]} */
+    comments: [{ id: 3, issue_url: 'https://api.github.com/repos/o/r/issues/1', created_at: AT, updated_at: AT }],
+  }
+  const client = fakeClient({ repos: { 'o/r': repo } })
+  const cursors = freshCursors()
+  /** @param {Record<string, unknown>[]} into */
+  const tick = (into) => captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { into.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  await tick([])
+  // Something newer arrives. The real listings put it AHEAD of the boundary
+  // rows, so a gate that forgets the boundary the moment it raises its
+  // watermark re-appends everything behind the new item.
+  repo.issues.push({ number: 2, state: 'open', created_at: LATER, updated_at: LATER })
+  repo.commits.push({ sha: 'c'.repeat(40), commit: { author: { date: LATER } } })
+  repo.comments.push({ id: 4, issue_url: 'https://api.github.com/repos/o/r/issues/1', created_at: LATER, updated_at: LATER })
+
+  /** @type {Record<string, unknown>[]} */
+  const second = []
+  await tick(second)
+  assert.deepEqual(second.map((row) => row.event_id).sort(), [
+    'comment:4',
+    `commit:${'c'.repeat(40)}`,
+    'issue:o/r#2',
+  ], 'only the new items, never the boundary rows behind them')
+
+  /** @type {Record<string, unknown>[]} */
+  const third = []
+  await tick(third)
+  assert.deepEqual(third, [], 'and the new boundary is carried in turn')
+})
+
 test('staged phase watermarks survive the cursor sidecar round trip', (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-staged-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))

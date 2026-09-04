@@ -23,7 +23,7 @@ import { randomUUID } from 'node:crypto'
 
 const STATE_FILE = 'github-cursors.json'
 const SCHEMA_VERSION = 1
-const MAX_BOUNDARY_IDS = 1000
+export const MAX_BOUNDARY_IDS = 1000
 
 /**
  * @param {string} stateDir

@@ -14,6 +14,13 @@
  * capture passes have to survive; a fake that filtered exclusively would hide
  * it. An item with no timestamp is always returned.
  *
+ * The three `since`-windowed listings also come back **newest-first**, as the
+ * real ones do (`/commits` is reverse-chronological, `/issues` and
+ * `/issues/comments` default to `sort=created&direction=desc`). Order is not
+ * cosmetic here: the boundary rows trail the new ones, so a fixture-order fake
+ * hides a gate that forgets the boundary as soon as it sees something newer.
+ * Items with no timestamp keep their fixture position, at the front.
+ *
  * @param {{
  *   viewerRepos?: string[],
  *   repos?: Record<string, {
@@ -83,11 +90,12 @@ function page(items) {
  * @param {(item: any) => string | undefined} timeOf
  */
 function atOrAfter(items, since, timeOf) {
-  if (!items || !since) return items
-  return items.filter((item) => {
+  if (!items) return items
+  const kept = since ? items.filter((item) => {
     const at = timeOf(item)
     return at === undefined || at >= since
-  })
+  }) : [...items]
+  return kept.sort((a, b) => (timeOf(b) ?? '').localeCompare(timeOf(a) ?? ''))
 }
 
 /** @param {any} item */

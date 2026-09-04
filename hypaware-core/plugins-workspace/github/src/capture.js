@@ -1,5 +1,6 @@
 // @ts-check
 
+import { MAX_BOUNDARY_IDS } from './cursors.js'
 import { commitKey, repoKey, str } from './keys.js'
 
 /**
@@ -696,14 +697,20 @@ function commentEventId(c) {
  * after our request. The pulls pass already refuses that trade
  * (`pullChangedSince`); this is the same guard for the other three passes.
  * Carrying the ids ON the watermark costs one timestamp's worth of identity,
- * never a repository's history, and items below the watermark are always
- * admitted, because an inclusive `since` cannot return them and dropping a row
- * is never the safe direction.
+ * never a repository's history.
  *
- * `staged`/`stagedIds` are the mid-phase values on `work`, `published`/
- * `publishedIds` what the cursor carries before the phase appends a page. Each
- * pair moves together, so the gate resumes from whichever survived
- * (LLP 0360#cursoring).
+ * Two sets, not one. `published`/`publishedIds` is the **floor**: the request
+ * carries the published watermark for every page of the pass (`setSince` runs
+ * at the phase boundary, not per page), so the floor's items come back on each
+ * of those pages and must be refused throughout. `staged`/`stagedIds` is the
+ * running maximum on `work`, which is what gets published next. Collapsing the
+ * two loses the floor the moment anything newer arrives, and the real
+ * endpoints hand back newest-first (`/commits` is reverse-chronological,
+ * `/issues` defaults to `sort=created&direction=desc`), so one new item is
+ * always enough to reach the boundary rows behind it. Below the floor nothing
+ * is refused: an inclusive `since` cannot return those, and dropping a row is
+ * never the safe direction. Keeping both means the gate resumes correctly from
+ * whichever of the pair survived a partial tick (LLP 0360#cursoring).
  *
  * @ref LLP 0360#resource-bounds [constrained-by]: identity carried across ticks is one watermark second's worth, not a repository's history
  *
@@ -715,12 +722,13 @@ function commentEventId(c) {
 function openGate(staged, stagedIds, published, publishedIds) {
   let high = staged ?? published
   let ids = new Set(staged === undefined ? publishedIds : stagedIds)
+  const floorIds = new Set(publishedIds)
   return {
     get high() {
       return high
     },
     get ids() {
-      return ids.size > 0 ? [...ids] : undefined
+      return ids.size > 0 ? [...ids].slice(0, MAX_BOUNDARY_IDS) : undefined
     },
     /**
      * A null `id` raises the watermark only: the caller emits no row for that
@@ -735,7 +743,9 @@ function openGate(staged, stagedIds, published, publishedIds) {
         high = at
         ids = new Set()
       }
-      if (id === null || !at || at !== high) return true
+      if (id === null) return true
+      if (published !== undefined && at === published && floorIds.has(id)) return false
+      if (!at || at !== high) return true
       if (ids.has(id)) return false
       ids.add(id)
       return true
@@ -751,6 +761,9 @@ function setSince(cursor, key, value) {
 
 /**
  * Publish (or clear) the identities sitting exactly on a phase's watermark.
+ * Bounded by `MAX_BOUNDARY_IDS` on the way out as well as on the way back in,
+ * so the sidecar cannot grow without limit and a written set always survives
+ * its own read.
  *
  * @param {RepoCursor} cursor
  * @param {'issues' | 'commits' | 'comments'} key
