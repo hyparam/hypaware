@@ -916,7 +916,15 @@ function rejectJson(req, res, status, body) {
   // reusable one. A client that reads a keep-alive header and returns the
   // socket to its pool meets the reset on a request it has already finished,
   // where its own error handler is gone and the throw is nobody's.
-  res.setHeader('connection', 'close')
+  //
+  // A request that declares no body is the exception: nothing is drained, so
+  // the cap cannot be crossed and no reset is coming. Closing it would cost a
+  // pooling client its socket for nothing, and on this listener that is the
+  // common refusal - a bodyless GET at a path or host nobody registered, on
+  // the connection an attached client forwards everything else over.
+  const length = req.headers['content-length']
+  const bodyless = req.headers['transfer-encoding'] === undefined && (length === undefined || length === '0')
+  if (!bodyless) res.setHeader('connection', 'close')
   sendJson(res, status, body)
 }
 

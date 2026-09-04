@@ -534,3 +534,40 @@ test('a body refused with 421 is drained only up to a cap', async (t) => {
     `the listener read ${served.bytesRead} of the ${overCap.length} bytes it refused`
   )
 })
+
+// The cap answers `connection: close` so a pooling client never meets the
+// reset on a request it has already finished. A refusal that declares no body
+// drains nothing, can never reach the cap, and is never reset, so it must keep
+// the connection: on this listener that is the common refusal, and it arrives
+// on the socket an attached client forwards everything else over.
+test('a bodyless refusal keeps the connection a pooling client is reusing', async (t) => {
+  const rig = await bootGateway()
+  t.after(() => rig.cleanup())
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+  t.after(() => agent.destroy())
+
+  /** @param {string} path */
+  function get(path) {
+    return new Promise((resolve, reject) => {
+      const request = http.request(
+        { host: '127.0.0.1', port: rig.proxy.port, path, agent, method: 'GET' },
+        (res) => {
+          const port = res.socket.localPort
+          res.resume()
+          res.on('end', () => resolve({ status: res.statusCode, connection: res.headers.connection, port }))
+        }
+      )
+      request.on('error', reject)
+      request.end()
+    })
+  }
+
+  const first = await get('/nope')
+  const second = await get('/nope')
+  assert.equal(first.status, 404)
+  assert.equal(second.status, 404)
+  assert.notEqual(first.connection, 'close')
+  // The same local port both times is the pool surviving the refusal.
+  assert.equal(second.port, first.port, 'the bodyless refusal cost the client its pooled socket')
+  assert.deepEqual(rig.upstreamHits, [])
+})
