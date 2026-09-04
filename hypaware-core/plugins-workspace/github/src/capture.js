@@ -833,6 +833,16 @@ function commentEventId(c) {
  * reason: the request budget splits a phase across ticks, and a set that
  * restarted empty would leave the duplicate on exactly the resumed page.
  *
+ * `emitted` recognizes "already appended" by the same bare event id the two
+ * boundary sets use, so it widens the trade above rather than escaping it: an
+ * item edited between two sightings of one phase is refused on the second, and
+ * that newer snapshot never lands either. The window grows from one wall-clock
+ * second to the phase's whole traversal, which a budget split can spread across
+ * ticks. Only the issues pass can lose anything by it, through `state`: a
+ * commit's date and sha are immutable, and a comment stores no column its own
+ * edit can move. The cure is the same one, and is still not this change: a
+ * content fingerprint, not a bare event id.
+ *
  * Capped like the boundary set and by the same constant, since an unbounded one
  * would carry a whole backfill's ids in the sidecar. Overflow drops the oldest
  * admissions, because a re-listing surfaces near the page just read, and
