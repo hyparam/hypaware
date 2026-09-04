@@ -14,6 +14,8 @@ repos inside one tick), [LLP 0361](./0361-github-capture-is-work-budgeted.decisi
 (the revalidation sidecar that shares the shape and self-heals via the policy
 fingerprint), [LLP 0301](./0301-bounded-compaction-resettle.issue.md)
 (#requirements the in-process precedent, `withPartitionMutationLock`),
+[LLP 0065](./0065-remote-credentials-lock.decision.md) (#d1 the
+cross-process precedent, the credentials-store age-stale mutex),
 [LLP 0028](./0028-context-graph-enrichment.decision.md) (#per-session-watermark
 the watermark sidecar pattern the github plugin copied),
 hyparam/hypaware#1286, PR #1235
@@ -90,10 +92,14 @@ full recovery.
   `withPartitionMutationLock` (`src/core/cache/partition.js`) is a promise
   chain keyed by partition dir in a module-level `Map`. It serializes flush
   against compaction inside one daemon process (LLP 0301#requirements). It
-  cannot see a second process. There is no cross-process file-lock primitive
-  anywhere in `src/core` to "expose": a state-dir lock is new infrastructure,
-  with a lock-file protocol, staleness detection, and a contention policy to
-  design.
+  cannot see a second process. The one cross-process file lock in `src/core`
+  is `withCredentialsLock` (`src/core/remote/credentials.js`): an `O_EXCL`
+  lock file with an age-stale break and a nonce-guarded release, settled by
+  LLP 0065#d1 for the remote credentials store. It is private to that module
+  and sized for a bounded token refresh, not a minutes-long tick, so a
+  state-dir lock plugins can use is still new public surface, but the
+  lock-file protocol, staleness policy, and contention shape have in-repo
+  precedent to adapt rather than design from scratch.
 - **The plugin contract has no seam to hang it on.** Plugins receive a bare
   `stateDir: string` (`hypaware-plugin-kernel-types.d.ts`). The only "lock"
   in the contract is the plugin-install lockfile, an unrelated concept.
@@ -128,7 +134,10 @@ Costs and open sub-decisions:
 - Staleness: a crashed holder must not wedge the daemon forever, but a
   too-short staleness horizon steals the lock from a live budgeted backfill,
   recreating the race it exists to prevent. A pid-liveness check helps on
-  one host and is still racy on pid reuse.
+  one host and is still racy on pid reuse; LLP 0065#d1 already rejected
+  liveness probes for the credentials lock (age-only, break by rm, grant
+  only by the create), and the open question here is whether that policy
+  survives a hold measured in minutes rather than one token refresh.
 - Adoption scope: github cursors only, or also observed-repos,
   context-graph-enrich, and the pattern as documented guidance for future
   sidecars.
@@ -198,4 +207,5 @@ demonstrably refuses or queues while the daemon holds the tick.
   `observed-repos.js`
 - `hypaware-core/plugins-workspace/context-graph-enrich/src/state.js`
 - `src/core/cache/partition.js` (`withPartitionMutationLock`)
+- `src/core/remote/credentials.js` (`withCredentialsLock`, LLP 0065#d1)
 - `hypaware-plugin-kernel-types.d.ts` (plugin contract, `stateDir`)
