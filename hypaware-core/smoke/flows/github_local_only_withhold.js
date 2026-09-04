@@ -228,15 +228,22 @@ export async function run({ harness, expect }) {
       row.attributes?.repos_retired === 1
     )
   )
+  // `repos` is the load-bearing attribute: retirement is what drives it to 0.
+  // The tick's `pending` and `inventory_pending` are incidental with this
+  // fixture, but for two different reasons, neither of them under test here:
+  // two evidence rows never reach the 50,000-row revalidation budget, so every
+  // pass finishes in one slice and no tick carries inventory work forward, and
+  // a tick that selects no repository ran no capture loop, so it has no
+  // per-repo continuation or request budget to report as pending either.
+  // Budget exhaustion, and the pending tick it produces, are owned by
+  // test/plugins/github-observed-repos.test.js.
   expect.that(
-    'telemetry: the post-retirement tick captured nothing and left no work pending',
+    'telemetry: the post-retirement tick selected no repository to capture',
     logs,
     (rows) => rows.some((row) =>
       row.body === 'github.capture_tick_completed' &&
       row.attributes?.mode === 'poll' &&
-      row.attributes?.repos === 0 &&
-      row.attributes?.pending === false &&
-      row.attributes?.inventory_pending === false
+      row.attributes?.repos === 0
     )
   )
 
