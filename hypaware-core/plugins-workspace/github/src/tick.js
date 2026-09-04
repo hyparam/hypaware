@@ -18,7 +18,7 @@ import { getClient } from './runtime.js'
  *
  * @param {GithubRuntime} runtime
  * @param {{ mode: 'backfill' | 'poll', only?: string[], observedRepos?: string[] }} opts
- * @returns {Promise<{ repos: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>}
+ * @returns {Promise<{ repos: number, visited: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>}
  */
 export async function runCaptureTick(runtime, opts) {
   const cursors = readCursors(runtime.stateDir)
@@ -61,7 +61,7 @@ export async function runCaptureTick(runtime, opts) {
         (runtime.observedRepos.lastKnown?.() ?? []).some(
           (repo) => !ignored.has(repo) && cursors.repos[repo]?.work !== undefined,
         )
-      return { repos: 0, events: 0, requests: 0, pending, errors: [{ repo: '(inventory)', error: message }] }
+      return { repos: 0, visited: 0, events: 0, requests: 0, pending, errors: [{ repo: '(inventory)', error: message }] }
     }
   }
   // Incomplete inventory revalidation is bounded local work remaining, in
@@ -98,6 +98,7 @@ export async function runCaptureTick(runtime, opts) {
     runtime.log.info('github.capture_tick_completed', {
       mode: opts.mode,
       repos: result.repos,
+      repos_visited: result.visited,
       events: result.events,
       requests: result.requests,
       pending,

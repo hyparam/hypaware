@@ -31,6 +31,7 @@ export async function startGithubSource() {
   /** @type {string | null} */
   let nextTickAt = null
   let lastRepoCount = 0
+  let lastInventoryRepos = 0
   let rowsWritten = 0
   let backlogPending = false
   /** @type {string | undefined} */
@@ -45,12 +46,19 @@ export async function startGithubSource() {
       const result = await runCaptureTick(runtime, { mode: 'poll' })
       rowsWritten += result.events
       backlogPending = result.pending
-      lastRepoCount = result.repos
+      // What the last tick reached, not the inventory: an exhausted budget can
+      // stop a tick partway through it (LLP 0361#budget). The inventory it was
+      // drawn from is published beside it, so a low count reads as the budget
+      // stopping early rather than as a shrunken inventory. The two being equal
+      // does not mean the tick finished, though - `backlog_pending` says that.
+      lastRepoCount = result.visited
+      lastInventoryRepos = result.repos
       lastError = result.errors[0]?.error
       if (result.errors.length === 0) lastSuccessAt = new Date().toISOString()
       runtime.log.info('github.poll_tick_completed', {
         operation: 'poll',
         repos: result.repos,
+        repos_visited: result.visited,
         events: result.events,
         errors: result.errors.length,
         requests: result.requests,
@@ -124,6 +132,7 @@ export async function startGithubSource() {
           last_tick_at: lastTickAt,
           last_success_at: lastSuccessAt,
           next_tick_at: nextTickAt,
+          last_inventory_repos: lastInventoryRepos,
           last_repo_count: lastRepoCount,
           in_flight: inFlight !== null,
           backlog_pending: backlogPending,
