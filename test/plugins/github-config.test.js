@@ -48,6 +48,33 @@ test('ignore entries must be owner/repo and retired inventory lists are rejected
   assert.equal(validateGithubConfig({ orgs: ['owner'] }).ok, false)
 })
 
+// A config written for the pre-bundling standalone source (`repos[]`,
+// `orgs[]`) must fail with the repair in the message, not with the bare
+// unknown-key error a typo gets: the operator has to know the list is gone
+// and what decides the inventory now, or a plain `hyp plugin remove` of the
+// old install takes GitHub capture down. Still rejected, never ignored: an
+// explicit list and a derived inventory capture different repositories.
+// @ref LLP 0360#inventory [tests]: no `repos[]` or `orgs[]` config belongs to the local source
+test('a retired repos/orgs key is rejected with a message that names the inventory replacement', () => {
+  for (const key of ['repos', 'orgs']) {
+    const r = validateGithubConfig({ [key]: ['owner/repo'] })
+    assert.equal(r.ok, false)
+    if (r.ok) return
+    assert.equal(r.errors.length, 1, key)
+    assert.equal(r.errors[0].pointer, `/${key}`)
+    assert.equal(r.errors[0].errorKind, 'github_config_invalid')
+    assert.match(r.errors[0].message, new RegExp(`unknown github config key "${key}"`))
+    assert.match(r.errors[0].message, /inventory = "all_visible"/)
+    assert.match(r.errors[0].message, /ignore\[\]/)
+    assert.match(r.errors[0].message, /Remove it/)
+  }
+  // A genuine typo keeps the bare error: it has no repair to name.
+  const typo = validateGithubConfig({ poll_intervall: '10m' })
+  assert.equal(typo.ok, false)
+  if (typo.ok) return
+  assert.equal(typo.errors[0].message, 'unknown github config key "poll_intervall"')
+})
+
 test('token_env must be an env-var NAME, never a token value', () => {
   // The config carries the NAME; the client resolves the value at call time.
   // A GitHub credential is base62 plus underscores, so it satisfies the POSIX

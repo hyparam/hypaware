@@ -23,6 +23,22 @@ export const CONFIG_DEFAULTS = Object.freeze({
 
 const CONFIG_KEYS = new Set(['ignore', 'poll_interval', 'inventory', 'token_env'])
 
+/**
+ * Keys the pre-bundling standalone source accepted and the bundled source
+ * retired. A config written for that source fails validation here with the
+ * same `unknown github config key` error a typo gets, which tells the
+ * operator nothing about what replaced the key, and a plain `hyp plugin
+ * remove @hypaware/github` then takes GitHub capture down. The message
+ * names the repair: the inventory is session evidence by default, or
+ * `inventory: "all_visible"`, with `ignore[]` as the only repository list.
+ * Still rejected, never silently ignored: an explicit list and a derived
+ * inventory capture different repositories, so the choice stays the
+ * operator's.
+ *
+ * @ref LLP 0360#inventory [constrained-by]: no `repos[]` or `orgs[]` config belongs to the local source
+ */
+const RETIRED_INVENTORY_KEYS = new Set(['repos', 'orgs'])
+
 /** `owner/repo` - exactly one slash, non-empty halves, no whitespace. */
 const REPO_SLUG = /^[^/\s]+\/[^/\s]+$/
 /** A POSIX env-var name (what `token_env` holds - the NAME, not the secret). */
@@ -56,7 +72,17 @@ export function validateGithubConfig(value) {
   const raw = /** @type {Record<string, unknown>} */ (value ?? {})
 
   for (const key of Object.keys(raw)) {
-    if (!CONFIG_KEYS.has(key)) errors.push(invalid(`/${key}`, `unknown github config key "${key}"`))
+    if (CONFIG_KEYS.has(key)) continue
+    if (RETIRED_INVENTORY_KEYS.has(key)) {
+      errors.push(invalid(
+        `/${key}`,
+        `unknown github config key "${key}": the bundled source no longer takes a repository list. ` +
+        'Remove it; the inventory is the repositories your recorded sessions touched (the default), ' +
+        'or set inventory = "all_visible" for every repository your token can see, and use ignore[] to exclude repositories'
+      ))
+      continue
+    }
+    errors.push(invalid(`/${key}`, `unknown github config key "${key}"`))
   }
 
   const ignore = readSlugArray(raw, 'ignore', errors) ?? []
