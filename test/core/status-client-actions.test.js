@@ -178,6 +178,61 @@ test('a default-on backfill target (enabled client, no explicit block) shows pen
   assert.equal(m.has('@hypaware/ai-gateway'), false)
 })
 
+// The backfill twin of the probe-less attach gate (LLP 0229): `desired()`
+// enumerates the runtime backfill registry, so a client adapter whose manifest
+// says it registers no provider (`backfill_provider: false`) is a target the
+// reconciler never names, and no marker will ever clear a `pending` derived
+// for it. Claude Desktop's history is imported by the `@hypaware/claude`
+// provider; its own line must read `n/a`, present rather than dropped, while
+// the provider that does the work stays `pending`.
+// @ref LLP 0375#status-derives-by-the-provider-gate [tests]: a provider-less client adapter is n/a, never pending, and is not dropped
+test('a client adapter that declares no backfill provider is n/a on a joined host, not a permanent pending', async () => {
+  const hypHome = await makeHome()
+  const stateRoot = path.join(hypHome, 'hypaware')
+
+  const seedPath = centralSeedPath(stateRoot)
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/central' },
+      { name: '@hypaware/ai-gateway' },
+      { name: '@hypaware/claude' },
+      { name: '@hypaware/claude-desktop' },
+    ],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.ok(report.clientActions, 'the joined host surfaces its targets')
+  const backfill = byKey(report.clientActions.actions.filter((a) => a.kind === 'backfill'))
+  assert.equal(backfill.get('@hypaware/claude')?.state, 'pending')
+  assert.equal(backfill.get('@hypaware/claude-desktop')?.state, 'n/a', 'present as n/a, not dropped and not pending')
+
+  // An explicit block on the provider-less plugin does not make it a target
+  // either: the gate is the registry, not the config.
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [
+      { name: '@hypaware/central' },
+      { name: '@hypaware/ai-gateway' },
+      { name: '@hypaware/claude' },
+      { name: '@hypaware/claude-desktop', config: { backfill: { window_days: 30 } } },
+    ],
+    sinks: { central: { plugin: '@hypaware/central', config: {} } },
+  }) + '\n')
+  const withBlock = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.ok(withBlock.clientActions)
+  const backfill2 = byKey(withBlock.clientActions.actions.filter((a) => a.kind === 'backfill'))
+  assert.equal(backfill2.get('@hypaware/claude-desktop')?.state, 'n/a')
+
+  const stdout = makeBuf()
+  renderStatusText({ report: withBlock, clientNames: [], datasets: [], cacheRoot: '/tmp/cache', stdout })
+  assert.match(stdout.text(), /backfill @hypaware\/claude\s+\[pending\]/)
+  assert.match(stdout.text(), /backfill @hypaware\/claude-desktop\s+\[n\/a\]/)
+})
+
 test('a default-on client on a NON-joined host keeps the V1 surface (no spurious action)', async () => {
   // The reconciler never runs on a non-joined host, so a bare local claude
   // install must not grow a new status line.

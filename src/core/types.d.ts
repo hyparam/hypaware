@@ -48,6 +48,14 @@ export interface ClientDescriptor {
    * client whose activity leaves no scannable trail.
    */
   activityProbe?: PluginActivityProbeManifest
+  /**
+   * `false` when the manifest declares `contributes.client.backfill_provider:
+   * false`: this client registers no backfill provider, another plugin's
+   * provider imports its history. Absent otherwise. Read by the `hyp status`
+   * client-actions derivation so a provider-less client is `n/a`, never a
+   * `pending` that cannot resolve (LLP 0375).
+   */
+  backfillProvider?: false
 }
 
 /**

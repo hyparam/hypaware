@@ -223,6 +223,25 @@ export interface PluginClientManifest {
    * core must be able to read it without importing plugin code.
    */
   activity_probe?: PluginActivityProbeManifest
+  /**
+   * Set to `false` when this client registers no backfill provider of its
+   * own because another plugin's provider imports its history: Claude
+   * Desktop's transcripts are read by the `@hypaware/claude` provider.
+   * Absent means the plugin registers a provider (every other client
+   * adapter does).
+   *
+   * Read by `hyp status`, which cannot see the runtime backfill registry
+   * without activating plugins and so derives backfill-on-join targets
+   * from the client descriptors. Without this flag a provider-less client
+   * on a joined host reads as a `backfill ... [pending]` that no
+   * reconciler pass will ever clear; with it the line reads `n/a`, the same
+   * answer a probe-less client gets for attach (LLP 0229).
+   *
+   * Opt-out rather than opt-in so a client that forgets the flag shows the
+   * loud permanent `pending` this exists to fix, never a silently missing
+   * line for a provider that is real.
+   */
+  backfill_provider?: boolean
 }
 
 /**

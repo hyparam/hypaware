@@ -2252,10 +2252,22 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
   // Client-adapter plugins (claude/codex), derived statically from the catalog
   // descriptors: the set the backfill default-on derivation needs ("this
   // enabled plugin imports on join") and, via the descriptors themselves, the
-  // universe of attach targets below.
-  const clientAdapterPlugins = new Set(
-    [...(clientDescriptors?.values() ?? [])].map((d) => d.plugin)
-  )
+  // universe of attach targets below. Each maps to whether the reconciler's
+  // `desired()` would ever name it: it enumerates the runtime backfill
+  // registry, so a client whose manifest declares it registers no provider
+  // (`backfill_provider: false`, Claude Desktop) is a target it never emits,
+  // and no marker will ever clear a `pending` derived for it. That is the
+  // backfill twin of the probe-less attach gate (LLP 0229): status derives
+  // by the reconciler's own gate or reports `n/a`.
+  // @ref LLP 0375#status-derives-by-the-provider-gate [implements]: a provider-less client adapter is inert for backfill, never pending
+  /** @type {Map<string, boolean>} */
+  const clientAdapterPlugins = new Map()
+  for (const d of clientDescriptors?.values() ?? []) {
+    const inert = d.backfillProvider === false
+    // A plugin can own several clients; it is inert only if none of them
+    // brings a provider.
+    clientAdapterPlugins.set(d.plugin, (clientAdapterPlugins.get(d.plugin) ?? true) && inert)
+  }
 
   // Declared backfill targets: enabled plugin entries that drive
   // backfill-on-join (LLP 0037, policy rides the owning plugin). Keyed by
@@ -2267,21 +2279,24 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
   //      the default-on case was invisible. It is gated on `hasCentral` so a
   //      non-joined host (where the reconciler never runs) keeps its
   //      V1-unchanged surface. A bare `claude`/`codex` install shows nothing.
-  /** @type {Map<string, { onJoin: boolean }>} */
+  /** @type {Map<string, { onJoin: boolean, inert?: boolean }>} */
   const declared = new Map()
   for (const entry of config?.plugins ?? []) {
     if (entry.enabled === false) continue
     const raw = entry.config?.backfill
     const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
+    // Known only for client adapters. An explicit block on any other plugin
+    // keeps its previous answer (declared, so pending until a marker lands).
+    const inert = clientAdapterPlugins.get(entry.name) === true
     if (hasBlock) {
       // Use the shared tri-state read so status can never disagree with the
       // reconciler about what a block means: a malformed `on_join` (e.g. the
       // string "false") is an opt-out, not default-on. `onJoin: undefined`
       // (block present, `on_join` absent) is default-on → not suppressed.
       const onJoin = readBackfillPolicy(entry).onJoin !== false
-      declared.set(entry.name, { onJoin })
+      declared.set(entry.name, { onJoin, inert })
     } else if (hasCentral && clientAdapterPlugins.has(entry.name)) {
-      declared.set(entry.name, { onJoin: true })
+      declared.set(entry.name, { onJoin: true, inert })
     }
   }
 

@@ -17,7 +17,8 @@
       "name": "claude-desktop",
       "skill_dir": ".claude/skills",
       "agent_dir": ".claude/agents",
-      "transcript_entrypoints": ["claude-desktop", "claude-desktop-3p"]
+      "transcript_entrypoints": ["claude-desktop", "claude-desktop-3p"],
+      "backfill_provider": false
     },
     "picker": [
       {
