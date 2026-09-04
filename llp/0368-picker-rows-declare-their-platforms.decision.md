@@ -7,6 +7,7 @@
 **Date:** 2026-09-03
 **Related:** LLP 0130 (#picker-block: the declarative picker row this extends), LLP 0011 (#autodetect-vs-default: a probe pre-checks, it never forces and never hides), LLP 0202 (#hidden-rows: display filtering is never a catalog deletion), LLP 0139 (#macos-only: the Desktop commands already refuse off macOS), LLP 0297 (#problem: the first reading of this gap), LLP 0358 (the decision that made the Desktop row visible again), hyparam/hypaware#1283
 **Extends:** LLP 0130
+**Extended-by:** LLP 0370 (the request covering what #display-only's carry leaves with no interactive exit: on the gating platform a configured gated row is kept unconditionally and silently, no menu answer removes it, and its `compose` riders come back with it)
 
 > LLP 0130 settled that a picker row is declarative manifest data and that
 > `detect` seeds its checkbox. LLP 0011 settled that detection may only
