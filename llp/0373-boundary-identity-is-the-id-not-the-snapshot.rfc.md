@@ -32,7 +32,7 @@ hyparam/hypaware#1354 (the invariant the `openGate` docstring leaves unstated)
 > never lands; for a pull, neither do the reviews and changed files of that
 > second. Within a phase the same bare id also drives the per-phase `emitted`
 > sets added for the pagination duplicate (#1335, #1345), so an item that
-> changes between two sightings of one traversal loses that snapshot too.
+> changes between two sightings of one traversal can lose that snapshot too.
 > Curing either means keying on the row's content rather than its identity,
 > across four passes and the four identity sets they use, which come in two
 > shapes (event-id strings and PR numbers) and two lifetimes (durable cursor
@@ -208,12 +208,15 @@ splits either across ticks, and both sets are staged on the work descriptor
 precisely so they survive that resume, so the window is as long as the traversal
 takes in wall-clock time, not as long as one tick. The set itself is bounded
 only for the gate half: `openGate` is opened afresh for every page and stages
-the newest `MAX_BOUNDARY_IDS` (1000) admissions after each one, with
-`readBoundaryIds` capping the read back to match, so `gate_emitted` is a sliding
-window of recent ids inside a tick as much as across a resume, and a long
-backfill forgets an id once 1000 later admissions have pushed it out. That
-bounds the set, not the window: a pagination re-listing surfaces near the page
-just read, so the ids that matter are still in it. `work.pulls_emitted` is
+the newest `MAX_BOUNDARY_IDS` (1000) admissions after each one, so
+`gate_emitted` is a sliding window of recent ids inside a tick as much as across
+a resume, and a long backfill forgets an id once 1000 later admissions have
+pushed it out. Within a tick that bound is the stager's alone: the next page
+re-seeds from the work descriptor in memory, and `readBoundaryIds` runs only on
+a resume, where it caps the opposite end (`slice(0, MAX_BOUNDARY_IDS)`, #guard)
+and is a no-op because the staged set already fits. That bounds the set, not the
+window: a pagination re-listing surfaces near the page just read, so the ids
+that matter are still in it. `work.pulls_emitted` is
 capped at neither end.
 
 Two of the four passes change under that wider window and two do not:
@@ -233,10 +236,11 @@ Two of the four passes change under that wider window and two do not:
   only route `review` and `pull_request_file` rows have into the table. What a
   reshuffle actually puts on a later page, though, is not the changed pull:
   `/pulls` is `sort=updated&direction=desc`, so a pull updated mid-traversal
-  jumps to offset zero, on a page the traversal has already consumed, and is not
-  re-listed at all. (It is picked up by the next poll instead, since its new
-  `updated_at` is above the baseline that traversal publishes.) The item a
-  reshuffle does re-list is the one pushed back across a page boundary, whose
+  jumps to offset zero, on a page the traversal has already consumed, so that
+  move alone never puts it back in front of the traversal. (Absent the push-down
+  below, it is picked up by the next poll instead, since its new `updated_at` is
+  above the baseline that traversal publishes.) The item a reshuffle does
+  re-list is the one pushed back across a page boundary, whose
   own `updated_at` did not move and whose row is therefore identical: exactly
   the duplicate #1335 reported and the set exists for. `pulls_emitted` refuses a
   genuinely newer snapshot only when enough other pulls are updated after it to
@@ -275,8 +279,12 @@ refusal is not re-offered even once: if the re-listing carried a timestamp above
 the running high, `admit` raises the watermark and claims the id into the
 boundary set before `emitted` answers, so the next tick's floor refuses the same
 item on the same id; if it did not, the traversal ends with the watermark above
-it and an inclusive `since` never returns it again. So both windows heal on the
-item's next update and neither heals without one.
+it and an inclusive `since` never returns it again. The pulls pass reaches the
+same end by its own route: a pushed-down re-listing is observed even though it
+is refused, so `advancePullsHigh` raises `work.pulls_high` to its new timestamp
+and claims its number, `finishPulls` publishes both, and the next poll refuses
+it again on `updated === high && capturedAtHigh.has(number)`. So both windows
+heal on the item's next update and neither heals without one.
 
 ### What a landed snapshot would be worth {#reach-value}
 
@@ -340,11 +348,15 @@ the dedup in front of it, both of which LLP 0023 settled.
   PR #1347 it bounds two identity sets rather than one, and not the same amount
   of history each: the boundary sets hold one watermark second's worth, and
   `work.gate_emitted` a sliding window of one traversal's most recent
-  admissions. The third set that outlives a page, `work.pulls_emitted`, sits
-  outside the cap entirely and is bounded only by the pull count of the phase it
-  lives in. A fingerprint is the same count of strings, so the bound survives
-  any option here, but the
-  cap's own documented failure mode (overflow re-appends every tick until the
+  admissions. The other two sit outside the cap entirely: `work.pulls_emitted`
+  is bounded only by the pull count of the phase it lives in, and
+  `cursor.pulls_high_numbers` by nothing this constant reaches (`readNumbers`
+  slices nothing, and neither does `advancePullsHigh` or `finishPulls`). The
+  durable one keeps the rule by another mechanism: `advancePullsHigh` retains
+  only the numbers sitting on the boundary second, so it holds what a boundary
+  set holds without being capped to it. A fingerprint is the same count of
+  strings, so the bound survives any option here, but the cap's own documented
+  failure mode (overflow re-appends every tick until the
   watermark moves) is unchanged by all of them and is not what this asks about.
 - **Cursors are sidecar control state.** LLP 0360#cursoring puts them beside
   the table, not in `github_events`. Every option below changes the meaning of
@@ -372,10 +384,11 @@ The two `emitted` sets cost less here, and that is worth separating out. They
 live in `cursor.work`, not in the published cursor, so re-keying one costs at
 most the phase in flight when the release lands: `readWork` drops a value it
 cannot read and the phase resumes with an empty set, which re-admits whatever
-that traversal had already appended (the #1345 duplicate, once). Neither needs a
-schema bump. `work.pulls_emitted` does share `pulls_high_numbers`' type problem:
-it is a `number[]` and `readNumbers` rejects anything that is not a positive
-integer, so a fingerprint cannot be written into it either.
+that traversal had already appended (the #1345 duplicate for the gate half,
+the #1335 one for the pulls half, once each). Neither needs a schema bump.
+`work.pulls_emitted` does share `pulls_high_numbers`' type problem: it is a
+`number[]` and `readNumbers` rejects anything that is not a positive integer,
+so a fingerprint cannot be written into it either.
 
 The schema bump is the expensive one, and more expensive than it looks. A
 discarded cursor leaves a repository with no `since` at all, and
@@ -422,7 +435,10 @@ Costs and open sub-decisions:
   its files, reviews, and commits requests each tick it flaps. Re-keying
   `pulls_emitted` extends that inside one traversal: every changed re-listing
   re-queues the pull's files, reviews and commits against the LLP 0361 budget,
-  which is part of what the id-keyed set was buying.
+  which is part of what the id-keyed set was buying. Priced against the
+  listing's order that is the narrow push-down case #reach-window records, not
+  every page, so the cost is real but small; B weighs the same half the same
+  way.
 - Carries #migration for the two published sets; the two `emitted` sets do not.
 
 ### B. A content fingerprint only where a snapshot field exists {#option-narrow}
@@ -521,8 +537,9 @@ green. An arm covering the pulls pass owes one more: that the boundary second's
 than staled (#reach) and a snapshot-only assertion would pass without them. An
 arm claiming #reach's traversal-long window owes the #1353 probe as well: a
 two-page traversal in which an item changes between its two sightings appends
-both snapshots, with the pagination-duplicate tests PR #1347 added still green,
-since those pin the case the `emitted` sets exist for.
+both snapshots, with the pagination-duplicate tests still green, PR #1340's for
+the pulls lane as well as PR #1347's for the gate lane, since those pin the case
+the `emitted` sets exist for.
 
 ## References
 
