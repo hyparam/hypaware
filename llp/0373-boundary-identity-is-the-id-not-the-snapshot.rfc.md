@@ -16,18 +16,20 @@ of this identity exists to keep, and "the cursor retains observed pull numbers",
 the separate set the comments pass types its rows from),
 [LLP 0032](./0032-github-llm-graph-bridge.decision.md) (the natural keys the
 event ids are built from), [LLP 0023](./0023-context-graph-projection.decision.md)
-(#merge-policy the order-independent props merge that decides what a second
-snapshot is worth downstream), hyparam/hypaware#1333,
+(#merge-policy the order-independent props merge and #pre-write-dedup the
+committed-id filter in front of it: together they decide what a second snapshot
+is worth downstream), hyparam/hypaware#1333,
 hyparam/hypaware#1284 (the unguarded behavior this guard replaced), PR #1330
 
-> Every `since`-windowed GitHub capture pass refuses an item it has already
+> Every incremental GitHub capture pass refuses an item it has already
 > captured at exactly the watermark second, and it recognizes "already
 > captured" by the item's stable event id. An item updated twice inside one
 > wall-clock second therefore keeps the identity it was first captured under,
-> and its second snapshot never lands. Curing that means keying the guard on
-> the row's content rather than its identity, across four passes whose durable
-> boundary state has two different shapes and one of which (`pullChangedSince`)
-> settled this trade before the guard existed. This document states the defect,
+> and its second snapshot never lands; for a pull, neither do the reviews and
+> changed files of that second. Curing that means keying the guard on the row's
+> content rather than its identity, across four passes whose durable boundary
+> state has two different shapes and one of which (`pullChangedSince`) settled
+> this trade before the guard existed. This document states the defect,
 > measures which passes it can actually damage, and lists the options. It
 > decides nothing.
 
@@ -65,10 +67,17 @@ Affected code at `origin/master` (`610aacfc`):
   `cursor.pulls_high_numbers`, a `number[]` of PR numbers validated by
   `readNumbers` as positive integers.
 
-Both exist because GitHub's `since` is inclusive and its timestamps are
-second-granular, so every tick re-fetches whatever sits exactly on the
-watermark. Advancing the watermark past that second instead would lose an item
-stamped in the same second but published after the request, which the tests
+Both exist because GitHub's timestamps are second-granular and every tick
+re-reads the watermark second. For issues, commits and comments that is the
+server's inclusive `since`. The pulls listing takes no `since` at all
+(`github_client.js`, `listPullRequestsPage`: `sort=updated&direction=desc`
+plus an `If-None-Match`); it is windowed client-side by `work.baseline_pulls`
+and the `olderThan` stop condition, which reaches the same equal-second overlap
+by a different route. "Four `since`-windowed passes" is the issue's phrasing,
+and it is loose in exactly that one place.
+
+Advancing the watermark past that second instead would lose an item stamped in
+the same second but published after the request, which the tests
 "an item tied at the watermark but not yet captured is still captured next tick"
 and "new activity does not drag the already-captured boundary rows back in"
 (`test/plugins/github-capture.test.js`) both pin. Removing the guard is
@@ -79,9 +88,10 @@ So the guard is right and the identity it uses is the question.
 
 ## How far the defect actually reaches {#reach}
 
-The four passes do not share the exposure, because the guard only loses what
-the captured row would have recorded differently. `base()` writes a fixed
-column set (LLP 0360#concrete-columns) and each pass fills a known subset:
+The four passes do not share the exposure. What a refusal loses is what the
+captured row would have recorded differently, plus, on the pulls pass, what the
+item's admission would have gone on to fetch. `base()` writes a fixed column
+set (LLP 0360#concrete-columns) and each pass fills a known subset:
 
 - **issues** (`issueRow`): `actor_login`, `actor_type`, `number`, `state`,
   `created_at`. `state` is `open` or `closed` and changes over an item's life.
@@ -90,7 +100,14 @@ column set (LLP 0360#concrete-columns) and each pass fills a known subset:
   `state` resolving to `merged` when `merged_at` is set. **Exposed**, and it
   carries the fan-out: an admitted pull re-queues its files, reviews, and
   commits sub-resources, so re-admission spends requests against the LLP 0361
-  budget, not just a row.
+  budget, not just a row. The fan-out also runs the other way, and this is the
+  one place the guard costs more than a snapshot. `work.pull_tasks` is built
+  only from the pulls that page admitted, and `review` and `pull_request_file`
+  rows reach the table by no other route, so a pull refused at the boundary
+  second withholds any review submitted or file changed in that second. Those
+  rows land when the pull is next admitted; if the second update was the pull's
+  last activity - a merge, typically - they never land at all. That is a
+  dropped row, not a stale one.
 - **commits** (`commitRow`): `actor_login`, `actor_type`, `sha`, `pr_number`,
   `created_at`, gated on `commitTime`. A commit's content is its identity: a
   changed commit is a different sha and therefore a different event id, which
@@ -105,10 +122,12 @@ column set (LLP 0360#concrete-columns) and each pass fills a known subset:
 - **comments** (`commentRow`): `actor_login`, `actor_type`, `number`,
   `created_at`, gated on `updated_at ?? created_at`. Editing a comment moves
   `updated_at` (not a stored column) and the body (never stored, LLP 0360), so
-  nothing the comment itself carries can change without changing the event id.
-  **Exposed through `event_type` only.** That column is not read off the
-  comment: `pull_request_comment` versus `issue_comment` is decided by whether
-  the comment's subject number is in `prNumbers`, the run-varying set seeded
+  no content the comment carries reaches a stored column, and `actor_login` /
+  `actor_type` are read off `c.user` and carry the same account-resolution
+  caveat recorded for commits above. **Exposed through `event_type`.** That
+  column is not read off the comment: `pull_request_comment` versus
+  `issue_comment` is decided by whether the comment's subject number is in
+  `prNumbers`, the run-varying set seeded
   from `cursor.pull_numbers` and extended by the same tick's issues and pulls
   pages (the retention LLP 0361#page-work describes). That set only grows, so a
   comment first typed `issue_comment` because its pull had not been sighted is
@@ -119,31 +138,58 @@ column set (LLP 0360#concrete-columns) and each pass fills a known subset:
   snapshot. A tick that resumes straight into a budget-split comments phase is
   the easiest way to reach it, because it runs neither listing that would have
   sighted the pull. Not cosmetic downstream: the `commented` edge is built off
-  the event type (`graph_contract.js:201-202`, `actorTo('commented', 'Issue',
-  'issue_comment', ...)` and its `PullRequest` twin), so the actor is attached
-  to the wrong node kind.
+  the event type (`github/src/graph_contract.js:201-202`,
+  `actorTo('commented', 'Issue', 'issue_comment', ...)` and its `PullRequest`
+  twin), so the actor is attached to the wrong node kind, and because edges are
+  id-addressed too a later corrected row mints the right edge beside the wrong
+  one rather than replacing it.
 
 The observable defect is therefore `state` (and the pull `payload`) on the
-issues and pulls passes, plus a comment's `event_type` discriminator, in the
-window where two updates land inside one second with no later activity on the
-item.
+issues and pulls passes, the reviews and changed files of a refused pull's
+boundary second, and a comment's `event_type` discriminator, in the window
+where two updates land inside one second with no later activity on the item.
 
-Downstream, one more measurement bears on what a fix is worth. The graph's
-props merge is order-independent by design (LLP 0023#merge-policy,
-`mergeRow`/`propsValueWins` in `context-graph/src/project.js`): the value from
-the earliest `first_seen` wins, and equal times tie-break on the stable JSON
-encoding. `Issue` and `PullRequest` nodes take `firstSeen: r.created_at`, the
-item's creation time, which is identical across every snapshot of that item, so
-the state prop always resolves by the lexicographic tie-break: `closed` beats
-`open`, `closed` beats `merged` beats `open`. So landing a second snapshot
-changes the graph exactly when the tie-break agrees with recency, which is the
-issue's own example: `open` then `closed` inside one second leaves the node
-reading `open` today and reading `closed` once the refused snapshot lands. The
-case it does not change is the reopen (`closed` then `open`), where the
-tie-break keeps `closed` either way. The defect is therefore visible in the
-graph, not only in raw SQL over `github_events`, for precisely the transition
-#1333 reports. That is an observation about the value of each option, not a
-proposal to change the merge policy, which LLP 0023 settled.
+One measurement bounds what any arm can buy before the question of downstream
+value arises. `github_events` has no capture-time column
+(`dataset.js`, `GITHUB_EVENTS_COLUMNS`) and one partition
+(`PARTITION_LABEL = 'all'`); the only monotonic value, `_hyp_ingest_seq`, is an
+`INTERNAL_FIELDS` column stripped from query output and from every `readRows`
+consumer (`src/core/cache/streaming-reader.js`). Two snapshots of one item
+therefore share `event_id` and `created_at` and differ only in `state`, with no
+column a reader can order them by, and #constraints forbids an arm from adding
+one. So landing the second snapshot makes the newer state present, not
+readable-as-current: whichever arm is chosen has to say what a consumer does
+with two rows. The #decision proof obligation below is about capture, not about
+resolution.
+
+Downstream, a second measurement bears on what a fix is worth, and it turns on
+two mechanisms rather than one. The graph's props merge is order-independent by
+design (LLP 0023#merge-policy, `mergeRow`/`propsValueWins` in
+`context-graph/src/project.js`): the value from the earliest `first_seen` wins,
+and equal times tie-break on the stable JSON encoding. `Issue` and
+`PullRequest` nodes take `firstSeen: r.created_at`, the item's creation time,
+which is identical across every snapshot of that item, so within one projection
+run the state prop resolves by the lexicographic tie-break: `closed` beats
+`merged` beats `open`. But a run reaches that merge only for a node it has not
+already committed. `node_id` is `sha('node\0<type>\0<natural key>')`
+(`context-graph/src/ids.js`) and does not cover `props`, and `dedupExisting`
+drops every built row whose id is already in the `node` dataset, so no later
+run can revise a committed node's props: `graph project` is on demand and
+append-only ("built on demand and never updates itself", the `graph` group help
+in `context-graph/src/index.js`), and `graph compact` only merges duplicate
+committed rows, of which this path produces none.
+
+So landing the second snapshot changes the graph only when it lands before the
+item's node is first projected. Then the tie-break sees both rows and, for the
+`open`-then-`closed` transition #1333 reports, resolves to `closed`. On a graph
+already projected from the first snapshot the refused row would change nothing
+even if it landed, and neither would the eventual unrefused update that follows
+it. There the loss shows only as the missing row in `github_events` (with the
+ordering caveat above) and in a graph projected afresh after it lands. The
+reopen (`closed` then `open`) does not change either way, because the tie-break
+keeps `closed`. That is an observation
+about the value of each option, not a proposal to change the merge policy or
+the dedup in front of it, both of which LLP 0023 settled.
 
 ## What the corpus already settles {#constraints}
 
@@ -210,9 +256,12 @@ arm that makes the four passes consistent in mechanism.
 
 Costs and open sub-decisions:
 
-- It buys nothing on commits, and on comments only the `event_type` case in
-  #reach, so on those two passes the fingerprint is mostly a more expensive
-  spelling of the event id; it enlarges the sidecar's per-entry size on all four.
+- It buys nothing on commits, and on comments it does not buy the `event_type`
+  case either: rows are append-only and an edge id varies with its destination
+  node, so admitting the corrected row adds a `pull_request_comment` row and a
+  second `commented` edge beside the wrong ones rather than replacing them. On
+  those two passes the fingerprint is mostly a more expensive spelling of the
+  event id, and it enlarges the sidecar's per-entry size on all four.
 - Fingerprint input has to be pinned exactly, because it is durable state read
   by a later release: which columns, what encoding, and what happens when a
   column is added to `github_events` later (a changed input silently re-admits
@@ -226,9 +275,10 @@ Costs and open sub-decisions:
 Issues and pulls key on identity plus the mutable snapshot fields (`state`, and
 the pull `payload`); commits and comments stay id-keyed, because nothing those
 items themselves carry can differ between two snapshots. The issue's own defect
-is cured, the sidecar grows only where growth buys something, and the guard's
-rule is still one rule ("refuse a row identical to one already appended"), just
-recognized to be a no-op on two passes.
+is cured, the pulls half also recovers the dropped boundary-second reviews and
+files (#reach), the sidecar grows only where growth buys something, and the
+guard's rule is still one rule ("refuse a row identical to one already
+appended"), just recognized to be a no-op on two passes.
 
 Costs and open sub-decisions:
 
@@ -256,14 +306,18 @@ rejection stays on the record rather than being rediscovered.
 ### D. Accept and document {#option-accept}
 
 The window is two updates inside one second on one item with no later activity
-on it, the loss is one stale snapshot rather than a dropped item, and the next
-update on that item recovers the current state in `github_events` and in the
-graph alike. It is not free: for the transition #1333 reports the node reads
-`open` until that next update (see #reach), and it also accepts the comment
-`event_type` case. `openGate`'s doc comment already names the trade explicitly.
-Promote that comment to a decided position, note it on LLP 0361, and close the
-issue. This is the honest null option, and its cost is bounded by how long an
-affected item stays quiet.
+on it. On the issues pass the loss is one stale snapshot rather than a dropped
+item, and the next update on that item lands the current state in
+`github_events`. It is not free, and three of its costs are not stale-snapshot
+shaped (all from #reach): a pull refused at the boundary second withholds that
+second's reviews and changed files, permanently when the update was the pull's
+last; a graph projected between the two ticks commits the stale `state` and can
+never revise it; and the comment `event_type` misclassification is accepted
+with its `commented` edge. `openGate`'s doc comment already names the trade
+explicitly. Promote that comment to a decided position, note it on LLP 0361,
+and close the issue. This is the honest null option, and its cost is bounded by
+how long an affected item stays quiet - except for a pull whose refused update
+was its last, where the boundary second's reviews and files are lost for good.
 
 ## Decision requested {#decision}
 
@@ -275,11 +329,13 @@ affected item stays quiet.
 3. The #migration arm: schema bump and full re-poll, one transitional
    re-admission of the boundary second, or a dual-shape read for one release.
 
-The proof obligation from issue #1333 carries over unchanged: a regression test
-in which an item updated twice inside one second has its second snapshot
-captured on the following tick, exercised across the passes the chosen arm
-claims to cover, and the existing boundary tests in
-`test/plugins/github-capture.test.js` still green.
+The proof obligation from issue #1333 carries over: a regression test in which
+an item updated twice inside one second has its second snapshot captured on the
+following tick, exercised across the passes the chosen arm claims to cover, and
+the existing boundary tests in `test/plugins/github-capture.test.js` still
+green. An arm covering the pulls pass owes one more: that the boundary second's
+`review` and `pull_request_file` rows land too, since those are dropped rather
+than staled (#reach) and a snapshot-only assertion would pass without them.
 
 ## References
 
@@ -289,6 +345,8 @@ claims to cover, and the existing boundary tests in
   (`openGate`, `pullChangedSince`, `advancePullsHigh`, the row builders)
 - `hypaware-core/plugins-workspace/github/src/cursors.js`
   (`SCHEMA_VERSION`, `MAX_BOUNDARY_IDS`, `readBoundaryIds`, `readNumbers`)
+- `hypaware-core/plugins-workspace/github/src/graph_contract.js`
+  (the `commented` edge rules keyed on `event_type`)
 - `hypaware-core/plugins-workspace/context-graph/src/project.js`
-  (`mergeRow`, `propsValueWins`)
+  (`mergeRow`, `propsValueWins`, `dedupExisting`) and `ids.js` (`nodeId`)
 - `test/plugins/github-capture.test.js` (the boundary tests any arm must keep)
