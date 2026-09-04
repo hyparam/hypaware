@@ -375,6 +375,7 @@ function failingInventoryRuntime(stateDir, err, onError = () => {}) {
     config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
     observedRepos: {
       async list() { throw err },
+      lastKnown() { return ['acme/widgets'] },
       revalidationPending() { return false },
     },
     clientFactory: () => ({
@@ -429,6 +430,34 @@ test('a failed session_repos inventory read does not retire backlog the cursors 
     report.pending,
     true,
     'clearing pending here would push a saved continuation from the backlog cadence back to a full poll interval',
+  )
+})
+
+test('a failed session_repos inventory read counts only continuations the live inventory still holds', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-stale-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // Nothing prunes the cursor sidecar, so a repository that left the inventory
+  // keeps the continuation its last tick saved: `acme/retired` contracted out
+  // of the session evidence, `acme/ignored` was added to `ignore[]`. Neither
+  // can be captured again, so neither is backlog a later tick could retire.
+  writeCursors(stateDir, {
+    schema_version: 1,
+    repos: {
+      'acme/retired': { work: { mode: 'poll', phase: 'issues' } },
+      'acme/ignored': { work: { mode: 'poll', phase: 'pulls' } },
+    },
+  })
+  const runtime = failingInventoryRuntime(stateDir, new Error('cache partition unreadable'))
+  runtime.config.ignore = ['Acme/Ignored']
+  runtime.observedRepos.lastKnown = () => ['acme/ignored', 'acme/widgets']
+
+  const report = await runCaptureTick(runtime, { mode: 'poll' })
+
+  assert.equal(report.errors.length, 1)
+  assert.equal(
+    report.pending,
+    false,
+    'a continuation no selectable repository holds would pin a failing 24h source to the backlog cadence forever',
   )
 })
 
