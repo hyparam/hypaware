@@ -274,7 +274,25 @@ for (const scenario of [
     assert.equal(payload.providers[0].provider, 'tester')
     assert.equal(payload.providers[0].status, 'failed')
   })
+
+  // These three paths skip the append and resume the provider generator, so a
+  // provider that records per-input progress on resume would mark the input
+  // done against rows nothing wrote. The count is the runner telling it.
+  test(`runBackfill counts the unlanded item on the run context for ${scenario.name}`, async () => {
+    const { ctx, runContexts, appended } = makeCtx(scenario.options)
+    await runBackfill(['tester'], ctx)
+    assert.equal(appended.length, 0, 'nothing may be appended on a failing path')
+    assert.equal(runContexts.length, 1)
+    assert.equal(runContexts[0].itemsFailed, 1)
+  })
 }
+
+test('runBackfill leaves the run context item-failure count at zero when rows land', async () => {
+  const { ctx, runContexts, appended } = makeCtx()
+  assert.equal(await runBackfill(['tester'], ctx), 0)
+  assert.equal(appended.length, 1)
+  assert.equal(runContexts[0].itemsFailed, 0)
+})
 
 test('runBackfill fails with exit 1 for an unknown explicit provider', async () => {
   const { ctx, err } = makeCtx()

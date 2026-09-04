@@ -2871,6 +2871,31 @@ export interface BackfillRunContext extends BackfillPlanContext {
    * materialize/write/flush steps in dry-run mode.
    */
   dryRun: boolean
+  /**
+   * How many yielded items the runner could not land, updated before the
+   * generator is resumed. It counts the non-throwing write failures only
+   * (no materializer for the item's `kind`, a materializer targeting a
+   * different dataset, an unregistered target dataset); a throwing write
+   * aborts the run, so the generator never resumes to read the count. An
+   * item whose materializer emitted no rows is not counted, because an
+   * already imported item legitimately materializes to nothing: an
+   * unchanged count means no enumerated failure, not proof of a write.
+   *
+   * Resuming a provider generator says the runner consumed the item, not
+   * that its rows landed. A provider that records per-input progress reads
+   * this around its yields (snapshot before, compare after) and withholds
+   * that progress when the count moved, so the input is retried rather
+   * than marked done against rows that were never written.
+   *
+   * The count is meaningless under `dryRun`: that mode skips materialize
+   * and write entirely, so it lands no rows and enumerates no failure. A
+   * provider must gate per-input progress on `dryRun` as well, or a
+   * dry run would mark inputs done against a write that never happened.
+   *
+   * Optional so an older host that supplies no count keeps the previous
+   * behavior: snapshot and comparison then read the same absent value.
+   */
+  itemsFailed?: number
 }
 
 /**
