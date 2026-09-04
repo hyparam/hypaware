@@ -1,5 +1,6 @@
 // @ts-check
 
+import { MAX_BOUNDARY_IDS } from './cursors.js'
 import { commitKey, repoKey, str } from './keys.js'
 
 /**
@@ -232,11 +233,16 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
   while (true) {
     if (work.phase === 'issues') {
       if (!budget.take()) return false
+      const gate = openGate(work.issues_high, work.issues_high_ids, cursor.since?.issues, cursor.boundary?.issues)
       const page = await client.listIssuesPage(owner, name, cursor.since?.issues, pageUrl(work.page))
       for (const issue of page.items) if (issue.pull_request) prNumbers.add(issue.number)
-      await flush(page.items.filter((it) => !it.pull_request).map((it) => issueRow(repo, it)))
+      // A pull carried by the issues feed still raises the watermark, but it
+      // emits no row here, so it takes no place in the boundary set.
+      const fresh = page.items.filter((it) => gate.admit(itemTime(it), it.pull_request ? null : issueEventId(repo, it)))
+      await flush(fresh.filter((it) => !it.pull_request).map((it) => issueRow(repo, it)))
       cursor.pull_numbers = sortedNumbers(prNumbers)
-      work.issues_high = newestItemTime(work.issues_high ?? cursor.since?.issues, page.items)
+      work.issues_high = gate.high
+      work.issues_high_ids = gate.ids
       work.page = page.next
       if (page.next === null) beginPulls(work, cursor)
       continue
@@ -302,22 +308,34 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
         continue
       }
       if (!budget.take()) return false
+      const gate = openGate(work.commits_high, work.commits_high_ids, cursor.since?.commits, cursor.boundary?.commits)
       const page = await client.listCommitsPage(owner, name, cursor.since?.commits, pageUrl(work.page))
-      await flush(page.items.map((c) => commitRow(repo, c, null)))
-      work.commits_high = newestCommitTime(work.commits_high ?? cursor.since?.commits, page.items)
-      work.commit_tasks = page.items.map((c) => ({ sha: c.sha, created_at: commitDate(c) ?? undefined }))
+      const fresh = page.items.filter((c) => gate.admit(commitTime(c), commitEventId(c, null)))
+      await flush(fresh.map((c) => commitRow(repo, c, null)))
+      work.commits_high = gate.high
+      work.commits_high_ids = gate.ids
+      // Only the appended commits queue their file sub-resource: re-queueing a
+      // boundary commit re-appends its `commit_file` rows and re-spends a
+      // request, every tick.
+      work.commit_tasks = fresh.map((c) => ({ sha: c.sha, created_at: commitDate(c) ?? undefined }))
       work.page = page.next
       continue
     }
 
     if (!budget.take()) return false
+    const gate = openGate(work.comments_high, work.comments_high_ids, cursor.since?.comments, cursor.boundary?.comments)
     const page = await client.listIssueCommentsPage(owner, name, cursor.since?.comments, pageUrl(work.page))
-    await flush(page.items.map((c) => commentRow(repo, c, prNumbers)).filter((r) => r !== null))
-    work.comments_high = newestItemTime(work.comments_high ?? cursor.since?.comments, page.items)
+    const fresh = page.items.filter((c) => gate.admit(itemTime(c), commentEventId(c)))
+    await flush(fresh.map((c) => commentRow(repo, c, prNumbers)).filter((r) => r !== null))
+    work.comments_high = gate.high
+    work.comments_high_ids = gate.ids
     work.page = page.next
     if (page.next === null) {
       cursor.pull_numbers = sortedNumbers(prNumbers)
-      if (work.comments_high) setSince(cursor, 'comments', work.comments_high)
+      if (work.comments_high) {
+        setSince(cursor, 'comments', work.comments_high)
+        setBoundary(cursor, 'comments', work.comments_high_ids)
+      }
       delete cursor.work
       return true
     }
@@ -385,8 +403,12 @@ async function drainPullTask({ client, owner, name, repo, tasks, budget, flush }
  * @param {GithubRepoWork} work @param {RepoCursor} cursor
  */
 function beginPulls(work, cursor) {
-  if (work.issues_high) setSince(cursor, 'issues', work.issues_high)
+  if (work.issues_high) {
+    setSince(cursor, 'issues', work.issues_high)
+    setBoundary(cursor, 'issues', work.issues_high_ids)
+  }
   delete work.issues_high
+  delete work.issues_high_ids
   work.phase = 'pulls'
   delete work.page
   work.baseline_pulls = cursor.since?.pulls
@@ -432,8 +454,12 @@ function finishPulls(work, cursor) {
  * @param {GithubRepoWork} work @param {RepoCursor} cursor
  */
 function finishCommits(work, cursor) {
-  if (work.commits_high) setSince(cursor, 'commits', work.commits_high)
+  if (work.commits_high) {
+    setSince(cursor, 'commits', work.commits_high)
+    setBoundary(cursor, 'commits', work.commits_high_ids)
+  }
   delete work.commits_high
+  delete work.commits_high_ids
   work.phase = 'comments'
   delete work.page
 }
@@ -446,7 +472,7 @@ function finishCommits(work, cursor) {
  * @returns {Record<string, unknown>}
  */
 function issueRow(repo, it) {
-  return base('issue', `issue:${repoKey(repo)}#${it.number}`, repo, {
+  return base('issue', issueEventId(repo, it), repo, {
     actor_login: loginOf(it.user),
     actor_type: typeOf(it.user),
     number: it.number,
@@ -513,8 +539,7 @@ function reviewRow(repo, pr, rv) {
  * @returns {Record<string, unknown>}
  */
 function commitRow(repo, c, prNumber) {
-  const id = prNumber == null ? `commit:${commitKey(c.sha)}` : `commit:${commitKey(c.sha)}:pr${prNumber}`
-  return base('commit', id, repo, {
+  return base('commit', commitEventId(c, prNumber), repo, {
     actor_login: loginOf(c.author),
     actor_type: typeOf(c.author),
     sha: str(c.sha),
@@ -550,7 +575,7 @@ function commentRow(repo, c, prNumbers) {
   const number = numberFromIssueUrl(c.issue_url)
   if (number == null) return null
   const onPr = prNumbers.has(number)
-  return base(onPr ? 'pull_request_comment' : 'issue_comment', `comment:${c.id}`, repo, {
+  return base(onPr ? 'pull_request_comment' : 'issue_comment', commentEventId(c), repo, {
     actor_login: loginOf(c.user),
     actor_type: typeOf(c.user),
     number,
@@ -691,38 +716,131 @@ function newestPullTime(high, pulls) {
   return max
 }
 
-/**
- * @param {string | undefined} high
- * @param {Array<GithubIssue | GithubComment>} rows
- * @returns {string | undefined}
+/** The field GitHub windows the issues-family `since` on.
+ *
+ * @param {GithubIssue | GithubComment} item @returns {string | undefined}
  */
-function newestItemTime(high, rows) {
-  let max = high
-  for (const row of rows) {
-    const value = row.updated_at ?? row.created_at
-    if (value && (!max || value > max)) max = value
-  }
-  return max
+function itemTime(item) {
+  return item.updated_at ?? item.created_at
+}
+
+/** @param {GithubCommit} commit @returns {string | undefined} */
+function commitTime(commit) {
+  return commit.commit?.committer?.date ?? commit.commit?.author?.date
+}
+
+/** @param {string} repo @param {GithubIssue} it */
+function issueEventId(repo, it) {
+  return `issue:${repoKey(repo)}#${it.number}`
+}
+
+/** @param {GithubCommit} c @param {number | null} prNumber */
+function commitEventId(c, prNumber) {
+  return prNumber == null ? `commit:${commitKey(c.sha)}` : `commit:${commitKey(c.sha)}:pr${prNumber}`
+}
+
+/** @param {GithubComment} c */
+function commentEventId(c) {
+  return `comment:${c.id}`
 }
 
 /**
- * @param {string | undefined} high
- * @param {GithubCommit[]} commits
- * @returns {string | undefined}
+ * The high-water gate for one `since`-windowed pass (issues, commits,
+ * comments): it raises the watermark and answers what has not been appended.
+ *
+ * GitHub's `since` is INCLUSIVE ("at or after") and the watermark is the
+ * newest captured item's own second-granularity timestamp, so every tick
+ * re-fetches whatever sits exactly on it. Pushing the watermark past that
+ * second instead would lose an item stamped in the same second but published
+ * after our request. The pulls pass already refuses that trade
+ * (`pullChangedSince`); this is the same guard for the other three passes.
+ * Carrying the ids ON the watermark costs one timestamp's worth of identity,
+ * never a repository's history.
+ *
+ * Two sets, not one. `published`/`publishedIds` is the **floor**: the request
+ * carries the published watermark for every page of the pass (`setSince` runs
+ * at the phase boundary, not per page), so the floor's items come back on each
+ * of those pages and must be refused throughout. `staged`/`stagedIds` is the
+ * running maximum on `work`, which is what gets published next. Collapsing the
+ * two loses the floor the moment anything newer arrives, and one new item is
+ * routinely enough to reach the boundary rows behind it (`/commits` is
+ * reverse-chronological, `/issues` defaults to `sort=created` descending).
+ * The floor is a static set for the whole pass, so `admit` does not depend on
+ * the order a listing arrives in, which is what makes it right even though
+ * none of these endpoints orders on `updated_at`, the field the gate windows
+ * on. Below the floor nothing is refused: an inclusive `since` cannot return
+ * those. Keeping both means the gate resumes correctly from whichever of the
+ * pair survived a partial tick (LLP 0360#cursoring).
+ *
+ * What the gate does drop: an item re-updated inside the same second it was
+ * captured keeps its `updated_at`, so the floor refuses it by identity and the
+ * newer snapshot never lands. That is the trade `pullChangedSince` already
+ * makes; curing it needs a content fingerprint, not a bare event id.
+ *
+ * @ref LLP 0360#resource-bounds [constrained-by]: identity carried across ticks is one watermark second's worth, not a repository's history
+ *
+ * @param {string | undefined} staged
+ * @param {string[] | undefined} stagedIds
+ * @param {string | undefined} published
+ * @param {string[] | undefined} publishedIds
  */
-function newestCommitTime(high, commits) {
-  let max = high
-  for (const commit of commits) {
-    const value = commit.commit?.committer?.date ?? commit.commit?.author?.date
-    if (value && (!max || value > max)) max = value
+function openGate(staged, stagedIds, published, publishedIds) {
+  let high = staged ?? published
+  let ids = new Set(staged === undefined ? publishedIds : stagedIds)
+  const floorIds = new Set(publishedIds)
+  return {
+    get high() {
+      return high
+    },
+    get ids() {
+      return ids.size > 0 ? [...ids].slice(0, MAX_BOUNDARY_IDS) : undefined
+    },
+    /**
+     * A null `id` raises the watermark only: the caller emits no row for that
+     * item, so it must not claim a place in the boundary set.
+     *
+     * @param {string | undefined} at
+     * @param {string | null} id
+     * @returns {boolean} whether the pass should append this item
+     */
+    admit(at, id) {
+      if (at && (!high || at > high)) {
+        high = at
+        ids = new Set()
+      }
+      if (id === null) return true
+      if (published !== undefined && at === published && floorIds.has(id)) return false
+      if (!at || at !== high) return true
+      if (ids.has(id)) return false
+      ids.add(id)
+      return true
+    },
   }
-  return max
 }
 
 /** @param {RepoCursor} cursor @param {'issues' | 'pulls' | 'commits' | 'comments'} key @param {string} value */
 function setSince(cursor, key, value) {
   if (!cursor.since) cursor.since = {}
   cursor.since[key] = value
+}
+
+/**
+ * Publish (or clear) the identities sitting exactly on a phase's watermark.
+ * Bounded by `MAX_BOUNDARY_IDS` on the way out as well as on the way back in,
+ * so the sidecar cannot grow without limit and a written set always survives
+ * its own read.
+ *
+ * @param {RepoCursor} cursor
+ * @param {'issues' | 'commits' | 'comments'} key
+ * @param {string[] | undefined} ids
+ */
+function setBoundary(cursor, key, ids) {
+  if (!ids || ids.length === 0) {
+    if (cursor.boundary) delete cursor.boundary[key]
+    return
+  }
+  if (!cursor.boundary) cursor.boundary = {}
+  cursor.boundary[key] = ids
 }
 
 /** @param {Set<number>} values */

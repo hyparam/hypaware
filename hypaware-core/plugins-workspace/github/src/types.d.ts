@@ -245,6 +245,13 @@ export interface ObservedRepoRevalidationState {
  */
 export interface RepoCursor {
   since?: { issues?: string; commits?: string; comments?: string; pulls?: string }
+  /**
+   * Event ids sitting exactly ON the matching `since` watermark. GitHub's
+   * `since` is inclusive, so those items come back every tick; carrying their
+   * identity is what stops them being appended twice without pushing the
+   * watermark past an item stamped in the same second (issue #1284).
+   */
+  boundary?: { issues?: string[]; commits?: string[]; comments?: string[] }
   etag?: Record<string, string>
   /**
    * Numbers known to be pull requests, from either listing: what discriminates
@@ -303,6 +310,11 @@ export interface GithubRepoWork {
   pulls_high_numbers?: number[]
   commits_high?: string
   comments_high?: string
+  // The boundary identities staged alongside each `*_high`, published into
+  // `RepoCursor.boundary` at the same phase boundary.
+  issues_high_ids?: string[]
+  commits_high_ids?: string[]
+  comments_high_ids?: string[]
   pulls_etag?: string
   pull_tasks?: GithubPullTask[]
   commit_tasks?: GithubCommitTask[]

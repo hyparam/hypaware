@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto'
 
 const STATE_FILE = 'github-cursors.json'
 const SCHEMA_VERSION = 1
+export const MAX_BOUNDARY_IDS = 1000
 
 /**
  * @param {string} stateDir
@@ -87,6 +88,16 @@ function readRepoCursor(value) {
     }
     if (Object.keys(since).length > 0) cursor.since = since
   }
+  if (v.boundary && typeof v.boundary === 'object') {
+    const b = /** @type {Record<string, unknown>} */ (v.boundary)
+    /** @type {NonNullable<RepoCursor['boundary']>} */
+    const boundary = {}
+    for (const k of /** @type {const} */ (['issues', 'commits', 'comments'])) {
+      const ids = readBoundaryIds(b[k])
+      if (ids) boundary[k] = ids
+    }
+    if (Object.keys(boundary).length > 0) cursor.boundary = boundary
+  }
   if (v.etag && typeof v.etag === 'object') {
     /** @type {Record<string, string>} */
     const etag = {}
@@ -123,6 +134,12 @@ function readWork(value) {
   if (typeof v.commits_high === 'string') work.commits_high = v.commits_high
   if (typeof v.comments_high === 'string') work.comments_high = v.comments_high
   if (typeof v.pulls_etag === 'string') work.pulls_etag = v.pulls_etag
+  const issuesIds = readBoundaryIds(v.issues_high_ids)
+  if (issuesIds) work.issues_high_ids = issuesIds
+  const commitsIds = readBoundaryIds(v.commits_high_ids)
+  if (commitsIds) work.commits_high_ids = commitsIds
+  const commentsIds = readBoundaryIds(v.comments_high_ids)
+  if (commentsIds) work.comments_high_ids = commentsIds
   if (Array.isArray(v.pull_tasks)) work.pull_tasks = v.pull_tasks.map(readPullTask).filter((x) => x !== null).slice(0, 100)
   if (Array.isArray(v.commit_tasks)) work.commit_tasks = v.commit_tasks.map(readCommitTask).filter((x) => x !== null).slice(0, 100)
   return work
@@ -132,6 +149,29 @@ function readWork(value) {
 function readNumbers(value) {
   if (!Array.isArray(value)) return null
   return [...new Set(value.filter((n) => Number.isSafeInteger(n) && n > 0))]
+}
+
+/**
+ * Boundary event ids read back from the sidecar, capped like the task lists
+ * are. `openGate` applies the same cap on the way out, so a written set always
+ * survives its own read and the sidecar cannot grow without limit.
+ *
+ * The cap is a bound, not a cure. A boundary set holds one watermark second's
+ * worth of items, so overflowing it means more than `MAX_BOUNDARY_IDS` items
+ * share one second: a bulk sweep, or a rewrite that restamps thousands of
+ * commits. The overflow sits outside the guard, so those items are re-appended,
+ * and re-spend their sub-resource requests, on every tick until something newer
+ * moves the watermark off that second. Better than the unguarded behavior
+ * #1284 reported, but the same shape of loop. Trading it for a bounded loss
+ * (advancing the watermark past a second that will not fit) is a design
+ * decision, not something a cap decides.
+ *
+ * @param {unknown} value @returns {string[] | null}
+ */
+function readBoundaryIds(value) {
+  if (!Array.isArray(value)) return null
+  const ids = [...new Set(value.filter((id) => typeof id === 'string' && id !== ''))].slice(0, MAX_BOUNDARY_IDS)
+  return ids.length > 0 ? ids : null
 }
 
 /** @param {unknown} value @returns {GithubPullTask | null} */
