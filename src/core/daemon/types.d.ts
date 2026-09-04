@@ -188,6 +188,7 @@ export type StatusDiagnosticKind =
   | 'maintenance_partitions_skipped'
   | 'capture_gap'
   | 'cache_flush_failing'
+  | 'installed_plugin_shadowed'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the

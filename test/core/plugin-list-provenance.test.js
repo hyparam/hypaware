@@ -17,12 +17,13 @@ function makeBuf() {
 /**
  * @param {string} name
  * @param {string} version
+ * @param {string} [rootDir] where the active copy runs from; a bundled fixture root by default
  */
-function activePlugin(name, version) {
+function activePlugin(name, version, rootDir = `/fixtures/bundled/${name}`) {
   return /** @type {any} */ ({
     name,
     version,
-    rootDir: `/fixtures/${name}`,
+    rootDir,
     manifest: { schema_version: 1, name, version, hypaware_api: '^1.0.0', runtime: 'node', entrypoint: './index.js' },
   })
 }
@@ -55,7 +56,8 @@ test('plugin list labels an active plugin as installed when the install lock hol
       env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
       stdout: makeBuf(),
       stderr: makeBuf(),
-      plugins: [activePlugin('@hypaware/claude', '1.0.0'), activePlugin('@third-party/echo', '0.2.0')],
+      // The third-party plugin runs from its install dir, the bundled one does not.
+      plugins: [activePlugin('@hypaware/claude', '1.0.0'), activePlugin('@third-party/echo', '0.2.0', installDir)],
     })
 
     assert.equal(await runPluginList([], ctx), 0)
@@ -72,6 +74,58 @@ test('plugin list labels an active plugin as installed when the install lock hol
     assert.equal(byName.get('@hypaware/claude')?.source, 'bundled')
     assert.equal(byName.get('@third-party/echo')?.source, 'installed')
     assert.equal(byName.get('@third-party/echo')?.active, true)
+    assert.equal(byName.get('@third-party/echo')?.shadowed, undefined)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// An installed copy of a bundled name is in the lock while the bundled copy
+// is what runs (LLP 0380). Name membership in the lock would label the active
+// bundled plugin "installed"; the root directory tells the two apart, and the
+// idle lock entry is marked with the command that clears it.
+// @ref LLP 0380#bundled-copy-wins [tests]: provenance is the root that runs, and the shadowed lock entry says so
+test('plugin list marks an installed copy the bundled plugin shadows, and labels the running copy bundled', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-plugin-list-shadow-'))
+  try {
+    const stateDir = path.join(hypHome, 'hypaware')
+    await fs.mkdir(stateDir, { recursive: true })
+    const installDir = path.join(stateDir, 'plugins', '@hypaware', 'github')
+    await writeLock(stateDir, {
+      schema_version: 1,
+      plugins: {
+        '@hypaware/github': {
+          name: '@hypaware/github',
+          version: '0.9.0',
+          source: { kind: 'local-dir', raw: installDir, path: installDir },
+          install_dir: installDir,
+          content_hash: 'a'.repeat(64),
+          manifest_hash: 'b'.repeat(64),
+          installed_at: '2026-08-31T00:00:00.000Z',
+        },
+      },
+    })
+    // The active copy runs from the bundled workspace, not the install dir.
+    const ctx = /** @type {any} */ ({
+      env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+      stdout: makeBuf(),
+      stderr: makeBuf(),
+      plugins: [activePlugin('@hypaware/github', '1.31.0')],
+    })
+
+    assert.equal(await runPluginList([], ctx), 0)
+    const text = ctx.stdout.text()
+    assert.match(text, /^  @hypaware\/github@1\.31\.0  \(bundled\)$/m)
+    assert.match(text, /^  @hypaware\/github@0\.9\.0  \(shadowed: the bundled copy runs; hyp plugin remove @hypaware\/github\)$/m)
+
+    ctx.stdout = makeBuf()
+    assert.equal(await runPluginList(['--json'], ctx), 0)
+    const json = JSON.parse(ctx.stdout.text())
+    const github = json.plugins.find((/** @type {{ name: string }} */ p) => p.name === '@hypaware/github')
+    assert.equal(github.source, 'bundled')
+    assert.equal(github.version, '1.31.0')
+    assert.equal(github.active, true)
+    assert.equal(github.shadowed, true)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }

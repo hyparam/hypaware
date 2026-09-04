@@ -24,6 +24,7 @@ import { devTelemetryDir, readObservabilityEnv } from '../observability/env.js'
 import { collectConfigErrors, diagnoseV1Config, validateConfig } from '../config/validate.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { detectShadowedPlugins } from '../runtime/boot.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
@@ -976,7 +977,15 @@ export async function collectHypAwareStatus(opts = {}) {
   // validates local additions against the same plugin set the daemon
   // runs. A local plugin that invalidates the merge (capability tie,
   // unknown plugin) is dropped here, not surfaced as a config error.
-  const catalog = await buildStatusCatalog({ stateDir: stateRoot })
+  const manifests = await discoverStatusManifests({ stateDir: stateRoot })
+  const catalog = catalogFromManifests(manifests)
+  // Installed plugins a bundled name shadows: boot activates the bundled
+  // copy and skips these, so they are idle code in the lock. Read off the
+  // same discovery pass, by the same rule boot applies.
+  const shadowedInstalled = detectShadowedPlugins({
+    discovered: manifests.bundled,
+    installed: manifests.installed,
+  })
 
   // @ref LLP 0031#central-layer-is-sacrosanct [implements]: Same merge + validation pruning as boot, so status shows exactly what runs
   const merged = resolveLayeredConfig({
@@ -1118,6 +1127,20 @@ export async function collectHypAwareStatus(opts = {}) {
         pointer: err.pointer,
       })
     }
+  }
+
+  // An installed plugin in a bundled name is code that never runs: boot
+  // activates the bundled copy and warns once in the daemon log. This is the
+  // surface that names it and the one command that clears it, and it is a
+  // warning, never an outage: the machine is running the right code.
+  // @ref LLP 0380#surfaced-not-fatal [implements]: the shadow is a repairable warning on `hyp status`, not a boot failure
+  for (const name of shadowedInstalled) {
+    diagnostics.push({
+      severity: 'warning',
+      kind: 'installed_plugin_shadowed',
+      message: `installed plugin ${name} is shadowed by the bundled copy of the same name; the installed code never runs`,
+      repair: [`hyp plugin remove ${name}`],
+    })
   }
 
   // V1 advisory diagnostics layered on top.
@@ -2892,20 +2915,40 @@ function parseIsoMs(value) {
  * @returns {Promise<PluginCatalog | undefined>}
  */
 async function buildStatusCatalog({ stateDir }) {
+  return catalogFromManifests(await discoverStatusManifests({ stateDir }))
+}
+
+/**
+ * The one discovery pass behind {@link buildStatusCatalog}, exposed so the
+ * collector can also ask the manifests a question the catalog cannot answer:
+ * which installed plugins are shadowed by a bundled name. The catalog is
+ * first-writer-wins, so a shadowed installed manifest leaves no trace in it.
+ * Each discovery failure degrades to empty, never throws.
+ *
+ * @param {{ stateDir: string }} args
+ * @returns {Promise<{ bundled: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }>}
+ */
+async function discoverStatusManifests({ stateDir }) {
+  /** @type {{ loaded: LoadedManifest[], excluded: LoadedManifest[] }} */
+  let bundled = { loaded: [], excluded: [] }
+  /** @type {{ loaded: LoadedManifest[] }} */
+  let installed = { loaded: [] }
   try {
-    /** @type {LoadedManifest[]} */
-    let bundledLoaded = []
-    /** @type {LoadedManifest[]} */
-    let installedLoaded = []
-    try {
-      const bundled = await discoverBundledPlugins()
-      bundledLoaded = [...bundled.loaded, ...bundled.excluded]
-    } catch { /* bundled discovery failure is non-fatal */ }
-    try {
-      const installed = await discoverInstalledPlugins({ stateDir })
-      installedLoaded = installed.loaded
-    } catch { /* installed discovery failure is non-fatal */ }
-    return buildPluginCatalog(bundledLoaded, installedLoaded)
+    bundled = await discoverBundledPlugins()
+  } catch { /* bundled discovery failure is non-fatal */ }
+  try {
+    installed = await discoverInstalledPlugins({ stateDir })
+  } catch { /* installed discovery failure is non-fatal */ }
+  return { bundled, installed }
+}
+
+/**
+ * @param {Awaited<ReturnType<typeof discoverStatusManifests>>} manifests
+ * @returns {PluginCatalog | undefined}
+ */
+function catalogFromManifests({ bundled, installed }) {
+  try {
+    return buildPluginCatalog([...bundled.loaded, ...bundled.excluded], installed.loaded)
   } catch {
     return undefined
   }

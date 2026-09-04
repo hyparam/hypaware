@@ -231,17 +231,25 @@ export async function runPluginList(argv, ctx) {
       ...installedByName.keys(),
       ...activeByName.keys(),
     ])
-    /** @type {Array<{name: string, version: string, source: 'bundled'|'installed', active: boolean, installed_at?: string, update?: unknown}>} */
+    /** @type {Array<{name: string, version: string, source: 'bundled'|'installed', active: boolean, shadowed?: true, installed_at?: string, update?: unknown}>} */
     const plugins = []
     for (const name of Array.from(allNames).sort()) {
       const inst = installedByName.get(name)
       const act = activeByName.get(name)
       const version = act?.version ?? inst?.version ?? ''
+      // Provenance is what runs, read off the active plugin's root directory:
+      // an installed copy of a bundled name is in the lock but never active
+      // (boot runs the bundled copy), so the name reports the bundled source
+      // and carries `shadowed` for the idle lock entry.
+      // @ref LLP 0380#bundled-copy-wins [implements]: the list says which copy runs, by root directory, not by lock membership
+      const runsInstalled = !!act && !!inst && act.rootDir === inst.install_dir
+      const shadowed = !!act && !!inst && !runsInstalled
       plugins.push({
         name,
         version,
-        source: inst ? 'installed' : 'bundled',
+        source: act ? (runsInstalled ? 'installed' : 'bundled') : 'installed',
         active: !!act,
+        ...(shadowed ? { shadowed: true } : {}),
         ...(inst ? { installed_at: inst.installed_at } : {}),
         ...(inst?.update !== undefined ? { update: inst.update } : {}),
       })
@@ -254,16 +262,18 @@ export async function runPluginList(argv, ctx) {
     ctx.stdout.write('No plugins active or installed.\n')
     return 0
   }
+  // Provenance is what runs, matched by root directory the same way the
+  // `--json` branch does: an active plugin whose root is a lock entry's
+  // install_dir runs the installed copy; everything else is bundled. Name
+  // membership in the lock is not enough, since an installed copy of a
+  // bundled name sits in the lock while the bundled copy is what runs.
+  // Printing "(bundled)" for every active plugin hid that copy entirely.
+  const installDirs = new Map(installed.map((e) => [e.name, e.install_dir]))
+  const activeRoots = new Map(active.map((p) => [p.name, p.rootDir]))
   if (active.length > 0) {
-    // Provenance is read off the install lock, the same way the `--json`
-    // branch labels `source`: an active plugin that is in the lock runs the
-    // installed copy, everything else is bundled. Printing "(bundled)" for
-    // every active plugin hid an installed copy running in a bundled name's
-    // place.
-    const installedNames = new Set(installed.map((e) => e.name))
     ctx.stdout.write('Active plugins (from current boot):\n')
     for (const p of active) {
-      const source = installedNames.has(p.name) ? 'installed' : 'bundled'
+      const source = installDirs.get(p.name) === p.rootDir ? 'installed' : 'bundled'
       ctx.stdout.write(`  ${p.name}@${p.version}  (${source})\n`)
     }
   }
@@ -271,7 +281,11 @@ export async function runPluginList(argv, ctx) {
     ctx.stdout.write('Installed plugins:\n')
     for (const entry of installed) {
       const available = entry.update?.available ? '  (update available)' : ''
-      ctx.stdout.write(`  ${entry.name}@${entry.version}${available}\n`)
+      const activeRoot = activeRoots.get(entry.name)
+      const shadowed = activeRoot !== undefined && activeRoot !== entry.install_dir
+        ? `  (shadowed: the bundled copy runs; hyp plugin remove ${entry.name})`
+        : ''
+      ctx.stdout.write(`  ${entry.name}@${entry.version}${available}${shadowed}\n`)
     }
   }
   return 0

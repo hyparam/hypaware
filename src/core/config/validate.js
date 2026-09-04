@@ -107,9 +107,10 @@ export function firstPartyPluginMetadata() {
  * work the same way they do for bundled plugins.
  *
  * First-party metadata always wins on collision: the boot path already
- * rejects installed plugins that shadow first-party names, but the
- * helper is defensive in case it is called outside the boot path (e.g.
- * `hyp config validate` from a host that has not booted).
+ * activates the bundled copy over an installed plugin that shadows a
+ * first-party name (LLP 0380), and this helper agrees with it when called
+ * outside the boot path (e.g. `hyp config validate` from a host that has
+ * not booted).
  *
  * @param {LoadedManifest[]} installedManifests
  * @param {Map<PluginName, PluginMetadata>} [base]

@@ -928,9 +928,7 @@ function orderedHelpNames(rows, category, preferred) {
 async function collectPluginHelpCommands(discovery) {
   try {
     const selection = await computeBootSelection(discovery)
-    // A shadow collision makes real boot throw before any command
-    // dispatches; advertise no plugin commands rather than ones boot rejects.
-    if (!selection || selection.shadowing.length > 0) return []
+    if (!selection) return []
 
     /** @type {Map<string, { name: string, summary: string, category?: string, audience?: string }>} */
     const out = new Map()
@@ -1038,9 +1036,6 @@ async function activateSeamCommandPlugins({ name, registry, kernel, discovery, s
     if (typeof name !== 'string' || name.length === 0 || name.startsWith('-')) return
     if (registry.match([name])) return
     const selection = await computeBootSelection(discovery)
-    // A shadow collision makes real boot throw; there is no coherent
-    // plugin set to activate from, so leave the miss path to report.
-    if (selection.shadowing.length > 0) return
     const activeNames = new Set(activePlugins.map((p) => p.name))
     const inactive = selection.selectedManifests.filter(
       (m) => !activeNames.has(/** @type {PluginName} */ (m.manifest.name))
@@ -1147,10 +1142,6 @@ export async function activatePluginDependencyClosure({
       (await computeBootSelection(
         /** @type {{ workspaceDir?: string, stateRoot: string, configPath: string }} */ (discovery)
       ))
-    // A shadow collision makes real boot throw; there is no coherent plugin
-    // set to activate from, so report every seed unresolved.
-    if (resolvedSelection.shadowing.length > 0) return { activated: [], failed: seeds }
-
     const inactive = resolvedSelection.selectedManifests.filter(
       (m) => !activeNames.has(/** @type {PluginName} */ (m.manifest.name))
     )
@@ -1275,9 +1266,6 @@ async function findInactivePluginForCommand(discovery, argv, unavailablePlugins 
   if (!Array.isArray(argv) || argv.length === 0 || argv[0].startsWith('-')) return undefined
   try {
     const selection = await computeBootSelection(discovery)
-    // A shadow collision makes real boot throw; there is no dispatchable
-    // command set to reason about, so offer no suggestion.
-    if (selection.shadowing.length > 0) return undefined
     // Selected but not running: the config is already right, so the repair is
     // to find out why the plugin did not come up, not to edit plugins[]. Boot
     // already reports that set, so read it rather than re-derive it by
