@@ -867,9 +867,10 @@ function sanitizeResponseHeaders(headers) {
 
 /**
  * Answer a request this listener will not forward, discarding whatever body it
- * carries under the shared cap in `drainRequestBody`. The drain runs before
- * the answer is written, because it is what decides whether this connection
- * can be answered as a reusable one.
+ * carries under the shared cap in `drainRequestBody`. The drain is SET UP
+ * before the answer is written, because that is what decides whether this
+ * connection can be answered as a reusable one. The bytes themselves are read
+ * after the head is on the wire, which is the order the helper documents.
  *
  * The upstream-failure site is the one here that refuses a request already
  * handed to a pipe, and it arrives PAUSED: `stream.pipe()` prepends its

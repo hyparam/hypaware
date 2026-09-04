@@ -54,6 +54,14 @@ const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
  * decrypted tunnel, so the needless close bills the client a fresh handshake
  * too.
  *
+ * What the declaration bounds is the read, not the sender. A caller that
+ * declares a small body and then stops sending is answered as reusable on a
+ * connection that is not reusable yet: the rest of that body is still what
+ * the parser reads next, so the server's request timeout, not this header, is
+ * what ends it. Answering every declared body `connection: close` would end
+ * it sooner, at the cost of the pooled socket above, and the trade is made
+ * for the compliant caller, which finishes its body or drops the socket.
+ *
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
  */
@@ -73,10 +81,12 @@ export function drainRequestBody(req, res) {
   // Asked for rather than left to the implicit resume that attaching a `data`
   // listener performs, because that one is skipped on a stream already paused.
   // The control routes and the OpenCode listener reach this not yet started,
-  // where the call is a no-op. The gateway's upstream-failure refusal does
-  // not: it hands over a request the collapsing pipe already paused, because
-  // unpiping the last destination pauses the source. There this line is the
-  // only thing that drains the body, so it is not removable.
+  // except the 413 that settles mid-upload (`session_ignore.js`'s `too_large`),
+  // which reaches it already flowing behind `readJsonBody`'s own `data`
+  // listener. Both of those are a no-op here. The gateway's upstream-failure
+  // refusal is neither: it hands over a request the collapsing pipe already
+  // paused, because unpiping the last destination pauses the source. There
+  // this line is the only thing that drains the body, so it is not removable.
   req.resume()
   res.on('finish', closeIfAnswered)
   if (!fitsUnderCap(req)) res.setHeader('connection', 'close')
