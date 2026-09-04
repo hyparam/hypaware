@@ -5,6 +5,8 @@ import process from 'node:process'
 import { Attr, runRoot } from '../../../src/core/observability/index.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
+/** @import { GithubClient } from '../../../hypaware-core/plugins-workspace/github/src/types.js' */
+
 /**
  * Shared fixtures and CLI plumbing for the paired GitHub smoke flows,
  * `github_local_capture` (the admitted half of the session-evidence
@@ -56,19 +58,46 @@ export function githubSessionRow({ gatewayId, id, cwd, remote }) {
 }
 
 /**
+ * The guard for a flow that withholds no repository: it admits everything its
+ * evidence names, so there is nothing to refuse at the network seam. Named,
+ * rather than an inline `() => {}`, so a call site tells a flow with nothing
+ * to withhold apart from one that lost its guard.
+ */
+export function noWithheldRepo() {}
+
+/**
  * A deterministic stand-in for the GitHub network client: one open issue on
  * every repository the source asks about, and nothing else.
  *
  * `listViewerRepos` throws because a session-evidence inventory reaching for
  * the viewer's repository list is the failure the pair exists to catch.
  *
- * `assertRepo` is the caller's own guard, run on the reads that name a
- * repository, so a flow proving a repository is withheld fails at the network
- * seam rather than only in a row count. It defaults to a no-op.
+ * `assertRepo` is the caller's own guard, so a flow proving a repository is
+ * withheld fails at the network seam rather than only in a row count. It runs
+ * on every read that names a repository, which is every `GithubClient` method
+ * but `listViewerRepos`: guarding only the reads this fixture's pages happen
+ * to lead to would leave the seam open on the rest, and `github sync` already
+ * calls `listIssueCommentsPage` on every repository it captures.
  *
- * @param {{ assertRepo?: (owner: string, name: string) => void }} [args]
+ * It is required because an omitted guard is lost silently: the seam stops
+ * being tested and every other assertion in the flow still passes (issue
+ * #1327). A flow with nothing to withhold passes `noWithheldRepo`.
+ *
+ * The `GithubClient` return type is load-bearing, not decoration: it is what
+ * holds the paragraph above true. A repo-naming read added to the interface
+ * is a typecheck error here until this fixture serves it, so the guard cannot
+ * fall behind the surface `github sync` can reach.
+ *
+ * @param {{ assertRepo: (owner: string, name: string) => void }} args
+ * @returns {GithubClient}
  */
-export function fakeGithubClient({ assertRepo = () => {} } = {}) {
+export function fakeGithubClient(args) {
+  const assertRepo = args?.assertRepo
+  if (typeof assertRepo !== 'function') {
+    throw new TypeError(
+      "fakeGithubClient: assertRepo is required - pass the flow's guard, or noWithheldRepo when the flow withholds no repository"
+    )
+  }
   return {
     async listViewerRepos() { throw new Error('session inventory must not enumerate GitHub') },
     async listIssuesPage(owner, name) {
@@ -81,12 +110,12 @@ export function fakeGithubClient({ assertRepo = () => {} } = {}) {
       }], next: null }
     },
     async listPullRequestsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
-    async listPullRequestFilesPage() { return { items: [], next: null } },
-    async listPullRequestReviewsPage() { return { items: [], next: null } },
-    async listPullRequestCommitsPage() { return { items: [], next: null } },
+    async listPullRequestFilesPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
+    async listPullRequestReviewsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
+    async listPullRequestCommitsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
     async listCommitsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
-    async listCommitFilesPage() { return { items: [], next: null } },
-    async listIssueCommentsPage() { return { items: [], next: null } },
+    async listCommitFilesPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
+    async listIssueCommentsPage(owner, name) { assertRepo(owner, name); return { items: [], next: null } },
   }
 }
 
