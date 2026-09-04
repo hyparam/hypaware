@@ -168,7 +168,16 @@ export function createBackfillSweepDriver(opts) {
       // that waited its turn behind a long predecessor starts its own budget
       // when it starts running, not when it was enqueued. `pending` itself
       // retains the provider result for its telemetry handlers below.
-      queue = head.then(() => awaitQueued(provider, devRunId, pending))
+      //
+      // The tail is total, the way the spool's own lock chains are
+      // (`withWriteLock` / `withFlushLock` in `src/core/cache/spool.js`). A
+      // queue promise that could reject would short-circuit every `head.then`
+      // enqueued after it, so no provider would ever run again and each would
+      // log `sweep_failed` without being tried: the same permanent wedge, from
+      // the handoff that exists to prevent it.
+      queue = head
+        .then(() => awaitQueued(provider, devRunId, pending))
+        .then(() => undefined, () => undefined)
       // Fire-and-forget, with both settlements handled: `void` here means "not
       // awaited", never "not observed".
       void pending.then(
