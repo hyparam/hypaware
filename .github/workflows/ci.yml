@@ -1,3 +1,11 @@
+# Four matrix jobs per PR, times the PRs in flight, put enough concurrent cold
+# `npm i` runs against the registry to burn the whole job budget before a test
+# ran, reddening the required gate on PRs that failed nothing (issue #1313), so
+# the npm cache directory is restored across runs. package-lock.json is
+# gitignored here, so the cache key is hashed from package.json:
+# `cache-dependency-path` must name a file that exists or setup-node fails
+# looking for a lock file, and `npm ci` is unavailable for the same reason. The
+# budget absorbs a genuinely cold install rather than killing one mid-install.
 name: CI
 on:
   pull_request:
@@ -13,7 +21,7 @@ concurrency:
 jobs:
   typecheck:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       matrix:
         node-version: [22, 24]
@@ -22,12 +30,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: package.json
       - run: npm i
       - run: npm run typecheck
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       matrix:
         node-version: [22, 24]
@@ -36,6 +46,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: package.json
       - run: npm i
       - run: npm test
 
