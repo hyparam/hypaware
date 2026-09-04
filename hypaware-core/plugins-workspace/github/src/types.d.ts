@@ -308,6 +308,14 @@ export interface GithubRepoWork {
    * remaining pages would give.
    */
   pulls_high_numbers?: number[]
+  /**
+   * Pull numbers this phase has already emitted a `pull_request` row for, so a
+   * re-listing produced by the `updated` sort reshuffling under pagination
+   * emits nothing a second time. Staged because the request budget splits the
+   * phase across ticks. Absent on a phase resumed from a work descriptor
+   * written before this field existed, which guards only its remaining pages.
+   */
+  pulls_emitted?: number[]
   commits_high?: string
   comments_high?: string
   // The boundary identities staged alongside each `*_high`, published into

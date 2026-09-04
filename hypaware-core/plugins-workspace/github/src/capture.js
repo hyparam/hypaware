@@ -212,6 +212,21 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
 
   if (!cursor.work) cursor.work = { mode: requestedMode, phase: 'issues' }
   const work = cursor.work
+  // Pulls this phase has already emitted a row for. The tie guard above answers
+  // only for the boundary second, but `sort=updated&direction=desc` reshuffles
+  // under pagination at every second: a pull updated mid-traversal is listed
+  // again on a later page of the same phase, at any distance above the baseline.
+  // Its event id carries no timestamp, so the second sighting is an identical
+  // duplicate row plus a repeat fan-out of files, reviews and commits, and
+  // `flush` deduplicates one batch, not a phase. Staged on the work descriptor
+  // rather than held in memory for the same reason `pulls_high_numbers` is: the
+  // request budget splits a pulls phase across ticks, and a set that restarted
+  // empty on the resumed page would leave the duplicate exactly where the
+  // reshuffle has had the longest to produce one. Dropped by `finishPulls`, so
+  // it lives no longer than one phase; a backfill's phase is the whole
+  // repository, which is the order `cursor.pull_numbers` beside it already is.
+  /** @type {Set<number> | null} */
+  let emittedPulls = null
 
   /** @param {Record<string, unknown>[]} rows */
   async function flush(rows) {
@@ -249,6 +264,11 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
     }
 
     if (work.phase === 'pulls') {
+      // Seeded on entry to the phase, not on entry to the tick: `beginPulls`
+      // can run earlier in this same call, and a set seeded above it would
+      // carry a stale descriptor's numbers into a phase that has emitted none
+      // of them, dropping those pulls and their fan-out with no row to show it.
+      emittedPulls ??= new Set(work.pulls_emitted ?? [])
       const tasks = work.pull_tasks ?? (work.pull_tasks = [])
       if (tasks.length > 0) {
         if (!await drainPullTask({ client, owner, name, repo, tasks, budget, flush })) return false
@@ -266,7 +286,17 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
         continue
       }
       const baseline = work.baseline_pulls
-      const changed = work.mode === 'backfill' ? page.items : page.items.filter((pr) => pullChangedSince(pr, baseline, capturedAtHigh))
+      // Backfill needs the same guard and has no baseline to filter on, so every
+      // re-listing it sees is a duplicate. Suppressing one loses nothing: two
+      // sightings of a pull carry one event id.
+      /** @type {GithubPull[]} */
+      const changed = []
+      for (const pr of page.items) {
+        if (emittedPulls.has(pr.number)) continue
+        if (work.mode !== 'backfill' && !pullChangedSince(pr, baseline, capturedAtHigh)) continue
+        emittedPulls.add(pr.number)
+        changed.push(pr)
+      }
       for (const pr of page.items) {
         prNumbers.add(pr.number)
         // The guard's set has to grow across the phase's pages, not only across
@@ -279,6 +309,9 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
       }
       await flush(changed.map((pr) => pullRow(repo, pr)))
       cursor.pull_numbers = sortedNumbers(prNumbers)
+      // Staged after the rows land, like every other durable advance here: a
+      // page whose flush throws must be re-listable (LLP 0361#page-work).
+      work.pulls_emitted = sortedNumbers(emittedPulls)
       work.pull_tasks = changed.map((pr) => ({ number: pr.number, created_at: pr.created_at, phase: 'files' }))
       advancePullsHigh(work, page.items)
       // Only the first page's ETag is a usable `If-None-Match` for the next
@@ -416,6 +449,7 @@ function beginPulls(work, cursor) {
   // Carried, not restarted: a phase that ends on a 304 observes no pulls and
   // must still republish what the previous one captured at that same second.
   work.pulls_high_numbers = cursor.pulls_high_numbers ?? []
+  work.pulls_emitted = []
   work.pull_tasks = []
 }
 
@@ -441,6 +475,7 @@ function finishPulls(work, cursor) {
   delete work.baseline_pulls
   delete work.pulls_high
   delete work.pulls_high_numbers
+  delete work.pulls_emitted
   delete work.pulls_etag
   delete work.pull_tasks
   work.commit_tasks = []
