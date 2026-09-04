@@ -227,6 +227,53 @@ test('a request with no body keeps its connection reusable', async () => {
   })
 })
 
+// The cap answers `connection: close` so a pooling client never meets the
+// over-cap reset on a request it already considers finished. A body the
+// request declares to fit under the cap is drained to its end, can never reach
+// the cap, and is never reset, so it must keep its connection: closing it
+// would cost the caller a socket for nothing (issue #1346).
+test('a refusal whose declared body fits under the cap keeps its connection reusable', async () => {
+  const set = new Set(['sess-live'])
+  await withControlSockets(set, async (port) => {
+    const body = JSON.stringify({ session_id: 'sess-live' })
+    for (const refusal of [
+      { name: 'the unknown-control-path 404', method: 'POST', path: '/_hypaware/unknown/thing', status: 404 },
+      { name: 'the method-not-allowed 405', method: 'PUT', path: '/_hypaware/ignore/session', status: 405 },
+    ]) {
+      // The follow-up rides the SAME socket, because "keeps its connection
+      // reusable" is a claim about the connection, not about a header: an
+      // absent `connection: close` proves only what was advertised. A second
+      // request answered on the same socket is the reusability itself.
+      const [received, followUp] = await rawExchanges(port, [
+        `${refusal.method} ${refusal.path} HTTP/1.1\r\nHost: 127.0.0.1\r\n` +
+          `content-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+        'GET /_hypaware/ignore/session?session_id=sess-live HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n',
+      ])
+      assert.match(received, new RegExp(`^HTTP/1\\.1 ${refusal.status} `), received.slice(0, 80))
+      assert.equal(
+        /\r\nconnection: close\r\n/i.test(received),
+        false,
+        `${refusal.name} closed a connection it drained to the end: ${received.slice(0, 200)}`
+      )
+      assert.match(
+        followUp,
+        /^HTTP\/1\.1 200 /,
+        `${refusal.name} did not answer a second request on the socket it kept: ${followUp.slice(0, 200)}`
+      )
+      assert.match(followUp, /"ignored":true/)
+    }
+    // Chunked framing declares no length, so it is never known to fit even
+    // when the body is tiny, and it has to be answered as a closing one.
+    const chunked = await rawExchange(
+      port,
+      'POST /_hypaware/unknown/thing HTTP/1.1\r\nHost: 127.0.0.1\r\n' +
+        `transfer-encoding: chunked\r\n\r\n${Buffer.byteLength(body).toString(16)}\r\n${body}\r\n0\r\n\r\n`
+    )
+    assert.match(chunked, /^HTTP\/1\.1 404 /, chunked.slice(0, 80))
+    assert.match(chunked, /\r\nconnection: close\r\n/i, chunked.slice(0, 200))
+  })
+})
+
 test('isControlPath recognizes the reserved prefix at segment boundaries only', () => {
   assert.equal(isControlPath('/_hypaware'), true)
   assert.equal(isControlPath('/_hypaware/ignore/session'), true)
@@ -380,39 +427,68 @@ function streamOversizedBody(port, method, path) {
  * @param {string} request
  * @returns {Promise<string>}
  */
-function rawExchange(port, request) {
+async function rawExchange(port, request) {
+  const [received] = await rawExchanges(port, [request])
+  return received
+}
+
+/**
+ * Send `requests` in order over ONE connection, each written only once the
+ * previous reply has arrived whole, and resolve with the replies in order.
+ * A reply to anything past the first is what proves the connection survived
+ * the request before it.
+ *
+ * @param {number} port
+ * @param {string[]} requests
+ * @returns {Promise<string[]>}
+ */
+function rawExchanges(port, requests) {
   return new Promise((resolve, reject) => {
+    /** @type {string[]} */
+    const replies = []
     let received = ''
+    let sent = 0
     const socket = net.connect(port, '127.0.0.1')
     const timer = setTimeout(() => {
       socket.destroy()
-      reject(new Error(`no response after ${JSON.stringify(request)}`))
+      reject(new Error(`no response after ${JSON.stringify(requests[sent - 1])}`))
     }, 10000)
-    socket.on('connect', () => socket.write(request))
+    socket.on('connect', () => socket.write(requests[sent++]))
     socket.on('data', (chunk) => {
       received += chunk.toString('utf8')
-      const headEnd = received.indexOf('\r\n\r\n')
-      if (headEnd === -1) return
-      const head = received.slice(0, headEnd)
-      const body = received.slice(headEnd + 4)
-      // `sendJson` is `writeHead` plus `res.end(string)`, which cannot compute
-      // a length, so Node frames every one of these replies
-      // `transfer-encoding: chunked` and sends no `content-length` at all.
-      // A chunked body is complete at its zero-length terminator; returning on
-      // the head alone would race a body that lands in a second TCP read and
-      // fail the body assertions spuriously.
-      if (/\r\ntransfer-encoding: chunked/i.test(head)) {
-        if (!body.endsWith('0\r\n\r\n')) return
-      } else {
-        const match = /\r\ncontent-length: (\d+)/i.exec(head)
-        if (match && body.length < Number(match[1])) return
+      if (!replyIsComplete(received)) return
+      replies.push(received)
+      received = ''
+      if (sent < requests.length) {
+        socket.write(requests[sent++])
+        return
       }
       clearTimeout(timer)
       socket.destroy()
-      resolve(received)
+      resolve(replies)
     })
     socket.on('error', reject)
   })
+}
+
+/**
+ * Has a whole reply arrived? `sendJson` is `writeHead` plus `res.end(string)`,
+ * which cannot compute a length, so Node frames every one of these replies
+ * `transfer-encoding: chunked` and sends no `content-length` at all. A chunked
+ * body is complete at its zero-length terminator; returning on the head alone
+ * would race a body that lands in a second TCP read and fail the body
+ * assertions spuriously.
+ *
+ * @param {string} received
+ */
+function replyIsComplete(received) {
+  const headEnd = received.indexOf('\r\n\r\n')
+  if (headEnd === -1) return false
+  const head = received.slice(0, headEnd)
+  const body = received.slice(headEnd + 4)
+  if (/\r\ntransfer-encoding: chunked/i.test(head)) return body.endsWith('0\r\n\r\n')
+  const match = /\r\ncontent-length: (\d+)/i.exec(head)
+  return !(match && body.length < Number(match[1]))
 }
 
 /** @param {string} base @param {string} sessionId */
