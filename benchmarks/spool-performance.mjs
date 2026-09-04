@@ -25,8 +25,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const mode = process.argv[2] ?? 'flush'
 assert.ok(['flush', 'inspect'].includes(mode))
 const repo = process.argv[3] ?? fileURLToPath(new URL('..', import.meta.url))
-const { streamFlushFile } = await import(pathToFileURL(path.join(repo, 'src/core/cache/streaming-reader.js')))
-const { createCacheSpool, SPOOL_DIR } = await import(pathToFileURL(path.join(repo, 'src/core/cache/spool.js')))
+const { streamFlushFile } = await import(pathToFileURL(path.join(repo, 'src/core/cache/streaming-reader.js')).href)
+const { createCacheSpool, SPOOL_DIR } = await import(pathToFileURL(path.join(repo, 'src/core/cache/spool.js')).href)
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-spool-performance-'))
 try {
   const tablePath = path.join(root, 'table')
