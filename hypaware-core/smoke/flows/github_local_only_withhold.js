@@ -82,8 +82,12 @@ export async function run({ harness, expect }) {
 
   await step('capture_admits_clean_only', async () => {
     const result = await dispatchText(['github', 'sync'], first)
-    expect.that('github sync: command exited 0', result.code, (value) => value === 0)
+    // stderr first: the `assertRepo` guard below reports an admitted-but-withheld
+    // repository by throwing inside the command, which surfaces as stderr text and
+    // only then as a nonzero exit. Checking the code first would report `value=1`
+    // and discard the one line that names which repository escaped.
     expect.that('github sync: no stderr', result.stderr, (value) => value === '')
+    expect.that('github sync: command exited 0', result.code, (value) => value === 0)
     expect.that(
       'github sync: only the export-eligible session admitted a repository',
       result.stdout,
@@ -139,15 +143,20 @@ export async function run({ harness, expect }) {
   // export-eligible evidence at all.
   await step('flip_policy', () => markLocalOnly(first, cleanCwd))
 
-  // `first` stays in scope but must not be dispatched through again: its
-  // observed-repos index still holds the pre-retirement repository set over
-  // the same sidecar `second` rewrites, and would write it back.
+  // What retires the repository is this call, not which lifetime the sync below
+  // is dispatched through. `github sync` resolves its index and storage from the
+  // module-level runtime singleton at call time (`requireGithubRuntime()` in
+  // github/src/commands.js), and each activation replaces that singleton, so
+  // after this line `first`'s observed-repos index is simply orphaned: it is
+  // unreachable from the command path and cannot write its pre-retirement set
+  // back over the sidecar. `second` is still what the steps below name, because
+  // reading the assertions should not require knowing about the singleton.
   const second = await step('restart', () => bootLifetime())
 
   await step('retire_on_policy_change', async () => {
     const result = await dispatchText(['github', 'sync'], second)
+    expect.that('github sync: no stderr after the policy change', result.stderr, (value) => value === '')
     expect.that('github sync: command exited 0 after the policy change', result.code, (value) => value === 0)
-    expect.that('github sync: no stderr', result.stderr, (value) => value === '')
     expect.that(
       'github sync: the retired repository is no longer captured',
       result.stdout,
@@ -171,7 +180,7 @@ export async function run({ harness, expect }) {
   await obs.shutdown()
   const logs = await expect.logs()
   expect.that(
-    'telemetry: the first tick resolved one repository from two sessions',
+    'telemetry: the first tick carried one candidate repository into capture',
     logs,
     (rows) => rows.some((row) =>
       row.body === 'github.inventory_resolved' &&
@@ -186,12 +195,17 @@ export async function run({ harness, expect }) {
     starts,
     (rows) => rows.length === 1 && rows[0]?.attributes?.trigger === 'policy_changed' && rows[0]?.attributes?.repos === 1
   )
+  // `rows_read` is what separates the two ways `repos_confirmed` reaches 0: the
+  // pass streamed both evidence rows and the export seam dropped each one, or it
+  // streamed nothing at all and completed vacuously (an empty partition set makes
+  // `paths.every(...)` true). Only the first retires for the reason under test.
   expect.that(
-    'telemetry: the pass completed within one tick and retired the repository',
+    'telemetry: the pass read both evidence rows, confirmed neither, and retired the repository',
     logs,
     (rows) => rows.some((row) =>
       row.body === 'github.observed_repos_revalidation_completed' &&
       row.attributes?.status === 'ok' &&
+      row.attributes?.rows_read === 2 &&
       row.attributes?.repos_confirmed === 0 &&
       row.attributes?.repos_retired === 1
     )
