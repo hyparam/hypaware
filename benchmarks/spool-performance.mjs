@@ -1,7 +1,19 @@
+// @ts-check
+
 // Synthetic spool benchmark. Run each mode in a fresh process for peak RSS:
 // node --expose-gc benchmarks/spool-performance.mjs flush [repo-root]
 // node --expose-gc benchmarks/spool-performance.mjs inspect [repo-root]
-// The optional root runs the same fixture against a baseline checkout.
+// The optional root runs the same fixture against a baseline checkout, so a
+// candidate and its baseline are measured on one fixture in one Node version.
+//
+// One 16 MiB envelope of 1,024 rows, median of three fresh Node v24.2.0
+// processes on macOS arm64, before and after the fragment-retaining line
+// reader (baseline d42c7946). Setup is excluded from CPU; peak RSS is the
+// whole-process maximum. These measure the two spool read paths only, not
+// whole-daemon cost:
+//   flush    251.35 -> 64.53 ms CPU, 302.09 -> 172.42 MiB peak RSS
+//   inspect  217.43 -> 33.98 ms CPU, 290.12 -> 132.41 MiB peak RSS
+
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
