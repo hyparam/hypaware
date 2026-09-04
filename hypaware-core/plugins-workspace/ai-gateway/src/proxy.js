@@ -904,8 +904,12 @@ function rejectJson(req, res, status, body) {
     req.pause()
     closeIfAnswered()
   })
-  // A request unpiped from a failed upstream is left not-flowing, and adding a
-  // `data` listener does not restart one: the drain has to ask.
+  // Asked for rather than left to the implicit resume that attaching a `data`
+  // listener performs, because that one is skipped on a stream already paused.
+  // Every site here reaches this flowing or not yet started, the
+  // upstream-failure one included: it arrives unpiped but still flowing, so
+  // the call is a no-op today. It is what keeps the drain honest at a site
+  // that hands over a paused request.
   req.resume()
   res.on('finish', closeIfAnswered)
   // Past the cap this connection is reset, so it must not be answered as a
