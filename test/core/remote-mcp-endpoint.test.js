@@ -221,7 +221,7 @@ test('graph neighbors carries the operator selector as a transport flag', async 
   await writeToken(path.join(hypHome, 'hypaware'), 'prod', 'tok')
   const { urls } = stubMcp(t)
   const { ctx } = verbCtx(hypHome, 'https://hyp.internal')
-  const graph = verbToCommand({ ...graphNeighborsVerb, render: () => ({ text: 'graph' }) })
+  const graph = verbToCommand({ ...graphNeighborsVerb, render: () => ({ stdout: 'graph' }) })
   assert.equal(await graph.run(['seed-node', '--remote', 'prod', '--org=*'], ctx), 0)
   assert.ok(urls.every((url) => url === 'https://hyp.internal/v1/mcp?org=*'))
 })
