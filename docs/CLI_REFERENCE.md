@@ -548,6 +548,33 @@ configuration defaults.
 hyp client history providers --json
 ```
 
+#### Scheduled recovery sweeps and `backfill.window_days`
+
+Some adapters rerun their history provider on a schedule, so history the live
+capture lane never saw is recovered without you running
+`hyp client history import` by hand. `@hypaware/claude` (which also serves
+Claude Desktop) and `@hypaware/openclaw` (its transcript sweep, Lane B) both
+sweep every five minutes by default.
+
+A positive `backfill.window_days` on a plugin entry bounds that scheduled
+sweep as well as the join-time import. This is deliberate
+([LLP 0359](../llp/0359-bounded-scheduled-backfill.decision.md#sweep-context)),
+and it is easy to miss: a `window_days` set only to keep the first import
+small also caps every later recovery, so a session older than the window is
+never swept up, OpenClaw's Lane B included. Nothing is removed from disk. The
+history is only left unimported, and widening or dropping `window_days` lets
+the next sweep take it.
+
+```json
+{ "name": "@hypaware/openclaw", "config": {
+  "backfill": { "window_days": 30 }
+} }
+```
+
+With no `window_days`, the sweep is still bounded, by the cache retention
+window: `query.cache.retention.default_days` if set, otherwise 90 days. To
+stop a scheduled sweep entirely, set the same block's `on_join` to false.
+
 ### Client skill commands
 
 The visible `hyp client skills` group contains the install command:
@@ -660,6 +687,10 @@ Tune the timer in the Claude plugin config if needed:
   "backfill": { "sweep_cron": "*/10 * * * *" }
 } }
 ```
+
+The same block's `window_days`, if set, bounds this scheduled rerun as well
+as the join-time import: see "Scheduled recovery sweeps and
+`backfill.window_days`" above.
 
 To turn the schedule off, set the same block's `on_join` to false. That is the
 existing opt-out from automatic history import, and it now withholds the

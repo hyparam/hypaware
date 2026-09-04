@@ -585,6 +585,12 @@ procedure has nothing to assert about a "deferred" turn.
   ([LLP 0229 #status-derives-by-the-same-gate](../llp/0229-status-derives-attach-state-by-the-desired-gate.decision.md#status-derives-by-the-same-gate))
   applies to `claude-desktop`, not to `openclaw`, and is not what this
   procedure checks.
+- **No positive `backfill.window_days` on the `@hypaware/openclaw` config
+  entry**, or one wide enough to cover the turns you are about to hold. A
+  positive `window_days` clips the scheduled sweep, not just the join-time
+  import ([LLP 0359 #sweep-context](../llp/0359-bounded-scheduled-backfill.decision.md#sweep-context)),
+  so a transcript older than that window is never recovered by Lane B and
+  step 6 would fail for a configured reason rather than a broken one.
 
 **Related:** [LLP 0167](../llp/0167-openclaw-capture-via-config-provider-override.rfc.md)
 (the override design and the verify-results this procedure re-confirms),

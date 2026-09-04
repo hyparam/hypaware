@@ -352,6 +352,18 @@ can supply, and getting it wrong stops every automatic update on macOS while
 the observed `XPC_SERVICE_NAME` line verbatim in the release notes as the
 baseline for the next release.
 
+If the release changes what bounds an automatic import (`backfill.window_days`,
+`backfill.sweep_cron`, or the window the scheduled sweep resolves), say so in
+the release notes and name every adapter the change reaches. The bounding is
+cross-plugin, and one such bound is already in force: as of
+v1.31.0 a provider's positive `backfill.window_days` narrows its scheduled
+recovery sweep as well as its join-time import
+([LLP 0359 #sweep-context](llp/0359-bounded-scheduled-backfill.decision.md#sweep-context)),
+OpenClaw's Lane B transcript sweep included, so a window an operator set only
+to keep the first import small also caps every later recovery. Nothing is
+removed from disk, and widening or dropping the window lets the next sweep
+take the older history.
+
 <!-- neutral:llp-conventions -->
 ## LLP conventions
 

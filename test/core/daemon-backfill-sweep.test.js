@@ -193,6 +193,32 @@ test('scheduled runs receive plugin window_days and the sweep marker', async () 
   assert.equal(seen.sweep, true)
 })
 
+// The narrowing is not Claude-specific: OpenClaw's Lane B transcript sweep is
+// clipped by the same `window_days` an operator may have set only to bound the
+// join-time import, so a session older than that window is never recovered by
+// the scheduled lane. docs/CLI_REFERENCE.md and the `openclaw_capture`
+// procedure in docs/ACCEPTANCE.md disclose that; this row keeps it true.
+// @ref LLP 0359#sweep-context [tests]: a positive `backfill.window_days` narrows that provider's sweep, whichever plugin owns it
+test('an OpenClaw window_days narrows its Lane B sweep, not only the join-time import', async () => {
+  /** @type {any} */
+  let seen = null
+  const driver = driverFor({
+    contributions: [contribution({ sweep: { cron: '* * * * *' } })],
+    config: {
+      version: 2,
+      query: { cache: { retention: { default_days: 90 } } },
+      plugins: [{ name: '@hypaware/openclaw', config: { backfill: { window_days: 7 } } }],
+    },
+    runBackfill: async (args) => { seen = args; return OK },
+  })
+
+  await driver.tick({ now: at('2026-08-01T10:00:00.000Z') })
+  await new Promise((resolve) => { setImmediate(resolve) })
+  // 7, not the 90-day cache retention the same config declares.
+  assert.equal(seen.retentionDays, 7)
+  assert.equal(seen.sweep, true)
+})
+
 test('a rejected sweep run neither throws out of tick nor becomes an unhandled rejection', async () => {
   /** @type {unknown[]} */
   const unhandled = []
