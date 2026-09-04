@@ -430,3 +430,169 @@ test('a reverse-proxy-only listener still path-routes absolute-form under a fore
   assert.equal(rig.started.length, 1)
   assert.equal(rig.warns.some((w) => w.message === 'listener.host_refused'), false)
 })
+
+/**
+ * Write a POST at the rebinding barrier (a foreign `Host` on the direct
+ * origin) and stream `body` at it, resolving when the listener closes the
+ * connection. Reports the answer and how many bytes the client managed to
+ * send, which is the only sender-visible trace of a paused read.
+ *
+ * @param {number} port
+ * @param {Buffer} body
+ * @returns {Promise<{ response: string, sent: number }>}
+ */
+function streamAtRefusal(port, body) {
+  return new Promise((resolve, reject) => {
+    let response = ''
+    let sent = 0
+    // Half-open, so the listener's own FIN does not tear the sender down
+    // before it has handed over the body: what is measured is how many bytes
+    // the listener reads, not how early the sender gave up.
+    const socket = net.connect({ port, host: '127.0.0.1', allowHalfOpen: true })
+    const timer = setTimeout(() => {
+      socket.destroy()
+      reject(new Error(`the listener read ${sent} bytes and left the connection open`))
+    }, 5000)
+    function pump() {
+      while (sent < body.length && !socket.destroyed) {
+        const end = Math.min(sent + 64 * 1024, body.length)
+        const chunk = body.subarray(sent, end)
+        sent = end
+        if (!socket.write(chunk)) {
+          socket.once('drain', pump)
+          return
+        }
+      }
+      if (sent === body.length && !socket.destroyed) socket.end()
+    }
+    socket.on('connect', () => {
+      socket.write(
+        'POST /v1/messages HTTP/1.1\r\nHost: attacker.example\r\n' +
+        `content-type: application/json\r\ncontent-length: ${body.length}\r\n\r\n`
+      )
+      pump()
+    })
+    socket.on('data', (chunk) => { response += chunk.toString('utf8') })
+    // The close is the point of the test, so a reset counts as one rather than
+    // as a failure.
+    socket.on('error', () => {})
+    socket.on('close', () => {
+      clearTimeout(timer)
+      resolve({ response, sent })
+    })
+  })
+}
+
+// The refused body is drained so a caller still uploading can read its 421, and
+// draining it without a bound hands the length of that read to the sender: the
+// rebound page the barrier exists to refuse can stream at it for as long as it
+// likes (issue #1276). So the drain is capped, and a body past the cap has its
+// connection closed once the refusal is on the wire.
+test('a body refused with 421 is drained only up to a cap', async (t) => {
+  // `startProxy` does not hand its server back, so capture the connections it
+  // accepts. The port is read at accept time, because a destroyed socket no
+  // longer reports one and being destroyed is what this measures.
+  /** @type {{ socket: net.Socket, port: number | undefined }[]} */
+  const serverSockets = []
+  const createServer = http.createServer
+  http.createServer = (/** @type {any[]} */ ...args) => {
+    const server = createServer(...args)
+    server.on('connection', (socket) => serverSockets.push({ socket, port: socket.localPort }))
+    return server
+  }
+  const rig = await bootGateway().finally(() => { http.createServer = createServer })
+  t.after(() => rig.cleanup())
+
+  // Far larger than the cap, and larger than any socket buffer either side
+  // could swallow whole, so a listener that stops reading stalls the write.
+  const huge = Buffer.alloc(32 * 1024 * 1024, 'x')
+  const streamed = await streamAtRefusal(rig.proxy.port, huge)
+  assert.ok(streamed.sent < huge.length, `the listener read all ${huge.length} bytes of a refused body`)
+  assert.match(streamed.response, /^HTTP\/1\.1 421 /)
+  // The reset must not be answered as a reusable connection, or a pooling
+  // client meets it on a request it already considers finished.
+  assert.match(
+    streamed.response,
+    /\r\nconnection: close\r\n/i,
+    `the oversized sender got ${JSON.stringify(streamed.response.slice(0, 200))}`
+  )
+  assert.deepEqual(rig.upstreamHits, [])
+  assert.equal(rig.started.length, 0)
+
+  // The same bound measured on the listener's own socket rather than the
+  // sender's, which cannot tell a paused read from a socket buffer that
+  // swallowed its write. Read to the end this is 256 KiB and change.
+  serverSockets.length = 0
+  const overCap = Buffer.alloc(256 * 1024, 'x')
+  const measured = await streamAtRefusal(rig.proxy.port, overCap)
+  assert.match(measured.response, /^HTTP\/1\.1 421 /)
+  const served = serverSockets.find((entry) => entry.port === rig.proxy.port)?.socket
+  assert.ok(served, 'the refused upload opened no listener connection to measure')
+  if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+  assert.ok(
+    served.bytesRead < 3 * 64 * 1024,
+    `the listener read ${served.bytesRead} of the ${overCap.length} bytes it refused`
+  )
+})
+
+// The cap answers `connection: close` so a pooling client never meets the
+// reset on a request it has already finished. A refusal that declares no body
+// drains nothing, can never reach the cap, and is never reset, so it must keep
+// the connection: on this listener that is the common refusal, and it arrives
+// on the socket an attached client forwards everything else over.
+test('a refusal whose body fits under the cap keeps the pooled connection', async (t) => {
+  const rig = await bootGateway()
+  t.after(() => rig.cleanup())
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+  t.after(() => agent.destroy())
+
+  /**
+   * @param {string} path
+   * @param {string} [body]
+   */
+  function refuse(path, body) {
+    return new Promise((resolve, reject) => {
+      const request = http.request(
+        {
+          host: '127.0.0.1',
+          port: rig.proxy.port,
+          path,
+          agent,
+          method: body === undefined ? 'GET' : 'POST',
+          ...(body === undefined ? {} : { headers: { 'content-length': Buffer.byteLength(body) } }),
+        },
+        (res) => {
+          const port = res.socket.localPort
+          res.resume()
+          res.on('end', () => resolve({ status: res.statusCode, connection: res.headers.connection, port }))
+        }
+      )
+      request.on('error', reject)
+      request.end(body)
+    })
+  }
+
+  const first = await refuse('/nope')
+  const second = await refuse('/nope')
+  assert.equal(first.status, 404)
+  assert.equal(second.status, 404)
+  assert.notEqual(first.connection, 'close')
+  // The same local port both times is the pool surviving the refusal.
+  assert.equal(second.port, first.port, 'the bodyless refusal cost the client its pooled socket')
+
+  // A declared body the drain will read to its end never crosses the cap, so
+  // no reset is coming and the socket is still the client's to reuse. Only a
+  // body that is not known to fit has to be answered as a closing connection.
+  const small = await refuse('/nope', 'x'.repeat(120))
+  const after = await refuse('/nope', 'x'.repeat(120))
+  assert.equal(small.status, 404)
+  assert.notEqual(small.connection, 'close')
+  assert.equal(after.port, small.port, 'a refused body that fits under the cap cost the client its pooled socket')
+
+  // Past the cap the connection is reset, so that one must say so.
+  const oversized = await refuse('/nope', 'x'.repeat(128 * 1024))
+  assert.equal(oversized.status, 404)
+  assert.equal(oversized.connection, 'close')
+
+  assert.deepEqual(rig.upstreamHits, [])
+})
