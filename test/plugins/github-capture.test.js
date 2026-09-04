@@ -648,6 +648,104 @@ test('a completed repo publishes every phase watermark and drops its work descri
   })
 })
 
+test('a second tick over unchanged upstream state appends nothing', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-boundary-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const client = fakeClient({
+    repos: {
+      'o/r': {
+        issues: [
+          { number: 1, state: 'open', created_at: '2026-05-01T00:00:00Z', updated_at: '2026-05-01T00:00:00Z' },
+          { number: 4, state: 'open', created_at: '2026-05-01T00:00:00Z', updated_at: '2026-05-01T00:00:00Z' },
+        ],
+        pulls: [{ number: 2, state: 'open', created_at: '2026-05-02T00:00:00Z', updated_at: '2026-05-02T00:00:00Z' }],
+        prFiles: { 2: ['src/a.js'] },
+        commits: [{ sha: 'b'.repeat(40), commit: { author: { date: '2026-05-03T00:00:00Z' } } }],
+        commitFiles: { ['b'.repeat(40)]: ['README.md'] },
+        comments: [
+          { id: 3, issue_url: 'https://api.github.com/repos/o/r/issues/1', created_at: '2026-05-04T00:00:00Z', updated_at: '2026-05-04T00:00:00Z' },
+          { id: 5, issue_url: 'https://api.github.com/repos/o/r/issues/1', created_at: '2026-05-04T00:00:00Z', updated_at: '2026-05-04T00:00:00Z' },
+        ],
+      },
+    },
+  })
+  // Through the sidecar, the way the daemon runs it: a boundary guard the
+  // cursor reader drops would re-append on every restart.
+  /** @param {Record<string, unknown>[]} into */
+  const tick = async (into) => {
+    const cursors = readCursors(stateDir)
+    try {
+      return await captureRepos({
+        client,
+        config: cfg(),
+        cursors,
+        append: async (batch) => { into.push(...batch) },
+        log: silentLog,
+        mode: 'poll',
+        observedRepos: ['o/r'],
+      })
+    } finally {
+      writeCursors(stateDir, cursors)
+    }
+  }
+
+  /** @type {Record<string, unknown>[]} */
+  const first = []
+  await tick(first)
+  assert.ok(first.length > 0, 'the first tick captures the repository')
+
+  /** @type {Record<string, unknown>[]} */
+  const second = []
+  const result = await tick(second)
+  assert.deepEqual(second, [], 'no new activity means no new rows')
+  assert.equal(result.events, 0)
+
+  /** @type {Record<string, unknown>[]} */
+  const third = []
+  await tick(third)
+  assert.deepEqual(third, [], 'and the tick after that appends nothing either')
+})
+
+test('an item tied at the watermark but not yet captured is still captured next tick', async () => {
+  const AT = '2026-05-01T00:00:00Z'
+  const repo = {
+    /** @type {any[]} */
+    issues: [{ number: 1, state: 'open', created_at: AT, updated_at: AT }],
+    /** @type {any[]} */
+    commits: [{ sha: 'a'.repeat(40), commit: { author: { date: AT } } }],
+    /** @type {any[]} */
+    comments: [{ id: 3, issue_url: 'https://api.github.com/repos/o/r/issues/1', created_at: AT, updated_at: AT }],
+  }
+  const client = fakeClient({ repos: { 'o/r': repo } })
+  const cursors = freshCursors()
+  /** @param {Record<string, unknown>[]} into */
+  const tick = (into) => captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { into.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  await tick([])
+  // Same second as the watermark, but published after the first tick read it:
+  // an exclusive boundary would lose these forever.
+  repo.issues.push({ number: 2, state: 'open', created_at: AT, updated_at: AT })
+  repo.commits.push({ sha: 'c'.repeat(40), commit: { author: { date: AT } } })
+  repo.comments.push({ id: 4, issue_url: 'https://api.github.com/repos/o/r/issues/1', created_at: AT, updated_at: AT })
+
+  /** @type {Record<string, unknown>[]} */
+  const second = []
+  await tick(second)
+  assert.deepEqual(second.map((row) => row.event_id).sort(), [
+    'comment:4',
+    `commit:${'c'.repeat(40)}`,
+    'issue:o/r#2',
+  ])
+})
+
 test('staged phase watermarks survive the cursor sidecar round trip', (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-staged-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
