@@ -131,6 +131,10 @@ function readWork(value) {
   if (typeof v.pulls_high === 'string') work.pulls_high = v.pulls_high
   const highNumbers = readNumbers(v.pulls_high_numbers)
   if (highNumbers) work.pulls_high_numbers = highNumbers
+  // The cross-page guard is only worth staging if it survives the sidecar, and
+  // a budget-split phase resumes through this reader.
+  const emitted = readNumbers(v.pulls_emitted)
+  if (emitted) work.pulls_emitted = emitted
   if (typeof v.commits_high === 'string') work.commits_high = v.commits_high
   if (typeof v.comments_high === 'string') work.comments_high = v.comments_high
   if (typeof v.pulls_etag === 'string') work.pulls_etag = v.pulls_etag

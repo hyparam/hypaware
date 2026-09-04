@@ -209,19 +209,23 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
   // set falls back to `pull_numbers` read here, before the issues pass mutates
   // it, which is the pre-fix answer rather than a re-capture of every tie.
   const capturedAtHigh = new Set(cursor.pulls_high_numbers ?? cursor.pull_numbers ?? [])
-  // Pulls this traversal has already emitted a row for. The tie guard above
-  // answers only for the boundary second, but `sort=updated&direction=desc`
-  // reshuffles under pagination at every second: a pull updated mid-traversal is
-  // listed again on a later page of the same phase, at any distance above the
-  // baseline. Its event id carries no timestamp, so the second sighting is an
-  // identical duplicate row plus a repeat fan-out of files, reviews and commits,
-  // and `flush` deduplicates one batch, not a phase. Phase-local, so it stays
-  // bounded by one traversal's captures rather than by repository history.
-  /** @type {Set<number>} */
-  const emittedPulls = new Set()
 
   if (!cursor.work) cursor.work = { mode: requestedMode, phase: 'issues' }
   const work = cursor.work
+  // Pulls this phase has already emitted a row for. The tie guard above answers
+  // only for the boundary second, but `sort=updated&direction=desc` reshuffles
+  // under pagination at every second: a pull updated mid-traversal is listed
+  // again on a later page of the same phase, at any distance above the baseline.
+  // Its event id carries no timestamp, so the second sighting is an identical
+  // duplicate row plus a repeat fan-out of files, reviews and commits, and
+  // `flush` deduplicates one batch, not a phase. Staged on the work descriptor
+  // rather than held in memory for the same reason `pulls_high_numbers` is: the
+  // request budget splits a pulls phase across ticks, and a set that restarted
+  // empty on the resumed page would leave the duplicate exactly where the
+  // reshuffle has had the longest to produce one. Dropped by `finishPulls`, so
+  // it stays bounded by the phase rather than by repository history.
+  /** @type {Set<number>} */
+  const emittedPulls = new Set(work.pulls_emitted ?? [])
 
   /** @param {Record<string, unknown>[]} rows */
   async function flush(rows) {
@@ -299,6 +303,9 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
       }
       await flush(changed.map((pr) => pullRow(repo, pr)))
       cursor.pull_numbers = sortedNumbers(prNumbers)
+      // Staged after the rows land, like every other durable advance here: a
+      // page whose flush throws must be re-listable (LLP 0361#page-work).
+      work.pulls_emitted = sortedNumbers(emittedPulls)
       work.pull_tasks = changed.map((pr) => ({ number: pr.number, created_at: pr.created_at, phase: 'files' }))
       advancePullsHigh(work, page.items)
       // Only the first page's ETag is a usable `If-None-Match` for the next
@@ -436,6 +443,7 @@ function beginPulls(work, cursor) {
   // Carried, not restarted: a phase that ends on a 304 observes no pulls and
   // must still republish what the previous one captured at that same second.
   work.pulls_high_numbers = cursor.pulls_high_numbers ?? []
+  work.pulls_emitted = []
   work.pull_tasks = []
 }
 
@@ -461,6 +469,7 @@ function finishPulls(work, cursor) {
   delete work.baseline_pulls
   delete work.pulls_high
   delete work.pulls_high_numbers
+  delete work.pulls_emitted
   delete work.pulls_etag
   delete work.pull_tasks
   work.commit_tasks = []
