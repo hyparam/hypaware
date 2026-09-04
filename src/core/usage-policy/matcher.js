@@ -70,7 +70,9 @@ const LOCAL_ONLY_LIST_VERSION_V2 = 2
  * fresh resolver, so it always reflects disk immediately. The parsed
  * `local-only` list itself is memoized separately with the same TTL, so
  * resolving many distinct `cwd`s in one window still does at most one list
- * read/parse, not one per `cwd`.
+ * read/parse, not one per `cwd`. Both memos are dropped the moment this
+ * resolver reads list bytes that differ from the ones they were derived from,
+ * so a verdict never outlives the list that produced it.
  *
  * Future enhancement (not V1): `hyp ignore` / `hyp unignore` could signal the
  * running daemon to invalidate and prime the affected `cwd`'s cache entry,
@@ -131,6 +133,10 @@ export function createUsagePolicyResolver({
   const cache = new Map()
   /** @type {{ scopes: ListScope[], expiresAt: number } | null} */
   let listCache = null
+  // Digest of the list-file bytes every live memo above was derived from;
+  // `null` until this resolver has read the list once.
+  /** @type {string | null} */
+  let listBytes = null
   const emit = logEvent ?? emitDebug
   const probeVolume = caseInsensitiveVolume ?? createVolumeCaseProbe({ logSkip: emit })
 
@@ -271,6 +277,37 @@ export function createUsagePolicyResolver({
   }
 
   /**
+   * Record the list-file bytes this resolver is now working from, dropping
+   * both memos when they differ from the bytes the live entries were derived
+   * from. Every path that reads the file calls this, so a memo can never
+   * outlive the bytes behind it.
+   *
+   * The memos bound cost (R6); they do not freeze a verdict. An entry this
+   * resolver has just proven was computed from superseded bytes is wrong, and
+   * keeping it buys nothing. That is also what keeps {@link fingerprint}
+   * honest for a consumer that derives durable state from the export seam's
+   * verdicts: a digest reporting a policy change must not be handed out while
+   * the seam still answers from the policy it replaced.
+   *
+   * This is not the deferred CLI-to-daemon invalidation signal: bytes another
+   * process wrote are still noticed only when this resolver next reads the
+   * file, so the TTL remains the leak bound for the capture hot path.
+   *
+   * @ref LLP 0070#derive [constrained-by]: a row is judged against the list as it stands, never a verdict the list has outlived
+   * @ref LLP 0367#policy-fingerprint [implements]: the digest describes the export seam's inputs, so a pass triggered by it evaluates under it
+   * @param {string} digest
+   * @returns {string} the same digest, for callers that also report it
+   */
+  function noteListBytes(digest) {
+    if (listBytes !== digest) {
+      listCache = null
+      cache.clear()
+    }
+    listBytes = digest
+    return digest
+  }
+
+  /**
    * The list entries paired with every spelling of each entry's declared
    * directory (symlink-resolved, then folded) and the case verdict for the
    * volume it lives on, computed once per TTL window along with the parse. So
@@ -302,13 +339,18 @@ export function createUsagePolicyResolver({
    */
   function readListEntriesSync() {
     const filePath = /** @type {string} */ (localOnlyListPath)
-    if (!existsSync(filePath)) return []
+    if (!existsSync(filePath)) {
+      noteListBytes('absent')
+      return []
+    }
     let raw
     try {
       raw = readFileSync(filePath, 'utf8')
     } catch (err) {
+      noteListBytes('unreadable')
       throw new LocalOnlyListUnreadableError(filePath, { cause: err })
     }
+    noteListBytes(listDigest(String(raw)))
     let parsed
     try {
       parsed = JSON.parse(raw)
@@ -360,21 +402,38 @@ export function createUsagePolicyResolver({
    * are deliberately outside the digest: they are unenumerable, and the
    * consumer's age backstop covers them.
    *
+   * Reading the bytes is also where the resolver notices that its memos
+   * predate them ({@link noteListBytes}), so the digest and the verdicts
+   * cannot describe two different policies. A consumer that will act on the
+   * verdicts must therefore read the digest from this same resolver first,
+   * the order the export seam's caller already uses.
+   *
    * @ref LLP 0367#policy-fingerprint [implements]: the usage-policy half of the export-policy fingerprint
    * @returns {string}
    */
   function fingerprint() {
     if (!localOnlyListPath) return 'no-list'
-    if (!existsSync(localOnlyListPath)) return 'absent'
+    if (!existsSync(localOnlyListPath)) return noteListBytes('absent')
     try {
-      const raw = String(readFileSync(localOnlyListPath, 'utf8'))
-      return createHash('sha256').update(raw).digest('hex').slice(0, 16)
+      return noteListBytes(listDigest(String(readFileSync(localOnlyListPath, 'utf8'))))
     } catch {
-      return 'unreadable'
+      return noteListBytes('unreadable')
     }
   }
 
   return { resolve, isIgnored, fingerprint }
+}
+
+/**
+ * Short stable digest of the list file's bytes. One definition, so the read
+ * that reports the fingerprint and the read that builds the memos cannot
+ * disagree about which bytes the resolver is working from.
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+function listDigest(raw) {
+  return createHash('sha256').update(raw).digest('hex').slice(0, 16)
 }
 
 /**

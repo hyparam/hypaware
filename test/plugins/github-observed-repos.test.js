@@ -6,6 +6,9 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { localOnlyListPath, writeLocalOnlyEntries } from '../../src/core/usage-policy/local_only.js'
+import { createUsagePolicyResolver } from '../../src/core/usage-policy/matcher.js'
+
 import { runGithubBackfill } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
 import { writeCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
 import { createLocalObservedReposIndex } from '../../hypaware-core/plugins-workspace/github/src/observed-repos.js'
@@ -478,4 +481,55 @@ test('hyp github backfill reports the inventory failure without contradicting it
     /hyp graph project/,
     'nothing was captured, so the next-step advice would dress a failure up as progress',
   )
+})
+
+test('a revalidation stamps the fingerprint it actually evaluated under, not the one that triggered it', async (t) => {
+  // hyparam/hypaware#1317: the trigger read the live policy while the pass's
+  // verdicts came from a warm resolver memo, so a marking made moments before
+  // the tick retired nothing and the new fingerprint was stamped anyway,
+  // latching the miss until the seven-day backstop. Both sides here come from
+  // one long-lived resolver, as a running daemon composes them.
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-policy-race-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const marked = path.join(stateDir, 'work', 'widgets')
+  fs.mkdirSync(marked, { recursive: true })
+
+  // Frozen clock, so the memo never expires on its own: the pass either sees
+  // the new policy or it does not.
+  const resolver = createUsagePolicyResolver({ localOnlyListPath: localOnlyListPath(stateDir), now: () => 1_000 })
+  const rows = [{ seq: 1, cwd: marked, remote: 'https://github.com/acme/widgets.git' }]
+  const storage = /** @type {QueryStorageService} */ (/** @type {unknown} */ ({
+    exportPolicyFingerprint() { return `v1 usage:${resolver.fingerprint?.()} source:none` },
+    async discoverCachePartitions() {
+      return [{ dataset: 'ai_gateway_messages', path: '/cache/messages/a', epoch: 0, rowCount: rows.length, partition: {} }]
+    },
+    async *readRowsSince(tablePath, opts) {
+      const since = opts.since ? Number(/** @type {{ seq: string }} */ (opts.since).seq) : 0
+      for (const row of rows) {
+        if (row.seq <= since) continue
+        const after = { v: 1, seq: String(row.seq) }
+        // The export seam's own withholding rule (src/core/cache/storage.js).
+        if (resolver.resolve(row.cwd).class !== 'full') yield { dropped: true, after }
+        else yield { row: { git_remote: row.remote }, after }
+      }
+    },
+  }))
+  const { log, events } = captureLog()
+  const make = () => createLocalObservedReposIndex({ storage, stateDir, log })
+
+  assert.deepEqual(await make().list(), ['acme/widgets'], 'admitted while the directory is still `full`')
+
+  // The user marks the directory, then the very next tick fires.
+  await writeLocalOnlyEntries({ stateDir, entries: [{ dir: marked, class: 'local-only' }] })
+
+  const after = make()
+  assert.deepEqual(await after.list(), [], 'the repo whose only evidence is now withheld stops being captured')
+  const completed = events.find((e) => e.name === 'github.observed_repos_revalidation_completed')
+  assert.deepEqual(
+    { trigger: events.find((e) => e.name === 'github.observed_repos_revalidation_started')?.fields.trigger, repos_retired: completed?.fields.repos_retired },
+    { trigger: 'policy_changed', repos_retired: 1 },
+  )
+
+  const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, 'github-observed-repos.json'), 'utf8'))
+  assert.deepEqual(persisted.repos, [], 'and the retirement is what the new fingerprint gets stamped over')
 })
