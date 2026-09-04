@@ -461,6 +461,27 @@ test('a failed session_repos inventory read counts only continuations the live i
   )
 })
 
+test('a failed session_repos inventory read reports no backlog when the inventory is empty', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-empty-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // A missing, unreadable, or older-schema observed-repos sidecar derives an
+  // empty inventory. Reporting the cursors anyway is the pin issue #1316
+  // removed: no repository the next tick could select holds that continuation,
+  // so nothing would ever retire the backlog it claims.
+  writeCursors(stateDir, { schema_version: 1, repos: { 'acme/widgets': { work: { mode: 'poll', phase: 'issues' } } } })
+  const runtime = failingInventoryRuntime(stateDir, new Error('cache partition unreadable'))
+  runtime.observedRepos.lastKnown = () => []
+
+  const report = await runCaptureTick(runtime, { mode: 'poll' })
+
+  assert.equal(report.errors.length, 1)
+  assert.equal(
+    report.pending,
+    false,
+    'an empty inventory selects no repository, so no saved continuation is backlog this source can retire',
+  )
+})
+
 test('a failed session_repos inventory read keeps an unfinished revalidation on the backlog cadence', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-failed-tick-reval-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))

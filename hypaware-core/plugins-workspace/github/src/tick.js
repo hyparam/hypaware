@@ -51,6 +51,10 @@ export async function runCaptureTick(runtime, opts) {
       // (LLP 0360#cursoring): a repository since ignored or gone from the
       // session evidence keeps its continuation forever, and counting it
       // reports backlog no tick can ever retire.
+      // An empty inventory therefore reports no backlog, and deliberately so:
+      // with no repository a later tick could select, a saved continuation is
+      // not work this source can retire. Falling back to the whole sidecar
+      // when the inventory reads empty would restore exactly that pin.
       const ignored = new Set(runtime.config.ignore.map((repo) => repo.toLowerCase()))
       const pending =
         runtime.observedRepos.revalidationPending?.() === true ||
