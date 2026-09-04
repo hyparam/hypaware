@@ -571,8 +571,11 @@ the next sweep take it.
 } }
 ```
 
-With no `window_days`, the sweep is still bounded, by the cache retention
-window: `query.cache.retention.default_days` if set, otherwise 90 days.
+With no `window_days`, the sweep falls back to the cache retention window:
+`query.cache.retention.default_days` if set, otherwise 90 days. A
+`default_days` of `0` is the open window rather than a zero-day one, so a
+sweep that falls back to it scans all history
+([LLP 0359 #sweep-context](../llp/0359-bounded-scheduled-backfill.decision.md#sweep-context)).
 
 Setting the same block's `on_join` to false stops `@hypaware/claude`'s
 scheduled sweep as well as its join-time import: that adapter contributes no
