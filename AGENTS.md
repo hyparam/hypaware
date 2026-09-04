@@ -298,7 +298,9 @@ hyp dev smoke claude_telemetry_capture
 hyp dev smoke hypignore_capture_drop
 hyp dev smoke local_only_export_withhold
 hyp dev smoke source_optout_export_withhold
+hyp dev smoke github_local_only_withhold
 hyp dev smoke opencode_capture
+hyp dev smoke github_local_capture
 hyp dev smoke otel_loopback_capture
 hyp dev smoke local_parquet_export
 hyp dev smoke query_grep_roundtrip
