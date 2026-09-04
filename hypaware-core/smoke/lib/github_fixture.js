@@ -5,6 +5,8 @@ import process from 'node:process'
 import { Attr, runRoot } from '../../../src/core/observability/index.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
 
+/** @import { GithubClient } from '../../../hypaware-core/plugins-workspace/github/src/types.js' */
+
 /**
  * Shared fixtures and CLI plumbing for the paired GitHub smoke flows,
  * `github_local_capture` (the admitted half of the session-evidence
@@ -81,7 +83,13 @@ export function noWithheldRepo() {}
  * being tested and every other assertion in the flow still passes (issue
  * #1327). A flow with nothing to withhold passes `noWithheldRepo`.
  *
+ * The `GithubClient` return type is load-bearing, not decoration: it is what
+ * holds the paragraph above true. A repo-naming read added to the interface
+ * is a typecheck error here until this fixture serves it, so the guard cannot
+ * fall behind the surface `github sync` can reach.
+ *
  * @param {{ assertRepo: (owner: string, name: string) => void }} args
+ * @returns {GithubClient}
  */
 export function fakeGithubClient(args) {
   const assertRepo = args?.assertRepo

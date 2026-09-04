@@ -24,6 +24,9 @@ test('fakeGithubClient refuses to build without a guard', () => {
 
 // Enumerated rather than listed by hand, so a read added to the fake without
 // the guard fails here instead of quietly widening the hole the guard closes.
+// Enumerating the fake is enumerating the real surface: the fixture returns
+// `GithubClient`, so a read on the interface that it does not serve is a
+// typecheck error rather than a method this loop never sees.
 // Every `GithubClient` method but `listViewerRepos` takes `(owner, repo)`
 // first (github/src/types.d.ts), and the arguments after those two are
 // ignored by the fake, so one call shape covers them all.
