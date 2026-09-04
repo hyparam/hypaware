@@ -173,6 +173,13 @@ export type GithubConfigResult =
 export interface ObservedReposIndex {
   list(): Promise<string[]>
   /**
+   * The inventory the last successful `list()` derived, served from persisted
+   * state without deriving again. A `list()` that throws leaves it intact, so
+   * a tick whose inventory read failed can still tell which repositories its
+   * durable cursors are about.
+   */
+  lastKnown(): string[]
+  /**
    * True when the last `list()` left a withholding revalidation pass
    * incomplete (LLP 0367): `list()` served only the repositories re-confirmed
    * so far, and bounded local work remains for the next tick.

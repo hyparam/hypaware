@@ -82,3 +82,26 @@ test('exportPolicyFingerprint composes both resolver halves and is constant with
   const bare = createQueryStorageService({ cacheRoot })
   assert.equal(bare.exportPolicyFingerprint?.(), 'v1 usage:none source:none')
 })
+
+test('a policy change the fingerprint reports is one the verdicts already apply', async (t) => {
+  // The digest exists so a consumer can derive durable state from the export
+  // seam's verdicts (LLP 0367). That is only sound if the two describe the
+  // same policy: reporting a change while the seam still answers from the
+  // policy it replaced lets the consumer stamp the new fingerprint over
+  // pre-change verdicts (hyparam/hypaware#1317).
+  const stateDir = makeStateDir(t)
+  const dir = path.join(stateDir, 'work')
+  fs.mkdirSync(dir, { recursive: true })
+  // A frozen clock, so nothing here rides on the memo TTL elapsing: this is
+  // the window in which a long-lived daemon resolver holds a warm verdict.
+  const resolver = createUsagePolicyResolver({ localOnlyListPath: localOnlyListPath(stateDir), now: () => 1_000 })
+
+  assert.equal(resolver.resolve(dir).class, 'full', 'warm, as ongoing capture in that directory leaves it')
+  const before = resolver.fingerprint?.()
+
+  await writeLocalOnlyEntries({ stateDir, entries: [{ dir, class: 'local-only' }] })
+  const after = resolver.fingerprint?.()
+
+  assert.notEqual(after, before, 'the marking changes the digest')
+  assert.equal(resolver.resolve(dir).class, 'local-only', 'and the verdict the seam serves changed with it')
+})
