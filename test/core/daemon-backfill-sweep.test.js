@@ -142,6 +142,15 @@ test('providers due together run serially without blocking the tick', async () =
   assert.deepEqual(started, ['openclaw', 'claude'])
 })
 
+// The run budget the two abandonment regressions below drive the driver with,
+// and a wait comfortably past it. Both are wide enough that a GC pause or a
+// busy shared runner cannot decide an assertion: these tests are about the
+// driver's handoff, not about how promptly this host gets to a timer. A budget
+// of a few milliseconds would let the timers phase beat the `setImmediate`
+// that proves the queue was still serial, and fail a correct driver.
+const BUDGET_MS = 100
+const PAST_BUDGET_MS = 400
+
 // The queue is what makes one provider's hang everybody's hang: `runProvider`
 // is plugin code reading a user's transcript tree, so a stalled network mount or
 // a wedged storage read gives it neither settlement, and an unbounded wait on
@@ -157,7 +166,7 @@ test('a run that never settles hands the queue on so the providers behind it sti
       contribution({ name: 'openclaw', sweep: { cron: '* * * * *' } }),
       contribution({ name: 'claude', plugin: '@hypaware/claude', sweep: { cron: '* * * * *' } }),
     ],
-    runTimeoutMs: 5,
+    runTimeoutMs: BUDGET_MS,
     runBackfill: (args) => {
       started.push(args.provider)
       // Never settles, either way: the pathological external hang.
@@ -172,7 +181,7 @@ test('a run that never settles hands the queue on so the providers behind it sti
   await new Promise((resolve) => { setImmediate(resolve) })
   assert.deepEqual(started, ['openclaw'], 'the queue is still serial while the head is inside its budget')
 
-  await new Promise((resolve) => setTimeout(resolve, 25))
+  await new Promise((resolve) => setTimeout(resolve, PAST_BUDGET_MS))
   assert.deepEqual(started, ['openclaw', 'claude'], 'the hung run never released the queue')
 })
 
@@ -190,7 +199,7 @@ test('an abandoned run keeps its own in-flight guard while later providers still
       contribution({ name: 'openclaw', sweep: { cron: '* * * * *' } }),
       contribution({ name: 'hourly', plugin: '@hypaware/hourly', sweep: { cron: '0 * * * *' } }),
     ],
-    runTimeoutMs: 5,
+    runTimeoutMs: BUDGET_MS,
     runBackfill: (args) => {
       started.push(args.provider)
       if (args.provider === 'openclaw') return /** @type {any} */ (new Promise(() => {}))
@@ -200,14 +209,14 @@ test('an abandoned run keeps its own in-flight guard while later providers still
 
   // :01 is not the top of the hour, so only the every-minute provider fires.
   assert.deepEqual((await driver.tick({ now: at('2026-08-01T10:01:00.000Z') })).fired, ['openclaw'])
-  await new Promise((resolve) => setTimeout(resolve, 25))
+  await new Promise((resolve) => setTimeout(resolve, PAST_BUDGET_MS))
 
   // The hung provider is still its own run's owner: skipped, never doubled.
   assert.deepEqual((await driver.tick({ now: at('2026-08-01T10:02:00.000Z') })).fired, [])
 
   // A different provider coming due later is not held by it.
   assert.deepEqual((await driver.tick({ now: at('2026-08-01T11:00:00.000Z') })).fired, ['hourly'])
-  await new Promise((resolve) => setTimeout(resolve, 25))
+  await new Promise((resolve) => setTimeout(resolve, PAST_BUDGET_MS))
   assert.deepEqual(started, ['openclaw', 'hourly'])
 })
 
