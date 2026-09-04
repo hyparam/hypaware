@@ -82,7 +82,6 @@ export async function* streamFlushFile(opts) {
     highWaterMark: 64 * 1024,
   })
 
-  let tail = ''
   let absoluteOffset = startOffset
   /** @type {readonly ColumnSpec[] | null} */
   let currentColumns = null
@@ -105,77 +104,69 @@ export async function* streamFlushFile(opts) {
     return chunk
   }
 
-  for await (const data of stream) {
-    const text = /** @type {string} */ (data)
-    tail += text
+  for await (const line of streamSpoolLines(stream)) {
+    const lineByteLen = Buffer.byteLength(line, 'utf8') + 1
+    const lineStartOffset = absoluteOffset
+    absoluteOffset += lineByteLen
 
-    let newlineIdx
-    while ((newlineIdx = tail.indexOf('\n')) !== -1) {
-      const line = tail.slice(0, newlineIdx)
-      const lineByteLen = Buffer.byteLength(line, 'utf8') + 1
-      const lineStartOffset = absoluteOffset
-      tail = tail.slice(newlineIdx + 1)
-      absoluteOffset += lineByteLen
+    if (line.length === 0) continue
 
-      if (line.length === 0) continue
+    /** @type {{ version?: number, columns?: readonly ColumnSpec[], rows?: Record<string, unknown>[] } | null} */
+    let envelope = null
+    try {
+      envelope = JSON.parse(line)
+    } catch {
+      malformedCount++
+      continue
+    }
 
-      /** @type {{ version?: number, columns?: readonly ColumnSpec[], rows?: Record<string, unknown>[] } | null} */
-      let envelope = null
-      try {
-        envelope = JSON.parse(line)
-      } catch {
-        malformedCount++
-        continue
+    if (
+      !envelope ||
+      envelope.version !== 1 ||
+      !Array.isArray(envelope.columns) ||
+      !Array.isArray(envelope.rows)
+    ) {
+      malformedCount++
+      continue
+    }
+
+    const signature = JSON.stringify(envelope.columns)
+    if (currentColumns && signature !== currentSignature) {
+      const sealed = sealBatch()
+      if (sealed) {
+        yield { chunk: sealed, resumeOffset: absoluteOffset - lineByteLen, malformedCount }
+        malformedCount = 0
       }
+    }
 
-      if (
-        !envelope ||
-        envelope.version !== 1 ||
-        !Array.isArray(envelope.columns) ||
-        !Array.isArray(envelope.rows)
-      ) {
-        malformedCount++
-        continue
-      }
+    currentColumns = envelope.columns
+    currentSignature = signature
 
-      const signature = JSON.stringify(envelope.columns)
-      if (currentColumns && signature !== currentSignature) {
+    for (let idx = 0; idx < envelope.rows.length; idx++) {
+      const row = envelope.rows[idx]
+      // Reserve-before-stamp: each seq is durably reserved (allocator
+      // advances the persisted nextSeq one block ahead) before it reaches
+      // a row, so a resumed flush never re-issues a seq it already stamped.
+      const seq = nextSeq ? await nextSeq() : null
+      const decorated = decorateRow(row, batchId, seq)
+      const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8')
+      currentRows.push(decorated)
+      currentBatchBytes += rowBytes
+
+      if (currentRows.length >= batchRowLimit || currentBatchBytes >= batchByteLimit) {
         const sealed = sealBatch()
         if (sealed) {
-          yield { chunk: sealed, resumeOffset: absoluteOffset - lineByteLen, malformedCount }
+          const endedOnLineBoundary = idx === envelope.rows.length - 1
+          yield {
+            chunk: sealed,
+            resumeOffset: endedOnLineBoundary ? absoluteOffset : lineStartOffset,
+            malformedCount,
+          }
           malformedCount = 0
         }
-      }
-
-      currentColumns = envelope.columns
-      currentSignature = signature
-
-      for (let idx = 0; idx < envelope.rows.length; idx++) {
-        const row = envelope.rows[idx]
-        // Reserve-before-stamp: each seq is durably reserved (allocator
-        // advances the persisted nextSeq one block ahead) before it reaches
-        // a row, so a resumed flush never re-issues a seq it already stamped.
-        const seq = nextSeq ? await nextSeq() : null
-        const decorated = decorateRow(row, batchId, seq)
-        const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8')
-        currentRows.push(decorated)
-        currentBatchBytes += rowBytes
-
-        if (currentRows.length >= batchRowLimit || currentBatchBytes >= batchByteLimit) {
-          const sealed = sealBatch()
-          if (sealed) {
-            const endedOnLineBoundary = idx === envelope.rows.length - 1
-            yield {
-              chunk: sealed,
-              resumeOffset: endedOnLineBoundary ? absoluteOffset : lineStartOffset,
-              malformedCount,
-            }
-            malformedCount = 0
-          }
-          if (!currentColumns) {
-            currentColumns = envelope.columns
-            currentSignature = signature
-          }
+        if (!currentColumns) {
+          currentColumns = envelope.columns
+          currentSignature = signature
         }
       }
     }
@@ -185,6 +176,38 @@ export async function* streamFlushFile(opts) {
   if (sealed) {
     yield { chunk: sealed, resumeOffset: absoluteOffset, malformedCount }
   }
+}
+
+/**
+ * Split decoded spool chunks without repeatedly flattening and scanning a
+ * growing envelope. An envelope can span thousands of chunks; retain its
+ * fragments and join only at the newline, so work stays linear in its size.
+ * The caller's UTF-8 stream decoder owns split multibyte characters. Flush
+ * ignores unfinished envelopes; provisional inspection also tries the tail.
+ *
+ * @param {AsyncIterable<string>} stream
+ * @param {boolean} [includeTrailing]
+ * @returns {AsyncGenerator<string>}
+ */
+export async function* streamSpoolLines(stream, includeTrailing = false) {
+  /** @type {string[]} */
+  let fragments = []
+  for await (const text of stream) {
+    let start = 0
+    let end
+    while ((end = text.indexOf('\n', start)) !== -1) {
+      let line = text.slice(start, end)
+      if (fragments.length) {
+        fragments.push(line)
+        line = fragments.join('')
+        fragments = []
+      }
+      start = end + 1
+      yield line
+    }
+    if (start < text.length) fragments.push(text.slice(start))
+  }
+  if (includeTrailing && fragments.length) yield fragments.join('')
 }
 
 /**

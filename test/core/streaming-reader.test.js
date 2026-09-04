@@ -344,3 +344,51 @@ test('empty file yields no batches', async () => {
 
   await fs.rm(dir, { recursive: true, force: true })
 })
+
+test('large spool envelopes scan each chunk once and preserve UTF-8 resume offsets', async () => {
+  const dir = await makeTmpDir()
+  const filePath = path.join(dir, 'wide-envelope.jsonl')
+  const first = envelope([{ id: 1, msg: '\u{1F642}'.repeat(512 * 1024) }])
+  const second = envelope([{ id: 2, msg: 'after-wide-row' }])
+  await fs.writeFile(filePath, first + second)
+  let scannedCharacters = 0
+  const originalIndexOf = String.prototype.indexOf
+  String.prototype.indexOf = function (search, position) {
+    if (search === '\n') scannedCharacters += this.length - (position ?? 0)
+    return originalIndexOf.call(this, search, position)
+  }
+  const batches = []
+  try {
+    for await (const batch of streamFlushFile({ filePath, batchId: 'wide', batchRowLimit: 1 })) batches.push(batch)
+  } finally {
+    String.prototype.indexOf = originalIndexOf
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+  assert.deepEqual(batches.map(batch => batch.chunk.rows[0].id), [1, 2])
+  assert.equal(batches[0].resumeOffset, Buffer.byteLength(first))
+  assert.equal(batches[1].resumeOffset, Buffer.byteLength(first + second))
+  assert.ok(scannedCharacters < (first.length + second.length) * 3,
+    `newline search revisited ${scannedCharacters} characters for ${first.length + second.length} input characters`)
+})
+
+test('provisional reads retain the final envelope without a newline', async () => {
+  const { createCacheSpool, SPOOL_DIR } = await import('../../src/core/cache/spool.js')
+  const dir = await makeTmpDir()
+  const tablePath = path.join(dir, 'table')
+  const spoolDir = path.join(tablePath, SPOOL_DIR)
+  await fs.mkdir(spoolDir, { recursive: true })
+  const filePath = path.join(spoolDir, 'active.jsonl')
+  const message = '\u{1F642}'.repeat(100_000)
+  await fs.writeFile(filePath, '\n' + envelope([{ id: 1, msg: 'complete' }]) + envelope([{ id: 2, msg: message }]).trimEnd())
+  const spool = createCacheSpool({ cacheRoot: dir, appendChunk: async () => ({ bytesWritten: 0 }) })
+  try {
+    const rows = []
+    for await (const row of spool.readSpooledRows(tablePath)) rows.push(row)
+    assert.deepEqual(rows, [{ id: 1, msg: 'complete' }, { id: 2, msg: message }])
+    const flushed = []
+    for await (const batch of streamFlushFile({ filePath, batchId: 'partial' })) flushed.push(...batch.chunk.rows)
+    assert.deepEqual(flushed.map(row => row.id), [1], 'flush still ignores an unterminated envelope')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
