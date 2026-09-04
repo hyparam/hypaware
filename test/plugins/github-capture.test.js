@@ -1037,6 +1037,62 @@ test('a boundary pull re-listed on a later page of the same phase is captured on
   )
 })
 
+test('a pull newer than the baseline re-listed on a later page of the same phase is captured once', async () => {
+  const baseline = '2026-01-31T00:00:00Z'
+  const newer = '2026-02-01T00:00:00Z'
+  const older = '2026-01-30T00:00:00Z'
+  const bumped = { number: 12, state: 'open', created_at: older, updated_at: newer, merged_at: null, user: { login: 'Bob' } }
+  const stale = { number: 9, state: 'open', created_at: older, updated_at: older, merged_at: null, user: { login: 'Ada' } }
+  const client = fakeClient({ repos: { 'o/r': { pulls: [] } } })
+  // The same reshuffle, one second above the boundary: `sort=updated&direction=desc`
+  // pushes an item back across the page boundary mid-traversal, so one phase lists
+  // #12 twice with `updated_at` strictly newer than the baseline, where the tie
+  // guard has nothing to say.
+  client.listPullRequestsPage = async (owner, name, etag, page) => (page === undefined
+    ? { items: [bumped], next: 'p2' }
+    : { items: [bumped, stale], next: null })
+
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z', pulls: baseline }, pull_numbers: [] }
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [12],
+    'one update, one row, however many pages listed it',
+  )
+  const ids = rows.map((row) => row.event_id)
+  assert.equal(new Set(ids).size, ids.length, 'and the second sighting fans out no duplicate sub-resources either')
+})
+
+test('backfill takes the same cross-page guard: a re-listed pull is captured once', async () => {
+  const at = '2026-02-01T00:00:00Z'
+  const bumped = { number: 12, state: 'open', created_at: at, updated_at: at, merged_at: null, user: { login: 'Bob' } }
+  const client = fakeClient({ repos: { 'o/r': { pulls: [] } } })
+  // Backfill has no baseline to filter on, so every re-listing the reshuffle
+  // produces used to be emitted verbatim, and a backfill traversal is the long one.
+  client.listPullRequestsPage = async (owner, name, etag, page) => (page === undefined
+    ? { items: [bumped], next: 'p2' }
+    : { items: [bumped], next: null })
+
+  const { rows } = await capture({ config: cfg(), client, mode: 'backfill', observedRepos: ['o/r'] })
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [12],
+    'one pull, one row',
+  )
+})
+
 test('a pulls phase resumed from a pre-field work descriptor publishes no partial captured set', async () => {
   const TIE = '2026-02-01T00:00:00Z'
   const older = '2026-01-31T00:00:00Z'

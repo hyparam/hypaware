@@ -209,6 +209,16 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
   // set falls back to `pull_numbers` read here, before the issues pass mutates
   // it, which is the pre-fix answer rather than a re-capture of every tie.
   const capturedAtHigh = new Set(cursor.pulls_high_numbers ?? cursor.pull_numbers ?? [])
+  // Pulls this traversal has already emitted a row for. The tie guard above
+  // answers only for the boundary second, but `sort=updated&direction=desc`
+  // reshuffles under pagination at every second: a pull updated mid-traversal is
+  // listed again on a later page of the same phase, at any distance above the
+  // baseline. Its event id carries no timestamp, so the second sighting is an
+  // identical duplicate row plus a repeat fan-out of files, reviews and commits,
+  // and `flush` deduplicates one batch, not a phase. Phase-local, so it stays
+  // bounded by one traversal's captures rather than by repository history.
+  /** @type {Set<number>} */
+  const emittedPulls = new Set()
 
   if (!cursor.work) cursor.work = { mode: requestedMode, phase: 'issues' }
   const work = cursor.work
@@ -266,7 +276,17 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
         continue
       }
       const baseline = work.baseline_pulls
-      const changed = work.mode === 'backfill' ? page.items : page.items.filter((pr) => pullChangedSince(pr, baseline, capturedAtHigh))
+      // Backfill needs the same guard and has no baseline to filter on, so every
+      // re-listing it sees is a duplicate. Suppressing one loses nothing: two
+      // sightings of a pull carry one event id.
+      /** @type {GithubPull[]} */
+      const changed = []
+      for (const pr of page.items) {
+        if (emittedPulls.has(pr.number)) continue
+        if (work.mode !== 'backfill' && !pullChangedSince(pr, baseline, capturedAtHigh)) continue
+        emittedPulls.add(pr.number)
+        changed.push(pr)
+      }
       for (const pr of page.items) {
         prNumbers.add(pr.number)
         // The guard's set has to grow across the phase's pages, not only across
