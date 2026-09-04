@@ -676,8 +676,13 @@ test('a refused continuation clears the poisoned work so the next tick captures 
   assert.deepEqual(recovered.rows.map((row) => row.event_id), ['issue:o/r#1'], 'the repo produces rows again on the following tick')
   assert.equal(readCursors(stateDir).repos['o/r'].since?.issues, '2026-02-01T00:00:00Z')
 
-  // The restart resumes from the published watermark, so a third tick adds
-  // nothing: recovery costs a stall, not duplicate `github_events` rows.
+  // The restart is the last-completed-phase retry LLP 0360#cursoring settles.
+  // Here the poison sits at the head of the phase, so there is nothing already
+  // appended to replay and a third tick adds nothing. Poison a phase that had
+  // part-appended and the restart re-appends that prefix instead, which the
+  // same decision accepts ("rows appended by an earlier attempt remain valid
+  // snapshots"): the staged high-water is deliberately NOT published on the
+  // clear, because publishing it would skip the pages the phase never fetched.
   const settled = await tick()
   assert.deepEqual(settled.rows, [])
   const ids = [...refused.rows, ...recovered.rows, ...settled.rows].map((row) => row.event_id)

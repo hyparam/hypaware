@@ -447,8 +447,8 @@ test('a foreign Link header is refused on the response that carried it, so it ne
 
   // Returning this page with its foreign `next` would persist a URL that can
   // never be fetched into `github-cursors.json`. Capture then clears that
-  // poisoned work and restarts the phase from its unpublished watermark, so
-  // page one's rows are appended again on every later tick. Refuse the page
+  // poisoned work and restarts the phase from its last published watermark,
+  // so page one's rows are appended again on every later tick. Refuse the page
   // instead: the stall stays loud and `github_events` gains no duplicates.
   await assert.rejects(client.listIssuesPage('o', 'r', undefined, undefined), (error) => {
     assert.ok(error instanceof Error)
