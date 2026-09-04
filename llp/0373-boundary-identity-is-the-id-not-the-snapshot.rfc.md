@@ -11,8 +11,9 @@
 #resource-bounds the identity budget it is sized against, #concrete-columns
 the structural columns a fingerprint could cover),
 [LLP 0361](./0361-github-capture-is-work-budgeted.decision.md) (#page-work
-"equal-timestamp unseen pulls are still captured" and "the cursor retains
-observed pull numbers", the pulls-pass half of this identity),
+"equal-timestamp unseen pulls are still captured", the rule the pulls-pass half
+of this identity exists to keep, and "the cursor retains observed pull numbers",
+the separate set the comments pass types its rows from),
 [LLP 0032](./0032-github-llm-graph-bridge.decision.md) (the natural keys the
 event ids are built from), [LLP 0023](./0023-context-graph-projection.decision.md)
 (#merge-policy the order-independent props merge that decides what a second
@@ -93,17 +94,34 @@ column set (LLP 0360#concrete-columns) and each pass fills a known subset:
 - **commits** (`commitRow`): `actor_login`, `actor_type`, `sha`, `pr_number`,
   `created_at`, gated on `commitTime`. A commit's content is its identity: a
   changed commit is a different sha and therefore a different event id, which
-  the guard admits already. There is no "second snapshot of the same commit".
-  **Not exposed.**
+  the guard admits already, and the repo-level pass always passes `prNumber`
+  null. **Not exposed by anything the commit carries.** The one column that is
+  not commit content is `actor_login`/`actor_type`, read off `c.author`: that
+  is GitHub's account resolution for the commit rather than part of the commit,
+  so it can change under a fixed sha (an address linked to an account later, a
+  renamed or deleted login). A far rarer window than the one this document is
+  about, and no arm below is worth choosing for it; recorded so the "identical
+  by construction" reading is not taken as stronger than it is.
 - **comments** (`commentRow`): `actor_login`, `actor_type`, `number`,
   `created_at`, gated on `updated_at ?? created_at`. Editing a comment moves
-  `updated_at` (not a stored column) and the body (never stored, LLP 0360).
-  No field this pass captures can change without changing the event id.
-  **Not exposed**: the refused second snapshot is byte-identical to the first.
+  `updated_at` (not a stored column) and the body (never stored, LLP 0360), so
+  nothing the comment itself carries can change without changing the event id.
+  **Exposed through `event_type` only.** That column is not read off the
+  comment: `pull_request_comment` versus `issue_comment` is decided by whether
+  the comment's subject number is in `prNumbers`, the run-varying set seeded
+  from `cursor.pull_numbers` and extended by the same tick's issues and pulls
+  pages (the retention LLP 0361#page-work describes). That set only grows, so a
+  comment first typed `issue_comment` because its pull had not been sighted is
+  typed `pull_request_comment` on a later tick, and the guard refuses the
+  correction for as long as the comment sits on the watermark second. Narrow: it
+  needs a pull absent from `cursor.pull_numbers` and from both listings of the
+  capturing tick, and the loss is a misclassification rather than a stale
+  snapshot.
 
-The whole observable defect is therefore `state` (and the pull `payload`) on the
-issues and pulls passes, in the window where two updates land inside one second
-with no later activity on the item.
+The observable defect is therefore `state` (and the pull `payload`) on the
+issues and pulls passes, plus a comment's `event_type` discriminator, in the
+window where two updates land inside one second with no later activity on the
+item.
 
 Downstream, one more measurement bears on what a fix is worth. The graph's
 props merge is order-independent by design (LLP 0023#merge-policy,
@@ -121,10 +139,14 @@ policy, which LLP 0023 settled.
 ## What the corpus already settles {#constraints}
 
 - **The pulls tie guard is decided, not incidental.** LLP 0361#page-work states
-  that equal-timestamp unseen pulls are still captured and that "the cursor
-  retains observed pull numbers". Changing the pulls identity from a number to
-  a content fingerprint edits what that document decided, so it needs this
-  document (or its successor), not a patch.
+  that equal-timestamp unseen pulls are still captured, and a tie guard is the
+  only thing that keeps that rule from re-appending the boundary second every
+  tick. (Its neighbouring sentence, "the cursor retains observed pull numbers",
+  is about `cursor.pull_numbers` and comment discrimination; the tie guard's own
+  `cursor.pulls_high_numbers` came later and falls back to `pull_numbers` on an
+  older sidecar.) Changing how that rule recognizes an unseen pull, from a
+  number to a content fingerprint, reworks the mechanism that document settled,
+  so it needs this document (or its successor), not a patch.
 - **Identity carried across ticks is budgeted.** LLP 0360#resource-bounds caps
   what capture may retain, and `openGate` is annotated `[constrained-by]`
   against it: one watermark second's worth of identity, never a repository's
@@ -169,9 +191,9 @@ arm that makes the four passes consistent in mechanism.
 
 Costs and open sub-decisions:
 
-- It buys nothing on commits and comments (see #reach), where the fingerprint
-  is a strictly more expensive spelling of the event id, and it enlarges the
-  sidecar's per-entry size on all four.
+- It buys nothing on commits, and on comments only the `event_type` case in
+  #reach, so on those two passes the fingerprint is mostly a more expensive
+  spelling of the event id; it enlarges the sidecar's per-entry size on all four.
 - Fingerprint input has to be pinned exactly, because it is durable state read
   by a later release: which columns, what encoding, and what happens when a
   column is added to `github_events` later (a changed input silently re-admits
@@ -183,14 +205,17 @@ Costs and open sub-decisions:
 ### B. A content fingerprint only where a snapshot field exists {#option-narrow}
 
 Issues and pulls key on identity plus the mutable snapshot fields (`state`, and
-the pull `payload`); commits and comments stay id-keyed, because their captured
-rows cannot differ between two snapshots. The observable defect is fully cured,
-the sidecar grows only where growth buys something, and the guard's rule is
-still one rule ("refuse a row identical to one already appended"), just
+the pull `payload`); commits and comments stay id-keyed, because nothing those
+items themselves carry can differ between two snapshots. The issue's own defect
+is cured, the sidecar grows only where growth buys something, and the guard's
+rule is still one rule ("refuse a row identical to one already appended"), just
 recognized to be a no-op on two passes.
 
 Costs and open sub-decisions:
 
+- It leaves the comment `event_type` case in #reach uncured, because that is
+  not an item field: covering it means fingerprinting the built row rather than
+  the item, which is arm A's mechanism on a pass arm B keeps id-keyed.
 - The four passes then differ in mechanism, which is exactly what the issue's
   deferral reasoning warned against ("fixing only the three new passes would
   leave the four passes inconsistent"). Accepting it means accepting that
@@ -214,7 +239,8 @@ rejection stays on the record rather than being rediscovered.
 The window is two updates inside one second on one item with no later activity
 on it, the loss is one stale snapshot rather than a dropped item, the graph
 result is usually unchanged (see #reach), and the next update on that item
-recovers the current state. `openGate`'s doc comment already names the trade
+recovers the current state. It also accepts the comment `event_type` case,
+which is narrower still. `openGate`'s doc comment already names the trade
 explicitly. Promote that comment to a decided position, note it on LLP 0361, and
 close the issue. This is the honest null option and it costs nothing.
 
