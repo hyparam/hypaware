@@ -2259,7 +2259,7 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
   // and no marker will ever clear a `pending` derived for it. That is the
   // backfill twin of the probe-less attach gate (LLP 0229): status derives
   // by the reconciler's own gate or reports `n/a`.
-  // @ref LLP 0375#status-derives-by-the-provider-gate [implements]: a provider-less client adapter is inert for backfill, never pending
+  // @ref LLP 0379#status-derives-by-the-provider-gate [implements]: a provider-less client adapter is inert for backfill, never pending
   /** @type {Map<string, boolean>} */
   const clientAdapterPlugins = new Map()
   for (const d of clientDescriptors?.values() ?? []) {

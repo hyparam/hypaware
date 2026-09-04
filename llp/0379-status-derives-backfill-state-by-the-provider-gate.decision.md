@@ -1,4 +1,4 @@
-# LLP 0375: status derives backfill state by the reconciler's provider gate
+# LLP 0379: status derives backfill state by the reconciler's provider gate
 
 **Type:** Decision
 **Status:** Draft

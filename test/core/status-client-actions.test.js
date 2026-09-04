@@ -185,7 +185,7 @@ test('a default-on backfill target (enabled client, no explicit block) shows pen
 // for it. Claude Desktop's history is imported by the `@hypaware/claude`
 // provider; its own line must read `n/a`, present rather than dropped, while
 // the provider that does the work stays `pending`.
-// @ref LLP 0375#status-derives-by-the-provider-gate [tests]: a provider-less client adapter is n/a, never pending, and is not dropped
+// @ref LLP 0379#status-derives-by-the-provider-gate [tests]: a provider-less client adapter is n/a, never pending, and is not dropped
 test('a client adapter that declares no backfill provider is n/a on a joined host, not a permanent pending', async () => {
   const hypHome = await makeHome()
   const stateRoot = path.join(hypHome, 'hypaware')

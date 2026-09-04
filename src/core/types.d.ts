@@ -53,7 +53,7 @@ export interface ClientDescriptor {
    * false`: this client registers no backfill provider, another plugin's
    * provider imports its history. Absent otherwise. Read by the `hyp status`
    * client-actions derivation so a provider-less client is `n/a`, never a
-   * `pending` that cannot resolve (LLP 0375).
+   * `pending` that cannot resolve (LLP 0379).
    */
   backfillProvider?: false
 }

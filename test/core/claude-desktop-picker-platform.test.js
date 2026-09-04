@@ -41,7 +41,7 @@ test('the Claude Desktop picker row declares the macOS-only platform gate its se
 // Desktop's transcripts are imported by the `@hypaware/claude` provider, so
 // its own client block says it registers no provider, and only the explicit
 // opt-out reaches the descriptor: every other client leaves the field absent.
-// @ref LLP 0375#manifest-declares-no-provider [tests]: the opt-out rides the client block into the descriptor; absent stays absent
+// @ref LLP 0379#manifest-declares-no-provider [tests]: the opt-out rides the client block into the descriptor; absent stays absent
 test('the Claude Desktop client block declares it registers no backfill provider', async () => {
   const catalog = await realCatalog()
   assert.equal(catalog.clientDescriptors.get('claude-desktop')?.backfillProvider, false)
