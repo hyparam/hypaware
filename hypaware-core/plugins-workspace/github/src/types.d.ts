@@ -294,7 +294,12 @@ export interface GithubRepoWork {
   // rather than skipping the un-fetched pages (LLP 0360#cursoring).
   issues_high?: string
   pulls_high?: string
-  /** Staged `RepoCursor.pulls_high_numbers` for the in-flight `pulls_high`. */
+  /**
+   * Staged `RepoCursor.pulls_high_numbers` for the in-flight `pulls_high`.
+   * Absent only on a phase resumed from a work descriptor written before this
+   * field existed, which stages nothing rather than the partial answer its
+   * remaining pages would give.
+   */
   pulls_high_numbers?: number[]
   commits_high?: string
   comments_high?: string

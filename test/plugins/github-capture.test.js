@@ -858,3 +858,80 @@ test('a refused continuation clears the poisoned work so the next tick captures 
   const ids = [...refused.rows, ...recovered.rows, ...settled.rows].map((row) => row.event_id)
   assert.equal(new Set(ids).size, ids.length, 'no duplicate event ids across the three ticks')
 })
+
+test('a boundary pull re-listed on a later page of the same phase is captured once', async () => {
+  const TIE = '2026-02-01T00:00:00Z'
+  const older = '2026-01-31T00:00:00Z'
+  const tied = { number: 12, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Bob' } }
+  const stale = { number: 9, state: 'open', created_at: older, updated_at: older, merged_at: null, user: { login: 'Ada' } }
+  const client = fakeClient({ repos: { 'o/r': { pulls: [] } } })
+  // `sort=updated&direction=desc` reshuffles under pagination: a pull updated
+  // mid-traversal pushes an item back across the page boundary, so one phase
+  // can list #12 twice.
+  client.listPullRequestsPage = async (owner, name, etag, page) => (page === undefined
+    ? { items: [tied], next: 'p2' }
+    : { items: [tied, stale], next: null })
+
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z', pulls: TIE }, pull_numbers: [] }
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [12],
+    'the second sighting is suppressed by the page that captured it, not re-emitted',
+  )
+})
+
+test('a pulls phase resumed from a pre-field work descriptor publishes no partial captured set', async () => {
+  const TIE = '2026-02-01T00:00:00Z'
+  const older = '2026-01-31T00:00:00Z'
+  const at = (number) => ({ number, state: 'open', created_at: TIE, updated_at: TIE, merged_at: null, user: { login: 'Bob' } })
+  const stale = { number: 9, state: 'open', created_at: older, updated_at: older, merged_at: null, user: { login: 'Ada' } }
+  const client = fakeClient({ repos: { 'o/r': { pulls: [] } } })
+  client.listPullRequestsPage = async (owner, name, etag, page) => (page === 'p2'
+    ? { items: [at(11), stale], next: null }
+    : { items: [at(13), at(12), at(11), stale], next: null })
+
+  // What the previous release leaves behind when its request budget runs out
+  // mid-pulls-phase: `pulls_high` staged, no `pulls_high_numbers`. Pages 1..N-1
+  // already captured #13 and #12 at the boundary second, and nothing on the
+  // remaining pages can say so.
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = {
+    since: { issues: '2026-01-01T00:00:00Z', pulls: TIE },
+    pull_numbers: [11, 12, 13],
+    work: { mode: 'poll', phase: 'pulls', page: 'p2', baseline_pulls: TIE, pulls_high: TIE, pull_tasks: [] },
+  }
+  /** @param {Record<string, unknown>[]} into */
+  const tick = (into) => captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { into.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  await tick([])
+  assert.equal(cursors.repos['o/r'].pulls_high_numbers, undefined, 'half a phase is not an answer about the boundary second')
+
+  const rows = []
+  await tick(rows)
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'pull_request').map((row) => row.number),
+    [],
+    'the pull_numbers fallback still covers the pulls the interrupted phase captured',
+  )
+  assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [11, 12, 13], 'and a whole phase publishes the dedicated set')
+})

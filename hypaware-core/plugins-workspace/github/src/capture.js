@@ -261,7 +261,16 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
       }
       const baseline = work.baseline_pulls
       const changed = work.mode === 'backfill' ? page.items : page.items.filter((pr) => pullChangedSince(pr, baseline, capturedAtHigh))
-      for (const pr of page.items) prNumbers.add(pr.number)
+      for (const pr of page.items) {
+        prNumbers.add(pr.number)
+        // The guard's set has to grow across the phase's pages, not only across
+        // ticks. `sort=updated&direction=desc` reshuffles under pagination, so a
+        // pull this page just captured at the boundary second can be listed
+        // again on a later page of the same traversal, and `flush` deduplicates
+        // one batch, not a phase. Reading the number back off this page is what
+        // "the pulls listing captured it" means.
+        if (updatedAt(pr) === baseline) capturedAtHigh.add(pr.number)
+      }
       await flush(changed.map((pr) => pullRow(repo, pr)))
       cursor.pull_numbers = sortedNumbers(prNumbers)
       work.pull_tasks = changed.map((pr) => ({ number: pr.number, created_at: pr.created_at, phase: 'files' }))
@@ -654,6 +663,14 @@ function olderThan(pr, high) {
 // @ref LLP 0361#page-work [implements]: equal-timestamp unseen pulls are still captured, so the boundary second's numbers are what the next poll needs
 function advancePullsHigh(work, pulls) {
   const high = newestPullTime(work.pulls_high, pulls)
+  // A pulls phase resumed from a work descriptor written before this field
+  // existed has no staged set, and the boundary pulls its earlier pages already
+  // captured are unrecoverable. Extending nothing would publish the remaining
+  // pages' numbers as if they were the whole answer, so the next poll would
+  // re-capture the rest. Stay silent instead and let `finishPulls` keep the
+  // cursor's `pull_numbers` fallback, until a page raises the high water and
+  // opens a second this phase has observed whole.
+  if (high === work.pulls_high && !work.pulls_high_numbers) return
   const numbers = new Set(high === work.pulls_high ? work.pulls_high_numbers ?? [] : [])
   for (const pr of pulls) if (updatedAt(pr) === high) numbers.add(pr.number)
   work.pulls_high = high
