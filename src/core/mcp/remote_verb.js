@@ -20,11 +20,11 @@ import { createHttpMcpClient, isAuthStatus } from './client.js'
  * the client display budget (context volume) is added separately by the
  * renderer: the two truncations of LLP 0033 §two-truncations.
  *
- * @param {{ verb: VerbRegistration, params: Record<string, unknown>, target: string, ctx: CommandRunContext }} args
+ * @param {{ verb: VerbRegistration, params: Record<string, unknown>, target: string, org?: string, ctx: CommandRunContext }} args
  * @returns {Promise<{ ok: true, result: unknown, notices: string[] } | { ok: false, error: string, exitCode?: number }>}
  * @ref LLP 0033#two-truncations [implements]: server cap surfaced here as its own line; client cannot lift it
  */
-export async function runRemoteVerb({ verb, params, target, ctx }) {
+export async function runRemoteVerb({ verb, params, target, org, ctx }) {
   // Built-in targets (the shipped central server) layered under the user's
   // own `query.remotes`, so `--remote hyperparam` works with no `remote add`.
   const remotes = effectiveRemotes(ctx.config)
@@ -50,7 +50,7 @@ export async function runRemoteVerb({ verb, params, target, ctx }) {
   // The registered URL is the server **base**; MCP is served at <base>/v1/mcp,
   // so POST the derived endpoint, not the base verbatim (which 404s).
   // @ref LLP 0084#derive [implements]: derive the MCP endpoint from the registered base
-  const mcpUrl = deriveMcpEndpoint(entry.url)
+  const mcpUrl = deriveMcpEndpoint(entry.url, org)
   /** @type {Awaited<ReturnType<typeof resolveAccessJwt>>} */
   let resolved
   try {

@@ -149,7 +149,7 @@ export async function runVerbCommand(verb, argv, ctx) {
     // `--remote <name>` passes straight through.
     // @ref LLP 0062#bare-remote [implements]: bare --remote uses query.default_remote, else the shipped built-in default
     const target = ctrl.controls.remote === '' ? effectiveDefaultRemote(ctx.config) : ctrl.controls.remote
-    const remote = await runRemoteVerb({ verb, params: parsed.params, target, ctx })
+    const remote = await runRemoteVerb({ verb, params: parsed.params, target, org: ctrl.controls.org, ctx })
     if (!remote.ok) {
       ctx.stderr.write(`hyp ${verb.name}: ${remote.error}\n`)
       return remote.exitCode ?? 1

@@ -713,7 +713,7 @@ function buildCoreCommands(registry) {
       category: 'additional',
       audience: 'operator',
       summary: 'Serve this host\'s verbs as an MCP server for AI clients',
-      usage: 'hyp mcp serve [--remote <target>]',
+      usage: 'hyp mcp serve [--remote <target> [--org <label|*>]]',
       run: runMcp,
     },
     makeGroupCommand({

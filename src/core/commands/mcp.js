@@ -43,7 +43,7 @@ export async function runMcp(argv, ctx) {
     // Fallback for clients without remote-MCP support: a stdio proxy that
     // injects the stored query-scoped credential (LLP 0034 §proxy-fallback).
     const { runMcpProxy } = await import('../mcp/proxy.js')
-    return runMcpProxy({ target: parsed.remote, ctx })
+    return runMcpProxy({ target: parsed.remote, org: parsed.org, ctx })
   }
 
   const require = createRequire(import.meta.url)
@@ -94,18 +94,21 @@ export async function runMcp(argv, ctx) {
  * (reserved follow-up).
  *
  * @param {string[]} argv
- * @returns {{ ok: true, remote: string | undefined, http: boolean } | { ok: false, error: string }}
+ * @returns {{ ok: true, remote: string | undefined, org?: string, http: boolean } | { ok: false, error: string }}
  */
 function parseMcpArgv(argv) {
   const parsed = parseCommandArgv(argv, {
     type: 'object',
     properties: {
       remote: { type: 'string' },
+      org: { type: 'string' },
       http: { type: 'boolean', default: false },
     },
   })
-  if ('help' in parsed) return { ok: false, error: 'usage: hyp mcp serve [--remote <target>]' }
+  if ('help' in parsed) return { ok: false, error: 'usage: hyp mcp serve [--remote <target> [--org <label|*>]]' }
   if (!parsed.ok) return parsed
-  const p = /** @type {{ remote?: string, http: boolean }} */ (parsed.params)
-  return { ok: true, remote: p.remote, http: p.http }
+  const p = /** @type {{ remote?: string, org?: string, http: boolean }} */ (parsed.params)
+  if (p.org !== undefined && !p.remote) return { ok: false, error: '--org requires --remote' }
+  if (p.org === '') return { ok: false, error: '--org expects an org label or *' }
+  return { ok: true, remote: p.remote, org: p.org, http: p.http }
 }

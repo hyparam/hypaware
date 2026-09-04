@@ -26,11 +26,11 @@ import { serveStdio } from './stdio.js'
  * without remote-MCP support, or environments still issuing the unscoped
  * token.
  *
- * @param {{ target: string, ctx: CommandRunContext }} args
+ * @param {{ target: string, org?: string, ctx: CommandRunContext }} args
  * @returns {Promise<number>}
  * @ref LLP 0034#proxy-fallback [implements]: stdio proxy injecting the 0600-stored credential; the fallback, not the primary path
  */
-export async function runMcpProxy({ target, ctx }) {
+export async function runMcpProxy({ target, org, ctx }) {
   const remotes = ctx.config?.query?.remotes ?? {}
   const entry = remotes[target]
   if (!entry) {
@@ -42,7 +42,7 @@ export async function runMcpProxy({ target, ctx }) {
   // The registered URL is the server **base**; MCP is served at <base>/v1/mcp,
   // so forward each message to the derived endpoint, not the base verbatim.
   // @ref LLP 0084#derive [implements]: derive the MCP endpoint from the registered base
-  const mcpUrl = deriveMcpEndpoint(entry.url)
+  const mcpUrl = deriveMcpEndpoint(entry.url, org)
   // Fail fast (exit 2) if there is no usable credential at all. This is a
   // presence check only - resolveToken never refreshes - so a near-expiry OIDC
   // JWT does not trigger a network refresh here that the first handleMessage

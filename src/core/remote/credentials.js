@@ -97,10 +97,11 @@ const MCP_PATH = '/v1/mcp'
  * the single registered target URL, so no second URL is ever configured.
  *
  * @param {string} url the registered target URL (a base, or a full /v1/mcp URL)
+ * @param {string} [org] operator read selector, carried only on the MCP URL
  * @returns {string}
  * @ref LLP 0084#derive [implements]: MCP endpoint derives from the registered base; a path already ending /v1/mcp is honored verbatim
  */
-export function deriveMcpEndpoint(url) {
+export function deriveMcpEndpoint(url, org) {
   /** @type {URL} */
   let parsed
   try {
@@ -113,6 +114,7 @@ export function deriveMcpEndpoint(url) {
   // only normalizing a trailing slash. Otherwise treat the URL as a base and
   // append the MCP path after any existing path prefix.
   parsed.pathname = trimmedPath.endsWith(MCP_PATH) ? trimmedPath : `${trimmedPath}${MCP_PATH}`
+  if (org !== undefined) parsed.searchParams.set('org', org)
   return parsed.toString()
 }
 
