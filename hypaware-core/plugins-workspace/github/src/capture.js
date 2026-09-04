@@ -704,13 +704,20 @@ function commentEventId(c) {
  * at the phase boundary, not per page), so the floor's items come back on each
  * of those pages and must be refused throughout. `staged`/`stagedIds` is the
  * running maximum on `work`, which is what gets published next. Collapsing the
- * two loses the floor the moment anything newer arrives, and the real
- * endpoints hand back newest-first (`/commits` is reverse-chronological,
- * `/issues` defaults to `sort=created&direction=desc`), so one new item is
- * always enough to reach the boundary rows behind it. Below the floor nothing
- * is refused: an inclusive `since` cannot return those, and dropping a row is
- * never the safe direction. Keeping both means the gate resumes correctly from
- * whichever of the pair survived a partial tick (LLP 0360#cursoring).
+ * two loses the floor the moment anything newer arrives, and one new item is
+ * routinely enough to reach the boundary rows behind it (`/commits` is
+ * reverse-chronological, `/issues` defaults to `sort=created` descending).
+ * The floor is a static set for the whole pass, so `admit` does not depend on
+ * the order a listing arrives in, which is what makes it right even though
+ * none of these endpoints orders on `updated_at`, the field the gate windows
+ * on. Below the floor nothing is refused: an inclusive `since` cannot return
+ * those. Keeping both means the gate resumes correctly from whichever of the
+ * pair survived a partial tick (LLP 0360#cursoring).
+ *
+ * What the gate does drop: an item re-updated inside the same second it was
+ * captured keeps its `updated_at`, so the floor refuses it by identity and the
+ * newer snapshot never lands. That is the trade `pullChangedSince` already
+ * makes; curing it needs a content fingerprint, not a bare event id.
  *
  * @ref LLP 0360#resource-bounds [constrained-by]: identity carried across ticks is one watermark second's worth, not a repository's history
  *

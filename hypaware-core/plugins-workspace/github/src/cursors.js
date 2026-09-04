@@ -141,10 +141,19 @@ function readWork(value) {
 }
 
 /**
- * Boundary event ids read back from the sidecar. Capped like the task lists
- * are: a boundary set holds one watermark second's worth of items, so a longer
- * array is a corrupt or hand-edited sidecar. Truncating costs a re-appended
- * row at worst, never a dropped one.
+ * Boundary event ids read back from the sidecar, capped like the task lists
+ * are. `openGate` applies the same cap on the way out, so a written set always
+ * survives its own read and the sidecar cannot grow without limit.
+ *
+ * The cap is a bound, not a cure. A boundary set holds one watermark second's
+ * worth of items, so overflowing it means more than `MAX_BOUNDARY_IDS` items
+ * share one second: a bulk sweep, or a rewrite that restamps thousands of
+ * commits. The overflow sits outside the guard, so those items are re-appended,
+ * and re-spend their sub-resource requests, on every tick until something newer
+ * moves the watermark off that second. Better than the unguarded behavior
+ * #1284 reported, but the same shape of loop. Trading it for a bounded loss
+ * (advancing the watermark past a second that will not fit) is a design
+ * decision, not something a cap decides.
  *
  * @param {unknown} value @returns {string[] | null}
  */

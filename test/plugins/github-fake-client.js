@@ -14,12 +14,15 @@
  * capture passes have to survive; a fake that filtered exclusively would hide
  * it. An item with no timestamp is always returned.
  *
- * The three `since`-windowed listings also come back **newest-first**, as the
- * real ones do (`/commits` is reverse-chronological, `/issues` and
- * `/issues/comments` default to `sort=created&direction=desc`). Order is not
- * cosmetic here: the boundary rows trail the new ones, so a fixture-order fake
- * hides a gate that forgets the boundary as soon as it sees something newer.
- * Items with no timestamp keep their fixture position, at the front.
+ * The three `since`-windowed listings also come back **newest-first**. That is
+ * the ordering that exposes the bug, not a promise the real API makes:
+ * `/commits` is reverse-chronological and `/issues` defaults to `sort=created`
+ * descending, but the client sends the repo issue-comments listing with no
+ * `sort` at all, and none of the three orders on `updated_at`, which is the
+ * field the capture gate windows on. Order is not cosmetic here: with the
+ * boundary rows trailing the new ones, a fixture-order fake hides a gate that
+ * forgets the boundary as soon as it sees something newer. Items with no
+ * timestamp sort last, keeping their fixture order among themselves.
  *
  * @param {{
  *   viewerRepos?: string[],
