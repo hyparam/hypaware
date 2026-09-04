@@ -621,3 +621,70 @@ test('staged phase watermarks survive the cursor sidecar round trip', (t) => {
   assert.equal(work?.commits_high, '2026-06-02T00:00:00Z')
   assert.equal(work?.comments_high, '2026-06-03T00:00:00Z')
 })
+
+test('a refused continuation clears the poisoned work so the next tick captures the repo again', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-foreign-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // A hand-tampered sidecar: the persisted continuation addresses an origin the
+  // client refuses. A live `Link` header cannot get here any more, because the
+  // client pins `next` on the response that carried it.
+  writeCursors(stateDir, /** @type {any} */ ({
+    schema_version: 1,
+    repos: {
+      'o/r': {
+        since: { issues: '2026-01-01T00:00:00Z' },
+        work: { mode: 'poll', phase: 'issues', page: 'https://evil.test/repos/o/r/issues?page=2' },
+      },
+    },
+  }))
+
+  const issues = [{ number: 1, state: 'open', created_at: '2026-02-01T00:00:00Z', updated_at: '2026-02-01T00:00:00Z', user: { login: 'a', type: 'User' } }]
+  const client = fakeClient({})
+  // The real client pins every URL to the configured API origin before it
+  // spends the token, so a continuation is refused rather than fetched.
+  client.listIssuesPage = async (_owner, _repo, since, page) => {
+    if (page !== undefined) {
+      throw Object.assign(new Error('GitHub continuation URL refused: it does not address the configured API base (origin https://evil.test)'), { hypErrorKind: 'github_foreign_origin' })
+    }
+    return { items: issues.filter((it) => !since || it.updated_at > since), next: null }
+  }
+
+  /** One tick: read the sidecar, capture, persist - the `tick.js` sequence. */
+  async function tick() {
+    /** @type {Record<string, unknown>[]} */
+    const rows = []
+    const cursors = readCursors(stateDir)
+    const result = await captureRepos({
+      client,
+      config: cfg(),
+      cursors,
+      append: async (batch) => { rows.push(...batch) },
+      log: silentLog,
+      mode: 'poll',
+      observedRepos: ['o/r'],
+    })
+    writeCursors(stateDir, cursors)
+    return { rows, result }
+  }
+
+  const refused = await tick()
+  assert.equal(refused.rows.length, 0, 'the refused tick captures nothing')
+  assert.equal(refused.result.errors.length, 1)
+  assert.equal(readCursors(stateDir).repos['o/r'].work, undefined, 'the poisoned work is gone from the sidecar')
+
+  const recovered = await tick()
+  assert.deepEqual(recovered.rows.map((row) => row.event_id), ['issue:o/r#1'], 'the repo produces rows again on the following tick')
+  assert.equal(readCursors(stateDir).repos['o/r'].since?.issues, '2026-02-01T00:00:00Z')
+
+  // The restart is the last-completed-phase retry LLP 0360#cursoring settles.
+  // Here the poison sits at the head of the phase, so there is nothing already
+  // appended to replay and a third tick adds nothing. Poison a phase that had
+  // part-appended and the restart re-appends that prefix instead, which the
+  // same decision accepts ("rows appended by an earlier attempt remain valid
+  // snapshots"): the staged high-water is deliberately NOT published on the
+  // clear, because publishing it would skip the pages the phase never fetched.
+  const settled = await tick()
+  assert.deepEqual(settled.rows, [])
+  const ids = [...refused.rows, ...recovered.rows, ...settled.rows].map((row) => row.event_id)
+  assert.equal(new Set(ids).size, ids.length, 'no duplicate event ids across the three ticks')
+})

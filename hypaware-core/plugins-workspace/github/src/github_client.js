@@ -107,7 +107,15 @@ export function createGithubClient({ tokenEnv, env, log, fetchImpl, baseUrl = AP
     }
 
     const etag = res.headers.get('etag')
-    const next = parseNextLink(res.headers.get('link'))
+    // Pin the continuation where it is produced, not only where it is spent.
+    // The caller persists `next` into `github-cursors.json`, so a URL refused
+    // only at fetch time is a refusal written into durable state: the phase
+    // that already appended this page then restarts from its last PUBLISHED
+    // watermark on every later tick, discarding the staged one, and re-appends
+    // the same rows, because `github_events` dedupes within one batch and not
+    // across ticks.
+    const link = parseNextLink(res.headers.get('link'))
+    const next = link === null ? null : resolveUrl(baseUrl, link)
     const data = await res.json()
     return { notModified: false, data, next, etag }
   }
