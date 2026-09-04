@@ -45,12 +45,15 @@ export async function startGithubSource() {
       const result = await runCaptureTick(runtime, { mode: 'poll' })
       rowsWritten += result.events
       backlogPending = result.pending
-      lastRepoCount = result.repos
+      // What the last tick reached, not the inventory: a budget-stopped tick
+      // covers only a prefix of it (LLP 0361#budget).
+      lastRepoCount = result.visited
       lastError = result.errors[0]?.error
       if (result.errors.length === 0) lastSuccessAt = new Date().toISOString()
       runtime.log.info('github.poll_tick_completed', {
         operation: 'poll',
         repos: result.repos,
+        repos_visited: result.visited,
         events: result.events,
         errors: result.errors.length,
         requests: result.requests,

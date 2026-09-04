@@ -113,7 +113,7 @@ test('default capture tick uses local session evidence without GitHub enumeratio
 
   assert.equal(observedReads, 1)
   assert.equal(viewerEnumerations, 0)
-  assert.deepEqual(report, { repos: 0, events: 0, requests: 0, pending: false, errors: [] })
+  assert.deepEqual(report, { repos: 0, visited: 0, events: 0, requests: 0, pending: false, errors: [] })
 })
 
 // ---------------------------------------------------------------------------

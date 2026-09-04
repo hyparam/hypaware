@@ -49,7 +49,7 @@ export async function runGithubBackfill(argv, ctx) {
     const only = parsed.repos.length > 0 ? parsed.repos : undefined
 
     const result = await runCaptureTick(runtime, { mode: 'backfill', only })
-    ctx.stdout.write(`github backfill: ${result.events} event(s) across ${result.repos} repo(s)\n`)
+    ctx.stdout.write(`github backfill: ${result.events} event(s) across ${result.visited} repo(s)\n`)
     if (result.pending) ctx.stdout.write('github backfill: bounded work remains and will resume on the next GitHub capture tick\n')
     reportErrors(ctx, result.errors)
     // Zero repos with an error reported is an inventory that never resolved,
@@ -83,7 +83,7 @@ export async function runGithubSync(_argv, ctx) {
   try {
     const runtime = requireGithubRuntime()
     const result = await runCaptureTick(runtime, { mode: 'poll' })
-    ctx.stdout.write(`github sync: ${result.events} event(s) across ${result.repos} repo(s)\n`)
+    ctx.stdout.write(`github sync: ${result.events} event(s) across ${result.visited} repo(s)\n`)
     if (result.pending) ctx.stdout.write('github sync: bounded work remains and will resume on the next GitHub capture tick\n')
     reportErrors(ctx, result.errors)
     return result.errors.length > 0 ? 1 : 0

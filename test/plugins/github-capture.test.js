@@ -7,7 +7,9 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { captureRepos, resolveRepos } from '../../hypaware-core/plugins-workspace/github/src/capture.js'
+import { runGithubSync } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
 import { readCursors, writeCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
+import { setGithubRuntime } from '../../hypaware-core/plugins-workspace/github/src/runtime.js'
 import { fakeClient, silentLog } from './github-fake-client.js'
 
 /** @import { CursorState, GithubClient, GithubConfig } from '../../hypaware-core/plugins-workspace/github/src/types.d.ts' */
@@ -392,6 +394,53 @@ test('request exhaustion rotates the next tick to the next repository', async ()
     'listIssues:o/a',
     'listIssues:o/b',
   ])
+})
+
+test('a budget-stopped tick reports the repositories it visited, not the whole inventory', async () => {
+  const result = await captureRepos({
+    client: fakeClient({}),
+    config: cfg(),
+    cursors: freshCursors(),
+    append: async () => {},
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/a', 'o/b', 'o/c'],
+    requestLimit: 1,
+  })
+
+  assert.equal(result.pending, true, 'the budget stopped the tick with repositories left')
+  assert.equal(result.visited, 1, 'the tick reached exactly one repository before the budget ran out')
+  assert.equal(result.repos, 3, 'the inventory size stays available for the selection checks')
+})
+
+test('hyp github sync counts the repositories the budget let it visit', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-sync-budget-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  setGithubRuntime(/** @type {any} */ ({
+    stateDir,
+    config: cfg(),
+    captureRequestLimit: 1,
+    observedRepos: { async list() { return ['o/a', 'o/b', 'o/c'] } },
+    clientFactory: () => fakeClient({
+      repos: { 'o/a': { issues: [{ number: 1, state: 'open', created_at: '2026-01-01T00:00:00Z', user: { login: 'a' } }] } },
+    }),
+    storage: {
+      cacheTablePath() { return '/cache/github_events' },
+      async appendRows() {},
+    },
+    log: { info() {}, error() {} },
+  }))
+  let out = ''
+  const ctx = /** @type {any} */ ({
+    stdout: { write(/** @type {string} */ chunk) { out += chunk } },
+    stderr: { write() {} },
+  })
+
+  const code = await runGithubSync([], ctx)
+
+  assert.equal(code, 0)
+  assert.match(out, /github sync: 1 event\(s\) across 1 repo\(s\)\n/)
+  assert.match(out, /bounded work remains/)
 })
 
 test('incremental pulls stop at the prior high-water page', async () => {

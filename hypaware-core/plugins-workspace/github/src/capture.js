@@ -82,7 +82,9 @@ export async function resolveRepos(config, client, log, observedRepos) {
  * @param {string[]} [args.only]  restrict to these repos (e.g. `hyp github backfill owner/repo`)
  * @param {string[]} [args.observedRepos] repositories evidenced by export-eligible local agent activity
  * @param {number} [args.requestLimit] test seam; production uses CAPTURE_REQUEST_LIMIT
- * @returns {Promise<{ repos: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>}
+ * @returns {Promise<{ repos: number, visited: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>} `repos` is the inventory this tick selected (after
+ *   `ignore[]` and any `only` narrowing); `visited` is how many of them the request
+ *   budget let it reach, which is fewer whenever the tick stops early (LLP 0361#budget).
  */
 export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos, requestLimit = CAPTURE_REQUEST_LIMIT }) {
   let repos = await resolveRepos(config, client, log, observedRepos)
@@ -176,7 +178,7 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       pending_repos: repos.filter((repo) => cursors.repos[repo]?.work).length,
     })
   }
-  return { repos: repos.length, events, requests: budget.used, pending, errors }
+  return { repos: repos.length, visited, events, requests: budget.used, pending, errors }
 }
 
 /**
