@@ -227,6 +227,43 @@ test('a request with no body keeps its connection reusable', async () => {
   })
 })
 
+// The cap answers `connection: close` so a pooling client never meets the
+// over-cap reset on a request it already considers finished. A body the
+// request declares to fit under the cap is drained to its end, can never reach
+// the cap, and is never reset, so it must keep its connection: closing it
+// would cost the caller a socket for nothing (issue #1346).
+test('a refusal whose declared body fits under the cap keeps its connection reusable', async () => {
+  const set = new Set(['sess-live'])
+  await withControlSockets(set, async (port) => {
+    const body = JSON.stringify({ session_id: 'sess-live' })
+    for (const refusal of [
+      { name: 'the unknown-control-path 404', method: 'POST', path: '/_hypaware/unknown/thing', status: 404 },
+      { name: 'the method-not-allowed 405', method: 'PUT', path: '/_hypaware/ignore/session', status: 405 },
+    ]) {
+      const received = await rawExchange(
+        port,
+        `${refusal.method} ${refusal.path} HTTP/1.1\r\nHost: 127.0.0.1\r\n` +
+          `content-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`
+      )
+      assert.match(received, new RegExp(`^HTTP/1\\.1 ${refusal.status} `), received.slice(0, 80))
+      assert.equal(
+        /\r\nconnection: close\r\n/i.test(received),
+        false,
+        `${refusal.name} closed a connection it drained to the end: ${received.slice(0, 200)}`
+      )
+    }
+    // Chunked framing declares no length, so it is never known to fit even
+    // when the body is tiny, and it has to be answered as a closing one.
+    const chunked = await rawExchange(
+      port,
+      'POST /_hypaware/unknown/thing HTTP/1.1\r\nHost: 127.0.0.1\r\n' +
+        `transfer-encoding: chunked\r\n\r\n${Buffer.byteLength(body).toString(16)}\r\n${body}\r\n0\r\n\r\n`
+    )
+    assert.match(chunked, /^HTTP\/1\.1 404 /, chunked.slice(0, 80))
+    assert.match(chunked, /\r\nconnection: close\r\n/i, chunked.slice(0, 200))
+  })
+})
+
 test('isControlPath recognizes the reserved prefix at segment boundaries only', () => {
   assert.equal(isControlPath('/_hypaware'), true)
   assert.equal(isControlPath('/_hypaware/ignore/session'), true)

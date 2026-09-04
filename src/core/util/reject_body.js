@@ -2,8 +2,10 @@
 
 // The one capped body drain, shared by the servers that discard a request
 // body they are not going to read: the control handler
-// (`src/core/control/session_ignore.js`) and the OpenCode listener's reject
-// branches (`hypaware-core/plugins-workspace/opencode/src/listener.js`).
+// (`src/core/control/session_ignore.js`), the OpenCode listener's reject
+// branches (`hypaware-core/plugins-workspace/opencode/src/listener.js`), and
+// the AI gateway's refusals
+// (`hypaware-core/plugins-workspace/ai-gateway/src/proxy.js`).
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
@@ -17,9 +19,11 @@
  *
  * A body the server refuses still has to be read for the answer to reach a
  * caller that is mid-upload, so the read cannot be skipped; left unbounded,
- * its length is the sender's to choose. 64 KiB also matches the control
- * handler's own `MAX_BODY_BYTES`, so a body that route would have accepted
- * is never cut.
+ * its length is the sender's to choose, and the shapes refused here (a
+ * DNS-rebound page, a remote peer, a caller naming a host or path nobody
+ * registered) are the ones that would choose a large one. 64 KiB also matches
+ * the control handler's own `MAX_BODY_BYTES`, so a body that route would have
+ * accepted is never cut.
  */
 const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
 
@@ -29,26 +33,31 @@ const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
  * Past the cap the request is paused, which is what bounds the read, and the
  * connection is closed once the answer is on the wire. Closing as soon as the
  * cap is hit would race the answer out and truncate it for a caller reading
- * the status it needs.
+ * the status it needs. The answer is written before a byte is drained, so a
+ * caller reading its socket while it uploads has the refusal in hand long
+ * before the cut; one that reads nothing until its upload finishes loses the
+ * answer to the reset, which is the price of the bound.
  *
- * Call this BEFORE writing the response head: a request that declares a body
- * is answered `connection: close`, because past the cap the connection is
- * reset and must not be answered as a reusable one. A client that reads a
- * keep-alive header and returns the socket to its pool meets the reset on a
- * request it has already finished, where its own error handler is gone and
- * the throw is nobody's. A request that declares no body drains nothing and
- * keeps its connection reusable. Chunked framing always counts as declaring
- * one, even when the body turns out to be empty: its length is unknowable
- * until it ends, and the header has to be set before the answer is written.
+ * Call this BEFORE writing the response head: a body that is not known to fit
+ * under the cap is answered `connection: close`, because past the cap the
+ * connection is reset and must not be answered as a reusable one. A client
+ * that reads a keep-alive header and returns the socket to its pool meets the
+ * reset on a request it has already finished, where its own error handler is
+ * gone and the throw is nobody's.
+ *
+ * A body the request declares to fit under the cap is the exception: it is
+ * drained to its end, the cap is never crossed, and no reset is coming.
+ * Closing it would cost a pooling client its socket for nothing, and on the
+ * gateway that is the common refusal shape - a bodyless GET, or a small POST,
+ * at a path or host nobody registered, on the connection an attached client
+ * forwards everything else over. Under a terminated CONNECT that socket is a
+ * decrypted tunnel, so the needless close bills the client a fresh handshake
+ * too.
  *
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
  */
 export function drainRequestBody(req, res) {
-  if (!declaresBody(req)) {
-    req.resume()
-    return
-  }
   let drained = 0
   let overCap = false
   function closeIfAnswered() {
@@ -61,23 +70,35 @@ export function drainRequestBody(req, res) {
     req.pause()
     closeIfAnswered()
   })
+  // Asked for rather than left to the implicit resume that attaching a `data`
+  // listener performs, because that one is skipped on a stream already paused.
+  // Every site reaches this flowing or not yet started, so the call is a no-op
+  // today. It is what keeps the drain honest at a site that hands over a
+  // paused request.
+  req.resume()
   res.on('finish', closeIfAnswered)
-  res.setHeader('connection', 'close')
+  if (!fitsUnderCap(req)) res.setHeader('connection', 'close')
 }
 
 /**
- * Does this request carry a body the parser will deliver? HTTP/1.1 frames a
- * body with `transfer-encoding` or a non-zero `content-length`; without
- * either, no `data` event is ever emitted.
+ * Is this request's body bounded, by its own framing, at or under the cap?
+ * Only then is the drain promised to end before the cap, which is what makes
+ * the connection safe to answer as a reusable one.
+ *
+ * HTTP/1.1 frames a body with `transfer-encoding` or `content-length`. With
+ * neither there is no body at all and no `data` event is ever emitted, which
+ * fits trivially. A chunked body declares no length, so it is never known to
+ * fit, even when it turns out to be empty: its length is unknowable until it
+ * ends, and the header has to be set before the answer is written.
  *
  * @param {IncomingMessage} req
  */
-function declaresBody(req) {
-  if (req.headers['transfer-encoding']) return true
+function fitsUnderCap(req) {
+  if (req.headers['transfer-encoding'] !== undefined) return false
   const length = req.headers['content-length']
-  if (typeof length !== 'string') return false
-  // Compared as a number, not as text: the parser has already refused a
-  // content-length that is not digits, and `00` frames no body even though it
-  // is not the string `0`.
-  return Number.parseInt(length, 10) > 0
+  if (length === undefined) return true
+  // Compared as a number, not as text, so `00` and `0` frame the same absent
+  // body. A length the parser let through that is still not digits reads back
+  // `NaN`, which fails this comparison and closes, the safe direction.
+  return Number(length) <= MAX_REJECTED_DRAIN_BYTES
 }

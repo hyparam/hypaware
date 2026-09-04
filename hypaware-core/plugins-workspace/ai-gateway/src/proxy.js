@@ -8,6 +8,7 @@ import { isControlPath } from '../../../../src/core/control/session_ignore.js'
 import { isMisdirectedHost } from '../../../../src/core/otlp/server.js'
 import { isIpLiteralHost } from '../../../../src/core/tls/x509.js'
 import { isLoopbackHost } from '../../../../src/core/util/loopback.js'
+import { drainRequestBody } from '../../../../src/core/util/reject_body.js'
 import { parseListen } from './config.js'
 import { attachConnectFrontDoor, connectHostOf, connectPortOf, openUpstream } from './connect.js'
 import { createNullExchange } from './recorder.js'
@@ -20,19 +21,6 @@ export { isControlPath }
  * @import { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
  * @import { Exchange } from './recorder.js'
  */
-
-// How much of a refused request's body is counted before the read is paused.
-// The socket read already in the parser when the pause lands is delivered too,
-// so the bytes actually read settle at about twice this, not exactly at it.
-// A refused body a caller is still uploading has to be read for the answer to
-// reach it at all, so the read cannot be skipped; left unbounded, its length is
-// the sender's to choose, and the shapes refused here (a DNS-rebound page, a
-// remote peer, a caller naming a host nobody registered) are the ones that
-// would choose a large one. The answer is written before a byte is drained, so
-// a caller reading its socket while it uploads has the refusal in hand long
-// before the cut; one that reads nothing until its upload finishes loses the
-// answer to the reset, which is the price of the bound.
-const MAX_REJECTED_DRAIN_BYTES = 64 * 1024
 
 /**
  * Hop-by-hop headers per RFC 7230 §6.1. These are scoped to one
@@ -878,13 +866,15 @@ function sanitizeResponseHeaders(headers) {
 }
 
 /**
- * Answer a request this listener will not forward, discarding at most
- * MAX_REJECTED_DRAIN_BYTES of its body.
+ * Answer a request this listener will not forward, discarding whatever body it
+ * carries under the shared cap in `drainRequestBody`. The drain runs before
+ * the answer is written, because it is what decides whether this connection
+ * can be answered as a reusable one.
  *
- * Past the cap the request is paused, which is what bounds the read, and the
- * connection is closed once the answer is on the wire. Closing as soon as the
- * cap is hit would race the answer out and truncate it for a caller reading
- * the status it needs.
+ * The upstream-failure site is the one here that refuses a request already
+ * handed to a pipe, and it still arrives flowing: the pipe tears down first,
+ * because `stream.pipe()` registers its dest-`error` handler with
+ * `prependListener`. So the drain's resume finds nothing paused to undo.
  *
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
@@ -892,46 +882,7 @@ function sanitizeResponseHeaders(headers) {
  * @param {object} body
  */
 function rejectJson(req, res, status, body) {
-  let drained = 0
-  let overCap = false
-  function closeIfAnswered() {
-    if (overCap && res.writableFinished) req.destroy()
-  }
-  req.on('data', (chunk) => {
-    drained += chunk.length
-    if (drained <= MAX_REJECTED_DRAIN_BYTES) return
-    overCap = true
-    req.pause()
-    closeIfAnswered()
-  })
-  // Asked for rather than left to the implicit resume that attaching a `data`
-  // listener performs, because that one is skipped on a stream already paused.
-  // Every site here reaches this flowing or not yet started, the
-  // upstream-failure one included: it arrives unpiped but still flowing, so
-  // the call is a no-op today. It is what keeps the drain honest at a site
-  // that hands over a paused request.
-  req.resume()
-  res.on('finish', closeIfAnswered)
-  // Past the cap this connection is reset, so it must not be answered as a
-  // reusable one. A client that reads a keep-alive header and returns the
-  // socket to its pool meets the reset on a request it has already finished,
-  // where its own error handler is gone and the throw is nobody's.
-  //
-  // A body the request declares to fit under the cap is the exception: it is
-  // drained to its end, the cap is never crossed, and no reset is coming.
-  // Closing it would cost a pooling client its socket for nothing, and the
-  // refusals on this listener are mostly that shape - a bodyless GET, or a
-  // small POST, at a path or host nobody registered, on the connection an
-  // attached client forwards everything else over. Under a terminated CONNECT
-  // that socket is a decrypted tunnel, so the needless close bills the client
-  // a fresh handshake too.
-  //
-  // A chunked body declares no length, so it is never known to fit.
-  const length = req.headers['content-length']
-  const declared = length === undefined ? 0 : Number(length)
-  const fitsUnderCap =
-    req.headers['transfer-encoding'] === undefined && declared <= MAX_REJECTED_DRAIN_BYTES
-  if (!fitsUnderCap) res.setHeader('connection', 'close')
+  drainRequestBody(req, res)
   sendJson(res, status, body)
 }
 
