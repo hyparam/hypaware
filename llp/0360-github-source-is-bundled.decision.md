@@ -15,6 +15,11 @@ LLP 0032 and used as the comparison in LLP 0121
 (#inventory gains contraction: the sidecar revalidates against the current
 withholding policy, so a repository with no remaining permitted evidence stops
 future capture)
+**Extended-by:** [LLP 0373](./0373-boundary-identity-is-the-id-not-the-snapshot.rfc.md)
+(the request covering what #cursoring's boundary identity is made of: the guard
+that keeps an inclusive `since` from re-appending the watermark second
+recognizes an item by its event id, so an item updated twice inside one second
+never has its second snapshot captured)
 **Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
 (#capture-regimes and #cursoring together entail that a repeat backfill
 re-appends; 0374 records that as the design and refuses a committed-row dedup)

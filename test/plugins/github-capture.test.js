@@ -1215,3 +1215,254 @@ test('a pulls phase resumed from a pre-field work descriptor publishes no partia
   )
   assert.deepEqual(cursors.repos['o/r'].pulls_high_numbers, [11, 12, 13], 'and a whole phase publishes the dedicated set')
 })
+
+test('an issue re-listed on a later page of the same phase, below its high water, is captured once', async () => {
+  // `/issues?state=all` carries no `sort`, so GitHub's default `created`
+  // descending applies. An issue created mid-traversal shifts every later
+  // offset and pushes the page-one tail onto page two, at a timestamp above
+  // `since` and below the page's own high water, where neither the boundary
+  // floor nor the tie set has anything to say.
+  const created = '2026-02-02T00:00:00Z'
+  const below = '2026-02-01T00:00:00Z'
+  const fresh = { number: 5, state: 'open', created_at: created, updated_at: created, user: { login: 'Bob' } }
+  const shifted = { number: 3, state: 'open', created_at: below, updated_at: below, user: { login: 'Ada' } }
+  const client = fakeClient({ repos: { 'o/r': {} } })
+  client.listIssuesPage = async (_owner, _name, _since, page) => (page === undefined
+    ? { items: [fresh, shifted], next: 'p2' }
+    : { items: [shifted], next: null })
+
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z' } }
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'issue').map((row) => row.number),
+    [5, 3],
+    'one issue, one row, however many pages listed it',
+  )
+})
+
+test('a commit re-listed on a later page of the same phase is captured once, and fans out its files once', async () => {
+  // `/commits` is reverse-chronological, so a push mid-traversal reshuffles it
+  // the same way. The second sighting costs more than a row here: an admitted
+  // commit re-enters `commit_tasks` and re-fetches its file list.
+  const pushed = '2026-02-02T00:00:00Z'
+  const below = '2026-02-01T00:00:00Z'
+  /** @param {string} sha @param {string} at */
+  const commit = (sha, at) => ({ sha, author: { login: 'Ada' }, commit: { author: { date: at } } })
+  /** @type {string[]} */
+  const calls = []
+  const client = fakeClient({ calls, repos: { 'o/r': { commitFiles: { newsha: ['b.js'], shifted: ['a.js'] } } } })
+  client.listCommitsPage = async (_owner, _name, _since, page) => (page === undefined
+    ? { items: [commit('newsha', pushed), commit('shifted', below)], next: 'p2' }
+    : { items: [commit('shifted', below)], next: null })
+
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { commits: '2026-01-01T00:00:00Z' } }
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'commit').map((row) => row.sha),
+    ['newsha', 'shifted'],
+    'one commit, one row',
+  )
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'commit_file').map((row) => row.path),
+    ['b.js', 'a.js'],
+    'and one sub-resource fan-out',
+  )
+  assert.deepEqual(
+    calls.filter((call) => call.startsWith('listCommitFiles')),
+    ['listCommitFiles:o/r@newsha', 'listCommitFiles:o/r@shifted'],
+    'the re-listing re-spends no request either',
+  )
+})
+
+test('a comment re-listed on a later page of the same phase is captured once', async () => {
+  const posted = '2026-02-02T00:00:00Z'
+  const below = '2026-02-01T00:00:00Z'
+  /** @param {number} id @param {string} at */
+  const comment = (id, at) => ({ id, created_at: at, updated_at: at, user: { login: 'Ada' }, issue_url: 'https://api.github.com/repos/o/r/issues/1' })
+  const client = fakeClient({ repos: { 'o/r': {} } })
+  client.listIssueCommentsPage = async (_owner, _name, _since, page) => (page === undefined
+    ? { items: [comment(22, posted), comment(21, below)], next: 'p2' }
+    : { items: [comment(21, below)], next: null })
+
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { comments: '2026-01-01T00:00:00Z' } }
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  const ids = rows.filter((row) => String(row.event_type).endsWith('_comment')).map((row) => row.event_id)
+  assert.deepEqual(ids, ['comment:22', 'comment:21'], 'one comment, one row')
+})
+
+test("the gate's cross-page guard survives a phase the request budget splits across ticks", async (t) => {
+  // The half a tick-local guard cannot cover: `budget.take()` persists the page
+  // and returns, and the descriptor round-trips through the sidecar reader
+  // before the reshuffled page two is ever fetched.
+  const created = '2026-02-02T00:00:00Z'
+  const below = '2026-02-01T00:00:00Z'
+  const fresh = { number: 5, state: 'open', created_at: created, updated_at: created, user: { login: 'Bob' } }
+  const shifted = { number: 3, state: 'open', created_at: below, updated_at: below, user: { login: 'Ada' } }
+  const client = fakeClient({ repos: { 'o/r': {} } })
+  client.listIssuesPage = async (_owner, _name, _since, page) => (page === undefined
+    ? { items: [fresh, shifted], next: 'p2' }
+    : { items: [shifted], next: null })
+
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-gate-emitted-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z' } }
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  /** @param {CursorState} state @param {number} requestLimit */
+  const tick = (state, requestLimit) => captureRepos({
+    client,
+    config: cfg(),
+    cursors: state,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+    requestLimit,
+  })
+
+  // One request reaches page one and no further.
+  const first = await tick(cursors, 1)
+  assert.equal(first.pending, true)
+  assert.deepEqual(
+    cursors.repos['o/r'].work?.gate_emitted,
+    ['issue:o/r#5', 'issue:o/r#3'],
+    'the guard is staged on the work descriptor, not left in memory',
+  )
+
+  writeCursors(stateDir, cursors)
+  const resumed = readCursors(stateDir)
+  assert.deepEqual(
+    resumed.repos['o/r'].work?.gate_emitted,
+    ['issue:o/r#5', 'issue:o/r#3'],
+    'and the sidecar reader admits it, so the resumed page still has it',
+  )
+  await tick(resumed, 50)
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'issue').map((row) => row.number),
+    [5, 3],
+    'one issue, one row, however many ticks the phase took',
+  )
+})
+
+test('a gate phase begun this tick does not inherit the staged set of the phase before it', async () => {
+  // The seeding-point hazard, in the direction that loses rows rather than
+  // duplicating them: the field is shared by the three gate phases, so a set
+  // still on the descriptor when the next one opens would suppress items that
+  // phase never appended.
+  const at = '2026-02-02T00:00:00Z'
+  const client = fakeClient({
+    repos: { 'o/r': { commits: [{ sha: 'c1', author: { login: 'Ada' }, commit: { author: { date: at } } }] } },
+  })
+
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = {
+    since: { commits: '2026-01-01T00:00:00Z' },
+    work: { mode: 'poll', phase: 'issues', gate_emitted: ['commit:c1'] },
+  }
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  await captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'commit').map((row) => row.sha),
+    ['c1'],
+    'the phase this tick opened guards only what this tick appended',
+  )
+})
+
+test('an item re-listed at the phase watermark second still claims its place in the published boundary', async () => {
+  // The half the phase-scoped set cannot answer for on its own. An issue edited
+  // mid-traversal is re-listed at a NEWER `updated_at` than the sighting that
+  // appended it, and that timestamp is the watermark the phase publishes. The
+  // guard refuses the second sighting, so if the refusal also skipped the
+  // boundary claim the cursor would publish a watermark whose floor set omits
+  // the one item sitting on it, and the next tick's inclusive `since` would
+  // append exactly the row the refusal saved.
+  const older = '2026-02-01T00:00:00Z'
+  const newer = '2026-02-03T00:00:00Z'
+  /** @param {string} at */
+  const issue = (at) => ({ number: 3, state: 'open', created_at: older, updated_at: at, user: { login: 'Ada' } })
+  const client = fakeClient({ repos: { 'o/r': {} } })
+  let reshuffled = false
+  client.listIssuesPage = async (_owner, _name, _since, page) => {
+    if (reshuffled) return { items: [issue(newer)], next: null }
+    return page === undefined ? { items: [issue(older)], next: 'p2' } : { items: [issue(newer)], next: null }
+  }
+
+  const cursors = freshCursors()
+  cursors.repos['o/r'] = { since: { issues: '2026-01-01T00:00:00Z' } }
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  const tick = () => captureRepos({
+    client,
+    config: cfg(),
+    cursors,
+    append: async (batch) => { rows.push(...batch) },
+    log: silentLog,
+    mode: 'poll',
+    observedRepos: ['o/r'],
+  })
+
+  await tick()
+  assert.deepEqual(
+    cursors.repos['o/r'].boundary?.issues,
+    ['issue:o/r#3'],
+    'the watermark second publishes the identity that sits on it',
+  )
+
+  // The next poll asks from that watermark, which is inclusive, so the issue
+  // comes back and only the floor set can refuse it.
+  reshuffled = true
+  await tick()
+  assert.deepEqual(
+    rows.filter((row) => row.event_type === 'issue').map((row) => row.number),
+    [3],
+    'one issue, one row, across both ticks',
+  )
+})

@@ -7,6 +7,11 @@
 **Date:** 2026-09-02
 **Related:** LLP 0032, LLP 0095, LLP 0096, LLP 0360
 **Extends:** LLP 0360
+**Extended-by:** [LLP 0373](./0373-boundary-identity-is-the-id-not-the-snapshot.rfc.md)
+(the request covering the identity behind #page-work's equal-timestamp rule:
+`pullChangedSince` recognizes a boundary pull by its number and the other three
+passes by their event id, so an item updated twice inside one second never has
+its second snapshot captured)
 **Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
 (#budget's deliberate new backfill is recorded there as re-appending rows,
 with the committed-row dedup alternative refused)
