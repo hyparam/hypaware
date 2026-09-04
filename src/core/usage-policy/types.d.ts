@@ -42,6 +42,12 @@ export interface UsagePolicyResolver {
    * LLP 0071/0103 list file), for consumers that must notice a policy change
    * without re-reading history (LLP 0367 #policy-fingerprint). Optional so a
    * hand-built test resolver without it behaves as a constant policy.
+   *
+   * Not pure: reading the bytes is also how the resolver notices that its
+   * memoized verdicts predate them, so this call drops the ones they have
+   * outlived. A consumer that will act on `resolve`'s verdicts must therefore
+   * call this first, or it can stamp a digest over verdicts computed under
+   * the policy that digest already replaced (hyparam/hypaware#1317).
    */
   fingerprint?(): string
 }

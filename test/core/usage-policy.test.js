@@ -337,6 +337,44 @@ test('resolve: list parse is memoized (TTL) independent of per-cwd caching, and 
   assert.equal(listReads, 2)
 })
 
+test('fingerprint: the memo drop is conditional, so it still bounds cost when nothing changed', () => {
+  // The drop exists so a digest reporting a policy change is never handed out
+  // while the seam still answers from the policy it replaced (#1317). It has
+  // to stay conditional: dropping on every digest read would put an ancestor
+  // walk and a list read back on the capture hot path for any process that
+  // also polls the fingerprint, which is exactly the per-cwd bound LLP 0049
+  // R6 sets. A frozen clock, so neither half rides on the TTL elapsing.
+  const files = /** @type {Record<string, string>} */ ({ [LIST_PATH]: listFile([]) })
+  const clock = 1_000
+  let listReads = 0
+  const resolver = createUsagePolicyResolver({
+    existsSync: (p) => Object.prototype.hasOwnProperty.call(files, p),
+    readFileSync: (p) => {
+      if (p === LIST_PATH) listReads += 1
+      return files[p] ?? ''
+    },
+    now: () => clock,
+    ttlMs: 5_000,
+    localOnlyListPath: LIST_PATH,
+  })
+
+  assert.equal(resolver.resolve('/private/proj-a').class, 'full')
+  assert.equal(listReads, 1)
+
+  // Same bytes: the digest costs its own read and nothing more. A second,
+  // never-before-seen cwd in the same window still reuses the list memo.
+  resolver.fingerprint?.()
+  assert.equal(listReads, 2)
+  assert.equal(resolver.resolve('/private/proj-b').class, 'full')
+  assert.equal(listReads, 2, 'an unchanged digest read left both memos alone')
+
+  // New bytes: both memos go at once, inside the TTL, so the warm `full`
+  // verdict cannot outlive the list that produced it.
+  files[LIST_PATH] = listFile(['/private/proj-a'])
+  resolver.fingerprint?.()
+  assert.equal(resolver.resolve('/private/proj-a').class, 'local-only')
+})
+
 test('resolve: a corrupt local-only list throws, not silently "no exclusions" (fail-safe)', () => {
   const fs = fakeFs({ [LIST_PATH]: '{ not valid json' })
   const resolver = createUsagePolicyResolver({ ...fs, localOnlyListPath: LIST_PATH })
