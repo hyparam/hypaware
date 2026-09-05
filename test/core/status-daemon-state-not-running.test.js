@@ -84,7 +84,21 @@ test('a stopped daemon\'s recorded state is printed as a record, not as a claim 
 test('a running daemon keeps the present-tense state line', async () => {
   const { hypHome, stateRoot } = await makeHome()
   writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
-  writeStatusFile(stateRoot, /** @type {any} */ ({ state: 'healthy', sources: [], sinks: [] }))
+  // Production-shaped, so the collector's verdict is what answers here: a real
+  // snapshot carries the writing process's pid and the `healthyAt + uptimeMs`
+  // pair LLP 0348 reads as the heartbeat. Without them the pid gate and the
+  // heartbeat both short-circuit, and the case would pass with the verdict
+  // deleted.
+  const healthyAt = new Date(Date.now() - 1000).toISOString()
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'healthy',
+    pid: process.pid,
+    startedAt: healthyAt,
+    healthyAt,
+    uptimeMs: 1000,
+    sources: [],
+    sinks: [],
+  }))
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.equal(report.daemon.running, true)
@@ -100,7 +114,17 @@ test('a running daemon keeps the present-tense state line', async () => {
 test('a live daemon that never reached healthy still states its snapshot in the present tense', async () => {
   const { hypHome, stateRoot } = await makeHome()
   writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
-  writeStatusFile(stateRoot, /** @type {any} */ ({ state: 'starting', sources: [], sinks: [] }))
+  // Production-shaped too: a daemon that never reached `healthy` writes its
+  // pid and `uptimeMs: 0` with no `healthyAt`, so the heartbeat is null by
+  // design (LLP 0351's gap) and the pid gate is the check that actually runs.
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'starting',
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    uptimeMs: 0,
+    sources: [],
+    sinks: [],
+  }))
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   const line = daemonLine(report)

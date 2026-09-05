@@ -1182,8 +1182,12 @@ function describeDaemon(daemon) {
   // this is an exited daemon's last boot verdict; unlabelled, `state=healthy`
   // reads as present tense beside `overall: degraded` on a machine capturing
   // nothing (issue #1392). A live process keeps the plain label: there the
-  // state is the collector's verdict, and a live daemon that never reached
-  // `healthy` has only its `starting` / `degraded` snapshot to say so.
+  // state is the collector's verdict whenever the snapshot is that process's
+  // own, and a live daemon that never reached `healthy` has only its
+  // `starting` / `degraded` snapshot to say so. A live pid paired with an
+  // earlier run's snapshot (a crash-loop, or a pid the OS reissued) is still
+  // transcribed in the present tense: `snapshotIsThisProcess` decides that in
+  // the collector and does not reach this line, so it is not this line's to fix.
   // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
   if (daemon.state) parts.push(`${daemon.running ? 'state' : 'last state'}=${printable(daemon.state)}`)
   if (daemon.pid) parts.push(`pid=${daemon.pid}`)
