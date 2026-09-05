@@ -109,10 +109,10 @@ function systemdRoot(t, unit = 'hypaware.service') {
 /**
  * The body a job wrote into `file`, once it is there.
  *
- * A shell `>` or `>>` truncates the path into existence before `printf`
- * writes into it, so a poll on the file existing can read it empty in the gap
- * between. Returns '' if nothing arrives, which the caller's assertion reports
- * as a job that never wrote.
+ * A shell `>` truncates the path into existence, and `>>` creates it, before
+ * `printf` writes into it, so a poll on the file existing can read it empty in
+ * the gap between. Returns '' if nothing arrives, which the caller's assertion
+ * reports as a job that never wrote.
  *
  * @param {string} file
  * @returns {Promise<string>}
@@ -496,7 +496,11 @@ test('launchctl mock: a setenv after bootstrap reaches the next launch', async (
   const plist = writePlist(root, label, ['/bin/sh', '-c', `printf '[%s]\\n' "$SANDBOX_PROBE" >> ${seen}`])
 
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
-  assert.equal(await waitForBody(seen), '[]\n', 'the first launch saw an unset variable')
+  // Match the first line rather than the whole body: KeepAlive relaunches the
+  // job every `throttleMs`, so an equality here would also be asserting that
+  // the poll read the file before the second launch appended to it, which is
+  // the kind of clock dependence this test was just rid of.
+  assert.match(await waitForBody(seen), /^\[\]\n/, 'the first launch saw an unset variable')
 
   assert.equal(shim(root, 'launchctl', ['setenv', 'SANDBOX_PROBE', 'on'], env).code, 0)
   let body = ''
