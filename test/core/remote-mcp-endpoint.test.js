@@ -306,3 +306,19 @@ test('an empty org value is named as such even with no --remote', async () => {
   assert.equal(await runMcp(['--org='], ctx), 2)
   assert.match(err.join(''), /--org expects an org label or \*/)
 })
+
+test('a non-object rejection on an --org read is reported, not replaced by a TypeError', async (t) => {
+  const hypHome = await tmpHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeToken(path.join(hypHome, 'hypaware'), 'prod', 'tok')
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+  // A rejection that is not an object: the org-403 check reads `.status` off it
+  // before isAuthError's own guard runs, so an unguarded read would throw from
+  // inside the catch block and bury the real failure.
+  globalThis.fetch = /** @type {any} */ (async () => { throw undefined })
+
+  const { ctx, err } = verbCtx(hypHome, 'https://hyp.internal')
+  assert.equal(await cmd.run(['SELECT 1', '--remote', 'prod', '--org', '*'], ctx), 1)
+  assert.doesNotMatch(err.join(''), /Cannot read properties/)
+})

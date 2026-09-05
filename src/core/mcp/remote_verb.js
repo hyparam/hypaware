@@ -75,7 +75,10 @@ export async function runRemoteVerb({ verb, params, target, org, ctx }) {
     try {
       return { authFailed: false, value: await callRemoteTool({ url: mcpUrl, token, verb, params }) }
     } catch (err) {
-      const status = Number(/** @type {any} */ (err).status) || 0
+      // Optional-chained like isAuthError below: a rejection is not guaranteed
+      // to be an object, and a catch block that throws replaces the real
+      // failure with a TypeError from the handler.
+      const status = Number(/** @type {any} */ (err)?.status) || 0
       // With an explicit --org, a 403 refuses the operator *read*, not the
       // credential: terminal, so it never spends a refresh and never re-sends a
       // request the server already denied and audited.
