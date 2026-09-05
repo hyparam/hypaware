@@ -274,14 +274,19 @@ export function ensureFsOp(fn, what, ErrorClass) {
   try {
     return fn()
   } catch (err) {
-    // A host refusal carries an errno name; a malformed plan reaching
-    // `mkdirSync` as a `TypeError` does not. Only the first is an install
-    // failure a caller may carry on from, so the second still propagates as
-    // the bug it is - the same line the picker finale's catch draws.
-    const code = err !== null && typeof err === 'object' && 'code' in err
-      ? /** @type {{ code: unknown }} */ (err).code
+    // A host refusal is a system error: a syscall was attempted and the host
+    // said no, so it names that syscall (`mkdir`, `open`, `rename`) alongside
+    // its errno. A malformed plan reaching `mkdirSync` names none, because no
+    // syscall ever ran. The errno alone cannot tell them apart: Node's
+    // argument validation throws `TypeError`s carrying a string `code` too
+    // (`mkdirSync(undefined)` gives `ERR_INVALID_ARG_TYPE`). Only the refusal
+    // is an install failure a caller may carry on from, so the bug still
+    // propagates as the bug it is - the same line the picker finale's catch
+    // draws.
+    const syscall = err !== null && typeof err === 'object'
+      ? /** @type {{ syscall?: unknown }} */ (err).syscall
       : undefined
-    if (typeof code !== 'string') throw err
+    if (typeof syscall !== 'string') throw err
     throw new ErrorClass(`failed to ${what}: ${err instanceof Error ? err.message : String(err)}`)
   }
 }

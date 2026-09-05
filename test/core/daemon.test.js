@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -455,21 +456,30 @@ test('serviceDaemonStatus degrades to "not loaded" when the service manager cann
 // picker finale as an install failure it can carry on from. It must not also
 // launder a bug into one: the finale prints "daemon install failed" and exits
 // 0, so a swallowed `TypeError` would be a silent no-install.
+// Real errors on both sides, never a hand-built stand-in: the discriminator is
+// a claim about the shape Node actually produces, and a fabricated `TypeError`
+// with no `code` is what let the first version of this test agree with a
+// predicate that did not hold (a real one carries `ERR_INVALID_ARG_TYPE`).
 test('ensureFsOp converts host refusals and lets bugs through', () => {
-  const refusal = Object.assign(new Error("EACCES: permission denied, mkdir '/x'"), { code: 'EACCES' })
+  const missingParent = path.join(os.tmpdir(), `hyp-ensurefs-${process.pid}`, 'user')
   assert.throws(
-    () => ensureFsOp(() => { throw refusal }, 'create /x', ServiceOpError),
+    () => ensureFsOp(() => fsSync.mkdirSync(missingParent), `create ${missingParent}`, ServiceOpError),
     (err) => {
       assert.ok(err instanceof ServiceOpError)
-      assert.match(err.message, /^failed to create \/x: EACCES: permission denied/)
+      assert.match(err.message, /^failed to create .*: ENOENT/)
       return true
     }
   )
   assert.throws(
-    () => ensureFsOp(() => { throw new TypeError('path must be a string') }, 'create /x', ServiceOpError),
+    () => ensureFsOp(() => fsSync.mkdirSync(/** @type {any} */ (undefined)), 'create <undefined>', ServiceOpError),
     (err) => {
       assert.ok(!(err instanceof ServiceOpError), 'a bug is not an install failure')
       assert.ok(err instanceof TypeError)
+      assert.equal(
+        /** @type {{ code?: unknown }} */ (err).code,
+        'ERR_INVALID_ARG_TYPE',
+        'the bug carries a string code as well, so the errno alone cannot be the test'
+      )
       return true
     }
   )
