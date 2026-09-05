@@ -338,11 +338,9 @@ test('runWizardJoin: prints its position above the joining narration', async () 
     runLogin: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
     waitForConverge: async () => ({ ok: false }),
   }))
-  assert.equal(
-    stdout.text().startsWith('Step 1 of 3 · Join your team\nJoining your team...\n'),
-    true,
-    stdout.text()
-  )
+  // The position line names the lane, so the plain sentence is not repeated under it.
+  assert.equal(stdout.text().startsWith('Step 1 of 3 · Join your team\n'), true, stdout.text())
+  assert.doesNotMatch(stdout.text(), /Joining your team\.\.\./)
 })
 
 test('runWizardJoin: without a position it narrates exactly as it does today', async () => {

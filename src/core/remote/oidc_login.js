@@ -35,6 +35,7 @@ import { createPkcePair } from './pkce.js'
  *   timeoutMs?: number,
  *   pollIntervalMs?: number,
  *   print?: (line: string) => void,
+ *   compact?: boolean,
  * }} args
  * @returns {Promise<OidcSession>}
  * @ref LLP 0058#d3 [implements]: client orchestrates the downstream PKCE leg; verifier held in memory, presented at /token
@@ -51,6 +52,7 @@ export async function loginWithBrowser({
   timeoutMs,
   pollIntervalMs,
   print = () => {},
+  compact = false,
 }) {
   const log = getLogger('remote')
   const { verifier, challenge } = createPkcePair()
@@ -69,7 +71,12 @@ export async function loginWithBrowser({
     })
 
     const opened = noBrowser ? false : openBrowser(startUrl)
-    if (opened) {
+    if (compact) {
+      // The wizard's join lane: the same fallback URL, without the paragraph
+      // around it. The lane's own position line already says what is happening.
+      print(opened ? 'Sign in in the browser that just opened. If it did not open, visit:' : 'Open this URL in your browser (any machine) to sign in:')
+      print(`  ${startUrl}`)
+    } else if (opened) {
       // The opener boolean is best-effort: a launcher that exists but fails (no
       // display on a headless box) still returns true. So phrase this as an
       // attempt, not a fact, and always print the URL as the real fallback -

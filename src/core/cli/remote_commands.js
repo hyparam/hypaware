@@ -27,6 +27,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
 import { enrollCentralSink } from '../commands/central.js'
 import { DURABLE_HINT } from '../commands/local_only.js'
+import { withSpinner } from './spinner.js'
 import { formatFirstSyncDeadline, writeFirstSyncHoldMarker } from '../usage-policy/first_sync_hold.js'
 import { originOf } from '../remote/gateway_seed.js'
 import { readAllStdin } from './stdio.js'
@@ -409,7 +410,7 @@ export async function runRemoteAdd(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait; `compact` is the wizard's join lane asking for one line per event instead of the standalone command's paragraphs
  * @returns {Promise<number>}
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
@@ -431,7 +432,7 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach }} [deps]
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean }} [deps]
  * @returns {Promise<LoginOutcome>}
  * @ref LLP 0179#outcome [implements]: the login lane returns { exitCode, reason }; runRemoteLogin is the adapter that keeps the CLI contract a number
  */
@@ -505,7 +506,7 @@ export async function remoteLogin(argv, ctx, deps = {}) {
   // as a static token. A piped token *without* a browser-mode flag already took
   // the static path above (`useStatic`), so nothing is swallowed silently there;
   // only an explicit `--no-browser` ignores a pipe, by design.
-  return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, {
+  return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, compact: deps.compact === true }, ctx, {
     login: deps.login ?? loginWithBrowser,
     seed: deps.seed ?? seedLoginGateway,
     enroll: deps.enroll ?? enrollCentralSink,
@@ -641,12 +642,12 @@ async function persistStaticToken(name, token, ctx) {
  * from one command, unless `--no-forward` declines it.
  *
  * @param {string} name
- * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean }} opts
+ * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean, compact?: boolean }} opts
  * @param {CommandRunContext} ctx
  * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach }} deps
  * @returns {Promise<LoginOutcome>}
  */
-async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon }, ctx, { login, seed, enroll, waitForAttach }) {
+async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, compact = false }, ctx, { login, seed, enroll, waitForAttach }) {
   const remotes = await readConfiguredRemotes(ctx)
   const entry = remotes[name]
   if (!entry) {
@@ -708,11 +709,28 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // sign-in is the accepting act. Phrased conditionally because the client
   // can't know pre-auth whether the server will mint a gateway credential.
   // @ref LLP 0063#d3 [implements]: default-on enrollment; the pre-auth notice is the consent surface, never a y/n prompt
+  // Compact (the wizard's join lane, LLP 0135 #join) keeps the notice, its
+  // placement, its conditional phrasing, and all three consequences D3
+  // enumerates, and drops only the line breaks: one line, still before the
+  // browser. The hedge is not shortenable - the client still cannot know
+  // pre-auth whether a gateway will be minted, so a flat "signing in forwards
+  // your logs" is false against a forwarding-off org. Neither is the org-config
+  // clause: applying org config is what attaches clients and backfills the
+  // history already on disk, and no reader infers that from "forwards captured
+  // logs". This notice is the whole consent surface, so a consequence dropped
+  // here is one the user is never told before they authenticate.
+  // The '--no-forward' sentence is the one thing left out: the wizard's lane
+  // runs a bare login (LLP 0134 #no-token-join) and cannot pass the flag, and
+  // the fork already offered the no-forwarding pathway as a choice.
   if (!alreadyEnrolled && !noForward) {
-    ctx.stderr.write('note: if your org has enabled forwarding, signing in will enroll this machine:\n')
-    ctx.stderr.write('  it forwards captured logs to the server, applies org config (which can attach\n')
-    ctx.stderr.write('  clients and backfill existing local history), and installs a background service.\n')
-    ctx.stderr.write("  re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
+    if (compact) {
+      ctx.stderr.write('note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config (which can attach clients and backfill existing local history), and installs a background service (Ctrl-C to cancel)\n')
+    } else {
+      ctx.stderr.write('note: if your org has enabled forwarding, signing in will enroll this machine:\n')
+      ctx.stderr.write('  it forwards captured logs to the server, applies org config (which can attach\n')
+      ctx.stderr.write('  clients and backfill existing local history), and installs a background service.\n')
+      ctx.stderr.write("  re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
+    }
   }
 
   /** @type {OidcSession} */
@@ -725,6 +743,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       // LLP 0061 D6): the machine hostname unless overridden with --host.
       host: host ?? os.hostname(),
       noBrowser,
+      compact,
       print: (line) => ctx.stderr.write(`${line}\n`),
     })
   } catch (err) {
@@ -753,7 +772,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     ctx.stderr.write("  (re-run 'hyp remote login' once any other hyp process releases the credentials lock)\n")
     return { exitCode: 1, reason: 'store_failed' }
   }
-  ctx.stdout.write(`logged in to '${name}' as org '${session.org}'\n`)
+  ctx.stdout.write(compact ? `✓ Signed in to '${name}' as org '${session.org}'\n` : `logged in to '${name}' as org '${session.org}'\n`)
 
   // No gateway credential (server didn't mint one, or --no-forward): query-only
   // login, nothing to forward. --no-forward with a minted gateway discards it
@@ -817,7 +836,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     /** @type {Awaited<ReturnType<typeof enrollCentralSink>>} */
     let result
     try {
-      result = await enroll({ ctx, url: centralUrl, gateway: session.gateway, noDaemon })
+      result = await enroll({ ctx, url: centralUrl, gateway: session.gateway, noDaemon, compact })
     } catch (err) {
       ctx.stderr.write(`hyp remote login: signed in, but enrollment failed: ${err instanceof Error ? err.message : String(err)}\n`)
       return { exitCode: 1, reason: 'enroll_failed' }
@@ -839,22 +858,39 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // the user typed, and no other line in this login recovers the URL.
     // Revisit if the server root ever becomes a real landing page.
     // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target and pairs it with its lookup
-    ctx.stdout.write(`forwarding logs to the '${name}' server\n`)
-    ctx.stdout.write("  (run 'hyp remote list' to see its URL)\n")
+    if (compact) {
+      ctx.stdout.write(`✓ Forwarding to the '${name}' server (run 'hyp remote list' to see its URL)\n`)
+    } else {
+      ctx.stdout.write(`forwarding logs to the '${name}' server\n`)
+      ctx.stdout.write("  (run 'hyp remote list' to see its URL)\n")
+    }
     // Print the deadline once, ahead of every exit branch below (--no-daemon,
     // a failed daemon install, or the normal attach-wait path): the hold and
     // its deadline are already committed to disk regardless of how the daemon
     // install itself goes, so the message stays true in all three. Absent only
     // when the best-effort marker write above failed (LLP 0100 R1's message
     // rides the hold, never invents one that was not actually written).
-    if (holdDeadline !== null) {
+    // Compact prints the deadline alone. The wizard that asked for it states
+    // the rest of R1 (the backfill statement, the skill hint, the release verb)
+    // in its closing privacy narration, which every path through it reaches -
+    // the ordinary close and `narrateEnrolledAbort` alike - so the full block
+    // here would say everything twice on the same run.
+    // The line states the deadline and the fact the hold guarantees, and
+    // nothing about being prompted: the send-now offer (LLP 0203) runs only on
+    // an attended, uncancelled, non-dry close, and at the deadline itself the
+    // hold simply lapses (LLP 0101 #no-release). A promise of an ask here
+    // would be false on exactly the paths where it would matter.
+    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the wizard's own narration carries the backfill statement, the skill hint, and the release verb
+    if (holdDeadline !== null && compact) {
+      ctx.stderr.write(`✓ First sync no later than ${formatFirstSyncDeadline(holdDeadline)}; nothing has been uploaded yet\n`)
+    } else if (holdDeadline !== null) {
       ctx.stderr.write(firstSyncHoldMessage(holdDeadline, name))
     }
     // Without the daemon there is nothing to wait on: it is what pulls the org
     // config and runs the attach reconcile. Say what is left to do and stop.
     if (noDaemon) {
       ctx.stdout.write("daemon install skipped (--no-daemon); run 'hyp daemon install' to finish enrolling\n")
-      ctx.stderr.write(DURABLE_HINT)
+      if (!compact) ctx.stderr.write(DURABLE_HINT)
       return { exitCode: 0, reason: 'ok' }
     }
     // The exit code stays the installer's, so a script still sees a failure,
@@ -862,7 +898,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // completed (LLP 0179#outcome, "the other exception the other way").
     if (result.daemonCode !== 0) {
       ctx.stderr.write(daemonIncompleteNote(process.platform, 'enrolled'))
-      ctx.stderr.write(DURABLE_HINT)
+      if (!compact) ctx.stderr.write(DURABLE_HINT)
       return { exitCode: result.daemonCode, reason: 'daemon_incomplete' }
     }
     // The daemon is installed; it now pulls the org config and auto-attaches any
@@ -876,14 +912,19 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // Announce the wait: the reconcile is async and can take the full budget on a
     // no-config / slow-pull org, and blocking silently for up to 30s reads as a
     // hang. One line on stderr before we start polling, then the result below.
-    ctx.stderr.write(`waiting for the daemon to attach clients (up to ${Math.round(ATTACH_WAIT_DEFAULT_MS / 1000)}s)...\n`)
-    const attached = await waitForAttach({ env: ctx.env })
+    // Compact: the same wait behind a spinner that clears itself, so the line
+    // that announced the wait is not left behind once the answer is in.
+    if (!compact) ctx.stderr.write(`waiting for the daemon to attach clients (up to ${Math.round(ATTACH_WAIT_DEFAULT_MS / 1000)}s)...\n`)
+    const wait = () => waitForAttach({ env: ctx.env })
+    const attached = compact
+      ? await withSpinner({ stdout: ctx.stdout, env: ctx.env, label: 'Attaching clients...' }, wait)
+      : await wait()
     if (attached.length > 0) {
-      ctx.stdout.write(`capturing ${attached.join(', ')}\n`)
+      ctx.stdout.write(compact ? `✓ Capturing ${attached.join(', ')}\n` : `capturing ${attached.join(', ')}\n`)
     } else {
       ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
     }
-    ctx.stderr.write(DURABLE_HINT)
+    if (!compact) ctx.stderr.write(DURABLE_HINT)
     return { exitCode: 0, reason: 'ok' }
   }
 
@@ -903,8 +944,11 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
 
   // Already-enrolled machine (re-login / re-seed): a prior daemon has run and is
   // already forwarding, so there is no "first" sync to defer - this fork writes
-  // no hold (LLP 0101 #which). The durable CLI floor stays discoverable.
-  ctx.stderr.write(DURABLE_HINT)
+  // no hold (LLP 0101 #which). The durable CLI floor stays discoverable, and
+  // compact suppresses it on this exit as on the three above - otherwise a
+  // wizard join onto an already-enrolled machine prints, mid-checklist, the
+  // one tip the compact lane exists to keep off it.
+  if (!compact) ctx.stderr.write(DURABLE_HINT)
   return { exitCode: 0, reason: 'ok' }
 }
 
