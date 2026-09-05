@@ -1036,6 +1036,18 @@ export async function runDaemon(opts = {}) {
   async function shutdown(reason) {
     if (shutdownInFlight) return done
     shutdownInFlight = true
+    // Record that an orderly stop began, before anything that can block. The
+    // settle below deliberately waits out an in-flight reconcile pass, which
+    // is a multi-minute `hyp backfill` import by design, and `hyp daemon stop`
+    // gives up after DAEMON_STOP_TIMEOUT_MS and tells the operator so. A
+    // snapshot still reading `healthy` through that window is read by
+    // `hyp status` as a crash the moment the operator, or the service
+    // manager's grace period, kills the process - the over-report the signal
+    // in LLP 0383 exists to avoid. Written synchronously, before the first
+    // `await`, so no stop can outrun it; the tick's own `persist()` carries no
+    // state patch, so `stopping` survives a tick already in flight.
+    // @ref LLP 0383#the-signal-is-the-daemons-last-state [constrained-by]: a snapshot left behind mid-shutdown must not read as a state a serving daemon writes
+    persist({ state: 'stopping' })
     // Close the control watcher first: reconcile settle below can hold
     // shutdown open for minutes, and a reload.request landing in that window
     // must not dispatch reload() into sources that are being stopped (or log

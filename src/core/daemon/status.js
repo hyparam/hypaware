@@ -1315,6 +1315,45 @@ export async function collectHypAwareStatus(opts = {}) {
     })
   }
 
+  // The complement of the block above, and the state the live facts alone
+  // cannot read: the service manager still holds the unit and nothing runs
+  // under it. `loaded` is a bootstrap fact on both platforms, independent of
+  // active/inactive, and `hyp daemon stop` rides the control file without ever
+  // calling the service manager, so a stop the operator asked for lands on
+  // exactly these three facts too (issue #1391).
+  //
+  // What tells them apart is the daemon's own last snapshot: `shutdown()`
+  // persists `state: 'stopped'` as its final write whatever asked for the
+  // stop, and a process that died cannot. Read as a record of how the run
+  // ended, not as a claim about now - the live facts above supply "now".
+  //
+  // Named forwards, not as `!== 'stopped'`: no snapshot at all, one from an
+  // older build, or one whose `state` a hostile file replaced with anything at
+  // all is not evidence of a crash. Only the states a *serving* daemon writes
+  // are, and `stopping` is left out with `stopped` - a shutdown ran to reach
+  // it. `daemon.state` is the file's own here, because the heartbeat verdict
+  // above only ever overwrites it for a live process.
+  // @ref LLP 0383#the-signal-is-the-daemons-last-state [implements]: the crash-versus-stopped signal is the snapshot's terminal state, not a service-manager exit code
+  const exitedWhileServing = daemon.state === 'starting'
+    || daemon.state === 'healthy'
+    || daemon.state === 'degraded'
+  if (daemon.installed && daemon.loaded && !daemon.running && exitedWhileServing) {
+    const artifact = platform === 'darwin' ? 'LaunchAgent' : 'user unit'
+    diagnostics.push({
+      severity: 'error',
+      kind: 'daemon_exited_abnormally',
+      // States the observations, not a cause: the same pair is left by an OOM
+      // kill, a fault, and a `kill -9`, and naming one of those is a wrong
+      // diagnosis rather than an unknown one.
+      message: `the ${artifact} is still loaded but no daemon process is running,`
+        + ` and the last status snapshot recorded '${daemon.state}' rather than a completed`
+        + ' stop - the daemon exited without shutting down, and nothing is being captured',
+      // Unlike the unloaded case above, the service manager is holding the
+      // unit, so the restart path reaches it.
+      repair: ['hyp daemon restart'],
+    })
+  }
+
   if (opts.binPath) {
     let binExists = true
     try {
