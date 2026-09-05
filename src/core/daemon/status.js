@@ -1387,7 +1387,19 @@ export async function collectHypAwareStatus(opts = {}) {
       })
     }
   } else if (daemonStatusFile && (daemonStatusFile.sources?.length ?? 0) > 0) {
-    sources.push(...(daemonStatusFile.sources ?? []))
+    // `status.json` outlives the process that wrote it, so with nothing
+    // running a transcribed `started` is a present-tense claim on a machine
+    // capturing nothing (issue #1410), under a daemon line that already reads
+    // `not running`. The identity outlives the process and is worth listing;
+    // the liveness claim does not, and `stopped` is what a source whose daemon
+    // is gone is. `failed` is left as written: it records why the last run
+    // went wrong, carries its `error` beside it, and claims nothing about now.
+    // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
+    sources.push(...(daemonStatusFile.sources ?? []).map((s) => (
+      daemon.running || s.state !== 'started'
+        ? s
+        : /** @type {SourceSnapshot} */ ({ ...s, state: 'stopped' })
+    )))
   } else {
     sources.push(...inferConfiguredSources(activePlugins))
   }
@@ -1457,6 +1469,12 @@ export async function collectHypAwareStatus(opts = {}) {
       sinks.push({ instance, plugin: info.plugin, kind: info.kind })
     }
   } else if (daemonStatusFile) {
+    // Ungated, unlike the sources fallback above, because a `SinkSnapshot`
+    // carries no liveness word: instance, plugin and kind are the shape of the
+    // install, and `lastTickAt` / `lastSuccessAt` are last-seen facts that stay
+    // true after their daemon exits (LLP 0164#not-liveness-gated). Dropping
+    // them with nothing running would print `(none - keeping captured data
+    // local only)` on a machine that does have a sink.
     sinks.push(...(daemonStatusFile.sinks ?? []))
   }
 
