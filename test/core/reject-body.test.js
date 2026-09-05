@@ -112,15 +112,20 @@ test('drainRequestBody stops reading a refused body at MAX_REJECTED_DRAIN_BYTES'
     // as soon as the refusal is flushed, so the read reaches only what arrived
     // first, which is a timing figure rather than a size one, and a
     // client-dependent one. At 8 MiB it measured 163705 in 43 of 64 samples
-    // and 2097152 in the other 21 through `fetch`, and 112798 through a raw
-    // socket.
+    // and 2097152 in the other 21 through `fetch`; a raw socket, which loses
+    // the race at a different moment, read 112798 on one host and 98317 on
+    // another.
     //
     // It is that teardown and not the sender running out of buffer that cuts
-    // the read: mutate away only the `connection: close` answer and the same
-    // 8 MiB sender empties its whole buffer in milliseconds, the server
-    // reading all of it. Both sizes declare a `content-length` past the cap
-    // and are answered `connection: close`, so nothing about `fitsUnderCap` is
-    // what separates them.
+    // the read. With the cap deleted the read is still only what arrived
+    // first; delete the `connection: close` answer as well and the same 8 MiB
+    // sender empties its whole buffer in milliseconds, the server reading all
+    // 8388702. Deleting the header on its own moves nothing, because the cap's
+    // own `req.destroy()` still cuts there. And the sender stalls in every one
+    // of those cells, including the one that reads the whole body, so the
+    // stall is not what ends the read. Both sizes declare a `content-length`
+    // past the cap and are answered `connection: close`, so nothing about
+    // `fitsUnderCap` is what separates them.
     const body = Buffer.alloc(4 * CAP_BYTES, 'x')
     const refused = await withDeadline(
       fetch(`${served.origin}/refused`, {
