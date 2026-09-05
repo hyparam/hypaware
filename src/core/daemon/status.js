@@ -1280,14 +1280,24 @@ export async function collectHypAwareStatus(opts = {}) {
     })
   }
 
+  // A unit or plist on disk proves only that the installer got as far as
+  // writing it: it is written before the service-manager calls that load and
+  // start the daemon, so a failed `daemon-reload` leaves exactly this state
+  // behind (issue #1387). With no process running either, the install did not
+  // finish and the machine is capturing nothing, which degrades `overall`
+  // through the severity rule the same way a wedged daemon does (LLP 0348).
   if (daemon.installed && !daemon.loaded) {
+    const manager = platform === 'darwin' ? 'launchd' : 'systemd'
+    const artifact = platform === 'darwin' ? 'HypAware LaunchAgent' : 'HypAware user unit'
     diagnostics.push({
-      severity: 'warning',
+      // A live process alongside an unloaded unit is still capturing, so that
+      // half stays the note it always was.
+      severity: daemon.running ? 'warning' : 'error',
       kind: 'daemon_loaded_no_pid',
-      message:
-        platform === 'darwin'
-          ? 'launchd is not currently loading the HypAware LaunchAgent'
-          : 'systemd is not currently loading the HypAware user unit',
+      message: daemon.running
+        ? `${manager} is not currently loading the ${artifact}`
+        : `${manager} is not loading the ${artifact} and no daemon process is running`
+          + ' - the install did not finish, so nothing is being captured',
       repair: ['hyp daemon restart'],
     })
   }
