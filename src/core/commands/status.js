@@ -1163,9 +1163,10 @@ function isCentralSink(layered, instance) {
 }
 
 /**
- * The `daemon:` line. `state` and `mode` are read straight out of
- * `status.json` (`collectHypAwareStatus` takes them from the snapshot when
- * the pid file did not already supply them), and `error` can quote the file's
+ * The `daemon:` line. `state` is the collector's verdict: it starts as the
+ * snapshot's value, and `collectHypAwareStatus` overrides it to `degraded` on
+ * a stale heartbeat. `mode` is read straight out of `status.json` when the
+ * pid file did not already supply it, and `error` can quote the file's
  * own bytes back: a `status.json` that is not valid JSON surfaces here as
  * `JSON.parse`'s message, which echoes an excerpt of the input verbatim. All
  * three are cleaned on the way into the line. `pid` needs no cleaning -
