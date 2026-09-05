@@ -44,8 +44,9 @@ async function makeHome() {
  *
  * @param {string} stateRoot
  * @param {DaemonState} state
+ * @param {string[]} [warnings] what the daemon recorded alongside that state
  */
-function leaveSnapshot(stateRoot, state) {
+function leaveSnapshot(stateRoot, state, warnings) {
   /** @type {DaemonStatus} */
   const status = {
     state,
@@ -57,6 +58,7 @@ function leaveSnapshot(stateRoot, state) {
     sources: [],
     sinks: [],
   }
+  if (warnings) status.warnings = warnings
   writeStatusFile(stateRoot, status)
 }
 
@@ -198,4 +200,37 @@ test('the daemon records the stop before anything that can block its shutdown', 
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
+})
+
+// Issue #1407. `degraded` covers two very different endings, and the snapshot
+// says which: `runDaemon` persists a `boot_failed:` warning when the boot
+// threw, so calling that "exited without shutting down" names an ending the
+// daemon never had. The verdict and severity are right either way; only the
+// sentence was not.
+test('a recorded boot failure is named as one, not as an exit without shutdown', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  leaveSnapshot(stateRoot, 'degraded', ['boot_failed: gateway listener could not bind'])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally')
+  assert.ok(diag, 'the failed boot still raises the diagnostic')
+  assert.equal(diag.severity, 'error')
+  assert.equal(report.overall, 'degraded')
+  assert.match(diag.message, /failed boot/, 'the message names the ending the snapshot recorded')
+  assert.doesNotMatch(diag.message, /exited without shutting down/)
+})
+
+// The over-fixing guard for that split: `degraded` on its own is a daemon that
+// served with a failed source and then died, which is exactly the ending the
+// original sentence describes.
+test('a degraded snapshot with no boot failure keeps the abnormal-exit message', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  leaveSnapshot(stateRoot, 'degraded', ['source_failed: codex'])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally')
+  assert.ok(diag)
+  assert.equal(diag.severity, 'error')
+  assert.equal(report.overall, 'degraded')
+  assert.match(diag.message, /exited without shutting down/)
 })

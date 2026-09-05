@@ -1337,6 +1337,17 @@ export async function collectHypAwareStatus(opts = {}) {
   const exitedWhileServing = daemon.state === 'starting'
     || daemon.state === 'healthy'
     || daemon.state === 'degraded'
+  // The one ending the snapshot names outright, and the one `degraded` alone
+  // gets wrong: a boot that threw never reached service and was owed no
+  // shutdown, so "exited without shutting down" describes a shape it never
+  // had. `runDaemon` persists `degraded` with a `boot_failed:` warning before
+  // it clears the pid and rethrows, read here with the prefix test
+  // `previousBootLooksStuck` applies to the same file (`src/core/update/self_update.js`).
+  // A `degraded` without that warning is a daemon that served with a failed
+  // source, which the message below already describes.
+  const warnings = daemonStatusFile?.warnings
+  const bootFailed = daemon.state === 'degraded'
+    && Array.isArray(warnings) && warnings.some((w) => String(w).startsWith('boot_failed'))
   if (daemon.installed && daemon.loaded && !daemon.running && exitedWhileServing) {
     const artifact = platform === 'darwin' ? 'LaunchAgent' : 'user unit'
     diagnostics.push({
@@ -1346,8 +1357,12 @@ export async function collectHypAwareStatus(opts = {}) {
       // kill, a fault, and a `kill -9`, and naming one of those is a wrong
       // diagnosis rather than an unknown one.
       message: `the ${artifact} is still loaded but no daemon process is running,`
-        + ` and the last status snapshot recorded '${daemon.state}' rather than a completed`
-        + ' stop - the daemon exited without shutting down, and nothing is being captured',
+        + ' and the last status snapshot recorded '
+        + (bootFailed
+          ? 'a failed boot - the daemon never finished starting'
+          : `'${daemon.state}' rather than a completed stop`
+            + ' - the daemon exited without shutting down')
+        + ', and nothing is being captured',
       // Unlike the unloaded case above, the service manager is holding the
       // unit, so the restart path reaches it.
       repair: ['hyp daemon restart'],
