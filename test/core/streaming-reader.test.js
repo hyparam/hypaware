@@ -344,3 +344,107 @@ test('empty file yields no batches', async () => {
 
   await fs.rm(dir, { recursive: true, force: true })
 })
+
+test('large spool envelopes scan each chunk once and preserve UTF-8 resume offsets', async () => {
+  const dir = await makeTmpDir()
+  const filePath = path.join(dir, 'wide-envelope.jsonl')
+  const first = envelope([{ id: 1, msg: '\u{1F642}'.repeat(512 * 1024) }])
+  const second = envelope([{ id: 2, msg: 'after-wide-row' }])
+  await fs.writeFile(filePath, first + second)
+  let scannedCharacters = 0
+  const originalIndexOf = String.prototype.indexOf
+  String.prototype.indexOf = function (search, position) {
+    if (search === '\n') scannedCharacters += this.length - (position ?? 0)
+    return originalIndexOf.call(this, search, position)
+  }
+  const batches = []
+  try {
+    for await (const batch of streamFlushFile({ filePath, batchId: 'wide', batchRowLimit: 1 })) batches.push(batch)
+  } finally {
+    String.prototype.indexOf = originalIndexOf
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+  assert.deepEqual(batches.map(batch => batch.chunk.rows[0].id), [1, 2])
+  assert.equal(batches[0].resumeOffset, Buffer.byteLength(first))
+  assert.equal(batches[1].resumeOffset, Buffer.byteLength(first + second))
+  // Lower bound as well as upper: the counter only sees work done through
+  // String#indexOf, so a reader that split lines some other way would score
+  // zero and pass this vacuously. Every input character must be searched at
+  // least once, and no more than a small constant times that.
+  assert.ok(scannedCharacters >= first.length,
+    `newline search only saw ${scannedCharacters} characters, so it is no longer measuring the splitter`)
+  assert.ok(scannedCharacters < (first.length + second.length) * 3,
+    `newline search revisited ${scannedCharacters} characters for ${first.length + second.length} input characters`)
+})
+
+test('provisional reads retain the final envelope without a newline', async () => {
+  const { createCacheSpool, SPOOL_DIR } = await import('../../src/core/cache/spool.js')
+  const dir = await makeTmpDir()
+  const tablePath = path.join(dir, 'table')
+  const spoolDir = path.join(tablePath, SPOOL_DIR)
+  await fs.mkdir(spoolDir, { recursive: true })
+  const filePath = path.join(spoolDir, 'active.jsonl')
+  const message = '\u{1F642}'.repeat(100_000)
+  await fs.writeFile(filePath, '\n' + envelope([{ id: 1, msg: 'complete' }]) + envelope([{ id: 2, msg: message }]).trimEnd())
+  const spool = createCacheSpool({ cacheRoot: dir, appendChunk: async () => ({ bytesWritten: 0 }) })
+  try {
+    const rows = []
+    for await (const row of spool.readSpooledRows(tablePath)) rows.push(row)
+    assert.deepEqual(rows, [{ id: 1, msg: 'complete' }, { id: 2, msg: message }])
+    const flushed = []
+    for await (const batch of streamFlushFile({ filePath, batchId: 'partial' })) flushed.push(...batch.chunk.rows)
+    assert.deepEqual(flushed.map(row => row.id), [1], 'flush still ignores an unterminated envelope')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('lines that end on, and characters that straddle, the 64 KiB read boundary survive intact', async () => {
+  // The reader retains chunk fragments and joins them at the newline, so the
+  // two chunk-boundary cases are the ones that can silently corrupt a row:
+  // a newline landing exactly at the boundary (nothing to retain), and a
+  // multi-byte character split across it (the stream decoder must hold the
+  // partial sequence back). Both must reproduce the payload byte for byte and
+  // leave resume offsets on real line boundaries.
+  const HIGH_WATER_MARK = 64 * 1024
+  const dir = await makeTmpDir()
+  try {
+    for (const boundaryOffset of [-1, 0, 1]) {
+      // Pad the first envelope so its terminating newline is the byte at
+      // HIGH_WATER_MARK + boundaryOffset.
+      const target = HIGH_WATER_MARK + boundaryOffset
+      const probe = envelope([{ id: 1, msg: '' }])
+      const padded = envelope([{ id: 1, msg: 'a'.repeat(target - Buffer.byteLength(probe)) }])
+      assert.equal(Buffer.byteLength(padded), target)
+      const filePath = path.join(dir, `boundary-${boundaryOffset}.jsonl`)
+      const second = envelope([{ id: 2, msg: 'after-boundary' }])
+      await fs.writeFile(filePath, padded + second)
+
+      const batches = []
+      for await (const batch of streamFlushFile({ filePath, batchId: 'boundary', batchRowLimit: 1 })) {
+        batches.push(batch)
+      }
+      assert.deepEqual(batches.map(batch => batch.chunk.rows[0].id), [1, 2])
+      assert.equal(batches[0].chunk.rows[0].msg, 'a'.repeat(target - Buffer.byteLength(probe)))
+      assert.equal(batches[0].resumeOffset, target)
+      assert.equal(batches[1].resumeOffset, target + Buffer.byteLength(second))
+    }
+
+    // Start a run of 4-byte characters at each byte phase around the boundary
+    // so one of them is split across the chunk read.
+    for (const phase of [0, 1, 2, 3]) {
+      const head = '{"version":1,"columns":' + JSON.stringify(COLUMNS) + ',"rows":[{"id":1,"msg":"'
+      const filler = 'a'.repeat(HIGH_WATER_MARK - phase - Buffer.byteLength(head))
+      const message = filler + '\u{1F642}'.repeat(4096)
+      const filePath = path.join(dir, `split-char-${phase}.jsonl`)
+      await fs.writeFile(filePath, envelope([{ id: 1, msg: message }]) + envelope([{ id: 2, msg: 'tail' }]))
+
+      const rows = []
+      for await (const batch of streamFlushFile({ filePath, batchId: 'split' })) rows.push(...batch.chunk.rows)
+      assert.deepEqual(rows.map(row => row.id), [1, 2])
+      assert.equal(rows[0].msg, message, `4-byte character split at phase ${phase} must round-trip`)
+    }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})

@@ -8,7 +8,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { isConfirmedSymlink } from './paths.js'
 import { createIngestSeqAllocator } from './ingest-seq.js'
-import { readProgress, removeProgress, streamFlushFile, writeProgress } from './streaming-reader.js'
+import { readProgress, removeProgress, streamFlushFile, streamSpoolLines, writeProgress } from './streaming-reader.js'
 
 /**
  * @import { FileHandle } from 'node:fs/promises'
@@ -394,22 +394,14 @@ async function* readSpooledRows(tablePath) {
     } catch {
       continue
     }
-    let tail = ''
     try {
-      for await (const chunk of stream) {
-        tail += chunk
-        let newlineIdx
-        while ((newlineIdx = tail.indexOf('\n')) !== -1) {
-          const line = tail.slice(0, newlineIdx)
-          tail = tail.slice(newlineIdx + 1)
-          yield* rowsFromSpoolLine(line)
-        }
-      }
       // The spool writer always terminates lines with `\n`, so a non-empty tail
       // is a truncated/half-written final line. The whole-file reader parsed it
       // best-effort (its `split('\n')` kept a trailing no-newline segment), so
       // keep that parity: a malformed remnant simply fails JSON.parse and drops.
-      yield* rowsFromSpoolLine(tail)
+      for await (const line of streamSpoolLines(stream, true)) {
+        yield* rowsFromSpoolLine(line)
+      }
     } catch {
       // A mid-read error (file vanished/unreadable) degrades to skipping the
       // rest of this file, matching the whole-file reader's per-file try/catch:
