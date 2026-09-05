@@ -1330,9 +1330,9 @@ export async function collectHypAwareStatus(opts = {}) {
   // Named forwards, not as `!== 'stopped'`: no snapshot at all, one from an
   // older build, or one whose `state` a hostile file replaced with anything at
   // all is not evidence of a crash. Only the states a *serving* daemon writes
-  // are, and `stopping` is left out with `stopped` - a shutdown ran to reach
-  // it. `daemon.state` is the file's own here, because the heartbeat verdict
-  // above only ever overwrites it for a live process.
+  // are. `stopping` is not one of them and is read below on its own terms.
+  // `daemon.state` is the file's own here, because the heartbeat verdict above
+  // only ever overwrites it for a live process.
   // @ref LLP 0383#the-signal-is-the-daemons-last-state [implements]: the crash-versus-stopped signal is the snapshot's terminal state, not a service-manager exit code
   const exitedWhileServing = daemon.state === 'starting'
     || daemon.state === 'healthy'
@@ -1349,8 +1349,34 @@ export async function collectHypAwareStatus(opts = {}) {
   const warnings = daemonStatusFile?.warnings
   const bootFailed = daemon.state === 'degraded'
     && Array.isArray(warnings) && warnings.some((w) => String(w).startsWith('boot_failed'))
-  if (daemon.installed && daemon.loaded && !daemon.running && exitedWhileServing) {
+
+  // `stopping` is the other ending, and only time reads it. `shutdown()` writes
+  // it as its first statement, so it marks a stop that started, and a process
+  // killed anywhere across shutdown freezes the snapshot there for good. A stop
+  // still under way is spent with the process alive, and a stop that reached
+  // its end wrote `stopped` before the process left - the probe above runs
+  // before the file is read, so a dead process is always read beside the last
+  // file that stop wrote. What stays silent here is the one non-failing way to
+  // reach the pair, a supervised restart's forced exit (LLP 0365
+  // #restart-exit-is-bounded), whose snapshot is minutes fresher than this
+  // window while the service manager relaunches. The snapshot's age separates
+  // the two, on the window and the last-write derivation the heartbeat check
+  // above already uses. An age that cannot be derived stays silent, as an
+  // unrecognised `state` does.
+  // @ref LLP 0384#stopping-is-a-claim-with-an-expiry [implements]: a terminal `stopping` snapshot older than the heartbeat window is a stop that never finished
+  const stoppingAgeMs = daemon.state === 'stopping'
+    ? daemonHeartbeatAgeMs(daemonStatusFile, Date.now())
+    : null
+  const stalledStop = stoppingAgeMs !== null && stoppingAgeMs > DAEMON_HEARTBEAT_STALE_MS
+    ? `recorded 'stopping' ${formatGapDuration(stoppingAgeMs)} ago - the stop began but never completed`
+    : null
+  if (daemon.installed && daemon.loaded && !daemon.running && (exitedWhileServing || stalledStop)) {
     const artifact = platform === 'darwin' ? 'LaunchAgent' : 'user unit'
+    const recordedBootFailure = bootFailed
+      ? 'recorded a failed boot - the daemon never finished starting'
+      : null
+    const recordedWhileServing = `recorded '${daemon.state}' rather than a completed stop`
+      + ' - the daemon exited without shutting down'
     diagnostics.push({
       severity: 'error',
       kind: 'daemon_exited_abnormally',
@@ -1358,12 +1384,8 @@ export async function collectHypAwareStatus(opts = {}) {
       // kill, a fault, and a `kill -9`, and naming one of those is a wrong
       // diagnosis rather than an unknown one.
       message: `the ${artifact} is still loaded but no daemon process is running,`
-        + ' and the last status snapshot recorded '
-        + (bootFailed
-          ? 'a failed boot - the daemon never finished starting'
-          : `'${daemon.state}' rather than a completed stop`
-            + ' - the daemon exited without shutting down')
-        + ', and nothing is being captured',
+        + ` and the last status snapshot ${stalledStop ?? recordedBootFailure ?? recordedWhileServing},`
+        + ' and nothing is being captured',
       // Unlike the unloaded case above, the service manager is holding the
       // unit, so the restart path reaches it.
       repair: ['hyp daemon restart'],
@@ -1402,8 +1424,41 @@ export async function collectHypAwareStatus(opts = {}) {
         state: started ? 'started' : 'stopped',
       })
     }
-  } else if (daemonStatusFile && (daemonStatusFile.sources?.length ?? 0) > 0) {
-    sources.push(...(daemonStatusFile.sources ?? []))
+  } else if (daemonStatusFile && Array.isArray(daemonStatusFile.sources) && daemonStatusFile.sources.length > 0) {
+    // `status.json` outlives the process that wrote it, so with nothing
+    // running a transcribed `started` is a present-tense claim on a machine
+    // capturing nothing (issue #1410), under a daemon line that already reads
+    // `not running`. The identity outlives the process and is worth listing;
+    // the liveness claim does not, and `stopped` is what a source whose daemon
+    // is gone is. `failed` is left as written: it records why the last run
+    // went wrong, carries its `error` beside it, and claims nothing about now.
+    //
+    // The liveness the rewrite reads is `daemon.running && snapshotIsThisProcess`,
+    // not `daemon.running` alone, for the reason spelled out where that pair is
+    // derived above: `processIsAlive` proves a pid is taken, not that the daemon
+    // took it, so a hard kill whose pid the OS reissued would otherwise let the
+    // dead run's `started` through on exactly the machine this is about.
+    //
+    // The branch is entered on `Array.isArray`, not on a truthy `.length`,
+    // because `readStatusFile` validates only "is an object": a `sources` of
+    // `"abcd"` arrives here with `length` 4 and no `.map`
+    // (LLP 0164#status-reads-it-from-the-status-file). That is the guard
+    // `recentEntrypointsFromSources` and `liveStatusSources` already use, and a
+    // file carrying no readable list falls through to the inference below, the
+    // same as a file carrying none at all. An entry that is not an object is
+    // dropped rather than carried through, for the reason `entryList` in
+    // `commands/daemon.js` drops one: every reader past this point
+    // dereferences `.name`, so a `null` in the list takes the whole report out
+    // at the render rather than here.
+    // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
+    const snapshotIsLive = daemon.running && snapshotIsThisProcess
+    sources.push(...daemonStatusFile.sources
+      .filter((s) => !!s && typeof s === 'object')
+      .map((s) => (
+        snapshotIsLive || s.state !== 'started'
+          ? s
+          : /** @type {SourceSnapshot} */ ({ ...s, state: 'stopped' })
+      )))
   } else {
     sources.push(...inferConfiguredSources(activePlugins))
   }
@@ -1473,7 +1528,19 @@ export async function collectHypAwareStatus(opts = {}) {
       sinks.push({ instance, plugin: info.plugin, kind: info.kind })
     }
   } else if (daemonStatusFile) {
-    sinks.push(...(daemonStatusFile.sinks ?? []))
+    // Ungated, unlike the sources fallback above, because a `SinkSnapshot`
+    // carries no liveness word: instance, plugin and kind are the shape of the
+    // install, and `lastTickAt` / `lastSuccessAt` are last-seen facts that stay
+    // true after their daemon exits (LLP 0164#not-liveness-gated). Dropping
+    // them with nothing running would print `(none - keeping captured data
+    // local only)` on a machine that does have a sink.
+    //
+    // Ungated for liveness is not ungated for shape: `readStatusFile` knows
+    // only that it read an object, so a `sinks` of `5` throws out of the
+    // collector at the spread and a `sinks` of `"ab"` spreads into one blank
+    // row per character. Same guard as the sources list above.
+    sinks.push(...(Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
+      .filter((s) => !!s && typeof s === 'object'))
   }
 
   // ----- client attach -----
