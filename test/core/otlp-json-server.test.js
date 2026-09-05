@@ -22,7 +22,8 @@ import { createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../..
 /**
  * Start a listener on a dynamic loopback port and return an origin plus
  * the requests the handler saw. `onRequest` lets a test make the handler
- * fail.
+ * fail. The accepted sockets come back too: what a refusal read off one is
+ * only measurable there.
  *
  * @param {{
  *   name?: string,
@@ -46,10 +47,14 @@ async function startServer(options = {}) {
       },
     },
   })
+  /** @type {net.Socket[]} */
+  const sockets = []
+  server.on('connection', (socket) => sockets.push(socket))
   const bound = await listenAndResolve(server, options.host ?? '127.0.0.1', 0, 'hypaware/test')
   return {
     seen,
     bound,
+    sockets,
     origin: `http://127.0.0.1:${bound.port}`,
     async close() {
       await new Promise((resolve, reject) => {
@@ -142,6 +147,60 @@ function rawRequestLine(port, request) {
     socket.on('close', () =>
       reject(new Error(`socket closed with no status line, got ${JSON.stringify(received)}`))
     )
+  })
+}
+
+/**
+ * Announce a body far larger than any cap and push it at a request the server
+ * refuses before reading, until the server stops reading. Resolves when the
+ * connection closes (the bounded outcome) or when the whole body went out
+ * (the unbounded one, which the caller asserts against).
+ *
+ * @param {number} port
+ * @param {{ requestLine: string, host: string }} options
+ * @returns {Promise<{ sent: number, total: number, received: string }>}
+ */
+function streamOversizedBody(port, options) {
+  // Larger than any socket buffer either side could swallow whole, so a
+  // server that stops reading stalls the write rather than absorbing it.
+  const body = Buffer.alloc(8 * 1024 * 1024, 'x')
+  let received = ''
+  let sent = 0
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1')
+    const timer = setTimeout(() => {
+      socket.destroy()
+      reject(new Error(`the listener read ${sent} bytes and left the connection open`))
+    }, 10000)
+    function pump() {
+      while (sent < body.length && !socket.destroyed) {
+        const end = Math.min(sent + 64 * 1024, body.length)
+        const chunk = body.subarray(sent, end)
+        sent = end
+        if (!socket.write(chunk)) {
+          socket.once('drain', pump)
+          return
+        }
+      }
+      // Everything went out, so nothing bounded the read. Close rather than
+      // wait for one a keep-alive answer will never send.
+      if (sent >= body.length) setTimeout(() => socket.destroy(), 50)
+    }
+    socket.on('connect', () => {
+      socket.write(
+        `${options.requestLine} HTTP/1.1\r\nHost: ${options.host}\r\n` +
+          `content-type: application/json\r\ncontent-length: ${body.length}\r\n\r\n`
+      )
+      pump()
+    })
+    socket.on('data', (chunk) => { received += chunk.toString('utf8') })
+    // The close is the point of the test, so a reset counts as one rather
+    // than as a failure.
+    socket.on('error', () => {})
+    socket.on('close', () => {
+      clearTimeout(timer)
+      resolve({ sent, total: body.length, received })
+    })
   })
 }
 
@@ -667,6 +726,59 @@ test('a request target new URL rejects is answered 400, not thrown out of the ha
     await s.close()
   }
 })
+
+// Both refusals above answer before reading anything, and a body they will
+// never read still has to be drained for that answer to reach a caller
+// mid-upload. Draining it with a bare `req.resume()` reads to EOF, which hands
+// the length of that read to the sender; the shared `drainRequestBody` bounds
+// it instead (issue #1351).
+for (const refusal of [
+  {
+    name: 'the misdirected-Host 421',
+    requestLine: 'POST /v1/logs',
+    host: 'attacker.example',
+    status: 421,
+  },
+  {
+    name: 'the invalid-target 400',
+    requestLine: 'POST //[',
+    host: '127.0.0.1',
+    status: 400,
+  },
+]) {
+  test(`${refusal.name} discards an oversized body only up to a cap`, async () => {
+    const s = await startServer()
+    try {
+      const out = await streamOversizedBody(s.bound.port, refusal)
+      assert.ok(
+        out.sent < out.total,
+        `${refusal.name} read all ${out.total} bytes of the body it refused`
+      )
+      // The cap is only visible as bytes the server read off the socket: a
+      // sender cannot tell a paused read from a socket buffer that swallowed
+      // its write.
+      const [served] = s.sockets
+      assert.ok(served, 'the refused upload opened no server connection to measure')
+      if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
+      // The drain stops at MAX_REJECTED_DRAIN_BYTES (64 KiB) plus whatever
+      // read was already in the parser when the pause landed.
+      assert.ok(
+        served.bytesRead < 512 * 1024,
+        `${refusal.name} read ${served.bytesRead} of the ${out.total} bytes it refused`
+      )
+      // The answer is written before a byte is discarded, so a caller reading
+      // its socket while it uploads still gets the status, and the reset it
+      // meets past the cap is announced rather than handed to a connection
+      // pool.
+      if (out.received) {
+        assert.match(out.received, new RegExp(`^HTTP/1\\.1 ${refusal.status} `), out.received.slice(0, 80))
+        assert.match(out.received, /\r\nconnection: close\r\n/i, out.received.slice(0, 200))
+      }
+    } finally {
+      await s.close()
+    }
+  })
+}
 
 test('the Host check exempts an explicitly routable bind only, and needs a Host to judge', () => {
   /** @type {PluginLogger} */

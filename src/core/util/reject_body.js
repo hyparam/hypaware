@@ -3,9 +3,11 @@
 // The one capped body drain, shared by the servers that discard a request
 // body they are not going to read: the control handler
 // (`src/core/control/session_ignore.js`), the OpenCode listener's reject
-// branches (`hypaware-core/plugins-workspace/opencode/src/listener.js`), and
-// the AI gateway's refusals
-// (`hypaware-core/plugins-workspace/ai-gateway/src/proxy.js`).
+// branches (`hypaware-core/plugins-workspace/opencode/src/listener.js`), the
+// AI gateway's refusals
+// (`hypaware-core/plugins-workspace/ai-gateway/src/proxy.js`), and the OTLP
+// listener's misdirected-Host and invalid-target refusals
+// (`src/core/otlp/server.js`).
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'

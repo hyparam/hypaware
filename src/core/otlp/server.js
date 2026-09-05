@@ -6,6 +6,7 @@ import zlib from 'node:zlib'
 import { isControlPath } from '../control/session_ignore.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { isLoopbackHost } from '../util/loopback.js'
+import { drainRequestBody } from '../util/reject_body.js'
 
 /**
  * @import { IncomingMessage, Server } from 'node:http'
@@ -296,15 +297,18 @@ export function createOtlpJsonServer(options) {
   const served = new Set(options.signals ?? ALL_SIGNALS)
 
   return http.createServer(async (req, res) => {
+    // The two refusals below discard a body they never read, and a bare
+    // `req.resume()` would read it to EOF, leaving the length of that read
+    // the sender's to choose.
     if (isMisdirectedHost(req, { name })) {
-      req.resume()
+      drainRequestBody(req, res)
       respondJsonError(res, 421, 7, 'Misdirected request: Host is not a loopback name')
       return
     }
 
     const url = requestUrlOf(req)
     if (!url) {
-      req.resume()
+      drainRequestBody(req, res)
       respondJsonError(res, 400, 3, 'Invalid request target')
       return
     }
