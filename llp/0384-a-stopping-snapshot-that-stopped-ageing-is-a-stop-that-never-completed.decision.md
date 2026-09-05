@@ -10,6 +10,7 @@
 (#the-signal-is-the-daemons-last-state read a terminal `stopping` as a stop that
 ran; this settles the case that reading leaves open, where the stop began and
 was killed before it could finish)
+**Extended-by:** LLP 0386 (#an-underivable-age-stays-silent: the boot-degraded population that paragraph leaves silent now derives an age, so it reaches this reading)
 **Related:** [LLP 0348](./0348-a-live-pid-is-not-a-live-daemon.decision.md)
 (#heartbeat-is-derived: the last-write time this reads, and #the-window: the
 window it borrows), [LLP 0365](./0365-self-update-cannot-strand-the-daemon.decision.md)

@@ -6,6 +6,7 @@
 **Generated-by:** neutral
 **Author:** Phil / Claude
 **Date:** 2026-09-02
+**Extended-by:** LLP 0386 (#option-persist-from-starting: the boot-degraded half of the gap is settled, at the narrowest point of option B; the `bootKernel`-wedge half stays open)
 **Related:** [LLP 0348](./0348-a-live-pid-is-not-a-live-daemon.decision.md)
 (#heartbeat-is-derived, #stale-heartbeat-is-unresponsive: the check this asks
 to widen), [LLP 0017](./0017-daemon-runtime.decision.md) (the boot-time

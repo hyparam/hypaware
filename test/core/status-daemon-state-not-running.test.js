@@ -107,16 +107,17 @@ test('a running daemon keeps the present-tense state line', async () => {
   assert.doesNotMatch(line, /last state=/)
 })
 
-// LLP 0351's thread to pull. A daemon that wedged before it ever reached
-// `healthy` is alive, so its `degraded` / `starting` snapshot is still the one
-// signal an operator has while `overall` stays quiet: it must not be softened
-// into a historical note.
+// LLP 0351's thread to pull. A daemon that wedged before it ever started
+// serving is alive, so its `starting` snapshot is still the one signal an
+// operator has while `overall` stays quiet: it must not be softened into a
+// historical note.
 test('a live daemon that never reached healthy still states its snapshot in the present tense', async () => {
   const { hypHome, stateRoot } = await makeHome()
   writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
-  // Production-shaped too: a daemon that never reached `healthy` writes its
-  // pid and `uptimeMs: 0` with no `healthyAt`, so the heartbeat is null by
-  // design (LLP 0351's gap) and the pid gate is the check that actually runs.
+  // Production-shaped too: a daemon still inside `bootKernel` writes its pid
+  // and `uptimeMs: 0` with no `healthyAt`, so the heartbeat is null by design
+  // (LLP 0351's gap, left open by LLP 0386#not-settled) and the pid gate is
+  // the check that actually runs.
   writeStatusFile(stateRoot, /** @type {any} */ ({
     state: 'starting',
     pid: process.pid,
