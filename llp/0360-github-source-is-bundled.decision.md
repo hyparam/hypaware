@@ -23,6 +23,11 @@ never has its second snapshot captured)
 **Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
 (#capture-regimes and #cursoring together entail that a repeat backfill
 re-appends; 0374 records that as the design and refuses a committed-row dedup)
+**Extended-by:** [LLP 0381](./0381-boundary-overflow-past-the-cap.rfc.md)
+(the request covering #resource-bounds' cap made concrete: when more than
+`MAX_BOUNDARY_IDS` items share one watermark second, the overflow sits outside
+the guard and is re-appended every tick, and every exit forks against a
+settled rule)
 
 > `@hypaware/github` ships under `hypaware-core/plugins-workspace/github`.
 > Bundling does not activate it by default: adding it to `plugins[]` remains the

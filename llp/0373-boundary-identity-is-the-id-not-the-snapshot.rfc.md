@@ -23,7 +23,10 @@ hyparam/hypaware#1284 (the unguarded behavior this guard replaced), PR #1330,
 hyparam/hypaware#1335 and PR #1340 (where `work.pulls_emitted` landed),
 hyparam/hypaware#1345 and PR #1347 (where `work.gate_emitted` landed),
 hyparam/hypaware#1353 (the loss they widen, with a verified probe),
-hyparam/hypaware#1354 (the invariant the `openGate` docstring leaves unstated)
+hyparam/hypaware#1354 (the invariant the `openGate` docstring leaves unstated),
+[LLP 0381](./0381-boundary-overflow-past-the-cap.rfc.md) (the disjoint
+capacity question: what happens when a boundary set overflows
+`MAX_BOUNDARY_IDS`, which #constraints below sets aside by name)
 
 > Every incremental GitHub capture pass refuses an item it has already
 > captured, and it recognizes "already captured" by the item's stable event id.
