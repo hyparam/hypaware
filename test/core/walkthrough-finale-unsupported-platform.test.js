@@ -7,7 +7,9 @@ import path from 'node:path'
 import process from 'node:process'
 import test from 'node:test'
 
-import { runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { runPickerFinale, runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
+import { SystemdUnitError } from '../../src/core/daemon/linux.js'
+import { LaunchAgentError } from '../../src/core/daemon/macos.js'
 import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
 
 /**
@@ -111,4 +113,81 @@ test('daemonIncompleteNote without a context clause names the missing service an
     daemonIncompleteNote('darwin'),
     "note: the daemon install did not finish - run 'hyp daemon install'\n"
   )
+})
+
+// The other half of the same defect, and the one every real user is exposed
+// to: `installDaemon` reaches darwin/linux and the service manager itself
+// fails. LLP 0317 D1 makes the platform installers raise their `ServiceOpError`
+// subclass when no pid appears, which is not a `DaemonInstallError`, so a catch
+// on that class alone would leave the run dying after the config commit exactly
+// as #1383 describes. The team pathway has never died here: `runDaemonInstall`
+// turns every install failure into exit 1 and the login lane reads that as
+// `daemon_incomplete` (#978).
+
+/**
+ * @param {string} home
+ * @param {string[]} events
+ * @param {{ write(chunk: string): boolean, text(): string }} stderr
+ */
+function finaleArgs(home, events, stderr) {
+  return {
+    finale: { dryRun: false, skipDaemonRestart: true },
+    retentionDays: 30,
+    interactive: false,
+    clientsPicked: ['claude'],
+    capabilities: /** @type {any} */ ({
+      has: (/** @type {string} */ id) => id === 'hypaware.ai-gateway',
+      require: () => ({
+        getClient: (/** @type {string} */ name) =>
+          name === 'claude' ? { attach: async () => { events.push('attach') } } : undefined,
+        localEndpoint: () => 'http://127.0.0.1:4317',
+      }),
+    }),
+    config: /** @type {any} */ ({
+      version: 2,
+      plugins: [{ name: '@hypaware/ai-gateway', config: { upstreams: [], proxy_mode: true } }],
+    }),
+    configPath: path.join(home, '.hyp', 'hypaware-config.json'),
+    env: { HOME: home, HYP_HOME: path.join(home, '.hyp') },
+    stdout: makeBuf(),
+    stderr,
+    waitForCaFn: async () => {
+      events.push('ca-wait')
+      return { ready: true }
+    },
+  }
+}
+
+test('a launchd/systemd install failure on a supported platform finishes the finale too', async () => {
+  for (const Err of [LaunchAgentError, SystemdUnitError]) {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-svcop-'))
+    /** @type {string[]} */
+    const events = []
+    const stderr = makeBuf()
+    const summary = await runPickerFinale(/** @type {any} */ ({
+      ...finaleArgs(home, events, stderr),
+      installDaemonFn: async () => { throw new Err('launchctl bootstrap exited 5') },
+    }))
+    assert.equal(summary.daemonInstall.failed, true, `${Err.name} is recorded as a failed install`)
+    assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
+    assert.deepEqual(events, ['attach'], 'no CA can appear without a daemon, so the wait is skipped and attach still runs')
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})
+
+test('an error that is not an install failure still escapes the finale', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-bug-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  await assert.rejects(
+    () => runPickerFinale(/** @type {any} */ ({
+      ...finaleArgs(home, events, stderr),
+      installDaemonFn: async () => { throw new TypeError('a bug in this lane') },
+    })),
+    /a bug in this lane/,
+    'the catch is install failures only; anything else is a bug and propagates'
+  )
+  assert.deepEqual(events, [], 'nothing after the install step ran')
+  await fs.rm(home, { recursive: true, force: true })
 })

@@ -11,6 +11,7 @@ import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { daemonIncompleteNote } from '../daemon/platform.js'
+import { ServiceOpError } from '../daemon/service_ops.js'
 import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
@@ -1663,9 +1664,19 @@ export async function runPickerFinale(args) {
   //
   // Reactive rather than a `platformIsSupported` gate: an absent service
   // manager is one of several ways `installDaemon` throws, and a
-  // launchd/systemd failure on a supported platform strands the same steps.
-  // The catch is `DaemonInstallError` and nothing else, so a bug in this lane
-  // still propagates and the span records the exception either way.
+  // launchd/systemd failure on a supported platform strands the same steps
+  // after the same config commit. Both are caught, as two distinct classes:
+  // `DaemonInstallError` for what `installDaemon` itself rejects (no service
+  // manager, a bin it cannot make durable), and `ServiceOpError` for what the
+  // platform installers raise, which is what LLP 0317 D1 requires of them when
+  // no pid appears. Nothing wider: a bug in this lane is not an install
+  // failure, so it still propagates, and the span records the exception either
+  // way.
+  //
+  // Catching both is what puts the local pathway where the team pathway
+  // already stands. `runDaemonInstall` turns every install failure into exit
+  // 1, which the login lane reads as `daemon_incomplete` and carries on from
+  // (#978), so a launchd failure has never ended a team run.
   // @ref LLP 0317#install-means-running [constrained-by]: a throw means no running service, so the CA wait below is skipped with it
   let installFailed = false
   if (!skipInstall) {
@@ -1740,7 +1751,7 @@ export async function runPickerFinale(args) {
       },
       { component: 'walkthrough' }
     ).catch((err) => {
-      if (!(err instanceof installMod.DaemonInstallError)) throw err
+      if (!(err instanceof installMod.DaemonInstallError) && !(err instanceof ServiceOpError)) throw err
       installFailed = true
       summary.daemonInstall = { skipped: false, dryRun, failed: true }
       stderr.write(daemonIncompleteNote(process.platform))
