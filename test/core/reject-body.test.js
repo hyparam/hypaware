@@ -298,16 +298,38 @@ async function settledBytesRead(socket, bound) {
   let previous = -1
   let stableFor = 0
   const started = Date.now()
+  let sampledAt = started
   while (Date.now() - started < LIMIT_MS) {
     await new Promise((resolve) => setTimeout(resolve, SAMPLE_MS))
+    const now = Date.now()
+    // Measured, not the nominal `SAMPLE_MS`: a loaded host hands back a 25ms
+    // timer late, and counting the sleeps rather than the clock would call a
+    // read still, which the window is measured in, before it has been still
+    // for that long.
+    const waited = now - sampledAt
+    sampledAt = now
     const sample = socket.bytesRead
     if (sample >= bound) return sample
-    stableFor = sample === previous ? stableFor + SAMPLE_MS : 0
+    stableFor = sample === previous ? stableFor + waited : 0
     previous = sample
     // Settled under the cap is not settled, it is a sender that has not caught
     // up yet, and taking it for an answer would pass the probe without ever
     // entering the window it exists to measure.
     if (sample > CAP_BYTES && stableFor >= STABLE_MS) return sample
+  }
+  // Out of window with the read still moving. Handing the last sample back is
+  // how an unbounded read on a sender too slow to finish inside the window
+  // passes for a bounded one: it sits under the bound only because the rest of
+  // the body has not arrived yet. Measured with the pause deleted and a sender
+  // trickling 4 KiB every 100ms, that path reported 204894 bytes, over the cap
+  // and under the bound, and every assertion below it passed. A read that
+  // stalled instead is still returned, so the caller's own cap check gets to
+  // say the drain was never asked to bound anything.
+  if (stableFor < STABLE_MS) {
+    throw new Error(
+      `the refused body's read was still growing at ${socket.bytesRead} bytes when the ${LIMIT_MS}ms ` +
+        'sampling window ran out, so no settled read was measured to hold against the bound'
+    )
   }
   return socket.bytesRead
 }
@@ -359,17 +381,20 @@ test('drainRequestBody stops reading a refused body while its answer is still pe
     const maxBoundedRead = 4 * CAP_BYTES + 16 * 1024
     // Thirty-two times the cap, eight times what the sibling probe sends,
     // because neither half of what sizes that one holds here. It is ceilinged:
-    // there the refusal is already out, so past about six caps an unbounded
+    // there the refusal is already out, so at a large enough body an unbounded
     // read stops being the whole body, the teardown cutting it at whatever
-    // arrived first, and a body chosen past that ceiling makes the probe
-    // vacuous rather than sharper. No teardown happens inside this window at
-    // all, the answer being withheld for the length of it, so an unbounded
-    // read here is the whole body at any size and there is no ceiling to
-    // respect. And it needs a floor that probe does not: a bounded read here
-    // reaches three and a half caps, so a 4-cap body would leave an unbounded
-    // read only a fifth again larger than the bound, near enough that a bound
-    // loose enough to be safe would stop failing. At 32 caps an unbounded read
-    // is 2097246, seven and a half times the bound, with nothing in between.
+    // arrived first - at 32 caps it cut 5 of 8 samples to 163705 - and a body
+    // chosen past that ceiling makes the probe vacuous rather than sharper. No
+    // teardown happens inside this window at all, the answer being withheld for
+    // the length of it, so an unbounded read here is the whole body at any size
+    // and there is no ceiling to respect. And it needs a floor that probe does
+    // not: a bounded read here already reaches three and a half caps, so the
+    // small bodies are the vacuous ones. At 4 caps an unbounded read measures
+    // 262237, which is under the bound, so the probe would pass with the pause
+    // deleted; 5 caps is the first size to clear the bound at all, and only by
+    // a sixth. At 32 caps an unbounded read is 2097246, seven and a half times
+    // the bound, with nothing in between: every sample is either that or the
+    // bounded 229281.
     const body = Buffer.alloc(32 * CAP_BYTES, 'x')
     client = net.connect(served.port, '127.0.0.1')
     // Ends as a reset arriving under a write this sender has not finished,
@@ -390,7 +415,10 @@ test('drainRequestBody stops reading a refused body while its answer is still pe
     )
 
     // Both checked before the bound, because either one failing quietly would
-    // leave a probe that passes without having entered the window at all.
+    // leave a probe that passes without having entered the window at all. The
+    // first is not a formality: stop withholding the answer and this same
+    // upload reads 98317, under the bound, so the probe would go green having
+    // measured the sibling's teardown rather than the pause.
     assert.ok(
       !pending.res.writableFinished,
       'the withheld refusal had already flushed, so the connection teardown could have bounded this read ' +
