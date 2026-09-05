@@ -15,6 +15,10 @@ its second snapshot captured)
 **Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
 (#budget's deliberate new backfill is recorded there as re-appending rows,
 with the committed-row dedup alternative refused)
+**Extended-by:** [LLP 0381](./0381-boundary-overflow-past-the-cap.rfc.md)
+(the request covering a watermark second too populous for the boundary cap:
+its per-tick re-append starves #budget's round-robin fairness, and one
+candidate exit forks against #page-work's equal-timestamp anti-loss rule)
 
 > A GitHub capture tick has one fixed request budget across its repository
 > inventory. API pages are normalized and appended as they arrive, unfinished
