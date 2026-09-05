@@ -34,7 +34,7 @@ import { isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { loadClientDescriptors, probeAttachedClients, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
-import { platformIsSupported } from '../daemon/platform.js'
+import { daemonIncompleteNote } from '../daemon/platform.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -287,27 +287,6 @@ async function markFirstSyncHoldBestEffort(stateDir) {
 }
 
 const FIRST_SYNC_RULE = '─'.repeat(62)
-
-/**
- * The note an enrolling login prints when the sign-in completed and the
- * enrollment landed but the daemon install did not finish. Enrollment is a
- * fact by this point (session written, sink provisioned, identity seeded,
- * first-sync hold armed), so the note reports a missing background service,
- * never a failed sign-in.
- *
- * The remediation prints only where it can work. `hyp daemon install` is the
- * fix on a platform with a service manager; on one without, no run of it
- * would finish, so the note says the machine captures nothing instead of
- * naming a command that cannot help (#978).
- *
- * @param {NodeJS.Platform} platform
- * @returns {string}
- */
-export function daemonIncompleteNote(platform) {
-  return platformIsSupported(platform)
-    ? "note: enrolled, but the daemon install did not finish - run 'hyp daemon install'\n"
-    : `note: enrolled, but ${platform} has no background service to install - nothing is captured on this machine\n`
-}
 
 /**
  * The first-sync deadline message: an absolute local time, a statement that
@@ -882,7 +861,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // and `daemon_incomplete` tells the wizard that the sign-in nonetheless
     // completed (LLP 0179#outcome, "the other exception the other way").
     if (result.daemonCode !== 0) {
-      ctx.stderr.write(daemonIncompleteNote(process.platform))
+      ctx.stderr.write(daemonIncompleteNote(process.platform, 'enrolled'))
       ctx.stderr.write(DURABLE_HINT)
       return { exitCode: result.daemonCode, reason: 'daemon_incomplete' }
     }

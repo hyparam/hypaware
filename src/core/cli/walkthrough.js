@@ -10,6 +10,7 @@ import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../c
 import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
+import { daemonIncompleteNote } from '../daemon/platform.js'
 import { defaultStateRoot, waitForLocalCa } from '../tls/ca.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
@@ -1653,8 +1654,23 @@ export async function runPickerFinale(args) {
     backfill: [],
   }
 
+  // A failed install must not take the finale steps that need no service
+  // manager down with it. The config is already committed by the time the
+  // finale starts, so attach, client assets and backfill still run and the
+  // note names what is missing. The team pathway lands in the same place via
+  // `skipDaemonInstall`, which only a join sets, leaving the local pathway to
+  // run headlong into the throw (#1383).
+  //
+  // Reactive rather than a `platformIsSupported` gate: an absent service
+  // manager is one of several ways `installDaemon` throws, and a
+  // launchd/systemd failure on a supported platform strands the same steps.
+  // The catch is `DaemonInstallError` and nothing else, so a bug in this lane
+  // still propagates and the span records the exception either way.
+  // @ref LLP 0317#install-means-running [constrained-by]: a throw means no running service, so the CA wait below is skipped with it
+  let installFailed = false
   if (!skipInstall) {
     if (!dryRun) await stopFinaleStartedSources(sources)
+    const installMod = await import('../daemon/install.js')
     await withSpan(
       'daemon.install',
       {
@@ -1665,7 +1681,6 @@ export async function runPickerFinale(args) {
         status: 'ok',
       },
       async (span) => {
-        const installMod = await import('../daemon/install.js')
         const binPath = finale.binPath ?? (process.argv[1] ?? '')
         /** @type {DaemonInstallOptions} */
         const options = {
@@ -1724,7 +1739,12 @@ export async function runPickerFinale(args) {
         }
       },
       { component: 'walkthrough' }
-    )
+    ).catch((err) => {
+      if (!(err instanceof installMod.DaemonInstallError)) throw err
+      installFailed = true
+      summary.daemonInstall = { skipped: false, dryRun, failed: true }
+      stderr.write(daemonIncompleteNote(process.platform))
+    })
   }
 
   // The intrinsic registry is the superset of attachable clients: gateway
@@ -1747,7 +1767,7 @@ export async function runPickerFinale(args) {
     // after attach, so no CA can appear before it) and on dry runs; the
     // wait-or-skip decision itself lives in the helper. Also skipped when no
     // gateway is active at all: there is no proxy CA to wait for.
-    if (!dryRun && !skipInstall && gateway) {
+    if (!dryRun && !skipInstall && !installFailed && gateway) {
       await waitForProxyCaBeforeAttach({
         config,
         env,
