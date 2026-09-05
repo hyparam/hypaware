@@ -709,10 +709,16 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // sign-in is the accepting act. Phrased conditionally because the client
   // can't know pre-auth whether the server will mint a gateway credential.
   // @ref LLP 0063#d3 [implements]: default-on enrollment; the pre-auth notice is the consent surface, never a y/n prompt
-  // Compact (the wizard's join lane, LLP 0135 #join) keeps the notice and its
-  // placement and drops the paragraph: one line, still before the browser.
+  // Compact (the wizard's join lane, LLP 0135 #join) keeps the notice, its
+  // placement, and its conditional phrasing, and drops only the paragraph: one
+  // line, still before the browser. The hedge is not shortenable - the client
+  // still cannot know pre-auth whether a gateway will be minted, so a flat
+  // "signing in forwards your logs" is false against a forwarding-off org.
+  // The '--no-forward' sentence is the one thing left out: the wizard's lane
+  // runs a bare login (LLP 0134 #no-token-join) and cannot pass the flag, and
+  // the fork already offered the no-forwarding pathway as a choice.
   if (!alreadyEnrolled && !noForward && compact) {
-    ctx.stderr.write('note: signing in enrolls this machine, forwarding captured logs to your org and installing a background service (Ctrl-C to cancel)\n')
+    ctx.stderr.write('note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server and installs a background service (Ctrl-C to cancel)\n')
   } else if (!alreadyEnrolled && !noForward) {
     ctx.stderr.write('note: if your org has enabled forwarding, signing in will enroll this machine:\n')
     ctx.stderr.write('  it forwards captured logs to the server, applies org config (which can attach\n')
@@ -859,10 +865,17 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // rides the hold, never invents one that was not actually written).
     // Compact prints the deadline alone. The wizard that asked for it states
     // the rest of R1 (the backfill statement, the skill hint, the release verb)
-    // on its first-look screen and then asks the send-now question, so the
-    // full block here would say everything twice on the same run.
+    // in its closing privacy narration, which every path through it reaches -
+    // the ordinary close and `narrateEnrolledAbort` alike - so the full block
+    // here would say everything twice on the same run.
+    // The line states the deadline and the fact the hold guarantees, and
+    // nothing about being prompted: the send-now offer (LLP 0203) runs only on
+    // an attended, uncancelled, non-dry close, and at the deadline itself the
+    // hold simply lapses (LLP 0101 #no-release). A promise of an ask here
+    // would be false on exactly the paths where it would matter.
+    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the wizard's own narration carries the backfill statement, the skill hint, and the release verb
     if (holdDeadline !== null && compact) {
-      ctx.stderr.write(`✓ First sync no later than ${formatFirstSyncDeadline(holdDeadline)}; you will be asked before it\n`)
+      ctx.stderr.write(`✓ First sync no later than ${formatFirstSyncDeadline(holdDeadline)}; nothing has been uploaded yet\n`)
     } else if (holdDeadline !== null) {
       ctx.stderr.write(firstSyncHoldMessage(holdDeadline, name))
     }
@@ -925,8 +938,11 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
 
   // Already-enrolled machine (re-login / re-seed): a prior daemon has run and is
   // already forwarding, so there is no "first" sync to defer - this fork writes
-  // no hold (LLP 0101 #which). The durable CLI floor stays discoverable.
-  ctx.stderr.write(DURABLE_HINT)
+  // no hold (LLP 0101 #which). The durable CLI floor stays discoverable, and
+  // compact suppresses it on this exit as on the three above - otherwise a
+  // wizard join onto an already-enrolled machine prints, mid-checklist, the
+  // one tip the compact lane exists to keep off it.
+  if (!compact) ctx.stderr.write(DURABLE_HINT)
   return { exitCode: 0, reason: 'ok' }
 }
 
