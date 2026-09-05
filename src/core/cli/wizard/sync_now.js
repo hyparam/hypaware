@@ -70,9 +70,11 @@ export async function runWizardSyncNow(opts) {
         // One question, and it is `hyp sync`'s own: the child prints the
         // plan (every destination, what is withheld) and asks its Y/n. A no
         // is the wait. A lead line says what is starting, so the plan does
-        // not read as a report the wizard forgot to introduce.
+        // not read as a report the wizard forgot to introduce - an
+        // introduction only, because the child's own warning opens on
+        // "nothing has left this machine yet" a few lines later.
         // @ref LLP 0203#no-new-consent [implements]: the wizard asks nothing of its own; the informed prompt is the only one
-        opts.stdout.write('\nNothing has left this machine yet. `hyp sync` shows what would leave and asks before sending:\n\n')
+        opts.stdout.write('\n`hyp sync` shows what would leave and asks before sending:\n\n')
         const result = await runSyncChild(opts)
         span.setAttribute('exit_code', result.code ?? -1)
         if (result.error) {
@@ -99,6 +101,17 @@ export async function runWizardSyncNow(opts) {
       } catch (err) {
         span.setAttribute('status', 'error')
         span.setAttribute(Attr.ERROR_KIND, err instanceof Error ? err.name : 'unknown')
+        // An unforeseen throw is the one remaining way this path ends with
+        // the deadline nowhere on screen: the narration stood down for a
+        // step that then said nothing. State the hold instead, in the same
+        // conservative direction `readHold` takes, and inside its own guard
+        // because a failed stdout is one of the things that lands here.
+        // @ref LLP 0188#never-silent [implements]: even the unforeseen exit states the hold
+        try {
+          if (typeof opts.deadline === 'number') writeHeldStatement(opts, opts.deadline)
+        } catch {
+          // Nowhere left to say it.
+        }
         return { asked: false, reason: /** @type {const} */ ('error') }
       }
     },
@@ -172,16 +185,23 @@ async function readHold(opts) {
 }
 
 /**
- * The statement for a run that could not put the question: the deadline, the
- * way out, and the review hint, since no other screen of this run states
- * them (the narration went quiet expecting this step to ask).
+ * The statement for a run that could not put the question, and the only
+ * screen such a run gets: `offerFollows` upstream is true whenever the run
+ * is attended, so an attended run whose stdin is not a terminal
+ * (`hyp init < file`, which `hyp init` still admits because it gates the
+ * wizard on stdout alone) stood the narration down and then landed here.
+ * It therefore carries every fact the narration carried: the deadline, that
+ * the first sync includes the imported history, the countdown command, the
+ * way out, and the review hint.
  *
+ * @ref LLP 0188#never-silent [implements]: the un-askable path states what the narration would have
  * @param {RunWizardSyncNowOptions} opts
  * @param {number} deadline
  */
 function writeHeldStatement(opts, deadline) {
   opts.stdout.write(
-    `\nNothing has been uploaded yet: nothing leaves this machine before ${formatFirstSyncDeadline(deadline)}.\n` +
+    `\nNothing has been uploaded yet: nothing leaves this machine before ${formatFirstSyncDeadline(deadline)},\n` +
+    'and that first sync includes your imported history. `hyp status` shows the countdown.\n' +
     'To send it sooner, run `hyp sync`: it shows what would leave and asks first.\n' +
     'To review or exclude anything before then, run the hypaware-privacy skill in Claude or Codex.\n'
   )

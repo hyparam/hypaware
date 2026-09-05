@@ -101,8 +101,74 @@ test('a non-interactive run is never asked, and never sends', async () => {
   // hint itself or the run ends without ever naming them.
   // @ref LLP 0188#never-silent [tests]: the un-askable path still names the release verb
   assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before /)
+  assert.match(o.stdout.text(), /includes your imported history/)
+  assert.match(o.stdout.text(), /`hyp status` shows the countdown/)
   assert.match(o.stdout.text(), /To send it sooner, run `hyp sync`/)
   assert.match(o.stdout.text(), /hypaware-privacy/)
+})
+
+// `spawnFn` is what lets every other test here run headless, and it is also
+// what bypasses the terminal gate, so the gate is only reachable with no seam
+// injected at all. Both halves of it matter: the child prompts on the
+// inherited terminal, so both ends have to be one. `hyp init` gates the
+// wizard on stdout alone, so the stdin half is a real attended run
+// (`hyp init < file`), not a hypothetical.
+// @ref LLP 0203#offer [tests]: attended-only means a terminal on both ends, and the un-askable attended run gets the full statement
+for (const surfaces of [
+  { name: 'a stdin that is not a terminal', stdin: false, stdout: true },
+  { name: 'a stdout that is not a terminal', stdin: true, stdout: false },
+]) {
+  test(`${surfaces.name} is never asked, and states the whole hold instead`, async () => {
+    const stdout = makeBuf()
+    const result = await runWizardSyncNow({
+      deadline: DEADLINE,
+      stdout,
+      stderr: makeBuf(),
+      env: /** @type {NodeJS.ProcessEnv} */ ({}),
+      interactive: true,
+      stdin: /** @type {any} */ ({ isTTY: surfaces.stdin }),
+      stdoutStream: /** @type {any} */ ({ isTTY: surfaces.stdout, write: () => true }),
+      readDeadline: async () => DEADLINE,
+    })
+    assert.deepEqual(result, { asked: false, reason: 'not-interactive' })
+    // Everything the privacy narration would have said, because it stood
+    // down for a question this run cannot be asked.
+    assert.match(stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before /)
+    assert.match(stdout.text(), /includes your imported history/)
+    assert.match(stdout.text(), /`hyp status` shows the countdown/)
+    assert.match(stdout.text(), /To send it sooner, run `hyp sync`/)
+    assert.match(stdout.text(), /hypaware-privacy/)
+  })
+}
+
+// The narration stood down for this step, so a step that throws and says
+// nothing is the one remaining way an enrolled run ends with the deadline
+// nowhere on screen.
+// @ref LLP 0188#never-silent [tests]: even the unforeseen exit states the hold
+test('an unforeseen throw states the hold rather than ending on nothing', async () => {
+  const stdout = makeBuf()
+  let firstWrite = true
+  const result = await runWizardSyncNow({
+    deadline: DEADLINE,
+    stdout: {
+      write(/** @type {string} */ chunk) {
+        if (firstWrite) {
+          firstWrite = false
+          throw new Error('EPIPE')
+        }
+        return stdout.write(chunk)
+      },
+    },
+    stderr: makeBuf(),
+    env: /** @type {NodeJS.ProcessEnv} */ ({}),
+    interactive: true,
+    spawnFn: /** @type {any} */ (() => {
+      throw new Error('spawn must not be reached')
+    }),
+    readDeadline: async () => DEADLINE,
+  })
+  assert.deepEqual(result, { asked: false, reason: 'error' })
+  assert.match(stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before /)
 })
 
 // @ref LLP 0203#child-process [tests]: the release is a real `hyp sync` in a fresh process, not an in-wizard reimplementation

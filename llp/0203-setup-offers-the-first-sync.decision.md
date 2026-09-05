@@ -64,10 +64,17 @@ signed up for, after seeing what it sends.
 The wizard's own privacy paragraph stands down on this path: with the plan
 about to state the deadline, the backfill, and the review hint and then ask,
 the paragraph said each of them one screen earlier. It stays on every path
-that ends without the offer (an abort, a non-interactive run, a dry run, a
-run with no terminal to prompt on), where it is the only sighting of the
-deadline and the way out
+the offer cannot reach at all (an abort, a non-interactive run, a dry run),
+where it is the only sighting of the deadline and the way out
 ([LLP 0188 #never-silent](./0188-enrolled-default-sync-with-client-optout.decision.md#never-silent)).
+
+One path is attended and still cannot be asked: `hyp init` admits a run
+whose stdout is a terminal and whose stdin is not (`hyp init < file`), and
+nothing may be spawned to prompt on a stdin like that. The paragraph has
+already stood down by then, so the step states the hold itself, carrying
+every fact the paragraph carried rather than only the release verb. Keeping
+the statement in the step rather than widening the paragraph's gate is what
+keeps the two from both printing.
 The join lane's one-line deadline stays too: it is the first moment the
 deadline is true, and it is one line.
 

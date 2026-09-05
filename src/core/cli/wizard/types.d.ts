@@ -625,8 +625,8 @@ export type FirstAskResult =
  * `released` is read back from the hold marker, never inferred from the
  * child's exit code: `hyp sync` exits 0 both when it sends and when the
  * user reads its destination list and answers no. `sync-declined` is that
- * second case, and it is deliberately distinct from `declined` (the wizard's
- * own question) - the two say different things about how far the user got.
+ * second case, and it is the only decline there is: the wizard puts no
+ * question of its own ahead of the child's (LLP 0203 #no-new-consent).
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
