@@ -410,3 +410,31 @@ test('a service install that left the job loaded with no pid still attempts no r
   )
   await fs.rm(home, { recursive: true, force: true })
 })
+
+// The combination neither test above covers (#1408): the install reached the
+// service manager *and* left a daemon running. A reinstall that raises partway
+// through has not necessarily stopped the process it was replacing, so the pid
+// is there and the restart runs. Which error class threw is not what the gate
+// reads.
+
+test('a service install that raised over a still-live daemon restarts it anyway', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-live-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  let restarted = false
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    finale: { dryRun: false, skipDaemonRestart: false },
+    installDaemonFn: async () => { throw new LaunchAgentError('launchctl bootstrap exited 5') },
+    daemonService: {
+      serviceDaemonStatus: async () => ({ installed: true, loaded: true, pid: 5150, platform: process.platform }),
+      restartServiceDaemon: async () => { restarted = true },
+    },
+  }))
+
+  assert.equal(summary.daemonInstall.failed, true, 'the service-manager failure is still a failed install')
+  assert.equal(restarted, true, 'the daemon the failed reinstall left running is restarted, not written off')
+  assert.deepEqual(summary.daemonRestart, { skipped: false, dryRun: false, ok: true })
+  await fs.rm(home, { recursive: true, force: true })
+})
