@@ -23,7 +23,11 @@ import { fileURLToPath } from 'node:url'
 
 import { Attr, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
-import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
+import {
+  SYNC_HELD_NO_DESTINATIONS_EXIT,
+  formatFirstSyncDeadline,
+  readFirstSyncDeadline,
+} from '../../usage-policy/first_sync_hold.js'
 import { isPromptCancelledError } from '../tui/runtime.js'
 import { isTty } from '../tui-router.js'
 import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
@@ -116,6 +120,17 @@ export async function runWizardSyncNow(opts) {
         const stillHeld = await readHold(opts)
         span.setAttribute('released', stillHeld === null)
         if (stillHeld !== null) {
+          // The marker still decides whether anything sent; the exit code only
+          // says why nothing did. A child that found no destination never
+          // rendered a plan, so nobody declined one: reading it as a decline
+          // inflates the rate LLP 0203 #consequences sizes the window by, and
+          // answers it with advice to re-run the command that just found
+          // nothing to send.
+          // @ref LLP 0203#read-back [implements]: the exit code separates the two ways a held marker outlives the child
+          if (result.code === SYNC_HELD_NO_DESTINATIONS_EXIT) {
+            writeNoDestinations(opts, stillHeld)
+            return { asked: true, released: false, reason: /** @type {const} */ ('no-destinations') }
+          }
           writeStillHeld(opts, stillHeld)
           return { asked: true, released: false, reason: /** @type {const} */ ('sync-declined') }
         }
@@ -261,5 +276,23 @@ function writeStillHeld(opts, deadline) {
   opts.stdout.write(
     `\nNothing was sent. Your history stays on this machine until ${formatFirstSyncDeadline(deadline)};\n` +
     'run `hyp sync` any time to send it sooner.\n'
+  )
+}
+
+/**
+ * The line for the one path that did not send because it had nowhere to send
+ * to. Separate from {@link writeStillHeld} because both of its statements are
+ * wrong here: the deadline is not when this history leaves (with no
+ * destination configured it never does), and re-running `hyp sync` is not the
+ * way to send it sooner.
+ *
+ * @param {RunWizardSyncNowOptions} opts
+ * @param {number} deadline
+ */
+function writeNoDestinations(opts, deadline) {
+  opts.stdout.write(
+    '\nNothing was sent: no destinations are configured on this machine yet.\n' +
+    `Your history stays here past ${formatFirstSyncDeadline(deadline)} while that is still true.\n` +
+    'Configure a destination, then run `hyp sync` to send it.\n'
   )
 }

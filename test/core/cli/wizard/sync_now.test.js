@@ -7,7 +7,11 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { runWizardSyncNow } from '../../../../src/core/cli/wizard/sync_now.js'
-import { firstSyncHoldMarkerPath, writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
+import {
+  SYNC_HELD_NO_DESTINATIONS_EXIT,
+  firstSyncHoldMarkerPath,
+  writeFirstSyncHoldMarker,
+} from '../../../../src/core/usage-policy/first_sync_hold.js'
 
 // The closing "send now" offer (LLP 0203): setup asks whether to wait out the
 // first-sync review window, and hands the user a real `hyp sync` rather than a
@@ -185,6 +189,28 @@ test('a child that exits 0 without releasing is reported as not sent', async () 
   assert.deepEqual(result, { asked: true, released: false, reason: 'sync-declined' })
   assert.match(o.stdout.text(), /Nothing was sent/)
   assert.match(o.stdout.text(), /run `hyp sync` any time/)
+})
+
+// The other way the marker survives the child, and not the same outcome: a
+// `hyp sync` that found no destination never rendered a plan, so nobody read
+// one and nobody declined it. Counting it as `sync-declined` puts a machine
+// that cannot send anything into the rate LLP 0203 #consequences reads as
+// "the window is sized wrong", and the plain restatement then points the user
+// back at the command that just found nothing to send.
+// @ref LLP 0203#read-back [tests]: the exit code separates the two ways a held marker outlives the child
+test('a child that found no destinations is not counted as a declined plan', async () => {
+  const spawn = fakeSpawn({ code: SYNC_HELD_NO_DESTINATIONS_EXIT })
+  const o = opts({
+    answer: 'now',
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => DEADLINE,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: false, reason: 'no-destinations' })
+  assert.match(o.stdout.text(), /Nothing was sent/)
+  assert.match(o.stdout.text(), /no destinations are configured/)
+  assert.doesNotMatch(o.stdout.text(), /run `hyp sync` any time/)
 })
 
 // @ref LLP 0203#read-back [tests]: an unreadable re-read is "still held", never a claimed release

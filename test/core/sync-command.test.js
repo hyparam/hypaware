@@ -9,6 +9,7 @@ import { PassThrough } from 'node:stream'
 
 import { runSync } from '../../src/core/commands/sync.js'
 import {
+  SYNC_HELD_NO_DESTINATIONS_EXIT,
   firstSyncHoldMarkerPath,
   writeFirstSyncHoldMarker,
 } from '../../src/core/usage-policy/first_sync_hold.js'
@@ -598,6 +599,19 @@ test('an instance argument ticks only that sink (no hold in play)', async () => 
   assert.equal(code, 0)
   assert.equal(parquet.exported.length, 1)
   assert.deepEqual(central.exported, [], 'a named instance must not wake the others')
+})
+
+test('a held machine with no destinations says so rather than exiting 0', async () => {
+  const hypHome = await makeHome('held-no-sinks')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const { ctx, stderr } = makeCtx({ hypHome, sinks: [], tty: true, answer: 'y' })
+
+  const code = await runSync([], ctx)
+
+  assert.equal(code, SYNC_HELD_NO_DESTINATIONS_EXIT)
+  assert.match(stderr.text, /no destinations are configured/)
+  assert.match(stderr.text, /review window/)
+  assert.ok(await holdExists(hypHome), 'nothing was sent, so the window still stands')
 })
 
 test('no sinks at all is a no-op, not an error', async () => {

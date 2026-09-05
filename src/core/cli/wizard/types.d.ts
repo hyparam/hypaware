@@ -628,10 +628,16 @@ export type FirstAskResult =
  * user reads its destination list and answers no. `sync-declined` is that
  * second case, and it is deliberately distinct from `declined` (the wizard's
  * own question) - the two say different things about how far the user got.
+ *
+ * `no-destinations` is the third run that leaves the marker standing, and it
+ * is not a decline at all: `hyp sync` found no sink to send to and never
+ * rendered a plan, so nobody read one. It is told apart by the child's exit
+ * code (`SYNC_HELD_NO_DESTINATIONS_EXIT`), never by the marker, which says
+ * only that nothing sent.
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
-  | { asked: true; released: false; reason: 'declined' | 'sync-declined' | 'spawn-failed' }
+  | { asked: true; released: false; reason: 'declined' | 'sync-declined' | 'no-destinations' | 'spawn-failed' }
   | { asked: false; reason: 'no-hold' | 'not-interactive' | 'error' }
 
 /** Options for `runWizardSyncNow`. */

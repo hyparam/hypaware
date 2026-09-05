@@ -364,7 +364,9 @@ sync`), and a replay cannot release the first-sync review hold.
 hyp sync --dry-run
 ```
 
-Any sink failure returns `1`. Avoid `--yes` until you have reviewed the plan.
+Any sink failure returns `1`. While the first-sync review window is open, a run
+that finds no configured destination returns `3`: nothing was sent, and the
+window still stands. Avoid `--yes` until you have reviewed the plan.
 
 ## Control the current session
 

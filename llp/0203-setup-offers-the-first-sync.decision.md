@@ -121,6 +121,16 @@ ambiguous about what still holds. An unreadable re-read is treated as "still
 held", because claiming a sync happened is the one wrong answer that cannot
 be corrected later.
 
+The marker says whether it sent. It does not say why it did not, and two runs
+leave it standing for opposite reasons: a user who read the destination plan
+and answered no, and a `hyp sync` that found no destination and so never
+rendered a plan for anyone to answer. The second exits with a code of its own
+rather than 0, which is what
+[LLP 0101 #no-release](./0101-first-sync-review-window.decision.md#no-release)
+already requires of a release that cannot happen. Setup reads that code only to
+pick which closing statement to print and which outcome to report; the release
+claim itself stays where this section puts it, on the marker.
+
 ## Why not {#why-not}
 
 - **Ask before the finale, with the other questions.** Rejected: at that
@@ -155,8 +165,8 @@ be corrected later.
   [LLP 0101](./0101-first-sync-review-window.decision.md) requires all three
   deadline surfaces to name it.
 - `wizard.finish` gains `sync_now` (`released`, `declined`, `sync-declined`,
-  `spawn-failed`, `skipped`), and the step emits a `wizard.sync_now` span
-  carrying the choice, the child's exit code, and whether the marker cleared.
+  `no-destinations`, `spawn-failed`, `skipped`), and the step emits a
+  `wizard.sync_now` span carrying the choice, the child's exit code, and whether the marker cleared.
   The declined/released split is the measurement that says whether the
   window's default sizing matches the people in it; a high `sync-declined`
   rate would say the opposite - that the wizard's question is talking users

@@ -20,6 +20,20 @@ const FIRST_SYNC_HOLD_VERSION = 1
 export const FIRST_SYNC_MIN_LEAD_MS = 4 * 60 * 60_000
 
 /**
+ * The exit code `hyp sync` uses when the hold is live and no destination was
+ * instantiated. It needs one of its own because both neighbouring codes are
+ * taken: 0 is what a user who read the destination plan and answered no also
+ * gets, and 1 is an export that ran and failed.
+ *
+ * It lives beside the hold rather than in the command because the hold is what
+ * makes the case reportable at all: with no window open, no destinations
+ * really is nothing to do.
+ *
+ * @ref LLP 0101#no-release [implements]: a release that cannot happen says so rather than exiting 0 having sent nothing
+ */
+export const SYNC_HELD_NO_DESTINATIONS_EXIT = 3
+
+/**
  * Compute the absolute first-sync hold deadline for an enrollment happening
  * at `now`: the next local 11:59pm, rolled to the following day's 11:59pm
  * when the same-day one is less than four hours away (`FIRST_SYNC_MIN_LEAD_MS`).
