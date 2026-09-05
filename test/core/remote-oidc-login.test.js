@@ -125,6 +125,8 @@ function tokenFetch() {
 test('compact shows a live waiting indication for the whole poll, then clears it', async () => {
   const { startPoller, release } = gatedPoller()
   const { chunks, stdout } = recordingTty()
+  /** @type {string[]} */
+  const printed = []
 
   const flow = loginWithBrowser({
     identityBase: 'https://hyp.internal/v1/identity',
@@ -134,6 +136,7 @@ test('compact shows a live waiting indication for the whole poll, then clears it
     compact: true,
     stdout,
     env: {},
+    print: (line) => printed.push(line),
   })
   // The spinner renders its first frame before the poll is awaited, so the
   // wait is announced from the moment it starts, not after it settles.
@@ -144,6 +147,9 @@ test('compact shows a live waiting indication for the whole poll, then clears it
   // And it is gone once the sign-in settles: the last write clears the line,
   // so whatever the lane prints next lands on a clean one.
   assert.equal(chunks.at(-1), '\r\x1b[2K')
+  // The opener boolean is best-effort, so the compact line offers the browser
+  // rather than asserting it opened.
+  assert.equal(printed[0], 'Sign in using the browser that just opened; if it did not open, visit:')
 })
 
 test('the plain lane writes nothing to stdout, spinner or otherwise', async () => {
