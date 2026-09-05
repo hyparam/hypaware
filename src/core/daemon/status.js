@@ -1330,15 +1330,34 @@ export async function collectHypAwareStatus(opts = {}) {
   // Named forwards, not as `!== 'stopped'`: no snapshot at all, one from an
   // older build, or one whose `state` a hostile file replaced with anything at
   // all is not evidence of a crash. Only the states a *serving* daemon writes
-  // are, and `stopping` is left out with `stopped` - a shutdown ran to reach
-  // it. `daemon.state` is the file's own here, because the heartbeat verdict
-  // above only ever overwrites it for a live process.
+  // are. `stopping` is not one of them and is read below on its own terms.
+  // `daemon.state` is the file's own here, because the heartbeat verdict above
+  // only ever overwrites it for a live process.
   // @ref LLP 0383#the-signal-is-the-daemons-last-state [implements]: the crash-versus-stopped signal is the snapshot's terminal state, not a service-manager exit code
   const exitedWhileServing = daemon.state === 'starting'
     || daemon.state === 'healthy'
     || daemon.state === 'degraded'
-  if (daemon.installed && daemon.loaded && !daemon.running && exitedWhileServing) {
+
+  // `stopping` is the other ending, and only time reads it. `shutdown()` writes
+  // it as its first statement, so it marks a stop that started, and a process
+  // killed anywhere across shutdown freezes the snapshot there for good. A stop
+  // still under way is spent with the process alive, so the only legitimate way
+  // to see `stopping` beside a dead process is the sub-second race between
+  // reading the file here and probing the process. The snapshot's age separates
+  // the two, on the window and the last-write derivation the heartbeat check
+  // above already uses. An age that cannot be derived stays silent, as an
+  // unrecognised `state` does.
+  // @ref LLP 0384#stopping-is-a-claim-with-an-expiry [implements]: a terminal `stopping` snapshot older than the heartbeat window is a stop that never finished
+  const stoppingAgeMs = daemon.state === 'stopping'
+    ? daemonHeartbeatAgeMs(daemonStatusFile, Date.now())
+    : null
+  const stalledStop = stoppingAgeMs !== null && stoppingAgeMs > DAEMON_HEARTBEAT_STALE_MS
+    ? `recorded 'stopping' ${formatGapDuration(stoppingAgeMs)} ago - the stop began but never completed`
+    : null
+  if (daemon.installed && daemon.loaded && !daemon.running && (exitedWhileServing || stalledStop)) {
     const artifact = platform === 'darwin' ? 'LaunchAgent' : 'user unit'
+    const recordedWhileServing = `recorded '${daemon.state}' rather than a completed stop`
+      + ' - the daemon exited without shutting down'
     diagnostics.push({
       severity: 'error',
       kind: 'daemon_exited_abnormally',
@@ -1346,8 +1365,8 @@ export async function collectHypAwareStatus(opts = {}) {
       // kill, a fault, and a `kill -9`, and naming one of those is a wrong
       // diagnosis rather than an unknown one.
       message: `the ${artifact} is still loaded but no daemon process is running,`
-        + ` and the last status snapshot recorded '${daemon.state}' rather than a completed`
-        + ' stop - the daemon exited without shutting down, and nothing is being captured',
+        + ` and the last status snapshot ${stalledStop ?? recordedWhileServing},`
+        + ' and nothing is being captured',
       // Unlike the unloaded case above, the service manager is holding the
       // unit, so the restart path reaches it.
       repair: ['hyp daemon restart'],

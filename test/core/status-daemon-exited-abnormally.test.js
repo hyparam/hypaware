@@ -44,8 +44,10 @@ async function makeHome() {
  *
  * @param {string} stateRoot
  * @param {DaemonState} state
+ * @param {{ writtenMsAgo?: number }} [opts] how long ago the snapshot was last
+ *   written, when the test needs that readable
  */
-function leaveSnapshot(stateRoot, state) {
+function leaveSnapshot(stateRoot, state, opts = {}) {
   /** @type {DaemonStatus} */
   const status = {
     state,
@@ -56,6 +58,12 @@ function leaveSnapshot(stateRoot, state) {
     mode: 'detached',
     sources: [],
     sinks: [],
+  }
+  if (typeof opts.writtenMsAgo === 'number') {
+    // `healthyAt + uptimeMs` is the moment of the last persist (LLP 0348
+    // #heartbeat-is-derived), so this puts that write where the test wants it.
+    status.healthyAt = new Date(Date.now() - opts.writtenMsAgo - 60_000).toISOString()
+    status.uptimeMs = 60_000
   }
   writeStatusFile(stateRoot, status)
 }
@@ -150,19 +158,62 @@ test('an installed daemon that has never run stays healthy', async () => {
   assert.equal(report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally'), undefined)
 })
 
-// The third over-fixing guard, and the writer's half of the same signal. A
-// shutdown that is killed before it finishes (a source stop that wedges, then
-// the service manager's grace period or an operator's `kill -9` after
-// `hyp daemon stop` reports its timeout) leaves `stopping`, which is a stop
-// somebody asked for and not a crash.
-test('a shutdown that was killed before it completed stays healthy', async () => {
+// Issue #1409. `shutdown()` persists `stopping` as its first statement, so a
+// process killed anywhere across shutdown leaves that snapshot behind for good,
+// and LLP 0383 read it as a stop that ran. The unit is still loaded and nothing
+// is capturing, so a machine in that state called itself healthy forever. What
+// says the stop never finished is the snapshot's age: nothing wrote to it since.
+//
+// @ref LLP 0384#stopping-is-a-claim-with-an-expiry [tests]: a terminal `stopping` snapshot older than the heartbeat window is a stop that never finished
+test('a shutdown killed before it completed is not reported healthy once its snapshot goes stale', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  leaveSnapshot(stateRoot, 'stopping', { writtenMsAgo: 30 * 60_000 })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.daemon.loaded, true, 'the service manager is still holding the unit')
+  assert.equal(report.daemon.running, false, 'and nothing is capturing')
+  assert.notEqual(report.overall, 'healthy', 'a stop that never completed is not a completed stop')
+
+  const diag = report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally')
+  assert.ok(diag, 'the abandoned stop is named')
+  assert.equal(diag.severity, 'error')
+  assert.match(diag.message, /recorded 'stopping' 30m ago/, 'the message states how long ago it was written')
+  assert.match(diag.message, /the stop began but never completed/)
+  assert.doesNotMatch(diag.message, /exited without shutting down/, 'a shutdown did begin')
+  assert.deepEqual(diag.repair, ['hyp daemon restart'])
+
+  const text = renderText(report)
+  assert.doesNotMatch(text, /overall:\s+healthy/)
+})
+
+// The over-fixing guard, and the reason the signal is an age rather than the
+// state alone. A stop in progress is spent with the process alive, so the
+// closest a probe gets is the race where the file is read just before the
+// process probe and the `stopped` write lands between the two, which leaves a
+// `stopping` snapshot seconds old.
+test('a stop that has only just begun raises nothing', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  leaveSnapshot(stateRoot, 'stopping', { writtenMsAgo: 2_000 })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.daemon.loaded, true)
+  assert.equal(report.daemon.running, false)
+  assert.equal(report.overall, 'healthy', 'a stop the operator asked for is still under way')
+  assert.equal(report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally'), undefined)
+})
+
+// LLP 0383's named-forwards rule in the time dimension. A snapshot with no
+// readable last-write time (no `healthyAt`, so the daemon was killed while
+// stopping before it ever reached `healthy`, which is also how an older build's
+// file reads) has an unreadable age, not a stale one.
+test('a stopping snapshot whose age cannot be derived stays healthy', async () => {
   const { hypHome, stateRoot } = await makeHome()
   leaveSnapshot(stateRoot, 'stopping')
 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.equal(report.daemon.loaded, true)
   assert.equal(report.daemon.running, false)
-  assert.equal(report.overall, 'healthy', 'a shutdown ran; it just did not reach the end')
+  assert.equal(report.overall, 'healthy', 'an unreadable age is not evidence of anything')
   assert.equal(report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally'), undefined)
 })
 
