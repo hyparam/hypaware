@@ -175,6 +175,13 @@ async function runGuardedInitWizard(opts, guard) {
    */
   let joined
   /**
+   * This run watched its own daemon install fail (the join lane's
+   * `daemon_incomplete`). A fact about the machine, not about the
+   * enrollment, so a later disconnect does not clear it: the install
+   * failed either way, and the finale must not run it a second time.
+   */
+  let daemonIncomplete = false
+  /**
    * The last selection the pick lane confirmed, so a back into pick
    * re-seeds the boxes with the user's answer instead of re-detecting.
    * @type {PickerSource[] | undefined}
@@ -450,15 +457,20 @@ async function runGuardedInitWizard(opts, guard) {
           ctx: opts.ctx,
           ...(joinProgress ? { progress: joinProgress } : {}),
         })
-        if (join.status === 'failed' || join.status === 'abandoned') {
+        // Fail closed: every status but the two that completed a sign-in
+        // returns to the fork, so a member added to `WizardJoinStatus`
+        // later cannot fall through into a pathway the user did not choose.
+        if (join.status !== 'ok' && join.status !== 'daemon_incomplete') {
           printJoinFailure(opts, join)
           continue
         }
         // Enrolled, but the daemon install did not finish: re-presenting the
         // fork would offer enrollment to a machine that already has it (#978).
-        // Name what is missing and carry on - the finale's daemon step reads
-        // `hyp status`, finds no installed daemon, and tries the install again.
+        // Name what is missing and carry on; the finale is told not to run
+        // the install again (see `runWizardFinale`), so the note the login
+        // lane just printed is the remediation.
         if (join.status === 'daemon_incomplete') {
+          daemonIncomplete = true
           opts.stderr.write('Enrolled, but the background service could not be installed - captures will not run until it is.\n')
         }
         pathway = 'team'
@@ -838,6 +850,7 @@ async function runGuardedInitWizard(opts, guard) {
       // run enrolled the machine even if the user then stepped back and
       // finished down the local path (LLP 0191 #join-not-undone).
       joinedAlready: joined !== undefined,
+      daemonIncomplete,
       // The finale is one step made of several acts, and the backfill
       // consent question sits behind three of them (install, attach,
       // asset copy), each narrating first. The boundary above cannot
@@ -1080,12 +1093,13 @@ function printJoinFailure(opts, join) {
  *   opts: RunInitWizardOptions,
  *   picked: WizardPickResult,
  *   joinedAlready: boolean,
+ *   daemonIncomplete: boolean,
  *   checkBoundary: () => Promise<boolean>,
  *   progress?: string,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready, checkBoundary, progress }) {
+async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, checkBoundary, progress }) {
   const finaleActions = { ...(opts.finale ?? {}) }
   /** @type {Set<string> | undefined} */
   let skipAttachClients
@@ -1095,6 +1109,21 @@ async function runWizardFinale({ opts, picked, joinedAlready, checkBoundary, pro
     const attached = (report?.clients ?? []).filter((c) => c.attached).map((c) => c.name)
     if (attached.length > 0) skipAttachClients = new Set(attached)
   }
+  // A run whose own daemon install just failed does not run it again, and
+  // the status read above cannot decide that. Both installers write the
+  // plist/unit before they call the service manager and neither rolls it
+  // back, while `daemon.installed` is that file's existence and nothing
+  // more, so a launchd/systemd failure sets the skip on its own residue.
+  // Where the platform has no installer at all the file is absent, the skip
+  // is not set, and `installDaemon` throws `unsupported platform` - which
+  // nothing between here and `bin/hypaware.js` catches, so the run would
+  // die after the config commit with the fork already behind it (#978).
+  // Skipping is right either way: the wizard has no input the login lane
+  // did not just try, and its note already named the remediation. The
+  // restart step below still runs and is already non-fatal, so a transient
+  // failure keeps its one best-effort revival.
+  // @ref LLP 0317#install-means-running [constrained-by]: a failed install still leaves its unit file behind, so file presence is not evidence the service runs
+  if (daemonIncomplete) finaleActions.skipDaemonInstall = true
 
   const runFinale = opts.finaleRunner ?? runPickerFinale
   return withSpan(

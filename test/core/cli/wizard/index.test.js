@@ -848,6 +848,28 @@ test('runInitWizard: an enrolled join whose daemon install failed proceeds on th
   assert.equal(opts._pickOpts.managed, true)
 })
 
+// The login lane's install just failed on this machine, so the finale must
+// not run it again. Nothing on disk can decide that: both installers write
+// the plist/unit before they call the service manager and neither rolls it
+// back, so `hyp status` reports `installed` for a service that never ran,
+// and where the platform has no installer the file is absent and
+// `installDaemon` throws instead - uncaught all the way out of `hyp setup`,
+// after the config commit, with the fork already behind the user (#978).
+test('runInitWizard: a daemon_incomplete run never re-runs the install it just watched fail', async () => {
+  // A home with no plist and no unit file: the shape of a platform that has
+  // no installer, and the half that would have thrown rather than no-opped.
+  const forkChoices = ['team', 'quit']
+  const { opts } = wizardOpts(await tmpHome(), {
+    fork: async () => forkChoices.shift(),
+    join: async () => ({ status: 'daemon_incomplete', lockedSources: ['claude'], managed: true }),
+  })
+  await runInitWizard(opts)
+  assert.equal(opts._finaleArgs.finale.skipDaemonInstall, true, 'the finale is told not to retry the install')
+  // The restart step is untouched: it is already non-fatal, so a transient
+  // failure keeps its one best-effort revival.
+  assert.equal(opts._finaleArgs.finale.skipDaemonRestart, undefined)
+})
+
 test('runInitWizard: an abandoned join is retriable and re-presents the fork', async () => {
   const forkChoices = ['team', 'team', 'local']
   const joins = [
