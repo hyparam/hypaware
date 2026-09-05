@@ -12,6 +12,7 @@ import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 /** @import { CollectStatusOptions, HypAwareStatusReport } from '../../src/core/daemon/types.js' */
+/** @import { TestContext } from 'node:test' */
 
 // With no runtime registry attached, `hyp status` takes its `sources:` block
 // straight off the daemon's `status.json`. That file outlives the process that
@@ -24,8 +25,10 @@ import { defaultConfigPath } from '../../src/core/config/schema.js'
 
 const NL = String.fromCharCode(10)
 
-async function makeHome() {
+/** @param {TestContext} t */
+async function makeHome(t) {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-dead-daemon-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
   const stateRoot = path.join(hypHome, 'hypaware')
   await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
@@ -77,8 +80,8 @@ function sourcesBlock(text) {
   return text.split('  sources:' + NL)[1].split('  sinks:' + NL)[0]
 }
 
-test('an exited daemon\'s snapshot sources are not reported as started', async () => {
-  const { hypHome, stateRoot } = await makeHome()
+test('an exited daemon\'s snapshot sources are not reported as started', async (t) => {
+  const { hypHome, stateRoot } = await makeHome(t)
   // No pid file: the daemon that wrote the snapshot is gone.
   writeSnapshot(stateRoot)
 
@@ -104,8 +107,8 @@ test('an exited daemon\'s snapshot sources are not reported as started', async (
   assert.match(text, /central.*@hypaware\/central, request/)
 })
 
-test('a running daemon\'s snapshot sources still render present-tense', async () => {
-  const { hypHome, stateRoot } = await makeHome()
+test('a running daemon\'s snapshot sources still render present-tense', async (t) => {
+  const { hypHome, stateRoot } = await makeHome(t)
   writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
   writeSnapshot(stateRoot)
 
@@ -117,8 +120,8 @@ test('a running daemon\'s snapshot sources still render present-tense', async ()
   assert.match(block, /otlp.*\[failed\]/)
 })
 
-test('a live pid the daemon did not take does not revive its predecessor\'s sources', async () => {
-  const { hypHome, stateRoot } = await makeHome()
+test('a live pid the daemon did not take does not revive its predecessor\'s sources', async (t) => {
+  const { hypHome, stateRoot } = await makeHome(t)
   // `processIsAlive` proves a pid is taken, not that the daemon took it: after
   // a hard kill the OS is free to reissue the number, and the collector already
   // derives `snapshotIsThisProcess` for exactly that (LLP 0348). Reading
@@ -142,8 +145,8 @@ test('a live pid the daemon did not take does not revive its predecessor\'s sour
   assert.match(block, /ai-gateway.*\[stopped\]/)
 })
 
-test('a status file whose sources are not a list does not break the report', async () => {
-  const { hypHome, stateRoot } = await makeHome()
+test('a status file whose sources are not a list does not break the report', async (t) => {
+  const { hypHome, stateRoot } = await makeHome(t)
   // `readStatusFile` validates only "is an object", so `sources` can be any
   // JSON value at all. A string has a `length` and no `.map`, and `hyp status`
   // is the one command an operator runs on a broken install: it has to answer.
@@ -157,4 +160,36 @@ test('a status file whose sources are not a list does not break the report', asy
   const text = renderText(report)
   assert.match(text, /daemon:.*not running/, 'the report is still rendered')
   assert.match(sourcesBlock(text), /\(none\)/, 'and an unreadable list names no sources')
+})
+
+test('a non-object entry inside the snapshot lists does not break the report', async (t) => {
+  const { hypHome, stateRoot } = await makeHome(t)
+  // Same reason the list itself is shape-checked: `readStatusFile` knows only
+  // that it read an object, so an entry can be any JSON value. Every reader
+  // past the fallback dereferences `.name` / `.instance`, so a `null` left in
+  // the list would take `hyp status` out at the render instead.
+  await fs.writeFile(statusFilePath(stateRoot), JSON.stringify({
+    state: 'healthy',
+    sources: [null, { name: 'otlp', plugin: '@hypaware/otel', state: 'started' }],
+    sinks: [null, { instance: 'central', plugin: '@hypaware/central', kind: 'request' }],
+  }))
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const text = renderText(report)
+  assert.match(sourcesBlock(text), /otlp.*\[stopped\]/, 'the readable source still renders')
+  assert.equal(report.sources.length, 1, 'and the unreadable entry is dropped, not carried')
+  assert.equal(report.sinks.length, 1)
+  assert.match(text, /central.*@hypaware\/central, request/)
+})
+
+test('a status file whose sinks are not a list does not break the report', async (t) => {
+  const { hypHome, stateRoot } = await makeHome(t)
+  // A number is not iterable, so the spread threw straight out of the
+  // collector; a string is, so it spread into one blank row per character.
+  for (const sinks of [5, 'ab']) {
+    await fs.writeFile(statusFilePath(stateRoot), JSON.stringify({ state: 'healthy', sources: [], sinks }))
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    assert.deepEqual(report.sinks, [], `sinks ${JSON.stringify(sinks)} names no sink`)
+    assert.match(renderText(report), /daemon:.*not running/, 'and the report is still rendered')
+  }
 })
