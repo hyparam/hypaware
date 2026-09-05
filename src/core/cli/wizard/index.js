@@ -969,7 +969,8 @@ async function runGuardedInitWizard(opts, guard) {
     })
   }
 
-  // The closing question list comes after the privacy narration, but it is
+  // The closing question list comes last, after whichever of the narration
+  // and the sync step this path ran, but it is
   // output only: onboarding never starts Claude Code or Codex. `hyp init`
   // may have been run from any directory, and that directory must not become
   // an agent session without an explicit launch command from the user.

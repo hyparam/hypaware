@@ -6,6 +6,7 @@
 **Author:** Kenny
 **Date:** 2026-08-21
 **Related:** LLP 0104 (confirm-on-TTY / `--yes` posture, unchanged), LLP 0174 (#prompt/#openclaw: enable-prompt copy, polarity overridden here), LLP 0190 (#fork-disconnect: default overridden here; #eof-everywhere narrowed here for `askYesNo` only), LLP 0203 (#offer: polarity overridden here), LLP 0101 (#no-release: the hold #eof-declines protects)
+**Extended-by:** LLP 0203 (#offer, amended 2026-09-05: the wizard's own send-now select is gone, so the second acting-default select this doc names no longer exists in code. `hyp sync`'s `askYesNo` is the only prompt on that path, and it declines at EOF like every other `askYesNo`, so #eof-declines still holds the hold - it just holds it with one prompt instead of two.)
 
 ## Context {#context}
 
@@ -105,6 +106,13 @@ instead of declining. The hold is safe either way - nothing is forwarded
 without an answer - but "the terminal gave up" would end with a sync
 started rather than with the wait the offer asked for, which is the
 outcome this section exists to rule out.
+
+*(Forward-ref, 2026-09-05: LLP 0203 #offer was amended and the wizard's
+send-now select was deleted, so only the fork disconnect question carries
+an `eofValue` today. The wizard now spawns `hyp sync` with no question of
+its own, and the child's `askYesNo` declines at EOF, so this paragraph's
+worry is answered by the rule above rather than by a second surface. The
+rule itself is unchanged.)*
 
 So a question of that kind names an `eofValue` and the legacy select
 returns it instead of coalescing the asker's `null` into the empty line.

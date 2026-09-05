@@ -191,7 +191,8 @@ function writeHeldStatement(opts, deadline) {
  * The line for every path that did not send: the wait is intact, and it is
  * still the user's to end. Without it, a declined child prompt leaves setup
  * ending on `hyp sync: cancelled` with no statement of what that means for
- * the deadline the narration just printed.
+ * the deadline, which on this path only the child's warning printed and
+ * which scrolls away with the answer.
  *
  * @param {RunWizardSyncNowOptions} opts
  * @param {number} deadline
