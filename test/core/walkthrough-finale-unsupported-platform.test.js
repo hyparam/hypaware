@@ -219,8 +219,33 @@ test('a failed npx durable-bin upgrade finishes the finale too', async () => {
     /^daemon install failed: npx detected, but npm install -g hypaware@1\.0\.0 failed: EACCES\./,
     'the npm diagnosis is actionable, so it reaches the user rather than only the span'
   )
-  assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
+  assert.match(stderr.text(), /Run 'npm install -g hypaware@1\.0\.0' manually/, 'the repair the user can actually run is the one printed')
+  assert.doesNotMatch(
+    stderr.text(),
+    /hyp daemon install/,
+    'the global install npm refused is what would have put hyp on PATH, so the note must not name a hyp command (#1395)'
+  )
   assert.deepEqual(events, ['attach'], 'attach still runs; it needs no daemon')
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// The other half of #1395: a GlobalInstallError is not by itself proof that no
+// hyp exists. npm install -g can land and the prefix lookup after it fail, and
+// that run does have a hyp on PATH, so the note is right there and still prints.
+test('a global install that landed before the prefix lookup failed still gets the note', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-prefix-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    installDaemonFn: async () => {
+      throw new GlobalInstallError('npm config get prefix failed: ENOENT', { globalBinInstalled: true })
+    },
+  }))
+  assert.equal(summary.daemonInstall.failed, true, 'a failed prefix lookup is still a failed daemon install')
+  assert.match(stderr.text(), /^daemon install failed: npm config get prefix failed: ENOENT\n/)
+  assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
   await fs.rm(home, { recursive: true, force: true })
 })
 
