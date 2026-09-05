@@ -107,24 +107,28 @@ function systemdRoot(t, unit = 'hypaware.service') {
 }
 
 /**
- * The body a job wrote into `file`, once it is there.
+ * The body a job wrote into `file`, once `ready` accepts it.
  *
  * A shell `>` truncates the path into existence, and `>>` creates it, before
  * `printf` writes into it, so a poll on the file existing can read it empty in
- * the gap between. Returns '' if nothing arrives, which the caller's assertion
- * reports as a job that never wrote.
+ * the gap between. The default `ready` takes any content, which is enough only
+ * because every job here writes its whole payload in one `printf`; a job that
+ * wrote in two steps would read back as a prefix, so give that one a `ready`
+ * that recognizes the end of the body. Returns the last read when nothing
+ * satisfies `ready`, so the caller's assertion reports what the job did write.
  *
  * @param {string} file
+ * @param {(body: string) => boolean} [ready]
  * @returns {Promise<string>}
  */
-async function waitForBody(file) {
+async function waitForBody(file, ready = (body) => body !== '') {
+  let body = ''
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    let body = ''
     try { body = fs.readFileSync(file, 'utf8') } catch { /* the job has not created it yet */ }
-    if (body !== '') return body
+    if (ready(body)) return body
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
-  return ''
+  return body
 }
 
 test('launchctl mock: bootstrap → print → bootout round trip', (t) => {
@@ -503,12 +507,7 @@ test('launchctl mock: a setenv after bootstrap reaches the next launch', async (
   assert.match(await waitForBody(seen), /^\[\]\n/, 'the first launch saw an unset variable')
 
   assert.equal(shim(root, 'launchctl', ['setenv', 'SANDBOX_PROBE', 'on'], env).code, 0)
-  let body = ''
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    body = fs.readFileSync(seen, 'utf8')
-    if (body.includes('[on]')) break
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
+  const body = await waitForBody(seen, (written) => written.includes('[on]'))
   assert.match(body, /\[on\]/, 'a restart after the setenv carries the domain value')
 })
 
