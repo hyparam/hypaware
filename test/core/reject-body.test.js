@@ -99,21 +99,28 @@ function rawRefusal(port, request) {
 test('drainRequestBody stops reading a refused body at MAX_REJECTED_DRAIN_BYTES', async () => {
   const served = await startRefusingServer()
   try {
-    // Four times the cap. Large enough that a host whose socket buffers take
-    // it whole never stalls the sender, which leaves the cap as the only
-    // thing that can stop the server reading all of it, and small enough that
-    // it still crosses the cap inside two socket reads. Bounded, the server
-    // reads 131072. Unbounded, it reads all 262372.
+    // Four times the cap. Large enough that an unbounded read of it is
+    // reliably the whole body, which leaves the cap as the only thing that can
+    // stop the server reading all of it, and small enough that it still
+    // crosses the cap inside two socket reads. Bounded, the server reads
+    // 131072. Unbounded, it reads all 262372.
     //
     // Neither a much smaller nor a much larger body pins as well. At twice the
     // cap an unbounded read is 131300, under the bound below, so the test
-    // would pass with the cap deleted. Past about six times it the body
-    // outruns the socket buffers, the sender stalls mid-upload, and the bytes
-    // queued behind the stall never arrive once the refusal tears the
-    // connection down: an unbounded read settles at 163705 instead of the
-    // whole body. Both sizes declare a `content-length` past the cap and are
-    // answered `connection: close`, so nothing about `fitsUnderCap` is what
-    // separates them. It is only whether the sender got the whole body out.
+    // would pass with the cap deleted. Much larger, an unbounded read stops
+    // being the whole body: the `connection: close` answer destroys the socket
+    // as soon as the refusal is flushed, so the read reaches only what arrived
+    // first, which is a timing figure rather than a size one, and a
+    // client-dependent one. At 8 MiB it measured 163705 in 43 of 64 samples
+    // and 2097152 in the other 21 through `fetch`, and 112798 through a raw
+    // socket.
+    //
+    // It is that teardown and not the sender running out of buffer that cuts
+    // the read: mutate away only the `connection: close` answer and the same
+    // 8 MiB sender empties its whole buffer in milliseconds, the server
+    // reading all of it. Both sizes declare a `content-length` past the cap
+    // and are answered `connection: close`, so nothing about `fitsUnderCap` is
+    // what separates them.
     const body = Buffer.alloc(4 * CAP_BYTES, 'x')
     const refused = await withDeadline(
       fetch(`${served.origin}/refused`, {
@@ -145,13 +152,13 @@ test('drainRequestBody stops reading a refused body at MAX_REJECTED_DRAIN_BYTES'
     // `--max-http-header-size`, the largest head the parser would have taken.
     //
     // Bounded there rather than a cap higher because the slack is exactly
-    // where this probe degenerates. An unbounded read that stalled its sender
-    // is 163705, and one that keeps the pause but drops the reset behind it is
-    // 196608: both are under three caps, so a looser bound would go quietly
-    // vacuous rather than fail. The stall is not hypothetical on the machines
-    // this repo is developed on - macOS defaults `sendspace` and `recvspace`
-    // to 131072 each, which puts a 256 KiB body on the combined-buffer
-    // boundary, and CI runs Linux only.
+    // where this probe degenerates. An unbounded read the refusal's teardown
+    // cut early is 163705, and one that keeps the pause but drops the reset
+    // behind it is 196608: both are under three caps, so a looser bound would
+    // go quietly vacuous rather than fail. The early cut is not hypothetical
+    // at this body size either - under load 163705 turned up in 2 of 64
+    // samples of this very upload, so the bound has to sit under it rather
+    // than merely under the whole body.
     const maxBoundedRead = 2 * CAP_BYTES + 16 * 1024
     assert.ok(
       socket.bytesRead < maxBoundedRead,
