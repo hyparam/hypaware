@@ -146,8 +146,8 @@ export async function runMcpProxy({ target, org, ctx }) {
       if (sid) sessionId = sid
       if (isNotify) return null
       if (!res.ok) {
-        // A 403 answering an explicit --org refused the read, not the
-        // credential, so it never reaches the dead-credential explanation. Any
+        // A 403 answering an explicit --org most likely refused the selector,
+        // not the credential, so it carries its own message naming both. Any
         // other 401/403 survived the refresh + retry above and is a dead
         // credential: explain by why it is dead - a refreshable OIDC session is
         // an expired session (re-login), a per-target env override re-login

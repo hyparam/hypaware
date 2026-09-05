@@ -237,7 +237,7 @@ test('adding the org selector leaves the target\'s own query parameters byte-ide
   assert.equal(deriveMcpEndpoint('https://host', 'acme.test'), 'https://host/v1/mcp?org=acme.test')
 })
 
-test('a 403 on an --org read is terminal: no refresh, no re-send, no re-login advice', async (t) => {
+test('a 403 on an --org read is terminal: no refresh, no re-send, both causes named', async (t) => {
   const hypHome = await tmpHome()
   t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
   // A refreshable oidc session: pre-fix, its 403 forced a token refresh and a
@@ -261,8 +261,12 @@ test('a 403 on an --org read is terminal: no refresh, no re-send, no re-login ad
   assert.equal(await cmd.run(['SELECT 1', '--remote', 'prod', '--org', 'other.test'], ctx), 1)
   // Exactly one send, and no identity /token call to refresh a live credential.
   assert.deepEqual(posts, ['https://hyp.internal/v1/mcp?org=other.test'])
-  assert.match(err.join(''), /refused the read for --org 'other\.test'/)
-  assert.doesNotMatch(err.join(''), /session has expired|remote login/)
+  assert.match(err.join(''), /refused --org 'other\.test' \(HTTP 403\), not retried/)
+  // "Your session has expired" is the wrong headline for a refused selector,
+  // but the message still names revocation and its remedy, because a 403 does
+  // not tell the client which layer answered.
+  assert.doesNotMatch(err.join(''), /session has expired/)
+  assert.match(err.join(''), /credential was revoked, in which case re-run 'hyp remote login prod'/)
 })
 
 test('the stdio proxy reports a 403 on an --org read as a refused org read', async (t) => {
@@ -287,7 +291,7 @@ test('the stdio proxy reports a 403 on an --org read as a refused org read', asy
   ctx.stdin = Readable.from([JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n'])
   assert.equal(await runMcpProxy({ target: 'prod', org: '*', ctx }), 0)
   assert.deepEqual(posts, ['https://hyp.internal/v1/mcp?org=*'])
-  assert.match(JSON.parse(out.join('')).error.message, /refused the read for --org '\*'/)
+  assert.match(JSON.parse(out.join('')).error.message, /refused --org '\*' \(HTTP 403\), not retried/)
 })
 
 test('the stdio proxy resolves the built-in target the verb path already accepts', async (t) => {
