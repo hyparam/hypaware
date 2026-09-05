@@ -187,10 +187,10 @@ test('a shutdown killed before it completed is not reported healthy once its sna
 })
 
 // The over-fixing guard, and the reason the signal is an age rather than the
-// state alone. A stop in progress is spent with the process alive, so the
-// closest a probe gets is the race where the file is read just before the
-// process probe and the `stopped` write lands between the two, which leaves a
-// `stopping` snapshot seconds old.
+// state alone. A stop in progress is spent with the process alive, and a stop
+// that finished wrote `stopped`, so the pair below is what a supervised
+// restart's forced exit leaves while the service manager relaunches: a fresh
+// `stopping` snapshot beside a dead process, which must stay silent.
 test('a stop that has only just begun raises nothing', async () => {
   const { hypHome, stateRoot } = await makeHome()
   leaveSnapshot(stateRoot, 'stopping', { writtenMsAgo: 2_000 })

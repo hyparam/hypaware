@@ -1341,9 +1341,13 @@ export async function collectHypAwareStatus(opts = {}) {
   // `stopping` is the other ending, and only time reads it. `shutdown()` writes
   // it as its first statement, so it marks a stop that started, and a process
   // killed anywhere across shutdown freezes the snapshot there for good. A stop
-  // still under way is spent with the process alive, so the only legitimate way
-  // to see `stopping` beside a dead process is the sub-second race between
-  // reading the file here and probing the process. The snapshot's age separates
+  // still under way is spent with the process alive, and a stop that reached
+  // its end wrote `stopped` before the process left - the probe above runs
+  // before the file is read, so a dead process is always read beside the last
+  // file that stop wrote. What stays silent here is the one non-failing way to
+  // reach the pair, a supervised restart's forced exit (LLP 0365
+  // #restart-exit-is-bounded), whose snapshot is minutes fresher than this
+  // window while the service manager relaunches. The snapshot's age separates
   // the two, on the window and the last-write derivation the heartbeat check
   // above already uses. An age that cannot be derived stays silent, as an
   // unrecognised `state` does.

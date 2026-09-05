@@ -12,8 +12,11 @@ ran; this settles the case that reading leaves open, where the stop began and
 was killed before it could finish)
 **Related:** [LLP 0348](./0348-a-live-pid-is-not-a-live-daemon.decision.md)
 (#heartbeat-is-derived: the last-write time this reads, and #the-window: the
-window it borrows), [LLP 0017](./0017-daemon-runtime.decision.md)
-(#the-service-status-query-never-raises: the probe budget this stays inside);
+window it borrows), [LLP 0365](./0365-self-update-cannot-strand-the-daemon.decision.md)
+(#restart-exit-is-bounded: the forced exit that legitimately leaves this pair
+behind, and the deadline the window has to stay wider than),
+[LLP 0017](./0017-daemon-runtime.decision.md)
+(#status-queries-never-raise: the probe budget this stays inside);
 hyparam/hypaware#1409, PR #1405
 
 > LLP 0383 excluded `stopping` from the crash signal because "a shutdown
@@ -41,12 +44,17 @@ as a completed stop.
 **A stop in progress is never what the collector is looking at.** The branch is
 gated on `!daemon.running`, and the parts of shutdown that take minutes are all
 spent with the process alive, so the multi-minute case that PR #1405 protects
-cannot reach here at all. What can reach here is a dead process next to a
-`stopping` snapshot, which is either the last fraction of a second of an orderly
-stop (the snapshot read before the process probe, the `stopped` write landing
-between the two) or a stop that will never write another byte. The live facts
-are identical in both. The only thing that differs is how long the snapshot has
-been sitting there.
+cannot reach here at all. A stop that ran to its end cannot reach here either:
+the collector probes the process before it reads the file, and `shutdown()`
+persists `stopped` before the process leaves, so a probe that says dead is
+always read beside a file that already says `stopped`. What is left beside a
+dead process is a `stopping` snapshot nothing will write to again, plus one
+bounded case that is not a failure at all: the forced exit a supervised restart
+takes when its shutdown overruns
+([LLP 0365](./0365-self-update-cannot-strand-the-daemon.decision.md#restart-exit-is-bounded)),
+which leaves that pair behind until the service manager relaunches. The live
+facts are identical in both. The only thing that differs is how long the
+snapshot has been sitting there.
 
 ## Decision {#decision}
 
@@ -81,19 +89,32 @@ no I/O the collector was not already doing.
 
 The same width is right because it is the same question: LLP 0348 sized it as
 how long the snapshot may go unwritten before `hyp status` stops believing the
-`state` recorded in it, and `stopping` is a recorded state. It is also far wider
-than the only legitimate way to observe a dead process beside a `stopping`
-snapshot, which is the sub-second read-order race above, so it absorbs that race
-and ordinary clock skew rather than turning them into an error on a machine that
-is stopping normally.
+`state` recorded in it, and `stopping` is a recorded state. It is also wider
+than the one non-failing way to observe a dead process beside a `stopping`
+snapshot, the restart forced exit above: that deadline is
+`RESTART_EXIT_DEADLINE_MS`, two minutes against this window's five, and the
+snapshot is rewritten after the deadline is armed, so the relaunch gap it leaves
+sits inside the window with room for ordinary clock skew. The margin is the
+point rather than a coincidence, and a forced-exit deadline raised past this
+window would turn a restart into an error.
 
 <a id="an-underivable-age-stays-silent"></a>**An age that cannot be derived
 raises nothing.** LLP 0383 names the serving states forwards so that a missing
 snapshot, an older build's snapshot, or a `state` field a hostile file replaced
 is not evidence of a crash. This is that rule in the time dimension: when
-`daemonHeartbeatAgeMs` returns `null`, because `healthyAt` is absent (a daemon
-killed while stopping before it ever reached `healthy`) or `uptimeMs` is missing
-or unusable, the snapshot stays silent. An unreadable age is not a stale one.
+`daemonHeartbeatAgeMs` returns `null`, because `healthyAt` is absent or
+`uptimeMs` is missing or unusable, the snapshot stays silent. An unreadable age
+is not a stale one.
+
+That silence is wider than it sounds, and the width is inherited rather than
+chosen here. `runDaemon` sets `healthyAtMs` once, only on a boot that reaches
+`state: 'healthy'`, so a daemon that booted `degraded` (any source failed to
+start) carries no `healthyAt` and a permanent `uptimeMs: 0` for its whole run,
+however long that is. Such a daemon killed mid-stop is silent here, exactly as
+it is already silent to LLP 0348's live-pid heartbeat check, which reads the
+same derivation. Widening it means changing what dates a snapshot's last write,
+which is LLP 0348's to settle and not this decision's: this one is scoped to
+which recorded `state` an age may be read against.
 
 ## Consequences {#consequences}
 
@@ -103,7 +124,7 @@ or unusable, the snapshot stays silent. An unreadable age is not a stale one.
   the daemon because the service manager is still holding the unit.
 - A machine probed during a live `hyp daemon stop` raises nothing *from this
   branch*. The process is alive for all of it, so the `!daemon.running` gate is
-  false, and at the instant it is not alive the snapshot is seconds old. A stop
+  false, and by the instant it is not alive the snapshot says `stopped`. A stop
   that outlasts the window with the process still alive is a different reading
   and not this one: `shutdown()` clears the tick before it waits, so the
   heartbeat check ([LLP 0348](./0348-a-live-pid-is-not-a-live-daemon.decision.md#stale-heartbeat-is-unresponsive))
