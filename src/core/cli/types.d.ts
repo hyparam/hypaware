@@ -338,6 +338,11 @@ export interface FinaleSummary {
   attach: { client: string; dryRun: boolean; ok: boolean; skipped?: boolean; noAdapter?: boolean }[]
   skillsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
   agentsInstalled: { name: string; client: string; dest: string; dryRun: boolean }[]
+  /**
+   * `skipped` is "the restart did not run": the caller asked for no daemon or
+   * no restart, or the install above failed, which leaves nothing to restart.
+   * `daemonInstall.failed` is where a run says it was the latter.
+   */
   daemonRestart: { skipped: boolean; dryRun: boolean; ok: boolean }
   /** Per-provider onboarding backfill outcomes (empty when none ran). */
   backfill: BackfillFinaleResult[]

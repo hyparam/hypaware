@@ -1948,7 +1948,13 @@ export async function runPickerFinale(args) {
     writeAttachedNotConfiguredWarning({ clients: summary.attachedNotConfigured, stdout, dryRun })
   }
 
-  if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
+  // A failed install left no service to restart, so the restart is withheld,
+  // for the same reason the proxy-CA wait above is. Attempting it printed a
+  // `daemon restart failed:` line directly under the note that had just said
+  // the install did not finish, reading as a second, unrelated fault (#1393).
+  // The withheld restart keeps the summary's initial `skipped: true` record;
+  // `daemonInstall.failed` is where the run says why.
+  if (!finale.skipDaemon && !finale.skipDaemonRestart && !installFailed && !dryRun) {
     try {
       const { restartServiceDaemon } = await import('../daemon/install.js')
       await restartServiceDaemon({ ...(homeDir ? { homeDir } : {}) })
