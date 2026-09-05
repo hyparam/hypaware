@@ -38,6 +38,7 @@ export const WALKTHROUGH_CANCEL_EXIT_CODE = 130
  * @import { AiGatewayCapability, CapabilityRegistry, ClientRegistration, ClientRegistry, HypAwareV2Config, PluginConfigInstance, PluginName, SinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor, PickerDescriptor } from '../../../src/core/types.js'
  * @import { DaemonInstallOptions, DaemonInstallPlan } from '../../../src/core/daemon/types.js'
+ * @import { restartServiceDaemon as restartServiceDaemonFn, serviceDaemonStatus as serviceDaemonStatusFn } from '../../../src/core/daemon/install.js'
  * @import { ClientAssetInstall, ClientAssetRemoval } from '../../../src/core/runtime/types.js'
  */
 
@@ -1613,6 +1614,10 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   skipAttachClients?: Set<string>,
  *   progress?: string,
  *   installDaemonFn?: (options: DaemonInstallOptions) => Promise<DaemonInstallPlan>,
+ *   daemonService?: {
+ *     restartServiceDaemon: typeof restartServiceDaemonFn,
+ *     serviceDaemonStatus: typeof serviceDaemonStatusFn,
+ *   },
  *   waitForCaFn?: (args: {
  *     stateRoot: string,
  *     timeoutMs?: number,
@@ -1961,32 +1966,40 @@ export async function runPickerFinale(args) {
     writeAttachedNotConfiguredWarning({ clients: summary.attachedNotConfigured, stdout, dryRun })
   }
 
-  // A failed install is withheld from the restart the way the proxy-CA wait
-  // above is: running it printed a `daemon restart failed:` line directly
-  // under the note that had just said the install did not finish, reading as a
-  // second, unrelated fault (#1393). Why the restart is pointless depends on
-  // which failure this was. One that reached the service manager already
-  // forced the start and polled for a pid, so a restart is no revival. One
-  // that never got that far (an unsupported platform, an unwritable unit dir,
-  // the npx durable-bin upgrade) installed no service for this run to restart.
-  // The gate is knowingly too broad for one of those: a durable-bin failure
-  // over a daemon that was already running leaves it serving the config this
-  // run replaced. Separating that case needs a runtime pid probe rather than
-  // an error class, so it is tracked in #1400. The dry-run branch carries the
-  // gate too, so a plan that could not be rendered does not go on to claim it
-  // would restart. Either way the withheld restart keeps the summary's initial
-  // `skipped: true` record, and `daemonInstall.failed` is where the run says
-  // why.
-  // @ref LLP 0317#install-means-running [constrained-by]: an install returns only once the daemon is observably running, so restarting after one that threw revives nothing
-  if (!finale.skipDaemon && !finale.skipDaemonRestart && !installFailed && !dryRun) {
-    try {
-      const { restartServiceDaemon } = await import('../daemon/install.js')
-      await restartServiceDaemon({ ...(homeDir ? { homeDir } : {}) })
-      summary.daemonRestart = { skipped: false, dryRun: false, ok: true }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      stderr.write(`daemon restart failed: ${message}\n`)
-      summary.daemonRestart = { skipped: false, dryRun: false, ok: false }
+  // A failed install withholds the restart the way the proxy-CA wait above
+  // does: running it printed a `daemon restart failed:` line directly under
+  // the note that had just said the install did not finish, two lines for one
+  // fault (#1393). What decides that is not which failure it was but whether
+  // anything is left running. An install that reached the service manager
+  // already forced the start and polled for a pid, so a restart after one that
+  // threw revives nothing. The npx durable-bin upgrade throws before either
+  // platform installer is called and so says nothing about the service: on a
+  // machine that already had one, gating on the failure alone left that daemon
+  // serving the config this run had just replaced, privacy picks included
+  // (#1400). So the failed-install branch asks the daemon rather than the
+  // error, and a pid is the answer, not "loaded": a job the service manager
+  // still holds with no process behind it is serving no config. The probe
+  // cannot break the finale in turn, degrading to `{ loaded: false }` rather
+  // than raising (LLP 0017 #status-queries-never-raise). The dry-run branch
+  // keeps the plain gate: it restarts nothing, so a plan that could not be
+  // rendered must not go on to claim it would. A withheld restart keeps the
+  // summary's initial `skipped: true` record, and `daemonInstall.failed` is
+  // where the run says why.
+  // @ref LLP 0317#install-means-running [constrained-by]: a pid, not "loaded", is what says a daemon is running
+  if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
+    const service = args.daemonService ?? await import('../daemon/install.js')
+    const serviceOptions = { ...(homeDir ? { homeDir } : {}) }
+    const restartable = !installFailed
+      || (await service.serviceDaemonStatus(serviceOptions)).pid !== undefined
+    if (restartable) {
+      try {
+        await service.restartServiceDaemon(serviceOptions)
+        summary.daemonRestart = { skipped: false, dryRun: false, ok: true }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        stderr.write(`daemon restart failed: ${message}\n`)
+        summary.daemonRestart = { skipped: false, dryRun: false, ok: false }
+      }
     }
   } else if (dryRun && !finale.skipDaemon && !installFailed) {
     summary.daemonRestart = { skipped: false, dryRun: true, ok: true }
