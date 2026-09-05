@@ -204,8 +204,10 @@ test('a stop that has only just begun raises nothing', async () => {
 
 // LLP 0383's named-forwards rule in the time dimension. A snapshot with no
 // readable last-write time (no `healthyAt`, so the daemon was killed while
-// stopping before it ever reached `healthy`, which is also how an older build's
-// file reads) has an unreadable age, not a stale one.
+// stopping without ever having started serving, i.e. it never returned from
+// `bootKernel`, which is also how an older build's file reads) has an
+// unreadable age, not a stale one. A daemon that booted `degraded` is not in
+// this set: it dates its writes (LLP 0386#serving-dates-the-write).
 test('a stopping snapshot whose age cannot be derived stays healthy', async () => {
   const { hypHome, stateRoot } = await makeHome()
   leaveSnapshot(stateRoot, 'stopping')
