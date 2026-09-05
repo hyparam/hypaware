@@ -1666,12 +1666,12 @@ export async function runPickerFinale(args) {
   // manager is one of several ways `installDaemon` throws, and a
   // launchd/systemd failure on a supported platform strands the same steps
   // after the same config commit. Both are caught, as two distinct classes:
-  // `DaemonInstallError` for what `installDaemon` itself rejects (no service
-  // manager, a bin it cannot make durable), and `ServiceOpError` for what the
-  // platform installers raise, which is what LLP 0317 D1 requires of them when
-  // no pid appears. Nothing wider: a bug in this lane is not an install
-  // failure, so it still propagates, and the span records the exception either
-  // way.
+  // `DaemonInstallError` for the platform `installDaemon` itself rejects,
+  // which is every `DaemonInstallError` in `install.js` and nothing else, and
+  // `ServiceOpError` for what the platform installers raise, which is what LLP
+  // 0317 D1 requires of them when no pid appears. Nothing wider: a bug in this
+  // lane is not an install failure, so it still propagates, and the span
+  // records the exception either way.
   //
   // Catching both is what puts the local pathway where the team pathway
   // already stands. `runDaemonInstall` turns every install failure into exit
