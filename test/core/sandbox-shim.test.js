@@ -106,6 +106,27 @@ function systemdRoot(t, unit = 'hypaware.service') {
   return { root, home, unit }
 }
 
+/**
+ * The body a job wrote into `file`, once it is there.
+ *
+ * A shell `>` or `>>` truncates the path into existence before `printf`
+ * writes into it, so a poll on the file existing can read it empty in the gap
+ * between. Returns '' if nothing arrives, which the caller's assertion reports
+ * as a job that never wrote.
+ *
+ * @param {string} file
+ * @returns {Promise<string>}
+ */
+async function waitForBody(file) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    let body = ''
+    try { body = fs.readFileSync(file, 'utf8') } catch { /* the job has not created it yet */ }
+    if (body !== '') return body
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  return ''
+}
+
 test('launchctl mock: bootstrap → print → bootout round trip', (t) => {
   const { root, plist, label, target } = sandboxRoot(t)
 
@@ -178,7 +199,7 @@ test('launchctl mock: setenv reaches the job launchd starts', async (t) => {
     '  <array>',
     '    <string>/bin/sh</string>',
     '    <string>-c</string>',
-    `    <string>printf '%s' "\$NODE_USE_SYSTEM_CA" &gt; ${seen}</string>`,
+    `    <string>printf '[%s]' "\$NODE_USE_SYSTEM_CA" &gt; ${seen}</string>`,
     '  </array>',
     '</dict>',
     '</plist>',
@@ -189,11 +210,9 @@ test('launchctl mock: setenv reaches the job launchd starts', async (t) => {
   assert.equal(shim(root, 'launchctl', ['setenv', 'NODE_USE_SYSTEM_CA', '1'], env).code, 0)
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
 
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    if (fs.existsSync(seen)) break
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
-  assert.equal(fs.readFileSync(seen, 'utf8'), '1', 'the domain variable is in the job env')
+  // The brackets keep the two failures apart: `[]` is a job that ran without
+  // the variable, an empty body a job that never wrote at all.
+  assert.equal(await waitForBody(seen), '[1]', 'the domain variable is in the job env')
 })
 
 test('security mock: the CN is read from the certificate without shelling out', (t) => {
@@ -477,11 +496,7 @@ test('launchctl mock: a setenv after bootstrap reaches the next launch', async (
   const plist = writePlist(root, label, ['/bin/sh', '-c', `printf '[%s]\\n' "$SANDBOX_PROBE" >> ${seen}`])
 
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    if (fs.existsSync(seen)) break
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
-  assert.equal(fs.readFileSync(seen, 'utf8'), '[]\n', 'the first launch saw an unset variable')
+  assert.equal(await waitForBody(seen), '[]\n', 'the first launch saw an unset variable')
 
   assert.equal(shim(root, 'launchctl', ['setenv', 'SANDBOX_PROBE', 'on'], env).code, 0)
   let body = ''
