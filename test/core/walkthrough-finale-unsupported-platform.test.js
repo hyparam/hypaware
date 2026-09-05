@@ -285,3 +285,29 @@ test('a failed install withholds the daemon restart instead of contradicting its
   )
   await fs.rm(home, { recursive: true, force: true })
 })
+
+// Same contradiction, one stream over: a dry run whose plan could not be
+// rendered printed the note and then went on to say it would restart the
+// daemon, and recorded the restart as a clean one (#1393).
+
+test('a dry run whose install plan failed does not go on to claim it would restart', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-dryrun-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  const stdout = makeBuf()
+  const summary = await withPlatform('win32', () => runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    stdout,
+    finale: { dryRun: true, skipDaemonRestart: false },
+  })))
+
+  assert.equal(summary.daemonInstall.failed, true)
+  assert.doesNotMatch(stdout.text(), /Would restart the daemon/)
+  assert.deepEqual(
+    summary.daemonRestart,
+    { skipped: true, dryRun: true, ok: false },
+    'the restart is recorded as skipped, not as a dry run that would have worked'
+  )
+  await fs.rm(home, { recursive: true, force: true })
+})
