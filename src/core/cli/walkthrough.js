@@ -1970,21 +1970,24 @@ export async function runPickerFinale(args) {
   // does: running it printed a `daemon restart failed:` line directly under
   // the note that had just said the install did not finish, two lines for one
   // fault (#1393). What decides that is not which failure it was but whether
-  // anything is left running. An install that reached the service manager
-  // already forced the start and polled for a pid, so a restart after one that
-  // threw revives nothing. The npx durable-bin upgrade throws before either
-  // platform installer is called and so says nothing about the service: on a
-  // machine that already had one, gating on the failure alone left that daemon
-  // serving the config this run had just replaced, privacy picks included
-  // (#1400). So the failed-install branch asks the daemon rather than the
-  // error, and a pid is the answer, not "loaded": a job the service manager
-  // still holds with no process behind it is serving no config. The probe
-  // cannot break the finale in turn, degrading to `{ loaded: false }` rather
-  // than raising (LLP 0017 #status-queries-never-raise). The dry-run branch
-  // keeps the plain gate: it restarts nothing, so a plan that could not be
-  // rendered must not go on to claim it would. A withheld restart keeps the
-  // summary's initial `skipped: true` record, and `daemonInstall.failed` is
-  // where the run says why.
+  // anything is left running. An install that reached the service manager can
+  // still leave a live daemon: a reinstall that raises partway through has not
+  // necessarily stopped the process it was replacing. That pid makes the
+  // restart run, so a `daemon restart failed:` line can still follow the
+  // install note here, one line per fault rather than two for one. The npx
+  // durable-bin upgrade throws before either platform installer is called and
+  // so says nothing about the service: on a machine that already had one,
+  // gating on the failure alone left that daemon serving the config this run
+  // had just replaced, privacy picks included (#1400). So the failed-install
+  // branch asks the daemon rather than the error, and a pid is the answer, not
+  // "loaded": a job the service manager still holds with no process behind it
+  // is serving no config. The probe cannot break the finale in turn, degrading
+  // to `{ loaded: false }` rather than raising (LLP 0017
+  // #status-queries-never-raise). The dry-run branch keeps the plain gate: it
+  // restarts nothing, so a plan that could not be rendered must not go on to
+  // claim it would. A withheld restart keeps the summary's initial
+  // `skipped: true` record, and `daemonInstall.failed` is where the run says
+  // why.
   // @ref LLP 0317#install-means-running [constrained-by]: a pid, not "loaded", is what says a daemon is running
   if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
     const serviceOptions = { ...(homeDir ? { homeDir } : {}) }
