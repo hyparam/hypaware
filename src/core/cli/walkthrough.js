@@ -1966,15 +1966,15 @@ export async function runPickerFinale(args) {
     writeAttachedNotConfiguredWarning({ clients: summary.attachedNotConfigured, stdout, dryRun })
   }
 
-  // A failed install withholds the restart the way the proxy-CA wait above
-  // does: running it printed a `daemon restart failed:` line directly under
-  // the note that had just said the install did not finish, two lines for one
-  // fault (#1393). What decides that is not which failure it was but whether
-  // anything is left running. An install that reached the service manager can
-  // still leave a live daemon: a reinstall that raises partway through has not
-  // necessarily stopped the process it was replacing. That pid makes the
-  // restart run, so a `daemon restart failed:` line can still follow the
-  // install note here, one line per fault rather than two for one. The npx
+  // A failed install can withhold the restart the way the proxy-CA wait
+  // above does: running it printed a `daemon restart failed:` line directly
+  // under the note that had just said the install did not finish, two lines
+  // for one fault (#1393). What decides that is not which failure it was but
+  // whether anything is left running. An install that reached the service
+  // manager can still leave a live daemon: a reinstall that raises partway
+  // through has not necessarily stopped the process it was replacing. That
+  // pid makes the restart run, so a `daemon restart failed:` line can follow
+  // the install note here, one line per fault rather than two for one. The npx
   // durable-bin upgrade throws before either platform installer is called and
   // so says nothing about the service: on a machine that already had one,
   // gating on the failure alone left that daemon serving the config this run
