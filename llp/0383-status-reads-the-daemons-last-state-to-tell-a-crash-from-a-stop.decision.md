@@ -17,6 +17,9 @@ never reaches the service manager, which is why the live facts cannot tell the
 two apart), [LLP 0164](./0164-status-names-recent-clients-from-gateway-entrypoints.decision.md)
 (#status-reads-it-from-the-status-file: the file this reads);
 hyparam/hypaware#1391, PR #1388
+**Extended-by:** [LLP 0384](./0384-a-stopping-snapshot-that-stopped-ageing-is-a-stop-that-never-completed.decision.md)
+(#stopping-is-a-claim-with-an-expiry: a terminal `stopping` snapshot older than
+the heartbeat window is a stop that never finished, and raises as a crash does)
 
 > `installed, loaded, not running` reported `overall: healthy`. It is the state
 > a daemon leaves when it dies under a unit the service manager is still
