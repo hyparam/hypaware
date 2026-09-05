@@ -362,7 +362,11 @@ test('a failed daemon install reports it and does not wait for attach', async ()
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 3)
   assert.equal(waited, false)
-  assert.match(err.join(''), /the daemon install did not finish - run 'hyp daemon install'/)
+  // The platform-invariant half of the note: it reports a missing background
+  // service over a completed enrollment. Which remediation follows is the
+  // platform's business, and daemonIncompleteNote's own tests below pin both
+  // branches, so asserting one of them here would fail the suite on win32.
+  assert.match(err.join(''), /note: enrolled, but /)
   assert.doesNotMatch(out.join(''), /capturing /)
 })
 
@@ -1182,7 +1186,7 @@ test('a failed daemon install still prints the durable hint before returning (LL
   assert.equal(code, 3)
   assert.equal(waited, false, 'a failed install does not wait for attach')
   assert.match(err.join(''), /hyp privacy set \[path\] local-only/)
-  assert.match(err.join(''), /the daemon install did not finish/)
+  assert.match(err.join(''), /note: enrolled, but /)
 })
 
 test('a re-login (already-enrolled, re-seed path) prints the durable hint (LLP 0102)', async () => {
