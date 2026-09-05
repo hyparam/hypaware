@@ -6,7 +6,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { daemonIncompleteNote, remoteLogin, runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
+import { remoteLogin, runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
+import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
 import { hasAppliedCentralConfig } from '../../src/core/config/apply.js'
 import { effectiveDefaultRemote } from '../../src/core/remote/builtin_remotes.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
@@ -376,13 +377,13 @@ test('a failed daemon install reports it and does not wait for attach', async ()
 // that cannot help (#978).
 test('daemonIncompleteNote: names the retry on a supported platform and never claims sign-in failed', () => {
   for (const platform of /** @type {const} */ (['darwin', 'linux'])) {
-    const note = daemonIncompleteNote(platform)
+    const note = daemonIncompleteNote(platform, 'enrolled')
     assert.match(note, /^note: enrolled, but the daemon install did not finish - run 'hyp daemon install'\n$/)
   }
 })
 
 test('daemonIncompleteNote: a platform with no service manager is not told to retry the install', () => {
-  const note = daemonIncompleteNote('win32')
+  const note = daemonIncompleteNote('win32', 'enrolled')
   assert.match(note, /^note: enrolled, but /)
   assert.doesNotMatch(note, /hyp daemon install/)
   assert.match(note, /nothing is captured on this machine/)

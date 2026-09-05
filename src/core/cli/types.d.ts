@@ -315,6 +315,12 @@ export interface FinaleSummary {
     dryRun: boolean
     plan?: Record<string, unknown>
     targetPath?: string
+    /**
+     * The install step ran and threw. Distinct from `skipped`, a caller's
+     * decision not to run it at all: the finale carries on either way, so
+     * without this a failure reads as a clean install with no target path.
+     */
+    failed?: boolean
   }
   globalInstall: {
     skipped: boolean
