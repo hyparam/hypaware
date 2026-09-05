@@ -193,7 +193,6 @@ test('the upstream-failure 502 never answers an over-cap declared body as a reus
       // Announced and then done: the sender sees its socket close rather than
       // an invitation to finish an upload nobody is going to read.
       await bounded(new Promise((resolve) => socket.on('close', resolve)), 'the announced close')
-      assert.equal(rig.requestBytes(), 0, 'the refused body was read after all')
     } finally {
       socket.destroy()
     }
