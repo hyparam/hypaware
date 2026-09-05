@@ -7,6 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 import test from 'node:test'
 
+import { GlobalInstallError } from '../../src/core/cli/global_install.js'
 import { runPickerFinale, runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
 import { SystemdUnitError } from '../../src/core/daemon/linux.js'
 import { LaunchAgentError } from '../../src/core/daemon/macos.js'
@@ -191,6 +192,66 @@ test('an error that is not an install failure still escapes the finale', async (
   )
   assert.deepEqual(events, [], 'nothing after the install step ran')
   await fs.rm(home, { recursive: true, force: true })
+})
+
+// The last two ways `installDaemon` could still kill the finale after the
+// config commit (#1386). Neither is a service-manager failure, so neither is a
+// `ServiceOpError`, and both are ordinary environment failures rather than
+// bugs: `npx hypaware setup` cannot reach the registry, or the plist/unit
+// directory cannot be written.
+
+test('a failed npx durable-bin upgrade finishes the finale too', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-npx-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    installDaemonFn: async () => {
+      throw new GlobalInstallError(
+        "npx detected, but npm install -g hypaware@1.0.0 failed: EACCES. Run 'npm install -g hypaware@1.0.0' manually"
+      )
+    },
+  }))
+  assert.equal(summary.daemonInstall.failed, true, 'the global install failure is a failed daemon install')
+  assert.match(
+    stderr.text(),
+    /^daemon install failed: npx detected, but npm install -g hypaware@1\.0\.0 failed: EACCES\./,
+    'the npm diagnosis is actionable, so it reaches the user rather than only the span'
+  )
+  assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
+  assert.deepEqual(events, ['attach'], 'attach still runs; it needs no daemon')
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// Skipped as root, who is refused by no mode bits: the mkdir would succeed and
+// the run would fail further along on something this test does not describe.
+test('an unwritable unit directory finishes the finale too', { skip: process.getuid?.() === 0 }, async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-eacces-'))
+  const systemdDir = path.join(home, '.config', 'systemd')
+  await fs.mkdir(systemdDir, { recursive: true })
+  // Only the unit directory's parent is sealed: the rest of the finale keeps
+  // writing under HOME, and this failure must not stand in for those.
+  await fs.chmod(systemdDir, 0o500)
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  try {
+    // The real installer, not the seam: the throw has to come from the
+    // filesystem write inside `installSystemdUnit` itself.
+    const summary = await withPlatform('linux', () => runPickerFinale(/** @type {any} */ (
+      finaleArgs(home, events, stderr)
+    )))
+    assert.equal(summary.daemonInstall.failed, true, 'an EACCES on the unit directory is a failed install')
+    assert.match(stderr.text(), /^daemon install failed: failed to create .*systemd\/user: EACCES/, 'the system error names the path and the reason')
+    assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
+    assert.deepEqual(events, ['attach'], 'attach still runs; it needs no daemon')
+  } finally {
+    // Restored whatever happened: a failed assertion would otherwise leave a
+    // 0500 directory that `fs.rm` cannot empty.
+    await fs.chmod(systemdDir, 0o700)
+    await fs.rm(home, { recursive: true, force: true })
+  }
 })
 
 // The restart ran after an install the same finale had recorded as failed, so

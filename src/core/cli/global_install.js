@@ -14,6 +14,20 @@ const PACKAGE_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 const PACKAGE_JSON = path.join(PACKAGE_ROOT, 'package.json')
 
 /**
+ * Error raised when npm refused the durable-bin upgrade: an unwritable global
+ * prefix, no registry, a failed install. A distinct class because a caller
+ * deciding whether to carry on without a daemon has to tell the environment
+ * saying no from a bug here, and every message names the repair (#1386).
+ */
+export class GlobalInstallError extends Error {
+  /** @param {string} message */
+  constructor(message) {
+    super(message)
+    this.name = 'GlobalInstallError'
+  }
+}
+
+/**
  * When `npx hypaware` installs the daemon directly, `process.argv[1]`
  * points into npm's `_npx` cache. Install the same package globally
  * first and use that durable binary for launchd/systemd.
@@ -47,7 +61,7 @@ export async function ensureDurableBinForNpx(opts) {
   })
   if (install.exitCode !== 0) {
     const detail = compactCommandError(install)
-    throw new Error(
+    throw new GlobalInstallError(
       `npx detected, but npm install -g ${packageSpec} failed${detail ? `: ${detail}` : ''}. ` +
       `Run 'npm install -g ${packageSpec}' manually, then rerun 'hyp setup', or pass ` +
       `'--bin <stable-hypaware.js>' to use an explicit daemon binary.`
@@ -108,10 +122,10 @@ async function globalPrefix(run, env) {
   const result = await run('npm', ['config', 'get', 'prefix'], { env, cwd: PACKAGE_ROOT })
   if (result.exitCode !== 0) {
     const detail = compactCommandError(result)
-    throw new Error(`npm config get prefix failed${detail ? `: ${detail}` : ''}`)
+    throw new GlobalInstallError(`npm config get prefix failed${detail ? `: ${detail}` : ''}`)
   }
   const prefix = result.stdout.trim().split(/\r?\n/).filter(Boolean).pop()
-  if (!prefix) throw new Error('npm config get prefix returned an empty prefix')
+  if (!prefix) throw new GlobalInstallError('npm config get prefix returned an empty prefix')
   return prefix
 }
 

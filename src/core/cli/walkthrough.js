@@ -9,6 +9,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
 import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
+import { GlobalInstallError } from './global_install.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { daemonIncompleteNote } from '../daemon/platform.js'
 import { ServiceOpError } from '../daemon/service_ops.js'
@@ -1665,15 +1666,19 @@ export async function runPickerFinale(args) {
   // Reactive rather than a `platformIsSupported` gate: an absent service
   // manager is one of several ways `installDaemon` throws, and a
   // launchd/systemd failure on a supported platform strands the same steps
-  // after the same config commit. Both are caught, as two distinct classes:
+  // after the same config commit. All are caught, as three distinct classes:
   // `DaemonInstallError` for the platform `installDaemon` itself rejects,
-  // which is every `DaemonInstallError` in `install.js` and nothing else, and
-  // `ServiceOpError` for what the platform installers raise, which is what LLP
-  // 0317 D1 requires of them when no pid appears. Nothing wider: a bug in this
-  // lane is not an install failure, so it still propagates, and the span
-  // records the exception either way.
+  // which is every `DaemonInstallError` in `install.js` and nothing else,
+  // `ServiceOpError` for what the platform installers raise: when no pid
+  // appears (LLP 0317 D1), when the host refuses the plist/unit write, and
+  // when the service manager cannot be spawned at all (no `systemctl` on a
+  // container or a non-systemd distro), and
+  // `GlobalInstallError` for the durable-bin upgrade npm refused, which every
+  // `npx hypaware setup` first run passes through (#1386). Nothing wider: a
+  // bug in this lane is not an install failure, so it still propagates, and
+  // the span records the exception either way.
   //
-  // Catching both is what puts the local pathway where the team pathway
+  // Catching them is what puts the local pathway where the team pathway
   // already stands. `runDaemonInstall` turns every install failure into exit
   // 1, which the login lane reads as `daemon_incomplete` and carries on from
   // (#978), so a launchd failure has never ended a team run.
@@ -1751,8 +1756,8 @@ export async function runPickerFinale(args) {
       },
       { component: 'walkthrough' }
     ).catch((err) => {
-      const serviceFailed = err instanceof ServiceOpError
-      if (!serviceFailed && !(err instanceof installMod.DaemonInstallError)) throw err
+      const diagnosed = err instanceof ServiceOpError || err instanceof GlobalInstallError
+      if (!diagnosed && !(err instanceof installMod.DaemonInstallError)) throw err
       installFailed = true
       summary.daemonInstall = { skipped: false, dryRun, failed: true }
       // The service manager's own diagnosis, which LLP 0317 #context is
@@ -1760,9 +1765,10 @@ export async function runPickerFinale(args) {
       // started it - ask launchd itself: launchctl print <target>" is the one
       // string that tells a person what to do next, and printing only the
       // generic note would leave it on the span and nowhere they can read it.
-      // `ServiceOpError` only: every `DaemonInstallError` says "unsupported
-      // platform", which the note restates in words the user can act on.
-      if (serviceFailed) stderr.write(`daemon install failed: ${err.message}\n`)
+      // Every class but `DaemonInstallError`, which says "unsupported
+      // platform" and nothing the note does not already restate. An npm or
+      // filesystem refusal names a path and a repair the note cannot know.
+      if (diagnosed) stderr.write(`daemon install failed: ${err.message}\n`)
       stderr.write(daemonIncompleteNote(process.platform))
     })
   }
