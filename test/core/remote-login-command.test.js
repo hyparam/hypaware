@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { remoteLogin, runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
+import { daemonIncompleteNote, remoteLogin, runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { hasAppliedCentralConfig } from '../../src/core/config/apply.js'
 import { effectiveDefaultRemote } from '../../src/core/remote/builtin_remotes.js'
 import { deriveIdentityBase, readCredentials } from '../../src/core/remote/credentials.js'
@@ -362,8 +362,30 @@ test('a failed daemon install reports it and does not wait for attach', async ()
   const code = await runRemoteLogin(['prod'], ctx, { login, enroll, waitForAttach })
   assert.equal(code, 3)
   assert.equal(waited, false)
-  assert.match(err.join(''), /the daemon install did not finish - run 'hyp daemon install'/)
+  // The platform-invariant half of the note: it reports a missing background
+  // service over a completed enrollment. Which remediation follows is the
+  // platform's business, and daemonIncompleteNote's own tests below pin both
+  // branches, so asserting one of them here would fail the suite on win32.
+  assert.match(err.join(''), /note: enrolled, but /)
   assert.doesNotMatch(out.join(''), /capturing /)
+})
+
+// The note reports a missing background service, never a failed sign-in, and
+// its remediation only prints where it can work: on a platform with no service
+// manager no `hyp daemon install` run would finish, so naming one is advice
+// that cannot help (#978).
+test('daemonIncompleteNote: names the retry on a supported platform and never claims sign-in failed', () => {
+  for (const platform of /** @type {const} */ (['darwin', 'linux'])) {
+    const note = daemonIncompleteNote(platform)
+    assert.match(note, /^note: enrolled, but the daemon install did not finish - run 'hyp daemon install'\n$/)
+  }
+})
+
+test('daemonIncompleteNote: a platform with no service manager is not told to retry the install', () => {
+  const note = daemonIncompleteNote('win32')
+  assert.match(note, /^note: enrolled, but /)
+  assert.doesNotMatch(note, /hyp daemon install/)
+  assert.match(note, /nothing is captured on this machine/)
 })
 
 test('an enrolling login whose attach poll throws still reports the timeout fallback, not a failure (Major 1)', async () => {
@@ -1164,7 +1186,7 @@ test('a failed daemon install still prints the durable hint before returning (LL
   assert.equal(code, 3)
   assert.equal(waited, false, 'a failed install does not wait for attach')
   assert.match(err.join(''), /hyp privacy set \[path\] local-only/)
-  assert.match(err.join(''), /the daemon install did not finish/)
+  assert.match(err.join(''), /note: enrolled, but /)
 })
 
 test('a re-login (already-enrolled, re-seed path) prints the durable hint (LLP 0102)', async () => {
