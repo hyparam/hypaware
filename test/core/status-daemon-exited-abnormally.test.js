@@ -222,10 +222,13 @@ test('a recorded boot failure is named as one, not as an exit without shutdown',
 
 // The over-fixing guard for that split: `degraded` on its own is a daemon that
 // served with a failed source and then died, which is exactly the ending the
-// original sentence describes. Both shapes it reaches `status.json` in are
-// covered, because `runDaemon` records the `anySourceFailed` case with no
-// `warnings` field at all, and the only other warning it ever writes is
-// `source_stop_failed:`.
+// original sentence describes. The first case is that production shape:
+// `runDaemon` records `anySourceFailed` with no `warnings` field at all. The
+// second is not a snapshot the daemon leaves - `source_stop_failed:` is only
+// ever persisted with `state: 'stopping'`, from inside `shutdown()` - but it
+// is the only other warning label `runDaemon` writes, so pairing it with
+// `degraded` exercises the negative side of the `boot_failed` prefix test
+// against a real label instead of an invented one.
 test('a degraded snapshot with no boot failure keeps the abnormal-exit message', async () => {
   for (const warnings of [undefined, ['source_stop_failed:codex:timed out']]) {
     const { hypHome, stateRoot } = await makeHome()
