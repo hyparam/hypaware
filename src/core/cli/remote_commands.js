@@ -710,20 +710,27 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // can't know pre-auth whether the server will mint a gateway credential.
   // @ref LLP 0063#d3 [implements]: default-on enrollment; the pre-auth notice is the consent surface, never a y/n prompt
   // Compact (the wizard's join lane, LLP 0135 #join) keeps the notice, its
-  // placement, and its conditional phrasing, and drops only the paragraph: one
-  // line, still before the browser. The hedge is not shortenable - the client
-  // still cannot know pre-auth whether a gateway will be minted, so a flat
-  // "signing in forwards your logs" is false against a forwarding-off org.
+  // placement, its conditional phrasing, and all three consequences D3
+  // enumerates, and drops only the line breaks: one line, still before the
+  // browser. The hedge is not shortenable - the client still cannot know
+  // pre-auth whether a gateway will be minted, so a flat "signing in forwards
+  // your logs" is false against a forwarding-off org. Neither is the org-config
+  // clause: applying org config is what attaches clients and backfills the
+  // history already on disk, and no reader infers that from "forwards captured
+  // logs". This notice is the whole consent surface, so a consequence dropped
+  // here is one the user is never told before they authenticate.
   // The '--no-forward' sentence is the one thing left out: the wizard's lane
   // runs a bare login (LLP 0134 #no-token-join) and cannot pass the flag, and
   // the fork already offered the no-forwarding pathway as a choice.
-  if (!alreadyEnrolled && !noForward && compact) {
-    ctx.stderr.write('note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server and installs a background service (Ctrl-C to cancel)\n')
-  } else if (!alreadyEnrolled && !noForward) {
-    ctx.stderr.write('note: if your org has enabled forwarding, signing in will enroll this machine:\n')
-    ctx.stderr.write('  it forwards captured logs to the server, applies org config (which can attach\n')
-    ctx.stderr.write('  clients and backfill existing local history), and installs a background service.\n')
-    ctx.stderr.write("  re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
+  if (!alreadyEnrolled && !noForward) {
+    if (compact) {
+      ctx.stderr.write('note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config (which can attach clients and backfill existing local history), and installs a background service (Ctrl-C to cancel)\n')
+    } else {
+      ctx.stderr.write('note: if your org has enabled forwarding, signing in will enroll this machine:\n')
+      ctx.stderr.write('  it forwards captured logs to the server, applies org config (which can attach\n')
+      ctx.stderr.write('  clients and backfill existing local history), and installs a background service.\n')
+      ctx.stderr.write("  re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
+    }
   }
 
   /** @type {OidcSession} */
@@ -907,12 +914,11 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // hang. One line on stderr before we start polling, then the result below.
     // Compact: the same wait behind a spinner that clears itself, so the line
     // that announced the wait is not left behind once the answer is in.
+    if (!compact) ctx.stderr.write(`waiting for the daemon to attach clients (up to ${Math.round(ATTACH_WAIT_DEFAULT_MS / 1000)}s)...\n`)
+    const wait = () => waitForAttach({ env: ctx.env })
     const attached = compact
-      ? await withSpinner({ stdout: ctx.stdout, env: ctx.env, label: 'Attaching clients...' }, () => waitForAttach({ env: ctx.env }))
-      : await (async () => {
-        ctx.stderr.write(`waiting for the daemon to attach clients (up to ${Math.round(ATTACH_WAIT_DEFAULT_MS / 1000)}s)...\n`)
-        return waitForAttach({ env: ctx.env })
-      })()
+      ? await withSpinner({ stdout: ctx.stdout, env: ctx.env, label: 'Attaching clients...' }, wait)
+      : await wait()
     if (attached.length > 0) {
       ctx.stdout.write(compact ? `✓ Capturing ${attached.join(', ')}\n` : `capturing ${attached.join(', ')}\n`)
     } else {

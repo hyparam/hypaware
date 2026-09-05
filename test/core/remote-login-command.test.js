@@ -301,7 +301,16 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login, compact: true })
   assert.equal(code, 0)
   const text = out.join('') + err.join('')
-  assert.match(text, /^note: if your org has enabled forwarding, signing in enrolls this machine: .*\(Ctrl-C to cancel\)$/m, 'the pre-auth notice keeps its hedge, as one line')
+  // LLP 0063 D3 mechanic 1 names what the notice must say, and asks for the
+  // copy to be pinned verbatim: it is the consent surface, so compact may lose
+  // the line breaks but not the hedge and not one of the three consequences
+  // (forwarding, org config that attaches clients and backfills local history,
+  // the background service).
+  assert.match(
+    text,
+    /^note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config \(which can attach clients and backfill existing local history\), and installs a background service \(Ctrl-C to cancel\)$/m,
+    'the pre-auth notice keeps its hedge and all three consequences, as one line'
+  )
   assert.match(text, /✓ Signed in to 'prod' as org /)
   assert.match(text, /✓ Forwarding to the 'prod' server \(run 'hyp remote list' to see its URL\)/)
   assert.match(text, /✓ First sync no later than .+; nothing has been uploaded yet/)
