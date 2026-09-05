@@ -170,8 +170,14 @@ test('drainRequestBody closes only the connection whose body is not known to fit
       `drainRequestBody closed a connection whose body fits under MAX_REJECTED_DRAIN_BYTES: ${JSON.stringify(underCap)}`
     )
 
-    // Declared past the cap: the connection is reset once the answer is out,
-    // so it must not be offered back as a reusable one.
+    // Declared past the cap, where the declaration alone is what decides it.
+    // The header has to be chosen before the answer is written, so this probe
+    // sends no byte of the body it announces and needs none: `fitsUnderCap`
+    // reads the framing headers and nothing else. What is pinned here is that
+    // a connection the drain could later reset is not offered back as a
+    // reusable one. The reset itself needs a body that actually crosses the
+    // cap, never reaches `req.destroy()` from here (no `data` event fires at
+    // all), and is what the first test pins.
     const overCap = await withDeadline(
       rawRefusal(
         served.port,
