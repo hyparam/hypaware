@@ -101,9 +101,14 @@ or unusable, the snapshot stays silent. An unreadable age is not a stale one.
   once its snapshot goes stale, instead of never. `overall` degrades through the
   existing severity rule and the repair is `hyp daemon restart`, which reaches
   the daemon because the service manager is still holding the unit.
-- A machine probed during a live `hyp daemon stop` still raises nothing. The
-  process is alive for all of it, and at the instant it is not, the snapshot is
-  seconds old.
+- A machine probed during a live `hyp daemon stop` raises nothing *from this
+  branch*. The process is alive for all of it, so the `!daemon.running` gate is
+  false, and at the instant it is not alive the snapshot is seconds old. A stop
+  that outlasts the window with the process still alive is a different reading
+  and not this one: `shutdown()` clears the tick before it waits, so the
+  heartbeat check ([LLP 0348](./0348-a-live-pid-is-not-a-live-daemon.decision.md#stale-heartbeat-is-unresponsive))
+  sees a frozen snapshot beside a live pid and raises `daemon_heartbeat_stale`.
+  That predates this decision, which neither widens nor narrows it.
 - An operator who force-kills a wedged stop is now told the stop did not
   complete. That is the intended reading rather than an over-report: the unit is
   still loaded, nothing is capturing, and a stop that reached its end writes
