@@ -147,9 +147,10 @@ test('compact shows a live waiting indication for the whole poll, then clears it
   // And it is gone once the sign-in settles: the last write clears the line,
   // so whatever the lane prints next lands on a clean one.
   assert.equal(chunks.at(-1), '\r\x1b[2K')
-  // The opener boolean is best-effort, so the compact line offers the browser
-  // rather than asserting it opened.
-  assert.equal(printed[0], 'Sign in using the browser that just opened; if it did not open, visit:')
+  // The opener boolean is best-effort (a launcher that exists but fails still
+  // returns true), so the compact line phrases the open as an attempt rather
+  // than asserting a browser is already up, matching the plain lane's wording.
+  assert.equal(printed[0], 'Opening your browser to sign in; if it did not open, visit:')
 })
 
 test('the plain lane writes nothing to stdout, spinner or otherwise', async () => {
