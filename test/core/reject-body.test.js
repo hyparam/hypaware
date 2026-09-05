@@ -99,14 +99,24 @@ function rawRefusal(port, request) {
 test('drainRequestBody stops reading a refused body at MAX_REJECTED_DRAIN_BYTES', async () => {
   const served = await startRefusingServer()
   try {
-    // Four times the cap, and deliberately no larger: a body this size fits
-    // in the two socket buffers whole, so the sender hands it over in one go
-    // and never stalls, which leaves the cap as the only thing that can stop
-    // the server reading all of it. A body big enough to outrun those buffers
-    // (8 MiB, say) cannot pin the cap at all - its `content-length` fails
-    // `fitsUnderCap`, so the drain answers `connection: close` and the socket
-    // is torn down as the ~60-byte refusal flushes, long before 64 KiB could
-    // be counted.
+    // Four times the cap, which is the size with the most room on either side
+    // of the assertion below. A body this size fits in the two socket buffers
+    // whole, so the sender hands it over in one go and never stalls, which
+    // leaves the cap as the only thing that can stop the server reading all
+    // of it. Bounded, the server reads 128 KiB. Unbounded, it reads all
+    // 256 KiB. That is a clear 64 KiB, one socket read, either side of the
+    // 192 KiB the assertion allows.
+    //
+    // Neither a much smaller nor a much larger body pins anything. At twice
+    // the cap an unbounded read is 128 KiB too, the same figure a bounded one
+    // produces. At eight times it (or at 8 MiB) the body outruns the socket
+    // buffers, so the sender stalls mid-upload and the bytes still queued
+    // behind that stall never arrive once the refusal tears the connection
+    // down: an unbounded read then settles around 160 KiB, under the
+    // assertion, and this test would pass with the bound deleted. Both sizes
+    // declare a `content-length` past the cap and are answered
+    // `connection: close`, so nothing about `fitsUnderCap` is what separates
+    // them. It is only whether the sender got the whole body out.
     const body = Buffer.alloc(4 * CAP_BYTES, 'x')
     const refused = await withDeadline(
       fetch(`${served.origin}/refused`, {
@@ -190,6 +200,23 @@ test('drainRequestBody closes only the connection whose body is not known to fit
       chunked,
       /\r\nconnection: close/i,
       `drainRequestBody answered a chunked body as reusable: ${JSON.stringify(chunked)}`
+    )
+
+    // Neither framing header is no body at all: no `data` event is ever
+    // emitted, nothing can cross the cap, and the connection stays reusable.
+    // Pinned separately from the declared-small body above because it is a
+    // separate branch of `fitsUnderCap` and the one the gateway meets most,
+    // a bodyless GET at a path nobody registered, arriving on the connection
+    // an attached client forwards everything else over.
+    const bodyless = await withDeadline(
+      rawRefusal(served.port, 'GET /refused HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n'),
+      'bodyless refusal'
+    )
+    assert.match(bodyless, /^HTTP\/1\.1 415 /)
+    assert.doesNotMatch(
+      bodyless,
+      /\r\nconnection: close/i,
+      `drainRequestBody closed a connection carrying no body at all: ${JSON.stringify(bodyless)}`
     )
   } finally {
     await served.close()
