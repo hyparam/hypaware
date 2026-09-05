@@ -862,6 +862,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // the user typed, and no other line in this login recovers the URL.
     // Revisit if the server root ever becomes a real landing page.
     // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target and pairs it with its lookup
+    // @ref LLP 0387#adjacency [constrained-by]: the compact branch is also the deadline line's half of R1a - drop the name or the lookup here and the compact privacy block below has neither
     if (compact) {
       ctx.stdout.write(`✓ Forwarding to the '${name}' server (run 'hyp remote list' to see its URL)\n`)
     } else {

@@ -34,7 +34,8 @@ hyparam/hypaware#1422, hyparam/hypaware#391
 
 LLP 0100 R1a binds "the enrolling login's destination surfaces - the
 forwarding line and the privacy block" to name the server by its configured
-target name, to withhold its URL, and to name the one command that maps the
+target name and to withhold its URL, and puts the lookup clause on the
+privacy block alone: that block must name the one command that maps the
 name back to a URL. The rationale is stated in the requirement itself: the
 name shown may be one the user never typed (a bare `hyp remote login`
 resolves its target through `effectiveDefaultRemote`), so withholding both
@@ -99,13 +100,16 @@ that bar. Under `2>log` the deadline line arrives alone.
 That is accepted here, because the compact lane cannot be reached by an
 invocation where it matters. `compact: true` is passed from exactly one
 place, the wizard's join lane, which runs the login over the wizard's own
-guarded streams; the wizard itself is attended-only (LLP 0131). A user who
-redirects one of the wizard's streams is not reading the checklist the
-compact lane was shaped for, and every non-wizard `hyp remote login`,
-including every non-TTY one, still gets the self-contained wide block. If
-compact output is ever offered on a bare `hyp remote login`, or to a
-non-TTY caller, this reading expires with that change: the deadline line
-would then have to carry the name and the lookup itself.
+guarded streams; that lane is attended-only (LLP 0131 #attended-only - a
+non-interactive wizard run sets `opts.picks` and short-circuits past the
+fork and the join straight to the pick phase, so it never reaches the lane
+that asks for compact). A user who redirects one of the wizard's streams is
+not reading the checklist the compact lane was shaped for, and every
+non-wizard `hyp remote login`, including every non-TTY one, still gets the
+self-contained wide block. If compact output is ever offered on a bare
+`hyp remote login`, or to a non-TTY caller, this reading expires with that
+change: the deadline line would then have to carry the name and the lookup
+itself.
 
 ## Consequences {#consequences}
 
@@ -114,8 +118,9 @@ would then have to carry the name and the lookup itself.
   by recording the reading, not by editing the line.
 - The compact lane's two lines are one surface for review purposes. Moving
   a write between them, or reordering them, breaks R1a for this lane even
-  though neither line changed; the `@ref` on the deadline line points here
-  so that a later editor sees the constraint at the site.
+  though neither line changed, and so does shortening the forwarding line's
+  compact branch; both lines carry an `@ref` here, so a later editor of
+  either one sees the constraint at the site.
 - LLP 0100 R1a is unchanged. This is a reading of the requirement against a
   lane that did not exist when it was written, not a relaxation of it: the
   wide lane's obligations, and the "never print the URL" half on both lanes,
