@@ -1987,19 +1987,25 @@ export async function runPickerFinale(args) {
   // where the run says why.
   // @ref LLP 0317#install-means-running [constrained-by]: a pid, not "loaded", is what says a daemon is running
   if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
-    const service = args.daemonService ?? await import('../daemon/install.js')
     const serviceOptions = { ...(homeDir ? { homeDir } : {}) }
-    const restartable = !installFailed
-      || (await service.serviceDaemonStatus(serviceOptions)).pid !== undefined
-    if (restartable) {
-      try {
+    // The module load and the probe sit inside the `try` with the restart,
+    // not ahead of it: by here the config is committed and the clients are
+    // attached, so a throw out of this block would abandon a finished run
+    // with no summary. The load is the reason it is not merely belt and
+    // braces, because a join skips the install block above and this is its
+    // first `daemon/install.js`.
+    try {
+      const service = args.daemonService ?? await import('../daemon/install.js')
+      const restartable = !installFailed
+        || (await service.serviceDaemonStatus(serviceOptions)).pid !== undefined
+      if (restartable) {
         await service.restartServiceDaemon(serviceOptions)
         summary.daemonRestart = { skipped: false, dryRun: false, ok: true }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        stderr.write(`daemon restart failed: ${message}\n`)
-        summary.daemonRestart = { skipped: false, dryRun: false, ok: false }
       }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      stderr.write(`daemon restart failed: ${message}\n`)
+      summary.daemonRestart = { skipped: false, dryRun: false, ok: false }
     }
   } else if (dryRun && !finale.skipDaemon && !installFailed) {
     summary.daemonRestart = { skipped: false, dryRun: true, ok: true }
