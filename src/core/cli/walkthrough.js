@@ -1687,7 +1687,7 @@ export async function runPickerFinale(args) {
   // already stands. `runDaemonInstall` turns every install failure into exit
   // 1, which the login lane reads as `daemon_incomplete` and carries on from
   // (#978), so a launchd failure has never ended a team run.
-  // @ref LLP 0317#install-means-running [constrained-by]: a throw means no running service, so the CA wait below is skipped with it
+  // @ref LLP 0317#install-means-running [constrained-by]: a raise is an install that could not prove a pid, so the CA wait below is skipped with it
   let installFailed = false
   if (!skipInstall) {
     if (!dryRun) await stopFinaleStartedSources(sources)
