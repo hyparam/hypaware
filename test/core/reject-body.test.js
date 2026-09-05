@@ -315,6 +315,17 @@ async function settledBytesRead(socket, bound) {
     // Settled under the cap is not settled, it is a sender that has not caught
     // up yet, and taking it for an answer would pass the probe without ever
     // entering the window it exists to measure.
+    //
+    // Above the cap, "stopped growing" is as far as sampling `bytesRead` can
+    // get. A sender delivering in bursts more than `STABLE_MS` apart is called
+    // settled by this check mid-body, and that mid-body sample would be handed
+    // back as a bounded read: the same vacuous pass the throw below closes for
+    // delivery that is slow but continuous. The shape is out of reach here
+    // rather than excluded. This probe's sender hands the whole body to a
+    // single `client.write` and paces nothing, so the only gap left is a host
+    // that stalls loopback delivery for longer than `STABLE_MS` while still
+    // running this 25ms sampler. A sender the test paced itself would need a
+    // different discriminator, not a longer window.
     if (sample > CAP_BYTES && stableFor >= STABLE_MS) return sample
   }
   // Out of window with the read still moving. Handing the last sample back is

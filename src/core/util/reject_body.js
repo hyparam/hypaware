@@ -16,8 +16,14 @@
 /**
  * How much of a discarded request body is counted before the read is paused.
  * The socket read already in the parser when the pause lands is delivered
- * too, so the bytes actually read settle at about twice this, not exactly
- * at it.
+ * too, so the bytes actually read settle above this rather than at it, and
+ * how far above depends on where the answer is. Once the answer is on the
+ * wire, the teardown behind it destroys the request as soon as the cap is
+ * crossed, and the read settles at about twice this. While the answer is
+ * still pending nothing is torn down, the pause reaches the socket only
+ * through the request stream's own backpressure, and the read settles at
+ * about three and a half times this. Both regimes are measured in
+ * `test/core/reject-body.test.js`.
  *
  * A body the server refuses still has to be read for the answer to reach a
  * caller that is mid-upload, so the read cannot be skipped; left unbounded,
