@@ -234,9 +234,9 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
   // `pulls_high_numbers` is: the request budget splits a pulls phase across
   // ticks, and a set that restarted empty on the resumed page would leave the
   // duplicate exactly where the push-down has had the longest to accumulate.
-  // Dropped by `finishPulls`, so it lives no longer than one phase; a backfill's
-  // phase is the whole repository, which is the order `cursor.pull_numbers`
-  // beside it already is.
+  // Dropped by `finishPulls`, so it lives no longer than one phase, and a phase
+  // that walks the whole repository, a backfill or that first poll, sizes it in
+  // the order `cursor.pull_numbers` beside it already is.
   /** @type {Set<number> | null} */
   let emittedPulls = null
 
