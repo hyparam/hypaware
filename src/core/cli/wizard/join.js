@@ -31,15 +31,19 @@ export const ORG_CONFIG_WAIT_MS = 60000
  * set of picker source ids the central layer owns so the pick phase can
  * lock them (`@ref LLP 0129#join-before-picker`).
  *
- * Three outcomes:
- * - **login failed** (non-zero exit): classify the login lane's own D7
- *   taxonomy into `'failed' | 'abandoned'` and return it; `runInitWizard`
- *   prints it and re-presents the fork (`@ref LLP 0129#failed-join-returns-to-fork`).
+ * Outcomes:
+ * - **login failed** (non-zero exit, and the sign-in did not complete):
+ *   classify the login lane's own D7 taxonomy into `'failed' | 'abandoned'`
+ *   and return it; `runInitWizard` prints it and re-presents the fork
+ *   (`@ref LLP 0129#failed-join-returns-to-fork`).
  * - **converged**: resolve the two-layer config from disk and lock every
  *   picker row whose owning plugin is in the central layer.
  * - **timed out / no-org-config 404**: narrate and return `'ok'` with an
  *   empty lock set rather than blocking - nothing is pinned, so the picker
  *   composes freely (LLP 0129).
+ * - **enrolled, daemon incomplete**: the same two converge branches, but
+ *   the status says `'daemon_incomplete'` so the wizard can name the one
+ *   thing that is missing instead of the sign-in that is not.
  *
  * @ref LLP 0134#login-lane [implements]: the fork's shared-collection row ("Collect shared agent logs") wraps the `hyp remote login` lane; the wizard adds narration and the locked-row computation, not a second enrollment path.
  *
@@ -87,12 +91,21 @@ async function runJoinFlow(opts, span) {
 
   const runLogin = opts.runLogin ?? (() => defaultRunLogin(opts))
   const login = await runLogin()
-  if (login.exitCode !== 0) {
-    const status = classifyLoginFailure(login)
+  // "Non-zero" and "the sign-in did not complete" are different questions,
+  // and `daemon_incomplete` is where they part: it carries the daemon
+  // installer's own code over a completed enrollment (LLP 0179#outcome, "the
+  // other exception the other way"). Branching on the code alone sent it to
+  // `classifyLoginFailure`'s `default:` arm, so a fully enrolled machine was
+  // told its sign-in did not complete and re-offered enrollment (#978).
+  // @ref LLP 0129#failed-join-returns-to-fork [constrained-by]: that fork return is for a join where "nothing is provisioned at that point"; this one provisioned everything, so it carries on instead
+  if (login.exitCode !== 0 && login.reason !== 'daemon_incomplete') {
+    const failure = classifyLoginFailure(login)
     setSpanAttr(span, 'status', 'error')
-    setSpanAttr(span, Attr.ERROR_KIND, status === 'failed' ? 'login_rejected' : 'login_abandoned')
-    return { status, detail: login.stderr, ...(login.reason ? { reason: login.reason } : {}) }
+    setSpanAttr(span, Attr.ERROR_KIND, failure === 'failed' ? 'login_rejected' : 'login_abandoned')
+    return { status: failure, detail: login.stderr, ...(login.reason ? { reason: login.reason } : {}) }
   }
+  /** @type {'ok' | 'daemon_incomplete'} */
+  const status = login.reason === 'daemon_incomplete' ? 'daemon_incomplete' : 'ok'
 
   // The converge wait can honestly take up to its full minute, and a static
   // line over a minute of silence reads as a hang: on a TTY the line
@@ -109,11 +122,11 @@ async function runJoinFlow(opts, span) {
     // Timeout or the no-org-config 404 steady state: nothing landed to lock.
     // Narrate and continue with an unlocked picker rather than blocking.
     opts.stdout.write("Didn't hear back from your org's config in time; continuing with an unlocked picker.\n")
-    return { status: 'ok', lockedSources: [] }
+    return { status, lockedSources: [] }
   }
 
   const lockedSources = await computeCentralLockedSources(opts)
-  return { status: 'ok', lockedSources, managed: true }
+  return { status, lockedSources, managed: true }
 }
 
 /**
@@ -156,6 +169,9 @@ export async function computeCentralLockedSources(opts) {
  * A lane result with no reason (an old-shaped test double) classifies as
  * retriable, which is the same answer the stderr matcher gave when it
  * recognized nothing.
+ *
+ * The closed set is unchanged. `daemon_incomplete` never reaches here:
+ * its sign-in completed, so `runJoinFlow` never calls this for it (#978).
  *
  * @ref LLP 0058#d7 [constrained-by]: the three definitive reasons are the D7 refusal codes verbatim, so the split is the server's taxonomy and not a wizard-local one
  * @ref LLP 0179#no-prose-control-flow [implements]: classify on the reason code, never on the lane's English

@@ -7,6 +7,7 @@ import { classifyLoginFailure, runWizardJoin } from '../../../../src/core/cli/wi
 
 /**
  * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { LoginOutcomeReason } from '../../../../src/core/remote/types.js'
  */
 
 // The wizard join phase (LLP 0135 #join, LLP 0134 #login-lane). A thin
@@ -118,6 +119,35 @@ test('classifyLoginFailure: a missing reason defaults to abandoned', () => {
   assert.equal(classifyLoginFailure(/** @type {any} */ ({})), 'abandoned')
 })
 
+// Every member of the login lane's vocabulary has a deliberate answer here,
+// so a new reason cannot arrive and fall through `default:` unexamined: the
+// map is keyed `Record<LoginOutcomeReason, ...>`, so adding a reason without
+// deciding what the wizard does with it fails `npm run typecheck`.
+// `daemon_incomplete` is 'enrolled': the sign-in completed, so the join lane
+// never asks the classifier about it (#978).
+test('classifyLoginFailure: every login outcome reason has a deliberate answer', () => {
+  /** @type {Record<LoginOutcomeReason, 'failed' | 'abandoned' | 'enrolled'>} */
+  const expected = {
+    ok: 'abandoned',
+    help: 'abandoned',
+    usage: 'abandoned',
+    connected_elsewhere: 'abandoned',
+    no_membership: 'failed',
+    org_not_permitted: 'failed',
+    org_selection_required: 'failed',
+    denied: 'abandoned',
+    login_failed: 'abandoned',
+    store_failed: 'abandoned',
+    seed_failed: 'abandoned',
+    enroll_failed: 'abandoned',
+    daemon_incomplete: 'enrolled',
+  }
+  for (const [reason, answer] of Object.entries(expected)) {
+    if (answer === 'enrolled') continue
+    assert.equal(classifyLoginFailure({ reason: /** @type {any} */ (reason) }), answer, reason)
+  }
+})
+
 // --- runWizardJoin: the login-failure branch returns to the fork ---
 
 test('runWizardJoin: a non-zero login exit returns the classified failure and never waits', async () => {
@@ -140,6 +170,45 @@ test('runWizardJoin: a transient login failure returns abandoned', async () => {
   })
   const out = await runWizardJoin(opts)
   assert.equal(out.status, 'abandoned')
+})
+
+// --- runWizardJoin: enrolled, but the daemon install did not finish ---
+
+// The login lane returns the installer's non-zero code with
+// reason 'daemon_incomplete', and its own note says "enrolled, but the daemon
+// install did not finish". That is a completed sign-in, so the join must not
+// classify it as a failed or abandoned login: it waits for the org config and
+// reports 'daemon_incomplete', which the wizard carries on from (#978).
+// @ref LLP 0129#failed-join-returns-to-fork [tests]:
+test('runWizardJoin: an enrolled login whose daemon install failed is not a login failure', async () => {
+  const cat = catalog({ pickerRows: { claude: '@hypaware/claude', codex: '@hypaware/codex' } })
+  let waited = false
+  const opts = joinOpts(cat, {
+    runLogin: async () => ({
+      exitCode: 3,
+      reason: 'daemon_incomplete',
+      stderr: "note: enrolled, but the daemon install did not finish - run 'hyp daemon install'\n",
+    }),
+    waitForConverge: async () => { waited = true; return { ok: true } },
+    resolveLayered: async () => layered(['@hypaware/claude'], ['@hypaware/claude', '@hypaware/codex']),
+  })
+  const out = await runWizardJoin(opts)
+  assert.notEqual(out.status, 'failed')
+  assert.notEqual(out.status, 'abandoned')
+  assert.equal(out.status, 'daemon_incomplete')
+  assert.equal(waited, true, 'an enrolled machine still waits for its org config')
+  assert.deepEqual(out.lockedSources, ['claude'])
+  assert.equal(out.managed, true)
+})
+
+test('runWizardJoin: an enrolled daemon-incomplete login whose org config times out still reports daemon_incomplete', async () => {
+  const cat = catalog({ pickerRows: { claude: '@hypaware/claude' } })
+  const opts = joinOpts(cat, {
+    runLogin: async () => ({ exitCode: 1, reason: 'daemon_incomplete', stderr: '' }),
+    waitForConverge: async () => ({ ok: false }),
+  })
+  const out = await runWizardJoin(opts)
+  assert.deepEqual(out, { status: 'daemon_incomplete', lockedSources: [] })
 })
 
 // --- runWizardJoin: the converged branch locks central-owned rows ---

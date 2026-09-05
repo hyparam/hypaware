@@ -355,13 +355,18 @@ export interface ConfigurePhaseResult {
 
 /**
  * The join phase's verdict (LLP 0135 #join). `ok` is a completed sign-in
- * (with an org config that either converged or timed out); `failed` and
- * `abandoned` are the two ways an incomplete join returns to the fork
- * (LLP 0129 #failed-join-returns-to-fork). `failed` is a definitive org
+ * (with an org config that either converged or timed out).
+ * `daemon_incomplete` is also a completed sign-in - authenticated,
+ * enrolled, forwarding, first-sync hold armed - whose background service
+ * did not install; it carries on into the wizard on the team pathway and
+ * only the caveat is narrated, because LLP 0129
+ * #failed-join-returns-to-fork governs a join that provisioned nothing and
+ * this one provisioned everything. `failed` and `abandoned` are the two
+ * ways an incomplete join returns to the fork. `failed` is a definitive org
  * membership/permission rejection (an admin must act); `abandoned` is a
  * transient/other failure the user can simply retry.
  */
-export type WizardJoinStatus = 'ok' | 'failed' | 'abandoned'
+export type WizardJoinStatus = 'ok' | 'daemon_incomplete' | 'failed' | 'abandoned'
 
 /**
  * The two-layer config `classifyClientProvenance` reads (LLP 0031): the
@@ -393,7 +398,8 @@ export interface LoginLaneResult {
 export interface WizardJoinResult {
   status: WizardJoinStatus
   /**
-   * Present on `'ok'`: the picker source ids owned by the central layer,
+   * Present on a completed join (`'ok'` or `'daemon_incomplete'`): the
+   * picker source ids owned by the central layer,
    * which the pick phase renders locked (LLP 0129 #join-before-picker).
    * Empty on a timeout or the no-org-config 404 steady state - nothing is
    * pinned, so the picker composes freely.
@@ -407,14 +413,15 @@ export interface WizardJoinResult {
    */
   managed?: boolean
   /**
-   * On a failure (`'failed' | 'abandoned'`): the login lane's own captured
-   * explanation, for narration. The lane already printed it; nothing
-   * branches on it (LLP 0179#no-prose-control-flow).
+   * On a fork-returning outcome (`'failed' | 'abandoned'`): the login
+   * lane's own captured explanation, for narration. The lane already
+   * printed it; nothing branches on it (LLP 0179#no-prose-control-flow).
    */
   detail?: string
   /**
-   * On a failure: the login lane's reason code, which is what
-   * `printJoinFailure` branches on to name the wizard-level consequence.
+   * On a fork-returning outcome: the login lane's reason code, which is
+   * what `printJoinFailure` branches on to name the wizard-level
+   * consequence.
    */
   reason?: LoginOutcomeReason
 }

@@ -821,6 +821,33 @@ test('runInitWizard: a multi-org join failure points at hyp remote login --org',
   assert.doesNotMatch(stderr.text(), /admin needs to grant/)
 })
 
+// A successful enrollment whose daemon install failed is not a failed
+// sign-in: the machine is enrolled, so re-presenting the fork would offer
+// enrollment to a machine that already has it, and "Sign-in did not complete"
+// contradicts the three lines above it (#978). The run carries on down the
+// team pathway and says what is actually missing.
+test('runInitWizard: an enrolled join whose daemon install failed proceeds on the team pathway', async () => {
+  // 'quit' backs the fork so a wizard that loops back terminates instead of
+  // hanging; reaching it at all is the defect this test names.
+  const forkChoices = ['team', 'quit']
+  const { opts, stderr, calls } = wizardOpts(await tmpHome(), {
+    fork: async () => forkChoices.shift(),
+    join: async () => ({ status: 'daemon_incomplete', lockedSources: ['claude'], managed: true }),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.doesNotMatch(stderr.text(), /Sign-in did not complete/)
+  assert.doesNotMatch(stderr.text(), /admin needs to grant/)
+  assert.match(stderr.text(), /background service could not be installed/)
+  assert.equal(calls.filter((c) => c === 'fork').length, 1, 'must not re-present the fork')
+  assert.equal(result.pathway, 'team')
+  // fork -> join -> the team pathway's lanes, with no second fork.
+  assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
+  // The enrollment still applies: the org's rows reach the picker locked.
+  assert.deepEqual(opts._pickOpts.locked, ['claude'])
+  assert.equal(opts._pickOpts.managed, true)
+})
+
 test('runInitWizard: an abandoned join is retriable and re-presents the fork', async () => {
   const forkChoices = ['team', 'team', 'local']
   const joins = [

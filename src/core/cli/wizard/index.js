@@ -60,7 +60,9 @@ import { wizardStepProgress } from './steps.js'
  * managed or not. Being managed no longer picks a different pathway; it
  * only pre-locks the org's picker rows, leaving local additions editable.
  * A failed or abandoned join returns to the fork rather than deciding for
- * the user (`@ref LLP 0129#failed-join-returns-to-fork` below).
+ * the user (`@ref LLP 0129#failed-join-returns-to-fork` below). A join that
+ * enrolled but could not install the daemon is neither: it carries on down
+ * the team pathway and says what is missing.
  *
  * Non-interactive callers (`--yes`, `--dry-run`, presets, `--from-file`)
  * set `opts.picks` and short-circuit straight to the pick phase and
@@ -80,7 +82,7 @@ import { wizardStepProgress } from './steps.js'
  * a completed join reused rather than re-run and confirmed picks
  * re-seeding the re-entered lane. Ctrl+C stays the cancel.
  *
- * @ref LLP 0129#failed-join-returns-to-fork [implements]: an incomplete join prints why and re-presents the fork; the wizard never falls through to a pathway the user did not choose
+ * @ref LLP 0129#failed-join-returns-to-fork [implements]: a failed or abandoned join prints why and re-presents the fork; the wizard never falls through to a pathway the user did not choose
  *
  * @param {RunInitWizardOptions} opts
  * @returns {Promise<InitWizardResult>}
@@ -448,9 +450,16 @@ async function runGuardedInitWizard(opts, guard) {
           ctx: opts.ctx,
           ...(joinProgress ? { progress: joinProgress } : {}),
         })
-        if (join.status !== 'ok') {
+        if (join.status === 'failed' || join.status === 'abandoned') {
           printJoinFailure(opts, join)
           continue
+        }
+        // Enrolled, but the daemon install did not finish: re-presenting the
+        // fork would offer enrollment to a machine that already has it (#978).
+        // Name what is missing and carry on - the finale's daemon step reads
+        // `hyp status`, finds no installed daemon, and tries the install again.
+        if (join.status === 'daemon_incomplete') {
+          opts.stderr.write('Enrolled, but the background service could not be installed - captures will not run until it is.\n')
         }
         pathway = 'team'
         locked = join.lockedSources
@@ -1034,7 +1043,7 @@ export function firstLookHadRows(result) {
 }
 
 /**
- * Explain an incomplete join before the fork is re-presented. The login
+ * Explain a failed or abandoned join before the fork is re-presented. The login
  * lane already printed its own detailed error (the join phase tees it
  * through), so this adds only the wizard-level consequence: what the
  * failure class means for the user's next choice. A multi-org account
