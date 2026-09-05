@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, statusFilePath, writeStatusFile } from '../../src/core/daemon/status.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
@@ -115,4 +115,46 @@ test('a running daemon\'s snapshot sources still render present-tense', async ()
   const block = sourcesBlock(renderText(report))
   assert.match(block, /ai-gateway.*\[started\]/, 'a live daemon\'s source is started')
   assert.match(block, /otlp.*\[failed\]/)
+})
+
+test('a live pid the daemon did not take does not revive its predecessor\'s sources', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // `processIsAlive` proves a pid is taken, not that the daemon took it: after
+  // a hard kill the OS is free to reissue the number, and the collector already
+  // derives `snapshotIsThisProcess` for exactly that (LLP 0348). Reading
+  // `daemon.running` alone would let the dead run's `started` through on the
+  // machine issue #1410 is about.
+  writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'healthy',
+    pid: process.pid + 1,
+    healthyAt: new Date().toISOString(),
+    uptimeMs: 0,
+    sources: [{ name: 'ai-gateway', plugin: '@hypaware/ai-gateway', state: 'started' }],
+    sinks: [],
+  }))
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.daemon.running, true, 'the pid is taken')
+
+  const block = sourcesBlock(renderText(report))
+  assert.ok(!block.includes('[started]'), 'but not by the daemon that wrote the snapshot')
+  assert.match(block, /ai-gateway.*\[stopped\]/)
+})
+
+test('a status file whose sources are not a list does not break the report', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // `readStatusFile` validates only "is an object", so `sources` can be any
+  // JSON value at all. A string has a `length` and no `.map`, and `hyp status`
+  // is the one command an operator runs on a broken install: it has to answer.
+  await fs.writeFile(statusFilePath(stateRoot), JSON.stringify({
+    state: 'healthy',
+    sources: 'abcd',
+    sinks: [],
+  }))
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const text = renderText(report)
+  assert.match(text, /daemon:.*not running/, 'the report is still rendered')
+  assert.match(sourcesBlock(text), /\(none\)/, 'and an unreadable list names no sources')
 })

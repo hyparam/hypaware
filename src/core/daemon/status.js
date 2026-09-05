@@ -1386,7 +1386,7 @@ export async function collectHypAwareStatus(opts = {}) {
         state: started ? 'started' : 'stopped',
       })
     }
-  } else if (daemonStatusFile && (daemonStatusFile.sources?.length ?? 0) > 0) {
+  } else if (daemonStatusFile && Array.isArray(daemonStatusFile.sources) && daemonStatusFile.sources.length > 0) {
     // `status.json` outlives the process that wrote it, so with nothing
     // running a transcribed `started` is a present-tense claim on a machine
     // capturing nothing (issue #1410), under a daemon line that already reads
@@ -1394,9 +1394,25 @@ export async function collectHypAwareStatus(opts = {}) {
     // the liveness claim does not, and `stopped` is what a source whose daemon
     // is gone is. `failed` is left as written: it records why the last run
     // went wrong, carries its `error` beside it, and claims nothing about now.
+    //
+    // The liveness the rewrite reads is `daemon.running && snapshotIsThisProcess`,
+    // not `daemon.running` alone, for the reason spelled out where that pair is
+    // derived above: `processIsAlive` proves a pid is taken, not that the daemon
+    // took it, so a hard kill whose pid the OS reissued would otherwise let the
+    // dead run's `started` through on exactly the machine this is about.
+    //
+    // The branch is entered on `Array.isArray`, not on a truthy `.length`,
+    // because `readStatusFile` validates only "is an object": a `sources` of
+    // `"abcd"` arrives here with `length` 4 and no `.map`
+    // (LLP 0164#status-reads-it-from-the-status-file). That is the guard
+    // `recentEntrypointsFromSources` and `statusFileSources` already use, and a
+    // file carrying no readable list falls through to the inference below, the
+    // same as a file carrying none at all. A per-entry `s &&` covers a null
+    // inside the list.
     // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
-    sources.push(...(daemonStatusFile.sources ?? []).map((s) => (
-      daemon.running || s.state !== 'started'
+    const snapshotIsLive = daemon.running && snapshotIsThisProcess
+    sources.push(...daemonStatusFile.sources.map((s) => (
+      snapshotIsLive || !s || s.state !== 'started'
         ? s
         : /** @type {SourceSnapshot} */ ({ ...s, state: 'stopped' })
     )))
