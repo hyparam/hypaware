@@ -222,15 +222,20 @@ test('a recorded boot failure is named as one, not as an exit without shutdown',
 
 // The over-fixing guard for that split: `degraded` on its own is a daemon that
 // served with a failed source and then died, which is exactly the ending the
-// original sentence describes.
+// original sentence describes. Both shapes it reaches `status.json` in are
+// covered, because `runDaemon` records the `anySourceFailed` case with no
+// `warnings` field at all, and the only other warning it ever writes is
+// `source_stop_failed:`.
 test('a degraded snapshot with no boot failure keeps the abnormal-exit message', async () => {
-  const { hypHome, stateRoot } = await makeHome()
-  leaveSnapshot(stateRoot, 'degraded', ['source_failed: codex'])
+  for (const warnings of [undefined, ['source_stop_failed:codex:timed out']]) {
+    const { hypHome, stateRoot } = await makeHome()
+    leaveSnapshot(stateRoot, 'degraded', warnings)
 
-  const report = await collectHypAwareStatus(collectOpts(hypHome))
-  const diag = report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally')
-  assert.ok(diag)
-  assert.equal(diag.severity, 'error')
-  assert.equal(report.overall, 'degraded')
-  assert.match(diag.message, /exited without shutting down/)
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    const diag = report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally')
+    assert.ok(diag)
+    assert.equal(diag.severity, 'error')
+    assert.equal(report.overall, 'degraded')
+    assert.match(diag.message, /exited without shutting down/)
+  }
 })

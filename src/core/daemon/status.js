@@ -1341,8 +1341,9 @@ export async function collectHypAwareStatus(opts = {}) {
   // gets wrong: a boot that threw never reached service and was owed no
   // shutdown, so "exited without shutting down" describes a shape it never
   // had. `runDaemon` persists `degraded` with a `boot_failed:` warning before
-  // it clears the pid and rethrows, read here with the prefix test
-  // `previousBootLooksStuck` applies to the same file (`src/core/update/self_update.js`).
+  // it clears the pid and rethrows, read here with the same prefix test that
+  // `previousBootLooksStuck` (`src/core/update/self_update.js`) already applies
+  // to that snapshot.
   // A `degraded` without that warning is a daemon that served with a failed
   // source, which the message below already describes.
   const warnings = daemonStatusFile?.warnings
