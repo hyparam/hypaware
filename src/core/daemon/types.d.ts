@@ -173,6 +173,7 @@ export type StatusDiagnosticKind =
   | 'daemon_binary_missing'
   | 'daemon_loaded_no_pid'
   | 'daemon_heartbeat_stale'
+  | 'daemon_exited_abnormally'
   | 'client_attach_missing'
   | 'client_attach_stale'
   | 'client_telemetry_stale'
