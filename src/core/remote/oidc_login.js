@@ -1,7 +1,9 @@
 // @ts-check
 
 import crypto from 'node:crypto'
+import process from 'node:process'
 
+import { withSpinner } from '../cli/spinner.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { exchangeCode, trimSlash } from './identity_client.js'
 import { startLoginPoller } from './login_poll.js'
@@ -36,6 +38,8 @@ import { createPkcePair } from './pkce.js'
  *   pollIntervalMs?: number,
  *   print?: (line: string) => void,
  *   compact?: boolean,
+ *   stdout?: { write(chunk: string): unknown },
+ *   env?: NodeJS.ProcessEnv,
  * }} args
  * @returns {Promise<OidcSession>}
  * @ref LLP 0058#d3 [implements]: client orchestrates the downstream PKCE leg; verifier held in memory, presented at /token
@@ -53,6 +57,8 @@ export async function loginWithBrowser({
   pollIntervalMs,
   print = () => {},
   compact = false,
+  stdout = process.stdout,
+  env,
 }) {
   const log = getLogger('remote')
   const { verifier, challenge } = createPkcePair()
@@ -94,7 +100,14 @@ export async function loginWithBrowser({
       smoke_step: 'browser_open',
     })
 
-    const { code } = await poller.waitForCode()
+    // The poll runs to a five-minute budget. The plain lane says so in a standing
+    // line; compact is the lane that drops standing lines, so it says it with a
+    // spinner instead - live while the poll runs, cleared once the sign-in
+    // settles, and off a TTY the same one plain line.
+    const poll = () => poller.waitForCode()
+    const { code } = compact
+      ? await withSpinner({ stdout, env, label: 'Waiting for the sign-in to complete...' }, poll)
+      : await poll()
     const session = await exchangeCode({ identityBase, code, codeVerifier: verifier, host, fetchImpl })
     log.info('remote.login_complete', {
       [Attr.COMPONENT]: 'remote-oidc',
