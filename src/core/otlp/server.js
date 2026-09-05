@@ -167,7 +167,8 @@ function hostnameOfHostHeader(value) {
  * the listener in the refusal log line; `log` lets a hosting plugin stamp its
  * own logger on it, the way the control handler does. Partial, because a
  * plugin may hold its logger under a type declaring only the methods it calls;
- * a logger with no `warn` still has its refusals counted.
+ * a logger with no `warn` still has its refusals counted, and never consumes
+ * the log window it cannot write into.
  * @returns {boolean}
  */
 export function isMisdirectedHost(req, opts) {
@@ -201,28 +202,35 @@ export function isMisdirectedHost(req, opts) {
   refusals.total += 1
   const now = Date.now()
   if (now - refusals.loggedAt >= HOST_REFUSED_LOG_INTERVAL_MS) {
-    refusals.loggedAt = now
     const log = opts.log ?? getLogger('otlp')
-    log.warn?.('listener.host_refused', {
-      [Attr.COMPONENT]: 'sources',
-      [Attr.OPERATION]: 'host_check',
-      [Attr.STATUS]: 'skipped',
-      [Attr.ERROR_KIND]: 'host_not_loopback',
-      listener: opts.name,
-      host: value.slice(0, LOGGED_HOST_MAX_CHARS),
-      // Which side refused and under what bind, because the rule is no longer
-      // 'loopback only' everywhere: a wildcard bind answers on its routable
-      // side to the address the request arrived on and to no other routable
-      // name. Without these, an operator whose name-based LAN exporter starts
-      // refusing reads a line indistinguishable from a rebinding attempt on
-      // the loopback side. Empty for an address that could not be read, the
-      // case that is judged rather than exempted.
-      arrived_on: arrivedOn,
-      bind: boundAddress(req) ?? '',
-      // Every refusal since this listener started, so a burst the interval
-      // above swallowed is still legible from one line.
-      refused_total: refusals.total,
-    })
+    // The window bounds a line, so only a logger that can write one spends
+    // it: advancing the clock for a logger with no `warn` would leave the
+    // next caller that can write a line silent for the rest of the interval.
+    // Not advancing it rate-limits nothing, because nothing was written; the
+    // refusal is counted above and answered below either way.
+    if (typeof log.warn === 'function') {
+      refusals.loggedAt = now
+      log.warn('listener.host_refused', {
+        [Attr.COMPONENT]: 'sources',
+        [Attr.OPERATION]: 'host_check',
+        [Attr.STATUS]: 'skipped',
+        [Attr.ERROR_KIND]: 'host_not_loopback',
+        listener: opts.name,
+        host: value.slice(0, LOGGED_HOST_MAX_CHARS),
+        // Which side refused and under what bind, because the rule is no longer
+        // 'loopback only' everywhere: a wildcard bind answers on its routable
+        // side to the address the request arrived on and to no other routable
+        // name. Without these, an operator whose name-based LAN exporter starts
+        // refusing reads a line indistinguishable from a rebinding attempt on
+        // the loopback side. Empty for an address that could not be read, the
+        // case that is judged rather than exempted.
+        arrived_on: arrivedOn,
+        bind: boundAddress(req) ?? '',
+        // Every refusal since this listener started, so a burst the interval
+        // above swallowed is still legible from one line.
+        refused_total: refusals.total,
+      })
+    }
   }
   return true
 }
