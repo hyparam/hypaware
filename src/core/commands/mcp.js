@@ -108,7 +108,9 @@ function parseMcpArgv(argv) {
   if ('help' in parsed) return { ok: false, error: 'usage: hyp mcp serve [--remote <target> [--org <label|*>]]' }
   if (!parsed.ok) return parsed
   const p = /** @type {{ remote?: string, org?: string, http: boolean }} */ (parsed.params)
-  if (p.org !== undefined && !p.remote) return { ok: false, error: '--org requires --remote' }
+  // Value check first: `--org=` with no --remote is an empty selector, and
+  // saying so beats blaming the missing target for it.
   if (p.org === '') return { ok: false, error: '--org expects an org label or *' }
+  if (p.org !== undefined && !p.remote) return { ok: false, error: '--org requires --remote' }
   return { ok: true, remote: p.remote, org: p.org, http: p.http }
 }

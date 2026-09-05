@@ -131,6 +131,21 @@ export function isAuthStatus(status) {
 }
 
 /**
+ * The terminal message for an operator read the server refused: with an
+ * explicit `--org`, a 403 answers the *selector*, not the credential. It is
+ * not a stale token, so neither a refresh nor a re-login can change it, and
+ * re-sending only earns a second denial in that org's audit trail. Shared by
+ * the verb attach path and the stdio proxy so the two never drift.
+ *
+ * @param {string} target
+ * @param {string} org
+ * @returns {string}
+ */
+export function orgReadRefusedMessage(target, org) {
+  return `'${target}' refused the read for --org '${org}' (HTTP 403) - this account may not read that org; re-login cannot grant operator standing`
+}
+
+/**
  * Tag the error so the attach path can recognize an auth rejection and attempt
  * a single silent refresh + retry.
  *

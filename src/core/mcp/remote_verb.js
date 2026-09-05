@@ -4,7 +4,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveRemotes } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, describeAuthRejection, resolveAccessJwt } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
-import { createHttpMcpClient, isAuthStatus } from './client.js'
+import { createHttpMcpClient, isAuthStatus, orgReadRefusedMessage } from './client.js'
 
 /**
  * @import { CommandRunContext, VerbRegistration } from '../../../hypaware-plugin-kernel-types.js'
@@ -75,8 +75,17 @@ export async function runRemoteVerb({ verb, params, target, org, ctx }) {
     try {
       return { authFailed: false, value: await callRemoteTool({ url: mcpUrl, token, verb, params }) }
     } catch (err) {
+      const status = Number(/** @type {any} */ (err).status) || 0
+      // With an explicit --org, a 403 refuses the operator *read*, not the
+      // credential: terminal, so it never spends a refresh and never re-sends a
+      // request the server already denied and audited.
+      if (org !== undefined && status === 403) {
+        /** @type {{ ok: false, error: string, exitCode: number }} */
+        const refused = { ok: false, error: orgReadRefusedMessage(target, org), exitCode: 1 }
+        return { authFailed: false, value: refused }
+      }
       const authFailed = isAuthError(err)
-      if (authFailed) lastAuthStatus = Number(/** @type {any} */ (err).status) || lastAuthStatus
+      if (authFailed) lastAuthStatus = status || lastAuthStatus
       /** @type {{ ok: false, error: string, exitCode: number }} */
       const value = { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 }
       return { authFailed, value }

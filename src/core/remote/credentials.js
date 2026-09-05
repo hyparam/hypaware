@@ -114,7 +114,16 @@ export function deriveMcpEndpoint(url, org) {
   // only normalizing a trailing slash. Otherwise treat the URL as a base and
   // append the MCP path after any existing path prefix.
   parsed.pathname = trimmedPath.endsWith(MCP_PATH) ? trimmedPath : `${trimmedPath}${MCP_PATH}`
-  if (org !== undefined) parsed.searchParams.set('org', org)
+  // Rewrite the raw query string rather than calling `searchParams.set`: that
+  // setter re-serializes every existing parameter as form encoding, so a
+  // registered `%20` would come back as `+`, a `~` as `%7E`, and a valueless
+  // `?flag` would grow an `=`, all only when an operator passes --org. This way
+  // the target's own parameters reach the server exactly as registered.
+  if (org !== undefined) {
+    const kept = parsed.search.replace(/^\?/, '').split('&')
+      .filter((part) => part !== '' && part !== 'org' && !part.startsWith('org='))
+    parsed.search = `?${[...kept, `org=${encodeURIComponent(org)}`].join('&')}`
+  }
   return parsed.toString()
 }
 

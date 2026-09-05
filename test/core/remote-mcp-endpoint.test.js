@@ -16,7 +16,7 @@ import { querySqlVerb } from '../../src/core/query/verb.js'
 import { verbToCommand } from '../../src/core/cli/verb_command.js'
 import { runMcp } from '../../src/core/commands/mcp.js'
 import { runMcpProxy } from '../../src/core/mcp/proxy.js'
-import { deriveMcpEndpoint, writeToken } from '../../src/core/remote/credentials.js'
+import { deriveMcpEndpoint, writeSession, writeToken } from '../../src/core/remote/credentials.js'
 
 const cmd = verbToCommand(querySqlVerb)
 
@@ -224,4 +224,85 @@ test('graph neighbors carries the operator selector as a transport flag', async 
   const graph = verbToCommand({ ...graphNeighborsVerb, render: () => ({ stdout: 'graph' }) })
   assert.equal(await graph.run(['seed-node', '--remote', 'prod', '--org=*'], ctx), 0)
   assert.ok(urls.every((url) => url === 'https://hyp.internal/v1/mcp?org=*'))
+})
+
+test('adding the org selector leaves the target\'s own query parameters byte-identical', () => {
+  // URL.searchParams.set re-serializes the whole query as form encoding, so a
+  // registered `%20`/`~`/valueless param would change shape the moment an
+  // operator passed --org. Everything but the appended selector must be untouched.
+  const registered = 'https://host/base?a=x%20y&b=~z&flag'
+  assert.equal(deriveMcpEndpoint(registered), 'https://host/base/v1/mcp?a=x%20y&b=~z&flag')
+  assert.equal(deriveMcpEndpoint(registered, '*'), 'https://host/base/v1/mcp?a=x%20y&b=~z&flag&org=*')
+  // A base with no query of its own carries the selector alone.
+  assert.equal(deriveMcpEndpoint('https://host', 'acme.test'), 'https://host/v1/mcp?org=acme.test')
+})
+
+test('a 403 on an --org read is terminal: no refresh, no re-send, no re-login advice', async (t) => {
+  const hypHome = await tmpHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // A refreshable oidc session: pre-fix, its 403 forced a token refresh and a
+  // second (audited) send of the read the server had already denied.
+  await writeSession(path.join(hypHome, 'hypaware'), 'prod', {
+    refreshToken: 'rt',
+    accessJwt: 'jwt',
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    org: 'acme',
+  })
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+  /** @type {string[]} */
+  const posts = []
+  globalThis.fetch = /** @type {any} */ (async (/** @type {string} */ url) => {
+    posts.push(String(url))
+    return { ok: false, status: 403, headers: { get: () => null }, text: async () => 'forbidden' }
+  })
+
+  const { ctx, err } = verbCtx(hypHome, 'https://hyp.internal')
+  assert.equal(await cmd.run(['SELECT 1', '--remote', 'prod', '--org', 'other.test'], ctx), 1)
+  // Exactly one send, and no identity /token call to refresh a live credential.
+  assert.deepEqual(posts, ['https://hyp.internal/v1/mcp?org=other.test'])
+  assert.match(err.join(''), /refused the read for --org 'other\.test'/)
+  assert.doesNotMatch(err.join(''), /session has expired|remote login/)
+})
+
+test('the stdio proxy reports a 403 on an --org read as a refused org read', async (t) => {
+  const hypHome = await tmpHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeSession(path.join(hypHome, 'hypaware'), 'prod', {
+    refreshToken: 'rt',
+    accessJwt: 'jwt',
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    org: 'acme',
+  })
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+  /** @type {string[]} */
+  const posts = []
+  globalThis.fetch = /** @type {any} */ (async (/** @type {string} */ url) => {
+    posts.push(String(url))
+    return { ok: false, status: 403, headers: { get: () => null }, text: async () => 'forbidden' }
+  })
+
+  const { ctx, out } = verbCtx(hypHome, 'https://hyp.internal')
+  ctx.stdin = Readable.from([JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n'])
+  assert.equal(await runMcpProxy({ target: 'prod', org: '*', ctx }), 0)
+  assert.deepEqual(posts, ['https://hyp.internal/v1/mcp?org=*'])
+  assert.match(JSON.parse(out.join('')).error.message, /refused the read for --org '\*'/)
+})
+
+test('the stdio proxy resolves the built-in target the verb path already accepts', async (t) => {
+  const hypHome = await tmpHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeToken(path.join(hypHome, 'hypaware'), 'hyperparam', 'tok')
+  const { urls } = stubMcp(t)
+  const { ctx } = verbCtx(hypHome, 'https://hyp.internal')
+  ctx.stdin = Readable.from([JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n'])
+  assert.equal(await runMcp(['--remote', 'hyperparam', '--org', '*'], ctx), 0)
+  assert.deepEqual(urls, ['https://hypaware.hyperparam.app/v1/mcp?org=*'])
+})
+
+test('an empty org value is named as such even with no --remote', async () => {
+  const { ctx, err } = verbCtx('/unused', 'https://hyp.internal')
+  assert.equal(await runMcp(['--org='], ctx), 2)
+  assert.match(err.join(''), /--org expects an org label or \*/)
 })
