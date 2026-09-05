@@ -194,24 +194,31 @@ export function classifyLoginFailure(login) {
 /**
  * The production login lane: run `hyp remote login` (bare, so it resolves
  * the default target and the browser flow, `@ref LLP 0134#no-token-join`
- * - the wizard never passes a token) against the wizard's command context.
+ * - the wizard never passes a token) against the wizard's command context,
+ * over the wizard's own guarded streams rather than the context's raw ones.
  * `remoteLogin` reports the outcome, so classification reads a code; the
  * stderr tee stays for `detail`, which echoes the lane's own explanation
  * back to the user (LLP 0179#no-prose-control-flow).
  *
  * @param {RunWizardJoinOptions} opts
+ * @param {typeof remoteLogin} [login] the login lane itself (tests)
  * @returns {Promise<LoginLaneResult>}
  */
-async function defaultRunLogin(opts) {
+export async function defaultRunLogin(opts, login = remoteLogin) {
   const ctx = opts.ctx
   if (!ctx) {
     throw new Error('runWizardJoin: no login context (opts.ctx) and no runLogin override was provided')
   }
-  const capture = teeWriter(ctx.stderr)
-  const teed = /** @type {CommandRunContext} */ ({ ...ctx, stderr: capture.stream })
+  // The lane prints through the wizard's streams, not the raw ones its
+  // context carries. Its attach wait holds the run for up to half a minute
+  // behind a ticking spinner, and off the guard a reader that leaves during
+  // that wait is written into for the rest of it, unnoticed.
+  // @ref LLP 0341#absorb [implements]: the login lane is a lane too, so its context writes through the guarded streams
+  const capture = teeWriter(opts.stderr)
+  const teed = /** @type {CommandRunContext} */ ({ ...ctx, stdout: opts.stdout, stderr: capture.stream })
   // Compact: one line per event. The wizard's later screens carry the
   // privacy block's other sentences, so the lane prints the deadline alone.
-  const { exitCode, reason } = await remoteLogin([], teed, { compact: true })
+  const { exitCode, reason } = await login([], teed, { compact: true })
   return { exitCode, reason, stderr: capture.text() }
 }
 

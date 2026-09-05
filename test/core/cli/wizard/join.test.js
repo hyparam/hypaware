@@ -3,7 +3,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { classifyLoginFailure, runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
+import { classifyLoginFailure, defaultRunLogin, runWizardJoin } from '../../../../src/core/cli/wizard/join.js'
+import { guardWizardOutput } from '../../../../src/core/cli/wizard/output_guard.js'
+import { withSpinner } from '../../../../src/core/cli/spinner.js'
 
 /**
  * @import { HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.js'
@@ -280,4 +282,79 @@ test('runWizardJoin: passes the org-config wait budget through to the converge h
   })
   await runWizardJoin(opts)
   assert.ok(sawWaitOpts && typeof sawWaitOpts.timeoutMs === 'number' && sawWaitOpts.timeoutMs > 0)
+})
+
+// --- defaultRunLogin: the login lane writes through the guarded streams ---
+
+/**
+ * A stdout stand-in that dies the way a pipe whose reader has gone does:
+ * set `destroyed`, and every later write is recorded as one that should
+ * never have reached it.
+ */
+function killableStdout() {
+  const stream = {
+    isTTY: true,
+    columns: 80,
+    destroyed: false,
+    /** @type {string[]} */
+    afterDeath: [],
+    /** @param {string} chunk */
+    write(chunk) {
+      if (stream.destroyed) stream.afterDeath.push(String(chunk))
+      return !stream.destroyed
+    },
+  }
+  return stream
+}
+
+/** @param {number} ms */
+function sleep(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms) })
+}
+
+// The login lane's attach wait holds the run for up to half a minute behind
+// a spinner. A reader that leaves during it must stop the ticking and be
+// recorded, which only happens if the lane's context writes through the
+// wizard's guard rather than straight at the stream.
+// @ref LLP 0341#absorb [tests]:
+test('defaultRunLogin: a pipe that dies during the attach wait stops the spinner and marks the guard', async () => {
+  const raw = killableStdout()
+  const rawErr = makeBuf()
+  const guard = guardWizardOutput({ stdout: raw, stderr: rawErr })
+  try {
+    const opts = /** @type {any} */ ({
+      stdout: guard.stdout,
+      stderr: guard.stderr,
+      ctx: { stdout: raw, stderr: rawErr },
+    })
+    await defaultRunLogin(opts, async (_argv, ctx) => {
+      await withSpinner(
+        { stdout: ctx.stdout, env: {}, intervalMs: 5, label: 'waiting for the daemon to attach clients...' },
+        async () => {
+          await sleep(20)
+          raw.destroyed = true
+          await sleep(40)
+        }
+      )
+      return { exitCode: 0, reason: 'ok' }
+    })
+    assert.equal(guard.outputDead(), true, 'the guard must learn the login lane found the surface dead')
+    assert.deepEqual(raw.afterDeath, [], 'no write may reach the stream after it died')
+  } finally {
+    guard.detach()
+  }
+})
+
+// The stderr tee still captures the lane's own explanation for `detail`, and
+// still shows it, now that it sits over the guarded stream.
+test('defaultRunLogin: the failure detail still captures the lane stderr', async () => {
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const opts = /** @type {any} */ ({ stdout, stderr, ctx: { stdout, stderr } })
+  const outcome = await defaultRunLogin(opts, async (_argv, ctx) => {
+    ctx.stderr.write('hyp remote login: not a member\n')
+    return { exitCode: 1, reason: 'no_membership' }
+  })
+  assert.equal(outcome.stderr, 'hyp remote login: not a member\n')
+  assert.equal(stderr.text(), 'hyp remote login: not a member\n')
 })
