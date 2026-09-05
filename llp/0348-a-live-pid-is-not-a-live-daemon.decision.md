@@ -12,6 +12,7 @@ read-side question boot health cannot answer, which is whether the daemon is
 still running its loop now)
 **Extended-by:** LLP 0349 (#not-settled: `recent_error_count` now counts the errors the install actually recorded, in the daemon log and the sink outboxes, over a stated 24-hour window)
 **Extended-by:** LLP 0383 (#stale-heartbeat-is-unresponsive: the other side of the live-process gate - what an exited daemon's leftover snapshot may be read for)
+**Extended-by:** LLP 0386 (#heartbeat-is-derived: the derivation is unchanged, but the writer now dates the pair for a daemon that boots `degraded`, so that daemon has a heartbeat to be late for)
 **Related:** LLP 0164 (#status-reads-it-from-the-status-file: the file this
 reads and why `hyp status` reads no kernel), LLP 0228
 (#status-file-is-the-surface: the same file as a standing operator surface),

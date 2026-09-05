@@ -135,12 +135,19 @@ export interface DaemonStatus {
   pid: number
   /** ISO timestamp of the daemon process boot. */
   startedAt: string
-  /** ISO timestamp the daemon first reached `healthy`. */
+  /**
+   * ISO timestamp the daemon started serving: written once the sources have
+   * been started, whatever the boot aggregate said, so a `degraded` boot
+   * carries it too. Absent only before that point, when there is no tick loop
+   * yet. The name predates the meaning and is kept because every reader and
+   * every older build shares this field.
+   * @ref LLP 0386#the-pair-keeps-its-name [constrained-by]: renaming would mint the field LLP 0348 declined to mint
+   */
   healthyAt?: string
   /** ISO timestamp the daemon transitioned to `stopped`. */
   stoppedAt?: string
   /**
-   * Milliseconds since `healthyAt` (0 when not yet healthy), recomputed
+   * Milliseconds since `healthyAt` (0 before the daemon serves), recomputed
    * immediately before every write. So `healthyAt + uptimeMs` is the moment
    * of that write, and `hyp status` reads the pair as the daemon heartbeat: a
    * writer, or a republisher, that refreshes either half against the current
