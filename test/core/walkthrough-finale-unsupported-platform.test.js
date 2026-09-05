@@ -224,7 +224,9 @@ test('a failed npx durable-bin upgrade finishes the finale too', async () => {
   await fs.rm(home, { recursive: true, force: true })
 })
 
-test('an unwritable unit directory finishes the finale too', async () => {
+// Skipped as root, who is refused by no mode bits: the mkdir would succeed and
+// the run would fail further along on something this test does not describe.
+test('an unwritable unit directory finishes the finale too', { skip: process.getuid?.() === 0 }, async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-eacces-'))
   const systemdDir = path.join(home, '.config', 'systemd')
   await fs.mkdir(systemdDir, { recursive: true })
@@ -234,15 +236,20 @@ test('an unwritable unit directory finishes the finale too', async () => {
   /** @type {string[]} */
   const events = []
   const stderr = makeBuf()
-  // The real installer, not the seam: the throw has to come from the
-  // filesystem write inside `installSystemdUnit` itself.
-  const summary = await withPlatform('linux', () => runPickerFinale(/** @type {any} */ (
-    finaleArgs(home, events, stderr)
-  )))
-  assert.equal(summary.daemonInstall.failed, true, 'an EACCES on the unit directory is a failed install')
-  assert.match(stderr.text(), /^daemon install failed: failed to create .*systemd\/user: EACCES/, 'the system error names the path and the reason')
-  assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
-  assert.deepEqual(events, ['attach'], 'attach still runs; it needs no daemon')
-  await fs.chmod(systemdDir, 0o700)
-  await fs.rm(home, { recursive: true, force: true })
+  try {
+    // The real installer, not the seam: the throw has to come from the
+    // filesystem write inside `installSystemdUnit` itself.
+    const summary = await withPlatform('linux', () => runPickerFinale(/** @type {any} */ (
+      finaleArgs(home, events, stderr)
+    )))
+    assert.equal(summary.daemonInstall.failed, true, 'an EACCES on the unit directory is a failed install')
+    assert.match(stderr.text(), /^daemon install failed: failed to create .*systemd\/user: EACCES/, 'the system error names the path and the reason')
+    assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
+    assert.deepEqual(events, ['attach'], 'attach still runs; it needs no daemon')
+  } finally {
+    // Restored whatever happened: a failed assertion would otherwise leave a
+    // 0500 directory that `fs.rm` cannot empty.
+    await fs.chmod(systemdDir, 0o700)
+    await fs.rm(home, { recursive: true, force: true })
+  }
 })

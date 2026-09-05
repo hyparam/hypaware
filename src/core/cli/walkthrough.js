@@ -1669,8 +1669,10 @@ export async function runPickerFinale(args) {
   // after the same config commit. All are caught, as three distinct classes:
   // `DaemonInstallError` for the platform `installDaemon` itself rejects,
   // which is every `DaemonInstallError` in `install.js` and nothing else,
-  // `ServiceOpError` for what the platform installers raise, both when no pid
-  // appears (LLP 0317 D1) and when the host refuses the plist/unit write, and
+  // `ServiceOpError` for what the platform installers raise: when no pid
+  // appears (LLP 0317 D1), when the host refuses the plist/unit write, and
+  // when the service manager cannot be spawned at all (no `systemctl` on a
+  // container or a non-systemd distro), and
   // `GlobalInstallError` for the durable-bin upgrade npm refused, which every
   // `npx hypaware setup` first run passes through (#1386). Nothing wider: a
   // bug in this lane is not an install failure, so it still propagates, and

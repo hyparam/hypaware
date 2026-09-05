@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { renderDaemonInstall, serviceDaemonStatus } from '../../src/core/daemon/install.js'
+import { ServiceOpError, ensureFsOp } from '../../src/core/daemon/service_ops.js'
 import { runDaemon } from '../../src/core/daemon/runtime.js'
 import {
   probeClientAttachFromDescriptor,
@@ -448,6 +449,30 @@ test('serviceDaemonStatus degrades to "not loaded" when the service manager cann
   assert.equal(status.installed, true)
   assert.equal(status.loaded, false)
   assert.equal(status.pid, undefined)
+})
+
+// `ensureFsOp` exists so an EACCES on the plist/unit directory reaches the
+// picker finale as an install failure it can carry on from. It must not also
+// launder a bug into one: the finale prints "daemon install failed" and exits
+// 0, so a swallowed `TypeError` would be a silent no-install.
+test('ensureFsOp converts host refusals and lets bugs through', () => {
+  const refusal = Object.assign(new Error("EACCES: permission denied, mkdir '/x'"), { code: 'EACCES' })
+  assert.throws(
+    () => ensureFsOp(() => { throw refusal }, 'create /x', ServiceOpError),
+    (err) => {
+      assert.ok(err instanceof ServiceOpError)
+      assert.match(err.message, /^failed to create \/x: EACCES: permission denied/)
+      return true
+    }
+  )
+  assert.throws(
+    () => ensureFsOp(() => { throw new TypeError('path must be a string') }, 'create /x', ServiceOpError),
+    (err) => {
+      assert.ok(!(err instanceof ServiceOpError), 'a bug is not an install failure')
+      assert.ok(err instanceof TypeError)
+      return true
+    }
+  )
 })
 
 test('the staged-restart exit code is distinct from success and error exits', async () => {
