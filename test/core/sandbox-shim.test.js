@@ -106,6 +106,31 @@ function systemdRoot(t, unit = 'hypaware.service') {
   return { root, home, unit }
 }
 
+/**
+ * The body a job wrote into `file`, once `ready` accepts it.
+ *
+ * A shell `>` truncates the path into existence, and `>>` creates it, before
+ * `printf` writes into it, so a poll on the file existing can read it empty in
+ * the gap between. The default `ready` takes any content, which is enough only
+ * because every job here writes its whole payload in one `printf`; a job that
+ * wrote in two steps would read back as a prefix, so give that one a `ready`
+ * that recognizes the end of the body. Returns the last read when nothing
+ * satisfies `ready`, so the caller's assertion reports what the job did write.
+ *
+ * @param {string} file
+ * @param {(body: string) => boolean} [ready]
+ * @returns {Promise<string>}
+ */
+async function waitForBody(file, ready = (body) => body !== '') {
+  let body = ''
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try { body = fs.readFileSync(file, 'utf8') } catch { /* the job has not created it yet */ }
+    if (ready(body)) return body
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  return body
+}
+
 test('launchctl mock: bootstrap → print → bootout round trip', (t) => {
   const { root, plist, label, target } = sandboxRoot(t)
 
@@ -178,7 +203,7 @@ test('launchctl mock: setenv reaches the job launchd starts', async (t) => {
     '  <array>',
     '    <string>/bin/sh</string>',
     '    <string>-c</string>',
-    `    <string>printf '%s' "\$NODE_USE_SYSTEM_CA" &gt; ${seen}</string>`,
+    `    <string>printf '[%s]' "\$NODE_USE_SYSTEM_CA" &gt; ${seen}</string>`,
     '  </array>',
     '</dict>',
     '</plist>',
@@ -189,11 +214,9 @@ test('launchctl mock: setenv reaches the job launchd starts', async (t) => {
   assert.equal(shim(root, 'launchctl', ['setenv', 'NODE_USE_SYSTEM_CA', '1'], env).code, 0)
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
 
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    if (fs.existsSync(seen)) break
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
-  assert.equal(fs.readFileSync(seen, 'utf8'), '1', 'the domain variable is in the job env')
+  // The brackets keep the two failures apart: `[]` is a job that ran without
+  // the variable, an empty body a job that never wrote at all.
+  assert.equal(await waitForBody(seen), '[1]', 'the domain variable is in the job env')
 })
 
 test('security mock: the CN is read from the certificate without shelling out', (t) => {
@@ -477,19 +500,14 @@ test('launchctl mock: a setenv after bootstrap reaches the next launch', async (
   const plist = writePlist(root, label, ['/bin/sh', '-c', `printf '[%s]\\n' "$SANDBOX_PROBE" >> ${seen}`])
 
   assert.equal(shim(root, 'launchctl', ['bootstrap', 'gui/501', plist], env).code, 0)
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    if (fs.existsSync(seen)) break
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
-  assert.equal(fs.readFileSync(seen, 'utf8'), '[]\n', 'the first launch saw an unset variable')
+  // Match the first line rather than the whole body: KeepAlive relaunches the
+  // job every `throttleMs`, so an equality here would also be asserting that
+  // the poll read the file before the second launch appended to it, which is
+  // the kind of clock dependence this test was just rid of.
+  assert.match(await waitForBody(seen), /^\[\]\n/, 'the first launch saw an unset variable')
 
   assert.equal(shim(root, 'launchctl', ['setenv', 'SANDBOX_PROBE', 'on'], env).code, 0)
-  let body = ''
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    body = fs.readFileSync(seen, 'utf8')
-    if (body.includes('[on]')) break
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
+  const body = await waitForBody(seen, (written) => written.includes('[on]'))
   assert.match(body, /\[on\]/, 'a restart after the setenv carries the domain value')
 })
 
