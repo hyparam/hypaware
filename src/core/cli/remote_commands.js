@@ -745,6 +745,10 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       noBrowser,
       compact,
       print: (line) => ctx.stderr.write(`${line}\n`),
+      // Compact announces the sign-in wait with a spinner, so it needs a stream
+      // and the env that vetoes animation, same as the attach wait below.
+      stdout: ctx.stdout,
+      env: ctx.env,
     })
   } catch (err) {
     const callbackError = /** @type {any} */ (err)?.callbackError
