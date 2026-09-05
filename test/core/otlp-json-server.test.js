@@ -893,6 +893,54 @@ test('a refusal is always counted but logged at most once an interval, with the 
   assert.ok(host.startsWith(logged))
 })
 
+// The window bounds a line, and the tally it throttles is keyed by the
+// listener rather than by the logger: an entry outlives the run that filled
+// it in, and a hosting plugin may hold its logger under a type declaring
+// `warn` optional (`ProxyOptions.log` does). A caller that cannot write the
+// line must not spend the window, or the next one that can refuses with
+// nothing in `logs`.
+test('a logger with no warn is counted and refused, but does not consume the log window', () => {
+  /** @type {{ event: string, fields: Record<string, unknown> }[]} */
+  const lines = []
+  /** @type {PluginLogger} */
+  const full = {
+    debug() {},
+    info() {},
+    error() {},
+    warn(event, fields) {
+      lines.push({ event, fields: fields ?? {} })
+    },
+  }
+  // Type-legal today, and silent: the methods a plugin calls, without the one
+  // the refusal writes through.
+  /** @type {Partial<PluginLogger>} */
+  const warnless = { info() {} }
+  /** @param {Partial<PluginLogger>} log */
+  const refuse = (log) =>
+    isMisdirectedHost(
+      /** @type {any} */ ({ socket: { localAddress: '127.0.0.1' }, headers: { host: 'attacker.example' } }),
+      // A listener name of its own: the tally lives as long as the process, so
+      // sharing one with another test would couple the two.
+      { name: 'hypaware/refusal-warnless', log }
+    )
+
+  assert.equal(refuse(warnless), true)
+  assert.equal(refuse(warnless), true)
+  assert.equal(lines.length, 0)
+
+  // The window was never spent, so a caller that can write a line still does,
+  // inside the same interval.
+  assert.equal(refuse(full), true)
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0]?.event, 'listener.host_refused')
+  // Every refusal so far, the two silent ones included.
+  assert.equal(lines[0]?.fields?.refused_total, 3)
+
+  // A line that was written does throttle the next one.
+  assert.equal(refuse(full), true)
+  assert.equal(lines.length, 1)
+})
+
 // The rule the refusal enforces is no longer 'loopback only' everywhere, so a
 // line that says only which `Host` was refused cannot tell an operator which
 // rule refused it. A wildcard bind's routable side and a loopback side produce
