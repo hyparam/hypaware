@@ -44,8 +44,9 @@ async function makeHome() {
  *
  * @param {string} stateRoot
  * @param {DaemonState} state
- * @param {{ writtenMsAgo?: number }} [opts] how long ago the snapshot was last
- *   written, when the test needs that readable
+ * @param {{ writtenMsAgo?: number, warnings?: string[] }} [opts] how long ago
+ *   the snapshot was last written and what the daemon recorded alongside that
+ *   state, when the test needs either readable
  */
 function leaveSnapshot(stateRoot, state, opts = {}) {
   /** @type {DaemonStatus} */
@@ -59,6 +60,7 @@ function leaveSnapshot(stateRoot, state, opts = {}) {
     sources: [],
     sinks: [],
   }
+  if (opts.warnings) status.warnings = opts.warnings
   if (typeof opts.writtenMsAgo === 'number') {
     // `healthyAt + uptimeMs` is the moment of the last persist (LLP 0348
     // #heartbeat-is-derived), so this puts that write where the test wants it.
@@ -248,5 +250,46 @@ test('the daemon records the stop before anything that can block its shutdown', 
     assert.equal(JSON.parse(readFileSync(statusFilePath(stateRoot), 'utf8')).state, 'stopped')
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// Issue #1407. `degraded` covers two very different endings, and the snapshot
+// says which: `runDaemon` persists a `boot_failed:` warning when the boot
+// threw, so calling that "exited without shutting down" names an ending the
+// daemon never had. The verdict and severity are right either way; only the
+// sentence was not.
+test('a recorded boot failure is named as one, not as an exit without shutdown', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  leaveSnapshot(stateRoot, 'degraded', { warnings: ['boot_failed: gateway listener could not bind'] })
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally')
+  assert.ok(diag, 'the failed boot still raises the diagnostic')
+  assert.equal(diag.severity, 'error')
+  assert.equal(report.overall, 'degraded')
+  assert.match(diag.message, /failed boot/, 'the message names the ending the snapshot recorded')
+  assert.doesNotMatch(diag.message, /exited without shutting down/)
+})
+
+// The over-fixing guard for that split: `degraded` on its own is a daemon that
+// served with a failed source and then died, which is exactly the ending the
+// original sentence describes. The first case is that production shape:
+// `runDaemon` records `anySourceFailed` with no `warnings` field at all. The
+// second is not a snapshot the daemon leaves - `source_stop_failed:` is only
+// ever persisted with `state: 'stopping'`, from inside `shutdown()` - but it
+// is the only other warning label `runDaemon` writes, so pairing it with
+// `degraded` exercises the negative side of the `boot_failed` prefix test
+// against a real label instead of an invented one.
+test('a degraded snapshot with no boot failure keeps the abnormal-exit message', async () => {
+  for (const warnings of [undefined, ['source_stop_failed:codex:timed out']]) {
+    const { hypHome, stateRoot } = await makeHome()
+    leaveSnapshot(stateRoot, 'degraded', { warnings })
+
+    const report = await collectHypAwareStatus(collectOpts(hypHome))
+    const diag = report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally')
+    assert.ok(diag)
+    assert.equal(diag.severity, 'error')
+    assert.equal(report.overall, 'degraded')
+    assert.match(diag.message, /exited without shutting down/)
   }
 })
