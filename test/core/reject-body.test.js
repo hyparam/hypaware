@@ -13,6 +13,10 @@ import net from 'node:net'
 
 import { drainRequestBody } from '../../src/core/util/reject_body.js'
 
+/**
+ * @import { IncomingMessage, ServerResponse } from 'node:http'
+ */
+
 // The cap the helper documents, restated here because it is not exported.
 const CAP_BYTES = 64 * 1024
 
@@ -44,12 +48,23 @@ function withDeadline(work, label) {
  * A server that refuses every request the way the helper's callers do: drain
  * first, because the drain decides whether the connection can be answered as
  * a reusable one, then write the refusal.
+ *
+ * `answer` replaces the writing half only, never the drain: the slow-response
+ * probe needs a handler that has called `drainRequestBody` and has not yet put
+ * its refusal on the wire, and that window is not reachable from a second
+ * server that drains some other way.
+ *
+ * @param {{ answer?: (req: IncomingMessage, res: ServerResponse) => void }} [options]
  */
-async function startRefusingServer() {
+async function startRefusingServer(options = {}) {
   /** @type {net.Socket[]} */
   const sockets = []
   const server = http.createServer((req, res) => {
     drainRequestBody(req, res)
+    if (options.answer) {
+      options.answer(req, res)
+      return
+    }
     res.writeHead(415, { 'content-type': 'text/plain' })
     res.end('refused')
   })
@@ -259,6 +274,147 @@ test('drainRequestBody closes only the connection whose body is not known to fit
       `drainRequestBody closed a connection carrying no body at all: ${JSON.stringify(bodyless)}`
     )
   } finally {
+    await served.close()
+  }
+})
+
+/**
+ * Watch a server-side socket until its read stops growing, and report where it
+ * stopped. Settling rather than a fixed wait, because a read is only shown to
+ * be unbounded once it has had the chance to finish: a sleep long enough on an
+ * idle machine is a coin flip on a loaded one, and a half-read body sampled
+ * early reads as a bounded one. Returns the moment the read passes `bound`
+ * too, so a failing probe says so promptly instead of waiting out a body it
+ * has already disproved.
+ *
+ * @param {net.Socket} socket
+ * @param {number} bound the largest read the caller will accept as bounded
+ * @returns {Promise<number>} bytes read when the read settled
+ */
+async function settledBytesRead(socket, bound) {
+  const SAMPLE_MS = 25
+  const STABLE_MS = 400
+  const LIMIT_MS = 5_000
+  let previous = -1
+  let stableFor = 0
+  const started = Date.now()
+  while (Date.now() - started < LIMIT_MS) {
+    await new Promise((resolve) => setTimeout(resolve, SAMPLE_MS))
+    const sample = socket.bytesRead
+    if (sample >= bound) return sample
+    stableFor = sample === previous ? stableFor + SAMPLE_MS : 0
+    previous = sample
+    // Settled under the cap is not settled, it is a sender that has not caught
+    // up yet, and taking it for an answer would pass the probe without ever
+    // entering the window it exists to measure.
+    if (sample > CAP_BYTES && stableFor >= STABLE_MS) return sample
+  }
+  return socket.bytesRead
+}
+
+test('drainRequestBody stops reading a refused body while its answer is still pending', async () => {
+  // Why a second cap probe: the first one cannot tell whether `req.pause()` is
+  // doing anything. Two independent things bound the read there. One is the
+  // cap block. The other is the `connection: close` answer, whose teardown
+  // destroys the socket as soon as the refusal flushes, and in that probe the
+  // refusal has always flushed before the read that crosses the cap lands. So
+  // the teardown alone reaches the same bounded number, and deleting the pause
+  // changes nothing that probe can see.
+  //
+  // Here the answer is withheld until after the measurement. That leaves
+  // `res.writableFinished` false, which makes the `req.destroy()` inside
+  // `closeIfAnswered` unreachable, and leaves the pause as the only thing that
+  // can stop the read. It is also the case the pause exists for: a caller's
+  // handler that has not finished answering by the time the upload crosses the
+  // cap.
+  /** @type {(entered: { req: IncomingMessage, res: ServerResponse }) => void} */
+  let reached = () => {}
+  /** @type {Promise<{ req: IncomingMessage, res: ServerResponse }>} */
+  const handlerEntered = new Promise((resolve) => {
+    reached = resolve
+  })
+  const served = await startRefusingServer({
+    // Answers nothing on purpose. The refusal is written further down, once
+    // the read has been measured inside the window.
+    answer: (req, res) => reached({ req, res }),
+  })
+  /** @type {net.Socket | undefined} */
+  let client
+  try {
+    // A bounded read here is bigger than the sibling probe's, and reached by a
+    // different route, so it gets its own bound rather than sharing one. There
+    // the answer is already out, so the read that crosses the cap is the last
+    // one: the socket is destroyed inside it, and every sample is 131072. Here
+    // nothing is destroyed, and `req.pause()` reaches the socket only through
+    // the request stream, which goes on buffering until its own backpressure
+    // stops the reads behind it. So the ceiling is the cap, plus the socket
+    // read in flight when the pause landed, plus what the stream buffers on
+    // the way to stopping, plus the read that stopping was too late for: four
+    // 64 KiB reads, and Node's default `--max-http-header-size` on top for the
+    // request head. Samples land at 229281, three and a half reads, and do not
+    // move with the body size. They do move with the length of the request
+    // head, which is what decides where inside a socket read the cap is
+    // crossed, so the allowance is deliberately not trimmed to what this one
+    // request measures.
+    const maxBoundedRead = 4 * CAP_BYTES + 16 * 1024
+    // Thirty-two times the cap, eight times what the sibling probe sends,
+    // because neither half of what sizes that one holds here. It is ceilinged:
+    // there the refusal is already out, so past about six caps an unbounded
+    // read stops being the whole body, the teardown cutting it at whatever
+    // arrived first, and a body chosen past that ceiling makes the probe
+    // vacuous rather than sharper. No teardown happens inside this window at
+    // all, the answer being withheld for the length of it, so an unbounded
+    // read here is the whole body at any size and there is no ceiling to
+    // respect. And it needs a floor that probe does not: a bounded read here
+    // reaches three and a half caps, so a 4-cap body would leave an unbounded
+    // read only a fifth again larger than the bound, near enough that a bound
+    // loose enough to be safe would stop failing. At 32 caps an unbounded read
+    // is 2097246, seven and a half times the bound, with nothing in between.
+    const body = Buffer.alloc(32 * CAP_BYTES, 'x')
+    client = net.connect(served.port, '127.0.0.1')
+    // Ends as a reset arriving under a write this sender has not finished,
+    // which is how a stalled upload is meant to end here, not a failure. A
+    // connect that never lands is left to the deadline below instead.
+    client.on('error', () => {})
+    client.write(
+      'POST /refused HTTP/1.1\r\nHost: 127.0.0.1\r\n' +
+        `content-type: text/plain\r\ncontent-length: ${body.length}\r\n\r\n`
+    )
+    client.write(body)
+    const pending = await withDeadline(handlerEntered, 'slow-response handler entry')
+
+    const serverSocket = pending.req.socket
+    const bytesRead = await withDeadline(
+      settledBytesRead(serverSocket, maxBoundedRead),
+      'slow-response read settling'
+    )
+
+    // Both checked before the bound, because either one failing quietly would
+    // leave a probe that passes without having entered the window at all.
+    assert.ok(
+      !pending.res.writableFinished,
+      'the withheld refusal had already flushed, so the connection teardown could have bounded this read ' +
+        'and the probe no longer isolates req.pause()'
+    )
+    assert.ok(
+      bytesRead > CAP_BYTES,
+      `only ${bytesRead} bytes of the ${body.length} being uploaded reached the server, never crossing the ` +
+        `${CAP_BYTES} cap, so the drain was never asked to bound anything`
+    )
+    assert.ok(
+      bytesRead < maxBoundedRead,
+      `drainRequestBody read ${bytesRead} bytes of the ${body.length} it refused while its answer was still ` +
+        `pending, past the ${maxBoundedRead} a bounded read can reach, so req.pause() did not bound the read ` +
+        'and the length of a refused body is the sender\'s to choose'
+    )
+
+    // Released only now, so the assertions above ran inside the window. The
+    // answer flushing is what makes `closeIfAnswered` destroy the request,
+    // which is what ends the stalled upload.
+    pending.res.writeHead(415, { 'content-type': 'text/plain' })
+    pending.res.end('refused')
+  } finally {
+    client?.destroy()
     await served.close()
   }
 })
