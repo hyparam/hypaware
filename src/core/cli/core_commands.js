@@ -184,6 +184,9 @@ function buildCoreCommands(registry) {
         '  --remote [target] run against a remote MCP target instead of the local\n' +
         '                    cache (bare --remote uses query.default_remote, else the\n' +
         "                    shipped default; manage targets with 'hyp remote').\n" +
+        '  --org <label|*>   with --remote, read one org by label or every org this\n' +
+        '                    account may read; operator-only, and each read is\n' +
+        "                    recorded in that org's audit trail.\n" +
         "See 'hyp query <subcommand> --help' for which flags a subcommand supports\n" +
         '(overview and schema, and the cache routines behind the query status/\n' +
         'refresh/maintain aliases, are local-only; query status rejects --remote\n' +
@@ -713,7 +716,7 @@ function buildCoreCommands(registry) {
       category: 'additional',
       audience: 'operator',
       summary: 'Serve this host\'s verbs as an MCP server for AI clients',
-      usage: 'hyp mcp serve [--remote <target>]',
+      usage: 'hyp mcp serve [--remote <target> [--org <label|*>]]',
       run: runMcp,
     },
     makeGroupCommand({
