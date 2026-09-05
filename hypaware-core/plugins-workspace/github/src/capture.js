@@ -213,18 +213,25 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
   if (!cursor.work) cursor.work = { mode: requestedMode, phase: 'issues' }
   const work = cursor.work
   // Pulls this phase has already emitted a row for. The tie guard above answers
-  // only for the boundary second, but `sort=updated&direction=desc` reshuffles
-  // under pagination at every second: a pull updated mid-traversal is listed
-  // again on a later page of the same phase, at any distance above the baseline.
-  // Its event id carries no timestamp, so the second sighting is an identical
+  // only for the boundary second, but a page of `sort=updated&direction=desc` is
+  // an offset into an ordering that moves under the traversal, so one phase can
+  // list the same pull twice. Not by that pull's own update: that sends it to
+  // offset zero, onto a page already consumed. What returns is the pull it
+  // displaced, because every update to a pull listed after a given one, and
+  // every new pull, shifts that one down a place until it crosses off the end of
+  // a consumed page onto a page still to come. Its own `updated_at` did not move
+  // and its event id carries no timestamp, so the second sighting is an identical
   // duplicate row plus a repeat fan-out of files, reviews and commits, and
-  // `flush` deduplicates one batch, not a phase. Staged on the work descriptor
-  // rather than held in memory for the same reason `pulls_high_numbers` is: the
-  // request budget splits a pulls phase across ticks, and a set that restarted
-  // empty on the resumed page would leave the duplicate exactly where the
-  // reshuffle has had the longest to produce one. Dropped by `finishPulls`, so
-  // it lives no longer than one phase; a backfill's phase is the whole
-  // repository, which is the order `cursor.pull_numbers` beside it already is.
+  // `flush` deduplicates one batch, not a phase. The same push-down bounds the
+  // reach: a page's worth (100) of later-updated pulls per page of distance, so
+  // it is a long backfill over a busy repository that produces one, not a poll.
+  // Staged on the work descriptor rather than held in memory for the same reason
+  // `pulls_high_numbers` is: the request budget splits a pulls phase across
+  // ticks, and a set that restarted empty on the resumed page would leave the
+  // duplicate exactly where the push-down has had the longest to accumulate.
+  // Dropped by `finishPulls`, so it lives no longer than one phase; a backfill's
+  // phase is the whole repository, which is the order `cursor.pull_numbers`
+  // beside it already is.
   /** @type {Set<number> | null} */
   let emittedPulls = null
 
@@ -301,10 +308,10 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
       for (const pr of page.items) {
         prNumbers.add(pr.number)
         // The guard's set has to grow across the phase's pages, not only across
-        // ticks. `sort=updated&direction=desc` reshuffles under pagination, so a
-        // pull this page just captured at the boundary second can be listed
-        // again on a later page of the same traversal, and `flush` deduplicates
-        // one batch, not a phase. Reading the number back off this page is what
+        // ticks. By the same push-down `emittedPulls` above describes, a pull
+        // this page just captured at the boundary second can be listed again on
+        // a later page of the same traversal, and `flush` deduplicates one
+        // batch, not a phase. Reading the number back off this page is what
         // "the pulls listing captured it" means.
         if (updatedAt(pr) === baseline) capturedAtHigh.add(pr.number)
       }
