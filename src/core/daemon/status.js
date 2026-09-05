@@ -918,12 +918,14 @@ export const DAEMON_HEARTBEAT_STALE_MS = 5 * 60_000
  * uptimeMs` *is* the moment of that write. Nothing new has to be recorded
  * for the heartbeat to be readable.
  *
- * Returns `null` when the snapshot dates no write (a daemon still inside
- * `bootKernel` has not started serving, so it has no tick to be late for) or
- * when either field is missing or unusable, which is also how a status file
- * written by an older build reads. Reaching `healthy` is not the condition: a
- * daemon whose boot aggregate landed `degraded` is serving, and dates its
- * writes like any other (LLP 0386#serving-dates-the-write).
+ * Returns `null` when the snapshot dates no write (a daemon that has not
+ * reached the first `persist()` of its run has not started serving, so it has
+ * no tick to be late for: the `starting` snapshot goes down before
+ * `bootKernel`, and the pair reaches disk on the first post-boot write, not on
+ * the assignment) or when either field is missing or unusable, which is also
+ * how a status file written by an older build reads. Reaching `healthy` is
+ * not the condition: a daemon whose boot aggregate landed `degraded` is
+ * serving, and dates its writes like any other (LLP 0386#serving-dates-the-write).
  *
  * @param {DaemonStatus | null | undefined} status
  * @param {number} nowMs
