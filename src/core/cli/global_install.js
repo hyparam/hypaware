@@ -20,10 +20,16 @@ const PACKAGE_JSON = path.join(PACKAGE_ROOT, 'package.json')
  * saying no from a bug here, and every message names the repair (#1386).
  */
 export class GlobalInstallError extends Error {
-  /** @param {string} message */
-  constructor(message) {
+  /**
+   * @param {string} message
+   * @param {{ globalBinInstalled?: boolean }} [opts] whether `npm install -g` had already
+   *   landed a global `hyp` when this failed, so a caller can tell whether naming a `hyp`
+   *   command as the repair names one that exists (#1395). The refusal itself has not.
+   */
+  constructor(message, opts) {
     super(message)
     this.name = 'GlobalInstallError'
+    this.globalBinInstalled = opts?.globalBinInstalled === true
   }
 }
 
@@ -122,10 +128,18 @@ async function globalPrefix(run, env) {
   const result = await run('npm', ['config', 'get', 'prefix'], { env, cwd: PACKAGE_ROOT })
   if (result.exitCode !== 0) {
     const detail = compactCommandError(result)
-    throw new GlobalInstallError(`npm config get prefix failed${detail ? `: ${detail}` : ''}`)
+    throw new GlobalInstallError(
+      `npm config get prefix failed${detail ? `: ${detail}` : ''}`,
+      { globalBinInstalled: true }
+    )
   }
   const prefix = result.stdout.trim().split(/\r?\n/).filter(Boolean).pop()
-  if (!prefix) throw new GlobalInstallError('npm config get prefix returned an empty prefix')
+  if (!prefix) {
+    throw new GlobalInstallError(
+      'npm config get prefix returned an empty prefix',
+      { globalBinInstalled: true }
+    )
+  }
   return prefix
 }
 

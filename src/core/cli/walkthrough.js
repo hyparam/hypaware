@@ -1769,7 +1769,14 @@ export async function runPickerFinale(args) {
       // platform" and nothing the note does not already restate. An npm or
       // filesystem refusal names a path and a repair the note cannot know.
       if (diagnosed) stderr.write(`daemon install failed: ${err.message}\n`)
-      stderr.write(daemonIncompleteNote(process.platform))
+      // `hyp daemon install`, the note's remediation, exists on an `npx hypaware setup`
+      // first run only if the global install landed. An npm refusal of that install is
+      // exactly the case where it did not, and the message just printed already names
+      // the runnable repair, so the note would only add a command that is not there
+      // (#1395). The same class raised after the install succeeded does have a `hyp`,
+      // so the flag decides rather than `instanceof`.
+      const noHypOnPath = err instanceof GlobalInstallError && !err.globalBinInstalled
+      if (!noHypOnPath) stderr.write(daemonIncompleteNote(process.platform))
     })
   }
 
