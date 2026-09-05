@@ -169,6 +169,7 @@ test('a launchd/systemd install failure on a supported platform finishes the fin
       installDaemonFn: async () => { throw new Err('launchctl bootstrap exited 5') },
     }))
     assert.equal(summary.daemonInstall.failed, true, `${Err.name} is recorded as a failed install`)
+    assert.match(stderr.text(), /^daemon install failed: launchctl bootstrap exited 5\n/, 'the service manager\'s own diagnosis reaches the user, not just the span')
     assert.match(stderr.text(), /the daemon install did not finish - run 'hyp daemon install'/)
     assert.deepEqual(events, ['attach'], 'no CA can appear without a daemon, so the wait is skipped and attach still runs')
     await fs.rm(home, { recursive: true, force: true })

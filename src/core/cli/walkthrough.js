@@ -1751,9 +1751,18 @@ export async function runPickerFinale(args) {
       },
       { component: 'walkthrough' }
     ).catch((err) => {
-      if (!(err instanceof installMod.DaemonInstallError) && !(err instanceof ServiceOpError)) throw err
+      const serviceFailed = err instanceof ServiceOpError
+      if (!serviceFailed && !(err instanceof installMod.DaemonInstallError)) throw err
       installFailed = true
       summary.daemonInstall = { skipped: false, dryRun, failed: true }
+      // The service manager's own diagnosis, which LLP 0317 #context is
+      // written around: "bootstrapped the LaunchAgent but launchd never
+      // started it - ask launchd itself: launchctl print <target>" is the one
+      // string that tells a person what to do next, and printing only the
+      // generic note would leave it on the span and nowhere they can read it.
+      // `ServiceOpError` only: every `DaemonInstallError` says "unsupported
+      // platform", which the note restates in words the user can act on.
+      if (serviceFailed) stderr.write(`daemon install failed: ${err.message}\n`)
       stderr.write(daemonIncompleteNote(process.platform))
     })
   }
