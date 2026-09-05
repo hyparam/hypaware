@@ -336,3 +336,77 @@ test('a dry run whose install plan failed does not go on to claim it would resta
   )
   await fs.rm(home, { recursive: true, force: true })
 })
+
+// The gate above was too broad for one of the three failure classes (#1400).
+// `GlobalInstallError` comes from the npx durable-bin upgrade, which runs
+// *before* either platform installer, so it says nothing about whether a
+// service exists. On a machine that already had one running, withholding the
+// restart left that daemon serving the config this run had just replaced, and
+// only an explicit reload would have picked the new one up. The predicate that
+// separates the classes is a runtime probe, not the error: restart what has a
+// live pid.
+
+test('a durable-bin failure over a running daemon still restarts it onto the config just written', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-npx-live-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  /** @type {Record<string, unknown>[]} */
+  const restarts = []
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    finale: { dryRun: false, skipDaemonRestart: false },
+    installDaemonFn: async () => {
+      throw new GlobalInstallError(
+        "npx detected, but npm install -g hypaware@1.0.0 failed: EACCES. Run 'npm install -g hypaware@1.0.0' manually"
+      )
+    },
+    daemonService: {
+      serviceDaemonStatus: async () => ({ installed: true, loaded: true, pid: 4242, platform: process.platform }),
+      restartServiceDaemon: async (/** @type {Record<string, unknown>} */ options) => { restarts.push(options) },
+    },
+  }))
+
+  assert.equal(summary.daemonInstall.failed, true, 'the durable-bin upgrade still counts as a failed install')
+  assert.equal(restarts.length, 1, 'the daemon that is observably running is restarted so it reads the new config')
+  assert.equal(restarts[0]?.homeDir, home, 'the restart addresses the same home the finale installed against')
+  assert.deepEqual(summary.daemonRestart, { skipped: false, dryRun: false, ok: true })
+  assert.doesNotMatch(stderr.text(), /daemon restart failed:/)
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+// The other side of the same predicate, and why it is a pid rather than
+// `loaded`: LLP 0317 D1's failure mode is a service the manager registered and
+// never spawned. The install raises for it, and there is no process serving the
+// old config, so there is nothing to restart and nothing to report.
+
+test('a service install that left the job loaded with no pid still attempts no restart', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-nopid-'))
+  /** @type {string[]} */
+  const events = []
+  const stderr = makeBuf()
+  let restarted = false
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    ...finaleArgs(home, events, stderr),
+    finale: { dryRun: false, skipDaemonRestart: false },
+    installDaemonFn: async () => { throw new LaunchAgentError('no pid after kickstart') },
+    daemonService: {
+      serviceDaemonStatus: async () => ({ installed: true, loaded: true, platform: process.platform }),
+      restartServiceDaemon: async () => { restarted = true },
+    },
+  }))
+
+  assert.equal(summary.daemonInstall.failed, true)
+  assert.equal(restarted, false, 'a registered job with no process behind it is serving no config')
+  assert.deepEqual(
+    summary.daemonRestart,
+    { skipped: true, dryRun: false, ok: false },
+    'the restart is recorded as skipped, not as a run that failed'
+  )
+  assert.equal(
+    stderr.text(),
+    `daemon install failed: no pid after kickstart\n${daemonIncompleteNote(process.platform)}`,
+    'still one fault, one diagnosis: no contradicting restart-failed line'
+  )
+  await fs.rm(home, { recursive: true, force: true })
+})
