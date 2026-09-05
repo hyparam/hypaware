@@ -10,7 +10,7 @@ import {
   defaultUnitDir,
   unitFileName,
 } from './platform.js'
-import { ServiceOpError, defaultSleep, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
+import { ServiceOpError, defaultSleep, ensureFsOp, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
 import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
 /**
@@ -57,6 +57,19 @@ export const realSystemctl = {
  */
 function ensure(res, what) {
   return ensureOk(res, what, SystemdUnitError)
+}
+
+/**
+ * Throw a {@link SystemdUnitError} when a filesystem step of the install
+ * failed.
+ *
+ * @template T
+ * @param {() => T} fn
+ * @param {string} what
+ * @returns {T}
+ */
+function ensureFs(fn, what) {
+  return ensureFsOp(fn, what, SystemdUnitError)
 }
 
 /**
@@ -264,10 +277,13 @@ export async function installSystemdUnit(options) {
   const systemctl = options.systemctl ?? realSystemctl
   const sleep = options.sleep ?? defaultSleep
 
-  fs.mkdirSync(plan.unitDir, { recursive: true })
-  fs.mkdirSync(plan.logDir, { recursive: true })
+  ensureFs(function() { fs.mkdirSync(plan.unitDir, { recursive: true }) }, `create ${plan.unitDir}`)
+  ensureFs(function() { fs.mkdirSync(plan.logDir, { recursive: true }) }, `create ${plan.logDir}`)
 
-  atomicWriteFileSync(plan.targetPath, plan.content, { mode: 0o644 })
+  ensureFs(
+    function() { atomicWriteFileSync(plan.targetPath, plan.content, { mode: 0o644 }) },
+    `write ${plan.targetPath}`,
+  )
 
   ensure(await systemctl.daemonReload(), 'systemctl --user daemon-reload')
   ensure(await systemctl.enable(plan.unitName), `enable ${plan.unitName}`)

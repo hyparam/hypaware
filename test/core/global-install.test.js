@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import {
+  GlobalInstallError,
   ensureDurableBinForNpx,
   globalHypawareBin,
   isNpxBinPath,
@@ -95,7 +96,16 @@ test('ensureDurableBinForNpx reports npm install failures with a repair command'
         return { exitCode: 1, stdout: '', stderr: 'EACCES permission denied' }
       },
     }),
-    new RegExp(`npm install -g ${escapeRegExp(packageSpec)} failed: EACCES permission denied`)
+    (err) => {
+      // The class, not just the text: the picker finale tells an environment
+      // failure it can carry on from from a bug in this lane by class (#1386).
+      assert.ok(err instanceof GlobalInstallError, 'the npm refusal is a GlobalInstallError')
+      assert.match(
+        err.message,
+        new RegExp(`npm install -g ${escapeRegExp(packageSpec)} failed: EACCES permission denied`)
+      )
+      return true
+    }
   )
 })
 

@@ -77,6 +77,28 @@ export class ServiceCommandTimeoutError extends ServiceOpError {
 }
 
 /**
+ * Error raised when the service manager could not be spawned at all: no
+ * `systemctl` on `PATH` (a container, WSL1, a non-systemd distro), a binary
+ * that is not executable. The host saying no, exactly like the non-zero exits
+ * `ensureOk` covers, so it is a `ServiceOpError` like every other way this
+ * seam fails. It was the one that rejected with a bare Node error instead,
+ * which is how a missing `systemctl` still killed the setup finale after the
+ * config commit (#1386).
+ */
+export class ServiceSpawnError extends ServiceOpError {
+  /**
+   * @param {string} message
+   * @param {string} [code]  the spawn failure's errno name, kept for logs that report an error kind
+   */
+  constructor(message, code) {
+    super(message)
+    this.name = 'ServiceSpawnError'
+    /** @type {string | undefined} */
+    this.code = code
+  }
+}
+
+/**
  * Env var that opts a test back into driving the host's own service
  * manager. Deliberately awkward to type: there is no legitimate use for
  * it in the traditional suite.
@@ -142,8 +164,9 @@ function serviceManagerSpawnRefusal(bin, args) {
 /**
  * Spawn a service-manager binary and collect its output. Never rejects
  * on a non-zero exit: callers decide what failure means (see
- * {@link ensureOk}). Rejects without spawning under the test runner (see
- * {@link serviceManagerSpawnRefusal}).
+ * {@link ensureOk}). Rejects with {@link ServiceSpawnError} when the binary
+ * could not be spawned at all, and without spawning under the test runner
+ * (see {@link serviceManagerSpawnRefusal}).
  *
  * `timeoutMs` bounds how long the child may take. Opt-in, because the
  * commands that reach here are not alike: a mutation the user is answering
@@ -199,7 +222,12 @@ export function runServiceCommand(bin, args, opts = {}) {
     proc.stderr.on('data', function(chunk) { stderr += chunk.toString('utf8') })
     proc.on('error', function(err) {
       if (timer) clearTimeout(timer)
-      reject(err)
+      reject(new ServiceSpawnError(
+        `failed to run '${[bin, ...args].join(' ')}': ${err.message}`,
+        typeof (/** @type {NodeJS.ErrnoException} */ (err).code) === 'string'
+          ? /** @type {string} */ (/** @type {NodeJS.ErrnoException} */ (err).code)
+          : undefined
+      ))
     })
     proc.on('close', function(code) {
       if (timer) clearTimeout(timer)
@@ -227,6 +255,40 @@ export function ensureOk(res, what, ErrorClass) {
     )
   }
   return res
+}
+
+/**
+ * Run one filesystem step of an install, raising `ErrorClass` when the host
+ * refuses it. An installer writes into directories the user may not own
+ * (EACCES), onto a read-only or full filesystem (EROFS, ENOSPC): environment
+ * failures exactly like the non-zero exits `ensureOk` covers, but reaching a
+ * caller as a bare Node system error indistinguishable from a bug (#1386).
+ *
+ * @template T
+ * @param {() => T} fn
+ * @param {string} what  human description of the step, e.g. `create /home/x/.config/systemd/user`
+ * @param {new (message: string, opts?: { exitCode?: number, stderr?: string }) => Error} ErrorClass
+ * @returns {T}
+ */
+export function ensureFsOp(fn, what, ErrorClass) {
+  try {
+    return fn()
+  } catch (err) {
+    // A host refusal is a system error: a syscall was attempted and the host
+    // said no, so it names that syscall (`mkdir`, `open`, `rename`) alongside
+    // its errno. A malformed plan reaching `mkdirSync` names none, because no
+    // syscall ever ran. The errno alone cannot tell them apart: Node's
+    // argument validation throws `TypeError`s carrying a string `code` too
+    // (`mkdirSync(undefined)` gives `ERR_INVALID_ARG_TYPE`). Only the refusal
+    // is an install failure a caller may carry on from, so the bug still
+    // propagates as the bug it is - the same line the picker finale's catch
+    // draws.
+    const syscall = err !== null && typeof err === 'object'
+      ? /** @type {{ syscall?: unknown }} */ (err).syscall
+      : undefined
+    if (typeof syscall !== 'string') throw err
+    throw new ErrorClass(`failed to ${what}: ${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 /**

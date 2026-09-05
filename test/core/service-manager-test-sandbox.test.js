@@ -238,6 +238,49 @@ test('the explicit opt-in still spawns', () => {
   })
 })
 
+// A host with no service manager at all is the commonest way `installDaemon`
+// fails on linux (a container, WSL1, a non-systemd distro), and the spawn
+// failure was the one way out of this seam that was not a `ServiceOpError`:
+// the bare Node error escaped the picker finale's catch and killed the run
+// after the config commit, which is exactly the damage #1383/#1386 close.
+//
+// Driven in a child for the same reason as the opt-in test above.
+test('a service manager that cannot be spawned rejects as a ServiceOpError', () => {
+  withTempDir((dir) => {
+    writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}')
+    const script = path.join(dir, 'spawn-failure.test.js')
+    const absent = path.join(dir, 'no-such-service-manager')
+    writeFileSync(script, [
+      `import { ServiceOpError, runServiceCommand } from ${JSON.stringify(SERVICE_OPS_URL)}`,
+      'let outcome',
+      'try {',
+      `  const res = await runServiceCommand(${JSON.stringify(absent)}, ['--user', 'daemon-reload'])`,
+      "  outcome = { kind: 'resolved', res }",
+      '} catch (err) {',
+      "  outcome = { kind: 'rejected', name: err.name, message: err.message, code: err.code, isServiceOp: err instanceof ServiceOpError }",
+      '}',
+      'process.stdout.write(JSON.stringify(outcome))',
+      '',
+    ].join('\n'))
+
+    const run = spawnSync(process.execPath, [script], {
+      encoding: 'utf8',
+      env: { ...process.env, [ALLOW_REAL_SERVICE_MANAGER_ENV]: '1' },
+      timeout: 60_000,
+    })
+
+    assert.equal(run.status, 0, `${run.stdout ?? ''}${run.stderr ?? ''}`)
+    const outcome = JSON.parse(run.stdout)
+    assert.equal(outcome.kind, 'rejected', `expected a rejection, got ${run.stdout}`)
+    assert.equal(outcome.isServiceOp, true, 'a caller deciding whether to carry on reads the class')
+    assert.equal(outcome.name, 'ServiceSpawnError')
+    // The errno survives the wrap: `serviceDaemonStatus` logs it as the
+    // error kind when it degrades to "not loaded".
+    assert.equal(outcome.code, 'ENOENT')
+    assert.match(outcome.message, /failed to run '.*no-such-service-manager --user daemon-reload'/)
+  })
+})
+
 // `hyp status` shells out through this helper on darwin (`security
 // verify-cert`, `launchctl getenv`). A locked login keychain can put
 // `security` behind a GUI prompt, and an unbounded spawn then hangs a command
