@@ -322,10 +322,13 @@ export async function runDaemon(opts = {}) {
   } else {
     status.state = 'healthy'
   }
-  if (status.state === 'healthy') {
-    healthyAtMs = Date.now()
-    status.healthyAt = new Date(healthyAtMs).toISOString()
-  }
+  // Dated whatever the aggregate above said: this is the instant the daemon
+  // starts serving, and `healthyAt + uptimeMs` is the last-write time every
+  // staleness reader derives, so a boot that lands `degraded` has to date its
+  // writes too or nothing can tell whether it is still ticking (issue #1417).
+  // @ref LLP 0386#serving-dates-the-write [implements]: the pair dates the run of a daemon that is serving, not the verdict on its boot
+  healthyAtMs = Date.now()
+  status.healthyAt = new Date(healthyAtMs).toISOString()
 
   // Attach apply-time deps before any sink materializes: the central
   // sink's pull loop may deliver a document immediately after its
