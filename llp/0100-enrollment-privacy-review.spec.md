@@ -116,7 +116,11 @@ Its job, in order:
   enrolling login gets the same hold and the same message on stderr; nothing
   prompts ([LLP 0063 D3](./0063-login-auto-provision-forward-sink.decision.md#d3)
   stands).
-- **R1a.** The enrolling login's destination surfaces - the forwarding line and
+- **R1a.** *(unchanged; read the compact join lane against
+  [LLP 0387 #adjacency](./0387-compact-join-r1a-is-satisfied-by-an-adjacent-pair.decision.md#adjacency),
+  where the forwarding line and the one-line deadline block are this
+  requirement's surface together)*
+  The enrolling login's destination surfaces - the forwarding line and
   the privacy block - MUST name the server by its configured target name and
   MUST NOT print its URL, and the privacy block MUST name a command that maps
   that name back to a URL (`hyp remote list`). Terminals autolink any printed
