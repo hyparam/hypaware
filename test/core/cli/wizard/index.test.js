@@ -1316,50 +1316,50 @@ test('runInitWizard: the suggested questions come last, after the privacy narrat
   assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want an attached AI client to start/)
 })
 
-// @ref LLP 0203#offer [tests]: the sync offer sits between the narration it acts on and the closing question list
-test('runInitWizard: an enrolled run is offered the first sync before the suggested questions', async () => {
+// @ref LLP 0203#offer [tests]: the sync offer sits between the first look it follows and the closing question list
+test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync question, before the suggested questions', async () => {
   const home = await tmpHome()
   await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
-  /** @type {any[]} */
-  const asked = []
+  let spawned = 0
   const { opts, stdout } = wizardOpts(home, {
     fork: async () => 'team',
     firstLook: firstLookWithRows(),
     syncNow: {
-      confirm: async (/** @type {any} */ question) => {
-        asked.push(question)
-        // The wizard prints "Starting hyp sync..." on 'now'; this run waits.
-        return 'wait'
-      },
-      spawnFn: () => { throw new Error('a waiting run must not sync') },
+      // A child that leaves the marker in place: the user read the plan and
+      // answered no.
+      spawnFn: /** @type {any} */ (() => {
+        spawned += 1
+        /** @type {Record<string, (arg: any) => void>} */
+        const handlers = {}
+        queueMicrotask(() => handlers.close?.(0))
+        return { on: (/** @type {string} */ event, /** @type {any} */ fn) => { handlers[event] = fn } }
+      }),
     },
   })
   await runInitWizard(opts)
 
-  assert.equal(asked.length, 1)
-  assert.match(asked[0].title, /Send your recorded history to the server now, or wait\?/)
-  // Asked after the narration that gives the question its meaning and
-  // before the closing list.
+  assert.equal(spawned, 1)
   const text = stdout.text()
-  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Questions worth asking'))
-  // The offer's "Send now" row states `hyp sync` and the asks-first promise,
-  // so the narration must not say the same sentence one screen earlier.
-  assert.doesNotMatch(text, /To send it sooner/)
-  // But the offer's frame is cleared when it resolves, so a run that ends on
-  // the wait must still leave the release verb somewhere on screen. Dropping
-  // the sentence upstream is only safe because the wait restates it here.
+  // The wizard asks nothing of its own, and its narration stands down for
+  // the child's plan: no paragraph, no menu, one lead line.
+  // @ref LLP 0203#no-new-consent [tests]: the informed prompt is the only prompt on the attended path
+  assert.doesNotMatch(text, /Nothing has been uploaded yet/)
+  assert.doesNotMatch(text, /Send your recorded history/)
+  assert.ok(text.indexOf('First look') < text.indexOf('`hyp sync` shows what would leave'))
+  assert.ok(text.indexOf('`hyp sync` shows what would leave') < text.indexOf('Questions worth asking'))
+  // A run that ends on the wait still leaves the deadline and the release
+  // verb on screen.
+  assert.match(text, /Nothing was sent\. Your history stays on this machine until /)
   assert.match(text, /run `hyp sync` any time to send it sooner/)
 })
 
 test('runInitWizard: a local install with no hold is never offered a sync', async () => {
-  /** @type {any[]} */
-  const asked = []
-  const { opts } = wizardOpts(await tmpHome(), {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
     fork: async () => 'local',
-    syncNow: { confirm: async (/** @type {any} */ q) => { asked.push(q); return 'wait' } },
+    syncNow: { spawnFn: () => { throw new Error('a local install must not sync') } },
   })
   await runInitWizard(opts)
-  assert.equal(asked.length, 0)
+  assert.doesNotMatch(stdout.text(), /hyp sync/)
 })
 
 test('runInitWizard: a first look with no rows still prints the questions with an empty-history note', async () => {
@@ -1424,9 +1424,11 @@ test('runInitWizard: team pathway with a live first-sync hold narrates the deadl
   })
   await runInitWizard(opts)
   const text = stdout.text()
-  assert.match(text, /Nothing has been uploaded yet/)
+  // No tty here, so the sync step cannot put the question and states the
+  // hold itself: the deadline, the way out, and the review hint.
+  assert.match(text, /Nothing has been uploaded yet: nothing leaves this machine before /)
   assert.match(text, /hypaware-privacy/)
-  assert.match(text, /hyp status/)
+  assert.match(text, /To send it sooner, run `hyp sync`/)
 })
 
 test('runInitWizard: local pathway never narrates the first-sync hold', async () => {

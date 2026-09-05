@@ -630,7 +630,7 @@ export type FirstAskResult =
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
-  | { asked: true; released: false; reason: 'declined' | 'sync-declined' | 'spawn-failed' }
+  | { asked: true; released: false; reason: 'sync-declined' | 'spawn-failed' }
   | { asked: false; reason: 'no-hold' | 'not-interactive' | 'error' }
 
 /** Options for `runWizardSyncNow`. */
@@ -650,7 +650,6 @@ export interface RunWizardSyncNowOptions {
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream
   /** Test seams; production callers pass none of these. */
-  confirm?: AsyncConfirmSelectPrompt
   spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess
   readDeadline?: () => Promise<number | null>
 }

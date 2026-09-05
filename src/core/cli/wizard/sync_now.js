@@ -1,16 +1,14 @@
 // @ts-check
 
 /**
- * The wizard's closing "send now" offer: after the privacy narration has
- * printed the first-sync deadline, an enrolled attended run asks whether to
- * wait it out or send immediately, and starts `hyp sync` for the user on the
- * second answer.
+ * The wizard's closing "send now" offer: an enrolled attended run starts
+ * `hyp sync` for the user, whose plan and confirm are the one question about
+ * the first sync. Answering no keeps the wait.
  *
- * The narration already names `hyp sync` as the way out
- * ([LLP 0101 #no-release](../../../../llp/0101-first-sync-review-window.decision.md#no-release)),
- * and naming a verb is not the same as offering it: the user who wants their
- * logs on the server tonight has to notice the sentence, remember the command,
- * and run it in a terminal the wizard is about to hand to a client.
+ * Naming a verb is not the same as offering it: the user who wants their
+ * logs on the server tonight would otherwise have to notice a sentence,
+ * remember the command, and run it in a terminal the wizard is about to
+ * hand to a client.
  *
  * @ref LLP 0203#offer [implements]: setup offers the release rather than only naming it
  *
@@ -24,23 +22,16 @@ import { fileURLToPath } from 'node:url'
 import { Attr, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
-import { isPromptCancelledError } from '../tui/runtime.js'
 import { isTty } from '../tui-router.js'
-import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
-
-/** Menu values. Not user-visible. */
-const WAIT = 'wait'
-const NOW = 'now'
 
 /**
- * Ask, and on "send now" run the real `hyp sync`.
+ * Run the real `hyp sync`, whose plan and confirm are the one question.
  *
  * Never throws and never changes the wizard's exit code: setup finished
- * before this ran, so a cancelled prompt, a failed spawn, or a child that
- * exits non-zero all degrade to the wait the user already had.
+ * before this ran, so a failed spawn or a child that exits non-zero
+ * degrades to the wait the user already had.
  *
- * @ref LLP 0203#offer [implements]: the closing sync offer, attended-only
- * @ref LLP 0299#decision [constrained-by]: send-now leads and is the default; only data destruction earns a no default
+ * @ref LLP 0203#offer [implements]: the closing sync offer, attended-only, asked once by `hyp sync` itself
  * @param {RunWizardSyncNowOptions} opts
  * @returns {Promise<WizardSyncNowResult>}
  */
@@ -59,44 +50,29 @@ export async function runWizardSyncNow(opts) {
           span.setAttribute('skip_reason', 'no-hold')
           return { asked: false, reason: /** @type {const} */ ('no-hold') }
         }
-        // A real terminal on both ends, not merely an "interactive" flag: this
-        // is the one wizard question whose yes sends data off the machine, so
-        // it is asked only where a person can actually answer it. A piped or
-        // redirected run keeps the wait, which is the state it would have had
-        // before this step existed. (`HYP_NO_TUI` is not a veto here - the
-        // confirm factory falls back to the numbered prompt on its own.)
-        const canPrompt = opts.confirm !== undefined
+        // A real terminal on both ends, not merely an "interactive" flag: the
+        // child's yes sends data off the machine, so it is started only where
+        // a person can answer it. A piped or redirected run keeps the wait,
+        // which is the state it would have had before this step existed.
+        const canPrompt = opts.spawnFn !== undefined
           || (isTty(opts.stdin ?? process.stdin) && isTty(opts.stdoutStream ?? opts.stdout))
         if (opts.interactive === false || !canPrompt) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'not-interactive')
-          // The privacy narration above dropped its `hyp sync` sentence on
-          // the expectation this step would offer the release as a choice.
-          // A run that cannot prompt still owes the reader the way out, so
-          // the skip states it instead of asking (LLP 0188 #never-silent).
-          opts.stdout.write('To send it sooner, run `hyp sync`: it shows what would leave and asks first.\n')
+          // The privacy narration above stays silent on the expectation this
+          // step would put the deadline in front of the user. A run that
+          // cannot prompt still owes the reader the deadline and the way
+          // out, so the skip states both (LLP 0188 #never-silent).
+          writeHeldStatement(opts, opts.deadline)
           return { asked: false, reason: /** @type {const} */ ('not-interactive') }
         }
 
-        const choice = await askSendNow(opts, opts.deadline)
-        span.setAttribute('choice', choice)
-        if (choice !== NOW) {
-          // Waiting ends plenty of enrolled runs even off the default - and
-          // this end has to restate the way out, because
-          // neither surface that named it survives. The narration above
-          // dropped its `hyp sync` sentence on the strength of this offer,
-          // and the offer's own frame is erased when it resolves
-          // (`clearOnResolve`, the TUI runtime's cleanup). Without this the
-          // run ends with the release verb nowhere on screen.
-          // @ref LLP 0188#never-silent [implements]: a declined release still leaves the standing way out on screen
-          writeStillHeld(opts, opts.deadline)
-          return { asked: true, released: false, reason: /** @type {const} */ ('declined') }
-        }
-
-        // The child prints the plan and asks its own Y/n, so say what is
-        // starting: two prompts in a row with no seam between them reads as
-        // one prompt that ignored the answer.
-        opts.stdout.write('\nStarting `hyp sync`...\n\n')
+        // One question, and it is `hyp sync`'s own: the child prints the
+        // plan (every destination, what is withheld) and asks its Y/n. A no
+        // is the wait. A lead line says what is starting, so the plan does
+        // not read as a report the wizard forgot to introduce.
+        // @ref LLP 0203#no-new-consent [implements]: the wizard asks nothing of its own; the informed prompt is the only one
+        opts.stdout.write('\nNothing has left this machine yet. `hyp sync` shows what would leave and asks before sending:\n\n')
         const result = await runSyncChild(opts)
         span.setAttribute('exit_code', result.code ?? -1)
         if (result.error) {
@@ -121,12 +97,6 @@ export async function runWizardSyncNow(opts) {
         }
         return { asked: true, released: true }
       } catch (err) {
-        if (isPromptCancelledError(err)) {
-          span.setAttribute('choice', WAIT)
-          // An esc is the same wait, and lands in the same erased frame.
-          if (typeof opts.deadline === 'number') writeStillHeld(opts, opts.deadline)
-          return { asked: true, released: false, reason: /** @type {const} */ ('declined') }
-        }
         span.setAttribute('status', 'error')
         span.setAttribute(Attr.ERROR_KIND, err instanceof Error ? err.name : 'unknown')
         return { asked: false, reason: /** @type {const} */ ('error') }
@@ -134,53 +104,6 @@ export async function runWizardSyncNow(opts) {
     },
     { component: 'wizard' }
   )
-}
-
-/**
- * The question. Two rows, sending first and selected by default: the user
- * enrolled to sync, so a bare enter takes the path they signed up for, and
- * waiting stays one arrow away for anyone who wants the review window. The
- * same polarity the `hyp sync` prompt itself uses, and the child's own
- * confirm still stands between this answer and anything leaving the machine.
- *
- * The rows say what each answer does rather than yes/no: "send now" is the
- * kind of choice a reader should not have to reconstruct from the question.
- *
- * @ref LLP 0299#eof-declines [implements]: the acting default is what a bare enter takes, not what a spent stdin lands on
- * @param {RunWizardSyncNowOptions} opts
- * @param {number} deadline
- * @returns {Promise<string>}
- */
-async function askSendNow(opts, deadline) {
-  const confirm = opts.confirm ?? defaultConfirmSelectPromptFactory({
-    stdout: /** @type {NodeJS.WritableStream} */ (opts.stdoutStream ?? opts.stdout),
-    env: opts.env,
-    ...(opts.stdin ? { stdin: opts.stdin } : {}),
-  })
-  return String(await confirm({
-    title: 'Send your recorded history to the server now, or wait?',
-    options: [
-      {
-        value: NOW,
-        label: 'Send now',
-        summary: 'Runs `hyp sync`: it lists every destination and asks before sending',
-      },
-      {
-        value: WAIT,
-        label: `Wait until ${formatFirstSyncDeadline(deadline)}`,
-        summary: 'Nothing leaves this machine before then',
-      },
-    ],
-    default: NOW,
-    // The default acts: `now` spawns `hyp sync` on this terminal, and the
-    // child's own confirm is not the backstop it looks like, because the
-    // child inherits the terminal rather than the stream. On a real tty a
-    // ctrl+D is a keypress, not a spent stream, so the child asks again
-    // instead of declining, and "the terminal gave up" ends with a sync
-    // started rather than with the wait it asked for (LLP 0299
-    // #eof-declines).
-    eofValue: WAIT,
-  }))
 }
 
 /**
@@ -246,6 +169,22 @@ async function readHold(opts) {
   } catch {
     return opts.deadline
   }
+}
+
+/**
+ * The statement for a run that could not put the question: the deadline, the
+ * way out, and the review hint, since no other screen of this run states
+ * them (the narration went quiet expecting this step to ask).
+ *
+ * @param {RunWizardSyncNowOptions} opts
+ * @param {number} deadline
+ */
+function writeHeldStatement(opts, deadline) {
+  opts.stdout.write(
+    `\nNothing has been uploaded yet: nothing leaves this machine before ${formatFirstSyncDeadline(deadline)}.\n` +
+    'To send it sooner, run `hyp sync`: it shows what would leave and asks first.\n' +
+    'To review or exclude anything before then, run the hypaware-privacy skill in Claude or Codex.\n'
+  )
 }
 
 /**
