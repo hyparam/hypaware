@@ -1283,31 +1283,35 @@ export async function collectHypAwareStatus(opts = {}) {
   // A unit or plist on disk proves only that the installer got as far as
   // writing it: it is written before the service-manager calls that load and
   // start the daemon, so a failed `daemon-reload` leaves exactly this state
-  // behind (issue #1387). With no process running either, the install did not
-  // finish and the machine is capturing nothing, which degrades `overall`
-  // through the severity rule the same way a wedged daemon does (LLP 0348).
+  // behind (issue #1387). When the probe answered and no process is running
+  // either, the machine is capturing nothing, which degrades `overall` through
+  // the severity rule the same way a wedged daemon does (LLP 0348).
   if (daemon.installed && !daemon.loaded) {
     const manager = platform === 'darwin' ? 'launchd' : 'systemd'
     const artifact = platform === 'darwin' ? 'HypAware LaunchAgent' : 'HypAware user unit'
+    // `daemon.loaded` is only ever assigned inside the probe's `try` above, and
+    // a probe that threw is folded into `daemon.error` there, so `!daemon.loaded`
+    // means "not loaded, or could not be asked". Only a probe that answered can
+    // support the claim below, and a live process alongside an unloaded unit is
+    // capturing anyway: both of those keep the note this has always been.
+    const capturingNothing = daemon.error === undefined && !daemon.running
     diagnostics.push({
-      // A live process alongside an unloaded unit is still capturing, so that
-      // half stays the note it always was.
-      severity: daemon.running ? 'warning' : 'error',
+      severity: capturingNothing ? 'error' : 'warning',
       kind: 'daemon_loaded_no_pid',
       // The message states what was observed, not why: the same pair of facts
       // is left by a failed `daemon-reload`, by a manual `launchctl bootout`,
       // and by a unit file an older version left behind, and naming one of
       // those is a wrong diagnosis rather than an unknown one.
-      message: daemon.running
-        ? `${manager} is not currently loading the ${artifact}`
-        : `${manager} is not loading the ${artifact} and no daemon process is running`
-          + ' - nothing is being captured',
-      // `hyp daemon restart` cannot repair the unloaded half: it sees the file
-      // on disk, calls straight through to `systemctl --user restart` /
-      // `launchctl kickstart` on a unit the service manager never loaded, and
-      // exits 1. Only a re-install runs the load step that is missing, which
-      // is why `daemon_binary_missing` already points there.
-      repair: [daemon.running ? 'hyp daemon restart' : 'hyp daemon install'],
+      message: capturingNothing
+        ? `${manager} is not loading the ${artifact} and no daemon process is running`
+          + ' - nothing is being captured'
+        : `${manager} is not currently loading the ${artifact}`,
+      // `hyp daemon restart` cannot repair a unit the service manager never
+      // loaded: it sees the file on disk, calls straight through to
+      // `systemctl --user restart` / `launchctl kickstart`, and exits 1. Only a
+      // re-install runs the load step that is missing, which is why
+      // `daemon_binary_missing` already points there.
+      repair: [capturingNothing ? 'hyp daemon install' : 'hyp daemon restart'],
     })
   }
 

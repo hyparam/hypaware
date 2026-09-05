@@ -141,3 +141,30 @@ test('an unloaded unit with a foreground daemon running stays healthy', async ()
   assert.equal(diag?.severity, 'warning')
   assert.deepEqual(diag?.repair, ['hyp daemon restart'], 'the running half keeps the repair it had')
 })
+
+// The second over-fixing guard, and the reason `capturingNothing` is not just
+// `!daemon.running`. `daemon.loaded` is assigned only inside the probe's `try`,
+// so a probe that throws leaves it at its `false` initializer and the collector
+// cannot tell "not loaded" from "could not ask". Escalating that to `error`
+// would report `overall: degraded`, and print "nothing is being captured", for
+// a unit that may be loaded and serving - which is exactly what the test-runner
+// guard (LLP 0181#the-guard) does to any suite run on a machine that has the
+// daemon installed for real.
+test('an unloaded unit whose probe could not answer stays a warning', async () => {
+  const { hypHome } = await makeHome()
+  await installAgainstBrokenSystemctl(hypHome)
+
+  const report = await collectHypAwareStatus({
+    ...collectOpts(hypHome),
+    systemdUnitStatus: async () => { throw new Error('refusing to run systemctl from the test runner') },
+  })
+  assert.equal(report.daemon.installed, true)
+  assert.equal(report.daemon.loaded, false, 'unset, because the probe never got to assign it')
+  assert.equal(report.daemon.running, false)
+  assert.ok(report.daemon.error, 'the probe failure is recorded, and is what tells the two apart')
+  assert.equal(report.overall, 'healthy', 'a probe that could not run is not evidence of an outage')
+
+  const diag = report.diagnostics.find((d) => d.kind === 'daemon_loaded_no_pid')
+  assert.equal(diag?.severity, 'warning')
+  assert.doesNotMatch(diag?.message ?? '', /nothing is being captured/)
+})
