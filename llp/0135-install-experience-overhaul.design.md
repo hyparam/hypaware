@@ -299,8 +299,10 @@ print a plain-text form of the same text: the legacy numbered picker prompt
 writes it above the question exactly where the TUI paints it.
 
 Lanes that own no prompt spec write the line themselves where the lane
-starts, once: `runWizardJoin` above its `Joining your team...` narration,
-`runPickerFinale` before its first action.
+starts, once: `runWizardJoin` where its `Joining your team...` narration
+would go, `runPickerFinale` before its first action. The position line
+already names the lane it starts, so join prints that plain sentence only
+on a run that has no position line to print.
 
 `wizardStepProgress` returns `undefined` whenever no position can be stated
 honestly, and every caller threads that `undefined` straight through as an
@@ -324,7 +326,8 @@ wrapper, not a second enrollment mechanism (`@ref LLP 0134#login-lane`):
 
 ```js
 export async function runWizardJoin(opts) {
-  opts.stdout.write('Joining your team...\n')
+  if (opts.progress) opts.stdout.write(`${opts.progress}\n`)   // the position line names the lane (#progress)
+  else opts.stdout.write('Joining your team...\n')
   const login = await runRemoteLogin([], loginCtxFrom(opts), {})  // existing hyp remote login machinery
   if (login.exitCode !== 0) return { status: classifyLoginFailure(login) }
 
