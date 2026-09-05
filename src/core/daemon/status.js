@@ -1409,8 +1409,41 @@ export async function collectHypAwareStatus(opts = {}) {
         state: started ? 'started' : 'stopped',
       })
     }
-  } else if (daemonStatusFile && (daemonStatusFile.sources?.length ?? 0) > 0) {
-    sources.push(...(daemonStatusFile.sources ?? []))
+  } else if (daemonStatusFile && Array.isArray(daemonStatusFile.sources) && daemonStatusFile.sources.length > 0) {
+    // `status.json` outlives the process that wrote it, so with nothing
+    // running a transcribed `started` is a present-tense claim on a machine
+    // capturing nothing (issue #1410), under a daemon line that already reads
+    // `not running`. The identity outlives the process and is worth listing;
+    // the liveness claim does not, and `stopped` is what a source whose daemon
+    // is gone is. `failed` is left as written: it records why the last run
+    // went wrong, carries its `error` beside it, and claims nothing about now.
+    //
+    // The liveness the rewrite reads is `daemon.running && snapshotIsThisProcess`,
+    // not `daemon.running` alone, for the reason spelled out where that pair is
+    // derived above: `processIsAlive` proves a pid is taken, not that the daemon
+    // took it, so a hard kill whose pid the OS reissued would otherwise let the
+    // dead run's `started` through on exactly the machine this is about.
+    //
+    // The branch is entered on `Array.isArray`, not on a truthy `.length`,
+    // because `readStatusFile` validates only "is an object": a `sources` of
+    // `"abcd"` arrives here with `length` 4 and no `.map`
+    // (LLP 0164#status-reads-it-from-the-status-file). That is the guard
+    // `recentEntrypointsFromSources` and `liveStatusSources` already use, and a
+    // file carrying no readable list falls through to the inference below, the
+    // same as a file carrying none at all. An entry that is not an object is
+    // dropped rather than carried through, for the reason `entryList` in
+    // `commands/daemon.js` drops one: every reader past this point
+    // dereferences `.name`, so a `null` in the list takes the whole report out
+    // at the render rather than here.
+    // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
+    const snapshotIsLive = daemon.running && snapshotIsThisProcess
+    sources.push(...daemonStatusFile.sources
+      .filter((s) => !!s && typeof s === 'object')
+      .map((s) => (
+        snapshotIsLive || s.state !== 'started'
+          ? s
+          : /** @type {SourceSnapshot} */ ({ ...s, state: 'stopped' })
+      )))
   } else {
     sources.push(...inferConfiguredSources(activePlugins))
   }
@@ -1480,7 +1513,19 @@ export async function collectHypAwareStatus(opts = {}) {
       sinks.push({ instance, plugin: info.plugin, kind: info.kind })
     }
   } else if (daemonStatusFile) {
-    sinks.push(...(daemonStatusFile.sinks ?? []))
+    // Ungated, unlike the sources fallback above, because a `SinkSnapshot`
+    // carries no liveness word: instance, plugin and kind are the shape of the
+    // install, and `lastTickAt` / `lastSuccessAt` are last-seen facts that stay
+    // true after their daemon exits (LLP 0164#not-liveness-gated). Dropping
+    // them with nothing running would print `(none - keeping captured data
+    // local only)` on a machine that does have a sink.
+    //
+    // Ungated for liveness is not ungated for shape: `readStatusFile` knows
+    // only that it read an object, so a `sinks` of `5` throws out of the
+    // collector at the spread and a `sinks` of `"ab"` spreads into one blank
+    // row per character. Same guard as the sources list above.
+    sinks.push(...(Array.isArray(daemonStatusFile.sinks) ? daemonStatusFile.sinks : [])
+      .filter((s) => !!s && typeof s === 'object'))
   }
 
   // ----- client attach -----
