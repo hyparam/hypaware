@@ -5,6 +5,10 @@
 **Systems:** CLI, Onboarding, Usage-Policy, Sinks, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-07-13
+**Extended-by:** [LLP 0387](./0387-compact-join-r1a-is-satisfied-by-an-adjacent-pair.decision.md)
+(#adjacency: in the wizard's compact join lane the forwarding line and the
+one-line deadline block satisfy R1a together, the first carrying the server
+name and the `hyp remote list` lookup for the pair)
 **Related:** LLP 0049, LLP 0063, LLP 0066, LLP 0069, LLP 0070, LLP 0071, LLP 0093, LLP 0094, LLP 0101, LLP 0102, LLP 0103, LLP 0104, LLP 0105, LLP 0106, LLP 0107
 
 > When `hyp remote login` enrolls a machine, the first sync to the org server
