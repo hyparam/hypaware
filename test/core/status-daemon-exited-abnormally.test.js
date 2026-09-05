@@ -5,8 +5,10 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { readFileSync } from 'node:fs'
 
-import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { collectHypAwareStatus, statusFilePath, writeStatusFile } from '../../src/core/daemon/status.js'
+import { runDaemon } from '../../src/core/daemon/runtime.js'
 import { renderStatusText } from '../../src/core/commands/status.js'
 import { defaultUnitDir, unitFileName } from '../../src/core/daemon/platform.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
@@ -146,4 +148,54 @@ test('an installed daemon that has never run stays healthy', async () => {
   assert.equal(report.daemon.running, false)
   assert.equal(report.overall, 'healthy', 'nothing has run, so nothing exited')
   assert.equal(report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally'), undefined)
+})
+
+// The third over-fixing guard, and the writer's half of the same signal. A
+// shutdown that is killed before it finishes (a source stop that wedges, then
+// the service manager's grace period or an operator's `kill -9` after
+// `hyp daemon stop` reports its timeout) leaves `stopping`, which is a stop
+// somebody asked for and not a crash.
+test('a shutdown that was killed before it completed stays healthy', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  leaveSnapshot(stateRoot, 'stopping')
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.daemon.loaded, true)
+  assert.equal(report.daemon.running, false)
+  assert.equal(report.overall, 'healthy', 'a shutdown ran; it just did not reach the end')
+  assert.equal(report.diagnostics.find((d) => d.kind === 'daemon_exited_abnormally'), undefined)
+})
+
+// That guard is only worth anything if the daemon reaches `stopping` before
+// the parts of shutdown that can hold it open for minutes: `await
+// maintenanceInFlight` and `await reconcileScheduler.settle()`, which waits
+// out a `hyp backfill` import by design. A snapshot still reading `healthy`
+// through that window would report a crash for a stop the operator asked for.
+// Read synchronously, so it can only pass if the write precedes every `await`
+// in `shutdown()`.
+test('the daemon records the stop before anything that can block its shutdown', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-shutdown-records-stop-'))
+  const stateRoot = path.join(hypHome, 'hypaware')
+  const configPath = defaultConfigPath(hypHome)
+  await fs.mkdir(path.dirname(configPath), { recursive: true })
+  await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }) + '\n')
+
+  const handle = await runDaemon({
+    hypHome,
+    configPath,
+    env: { ...process.env, HYP_HOME: hypHome },
+    runId: 'shutdown-records-stop-test',
+    tickIntervalMs: 0,
+    installSignalHandlers: false,
+  })
+  try {
+    const stopping = handle.stop()
+    const snapshot = JSON.parse(readFileSync(statusFilePath(stateRoot), 'utf8'))
+    assert.equal(snapshot.state, 'stopping', 'the stop is on disk before shutdown can block')
+    await stopping
+    await handle.done
+    assert.equal(JSON.parse(readFileSync(statusFilePath(stateRoot), 'utf8')).state, 'stopped')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
 })
