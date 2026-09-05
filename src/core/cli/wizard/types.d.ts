@@ -628,6 +628,10 @@ export type FirstAskResult =
  * user reads its destination list and answers no. `sync-declined` is that
  * second case, and it is deliberately distinct from `declined` (the wizard's
  * own question) - the two say different things about how far the user got.
+ *
+ * `asked` reports whether that wizard question was put, not how far the child
+ * got afterwards: `spawn-failed` is an asked run whose answer was `now`, while
+ * the `asked: false` arm is the three paths where nobody was offered anything.
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }

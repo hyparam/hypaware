@@ -104,6 +104,10 @@ export async function runWizardSyncNow(opts) {
           span.setAttribute(Attr.ERROR_KIND, 'spawn_failed')
           opts.stderr?.write(`Could not start hyp sync: ${result.error}\n`)
           writeStillHeld(opts, opts.deadline)
+          // `asked: true` although the child never printed its plan: `asked`
+          // reports the wizard's own question, which here was put and answered
+          // `now` (`WizardSyncNowResult`). `asked: false` is reserved for the
+          // runs nobody was offered anything on.
           return { asked: true, released: false, reason: /** @type {const} */ ('spawn-failed') }
         }
 
