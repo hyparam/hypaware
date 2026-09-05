@@ -224,7 +224,12 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
   // duplicate row plus a repeat fan-out of files, reviews and commits, and
   // `flush` deduplicates one batch, not a phase. The same push-down bounds the
   // reach: a page's worth (100) of later-updated pulls per page of distance, so
-  // it is a long backfill over a busy repository that produces one, not a poll.
+  // a pull sighted early on a consumed page comes back only under a long
+  // backfill over a busy repository. One sighted near that page's tail needs
+  // only a handful, which is the sighting the `capturedAtHigh` comment below
+  // rests on: a poll reaches a second page only when all 100 pulls on the first
+  // sit at or above its baseline, and a repository that busy reshuffles between
+  // two requests.
   // Staged on the work descriptor rather than held in memory for the same reason
   // `pulls_high_numbers` is: the request budget splits a pulls phase across
   // ticks, and a set that restarted empty on the resumed page would leave the
