@@ -80,7 +80,7 @@ export async function loginWithBrowser({
     if (compact) {
       // The wizard's join lane: the same fallback URL, without the paragraph
       // around it. The lane's own position line already says what is happening.
-      print(opened ? 'Sign in in the browser that just opened. If it did not open, visit:' : 'Open this URL in your browser (any machine) to sign in:')
+      print(opened ? 'Sign in using the browser that just opened; if it did not open, visit:' : 'Open this URL in your browser (any machine) to sign in:')
       print(`  ${startUrl}`)
     } else if (opened) {
       // The opener boolean is best-effort: a launcher that exists but fails (no
