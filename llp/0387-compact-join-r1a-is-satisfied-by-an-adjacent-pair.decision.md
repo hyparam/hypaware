@@ -16,7 +16,9 @@ are consent surfaces rather than prompts), LLP 0101 (#no-release: the hold
 runs to its absolute deadline, which is what the compact line states),
 LLP 0131 (#attended-only: the compact lane runs only under the wizard, and
 only attended), LLP 0135 (the wizard whose join lane asked for compact
-output), hyparam/hypaware#1422, hyparam/hypaware#391
+output), LLP 0203 (#offer: on the ordinary attended close the send-now
+offer, not the narration, carries R1's release verb),
+hyparam/hypaware#1422, hyparam/hypaware#391
 
 > `hyp remote login` has two output lanes. The wide lane prints a boxed
 > privacy block that names the server and `hyp remote list` inside its own
@@ -49,17 +51,21 @@ stdout, and "redirect either and the other must still stand on its own".
 The compact lane, added for the wizard's join step, prints one line per
 event. It replaces the whole rule-lined block with a single stderr line
 carrying the deadline and the hold's guarantee, because the wizard's own
-closing narration states the rest of R1 (the backfill statement, the skill
-hint, the release verb) and the block would otherwise say everything twice
-in one run. That closing narration names neither the server nor
-`hyp remote list`, so if the compact deadline line had to satisfy R1a alone,
-it would fail: it names no server and no lookup command.
+close states the rest of R1 and the block would otherwise say everything
+twice in one run. `narratePrivacyIfTeamPath` carries the backfill statement
+and the skill hint on every path; the release verb reaches the ordinary
+attended close through the send-now offer (LLP 0203) rather than the
+narration, which drops its `hyp sync` sentence exactly when that offer
+follows, and states it only on the abort path. Neither the narration nor the
+offer names the server or `hyp remote list`, so if the compact deadline line
+had to satisfy R1a alone, it would fail: it names no server and no lookup
+command.
 
 ## The pair is the surface {#adjacency}
 
 **In the compact lane the forwarding line and the deadline line jointly
 satisfy R1a, and neither is required to satisfy it alone.** The two writes
-are consecutive in `runRemoteLogin`, with only comments between them:
+are consecutive in `runBrowserLogin`, with only comments between them:
 
 ```
 ✓ Forwarding to the 'prod' server (run 'hyp remote list' to see its URL)
@@ -117,13 +123,13 @@ would then have to carry the name and the lookup itself.
 
 ## References
 
-- LLP 0063, LLP 0100, LLP 0101, LLP 0131, LLP 0135
+- LLP 0063, LLP 0100, LLP 0101, LLP 0131, LLP 0135, LLP 0203
 - hyparam/hypaware#1422, hyparam/hypaware#391, PR #1375
 - `src/core/cli/remote_commands.js` (the forwarding line, the compact
   deadline line, and `firstSyncHoldMessage` for the wide block),
   `src/core/cli/wizard/join.js` (`defaultRunLogin`, the one caller that
   passes `compact: true`), `src/core/cli/wizard/index.js`
-  (`narratePrivacyIfTeamPath`, the closing narration that carries the rest
-  of R1 and names no server),
+  (`narratePrivacyIfTeamPath`, the closing narration that carries the
+  backfill statement and the skill hint, and names no server),
   `test/core/remote-login-command.test.js` (the compact-lane test that pins
   both lines)
