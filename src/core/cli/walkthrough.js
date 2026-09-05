@@ -1961,7 +1961,24 @@ export async function runPickerFinale(args) {
     writeAttachedNotConfiguredWarning({ clients: summary.attachedNotConfigured, stdout, dryRun })
   }
 
-  if (!finale.skipDaemon && !finale.skipDaemonRestart && !dryRun) {
+  // A failed install is withheld from the restart the way the proxy-CA wait
+  // above is: running it printed a `daemon restart failed:` line directly
+  // under the note that had just said the install did not finish, reading as a
+  // second, unrelated fault (#1393). Why the restart is pointless depends on
+  // which failure this was. One that reached the service manager already
+  // forced the start and polled for a pid, so a restart is no revival. One
+  // that never got that far (an unsupported platform, an unwritable unit dir,
+  // the npx durable-bin upgrade) installed no service for this run to restart.
+  // The gate is knowingly too broad for one of those: a durable-bin failure
+  // over a daemon that was already running leaves it serving the config this
+  // run replaced. Separating that case needs a runtime pid probe rather than
+  // an error class, so it is tracked in #1400. The dry-run branch carries the
+  // gate too, so a plan that could not be rendered does not go on to claim it
+  // would restart. Either way the withheld restart keeps the summary's initial
+  // `skipped: true` record, and `daemonInstall.failed` is where the run says
+  // why.
+  // @ref LLP 0317#install-means-running [constrained-by]: an install returns only once the daemon is observably running, so restarting after one that threw revives nothing
+  if (!finale.skipDaemon && !finale.skipDaemonRestart && !installFailed && !dryRun) {
     try {
       const { restartServiceDaemon } = await import('../daemon/install.js')
       await restartServiceDaemon({ ...(homeDir ? { homeDir } : {}) })
@@ -1971,7 +1988,7 @@ export async function runPickerFinale(args) {
       stderr.write(`daemon restart failed: ${message}\n`)
       summary.daemonRestart = { skipped: false, dryRun: false, ok: false }
     }
-  } else if (dryRun && !finale.skipDaemon && !finale.skipDaemonRestart) {
+  } else if (dryRun && !finale.skipDaemon && !finale.skipDaemonRestart && !installFailed) {
     summary.daemonRestart = { skipped: false, dryRun: true, ok: true }
     stdout.write(`(dry-run) Would restart the daemon\n`)
   }
