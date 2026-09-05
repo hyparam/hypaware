@@ -551,7 +551,7 @@ run directly. The common Phase 8 conditions:
 | `sink_missing_encoder`                | a local-fs sink is configured but no encoder plugin is enabled                     | re-run `hyp setup` and pick "local Parquet export"                        |
 | `client_attach_missing`               | a client plugin is enabled but its settings file shows no HypAware marker          | the printed repair names the client, e.g. `hyp client attach opencode`     |
 | `daemon_binary_missing`               | the daemon installer references a binary that no longer exists on disk             | `hyp daemon install`                                                     |
-| `daemon_loaded_no_pid`                | the daemon service file is installed but launchd / systemd is not loading it       | `hyp daemon restart`                                                     |
+| `daemon_loaded_no_pid`                | the daemon service file is installed but launchd / systemd is not loading it; an `error` rather than a warning when no daemon process is running either, because nothing is being captured | `hyp daemon restart` while a process is still running, otherwise `hyp daemon install` |
 | `daemon_heartbeat_stale`              | the daemon process is alive but its status snapshot has stopped advancing, so its tick is not completing | `hyp daemon restart`                                                     |
 | `recent_errors`                       | failures recorded in the last 24h: `error` lines in the daemon log, failed sink export batches in an outbox, and dev-telemetry error records | inspect `~/.hyp/hypaware/logs/daemon.log` and `~/.hyp/hypaware/sinks/*/outbox`, then `hyp daemon restart` |
 

@@ -1294,11 +1294,20 @@ export async function collectHypAwareStatus(opts = {}) {
       // half stays the note it always was.
       severity: daemon.running ? 'warning' : 'error',
       kind: 'daemon_loaded_no_pid',
+      // The message states what was observed, not why: the same pair of facts
+      // is left by a failed `daemon-reload`, by a manual `launchctl bootout`,
+      // and by a unit file an older version left behind, and naming one of
+      // those is a wrong diagnosis rather than an unknown one.
       message: daemon.running
         ? `${manager} is not currently loading the ${artifact}`
         : `${manager} is not loading the ${artifact} and no daemon process is running`
-          + ' - the install did not finish, so nothing is being captured',
-      repair: ['hyp daemon restart'],
+          + ' - nothing is being captured',
+      // `hyp daemon restart` cannot repair the unloaded half: it sees the file
+      // on disk, calls straight through to `systemctl --user restart` /
+      // `launchctl kickstart` on a unit the service manager never loaded, and
+      // exits 1. Only a re-install runs the load step that is missing, which
+      // is why `daemon_binary_missing` already points there.
+      repair: [daemon.running ? 'hyp daemon restart' : 'hyp daemon install'],
     })
   }
 

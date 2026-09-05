@@ -113,6 +113,11 @@ test('a daemon install whose service-manager step failed is not reported healthy
   const diag = report.diagnostics.find((d) => d.kind === 'daemon_loaded_no_pid')
   assert.ok(diag, 'the unfinished install is named')
   assert.equal(diag.severity, 'error')
+  // The repair has to run the load step that never ran. `hyp daemon restart`
+  // takes the installed-service branch on the unit file's presence and calls
+  // `systemctl --user restart` on a unit the service manager never loaded,
+  // which exits 1 and leaves the operator with no next step.
+  assert.deepEqual(diag.repair, ['hyp daemon install'])
 
   const text = renderText(report)
   assert.match(text, /daemon:\s+installed, not loaded, not running/)
@@ -132,5 +137,7 @@ test('an unloaded unit with a foreground daemon running stays healthy', async ()
   assert.equal(report.daemon.loaded, false)
   assert.equal(report.daemon.running, true)
   assert.equal(report.overall, 'healthy')
-  assert.equal(report.diagnostics.find((d) => d.kind === 'daemon_loaded_no_pid')?.severity, 'warning')
+  const diag = report.diagnostics.find((d) => d.kind === 'daemon_loaded_no_pid')
+  assert.equal(diag?.severity, 'warning')
+  assert.deepEqual(diag?.repair, ['hyp daemon restart'], 'the running half keeps the repair it had')
 })
