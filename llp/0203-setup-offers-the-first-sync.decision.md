@@ -70,14 +70,15 @@ where it is the only sighting of the deadline and the way out
 The join lane's one-line deadline stays too: it is the first moment the
 deadline is true, and it is one line.
 
-Three paths reach the step and still never put the question: `hyp init`
-admits an attended run whose stdout is a terminal and whose stdin is not
+Some runs reach the step and still never see the plan: `hyp init` admits an
+attended run whose stdout is a terminal and whose stdin is not
 (`hyp init < file`), and nothing may be spawned to prompt on a stdin like
-that; a spawn can fail; and an unforeseen throw can end the step. The
-paragraph has already stood down by then and the child printed no plan, so
-the step states the hold itself, carrying every fact the paragraph carried
-rather than only the release verb. Keeping the statement in the step rather
-than widening the paragraph's gate is what keeps the two from both printing.
+that; a spawn can fail; a child can exit before rendering its plan; and an
+unforeseen throw can end the step. The paragraph has already stood down by
+then and nothing else on the run says any of it, so the step states the hold
+itself, carrying every fact the paragraph carried rather than only the
+release verb. Keeping the statement in the step rather than widening the
+paragraph's gate is what keeps the two from both printing.
 
 The question list keeps its place as the last thing on screen
 ([LLP 0198 #onboarding-list](./0198-setup-ends-on-a-question.decision.md#onboarding-list)):
@@ -160,8 +161,12 @@ be corrected later.
 
 ## Consequences {#consequences}
 
-- A user with no privacy concern finishes setup with rows on the server, and
-  a user who wants the window keeps it by pressing enter.
+- A user with no privacy concern finishes setup with rows on the server by
+  pressing enter, and a user who wants the window keeps it by answering `n`.
+  That is the polarity of the child's own confirm
+  ([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md)); the
+  deleted wizard select's enter meant the opposite, and this decision no
+  longer puts it in front.
 - On the attended path the deadline is stated twice per run (the join
   lane's line and the sync plan's warning) and asked about once. The
   declining run still ends on a line that restates the deadline and names
@@ -172,7 +177,10 @@ be corrected later.
   review hint (the `hypaware-privacy` skill) rides the sync plan's warning on
   this path, so the warning names the skill alongside `hyp privacy set`.
 - `wizard.finish` gains `sync_now` (`released`, `sync-declined`,
-  `spawn-failed`, `skipped`), and the step emits a `wizard.sync_now` span
-  carrying the child's exit code and whether the marker cleared. The
-  declined/released split is the measurement that says whether the window's
-  default sizing matches the people in it.
+  `child-failed`, `spawn-failed`, `skipped`), and the step emits a
+  `wizard.sync_now` span carrying the child's exit code and whether the
+  marker cleared. The declined/released split is the measurement that says
+  whether the window's default sizing matches the people in it, which is why
+  a child that exited non-zero is `child-failed` rather than a decline: it
+  never reached its plan, and counting it as one would inflate the rate this
+  step exists to measure.

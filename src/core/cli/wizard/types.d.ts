@@ -627,10 +627,13 @@ export type FirstAskResult =
  * user reads its destination list and answers no. `sync-declined` is that
  * second case, and it is the only decline there is: the wizard puts no
  * question of its own ahead of the child's (LLP 0203 #no-new-consent).
+ * `child-failed` is the still-held run whose child exited non-zero, which a
+ * decline never does: it never reached its plan, so it is not a decline and
+ * must not be counted as one.
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
-  | { asked: true; released: false; reason: 'sync-declined' | 'spawn-failed' }
+  | { asked: true; released: false; reason: 'sync-declined' | 'child-failed' | 'spawn-failed' }
   | { asked: false; reason: 'no-hold' | 'not-interactive' | 'error' }
 
 /** Options for `runWizardSyncNow`. */

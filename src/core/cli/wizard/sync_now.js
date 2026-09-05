@@ -98,6 +98,17 @@ export async function runWizardSyncNow(opts) {
         const stillHeld = await readHold(opts)
         span.setAttribute('released', stillHeld === null)
         if (stillHeld !== null) {
+          // A decline exits 0 (`sync cancelled`), so a non-zero exit is a
+          // child that never reached its plan: an empty sink set, a boot that
+          // failed, a signal. That run saw none of what the narration stood
+          // down for, so it takes the whole statement and its own reason -
+          // reading it as a decline would also inflate the one rate this
+          // step is measured by. The read-back still decides first: a child
+          // that released and *then* failed must never be told it did not.
+          if (result.code !== 0) {
+            writeHeldStatement(opts, stillHeld)
+            return { asked: true, released: false, reason: /** @type {const} */ ('child-failed') }
+          }
           writeStillHeld(opts, stillHeld)
           return { asked: true, released: false, reason: /** @type {const} */ ('sync-declined') }
         }
@@ -206,10 +217,12 @@ async function readHold(opts) {
  */
 function writeHeldStatement(opts, deadline) {
   opts.stdout.write(
-    `\nNothing has been uploaded yet: nothing leaves this machine before ${formatFirstSyncDeadline(deadline)},\n` +
-    'and that first sync includes your imported history. `hyp status` shows the countdown.\n' +
+    '\nNothing has been uploaded yet: nothing leaves this machine before\n' +
+    `${formatFirstSyncDeadline(deadline)}. That first sync includes your imported history,\n` +
+    'and `hyp status` shows the countdown.\n' +
     'To send it sooner, run `hyp sync`: it shows what would leave and asks first.\n' +
-    'To review or exclude anything before then, run the hypaware-privacy skill in Claude or Codex.\n'
+    'To review or exclude anything before then, run the hypaware-privacy skill\n' +
+    'in Claude or Codex.\n'
   )
 }
 

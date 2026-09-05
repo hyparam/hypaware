@@ -1426,7 +1426,7 @@ test('runInitWizard: team pathway with a live first-sync hold narrates the deadl
   const text = stdout.text()
   // No tty here, so the sync step cannot put the question and states the
   // hold itself: the deadline, the way out, and the review hint.
-  assert.match(text, /Nothing has been uploaded yet: nothing leaves this machine before /)
+  assert.match(text, /Nothing has been uploaded yet: nothing leaves this machine before/)
   assert.match(text, /hypaware-privacy/)
   assert.match(text, /To send it sooner, run `hyp sync`/)
 })

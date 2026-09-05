@@ -100,7 +100,7 @@ test('a non-interactive run is never asked, and never sends', async () => {
   // run, so the skip has to state the deadline, the way out, and the review
   // hint itself or the run ends without ever naming them.
   // @ref LLP 0188#never-silent [tests]: the un-askable path still names the release verb
-  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before /)
+  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
   assert.match(o.stdout.text(), /includes your imported history/)
   assert.match(o.stdout.text(), /`hyp status` shows the countdown/)
   assert.match(o.stdout.text(), /To send it sooner, run `hyp sync`/)
@@ -133,7 +133,7 @@ for (const surfaces of [
     assert.deepEqual(result, { asked: false, reason: 'not-interactive' })
     // Everything the privacy narration would have said, because it stood
     // down for a question this run cannot be asked.
-    assert.match(stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before /)
+    assert.match(stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
     assert.match(stdout.text(), /includes your imported history/)
     assert.match(stdout.text(), /`hyp status` shows the countdown/)
     assert.match(stdout.text(), /To send it sooner, run `hyp sync`/)
@@ -168,7 +168,7 @@ test('an unforeseen throw states the hold rather than ending on nothing', async 
     readDeadline: async () => DEADLINE,
   })
   assert.deepEqual(result, { asked: false, reason: 'error' })
-  assert.match(stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before /)
+  assert.match(stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
 })
 
 // @ref LLP 0203#child-process [tests]: the release is a real `hyp sync` in a fresh process, not an in-wizard reimplementation
@@ -210,6 +210,40 @@ test('a child that exits 0 without releasing is reported as not sent', async () 
   assert.match(o.stdout.text(), /run `hyp sync` any time/)
 })
 
+// A decline exits 0, so a non-zero exit is a child that never reached its
+// plan (an empty sink set, a boot that failed, a signal). Reading that as a
+// decline would leave the run with none of what the narration stood down for
+// and would count a crash as a user choosing the window.
+// @ref LLP 0188#never-silent [tests]: a child that never showed its plan states the hold
+test('a child that exits non-zero states the whole hold and is not counted as a decline', async () => {
+  const spawn = fakeSpawn({ code: 1 })
+  const o = opts({
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => DEADLINE,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: false, reason: 'child-failed' })
+  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
+  assert.match(o.stdout.text(), /hypaware-privacy/)
+  assert.doesNotMatch(o.stdout.text(), /Nothing was sent/)
+})
+
+// The read-back still decides first: a child that released and then failed
+// must never be told its history is still here.
+// @ref LLP 0203#read-back [tests]: a non-zero exit never overrides a marker that is gone
+test('a child that released and then exited non-zero is still a release', async () => {
+  const spawn = fakeSpawn({ code: 1 })
+  const o = opts({
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => null,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: true })
+  assert.doesNotMatch(o.stdout.text(), /Nothing has been uploaded yet/)
+})
+
 // @ref LLP 0203#read-back [tests]: an unreadable re-read is "still held", never a claimed release
 test('a re-read that throws is reported as not sent, not as a release', async () => {
   const spawn = fakeSpawn({ code: 0 })
@@ -239,7 +273,7 @@ test('a spawn failure never fails the install, and states the whole hold', async
 
   assert.deepEqual(result, { asked: true, released: false, reason: 'spawn-failed' })
   assert.match(o.stderr.text(), /Could not start hyp sync: ENOENT/)
-  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before /)
+  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
   assert.match(o.stdout.text(), /includes your imported history/)
   assert.match(o.stdout.text(), /To send it sooner, run `hyp sync`/)
   assert.match(o.stdout.text(), /hypaware-privacy/)
