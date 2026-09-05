@@ -230,6 +230,27 @@ export function ensureOk(res, what, ErrorClass) {
 }
 
 /**
+ * Run one filesystem step of an install, raising `ErrorClass` when the host
+ * refuses it. An installer writes into directories the user may not own
+ * (EACCES), onto a read-only or full filesystem (EROFS, ENOSPC): environment
+ * failures exactly like the non-zero exits `ensureOk` covers, but reaching a
+ * caller as a bare Node system error indistinguishable from a bug (#1386).
+ *
+ * @template T
+ * @param {() => T} fn
+ * @param {string} what  human description of the step, e.g. `create /home/x/.config/systemd/user`
+ * @param {new (message: string, opts?: { exitCode?: number, stderr?: string }) => Error} ErrorClass
+ * @returns {T}
+ */
+export function ensureFsOp(fn, what, ErrorClass) {
+  try {
+    return fn()
+  } catch (err) {
+    throw new ErrorClass(`failed to ${what}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/**
  * Remove a service file, tolerating one already removed. Any error
  * other than ENOENT still throws.
  *

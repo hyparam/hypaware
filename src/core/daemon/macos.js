@@ -10,7 +10,7 @@ import {
   defaultPlistDir,
   plistFileName,
 } from './platform.js'
-import { ServiceOpError, defaultSleep, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
+import { ServiceOpError, defaultSleep, ensureFsOp, ensureOk, runServiceCommand, unlinkServiceFile } from './service_ops.js'
 import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
 /**
@@ -51,6 +51,19 @@ export const realLaunchctl = {
  */
 function ensure(res, what) {
   return ensureOk(res, what, LaunchAgentError)
+}
+
+/**
+ * Throw a {@link LaunchAgentError} when a filesystem step of the install
+ * failed.
+ *
+ * @template T
+ * @param {() => T} fn
+ * @param {string} what
+ * @returns {T}
+ */
+function ensureFs(fn, what) {
+  return ensureFsOp(fn, what, LaunchAgentError)
 }
 
 /**
@@ -311,8 +324,8 @@ export async function installLaunchAgent(options) {
   const { launchctl, userDomain, target } = resolveTarget(options)
   const sleep = options.sleep ?? defaultSleep
 
-  fs.mkdirSync(plan.plistDir, { recursive: true })
-  fs.mkdirSync(plan.logDir, { recursive: true })
+  ensureFs(function() { fs.mkdirSync(plan.plistDir, { recursive: true }) }, `create ${plan.plistDir}`)
+  ensureFs(function() { fs.mkdirSync(plan.logDir, { recursive: true }) }, `create ${plan.logDir}`)
 
   const printRes = await launchctl.print([target])
   if (printRes.exitCode === 0) {
@@ -320,7 +333,10 @@ export async function installLaunchAgent(options) {
     await waitUntilUnloaded(launchctl, target, sleep)
   }
 
-  atomicWriteFileSync(plan.targetPath, plan.content, { mode: 0o644 })
+  ensureFs(
+    function() { atomicWriteFileSync(plan.targetPath, plan.content, { mode: 0o644 }) },
+    `write ${plan.targetPath}`,
+  )
 
   let bootstrapRes = await launchctl.bootstrap([userDomain, plan.targetPath])
   for (
