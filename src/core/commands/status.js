@@ -334,6 +334,11 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       ...(report.daemon.error ? { error: report.daemon.error } : {}),
     },
     ...(report.selfUpdate ? { self_update: report.selfUpdate.json } : {}),
+    // The state here is the collector's, the same value the text plane prints,
+    // and not the word `status.json` recorded: a source whose daemon is not
+    // running is not started, on either plane. The dead run's own last write
+    // stays readable, byte-exact, from `hyp daemon status --json` (#1416).
+    // @ref LLP 0385#sources-state-is-a-verdict [implements]: --json is a machine rendering of this report, not a second data source with different epistemics
     sources: report.sources.map((s) => ({
       name: s.name,
       plugin: s.plugin,

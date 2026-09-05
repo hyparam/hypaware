@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { collectHypAwareStatus, statusFilePath, writeStatusFile } from '../../src/core/daemon/status.js'
 import { renderStatusJson, renderStatusText } from '../../src/core/commands/status.js'
+import { runDaemonStatus } from '../../src/core/commands/daemon.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 
@@ -105,6 +106,34 @@ test('an exited daemon\'s snapshot sources are not reported as started', async (
   // The sink block carries no liveness word, so it stays the record it is
   // rather than becoming a false `(none)` on a machine that has a sink.
   assert.match(text, /central.*@hypaware\/central, request/)
+})
+
+test('a dead daemon publishes the verdict on one machine surface and the record on the other', async (t) => {
+  const { hypHome, stateRoot } = await makeHome(t)
+  // One dead run read on both machine surfaces. `hyp status --json` renders
+  // the collector's report, so it says what is up now; `hyp daemon status
+  // --json` is the status file's copy, so it says what the run last recorded.
+  // Issue #1416 asked which of the two the first surface carries, and this
+  // pins both: neither reading is lost, and each is on the command whose
+  // subject it is.
+  // @ref LLP 0385#the-file-copy-is-daemon-status [tests]: the terminal recorded state stays reachable on the machine plane, on the surface whose contract is the file
+  writeSnapshot(stateRoot)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const json = renderStatusJson({ report, clientNames: [], datasets: [], cacheRoot: '/cache' })
+  assert.equal(json.sources[0].state, 'stopped', 'hyp status --json reports the verdict')
+
+  const stdout = makeBuf()
+  const code = await runDaemonStatus(['--json'], /** @type {any} */ ({
+    env: { HYP_HOME: hypHome },
+    stdout,
+    stderr: makeBuf(),
+  }))
+  assert.equal(code, 0)
+  const recorded = JSON.parse(stdout.text())
+  assert.equal(recorded.running, false, 'the same dead daemon')
+  assert.equal(recorded.sources[0].state, 'started', 'and the file copy still carries what it recorded')
+  assert.equal(recorded.sources[1].state, 'failed')
 })
 
 test('a running daemon\'s snapshot sources still render present-tense', async (t) => {
