@@ -293,6 +293,23 @@ test('a configured persisted_path is honored and non-matching central sinks are 
   await assert.rejects(fs.access(otherPath))
 })
 
+test('compact login (the wizard join lane) prints one line per event and no privacy block', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login, compact: true })
+  assert.equal(code, 0)
+  const text = out.join('') + err.join('')
+  assert.match(text, /^note: signing in enrolls this machine, .*\(Ctrl-C to cancel\)$/m, 'the pre-auth notice stays, as one line')
+  assert.match(text, /✓ Signed in to 'prod' as org /)
+  assert.match(text, /✓ Forwarding to the 'prod' server \(run 'hyp remote list' to see its URL\)/)
+  assert.match(text, /✓ First sync no later than .+; you will be asked before it/)
+  assert.doesNotMatch(text, /PRIVACY - review before first sync/)
+  assert.doesNotMatch(text, /forwarding logs to the/)
+  assert.doesNotMatch(text, /tip: mark a directory local-only/)
+})
+
 test('a gateway credential with no matching central sink provisions one, forwarding from one command (LLP 0063 D2)', async () => {
   const hypHome = await tmpHome()
   const { ctx, out } = await makeCtx({ hypHome })
