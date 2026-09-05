@@ -1971,7 +1971,7 @@ export async function runPickerFinale(args) {
       stderr.write(`daemon restart failed: ${message}\n`)
       summary.daemonRestart = { skipped: false, dryRun: false, ok: false }
     }
-  } else if (dryRun && !finale.skipDaemon) {
+  } else if (dryRun && !finale.skipDaemon && !finale.skipDaemonRestart) {
     summary.daemonRestart = { skipped: false, dryRun: true, ok: true }
     stdout.write(`(dry-run) Would restart the daemon\n`)
   }

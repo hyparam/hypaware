@@ -746,3 +746,50 @@ test('a live surface, and a caller with no boundary check, both still ask', asyn
     assert.equal(backfill.calls.length, 1)
   }
 })
+
+// A dry run previews the real run, so it can only advertise a restart the
+// real run would perform. The real-run gate reads `skipDaemonRestart`, so
+// the dry-run branch has to read it too.
+test('a dry run honours skipDaemonRestart instead of advertising a restart', async () => {
+  const env = await tmpEnv('hypaware-finale-dryrun-skiprestart-')
+  const stdout = makeBuf()
+
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    finale: { dryRun: true, skipDaemon: false, skipDaemonRestart: true },
+    clientsPicked: [],
+    capabilities: noGateway,
+    config: { version: 2, plugins: [] },
+    configPath: path.join(String(env.HOME), 'config.json'),
+    env,
+    stdout,
+    stderr: makeBuf(),
+    retentionDays: 30,
+    interactive: false,
+  }))
+
+  assert.doesNotMatch(stdout.text(), /Would restart the daemon/)
+  assert.deepEqual(summary.daemonRestart, { skipped: true, dryRun: true, ok: false })
+})
+
+// The other half, so the gate above cannot over-correct into "a dry run
+// never previews a restart".
+test('a dry run without skipDaemonRestart still previews the restart', async () => {
+  const env = await tmpEnv('hypaware-finale-dryrun-restart-')
+  const stdout = makeBuf()
+
+  const summary = await runPickerFinale(/** @type {any} */ ({
+    finale: { dryRun: true, skipDaemon: false },
+    clientsPicked: [],
+    capabilities: noGateway,
+    config: { version: 2, plugins: [] },
+    configPath: path.join(String(env.HOME), 'config.json'),
+    env,
+    stdout,
+    stderr: makeBuf(),
+    retentionDays: 30,
+    interactive: false,
+  }))
+
+  assert.match(stdout.text(), /\(dry-run\) Would restart the daemon/)
+  assert.deepEqual(summary.daemonRestart, { skipped: false, dryRun: true, ok: true })
+})
