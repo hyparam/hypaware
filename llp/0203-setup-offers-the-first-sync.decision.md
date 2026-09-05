@@ -67,16 +67,17 @@ the paragraph said each of them one screen earlier. It stays on every path
 the offer cannot reach at all (an abort, a non-interactive run, a dry run),
 where it is the only sighting of the deadline and the way out
 ([LLP 0188 #never-silent](./0188-enrolled-default-sync-with-client-optout.decision.md#never-silent)).
-
-One path is attended and still cannot be asked: `hyp init` admits a run
-whose stdout is a terminal and whose stdin is not (`hyp init < file`), and
-nothing may be spawned to prompt on a stdin like that. The paragraph has
-already stood down by then, so the step states the hold itself, carrying
-every fact the paragraph carried rather than only the release verb. Keeping
-the statement in the step rather than widening the paragraph's gate is what
-keeps the two from both printing.
 The join lane's one-line deadline stays too: it is the first moment the
 deadline is true, and it is one line.
+
+Three paths reach the step and still never put the question: `hyp init`
+admits an attended run whose stdout is a terminal and whose stdin is not
+(`hyp init < file`), and nothing may be spawned to prompt on a stdin like
+that; a spawn can fail; and an unforeseen throw can end the step. The
+paragraph has already stood down by then and the child printed no plan, so
+the step states the hold itself, carrying every fact the paragraph carried
+rather than only the release verb. Keeping the statement in the step rather
+than widening the paragraph's gate is what keeps the two from both printing.
 
 The question list keeps its place as the last thing on screen
 ([LLP 0198 #onboarding-list](./0198-setup-ends-on-a-question.decision.md#onboarding-list)):

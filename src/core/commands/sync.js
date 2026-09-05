@@ -758,7 +758,8 @@ function renderFirstSyncWarning(deadlineMs) {
     '  FIRST SYNC: nothing has left this machine yet. Sending now ends the review\n' +
     `  window (until ${formatFirstSyncDeadline(deadlineMs)}), includes your imported history,\n` +
     '  and cannot be undone. To review or exclude anything first, run the\n' +
-    '  hypaware-privacy skill in Claude or Codex, or: hyp privacy set <path> local-only\n'
+    '  hypaware-privacy skill in Claude or Codex, or:\n' +
+    '    hyp privacy set <path> local-only\n'
   )
 }
 

@@ -228,14 +228,21 @@ test('a re-read that throws is reported as not sent, not as a release', async ()
   assert.match(o.stdout.text(), /Nothing was sent/)
 })
 
-test('a spawn failure never fails the install, and restates the wait', async () => {
+// A child that never started never printed its plan, so this run saw nothing
+// the narration would have said - the same hole as the run that could not be
+// asked, and it takes the same whole statement rather than the short one.
+// @ref LLP 0188#never-silent [tests]: a failed spawn states the hold, not only the wait
+test('a spawn failure never fails the install, and states the whole hold', async () => {
   const spawn = fakeSpawn({ error: new Error('ENOENT') })
   const o = opts({ spawnFn: spawn.spawnFn })
   const result = await runWizardSyncNow(o.args)
 
   assert.deepEqual(result, { asked: true, released: false, reason: 'spawn-failed' })
   assert.match(o.stderr.text(), /Could not start hyp sync: ENOENT/)
-  assert.match(o.stdout.text(), /Nothing was sent/)
+  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before /)
+  assert.match(o.stdout.text(), /includes your imported history/)
+  assert.match(o.stdout.text(), /To send it sooner, run `hyp sync`/)
+  assert.match(o.stdout.text(), /hypaware-privacy/)
 })
 
 // Everything above replaces the re-read with the `readDeadline` seam, which

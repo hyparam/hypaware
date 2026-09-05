@@ -81,7 +81,11 @@ export async function runWizardSyncNow(opts) {
           span.setAttribute('status', 'error')
           span.setAttribute(Attr.ERROR_KIND, 'spawn_failed')
           opts.stderr?.write(`Could not start hyp sync: ${result.error}\n`)
-          writeStillHeld(opts, opts.deadline)
+          // The whole statement, not the short restatement: a child that never
+          // started never printed its plan, so this is the same case as the
+          // run that could not be asked at all, and the narration stood down
+          // for both. `writeStillHeld` is for the run whose child did print.
+          writeHeldStatement(opts, opts.deadline)
           return { asked: true, released: false, reason: /** @type {const} */ ('spawn-failed') }
         }
 
@@ -185,11 +189,13 @@ async function readHold(opts) {
 }
 
 /**
- * The statement for a run that could not put the question, and the only
- * screen such a run gets: `offerFollows` upstream is true whenever the run
- * is attended, so an attended run whose stdin is not a terminal
+ * The statement for a run whose question was never put, and the only screen
+ * such a run gets: `offerFollows` upstream is true whenever the run is
+ * attended, so an attended run whose stdin is not a terminal
  * (`hyp init < file`, which `hyp init` still admits because it gates the
  * wizard on stdout alone) stood the narration down and then landed here.
+ * A failed spawn and an unforeseen throw land here for the same reason:
+ * the child printed no plan, so nothing else on the run says any of this.
  * It therefore carries every fact the narration carried: the deadline, that
  * the first sync includes the imported history, the countdown command, the
  * way out, and the review hint.
