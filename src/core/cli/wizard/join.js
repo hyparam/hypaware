@@ -83,8 +83,8 @@ export async function runWizardJoin(opts) {
 async function runJoinFlow(opts, span) {
   // The join lane owns no prompt spec of its own - it narrates, then hands
   // off to the login lane, which may prompt (org selection) inside. So its
-  // position line is written here, once, above the narration: the whole
-  // lane is one step however many prompts happen inside it.
+  // position line is written here, once, where the narration would go: the
+  // whole lane is one step however many prompts happen inside it.
   // @ref LLP 0135#progress [implements]: the join lane counts once, and prints its position where it starts
   // The position line already names the lane; the plain sentence is only
   // for a run that has no position line to print.
