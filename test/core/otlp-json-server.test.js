@@ -13,6 +13,7 @@ import os from 'node:os'
 import zlib from 'node:zlib'
 
 import { createOtlpJsonServer, isMisdirectedHost, listenAndResolve } from '../../src/core/otlp/server.js'
+import { streamOversizedBody } from '../helpers/oversized_body.js'
 
 /**
  * @import { PluginLogger } from '../../hypaware-plugin-kernel-types.js'
@@ -147,60 +148,6 @@ function rawRequestLine(port, request) {
     socket.on('close', () =>
       reject(new Error(`socket closed with no status line, got ${JSON.stringify(received)}`))
     )
-  })
-}
-
-/**
- * Announce a body far larger than any cap and push it at a request the server
- * refuses before reading, until the server stops reading. Resolves when the
- * connection closes (the bounded outcome) or when the whole body went out
- * (the unbounded one, which the caller asserts against).
- *
- * @param {number} port
- * @param {{ requestLine: string, host: string }} options
- * @returns {Promise<{ sent: number, total: number, received: string }>}
- */
-function streamOversizedBody(port, options) {
-  // Larger than any socket buffer either side could swallow whole, so a
-  // server that stops reading stalls the write rather than absorbing it.
-  const body = Buffer.alloc(8 * 1024 * 1024, 'x')
-  let received = ''
-  let sent = 0
-  return new Promise((resolve, reject) => {
-    const socket = net.connect(port, '127.0.0.1')
-    const timer = setTimeout(() => {
-      socket.destroy()
-      reject(new Error(`the listener read ${sent} bytes and left the connection open`))
-    }, 10000)
-    function pump() {
-      while (sent < body.length && !socket.destroyed) {
-        const end = Math.min(sent + 64 * 1024, body.length)
-        const chunk = body.subarray(sent, end)
-        sent = end
-        if (!socket.write(chunk)) {
-          socket.once('drain', pump)
-          return
-        }
-      }
-      // Everything went out, so nothing bounded the read. Close rather than
-      // wait for one a keep-alive answer will never send.
-      if (sent >= body.length) setTimeout(() => socket.destroy(), 50)
-    }
-    socket.on('connect', () => {
-      socket.write(
-        `${options.requestLine} HTTP/1.1\r\nHost: ${options.host}\r\n` +
-          `content-type: application/json\r\ncontent-length: ${body.length}\r\n\r\n`
-      )
-      pump()
-    })
-    socket.on('data', (chunk) => { received += chunk.toString('utf8') })
-    // The close is the point of the test, so a reset counts as one rather
-    // than as a failure.
-    socket.on('error', () => {})
-    socket.on('close', () => {
-      clearTimeout(timer)
-      resolve({ sent, total: body.length, received })
-    })
   })
 }
 
