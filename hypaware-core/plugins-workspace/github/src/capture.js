@@ -222,14 +222,14 @@ async function captureRepo({ client, repo, cursor, requestedMode, budget, append
   // a consumed page onto a page still to come. Its own `updated_at` did not move
   // and its event id carries no timestamp, so the second sighting is an identical
   // duplicate row plus a repeat fan-out of files, reviews and commits, and
-  // `flush` deduplicates one batch, not a phase. The same push-down bounds the
-  // reach: a page's worth (100) of later-updated pulls per page of distance, so
-  // a pull sighted early on a consumed page comes back only under a long
-  // backfill over a busy repository. One sighted near that page's tail needs
-  // only a handful, which is the sighting the `capturedAtHigh` comment below
-  // rests on: a poll reaches a second page only when all 100 pulls on the first
-  // sit at or above its baseline, and a repository that busy reshuffles between
-  // two requests.
+  // `flush` deduplicates one batch, not a phase. The push-down bounds distance,
+  // not likelihood: a pull sighted at the tail of the page just consumed crosses
+  // on a single displacement, one sighted a page further back needs a page's
+  // worth (100). So any traversal with pages behind it can produce one, which is
+  // the first poll of a repository as much as a `hyp github backfill`: with no
+  // `since.pulls` the `reachedHighWater` stop below never fires and the phase
+  // walks the whole repository. A poll that has a baseline usually stops on its
+  // first page, which leaves the push-down nowhere to land.
   // Staged on the work descriptor rather than held in memory for the same reason
   // `pulls_high_numbers` is: the request budget splits a pulls phase across
   // ticks, and a set that restarted empty on the resumed page would leave the
