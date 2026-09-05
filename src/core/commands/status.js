@@ -1163,9 +1163,10 @@ function isCentralSink(layered, instance) {
 }
 
 /**
- * The `daemon:` line. `state` and `mode` are read straight out of
- * `status.json` (`collectHypAwareStatus` takes them from the snapshot when
- * the pid file did not already supply them), and `error` can quote the file's
+ * The `daemon:` line. `state` is the collector's verdict: it starts as the
+ * snapshot's value, and `collectHypAwareStatus` overrides it to `degraded` on
+ * a stale heartbeat. `mode` is read straight out of `status.json` when the
+ * pid file did not already supply it, and `error` can quote the file's
  * own bytes back: a `status.json` that is not valid JSON surfaces here as
  * `JSON.parse`'s message, which echoes an excerpt of the input verbatim. All
  * three are cleaned on the way into the line. `pid` needs no cleaning -
@@ -1178,7 +1179,18 @@ function describeDaemon(daemon) {
   parts.push(daemon.installed ? 'installed' : 'not installed')
   if (daemon.installed) parts.push(daemon.loaded ? 'loaded' : 'not loaded')
   parts.push(daemon.running ? 'running' : 'not running')
-  if (daemon.state) parts.push(`state=${printable(daemon.state)}`)
+  // `status.json` outlives the process that wrote it, so with nothing running
+  // this is an exited daemon's last boot verdict; unlabelled, `state=healthy`
+  // reads as present tense beside `overall: degraded` on a machine capturing
+  // nothing (issue #1392). A live process keeps the plain label: there the
+  // state is the collector's verdict whenever the snapshot is that process's
+  // own, and a live daemon that never reached `healthy` has only its
+  // `starting` / `degraded` snapshot to say so. A live pid paired with an
+  // earlier run's snapshot (a crash-loop, or a pid the OS reissued) is still
+  // transcribed in the present tense: `snapshotIsThisProcess` decides that in
+  // the collector and does not reach this line, so it is not this line's to fix.
+  // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
+  if (daemon.state) parts.push(`${daemon.running ? 'state' : 'last state'}=${printable(daemon.state)}`)
   if (daemon.pid) parts.push(`pid=${daemon.pid}`)
   if (daemon.mode) parts.push(`mode=${printable(daemon.mode)}`)
   if (daemon.error) parts.push(`error=${printable(daemon.error, MAX_ERROR_CHARS)}`)
