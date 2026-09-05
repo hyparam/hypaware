@@ -175,3 +175,87 @@ test('buildStartUrl omits org when not given, and never carries a redirect_uri',
   assert.equal(url.searchParams.get('org'), null)
   assert.equal(url.searchParams.get('redirect_uri'), null)
 })
+
+test('the plain lane says it is waiting even when the browser was not opened', async () => {
+  const { startPoller } = scriptedPoller()
+  /** @type {string[]} */
+  const printed = []
+  await loginWithBrowser({
+    identityBase: 'https://hyp.internal/v1/identity',
+    noBrowser: true,
+    openBrowser: () => true,
+    fetchImpl: tokenFetch(),
+    startPoller,
+    print: (line) => printed.push(line),
+  })
+  // Without it this branch prints the URL and then goes silent for the whole
+  // five-minute poll budget, ending in a bare timeout.
+  const waitAt = printed.findIndex((line) => /Waiting for the sign-in to complete/.test(line))
+  assert.ok(waitAt >= 0, 'the no-browser branch announces the wait')
+  const urlAt = printed.findIndex((line) => line.includes('/login/start'))
+  assert.ok(waitAt > urlAt, 'and announces it after the URL, so it is the last thing on screen')
+})
+
+/**
+ * A /token endpoint held open until the test releases it, so the output
+ * written *during* the code exchange can be observed.
+ */
+function gatedTokenFetch() {
+  let release = /** @type {() => void} */ (() => {})
+  const gate = /** @type {Promise<void>} */ (new Promise((resolve) => { release = () => resolve() }))
+  const fetchImpl = /** @type {any} */ (async () => {
+    await gate
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({ refresh_token: 'rt', access_jwt: 'jwt', expires_at: '2026-06-29T12:00:00Z', org: 'acme' }),
+    }
+  })
+  return { fetchImpl, release }
+}
+
+/** Let the flow settle out of the poll phase and into the exchange. */
+function settle() {
+  return new Promise((resolve) => setTimeout(resolve, 10))
+}
+
+test('compact covers the token exchange with a second, differently worded phase', async () => {
+  const { startPoller, release } = gatedPoller()
+  const { fetchImpl, release: releaseToken } = gatedTokenFetch()
+  const { chunks, stdout } = recordingTty()
+
+  const flow = loginWithBrowser({
+    identityBase: 'https://hyp.internal/v1/identity',
+    openBrowser: () => true,
+    fetchImpl,
+    startPoller,
+    compact: true,
+    stdout,
+    env: {},
+  })
+  release()
+  await settle()
+
+  // The sign-in has completed, so the poll's label would be a lie here; the
+  // exchange is bounded at 30s, so the lane cannot go silent either.
+  const frame = String(chunks.at(-1))
+  assert.match(frame, /Finishing the sign-in/)
+  assert.doesNotMatch(frame, /Waiting for the sign-in to complete/)
+
+  releaseToken()
+  await flow
+  assert.equal(chunks.at(-1), '\r\x1b[2K', 'and the line is cleared once the session is in hand')
+})
+
+test('the plain lane names the exchange phase too', async () => {
+  const { startPoller } = scriptedPoller()
+  /** @type {string[]} */
+  const printed = []
+  await loginWithBrowser({
+    identityBase: 'https://hyp.internal/v1/identity',
+    openBrowser: () => true,
+    fetchImpl: tokenFetch(),
+    startPoller,
+    print: (line) => printed.push(line),
+  })
+  assert.equal(printed.at(-1), 'Finishing the sign-in...')
+})

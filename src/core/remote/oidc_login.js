@@ -26,6 +26,20 @@ import { createPkcePair } from './pkce.js'
  */
 
 /**
+ * One wording for the wait on the human, wherever it is shown: the plain lane's
+ * standing line in both its branches, and the compact lane's spinner.
+ */
+const WAITING_LABEL = 'Waiting for the sign-in to complete...'
+
+/**
+ * The second phase, deliberately not the same sentence: the sign-in has
+ * completed once the code arrives, so the label above stops being true there.
+ * Work in progress rather than a finished state, so it stays honest in the
+ * transcript a failed exchange leaves behind.
+ */
+const FINISHING_LABEL = 'Finishing the sign-in...'
+
+/**
  * @param {{
  *   identityBase: string,
  *   org?: string,
@@ -87,10 +101,15 @@ export async function loginWithBrowser({
       // display on a headless box) still returns true. So phrase this as an
       // attempt, not a fact, and always print the URL as the real fallback -
       // opened anywhere, on any device, the login still completes here.
-      print(`Opening your browser to sign in. Waiting for the sign-in to complete...`)
+      print(`Opening your browser to sign in. ${WAITING_LABEL}`)
       print(`If it did not open, visit (from any machine):\n\n  ${startUrl}\n`)
     } else {
       print(`Open this URL in your browser (any machine) to sign in:\n\n  ${startUrl}\n`)
+      // The branch above carries the wait inside its first sentence. Without
+      // this line the branch that has no such sentence (`--no-browser`, or no
+      // launcher: the headless case D1 exists to serve) prints the URL and then
+      // goes silent for the whole five-minute poll budget.
+      print(WAITING_LABEL)
     }
     log.info('remote.browser_open', {
       [Attr.COMPONENT]: 'remote-oidc',
@@ -106,9 +125,18 @@ export async function loginWithBrowser({
     // settles, and off a TTY the same one plain line.
     const poll = () => poller.waitForCode()
     const { code } = compact
-      ? await withSpinner({ stdout, env, label: 'Waiting for the sign-in to complete...' }, poll)
+      ? await withSpinner({ stdout, env, label: WAITING_LABEL }, poll)
       : await poll()
-    const session = await exchangeCode({ identityBase, code, codeVerifier: verifier, host, fetchImpl })
+
+    // Redeeming the code is still the login and still blocking: `exchangeCode`
+    // bounds its /token POST at 30s, and a wedged endpoint spends all of it
+    // here. So it gets its own phase, announced in each lane the way the poll
+    // above is, rather than a cleared spinner and a blank terminal.
+    const redeem = () => exchangeCode({ identityBase, code, codeVerifier: verifier, host, fetchImpl })
+    if (!compact) print(FINISHING_LABEL)
+    const session = compact
+      ? await withSpinner({ stdout, env, label: FINISHING_LABEL }, redeem)
+      : await redeem()
     log.info('remote.login_complete', {
       [Attr.COMPONENT]: 'remote-oidc',
       [Attr.OPERATION]: 'remote.login',
