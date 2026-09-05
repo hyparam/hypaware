@@ -99,10 +99,11 @@ function rawRefusal(port, request) {
 test('drainRequestBody stops reading a refused body at MAX_REJECTED_DRAIN_BYTES', async () => {
   const served = await startRefusingServer()
   try {
-    // Four times the cap. Large enough that an unbounded read of it is
-    // reliably the whole body, which leaves the cap as the only thing that can
-    // stop the server reading all of it, and small enough that it still
-    // crosses the cap inside two socket reads. Bounded, the server reads
+    // Four times the cap. Large enough that an unbounded read of it is all
+    // but always the whole body, so a bounded read is the cap's doing and not
+    // the teardown's; in the few samples where the teardown cuts first
+    // instead, the bound further down still catches it. Small enough that it
+    // still crosses the cap inside two socket reads. Bounded, the server reads
     // 131072. Unbounded, it reads all 262372.
     //
     // Neither a much smaller nor a much larger body pins as well. At twice the
@@ -119,14 +120,19 @@ test('drainRequestBody stops reading a refused body at MAX_REJECTED_DRAIN_BYTES'
     //
     // It is that teardown and not the sender running out of buffer that cuts
     // the read. With the cap deleted the read is still only what arrived
-    // first; delete the `connection: close` answer as well and the same 8 MiB
-    // sender empties its whole buffer in milliseconds, the server reading all
-    // 8388702. Deleting the header on its own moves nothing, because the cap's
-    // own `req.destroy()` still cuts there. And the sender hits backpressure
-    // in every one of those cells, the whole-body one included, so it is a
-    // transient the read outlives rather than what ends it. Both sizes declare
-    // a `content-length` past the cap and are answered `connection: close`, so
-    // nothing about `fitsUnderCap` is what separates them.
+    // first; delete the `connection: close` answer as well and it moves under
+    // either client. A raw socket empties its whole 8 MiB buffer in
+    // milliseconds and the server reads all 8388702; `fetch`, which ends the
+    // connection from its own side instead, reads 2613675. Both figures count
+    // the request head, 94 bytes for the raw shape this file sends against 228
+    // for `fetch`, so the two clients' numbers do not line up digit for digit.
+    // Deleting the header on its own moves nothing, because the cap's own
+    // `req.destroy()` still cuts there. And the sender hits backpressure in
+    // every one of the raw-socket cells, the whole-body one included, so it is
+    // a transient the read outlives rather than what ends it. Both sizes
+    // declare a `content-length` past the cap and are answered
+    // `connection: close`, so nothing about `fitsUnderCap` is what separates
+    // them.
     const body = Buffer.alloc(4 * CAP_BYTES, 'x')
     const refused = await withDeadline(
       fetch(`${served.origin}/refused`, {
@@ -160,11 +166,11 @@ test('drainRequestBody stops reading a refused body at MAX_REJECTED_DRAIN_BYTES'
     // Bounded there rather than a cap higher because the slack is exactly
     // where this probe degenerates. An unbounded read the refusal's teardown
     // cut early is 163705, and one that keeps the pause but drops the reset
-    // behind it is 196608: both are under three caps, so a looser bound would
-    // go quietly vacuous rather than fail. The early cut is not hypothetical
-    // at this body size either - under load 163705 turned up in 2 of 64
-    // samples of this very upload, so the bound has to sit under it rather
-    // than merely under the whole body.
+    // behind it is 196608: a bound a cap higher would be 212992, over both, so
+    // it would go quietly vacuous rather than fail. The early cut is not
+    // hypothetical at this body size either - under load 163705 turned up in
+    // 2 of 64 samples of this very upload, so the bound has to sit under it
+    // rather than merely under the whole body.
     const maxBoundedRead = 2 * CAP_BYTES + 16 * 1024
     assert.ok(
       socket.bytesRead < maxBoundedRead,
