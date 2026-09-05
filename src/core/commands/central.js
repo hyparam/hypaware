@@ -193,12 +193,12 @@ export async function runJoin(argv, ctx) {
  * server-owned org), not something the human typed, so provenance, not who
  * ran the command, picks the layer.
  *
- * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean }} args
+ * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean, compact?: boolean }} args `compact` passes through to the daemon install's one-line report
  * @returns {Promise<{ provisioned: boolean, connectedElsewhere?: string, daemonCode: number }>}
  * @ref LLP 0063#d2 [implements]: provision join's exact sink block (minus the bootstrap token) into the central-seed layer, then seed the login-minted identity into it
  * @ref LLP 0063#d5 [implements]: an enrolling login finishes with join's daemon install (join parity); --no-daemon prints the finish-by-hand command
  */
-export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
+export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact = false }) {
   const obsEnv = readObservabilityEnv(ctx.env)
   const stateRoot = obsEnv.stateDir
   const localPath = ctx.env.HYP_CONFIG ? path.resolve(ctx.env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
@@ -271,7 +271,7 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon }) {
   }
 
   if (noDaemon) return { provisioned: true, daemonCode: 0 }
-  const daemonCode = await runDaemonInstall([], ctx)
+  const daemonCode = await runDaemonInstall([], ctx, { compact })
   return { provisioned: true, daemonCode }
 }
 

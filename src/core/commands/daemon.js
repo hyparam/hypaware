@@ -322,8 +322,9 @@ export async function runDaemonRestart(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ compact?: boolean }} [opts] `compact` reports success as one line, for a caller that narrates the install as a step of its own
  */
-export async function runDaemonInstall(argv, ctx) {
+export async function runDaemonInstall(argv, ctx, opts = {}) {
   const parsed = parseDaemonInstallArgs(argv)
   if (parsed.help) {
     ctx.stdout.write('usage: hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json]]\n')
@@ -375,6 +376,10 @@ export async function runDaemonInstall(argv, ctx) {
 
   try {
     const plan = await installDaemon(options)
+    if (opts.compact) {
+      ctx.stdout.write('✓ Background service installed\n')
+      return 0
+    }
     ctx.stdout.write(`✓ Daemon installed (${daemonKindLabel(plan.platform)})\n`)
     ctx.stdout.write(`  target:  ${plan.targetPath}\n`)
     ctx.stdout.write(`  config:  ${plan.configPath}\n`)

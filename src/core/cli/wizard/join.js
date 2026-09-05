@@ -86,8 +86,10 @@ async function runJoinFlow(opts, span) {
   // position line is written here, once, above the narration: the whole
   // lane is one step however many prompts happen inside it.
   // @ref LLP 0135#progress [implements]: the join lane counts once, and prints its position where it starts
+  // The position line already names the lane; the plain sentence is only
+  // for a run that has no position line to print.
   if (opts.progress) opts.stdout.write(`${opts.progress}\n`)
-  opts.stdout.write('Joining your team...\n')
+  else opts.stdout.write('Joining your team...\n')
 
   const runLogin = opts.runLogin ?? (() => defaultRunLogin(opts))
   const login = await runLogin()
@@ -207,7 +209,9 @@ async function defaultRunLogin(opts) {
   }
   const capture = teeWriter(ctx.stderr)
   const teed = /** @type {CommandRunContext} */ ({ ...ctx, stderr: capture.stream })
-  const { exitCode, reason } = await remoteLogin([], teed, {})
+  // Compact: one line per event. The wizard's later screens carry the
+  // privacy block's other sentences, so the lane prints the deadline alone.
+  const { exitCode, reason } = await remoteLogin([], teed, { compact: true })
   return { exitCode, reason, stderr: capture.text() }
 }
 

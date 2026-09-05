@@ -93,6 +93,74 @@ test('--no-browser prints the URL instead of opening it', async () => {
   assert.match(printed.join('\n'), /\/login\/start/)
 })
 
+/**
+ * A poller whose wait is held open until the test releases it, so the output
+ * written *during* the poll can be observed.
+ */
+function gatedPoller() {
+  let release = /** @type {() => void} */ (() => {})
+  const gate = /** @type {Promise<void>} */ (new Promise((resolve) => { release = () => resolve() }))
+  const startPoller = /** @type {any} */ (() => ({
+    waitForCode: async () => { await gate; return { code: 'the-code' } },
+    close: () => {},
+  }))
+  return { startPoller, release }
+}
+
+/** A fake TTY that records everything written to it. */
+function recordingTty() {
+  /** @type {string[]} */
+  const chunks = []
+  return { chunks, stdout: { isTTY: true, write: (/** @type {string} */ chunk) => { chunks.push(chunk); return true } } }
+}
+
+/** A /token endpoint that always mints a session. */
+function tokenFetch() {
+  return /** @type {any} */ (async () => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify({ refresh_token: 'rt', access_jwt: 'jwt', expires_at: '2026-06-29T12:00:00Z', org: 'acme' }),
+  }))
+}
+
+test('compact shows a live waiting indication for the whole poll, then clears it', async () => {
+  const { startPoller, release } = gatedPoller()
+  const { chunks, stdout } = recordingTty()
+
+  const flow = loginWithBrowser({
+    identityBase: 'https://hyp.internal/v1/identity',
+    openBrowser: () => true,
+    fetchImpl: tokenFetch(),
+    startPoller,
+    compact: true,
+    stdout,
+    env: {},
+  })
+  // The spinner renders its first frame before the poll is awaited, so the
+  // wait is announced from the moment it starts, not after it settles.
+  assert.match(chunks.join(''), /Waiting for the sign-in to complete/)
+
+  release()
+  await flow
+  // And it is gone once the sign-in settles: the last write clears the line,
+  // so whatever the lane prints next lands on a clean one.
+  assert.equal(chunks.at(-1), '\r\x1b[2K')
+})
+
+test('the plain lane writes nothing to stdout, spinner or otherwise', async () => {
+  const { startPoller } = scriptedPoller()
+  const { chunks, stdout } = recordingTty()
+
+  await loginWithBrowser({
+    identityBase: 'https://hyp.internal/v1/identity',
+    openBrowser: () => true,
+    fetchImpl: tokenFetch(),
+    startPoller,
+    stdout,
+    env: {},
+  })
+  assert.deepEqual(chunks, [], 'the standalone transcript is still the print seam alone')
+})
+
 test('closes the poller even when the flow rejects', async () => {
   const { startPoller, wasClosed } = scriptedPoller({ reject: new Error('login failed: access_denied') })
   await assert.rejects(

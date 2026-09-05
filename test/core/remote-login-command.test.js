@@ -293,6 +293,36 @@ test('a configured persisted_path is honored and non-matching central sinks are 
   await assert.rejects(fs.access(otherPath))
 })
 
+test('compact login (the wizard join lane) prints one line per event and no privacy block', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, out, err } = await makeCtx({ hypHome })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login, compact: true })
+  assert.equal(code, 0)
+  const text = out.join('') + err.join('')
+  // LLP 0063 D3 mechanic 1 names what the notice must say, and asks for the
+  // copy to be pinned verbatim: it is the consent surface, so compact may lose
+  // the line breaks but not the hedge and not one of the three consequences
+  // (forwarding, org config that attaches clients and backfills local history,
+  // the background service).
+  assert.match(
+    text,
+    /^note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config \(which can attach clients and backfill existing local history\), and installs a background service \(Ctrl-C to cancel\)$/m,
+    'the pre-auth notice keeps its hedge and all three consequences, as one line'
+  )
+  assert.match(text, /✓ Signed in to 'prod' as org /)
+  assert.match(text, /✓ Forwarding to the 'prod' server \(run 'hyp remote list' to see its URL\)/)
+  assert.match(text, /✓ First sync no later than .+; nothing has been uploaded yet/)
+  // The send-now offer (LLP 0203) runs only on an attended, uncancelled close,
+  // and the deadline itself just lapses (LLP 0101 #no-release), so the line
+  // must not promise a prompt.
+  assert.doesNotMatch(text, /you will be asked/)
+  assert.doesNotMatch(text, /PRIVACY - review before first sync/)
+  assert.doesNotMatch(text, /forwarding logs to the/)
+  assert.doesNotMatch(text, /tip: mark a directory local-only/)
+})
+
 test('a gateway credential with no matching central sink provisions one, forwarding from one command (LLP 0063 D2)', async () => {
   const hypHome = await tmpHome()
   const { ctx, out } = await makeCtx({ hypHome })
@@ -1201,6 +1231,19 @@ test('a re-login (already-enrolled, re-seed path) prints the durable hint (LLP 0
   const code = await runRemoteLogin(['prod'], ctx, { login })
   assert.equal(code, 0)
   assert.match(err.join(''), /hyp privacy set \[path\] local-only/)
+})
+
+test('the re-seed exit suppresses the durable hint under compact, like the enrolling exits', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal', identity: {} } } },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin(['prod'], ctx, { login, compact: true })
+  assert.equal(code, 0)
+  assert.doesNotMatch(err.join(''), /hyp privacy set \[path\] local-only/)
 })
 
 /* --------------------------------------------------------------------------
