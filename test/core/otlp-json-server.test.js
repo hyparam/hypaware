@@ -760,8 +760,15 @@ for (const refusal of [
       const [served] = s.sockets
       assert.ok(served, 'the refused upload opened no server connection to measure')
       if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))
-      // The drain stops at MAX_REJECTED_DRAIN_BYTES (64 KiB) plus whatever
-      // read was already in the parser when the pause landed.
+      // What this bounds is the read, not which of the drain's two bounds cut
+      // it. A body this large is never promised to fit, so the drain also
+      // answers `connection: close`, and the connection goes as soon as the
+      // refusal flushes; measured, that alone settles the read at the same
+      // ~112 KiB the byte cap would. Isolating MAX_REJECTED_DRAIN_BYTES needs
+      // a body small enough for both socket buffers to take whole, so that
+      // nothing but the cap can stop the read, which is the shape
+      // `test/plugins/opencode-listener.test.js` already pins it with. The
+      // margin below is loose because it is measuring neither bound exactly.
       assert.ok(
         served.bytesRead < 512 * 1024,
         `${refusal.name} read ${served.bytesRead} of the ${out.total} bytes it refused`
