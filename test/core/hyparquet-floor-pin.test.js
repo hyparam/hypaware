@@ -226,6 +226,11 @@ test('a declaration dedupes when the root pin satisfies it, not when it matches 
   for (const spec of ['1.29.2', '^1.29.2', '^1.28.2', '~1.29.0', '>=1.28.2', '*']) {
     assert.equal(against(spec), '', `${spec} dedupes onto the root pin`)
   }
+  // The rest of the npm range grammar, which a dependency is free to publish
+  // and npm dedupes exactly as it dedupes the single comparators above.
+  for (const spec of ['>=1.28.0 <2.0.0', '^1.29.0 || ^2.0.0', '1.29.x', '1.29', '1.28.0 - 1.30.0']) {
+    assert.equal(against(spec), '', `${spec} dedupes onto the root pin`)
+  }
   // A declaration the pin cannot satisfy is the failure this check is for, in
   // both directions. One message serves both, so what is asserted is that it
   // carries each remedy beside the direction that wants it: matching only
@@ -236,9 +241,16 @@ test('a declaration dedupes when the root pin satisfies it, not when it matches 
     assert.match(against(spec), /ABOVE the root pin, move the ROOT pin up/)
     assert.match(against(spec), /BELOW it wants an `overrides` entry naming 1\.29\.2/)
   }
-  // An unfamiliar range shape says that is what happened rather than claiming
-  // the declaration is out of range.
-  assert.match(against('>=1.28.0 <2.0.0'), /cannot judge/)
+  // The same grammar out of range is still out of range rather than
+  // unjudgeable, so it names a remedy instead of asking to be read by hand.
+  for (const spec of ['>=1.30.0 <2.0.0', '^1.30.0 || ^2.0.0', '1.27.x', '1.26.0 - 1.28.0']) {
+    assert.match(against(spec), /does not satisfy/, `${spec} is out of range for the root pin`)
+  }
+  // A range shape outside that grammar still says so rather than claiming the
+  // declaration is out of range: what the matcher cannot read reddens.
+  for (const spec of ['npm:hyparquet-fork@^1.29.0', 'github:hyparam/hyparquet#main', '>=1.28.0 <garbage']) {
+    assert.match(against(spec), /cannot judge/, `${spec} is not a range this check can read`)
+  }
   // A declaration with nothing in it is unreadable, not satisfied: the matcher
   // answers `true` for an empty or null range, so judging satisfaction first
   // would wave these through as deduped.

@@ -169,3 +169,29 @@ test('matchesSemverRange preserves zero-major caret behavior', () => {
   assert.equal(matchesSemverRange('0.0.3', '^0.0.3'), true)
   assert.equal(matchesSemverRange('0.0.4', '^0.0.3'), false)
 })
+
+test('matchesSemverRange covers compound, alternative, x and hyphen ranges', () => {
+  // A compound range is every comparator at once, an alternative set is any
+  // one of them, and both are shapes an ordinary npm dependency publishes.
+  assert.equal(matchesSemverRange('1.29.2', '>=1.28.0 <2.0.0'), true)
+  assert.equal(matchesSemverRange('2.0.0', '>=1.28.0 <2.0.0'), false)
+  assert.equal(matchesSemverRange('1.29.2', '>= 1.28.0 < 2.0.0'), true)
+  assert.equal(matchesSemverRange('2.1.0', '^1.29.0 || ^2.0.0'), true)
+  assert.equal(matchesSemverRange('3.0.0', '^1.29.0 || ^2.0.0'), false)
+  // An `x` (or an omitted position) stands for the whole span below it, and
+  // bounds a comparator by where that span ends rather than by 0.
+  assert.equal(matchesSemverRange('1.29.9', '1.29.x'), true)
+  assert.equal(matchesSemverRange('1.30.0', '1.29'), false)
+  assert.equal(matchesSemverRange('0.9.0', '0.x'), true)
+  assert.equal(matchesSemverRange('1.0.0', '0.x'), false)
+  assert.equal(matchesSemverRange('1.30.0', '>1.29'), true)
+  assert.equal(matchesSemverRange('1.29.9', '>1.29'), false)
+  assert.equal(matchesSemverRange('1.29.9', '<=1.29'), true)
+  assert.equal(matchesSemverRange('1.2.3', '1.2.3 - 2.0.0'), true)
+  assert.equal(matchesSemverRange('2.0.0', '1.2.3 - 2.0.0'), true)
+  assert.equal(matchesSemverRange('2.0.1', '1.2.3 - 2.0.0'), false)
+  assert.equal(matchesSemverRange('2.0.1', '1.2.3 - 2.0'), true)
+  // A shape outside the grammar is false rather than a guess.
+  assert.equal(matchesSemverRange('1.2.3', 'npm:other@1.2.3'), false)
+  assert.equal(matchesSemverRange('1.2.3', '>=1.2.3 <garbage'), false)
+})
