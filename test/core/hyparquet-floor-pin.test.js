@@ -104,10 +104,12 @@ test('hypgrep is a plain dependency, held at the floor by an override', () => {
   // where the resolved half below can run. It names the root pin rather than
   // the floor so the copy it forces is the one already hoisted, not a second
   // correct one.
-  assert.equal(overrides.hypgrep?.hyparquet, ROOT_PINS.hyparquet,
-    'LLP 0222 #hyparquet-floor: the hypgrep override holds hyparquet at the root pin')
-  assert.equal(overrides.hypgrep?.['hyparquet-writer'], ROOT_PINS['hyparquet-writer'],
-    'the hypgrep override holds hyparquet-writer at the root pin')
+  assert.ok(pinsRoot(overrides.hypgrep?.hyparquet, 'hyparquet'),
+    'LLP 0222 #hyparquet-floor: the hypgrep override holds hyparquet at the root pin, ' +
+    `and it names ${overrides.hypgrep?.hyparquet}`)
+  assert.ok(pinsRoot(overrides.hypgrep?.['hyparquet-writer'], 'hyparquet-writer'),
+    'the hypgrep override holds hyparquet-writer at the root pin, ' +
+    `and it names ${overrides.hypgrep?.['hyparquet-writer']}`)
   // Index writes ride the existing optionalDependency exactly as the cache
   // write path does. Pinning the writer inside an override must not promote it
   // to a hard root dependency: an install with `--omit=optional` still has to
@@ -153,7 +155,13 @@ test('icebird uses the root parquet pins directly or through overrides', t => {
   const declared = installedDeclarations('icebird')
   assert.ok(declared, 'icebird is not installed beside the resolved tree - run `npm i`')
   for (const [name, version] of Object.entries(ROOT_PINS)) {
-    assert.equal(overrides.icebird?.[name] ?? declared[name], version,
+    const entry = overrides.icebird?.[name]
+    if (entry !== undefined) {
+      assert.ok(pinsRoot(entry, name),
+        `an icebird override for ${name} must name the root pin, and it names ${entry}`)
+      continue
+    }
+    assert.equal(declared[name], version,
       `icebird must share the root ${name} pin, directly or through an override`)
   }
 })
@@ -191,37 +199,26 @@ test('every read-path dependency that carries hyparquet is held at the floor', t
   // own hyparquet either already resolves at or above the floor or needs an
   // override, and this names which one it is instead of leaving a second copy
   // to be found by a wrong row count.
-  const offenders = []
-  for (const [dep, floor] of Object.entries(FLOORS)) {
-    // A pin read off the manifest as undefined would make every comparison below
-    // vacuous, so it is reported once here rather than skipped per dependency.
-    if (floor === undefined) offenders.push(`no root pin for ${dep}, so nothing can be checked against its floor`)
-  }
-  for (const name of Object.keys(dependencies)) {
-    if (name === 'hyparquet') continue
-    const declared = installedDeclarations(name)
-    if (!declared) {
-      // Only for a dependency an override governs: that entry is the whole of
-      // its adoption, and an absent package means the one check that could
-      // have proved the entry took never ran.
-      if (overrides[name]) {
-        offenders.push(`${name} has an overrides entry but is not installed, so nothing verified it - run \`npm i\``)
-      }
-      continue
-    }
-    for (const [dep, floor] of Object.entries(FLOORS)) {
-      if (floor === undefined) continue
-      if (declared[dep] === undefined) continue
-      if (atOrAboveFloor(declared[dep], floor)) continue
-      // An override is the other way to be safe: it forces the root copy, so a
-      // below-floor declaration never resolves.
-      if (overrides[name]?.[dep] === ROOT_PINS[dep]) continue
-      offenders.push(`${name} declares ${dep}@${declared[dep]}, below the ${dep} floor ${floor}, ` +
-        `and no overrides entry pins it to ${ROOT_PINS[dep]}`)
-    }
-  }
+  const offenders = floorOffenders(dependencies, overrides, installedDeclarations)
   assert.deepEqual(offenders, [], 'LLP 0222 #hyparquet-floor: an older copy resolving ' +
     `beside the floor answers relational bounds wrong:\n  ${offenders.join('\n  ')}`)
+})
+
+// A made-up manifest, because nothing here carries npm's `$name` override form
+// today and only a synthetic input can hold the property: an entry that names
+// the root pin by reference is the same pin, and reading it as a literal
+// version reports it as an offender pinning `hyparquet@$hyparquet`.
+test('an overrides entry may name the root pin by npm\'s $name reference', () => {
+  const declarationsOf = () => ({ hyparquet: '1.27.1' })
+  const deps = { hypgrep: '0.5.1' }
+  assert.deepEqual(floorOffenders(deps, { hypgrep: { hyparquet: '$hyparquet' } }, declarationsOf), [],
+    '`$hyparquet` resolves to the root pin, so it holds hypgrep at the floor')
+  assert.deepEqual(floorOffenders(deps, { hypgrep: { hyparquet: ROOT_PINS.hyparquet } }, declarationsOf), [],
+    'the same entry written by value reads as green too')
+  assert.equal(floorOffenders(deps, { hypgrep: { hyparquet: '$hyparquet-writer' } }, declarationsOf).length, 1,
+    'a reference to another package is not a reference to this one')
+  assert.equal(floorOffenders(deps, {}, declarationsOf).length, 1,
+    'a below-floor declaration with no entry at all is still an offender')
 })
 
 test('the read path resolves the one root hyparquet, not a nested copy', t => {
@@ -251,6 +248,51 @@ test('the read path resolves the one root hyparquet, not a nested copy', t => {
   assert.deepEqual(nested, [], 'LLP 0222 #hyparquet-floor: the overrides exist so ' +
     `these dedupe to the root copy:\n  ${nested.join('\n  ')}`)
 })
+
+/**
+ * The read-path dependencies that resolve a governed package below its floor
+ * with nothing holding them to the root copy instead. One line per offender,
+ * empty when every one is held. Pure over its inputs, so a manifest shape this
+ * repo does not carry can be held to the same reading as the one it does.
+ *
+ * @param {Record<string, string>} deps the root `dependencies`
+ * @param {Record<string, Record<string, string>>} entries the root `overrides`
+ * @param {(name: string) => Record<string, string> | undefined} declarationsOf
+ *   what a dependency declares, or undefined when it is not installed
+ * @returns {string[]}
+ */
+function floorOffenders(deps, entries, declarationsOf) {
+  const offenders = []
+  for (const [dep, floor] of Object.entries(FLOORS)) {
+    // A pin read off the manifest as undefined would make every comparison below
+    // vacuous, so it is reported once here rather than skipped per dependency.
+    if (floor === undefined) offenders.push(`no root pin for ${dep}, so nothing can be checked against its floor`)
+  }
+  for (const name of Object.keys(deps)) {
+    if (name === 'hyparquet') continue
+    const declared = declarationsOf(name)
+    if (!declared) {
+      // Only for a dependency an override governs: that entry is the whole of
+      // its adoption, and an absent package means the one check that could
+      // have proved the entry took never ran.
+      if (entries[name]) {
+        offenders.push(`${name} has an overrides entry but is not installed, so nothing verified it - run \`npm i\``)
+      }
+      continue
+    }
+    for (const [dep, floor] of Object.entries(FLOORS)) {
+      if (floor === undefined) continue
+      if (declared[dep] === undefined) continue
+      if (atOrAboveFloor(declared[dep], floor)) continue
+      // An override is the other way to be safe: it forces the root copy, so a
+      // below-floor declaration never resolves.
+      if (pinsRoot(entries[name]?.[dep], dep)) continue
+      offenders.push(`${name} declares ${dep}@${declared[dep]}, below the ${dep} floor ${floor}, ` +
+        `and no overrides entry pins it to ${ROOT_PINS[dep]}`)
+    }
+  }
+  return offenders
+}
 
 /**
  * Everything a package declares that npm may install for it, read from the
@@ -336,6 +378,24 @@ function packagesIn(nodeModules) {
  */
 function installedVersion(nodeModules, name) {
   return readJson(path.join(nodeModules, name, 'package.json'))?.version
+}
+
+/**
+ * Whether an `overrides` entry holds `dep` at the root pin.
+ *
+ * npm resolves the `$name` reference form to the root's own spec for that
+ * package, so `"$hyparquet"` is the root pin written by reference: the same
+ * version, and one that still names the pin after a bump moves it. The name
+ * has to match the package the entry governs, because a reference to a
+ * different one resolves to a different pin.
+ *
+ * @param {string | undefined} entry the version an overrides entry names
+ * @param {string} dep the package that entry governs
+ * @returns {boolean}
+ */
+function pinsRoot(entry, dep) {
+  if (typeof entry !== 'string') return false
+  return entry === `$${dep}` || entry === ROOT_PINS[dep]
 }
 
 /**
