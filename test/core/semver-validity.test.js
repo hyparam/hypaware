@@ -20,9 +20,17 @@ test('isValidRange accepts the operators the kernel matcher understands', () => 
   }
 })
 
+test('isValidRange accepts the rest of the npm range grammar the matcher reads', () => {
+  for (const r of ['1.x', '1.2', '>=1.0.0 <2.0.0', '^1.2.3 || ^2.0.0', '1.2.3 - 2.0.0', '>= 1.0.0']) {
+    assert.equal(isValidRange(r), true, `${r} should be valid`)
+  }
+})
+
 test('isValidRange rejects empty and unparseable ranges', () => {
   assert.equal(isValidRange(''), false)
   assert.equal(isValidRange('^garbage'), false)
-  assert.equal(isValidRange('1.x'), false)
+  assert.equal(isValidRange('npm:hyparquet@1.0.0'), false)
+  assert.equal(isValidRange('>=1.0.0 <garbage'), false)
+  assert.equal(isValidRange('1.0.0 -'), false)
   assert.equal(isValidRange(undefined), false)
 })
