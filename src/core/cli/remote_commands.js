@@ -862,6 +862,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // the user typed, and no other line in this login recovers the URL.
     // Revisit if the server root ever becomes a real landing page.
     // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target and pairs it with its lookup
+    // @ref LLP 0387#adjacency [constrained-by]: the compact branch is also the deadline line's half of R1a - drop the name or the lookup here and the compact privacy block below has neither
     if (compact) {
       ctx.stdout.write(`✓ Forwarding to the '${name}' server (run 'hyp remote list' to see its URL)\n`)
     } else {
@@ -885,6 +886,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // hold simply lapses (LLP 0101 #no-release). A promise of an ask here
     // would be false on exactly the paths where it would matter.
     // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the wizard's own narration carries the backfill statement, the skill hint, and the release verb
+    // @ref LLP 0387#adjacency [implements]: compact meets R1a as a pair - the forwarding line directly above carries the server name and the 'hyp remote list' lookup for both lines
     if (holdDeadline !== null && compact) {
       ctx.stderr.write(`✓ First sync no later than ${formatFirstSyncDeadline(holdDeadline)}; nothing has been uploaded yet\n`)
     } else if (holdDeadline !== null) {

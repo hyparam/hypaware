@@ -326,7 +326,7 @@ test('runInitWizard: a non-interactive run carries no breadcrumb anywhere', asyn
 
 // --- the phases that render it ---
 
-test('runWizardJoin: prints its position above the joining narration', async () => {
+test('runWizardJoin: prints its position instead of the joining narration', async () => {
   const stdout = makeBuf()
   const stderr = makeBuf()
   await runWizardJoin(/** @type {any} */ ({
