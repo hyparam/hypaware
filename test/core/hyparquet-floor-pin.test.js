@@ -318,7 +318,7 @@ test('the read path resolves the one root hyparquet, not a nested copy', t => {
  * floor's answer is the conservative one on purpose.
  *
  * @param {string} name the package being judged
- * @param {Record<string, string>} declared what it declares
+ * @param {Record<string, string | null>} declared what it declares
  * @param {Record<string, string> | undefined} overridden the root `overrides` entry for it
  * @param {Record<string, string | undefined>} pins the root pins, by package
  * @returns {string[]}
@@ -347,18 +347,19 @@ function dedupeOffenders(name, declared, overridden, pins) {
     // Nothing declared is nothing to nest, which is how the floor check below
     // reads an absent declaration too. Calling it a violation would report a
     // package the dependency has dropped as a dedupe failure.
-    if (declared[dep] === undefined) continue
+    const spec = declared[dep]
+    if (spec === undefined) continue
     // The shape is judged before the satisfaction, because the matcher answers
     // `true` for a range it was given nothing to judge: an empty or null
     // declaration would otherwise short-circuit as deduped and never reach the
     // branch that says the shape was unreadable.
-    if (!isValidRange(declared[dep])) {
-      offenders.push(`${name} declares ${dep}@${declared[dep]}, a range shape this check cannot ` +
+    if (!isValidRange(spec)) {
+      offenders.push(`${name} declares ${dep}@${spec}, a range shape this check cannot ` +
         `judge against the root pin ${pin} - read it before trusting either answer`)
       continue
     }
-    if (matchesSemverRange(pin, declared[dep])) continue
-    offenders.push(`${name} declares ${dep}@${declared[dep]}, which the root pin ${pin} does not ` +
+    if (matchesSemverRange(pin, spec)) continue
+    offenders.push(`${name} declares ${dep}@${spec}, which the root pin ${pin} does not ` +
       'satisfy, so npm nests a second copy: if that declaration is ABOVE the root pin, move the ' +
       `ROOT pin up; only one BELOW it wants an \`overrides\` entry naming ${pin}`)
   }

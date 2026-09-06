@@ -81,7 +81,7 @@ export function isValidSemver(version) {
  * never satisfy.
  *
  * @param {unknown} range
- * @returns {boolean}
+ * @returns {range is string}
  */
 export function isValidRange(range) {
   if (typeof range !== 'string') return false
