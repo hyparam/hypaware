@@ -91,6 +91,9 @@
     "hypvector": "0.2.2"
   },
   "overrides": {
+    "hyparquet-writer@0.16.9": {
+      "hyparquet": "1.30.0"
+    },
     "icebird": {
       "hyparquet": "1.30.0"
     },

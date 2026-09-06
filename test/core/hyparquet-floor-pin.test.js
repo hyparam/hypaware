@@ -10,10 +10,14 @@
 // version), but the correctness requirement is the floor, so that is what the
 // checks below compare against.
 //
-// `hypgrep` (LLP 0264 #dependency) is the first read-path dependency that
-// declares a hyparquet below the floor: 0.5.1 pins 1.27.1. It is adopted
-// behind a root `overrides` entry, so this is the gate on that entry. Three kinds
-// of check live here and they prove different things:
+// `hypgrep` (LLP 0264 #dependency) was the first read-path dependency to
+// declare a hyparquet below the floor: 0.5.1 pinned 1.27.1, adopted behind a
+// root `overrides` entry. 0.5.2 declares the root pin itself, so that entry now
+// only restates what hypgrep already asks for, and `icebird` is the entry doing
+// the work: 0.8.28 declares 1.29.2, which the 1.30.0 root pin does not satisfy.
+// The two swap roles as upstream moves, which is why the checks below are
+// written against the pins rather than against either package by name. Three
+// kinds of check live here and they prove different things:
 //
 //   - The manifest half (the first two tests) reads only the checked-in root
 //     `package.json`, so it runs on any checkout: the root pins are exact, and
@@ -29,19 +33,27 @@
 //     neither the manifest nor the tree, so it never skips.
 //
 // What neither half reaches: npm honours `overrides` only for the root
-// project, so the entry governs this checkout and any install that treats
-// hypaware as the root, and is ignored when hypaware is itself installed as a
-// dependency (`npm i -g hypaware`, `npx hypaware`), where hypgrep still gets
-// its own 1.27.1. Widening the range upstream in hypgrep, which LLP 0264
-// #dependency already names as the durable fix, is what closes that; a check
-// on it would have to pack and install this package, which is not a job for
-// the traditional suite.
+// project, so the entries govern this checkout and any install that treats
+// hypaware as the root, and are ignored when hypaware is itself installed as a
+// dependency (`npm i -g hypaware`, `npx hypaware`), where icebird still gets
+// its own 1.29.2. That gap now costs a second reader rather than a wrong row:
+// the below-floor version of it closed when hypgrep 0.5.2 stopped declaring
+// 1.27.1. Moving the declaration upstream, which LLP 0264 #dependency already
+// names as the durable fix, is what closes the rest; a check on it would have
+// to pack and install this package, which is not a job for the traditional
+// suite.
 //
 // Scope is the root `dependencies`, which is the query read path: the kernel
 // reads parquet through icebird and (from LLP 0264) hypgrep. The
 // optionalDependencies are write-side and vector-side (`hyparquet-writer`,
-// `hypvector`); each carries its own nested hyparquet today, neither runs
-// icebird's converter, and neither is this task's business.
+// `hypvector`); neither runs icebird's converter, so neither is checked here.
+// The root `overrides` do name one of them, and not as part of any floor: no
+// published `hyparquet-writer` declares 1.30.0, so once the root pin moved
+// there npm bound the hoisted writer to it regardless and then reported the
+// tree invalid. The entry says that binding is intended. Its key is
+// version-scoped (`hyparquet-writer@0.16.9`) on purpose: a bare key would also
+// reach the 0.16.1 copy nested under `hypvector` and drag it from 1.26.1 to
+// 1.30.0, which is a change to the vector path with nothing asking for it.
 //
 // @ref LLP 0222#hyparquet-floor [tests]: a floor only holds if nothing below it resolves beside the pin, and the deduping the same section claims is a separate property that has to be held separately
 // @ref LLP 0264#dependency [tests]: hypgrep enters as a plain root dependency, held to the floor by an override
@@ -134,16 +146,18 @@ test('hypgrep is a plain dependency, held at the floor by an override', () => {
 // and reading a dedupe failure as a correctness failure is how the floor tests
 // would start lying.
 //
-// icebird carries no override entry any more: 0.8.28 declares the root pins
-// itself, so npm dedupes without one, and an entry naming the same versions
-// would only be a second place to forget to bump. That is why this check reads
-// icebird's own installed declaration when no override names the pin, and why
-// it sits in the resolved half rather than the manifest half above. The remedy
-// when it goes red is still directional: if icebird declares a parquet package
-// ABOVE the root pin, move the ROOT pin up; only a declaration BELOW the pin
-// wants the override back. Holding a dependency down onto an older reader to
-// win a dedupe would trade the property that matters for the one that does
-// not.
+// icebird carries an override entry again: it declared the root pins itself
+// while the root pinned hyparquet 1.29.2, and 0.8.28 still declares 1.29.2 now
+// that the root pin is 1.30.0, so npm nests a private copy without one. An
+// entry is worth having only while it names something the dependency does not
+// already ask for; one that merely restates the declaration is a second place
+// to forget to bump. That is why this check reads icebird's own installed
+// declaration when no override names the pin, and why it sits in the resolved
+// half rather than the manifest half above. The remedy when it goes red is
+// still directional: if icebird declares a parquet package ABOVE the root pin,
+// move the ROOT pin up; only a declaration BELOW the pin wants the override
+// back. Holding a dependency down onto an older reader to win a dedupe would
+// trade the property that matters for the one that does not.
 test('icebird uses the root parquet pins directly or through overrides', t => {
   assert.ok(dependencies.icebird, 'icebird is the read path; it belongs in `dependencies`')
   if (!INSTALLED) {
