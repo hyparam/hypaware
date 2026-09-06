@@ -489,3 +489,33 @@ test('this branch mints no number another ref already claims', t => {
   const found = collisions(refFiles, mintedNumbers(REPO_ROOT).numbers)
   assert.deepEqual(found.map(c => `LLP ${c.number}: ${c.claimants.map(x => x.file).join(', ')}`), [])
 })
+
+// `cat-file --batch` hands back a tree as raw bytes, and an entry's trailing
+// object id is 20 bytes under sha1 but 32 under sha256. Reading a sha256 tree
+// 20 bytes at a time leaves the cursor mid-id, so every later entry is parsed
+// from a wrong offset: subtrees come out as ids git answers `missing` for,
+// `llp/tombstones/` drops out of the scan and its retired numbers become
+// mintable again, and the walk goes on inventing entries until the heap ends
+// the process. The width has to come off the reply, not a constant.
+test('the tree walk reads a sha256 repository, whose object ids are wider', t => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'llp-numbers-sha256-'))
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }))
+  try {
+    git(repo, ['init', '-q', '-b', 'master', '--object-format=sha256'])
+  } catch {
+    t.skip('this git cannot create a sha256 repository')
+    return
+  }
+  writeDoc(repo, 'llp/0264-grep-search.decision.md')
+  writeDoc(repo, 'llp/tombstones/0018-retired.decision.md')
+  git(repo, ['add', '-A'])
+  git(repo, ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'corpus'])
+
+  // The tombstone is the one that matters: it lives a level down, so it is
+  // reached only through a subtree id the walk has to have read whole.
+  assert.deepEqual(refFilesFromGit(repo, ['refs/heads/master']).get('refs/heads/master'), [
+    'llp/0264-grep-search.decision.md',
+    'llp/tombstones/0018-retired.decision.md',
+  ])
+  assert.equal(nextFreeNumber(refFilesFromGit(repo, mergeableRefs(repo))), 265)
+})

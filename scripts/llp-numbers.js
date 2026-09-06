@@ -464,7 +464,12 @@ function tryGitBatch(repoRoot, args, input) {
  * The entries of every tree object in a `cat-file --batch` reply, keyed by id.
  * The reply is `<id> <type> <size>\n<bytes>\n` per object, or `<id> missing\n`
  * for one git does not have (a shallow clone), which lists as empty. A tree's
- * bytes are `<mode> <name>\0<20-byte id>` per entry, in tree order.
+ * bytes are `<mode> <name>\0<id>` per entry, in tree order, where the id is
+ * raw bytes of the repository's hash: 20 of them under sha1 and 32 under
+ * sha256. The width is read off the header's own object name rather than
+ * assumed, because guessing 20 in a sha256 repository steps the cursor into
+ * the middle of an id and the walk then reads its own garbage until it runs
+ * the heap out. `ls-tree` was hash-agnostic and this stands in for it.
  *
  * @param {Buffer} raw
  * @returns {Map<string, { mode: string, name: string, id: string }[]>}
@@ -483,16 +488,22 @@ function parseTreeBatch(raw) {
     if (type === 'tree') {
       /** @type {{ mode: string, name: string, id: string }[]} */
       const entries = []
+      const idBytes = id.length / 2
       let cursor = at
       while (cursor < end) {
         const space = raw.indexOf(0x20, cursor)
         const nul = raw.indexOf(0x00, space)
+        // Nothing git emits trips this. It is here so that a cursor that ever
+        // does fall out of step stops rather than reading the rest of the
+        // buffer as entries, which is an out-of-memory abort and not an error
+        // anyone can act on.
+        if (space === -1 || nul === -1 || nul + 1 + idBytes > end) break
         entries.push({
           mode: raw.toString('latin1', cursor, space),
           name: raw.toString('utf8', space + 1, nul),
-          id: raw.toString('hex', nul + 1, nul + 21),
+          id: raw.toString('hex', nul + 1, nul + 1 + idBytes),
         })
-        cursor = nul + 21
+        cursor = nul + 1 + idBytes
       }
       trees.set(id, entries)
     }
