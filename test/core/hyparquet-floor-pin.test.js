@@ -296,6 +296,28 @@ test('every read-path dependency that carries hyparquet is held at the floor', t
     for (const [dep, floor] of Object.entries(FLOORS)) {
       if (floor === undefined) continue
       if (declared[dep] === undefined) continue
+      // An override forces the root copy whatever the dependency declares, so it
+      // holds a dependency DOWN exactly as readily as it holds one up, and the
+      // floor comparison below cannot see that: it judges the declaration, which
+      // is above the floor precisely in the case that goes wrong. The direction
+      // is what separates the two, so it is asked here rather than inferred.
+      // Live at this head: hypgrep 0.5.2 declares hyparquet 1.30.0 because it
+      // imports `rowIndex`, which 1.29.2 does not export, so a root pin moved
+      // back under it would leave every check in this file green and break the
+      // first grep at module link, which no floor can catch because the floor is
+      // a property of hyparquet's behaviour and this is a property of hypgrep's
+      // imports. The remedy is the one the resolved half already names for an
+      // above-pin declaration - move the ROOT pin up - and not dropping the
+      // entry, which nests a second copy instead.
+      if (overrides[name]?.[dep] === ROOT_PINS[dep] &&
+          isValidRange(declared[dep]) &&
+          !matchesSemverRange(ROOT_PINS[dep] ?? '', declared[dep]) &&
+          atOrAboveFloor(declared[dep], ROOT_PINS[dep])) {
+        offenders.push(`${name} declares ${dep}@${declared[dep]}, ABOVE the root pin ` +
+          `${ROOT_PINS[dep]}, and its overrides entry forces that older pin on it anyway: ` +
+          'move the ROOT pin up')
+        continue
+      }
       if (atOrAboveFloor(declared[dep], floor)) continue
       // An override is the other way to be safe: it forces the root copy, so a
       // below-floor declaration never resolves.
