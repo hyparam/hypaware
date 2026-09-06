@@ -274,7 +274,7 @@ export function refFilesFromGit(repoRoot, refs) {
   // without the directory, or one git cannot read, comes back `missing`.
   const resolved = tryGitBatch(repoRoot, ['cat-file', '--batch-check=%(objectname) %(objecttype)'],
     refs.map(ref => `${ref}:${LLP_DIR}`).join('\n') + '\n')
-  if (resolved === null) return refFiles
+  if (resolved === null) return refFilesByLsTree(repoRoot, refs)
   /** @type {Map<string, string>} */
   const treeOf = new Map()
   resolved.toString('utf8').split('\n').forEach((line, index) => {
@@ -292,7 +292,13 @@ export function refFilesFromGit(repoRoot, refs) {
   let level = [...new Set(treeOf.values())].map(id => ({ root: id, id, prefix: `${LLP_DIR}/` }))
   while (level.length > 0) {
     const raw = tryGitBatch(repoRoot, ['cat-file', '--batch'], [...new Set(level.map(node => node.id))].join('\n') + '\n')
-    if (raw === null) break
+    // A level that does not come back (git failed, or its reply outran
+    // BATCH_BUFFER_BYTES) would leave every ref under it holding a SHORT
+    // listing, which reads as an answer and is issue #907 again: `next` would
+    // mint under a number already taken and `check` would pass without seeing
+    // it. A ref missing entirely is survivable, a truncated one is not, so drop
+    // to the per-ref walk, which is slow rather than wrong.
+    if (raw === null) return refFilesByLsTree(repoRoot, refs)
     const trees = parseTreeBatch(raw)
     /** @type {typeof level} */
     const next = []
@@ -309,6 +315,27 @@ export function refFilesFromGit(repoRoot, refs) {
   // Byte order of the full path, which is the order `ls-tree -r` lists in.
   for (const files of filesOfTree.values()) files.sort()
   for (const [ref, id] of treeOf) refFiles.set(ref, [...filesOfTree.get(id) ?? []])
+  return refFiles
+}
+
+/**
+ * The same index built one `ls-tree` per ref, for a batch walk that could not
+ * finish. Slower by a process per ref, but it degrades the way the caller is
+ * promised: a ref git cannot read is left out entirely, never handed back
+ * carrying only some of the documents it has.
+ *
+ * @param {string} repoRoot
+ * @param {string[]} refs
+ * @returns {Map<string, string[]>}
+ */
+function refFilesByLsTree(repoRoot, refs) {
+  /** @type {Map<string, string[]>} */
+  const refFiles = new Map()
+  for (const ref of refs) {
+    const listed = tryGit(repoRoot, ['ls-tree', '-r', '--name-only', ref, '--', LLP_DIR])
+    if (listed === null) continue
+    refFiles.set(ref, listed.split('\n').filter(line => line !== ''))
+  }
   return refFiles
 }
 
