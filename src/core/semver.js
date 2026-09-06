@@ -22,9 +22,6 @@ export function matchesSemverRange(version, range) {
   if (isWildcard(trimmed)) return true
   const v = parseSemver(version)
   if (!v) return false
-  // The single-alternative case is the common one, and takes the string as it
-  // stands rather than allocating a one-element split.
-  if (!trimmed.includes('||')) return matchesAlternative(v, trimmed)
   for (const alternative of trimmed.split('||')) {
     if (matchesAlternative(v, alternative)) return true
   }
@@ -57,7 +54,6 @@ export function isValidRange(range) {
   const trimmed = range.trim()
   if (trimmed === '') return false
   if (isWildcard(trimmed)) return true
-  if (!trimmed.includes('||')) return comparatorsOf(trimmed) !== null
   return trimmed.split('||').every((alternative) => comparatorsOf(alternative) !== null)
 }
 
@@ -98,9 +94,6 @@ const SIMPLE = /^(>=|<=|>|<|=|\^|~)?v?(\d+|[xX*])(?:\.(\d+|[xX*])(?:\.(\d+|[xX*]
 function comparatorsOf(alternative) {
   const trimmed = alternative.trim()
   if (trimmed === '') return null
-  // A space-free alternative is one comparator, and needs neither the
-  // operator-spacing fixup nor the split below.
-  if (!/\s/.test(trimmed)) return simpleComparators(trimmed)
   // `>= 1.2.3` is one comparator, not two tokens, so the space after an
   // operator closes up before the compound range splits on whitespace.
   const parts = trimmed.replace(/([<>=^~]+)\s+/g, '$1').split(/\s+/)
@@ -121,8 +114,9 @@ function comparatorsOf(alternative) {
 function simpleComparators(part) {
   const p = parseSimple(part)
   if (!p) return null
-  // An `x` in the major position bounds nothing, which only reads as a range
-  // for the operators that take the version as a floor.
+  // An `x` in the major position names no version. npm reads that as `*` for
+  // the bare and caret/tilde forms; a relational operator has nothing to
+  // compare against, so it is a shape this matcher declines to judge.
   if (p.major === undefined) return p.op === '' || p.op === '=' || p.op === '^' || p.op === '~' ? [] : null
   const low = { major: p.major, minor: p.minor ?? 0, patch: p.patch ?? 0 }
   if (p.op === '>=') return [{ op: '>=', v: low }]
