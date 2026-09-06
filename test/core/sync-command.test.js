@@ -613,6 +613,28 @@ test('a held machine with no destinations says so rather than exiting 0', async 
   assert.match(stderr.text, /no destinations are configured/)
   assert.match(stderr.text, /review window/)
   assert.ok(await holdExists(hypHome), 'nothing was sent, so the window still stands')
+  assert.match(stderr.text, /run `hyp sync` again/, 'an attended caller can just rerun')
+})
+
+// "Run `hyp sync` again" is advice a `--yes` caller cannot take: with a
+// destination configured, that rerun hits the held `--yes` refusal and exits 2.
+test('the held no-destinations advice is followable by the --yes caller who got it', async () => {
+  const hypHome = await makeHome('held-no-sinks-yes')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const { ctx, stderr } = makeCtx({ hypHome, sinks: [], tty: false })
+
+  const code = await runSync(['--yes'], ctx)
+
+  assert.equal(code, SYNC_HELD_NO_DESTINATIONS_EXIT)
+  assert.match(stderr.text, /no destinations are configured/)
+  assert.match(stderr.text, /from a terminal/)
+  assert.match(stderr.text, /--yes cannot do it/)
+  assert.doesNotMatch(
+    stderr.text,
+    /run `hyp sync` again/,
+    'the bare rerun is what the held --yes refusal rejects'
+  )
+  assert.ok(await holdExists(hypHome), 'nothing was sent, so the window still stands')
 })
 
 // The report is for a run that offered to send. A dry run never did, so it

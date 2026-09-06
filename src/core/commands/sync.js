@@ -116,11 +116,19 @@ export async function runSync(argv, ctx) {
     // advice below names a different command than the one the caller ran.
     // @ref LLP 0101#no-release [implements]: a release that cannot happen says so rather than exiting 0 having sent nothing
     if (deadline !== null && !dryRun && !history) {
+      // `--yes` is not exempt from this branch, so its advice has to be one
+      // the caller's own flag set can follow. The plain rerun is not: once a
+      // destination exists, that same command lands on the held `--yes`
+      // refusal below.
+      const rerun = yes
+        ? '  Configure a destination, then run `hyp sync` from a terminal: ending the window\n' +
+          '  early takes an interactive confirmation, so --yes cannot do it.\n'
+        : '  Configure a destination, then run `hyp sync` again.\n'
       ctx.stderr.write(
         `${SYNC_HELD_NO_DESTINATIONS_NOTICE}\n` +
         `  The first-sync review window stays open until ${formatFirstSyncDeadline(deadline)},\n` +
         '  and nothing leaves this machine while it has nowhere to go.\n' +
-        '  Configure a destination, then run `hyp sync` again.\n'
+        rerun
       )
       return SYNC_HELD_NO_DESTINATIONS_EXIT
     }
