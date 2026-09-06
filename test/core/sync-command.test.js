@@ -9,6 +9,7 @@ import { PassThrough } from 'node:stream'
 
 import { runSync } from '../../src/core/commands/sync.js'
 import {
+  SYNC_HELD_NO_DESTINATIONS_EXIT,
   firstSyncHoldMarkerPath,
   writeFirstSyncHoldMarker,
 } from '../../src/core/usage-policy/first_sync_hold.js'
@@ -599,6 +600,52 @@ test('an instance argument ticks only that sink (no hold in play)', async () => 
   assert.equal(code, 0)
   assert.equal(parquet.exported.length, 1)
   assert.deepEqual(central.exported, [], 'a named instance must not wake the others')
+})
+
+test('a held machine with no destinations says so rather than exiting 0', async () => {
+  const hypHome = await makeHome('held-no-sinks')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const { ctx, stderr } = makeCtx({ hypHome, sinks: [], tty: true, answer: 'y' })
+
+  const code = await runSync([], ctx)
+
+  assert.equal(code, SYNC_HELD_NO_DESTINATIONS_EXIT)
+  assert.match(stderr.text, /no destinations are configured/)
+  assert.match(stderr.text, /review window/)
+  assert.ok(await holdExists(hypHome), 'nothing was sent, so the window still stands')
+})
+
+// The report is for a run that offered to send. A dry run never did, so it
+// keeps the exit code an inspection script reads as "I looked, nothing to
+// see" - the same exemption `--dry-run` already has from the held refusals.
+test('a held machine with no destinations still exits 0 under --dry-run', async () => {
+  const hypHome = await makeHome('held-no-sinks-dry-run')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const { ctx, stdout, stderr } = makeCtx({ hypHome, sinks: [], tty: true })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /no sinks instantiated; nothing to do/)
+  assert.doesNotMatch(stderr.text, /review window/)
+  assert.ok(await holdExists(hypHome))
+})
+
+// A replay can never end the window, so the new code has no early release to
+// be silent about, and its advice ("run `hyp sync` again") names a command the
+// caller did not run. This invocation kept exiting 0 before the code existed
+// and has to keep doing so.
+test('a held machine with no destinations still exits 0 under --history', async () => {
+  const hypHome = await makeHome('held-no-sinks-history')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const { ctx, stdout, stderr } = makeCtx({ hypHome, sinks: [], tty: true })
+
+  const code = await runSync(['--history', 'claude'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /no sinks instantiated; nothing to do/)
+  assert.doesNotMatch(stderr.text, /review window/)
+  assert.ok(await holdExists(hypHome))
 })
 
 test('no sinks at all is a no-op, not an error', async () => {

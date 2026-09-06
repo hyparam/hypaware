@@ -8,6 +8,8 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { effectiveRemotes } from '../remote/builtin_remotes.js'
 import { previewPendingRows } from '../sinks/pending.js'
 import {
+  SYNC_HELD_NO_DESTINATIONS_EXIT,
+  SYNC_HELD_NO_DESTINATIONS_NOTICE,
   clearFirstSyncHold,
   firstSyncHoldMarkerPath,
   formatFirstSyncDeadline,
@@ -83,6 +85,11 @@ export async function runSync(argv, ctx) {
     return 2
   }
 
+  // Read before the handle count, not after it: whether an empty handle set is
+  // worth reporting depends on whether a window is open.
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const deadline = await readFirstSyncDeadline({ stateDir })
+
   const allHandles = /** @type {ExtendedSinkRegistry} */ (ctx.sinks).listHandles?.() ?? []
   const handles = instance ? allHandles.filter((h) => h.instanceName === instance) : allHandles
   if (instance && handles.length === 0) {
@@ -92,12 +99,35 @@ export async function runSync(argv, ctx) {
     return 1
   }
   if (handles.length === 0) {
+    // With no window open this really is nothing to do. While one is open it
+    // is the opposite: the caller ran the one verb that ends the window early
+    // and got back a success line that neither sent anything nor said the wait
+    // still stands. Distinguishably, because a user who read the plan and
+    // answered no also leaves the marker in place and exits 0.
+    //
+    // `--dry-run` is exempt, for the reason it is exempt from the held
+    // refusals below: it never offered to send, so it has no success line to
+    // correct, and an inspection run has to keep exiting 0 whether or not a
+    // window happens to be open behind it.
+    //
+    // `--history` is exempt too, and for the opposite reason: a replay can
+    // never end the window (`runHistorySync` refuses with 2 while the hold is
+    // live), so it has no early-release success line to correct, and the
+    // advice below names a different command than the one the caller ran.
+    // @ref LLP 0101#no-release [implements]: a release that cannot happen says so rather than exiting 0 having sent nothing
+    if (deadline !== null && !dryRun && !history) {
+      ctx.stderr.write(
+        `${SYNC_HELD_NO_DESTINATIONS_NOTICE}\n` +
+        `  The first-sync review window stays open until ${formatFirstSyncDeadline(deadline)},\n` +
+        '  and nothing leaves this machine while it has nowhere to go.\n' +
+        '  Configure a destination, then run `hyp sync` again.\n'
+      )
+      return SYNC_HELD_NO_DESTINATIONS_EXIT
+    }
     ctx.stdout.write('no sinks instantiated; nothing to do\n')
     return 0
   }
 
-  const stateDir = readObservabilityEnv(ctx.env).stateDir
-  const deadline = await readFirstSyncDeadline({ stateDir })
   const remotes = effectiveRemotes(ctx.config)
   const destinations = handles.map((handle) => describeDestination(handle, remotes))
 

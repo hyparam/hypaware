@@ -116,8 +116,10 @@ a plan omitting the one destination the release exists to unblock - precisely
 the misleading artifact R2 requires the plan to prevent, and the same reason
 `hyp sync <instance>` refuses to release at all.
 
-So the step spawns `bin/hypaware.js sync` with `process.execPath` and
-`stdio: 'inherit'`. The child boots from the config setup just wrote and sees
+So the step spawns `bin/hypaware.js sync` with `process.execPath`, inheriting
+stdin and stdout and piping stderr straight back out (the pipe is read for the
+corroborating notice below, not to withhold anything from the terminal). The
+child boots from the config setup just wrote and sees
 the real sink set. Inheriting the terminal is safe for the reason
 [LLP 0198 #real-launch](./0198-setup-ends-on-a-question.decision.md#real-launch)
 establishes for `hyp ask`'s own spawn: the wizard's own prompt has resolved, so
@@ -133,6 +135,33 @@ restates the deadline, so a run ending on `sync cancelled` is not left
 ambiguous about what still holds. An unreadable re-read is treated as "still
 held", because claiming a sync happened is the one wrong answer that cannot
 be corrected later.
+
+The marker says whether it sent. It does not say why it did not, and two runs
+leave it standing for opposite reasons: a user who read the destination plan
+and answered no, and a `hyp sync` that found no destination and so never
+rendered a plan for anyone to answer. The second exits with a code of its own
+rather than 0, which is what
+[LLP 0101 #no-release](./0101-first-sync-review-window.decision.md#no-release)
+already requires of a release that cannot happen. Setup reads that code to pick
+which closing statement to print and which outcome to report, and it reads it
+before the marker, because the marker cannot contradict it: the code comes back
+before the child touched an export, so nothing was sent, while an absent marker
+is only weak evidence that something was ([LLP 0101](./0101-first-sync-review-window.decision.md)
+makes the read fail open, so a corrupt or lapsed marker also reads as absent).
+That is the same polarity as the paragraph above, not an exception to it -
+"released" is the claim that has to be earned, and no other exit code earns or
+forfeits it.
+
+The code is read with the sentence the child prints beside it, never alone. An
+exit code is a small integer with no namespace: Node returns 3 on an internal
+parse error, before a line of sync code has run, and a later `runSync` path
+could pick it for something else. Setup is about to repeat the explanation as
+its own closing statement, so it requires the notice the no-destinations branch
+writes as well as the code, and treats the code without it as any other
+non-zero exit. The corroboration is deliberately not a second look at the
+marker: that read fails open, so letting it veto here would put a run that
+provably sent nothing back on the "released" side, which is the polarity this
+section settles.
 
 ## Why not {#why-not}
 
@@ -177,10 +206,13 @@ be corrected later.
   review hint (the `hypaware-privacy` skill) rides the sync plan's warning on
   this path, so the warning names the skill alongside `hyp privacy set`.
 - `wizard.finish` gains `sync_now` (`released`, `sync-declined`,
-  `child-failed`, `spawn-failed`, `skipped`), and the step emits a
-  `wizard.sync_now` span carrying the child's exit code and whether the
-  marker cleared. The declined/released split is the measurement that says
+  `child-failed`, `no-destinations`, `spawn-failed`, `skipped`), and the step
+  emits a `wizard.sync_now` span carrying the child's exit code and whether
+  the marker cleared. The declined/released split is the measurement that says
   whether the window's default sizing matches the people in it, which is why
   a child that exited non-zero is `child-failed` rather than a decline: it
   never reached its plan, and counting it as one would inflate the rate this
-  step exists to measure.
+  step exists to measure. `no-destinations` is carved out of `child-failed`
+  for the opposite reason: that run did not break, it had nowhere to send,
+  and its closing statement says so rather than restating a deadline as if a
+  destination existed.

@@ -20,6 +20,40 @@ const FIRST_SYNC_HOLD_VERSION = 1
 export const FIRST_SYNC_MIN_LEAD_MS = 4 * 60 * 60_000
 
 /**
+ * The exit code `hyp sync` uses when the hold is live and no destination was
+ * instantiated. It needs one of its own because both neighbouring codes are
+ * taken: 0 is what a user who read the destination plan and answered no also
+ * gets, and 1 already covers every run that got as far as a plan and could not
+ * finish - a failed export, a marker that would not clear, a hold that
+ * reappeared mid-run - so it cannot be told apart from a run that never had a
+ * destination to render a plan for.
+ *
+ * It lives beside the hold rather than in the command because the hold is what
+ * makes the case reportable at all: with no window open, no destinations
+ * really is nothing to do.
+ *
+ * @ref LLP 0101#no-release [implements]: a release that cannot happen says so rather than exiting 0 having sent nothing
+ */
+export const SYNC_HELD_NO_DESTINATIONS_EXIT = 3
+
+/**
+ * The first line `hyp sync` prints on that same path, and the corroboration
+ * the exit code cannot supply on its own: 3 is a small integer any process can
+ * return, and Node itself returns it on an internal parse error, before a line
+ * of sync code has run. A reader that repeats the explanation (setup does, on
+ * its closing screen) therefore looks for the sentence beside the code, so a
+ * child that exited 3 for some other reason is not explained as a machine with
+ * nowhere to send.
+ *
+ * It is shared from here, next to the code it corroborates, so the command
+ * that writes it and the readers that match on it cannot drift apart.
+ *
+ * @ref LLP 0203#read-back [implements]: the exit code is believed alongside the sentence the child prints with it
+ */
+export const SYNC_HELD_NO_DESTINATIONS_NOTICE =
+  'hyp sync: no destinations are configured, so there is nothing to send.'
+
+/**
  * Compute the absolute first-sync hold deadline for an enrollment happening
  * at `now`: the next local 11:59pm, rolled to the following day's 11:59pm
  * when the same-day one is less than four hours away (`FIRST_SYNC_MIN_LEAD_MS`).

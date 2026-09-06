@@ -2,12 +2,19 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { paintLine } from '../../../../src/core/cli/style.js'
 import { runWizardSyncNow } from '../../../../src/core/cli/wizard/sync_now.js'
-import { firstSyncHoldMarkerPath, writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
+import {
+  SYNC_HELD_NO_DESTINATIONS_EXIT,
+  SYNC_HELD_NO_DESTINATIONS_NOTICE,
+  firstSyncHoldMarkerPath,
+  writeFirstSyncHoldMarker,
+} from '../../../../src/core/usage-policy/first_sync_hold.js'
 
 // The closing "send now" offer (LLP 0203): setup asks whether to wait out the
 // first-sync review window, and hands the user a real `hyp sync` rather than a
@@ -26,6 +33,10 @@ function makeBuf() {
     },
   }
 }
+
+/** What the real child writes on the no-destinations path, notice first. */
+const NO_DESTINATIONS_STDERR =
+  `${SYNC_HELD_NO_DESTINATIONS_NOTICE}\n  The first-sync review window stays open...\n`
 
 /** A deadline far enough out that no clock skew makes it stale. */
 const DEADLINE = Date.now() + 6 * 60 * 60_000
@@ -62,11 +73,19 @@ function opts(over = {}) {
 }
 
 /**
- * A spawn stub that records its argv and closes with `code`, recording nothing
- * else: `stdio: 'inherit'` means the child owns the terminal, so there are no
- * pipes to fake.
+ * A spawn stub that records its argv, writes `stderr` on the one piped stream
+ * the real child has, and closes with `code`. Only stderr is faked: stdin and
+ * stdout stay inherited, so the child owns the terminal it prompts on.
  *
- * @param {{ code?: number | null, error?: Error }} [behaviour]
+ * `stderr` may be a list, which is how the real stream arrives: the notice is
+ * one write in `runSync` but the reader sees whatever chunks the pipe hands
+ * it, and a boundary inside the sentence must not hide it.
+ *
+ * The stderr stub is a real `EventEmitter`, not a handler bag: an `error`
+ * with nobody listening has to throw here the way it throws on the real pipe,
+ * or a test cannot tell the difference.
+ *
+ * @param {{ code?: number | null, error?: Error, stderr?: string | string[], stderrError?: Error }} [behaviour]
  */
 function fakeSpawn(behaviour = {}) {
   /** @type {{ command: string, args: string[], options: any }[]} */
@@ -76,11 +95,20 @@ function fakeSpawn(behaviour = {}) {
     calls.push({ command, args, options })
     /** @type {Record<string, (arg: any) => void>} */
     const handlers = {}
+    const stderr = Object.assign(new EventEmitter(), { setEncoding() {} })
     queueMicrotask(() => {
-      if (behaviour.error) handlers.error?.(behaviour.error)
-      else handlers.close?.(behaviour.code ?? 0)
+      if (behaviour.error) {
+        handlers.error?.(behaviour.error)
+        return
+      }
+      const chunks = behaviour.stderr === undefined
+        ? []
+        : (Array.isArray(behaviour.stderr) ? behaviour.stderr : [behaviour.stderr])
+      for (const chunk of chunks) stderr.emit('data', chunk)
+      if (behaviour.stderrError) stderr.emit('error', behaviour.stderrError)
+      handlers.close?.(behaviour.code ?? 0)
     })
-    return { on: (/** @type {string} */ event, /** @type {any} */ fn) => { handlers[event] = fn } }
+    return { stderr, on: (/** @type {string} */ event, /** @type {any} */ fn) => { handlers[event] = fn } }
   }
   return { spawnFn, calls }
 }
@@ -186,7 +214,9 @@ test('the step spawns `hyp sync` on the inherited terminal, as the one question,
   assert.equal(call.command, process.execPath)
   assert.match(call.args[0], /bin\/hypaware\.js$/)
   assert.deepEqual(call.args.slice(1), ['sync'])
-  assert.equal(call.options.stdio, 'inherit')
+  // stdin and stdout stay on the terminal the child prompts on; only its
+  // diagnostics are piped, so setup can read what the child said about them.
+  assert.deepEqual(call.options.stdio, ['inherit', 'inherit', 'pipe'])
   assert.deepEqual(result, { asked: true, released: true })
   // The wizard put no question of its own: one lead line, then the child.
   // @ref LLP 0203#no-new-consent [tests]: the informed prompt is the only prompt
@@ -242,6 +272,124 @@ test('a child that released and then exited non-zero is still a release', async 
 
   assert.deepEqual(result, { asked: true, released: true })
   assert.doesNotMatch(o.stdout.text(), /Nothing has been uploaded yet/)
+})
+
+// The one non-zero exit that is not a run that broke, and so not the generic
+// held statement above: a `hyp sync` that found no destination sent nothing
+// because there was nowhere to send, and the statement that names the
+// deadline as if a destination existed would point the user back at the
+// command that just found nothing to send.
+// @ref LLP 0203#read-back [tests]: the exit code separates the two ways a held marker outlives the child
+test('a child that found no destinations gets its own line, not the held statement', async () => {
+  const spawn = fakeSpawn({
+    code: SYNC_HELD_NO_DESTINATIONS_EXIT,
+    stderr: NO_DESTINATIONS_STDERR,
+  })
+  const o = opts({
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => DEADLINE,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: false, reason: 'no-destinations' })
+  assert.match(o.stdout.text(), /Nothing was sent/)
+  assert.match(o.stdout.text(), /no destinations are configured/)
+  assert.doesNotMatch(o.stdout.text(), /run `hyp sync` any time/)
+})
+
+// The marker re-read fails open (LLP 0101: a corrupt or lapsed marker reads as
+// absent), so an absent marker on its own is not proof of a release. This exit
+// code is proof of the opposite: it comes back before the child touched an
+// export, so it outranks whatever the re-read says.
+// @ref LLP 0203#read-back [tests]: a run that provably sent nothing is never reported as released
+test('a no-destinations child is not a release even when the marker reads absent', async () => {
+  const spawn = fakeSpawn({
+    code: SYNC_HELD_NO_DESTINATIONS_EXIT,
+    stderr: NO_DESTINATIONS_STDERR,
+  })
+  const o = opts({
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => null,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: false, reason: 'no-destinations' })
+  assert.match(o.stdout.text(), /no destinations are configured/)
+})
+
+// Exit 3 is not proof on its own. It is a small integer any process can
+// return: Node itself exits 3 on an internal parse error, before a line of
+// `hyp sync` has run, and nothing stops a later `runSync` path from picking
+// the same code for something else. A child that never reached the
+// no-destinations branch never printed its notice either, so setup falls back
+// to the outcome every other non-zero exit gets rather than explaining a
+// machine state nobody observed.
+// @ref LLP 0203#read-back [tests]: the exit code is read alongside the sentence the child prints with it
+test('an exit 3 the child never explained is a plain child-failed, not no-destinations', async () => {
+  const spawn = fakeSpawn({ code: SYNC_HELD_NO_DESTINATIONS_EXIT })
+  const o = opts({
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => DEADLINE,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: false, reason: 'child-failed' })
+  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
+  assert.doesNotMatch(o.stdout.text(), /no destinations are configured/)
+})
+
+// Reading the child's stderr must not consume it. Piping it is a means to the
+// corroboration above, not a decision to swallow the child's diagnostics: the
+// terminal still owes the user everything `hyp sync` said, in the order it
+// said it.
+// @ref LLP 0203#child-process [tests]: the piped stderr is echoed, not withheld
+test('the child keeps its voice: everything on its stderr is written back out', async () => {
+  const spawn = fakeSpawn({ code: 1, stderr: ['hyp sync: something broke\n', '  and then more\n'] })
+  const o = opts({
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => DEADLINE,
+  })
+  await runWizardSyncNow(o.args)
+
+  assert.equal(o.stderr.text(), 'hyp sync: something broke\n  and then more\n')
+})
+
+// Piping a stream means owning its failures. An `error` nobody listens for is
+// an uncaught exception, and it would land on a setup that had already done
+// every one of its acts - the same defect `installStreamErrorHandlers` exists
+// for on the write side. The read is best-effort; the run is not.
+// @ref LLP 0203#child-process [tests]: a failed read pipe does not take the wizard down with it
+test('a stderr pipe that fails does not take the run down: the exit code is still judged', async () => {
+  const spawn = fakeSpawn({ code: 0, stderrError: Object.assign(new Error('read failed'), { code: 'EIO' }) })
+  const o = opts({
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => null,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: true })
+})
+
+// The notice arrives as pipe chunks, not as the one write that produced it,
+// and it arrives as the child *printed* it: `colorizeStderr` paints the
+// `hyp sync:` prefix of this very line, which drops a reset inside the
+// sentence. Neither may hide the corroboration, or exit 3 is back to being
+// believed or disbelieved for reasons nobody can see.
+// @ref LLP 0203#read-back [tests]: the notice is recognised as the child writes it, chunked and styled
+test('a notice split across chunks and painted by severity colour is still read', async () => {
+  const painted = paintLine(SYNC_HELD_NO_DESTINATIONS_NOTICE)
+  const spawn = fakeSpawn({
+    code: SYNC_HELD_NO_DESTINATIONS_EXIT,
+    stderr: [painted.slice(0, 12), painted.slice(12), '\n  and a trailing line\n'],
+  })
+  const o = opts({
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => DEADLINE,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: false, reason: 'no-destinations' })
+  assert.match(o.stdout.text(), /no destinations are configured/)
 })
 
 // @ref LLP 0203#read-back [tests]: an unreadable re-read is "still held", never a claimed release

@@ -21,7 +21,13 @@ import { fileURLToPath } from 'node:url'
 
 import { Attr, withSpan } from '../../observability/index.js'
 import { readObservabilityEnv } from '../../observability/env.js'
-import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
+import {
+  SYNC_HELD_NO_DESTINATIONS_EXIT,
+  SYNC_HELD_NO_DESTINATIONS_NOTICE,
+  formatFirstSyncDeadline,
+  readFirstSyncDeadline,
+} from '../../usage-policy/first_sync_hold.js'
+import { stripSgr } from '../style.js'
 import { isTty } from '../tui-router.js'
 
 /**
@@ -96,6 +102,27 @@ export async function runWizardSyncNow(opts) {
         // about the one thing this screen exists to be honest about.
         // @ref LLP 0203#read-back [implements]: the outcome is read from the hold marker, never inferred from the exit code
         const stillHeld = await readHold(opts)
+        // The one exit code that outranks the marker, and only because it is
+        // returned before the child touched an export: nothing was sent, so
+        // no marker reading can make this a release. The re-read fails open
+        // (LLP 0101: a corrupt or lapsed marker reads as absent), and taking
+        // that as "released" here would be the false "your history is on its
+        // way" this step exists to prevent.
+        //
+        // It also earns its own arm ahead of the generic non-zero one below:
+        // a child that found no destination is not a run that broke, and the
+        // held statement that arm writes would answer it with advice to
+        // re-run the command that just found nothing to send.
+        // @ref LLP 0203#read-back [implements]: the exit code separates the ways a run that sent nothing outlives the child
+        // Read with the notice the child prints beside it, never alone: 3 is
+        // not exclusively ours, and this screen is where a wrong explanation
+        // gets stated as fact. The corroboration is deliberately not a second
+        // look at the marker, whose read fails open.
+        if (result.code === SYNC_HELD_NO_DESTINATIONS_EXIT && result.noDestinations) {
+          span.setAttribute('released', false)
+          writeNoDestinations(opts, stillHeld ?? opts.deadline)
+          return { asked: true, released: false, reason: /** @type {const} */ ('no-destinations') }
+        }
         span.setAttribute('released', stillHeld === null)
         if (stillHeld !== null) {
           // A decline exits 0 (`sync cancelled`), so a non-zero exit is a
@@ -147,28 +174,80 @@ export async function runWizardSyncNow(opts) {
  * requires the plan to prevent. The child boots from the config setup just
  * wrote and sees the real sink set.
  *
- * `stdio: 'inherit'` for the same reason the first ask uses it: the child
- * owns a real prompt. It is safe here because the wizard's own prompt has
- * resolved, so raw mode and the cursor are already restored.
+ * stdin and stdout are inherited for the same reason the first ask inherits
+ * them: the child owns a real prompt, and its plan is the screen the user
+ * answers. It is safe here because the wizard's own prompt has resolved, so raw
+ * mode and the cursor are already restored.
+ *
+ * stderr is the exception: it is piped so the caller can tell the one exit code
+ * this child explains from the same code arriving for any other reason, which
+ * nothing but the child's own words separates. Everything read is written
+ * straight back out, so the terminal still shows the child's diagnostics.
+ *
+ * The echo is not decoration. `askYesNo` builds its readline over `ctx.stderr`
+ * (`src/core/cli/confirm.js`), so the send confirm itself rides the piped
+ * stream and this loop is its only path to the terminal. Two consequences,
+ * both measured rather than assumed: readline sees a non-TTY output and so
+ * builds with `terminal: false`, which still writes the query and still reads
+ * the answer, but takes no raw mode and does no cursor bookkeeping, leaving
+ * the tty canonical and the terminal itself echoing what is typed; and the
+ * question ends without a newline, which leaves the parent's `colorizeStderr`
+ * mid-line, so the next line the child writes reaches the user unpainted.
+ * Anything that narrows this pipe further has to keep the first of those
+ * true: the prompt it carries is the one gate on sending.
  *
  * @ref LLP 0203#child-process [implements]: the release runs in a fresh process so its plan names the real destinations
  * @param {RunWizardSyncNowOptions} opts
- * @returns {Promise<{ code: number | null, error?: string }>}
+ * @returns {Promise<{ code: number | null, error?: string, noDestinations?: boolean }>}
  */
 function runSyncChild(opts) {
   const spawnFn = opts.spawnFn ?? spawn
   const binPath = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
   return new Promise((resolve) => {
     let settled = false
-    /** @param {{ code: number | null, error?: string }} r */
+    /** @param {{ code: number | null, error?: string, noDestinations?: boolean }} r */
     const done = (r) => { if (!settled) { settled = true; resolve(r) } }
     try {
       const child = spawnFn(process.execPath, [binPath, 'sync'], {
-        stdio: 'inherit',
+        stdio: ['inherit', 'inherit', 'pipe'],
         env: opts.env,
       })
+      let noDestinations = false
+      // Only the notice is retained, and only until it is seen: a loud failure
+      // can write an unbounded amount here and none of it is evidence. The
+      // carried tail catches a notice split across chunks, and is measured
+      // against the raw text so a style escape straddling a boundary is
+      // rejoined before it is stripped.
+      let pending = ''
+      const echo = opts.stderr ?? process.stderr
+      child.stderr?.setEncoding('utf8')
+      // Piping a stream means owning its failures. An unlistened `error` on
+      // this pipe is an uncaught exception - no `try`/`catch` here can contain
+      // an emitter event - and it would end a setup whose every act had
+      // already succeeded, which is the defect `installStreamErrorHandlers`
+      // exists for on the write side. Nothing can be done about it and nothing
+      // needs to be: `close` still fires, so the exit code is still judged,
+      // only without the corroboration the pipe was there to collect.
+      child.stderr?.on('error', () => {})
+      child.stderr?.on('data', (chunk) => {
+        const text = String(chunk)
+        echo.write(text)
+        if (noDestinations) return
+        pending += text
+        // Compared without style escapes. `colorizeStderr` paints the
+        // `hyp sync:` prefix of this very line, which drops a reset inside the
+        // sentence and leaves the child writing something that no longer
+        // contains the constant it was built from. Colour is TTY-gated and
+        // this child's stderr is a pipe, so it does not happen today - but a
+        // corroboration that quietly depended on that would fail the same
+        // silent way the exit code alone did, which is the whole defect here.
+        if (stripSgr(pending).includes(SYNC_HELD_NO_DESTINATIONS_NOTICE)) noDestinations = true
+        else pending = pending.slice(-SYNC_HELD_NO_DESTINATIONS_NOTICE.length * 2)
+      })
       child.on('error', (err) => done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }))
-      child.on('close', (code) => done({ code }))
+      // `close`, not `exit`: it fires once the piped stderr has closed too, so
+      // the last thing the child said is in hand before the code is judged.
+      child.on('close', (code) => done({ code, noDestinations }))
     } catch (err) {
       done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' })
     }
@@ -240,5 +319,32 @@ function writeStillHeld(opts, deadline) {
   opts.stdout.write(
     `\nNothing was sent. Your history stays on this machine until ${formatFirstSyncDeadline(deadline)};\n` +
     'run `hyp sync` any time to send it sooner.\n'
+  )
+}
+
+/**
+ * The line for the one path that did not send because it had nowhere to send
+ * to. Separate from {@link writeStillHeld} because its statements are wrong
+ * here: the deadline is not when this history leaves while nothing is
+ * configured to take it, and re-running `hyp sync` on this machine as it
+ * stands would find the same nothing.
+ *
+ * What it must not do is drop the deadline, which is the mistake the first
+ * draft of this line made. The hold marker is untouched here and still lapses
+ * on schedule, and the driver gates on the marker alone: if a destination
+ * appears before the deadline by any route the user did not drive (a pulled
+ * org config carrying a `sinks` block, a retried `hyp remote login`), the
+ * deadline forwards this history with no `hyp sync` from anyone. So the
+ * deadline is stated as what it is, conditional on a destination existing,
+ * rather than left off setup's last screen as inapplicable.
+ *
+ * @param {RunWizardSyncNowOptions} opts
+ * @param {number} deadline
+ */
+function writeNoDestinations(opts, deadline) {
+  opts.stdout.write(
+    '\nNothing was sent: no destinations are configured on this machine yet.\n' +
+    'Your history stays here while that is true. Once one is configured it\n' +
+    `leaves on the ${formatFirstSyncDeadline(deadline)} deadline, or sooner with \`hyp sync\`.\n`
   )
 }
