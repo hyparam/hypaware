@@ -31,6 +31,13 @@ import { stripSgr } from '../style.js'
 import { isTty } from '../tui-router.js'
 
 /**
+ * How long the settle keeps waiting on the piped stderr after the child itself
+ * is already gone. The pipe outlives its writer, so this is the only bound on
+ * that wait.
+ */
+const STDERR_CLOSE_GRACE_MS = 250
+
+/**
  * Run the real `hyp sync`, whose plan and confirm are the one question.
  *
  * Never throws and never changes the wizard's exit code: setup finished
@@ -205,8 +212,14 @@ function runSyncChild(opts) {
   const binPath = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
   return new Promise((resolve) => {
     let settled = false
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let grace
+    // Whoever settles first cancels the wait, so the grace timer outlives the
+    // result it was there to produce in no ordering: `error` can arrive with
+    // the timer already armed, and `close` is only documented to follow `exit`,
+    // not to be the last word.
     /** @param {{ code: number | null, error?: string, noDestinations?: boolean }} r */
-    const done = (r) => { if (!settled) { settled = true; resolve(r) } }
+    const done = (r) => { if (!settled) { settled = true; clearTimeout(grace); resolve(r) } }
     try {
       const child = spawnFn(process.execPath, [binPath, 'sync'], {
         stdio: ['inherit', 'inherit', 'pipe'],
@@ -247,7 +260,16 @@ function runSyncChild(opts) {
       child.on('error', (err) => done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }))
       // `close`, not `exit`: it fires once the piped stderr has closed too, so
       // the last thing the child said is in hand before the code is judged.
+      // Bounded by `exit`, because the pipe outlives the process that wrote to
+      // it: any descendant that inherited fd 2 holds it open for as long as it
+      // lives, and `close` alone would leave setup's last step waiting on a
+      // stranger. Nothing under `hyp sync` spawns today, so the bound decides
+      // only how a future one fails.
       child.on('close', (code) => done({ code, noDestinations }))
+      child.on('exit', (code) => {
+        if (settled) return
+        grace = setTimeout(() => done({ code, noDestinations }), STDERR_CLOSE_GRACE_MS)
+      })
     } catch (err) {
       done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' })
     }
