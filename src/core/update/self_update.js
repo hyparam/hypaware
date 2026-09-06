@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { warningsRecordBootFailure } from '../daemon/boot_failure.js'
 import { daemonRunDir, processIsAlive, readPidFile } from '../daemon/pid.js'
 import { LAUNCH_LABEL } from '../daemon/platform.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
@@ -518,8 +519,7 @@ export function previousBootLooksStuck(stateRoot) {
     const parsed = JSON.parse(raw)
     if (parsed?.state === 'starting') return true
     if (parsed?.state !== 'degraded') return false
-    const warnings = Array.isArray(parsed.warnings) ? parsed.warnings : []
-    return warnings.some((w) => String(w).startsWith('boot_failed'))
+    return warningsRecordBootFailure(parsed.warnings)
   } catch {
     return false
   }
