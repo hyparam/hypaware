@@ -116,8 +116,10 @@ a plan omitting the one destination the release exists to unblock - precisely
 the misleading artifact R2 requires the plan to prevent, and the same reason
 `hyp sync <instance>` refuses to release at all.
 
-So the step spawns `bin/hypaware.js sync` with `process.execPath` and
-`stdio: 'inherit'`. The child boots from the config setup just wrote and sees
+So the step spawns `bin/hypaware.js sync` with `process.execPath`, inheriting
+stdin and stdout and piping stderr straight back out (the pipe is read for the
+corroborating notice below, not to withhold anything from the terminal). The
+child boots from the config setup just wrote and sees
 the real sink set. Inheriting the terminal is safe for the reason
 [LLP 0198 #real-launch](./0198-setup-ends-on-a-question.decision.md#real-launch)
 establishes for `hyp ask`'s own spawn: the wizard's own prompt has resolved, so
@@ -149,6 +151,17 @@ makes the read fail open, so a corrupt or lapsed marker also reads as absent).
 That is the same polarity as the paragraph above, not an exception to it -
 "released" is the claim that has to be earned, and no other exit code earns or
 forfeits it.
+
+The code is read with the sentence the child prints beside it, never alone. An
+exit code is a small integer with no namespace: Node returns 3 on an internal
+parse error, before a line of sync code has run, and a later `runSync` path
+could pick it for something else. Setup is about to repeat the explanation as
+its own closing statement, so it requires the notice the no-destinations branch
+writes as well as the code, and treats the code without it as any other
+non-zero exit. The corroboration is deliberately not a second look at the
+marker: that read fails open, so letting it veto here would put a run that
+provably sent nothing back on the "released" side, which is the polarity this
+section settles.
 
 ## Why not {#why-not}
 
@@ -199,7 +212,7 @@ forfeits it.
   whether the window's default sizing matches the people in it, which is why
   a child that exited non-zero is `child-failed` rather than a decline: it
   never reached its plan, and counting it as one would inflate the rate this
-  step exists to measure. `no-destinations` is the one such exit named rather
-  than lumped in, because its cause is known and it is not a failure either:
-  the machine had nowhere to send from the start, and the window is not being
-  declined on it.
+  step exists to measure. `no-destinations` is carved out of `child-failed`
+  for the opposite reason: that run did not break, it had nowhere to send,
+  and its closing statement says so rather than restating a deadline as if a
+  destination existed.

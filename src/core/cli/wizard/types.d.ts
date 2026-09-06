@@ -632,10 +632,14 @@ export type FirstAskResult =
  * decline never does: it never reached its plan, so it is not a decline and
  * must not be counted as one.
  *
- * `no-destinations` is the one child-failed run that is told apart from the
- * rest, because its cause is known: `hyp sync` found no sink to send to and
- * exited `SYNC_HELD_NO_DESTINATIONS_EXIT` before rendering a plan. Told apart
- * by that exit code, never by the marker, which says only that nothing sent.
+ * `no-destinations` is the one non-zero exit that is named rather than left
+ * to `child-failed`: `hyp sync` found no sink to send to, which is not a run
+ * that broke. It is told apart by the child's exit code
+ * (`SYNC_HELD_NO_DESTINATIONS_EXIT`) together with the notice it prints on
+ * that branch (`SYNC_HELD_NO_DESTINATIONS_NOTICE`), never by the marker,
+ * which says only that nothing sent. Both halves are required: 3 is a small
+ * integer any process can return, and this arm restates the explanation as
+ * setup's closing statement.
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
