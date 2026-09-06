@@ -626,27 +626,24 @@ export type FirstAskResult =
  * `released` is read back from the hold marker, never inferred from the
  * child's exit code: `hyp sync` exits 0 both when it sends and when the
  * user reads its destination list and answers no. `sync-declined` is that
- * second case, and it is deliberately distinct from `declined` (the wizard's
- * own question) - the two say different things about how far the user got.
+ * second case, and it is the only decline there is: the wizard puts no
+ * question of its own ahead of the child's (LLP 0203 #no-new-consent).
+ * `child-failed` is the still-held run whose child exited non-zero, which a
+ * decline never does: it never reached its plan, so it is not a decline and
+ * must not be counted as one.
  *
- * `no-destinations` is the third run that leaves the marker standing, and it
- * is not a decline at all: `hyp sync` found no sink to send to and never
- * rendered a plan, so nobody read one. It is told apart by the child's exit
- * code (`SYNC_HELD_NO_DESTINATIONS_EXIT`) together with the notice it prints
- * on that branch (`SYNC_HELD_NO_DESTINATIONS_NOTICE`), never by the marker,
+ * `no-destinations` is the one non-zero exit that is named rather than left
+ * to `child-failed`: `hyp sync` found no sink to send to, which is not a run
+ * that broke. It is told apart by the child's exit code
+ * (`SYNC_HELD_NO_DESTINATIONS_EXIT`) together with the notice it prints on
+ * that branch (`SYNC_HELD_NO_DESTINATIONS_NOTICE`), never by the marker,
  * which says only that nothing sent. Both halves are required: 3 is a small
  * integer any process can return, and this arm restates the explanation as
  * setup's closing statement.
- *
- * `asked` reports whether that wizard question was put, not how far the child
- * got afterwards: `spawn-failed` and `no-destinations` are asked runs whose
- * answer was `now`, while `no-hold` and `not-interactive` are the paths nobody
- * was offered anything on. `error` is the one arm that spans both, because an unforeseen throw
- * lands there whether it came before the question or after the answer.
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
-  | { asked: true; released: false; reason: 'declined' | 'sync-declined' | 'no-destinations' | 'spawn-failed' }
+  | { asked: true; released: false; reason: 'sync-declined' | 'child-failed' | 'no-destinations' | 'spawn-failed' }
   | { asked: false; reason: 'no-hold' | 'not-interactive' | 'error' }
 
 /** Options for `runWizardSyncNow`. */
@@ -666,7 +663,6 @@ export interface RunWizardSyncNowOptions {
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream
   /** Test seams; production callers pass none of these. */
-  confirm?: AsyncConfirmSelectPrompt
   spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess
   readDeadline?: () => Promise<number | null>
 }

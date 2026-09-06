@@ -258,12 +258,15 @@ so the user's first question becomes their next data point.
 This is a pleasant accident rather than a design goal, and it is not
 narrated.
 
-The cost of that ordering is that on an enrolled install the "nothing has
-been uploaded yet" block and its deadline are no longer the last thing on
-screen, and can scroll out of view on a short terminal. The sync offer
+The cost of that ordering is that on an enrolled install the deadline is
+no longer the last thing on screen, and can scroll out of view on a short
+terminal. The sync offer
 ([LLP 0203 #offer](./0203-setup-offers-the-first-sync.decision.md#offer))
-is what keeps the deadline actionable despite that: it restates it as a
-prompt the user must answer, between the narration and the list.
+is what keeps the deadline actionable despite that: it puts `hyp sync`'s
+own plan and confirm ahead of the list, which state the deadline and ask
+about it. On that path the wizard's "nothing has been uploaded yet"
+paragraph stands down for the plan; every path without the offer keeps
+it.
 
 `hyp ask` is a new top-level verb in an already-broad surface. It earns
 the slot by being the only one that is about *starting* rather than
