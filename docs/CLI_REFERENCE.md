@@ -107,6 +107,9 @@ Typed query commands accept shared rendering controls such as `--format`,
 `--refresh never|auto|always` for local cache refresh and `--remote [TARGET]`
 for remote execution when the command is a remote-capable typed verb. You
 can't request an explicit local refresh and remote execution together.
+With `--remote`, an operator can add `--org <label|*>` to read one org by
+label or every org the account may read. It is rejected without `--remote`,
+and the server records each such read in that org's audit trail.
 
 ### `hyp query overview`
 
@@ -129,7 +132,7 @@ dataset is registered.
 ### `hyp query sql`
 
 ```text
-hyp query sql <sql> [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]
+hyp query sql <sql> [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
 Runs one read-only `SELECT` statement against registered datasets. Local
@@ -148,7 +151,7 @@ failures return `1`.
 ### `hyp query grep`
 
 ```text
-hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]
+hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
 Searches recorded `ai_gateway_messages` text without SQL. The pattern is a
@@ -205,7 +208,7 @@ hyp query schema ai_gateway_messages
 Plugin: `@hypaware/context-graph`.
 
 ```text
-hyp query graph neighbors <node> [--depth <depth>] [--type <type>] [--edge-type <edge_type...>] [--direction out|in|both] [--limit <limit>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]
+hyp query graph neighbors <node> [--depth <depth>] [--type <type>] [--edge-type <edge_type...>] [--direction out|in|both] [--limit <limit>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
 Resolves a node ID, natural key, or label, then walks the activity graph in
@@ -1398,7 +1401,7 @@ hyp remote remove team
 ### `hyp mcp serve`
 
 ```text
-hyp mcp serve [--remote <target>]
+hyp mcp serve [--remote <target> [--org <label|*>]]
 ```
 
 Serves active typed verbs over standard input and output, or proxies a named
