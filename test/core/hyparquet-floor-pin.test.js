@@ -530,11 +530,17 @@ function installedVersion(nodeModules, name) {
  * wins. Undefined when the root declares nothing by that name, which is what
  * npm refuses the install over.
  *
+ * The chain is truthy rather than nullish because npm's is: it reads each map
+ * as `if (pkg.devDependencies?.[ref])`, so a declaration of `""` (npm's "any
+ * version") is skipped rather than returned. Reading it as a match would fail
+ * the premise assertion above on a manifest npm resolves correctly, and blame a
+ * second declaration that is not there.
+ *
  * @param {string} name the package a `$name` reference points at
  * @returns {string | undefined}
  */
 function referencedSpec(name) {
-  return devDependencies[name] ?? optionalDependencies[name] ?? dependencies[name] ?? peerDependencies[name]
+  return devDependencies[name] || optionalDependencies[name] || dependencies[name] || peerDependencies[name]
 }
 
 /**
