@@ -37,6 +37,17 @@ const DOC_PATTERN = /^(\d{4})-.*\.md$/
 /** How many refs a claimant line names before it summarises the rest. */
 const MAX_REFS_SHOWN = 6
 
+/** The mode a tree entry carries when it is itself a tree, in git's own octal. */
+const TREE_MODE = '40000'
+
+/**
+ * Room for one level of the walk in `refFilesFromGit`: every distinct `llp/`
+ * tree across every ref, at a few dozen bytes an entry. This clone's 951 refs
+ * share 441 such trees and come to 5.5 MiB; the default 1 MiB would not hold
+ * them.
+ */
+const BATCH_BUFFER_BYTES = 64 * 1024 * 1024
+
 /** The label the working tree carries when it claims a number alongside the refs. */
 export const WORKTREE = 'the working tree'
 
@@ -256,6 +267,70 @@ export function mergeableRefs(repoRoot) {
 export function refFilesFromGit(repoRoot, refs) {
   /** @type {Map<string, string[]>} */
   const refFiles = new Map()
+  if (refs.length === 0) return refFiles
+  // One `cat-file` resolves every ref's `llp/` tree, one line per ref in order,
+  // where a `ls-tree` per ref cost a process each: a clone with a hundred
+  // branches spent well over a second here, most of it in fork and exec. A ref
+  // without the directory, or one git cannot read, comes back `missing`.
+  const resolved = tryGitBatch(repoRoot, ['cat-file', '--batch-check=%(objectname) %(objecttype)'],
+    refs.map(ref => `${ref}:${LLP_DIR}`).join('\n') + '\n')
+  if (resolved === null) return refFilesByLsTree(repoRoot, refs)
+  /** @type {Map<string, string>} */
+  const treeOf = new Map()
+  resolved.toString('utf8').split('\n').forEach((line, index) => {
+    const [id, type] = line.split(' ')
+    if (type === 'tree' && index < refs.length) treeOf.set(refs[index], id)
+  })
+
+  // Walk the trees a level at a time, every tree of the level in one more
+  // `cat-file`, so the calls scale with the depth of `llp/` and not with the
+  // number of refs. Refs sharing a tree, the common case for a branch that
+  // never touched the corpus, are read once.
+  /** @type {Map<string, string[]>} */
+  const filesOfTree = new Map()
+  /** @type {{ root: string, id: string, prefix: string }[]} */
+  let level = [...new Set(treeOf.values())].map(id => ({ root: id, id, prefix: `${LLP_DIR}/` }))
+  while (level.length > 0) {
+    const raw = tryGitBatch(repoRoot, ['cat-file', '--batch'], [...new Set(level.map(node => node.id))].join('\n') + '\n')
+    // A level that does not come back (git failed, or its reply outran
+    // BATCH_BUFFER_BYTES) would leave every ref under it holding a SHORT
+    // listing, which reads as an answer and is issue #907 again: `next` would
+    // mint under a number already taken and `check` would pass without seeing
+    // it. A ref missing entirely is survivable, a truncated one is not, so drop
+    // to the per-ref walk, which is slow rather than wrong.
+    if (raw === null) return refFilesByLsTree(repoRoot, refs)
+    const trees = parseTreeBatch(raw)
+    /** @type {typeof level} */
+    const next = []
+    for (const node of level) {
+      const files = filesOfTree.get(node.root) ?? []
+      filesOfTree.set(node.root, files)
+      for (const entry of trees.get(node.id) ?? []) {
+        if (entry.mode === TREE_MODE) next.push({ root: node.root, id: entry.id, prefix: `${node.prefix}${entry.name}/` })
+        else files.push(`${node.prefix}${entry.name}`)
+      }
+    }
+    level = next
+  }
+  // Byte order of the full path, which is the order `ls-tree -r` lists in.
+  for (const files of filesOfTree.values()) files.sort()
+  for (const [ref, id] of treeOf) refFiles.set(ref, [...filesOfTree.get(id) ?? []])
+  return refFiles
+}
+
+/**
+ * The same index built one `ls-tree` per ref, for a batch walk that could not
+ * finish. Slower by a process per ref, but it degrades the way the caller is
+ * promised: a ref git cannot read is left out entirely, never handed back
+ * carrying only some of the documents it has.
+ *
+ * @param {string} repoRoot
+ * @param {string[]} refs
+ * @returns {Map<string, string[]>}
+ */
+function refFilesByLsTree(repoRoot, refs) {
+  /** @type {Map<string, string[]>} */
+  const refFiles = new Map()
   for (const ref of refs) {
     const listed = tryGit(repoRoot, ['ls-tree', '-r', '--name-only', ref, '--', LLP_DIR])
     if (listed === null) continue
@@ -365,6 +440,76 @@ function tryGit(repoRoot, args) {
   } catch {
     return null
   }
+}
+
+/**
+ * Run git with `input` on stdin and hand back its raw stdout, or null when git
+ * failed. Raw, not decoded: `cat-file --batch` follows each text header with the
+ * object's bytes, and a tree object is binary.
+ *
+ * @param {string} repoRoot
+ * @param {string[]} args
+ * @param {string} input
+ * @returns {Buffer | null}
+ */
+function tryGitBatch(repoRoot, args, input) {
+  try {
+    return execFileSync('git', args, { cwd: repoRoot, input, stdio: ['pipe', 'pipe', 'ignore'], maxBuffer: BATCH_BUFFER_BYTES })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The entries of every tree object in a `cat-file --batch` reply, keyed by id.
+ * The reply is `<id> <type> <size>\n<bytes>\n` per object, or `<id> missing\n`
+ * for one git does not have (a shallow clone), which lists as empty. A tree's
+ * bytes are `<mode> <name>\0<id>` per entry, in tree order, where the id is
+ * raw bytes of the repository's hash: 20 of them under sha1 and 32 under
+ * sha256. The width is read off the header's own object name rather than
+ * assumed, because guessing 20 in a sha256 repository steps the cursor into
+ * the middle of an id and the walk then reads its own garbage until it runs
+ * the heap out. `ls-tree` was hash-agnostic and this stands in for it.
+ *
+ * @param {Buffer} raw
+ * @returns {Map<string, { mode: string, name: string, id: string }[]>}
+ */
+function parseTreeBatch(raw) {
+  /** @type {Map<string, { mode: string, name: string, id: string }[]>} */
+  const trees = new Map()
+  let at = 0
+  while (at < raw.length) {
+    const eol = raw.indexOf(0x0a, at)
+    if (eol === -1) break
+    const [id, type, size] = raw.toString('latin1', at, eol).split(' ')
+    at = eol + 1
+    if (type === 'missing') continue
+    const end = at + Number(size)
+    if (type === 'tree') {
+      /** @type {{ mode: string, name: string, id: string }[]} */
+      const entries = []
+      const idBytes = id.length / 2
+      let cursor = at
+      while (cursor < end) {
+        const space = raw.indexOf(0x20, cursor)
+        const nul = raw.indexOf(0x00, space)
+        // Nothing git emits trips this. It is here so that a cursor that ever
+        // does fall out of step stops rather than reading the rest of the
+        // buffer as entries, which is an out-of-memory abort and not an error
+        // anyone can act on.
+        if (space === -1 || nul === -1 || nul + 1 + idBytes > end) break
+        entries.push({
+          mode: raw.toString('latin1', cursor, space),
+          name: raw.toString('utf8', space + 1, nul),
+          id: raw.toString('hex', nul + 1, nul + 1 + idBytes),
+        })
+        cursor = nul + 1 + idBytes
+      }
+      trees.set(id, entries)
+    }
+    at = end + 1
+  }
+  return trees
 }
 
 /**
