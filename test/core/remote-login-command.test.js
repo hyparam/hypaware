@@ -24,11 +24,20 @@ async function tmpHome() {
  * `sinks` lands in the same config file, so gateway seeding resolves it the
  * way the daemon would.
  *
+ * `both` is the same writes in the order they happened, across both streams:
+ * `out` and `err` on their own cannot show that two lines are adjacent when
+ * one goes to stdout and the other to stderr, which is what the reader sees.
+ *
  * @param {{ hypHome: string, stdin?: any, remotes?: any, sinks?: any }} opts
  */
 async function makeCtx({ hypHome, stdin, remotes, sinks }) {
   /** @type {string[]} */ const out = []
   /** @type {string[]} */ const err = []
+  /** @type {string[]} */ const both = []
+  const capture = (/** @type {string[]} */ stream) => (/** @type {string} */ s) => {
+    stream.push(s)
+    both.push(s)
+  }
   const configPath = path.join(hypHome, 'config.json')
   const resolvedRemotes = remotes ?? { prod: { url: 'https://hyp.internal/mcp' } }
   const config = { version: 2, query: { remotes: resolvedRemotes }, ...(sinks ? { sinks } : {}) }
@@ -37,10 +46,10 @@ async function makeCtx({ hypHome, stdin, remotes, sinks }) {
     env: { HYP_HOME: hypHome, HYP_CONFIG: configPath },
     config,
     stdin: stdin ?? { isTTY: true },
-    stdout: { write: (/** @type {string} */ s) => out.push(s) },
-    stderr: { write: (/** @type {string} */ s) => err.push(s) },
+    stdout: { write: capture(out) },
+    stderr: { write: capture(err) },
   })
-  return { ctx, out, err }
+  return { ctx, out, err, both }
 }
 
 /** An OidcSession carrying a login-minted gateway credential (LLP 0061). */
@@ -295,12 +304,13 @@ test('a configured persisted_path is honored and non-matching central sinks are 
 
 test('compact login (the wizard join lane) prints one line per event and no privacy block', async () => {
   const hypHome = await tmpHome()
-  const { ctx, out, err } = await makeCtx({ hypHome })
+  const { ctx, both } = await makeCtx({ hypHome })
   const login = /** @type {any} */ (async () => gatewaySession())
 
   const code = await runRemoteLogin(['prod', '--no-daemon'], ctx, { login, compact: true })
   assert.equal(code, 0)
-  const text = out.join('') + err.join('')
+  const text = both.join('')
+  const lines = text.split('\n')
   // LLP 0063 D3 mechanic 1 names what the notice must say, and asks for the
   // copy to be pinned verbatim: it is the consent surface, so compact may lose
   // the line breaks but not the hedge and not one of the three consequences
@@ -314,6 +324,18 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   assert.match(text, /✓ Signed in to 'prod' as org /)
   assert.match(text, /✓ Forwarding to the 'prod' server \(run 'hyp remote list' to see its URL\)/)
   assert.match(text, /✓ First sync no later than .+; nothing has been uploaded yet/)
+  // Compact drops the privacy block, so the deadline line is the second half of
+  // the R1a pair: it names no server itself and reads as being about this target
+  // only while it sits directly under the forwarding line. The pair spans stdout
+  // and stderr, so adjacency is only visible in the interleaved capture.
+  // @ref LLP 0100#requirements [tests]: R1a - the compact pair holds only while the two lines stay consecutive
+  const forwardingAt = lines.findIndex((line) => line.startsWith("✓ Forwarding to the 'prod' server"))
+  assert.notEqual(forwardingAt, -1, 'the compact forwarding line is written')
+  assert.match(
+    lines[forwardingAt + 1] ?? '',
+    /^✓ First sync no later than .+; nothing has been uploaded yet$/,
+    'the deadline line comes next, with no other write between it and the forwarding line'
+  )
   // The send-now offer (LLP 0203) runs only on an attended, uncancelled close,
   // and the deadline itself just lapses (LLP 0101 #no-release), so the line
   // must not promise a prompt.

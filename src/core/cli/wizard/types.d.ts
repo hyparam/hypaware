@@ -634,6 +634,12 @@ export type FirstAskResult =
  * rendered a plan, so nobody read one. It is told apart by the child's exit
  * code (`SYNC_HELD_NO_DESTINATIONS_EXIT`), never by the marker, which says
  * only that nothing sent.
+ *
+ * `asked` reports whether that wizard question was put, not how far the child
+ * got afterwards: `spawn-failed` and `no-destinations` are asked runs whose
+ * answer was `now`, while `no-hold` and `not-interactive` are the paths nobody
+ * was offered anything on. `error` is the one arm that spans both, because an unforeseen throw
+ * lands there whether it came before the question or after the answer.
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
