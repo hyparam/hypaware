@@ -62,6 +62,8 @@ export interface LoginGatewayCredential {
    */
   expiresAt: number
   gatewayId: string
+  /** Stable server-assigned organization identifier for export state. */
+  org: string
 }
 
 /**

@@ -75,7 +75,7 @@ test('exchangeCode captures the login-minted gateway credential (LLP 0061 D1)', 
     },
   })
   const session = await exchangeCode({ identityBase: 'https://hyp.internal/v1/identity', code: 'c', codeVerifier: 'v', fetchImpl })
-  assert.deepEqual(session.gateway, { jwt: 'gw-jwt', expiresAt: gatewayExp, gatewayId: 'gw-42' })
+  assert.deepEqual(session.gateway, { jwt: 'gw-jwt', expiresAt: gatewayExp, gatewayId: 'gw-42', org: 'acme' })
 })
 
 test('exchangeCode against a server without login-gateway support carries no gateway', async () => {

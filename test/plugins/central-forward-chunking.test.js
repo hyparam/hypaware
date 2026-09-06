@@ -526,6 +526,34 @@ test('a newly forwardable open dataset starts after its existing local history',
   assert.equal(watermarks.record?.exportedRowCount, 2)
 })
 
+test('a new remote destination forwards retained open-dataset history from sequence zero', async () => {
+  const { sink, calls, watermarks, rollouts, log, storage } = buildSink({
+    count: 3,
+    signal: 'claude_telemetry',
+  })
+  const dataset = {
+    ...makeQuery('claude_telemetry').getDataset('claude_telemetry_events'),
+    discoverPartitions: async () => TELEMETRY_BATCH.partitions,
+  }
+
+  await initializeOpenDatasetRollouts({
+    query: /** @type {any} */ ({ listDatasets: () => [dataset] }),
+    storage: /** @type {any} */ (storage),
+    watermarks: /** @type {any} */ (watermarks),
+    rollouts: /** @type {any} */ (rollouts),
+    log: /** @type {any} */ (log),
+    replayRetainedHistory: true,
+  })
+
+  assert.equal(watermarks.record?.continuation.seq, '0')
+  assert.deepEqual(rollouts.record?.partitions, ['source=claude'])
+  const result = await sink.exportBatch(/** @type {any} */ (TELEMETRY_BATCH), /** @type {any} */ ({}))
+  assert.equal(result.status, 'exported')
+  assert.deepEqual(calls.map((call) => call.method), ['PUT', 'POST'])
+  assert.deepEqual(calls[1].lines.map((line) => JSON.parse(line).message_id), ['m0', 'm1', 'm2'])
+  assert.equal(watermarks.record?.continuation.seq, '3')
+})
+
 test('a cold open dataset forwards the first partition created after rollout initialization', async () => {
   let count = 0
   const { sink, calls, watermarks, rollouts, log, storage } = buildSink({

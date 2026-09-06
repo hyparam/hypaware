@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-08-24
 **Related:** LLP 0014, LLP 0040, LLP 0305
+**Extended-by:** LLP 0315 (destination enrollment replays retained eligible history; the rollout manifest still baselines new dataset support for an existing destination)
 
 > Extend LLP 0305's start-now migration with dataset-level rollout state. The
 > central sink baselines partitions present when the sink instance starts,

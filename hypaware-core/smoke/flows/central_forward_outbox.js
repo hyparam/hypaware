@@ -339,6 +339,7 @@ async function startFakeCentralServer() {
         res.end(JSON.stringify({
           jwt: signFakeJwt(`gateway-${issuedCount}`),
           expires_at: nextExpiresAt,
+          org: 'smoke.test',
         }))
         return
       }
@@ -349,6 +350,7 @@ async function startFakeCentralServer() {
         res.end(JSON.stringify({
           jwt: signFakeJwt(`gateway-${issuedCount}`),
           expires_at: nextExpiresAt,
+          org: 'smoke.test',
         }))
         return
       }

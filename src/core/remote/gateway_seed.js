@@ -75,6 +75,7 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
       jwt: gateway.jwt,
       expiresAt: gateway.expiresAt,
       gatewayId: gateway.gatewayId,
+      org: gateway.org,
     })
     log.info('remote.gateway_seeded', {
       [Attr.COMPONENT]: 'remote-oidc',
@@ -185,11 +186,11 @@ export async function readCentralSinkOrigins({ stateDir, configPath }) {
  * seed (idempotent: the server dedups to the same gateway), a bootstrap-minted
  * identity, or a stale identity from another server.
  *
- * @param {{ persistedPath: string, centralUrl: string, jwt: string, expiresAt: number, gatewayId: string }} args
+ * @param {{ persistedPath: string, centralUrl: string, jwt: string, expiresAt: number, gatewayId: string, org: string }} args
  * @returns {{ replaced: PersistedIdentity | undefined }}
  * @ref LLP 0061#d2 [implements]: a login seed is the persisted identity pre-populated; only the writer is new, the forward path is untouched
  */
-export function writeLoginSeed({ persistedPath, centralUrl, jwt, expiresAt, gatewayId }) {
+export function writeLoginSeed({ persistedPath, centralUrl, jwt, expiresAt, gatewayId, org }) {
   if (typeof jwt !== 'string' || jwt.length === 0) {
     throw new Error('writeLoginSeed: jwt is required')
   }
@@ -202,6 +203,9 @@ export function writeLoginSeed({ persistedPath, centralUrl, jwt, expiresAt, gate
   if (typeof centralUrl !== 'string' || centralUrl.length === 0) {
     throw new Error('writeLoginSeed: centralUrl is required')
   }
+  if (typeof org !== 'string') {
+    throw new Error('writeLoginSeed: org must be a string')
+  }
   // Read the current identity for the caller's report; a missing or corrupt
   // file is simply no prior identity (the fresh mint supersedes it).
   const replaced = readPersistedIdentity(persistedPath)
@@ -210,6 +214,8 @@ export function writeLoginSeed({ persistedPath, centralUrl, jwt, expiresAt, gate
     jwt,
     expires_at: expiresAt,
     gateway_id: gatewayId,
+    // @ref LLP 0315#destination-identity [implements]: login persists the server-assigned org beside the gateway credential so sink progress can be destination-scoped
+    org,
     central_url: centralUrl,
     origin: 'login',
   }
@@ -234,12 +240,13 @@ function readPersistedIdentity(filePath) {
     return undefined
   }
   if (!parsed || typeof parsed !== 'object') return undefined
-  const { jwt, expires_at, gateway_id, central_url, bootstrap_token_fp, origin } = parsed
+  const { jwt, expires_at, gateway_id, org, central_url, bootstrap_token_fp, origin } = parsed
   if (typeof jwt !== 'string' || jwt.length === 0) return undefined
   if (typeof gateway_id !== 'string' || gateway_id.length === 0) return undefined
   if (typeof expires_at !== 'number' || !Number.isInteger(expires_at)) return undefined
   /** @type {PersistedIdentity} */
   const identity = { jwt, expires_at, gateway_id }
+  if (typeof org === 'string') identity.org = org
   if (typeof central_url === 'string') identity.central_url = central_url
   if (typeof bootstrap_token_fp === 'string') identity.bootstrap_token_fp = bootstrap_token_fp
   if (origin === 'login') identity.origin = origin

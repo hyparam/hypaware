@@ -35,14 +35,14 @@ function makeFetch() {
     if (u.endsWith('/v1/identity/bootstrap')) {
       calls.bootstrap += 1
       return new Response(
-        JSON.stringify({ jwt: fakeJwt(`gw-boot-${calls.bootstrap}`), expires_at: NOW_SEC + 30 * DAY }),
+        JSON.stringify({ jwt: fakeJwt(`gw-boot-${calls.bootstrap}`), expires_at: NOW_SEC + 30 * DAY, org: 'acme.test' }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       )
     }
     if (u.endsWith('/v1/identity/refresh')) {
       calls.refresh += 1
       return new Response(
-        JSON.stringify({ jwt: fakeJwt(`gw-refresh-${calls.refresh}`), expires_at: NOW_SEC + 60 * DAY }),
+        JSON.stringify({ jwt: fakeJwt(`gw-refresh-${calls.refresh}`), expires_at: NOW_SEC + 60 * DAY, org: 'acme.test' }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       )
     }
@@ -64,6 +64,7 @@ function seedArgs(persistedPath) {
     jwt: fakeJwt('gw-login'),
     expiresAt: NOW_SEC + 30 * DAY,
     gatewayId: 'gw-login',
+    org: 'acme.test',
   }
 }
 
@@ -75,6 +76,7 @@ test('writeLoginSeed writes a 0600 login-origin identity stamped with the centra
   assert.equal(persisted.origin, 'login')
   assert.equal(persisted.central_url, 'https://central-a.example')
   assert.equal(persisted.gateway_id, 'gw-login')
+  assert.equal(persisted.org, 'acme.test')
   assert.equal(persisted.expires_at, NOW_SEC + 30 * DAY)
   assert.equal(persisted.bootstrap_token_fp, undefined)
   if (process.platform !== 'win32') assert.equal(fs.statSync(persistedPath).mode & 0o777, 0o600)
@@ -99,6 +101,7 @@ test('acquire() loads a login seed with no bootstrap token configured (LLP 0061 
   assert.equal(source, 'loaded')
   assert.equal(calls.bootstrap, 0)
   assert.equal(await client.getCurrentJwt(), seedArgs(persistedPath).jwt)
+  assert.deepEqual(client.getDestination(), { origin: 'https://central-a.example', org: 'acme.test' })
 })
 
 test('a configured bootstrap token does not re-bootstrap over a same-URL login seed (LLP 0061 D3)', async () => {

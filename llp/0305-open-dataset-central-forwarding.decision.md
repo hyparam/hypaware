@@ -7,7 +7,7 @@
 **Date:** 2026-08-24
 **Related:** LLP 0014, LLP 0040, LLP 0070, LLP 0105, LLP 0255, LLP 0262, LLP 0278
 
-**Extended-by:** LLP 0307 (durable dataset rollout manifest disambiguates existing, future, and damaged partition progress), LLP 0324 (#eligibility, #start-now: the sync preview asks the sink's disposition so the consent count matches what actually ships)
+**Extended-by:** LLP 0307 (durable dataset rollout manifest disambiguates existing, future, and damaged partition progress), LLP 0315 (new remote destinations replay retained eligible history while existing-destination software rollouts keep the fresh baseline), LLP 0324 (#eligibility, #start-now: the sync preview asks the sink's disposition so the consent count matches what actually ships)
 
 > The central server already accepts catalog registration with
 > `PUT /v1/datasets/{name}` followed by `POST /v1/ingest/{name}`. The client
