@@ -45,6 +45,19 @@ export function paint(text, sgr, on) {
 const ANSI_SGR = /\x1b\[[0-9;]*m/g
 
 /**
+ * The text without its style escapes: what a reader sees, and what a
+ * matcher has to compare against. {@link paintLine} paints a *prefix*, so a
+ * classified diagnostic carries a reset in the middle of its own sentence
+ * and no longer contains the string it was written from.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function stripSgr(text) {
+  return text.replace(ANSI_SGR, '')
+}
+
+/**
  * Visible width of one line, ignoring style escapes. Measured in code
  * units, which matches column count for the Latin text, box glyphs and
  * middots the CLI prints.
@@ -53,7 +66,7 @@ const ANSI_SGR = /\x1b\[[0-9;]*m/g
  * @returns {number}
  */
 export function visibleWidth(line) {
-  return line.replace(ANSI_SGR, '').length
+  return stripSgr(line).length
 }
 
 /** The one frame shape: rounded, single-ruled, to match the dim `─` rules. */

@@ -632,8 +632,11 @@ export type FirstAskResult =
  * `no-destinations` is the third run that leaves the marker standing, and it
  * is not a decline at all: `hyp sync` found no sink to send to and never
  * rendered a plan, so nobody read one. It is told apart by the child's exit
- * code (`SYNC_HELD_NO_DESTINATIONS_EXIT`), never by the marker, which says
- * only that nothing sent.
+ * code (`SYNC_HELD_NO_DESTINATIONS_EXIT`) together with the notice it prints
+ * on that branch (`SYNC_HELD_NO_DESTINATIONS_NOTICE`), never by the marker,
+ * which says only that nothing sent. Both halves are required: 3 is a small
+ * integer any process can return, and this arm restates the explanation as
+ * setup's closing statement.
  *
  * `asked` reports whether that wizard question was put, not how far the child
  * got afterwards: `spawn-failed` and `no-destinations` are asked runs whose

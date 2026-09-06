@@ -29,6 +29,7 @@ import {
   formatFirstSyncDeadline,
   readFirstSyncDeadline,
 } from '../../usage-policy/first_sync_hold.js'
+import { stripSgr } from '../style.js'
 import { isPromptCancelledError } from '../tui/runtime.js'
 import { isTty } from '../tui-router.js'
 import { defaultConfirmSelectPromptFactory } from '../walkthrough.js'
@@ -257,17 +258,34 @@ function runSyncChild(opts) {
       let noDestinations = false
       // Only the notice is retained, and only until it is seen: a loud failure
       // can write an unbounded amount here and none of it is evidence. The
-      // carried tail catches a notice split across two chunks.
+      // carried tail catches a notice split across chunks, and is measured
+      // against the raw text so a style escape straddling a boundary is
+      // rejoined before it is stripped.
       let pending = ''
       const echo = opts.stderr ?? process.stderr
       child.stderr?.setEncoding('utf8')
+      // Piping a stream means owning its failures. An unlistened `error` on
+      // this pipe is an uncaught exception - no `try`/`catch` here can contain
+      // an emitter event - and it would end a setup whose every act had
+      // already succeeded, which is the defect `installStreamErrorHandlers`
+      // exists for on the write side. Nothing can be done about it and nothing
+      // needs to be: `close` still fires, so the exit code is still judged,
+      // only without the corroboration the pipe was there to collect.
+      child.stderr?.on('error', () => {})
       child.stderr?.on('data', (chunk) => {
         const text = String(chunk)
         echo.write(text)
         if (noDestinations) return
         pending += text
-        if (pending.includes(SYNC_HELD_NO_DESTINATIONS_NOTICE)) noDestinations = true
-        else pending = pending.slice(-SYNC_HELD_NO_DESTINATIONS_NOTICE.length)
+        // Compared without style escapes. `colorizeStderr` paints the
+        // `hyp sync:` prefix of this very line, which drops a reset inside the
+        // sentence and leaves the child writing something that no longer
+        // contains the constant it was built from. Colour is TTY-gated and
+        // this child's stderr is a pipe, so it does not happen today - but a
+        // corroboration that quietly depended on that would fail the same
+        // silent way the exit code alone did, which is the whole defect here.
+        if (stripSgr(pending).includes(SYNC_HELD_NO_DESTINATIONS_NOTICE)) noDestinations = true
+        else pending = pending.slice(-SYNC_HELD_NO_DESTINATIONS_NOTICE.length * 2)
       })
       child.on('error', (err) => done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }))
       // `close`, not `exit`: it fires once the piped stderr has closed too, so
