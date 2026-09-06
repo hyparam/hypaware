@@ -108,8 +108,13 @@ export async function runSync(argv, ctx) {
     // refusals below: it never offered to send, so it has no success line to
     // correct, and an inspection run has to keep exiting 0 whether or not a
     // window happens to be open behind it.
+    //
+    // `--history` is exempt too, and for the opposite reason: a replay can
+    // never end the window (`runHistorySync` refuses with 2 while the hold is
+    // live), so it has no early-release success line to correct, and the
+    // advice below names a different command than the one the caller ran.
     // @ref LLP 0101#no-release [implements]: a release that cannot happen says so rather than exiting 0 having sent nothing
-    if (deadline !== null && !dryRun) {
+    if (deadline !== null && !dryRun && !history) {
       ctx.stderr.write(
         'hyp sync: no destinations are configured, so there is nothing to send.\n' +
         `  The first-sync review window stays open until ${formatFirstSyncDeadline(deadline)},\n` +

@@ -366,8 +366,9 @@ hyp sync --dry-run
 
 Any sink failure returns `1`. While the first-sync review window is open, a run
 that finds no configured destination returns `3`: nothing was sent, and the
-window still stands. `--dry-run` still returns `0` there, as it does with no
-window open. Avoid `--yes` until you have reviewed the plan.
+window still stands. `--dry-run` and `--history` still return `0` there, as
+they do with no window open: neither can end the window, so neither has an
+early release to report. Avoid `--yes` until you have reviewed the plan.
 
 ## Control the current session
 

@@ -23,7 +23,10 @@ export const FIRST_SYNC_MIN_LEAD_MS = 4 * 60 * 60_000
  * The exit code `hyp sync` uses when the hold is live and no destination was
  * instantiated. It needs one of its own because both neighbouring codes are
  * taken: 0 is what a user who read the destination plan and answered no also
- * gets, and 1 is an export that ran and failed.
+ * gets, and 1 already covers every run that got as far as a plan and could not
+ * finish - a failed export, a marker that would not clear, a hold that
+ * reappeared mid-run - so it cannot be told apart from a run that never had a
+ * destination to render a plan for.
  *
  * It lives beside the hold rather than in the command because the hold is what
  * makes the case reportable at all: with no window open, no destinations

@@ -287,10 +287,19 @@ function writeStillHeld(opts, deadline) {
 
 /**
  * The line for the one path that did not send because it had nowhere to send
- * to. Separate from {@link writeStillHeld} because both of its statements are
- * wrong here: the deadline is not when this history leaves (with no
- * destination configured it never does), and re-running `hyp sync` is not the
- * way to send it sooner.
+ * to. Separate from {@link writeStillHeld} because its statements are wrong
+ * here: the deadline is not when this history leaves while nothing is
+ * configured to take it, and re-running `hyp sync` on this machine as it
+ * stands would find the same nothing.
+ *
+ * What it must not do is drop the deadline, which is the mistake the first
+ * draft of this line made. The hold marker is untouched here and still lapses
+ * on schedule, and the driver gates on the marker alone: if a destination
+ * appears before the deadline by any route the user did not drive (a pulled
+ * org config carrying a `sinks` block, a retried `hyp remote login`), the
+ * deadline forwards this history with no `hyp sync` from anyone. So the
+ * deadline is stated as what it is, conditional on a destination existing,
+ * rather than left off setup's last screen as inapplicable.
  *
  * @param {RunWizardSyncNowOptions} opts
  * @param {number} deadline
@@ -298,7 +307,7 @@ function writeStillHeld(opts, deadline) {
 function writeNoDestinations(opts, deadline) {
   opts.stdout.write(
     '\nNothing was sent: no destinations are configured on this machine yet.\n' +
-    `Your history stays here past ${formatFirstSyncDeadline(deadline)} while that is still true.\n` +
-    'Configure a destination, then run `hyp sync` to send it.\n'
+    'Your history stays here while that is true. Once one is configured it\n' +
+    `leaves on the ${formatFirstSyncDeadline(deadline)} deadline, or sooner with \`hyp sync\`.\n`
   )
 }

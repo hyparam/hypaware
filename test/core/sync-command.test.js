@@ -630,6 +630,23 @@ test('a held machine with no destinations still exits 0 under --dry-run', async 
   assert.ok(await holdExists(hypHome))
 })
 
+// A replay can never end the window, so the new code has no early release to
+// be silent about, and its advice ("run `hyp sync` again") names a command the
+// caller did not run. This invocation kept exiting 0 before the code existed
+// and has to keep doing so.
+test('a held machine with no destinations still exits 0 under --history', async () => {
+  const hypHome = await makeHome('held-no-sinks-history')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const { ctx, stdout, stderr } = makeCtx({ hypHome, sinks: [], tty: true })
+
+  const code = await runSync(['--history', 'claude'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /no sinks instantiated; nothing to do/)
+  assert.doesNotMatch(stderr.text, /review window/)
+  assert.ok(await holdExists(hypHome))
+})
+
 test('no sinks at all is a no-op, not an error', async () => {
   const hypHome = await makeHome('no-sinks')
   const { ctx, stdout } = makeCtx({ hypHome, sinks: [] })
