@@ -9,6 +9,7 @@ import { effectiveRemotes } from '../remote/builtin_remotes.js'
 import { previewPendingRows } from '../sinks/pending.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
+  SYNC_HELD_NO_DESTINATIONS_NOTICE,
   clearFirstSyncHold,
   firstSyncHoldMarkerPath,
   formatFirstSyncDeadline,
@@ -116,7 +117,7 @@ export async function runSync(argv, ctx) {
     // @ref LLP 0101#no-release [implements]: a release that cannot happen says so rather than exiting 0 having sent nothing
     if (deadline !== null && !dryRun && !history) {
       ctx.stderr.write(
-        'hyp sync: no destinations are configured, so there is nothing to send.\n' +
+        `${SYNC_HELD_NO_DESTINATIONS_NOTICE}\n` +
         `  The first-sync review window stays open until ${formatFirstSyncDeadline(deadline)},\n` +
         '  and nothing leaves this machine while it has nowhere to go.\n' +
         '  Configure a destination, then run `hyp sync` again.\n'

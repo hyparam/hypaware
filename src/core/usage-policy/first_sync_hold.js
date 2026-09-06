@@ -37,6 +37,23 @@ export const FIRST_SYNC_MIN_LEAD_MS = 4 * 60 * 60_000
 export const SYNC_HELD_NO_DESTINATIONS_EXIT = 3
 
 /**
+ * The first line `hyp sync` prints on that same path, and the corroboration
+ * the exit code cannot supply on its own: 3 is a small integer any process can
+ * return, and Node itself returns it on an internal parse error, before a line
+ * of sync code has run. A reader that repeats the explanation (setup does, on
+ * its closing screen) therefore looks for the sentence beside the code, so a
+ * child that exited 3 for some other reason is not explained as a machine with
+ * nowhere to send.
+ *
+ * It is shared from here, next to the code it corroborates, so the command
+ * that writes it and the readers that match on it cannot drift apart.
+ *
+ * @ref LLP 0203#read-back [implements]: the exit code is believed alongside the sentence the child prints with it
+ */
+export const SYNC_HELD_NO_DESTINATIONS_NOTICE =
+  'hyp sync: no destinations are configured, so there is nothing to send.'
+
+/**
  * Compute the absolute first-sync hold deadline for an enrollment happening
  * at `now`: the next local 11:59pm, rolled to the following day's 11:59pm
  * when the same-day one is less than four hours away (`FIRST_SYNC_MIN_LEAD_MS`).

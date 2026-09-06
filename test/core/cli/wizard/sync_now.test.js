@@ -9,6 +9,7 @@ import path from 'node:path'
 import { runWizardSyncNow } from '../../../../src/core/cli/wizard/sync_now.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
+  SYNC_HELD_NO_DESTINATIONS_NOTICE,
   firstSyncHoldMarkerPath,
   writeFirstSyncHoldMarker,
 } from '../../../../src/core/usage-policy/first_sync_hold.js'
@@ -30,6 +31,10 @@ function makeBuf() {
     },
   }
 }
+
+/** What the real child writes on the no-destinations path, notice first. */
+const NO_DESTINATIONS_STDERR =
+  `${SYNC_HELD_NO_DESTINATIONS_NOTICE}\n  The first-sync review window stays open...\n`
 
 /** A deadline far enough out that no clock skew makes it stale. */
 const DEADLINE = Date.now() + 6 * 60 * 60_000
@@ -73,11 +78,11 @@ function opts(over = {}) {
 }
 
 /**
- * A spawn stub that records its argv and closes with `code`, recording nothing
- * else: `stdio: 'inherit'` means the child owns the terminal, so there are no
- * pipes to fake.
+ * A spawn stub that records its argv, writes `stderr` on the one piped stream
+ * the real child has, and closes with `code`. Only stderr is faked: stdin and
+ * stdout stay inherited, so the child owns the terminal it prompts on.
  *
- * @param {{ code?: number | null, error?: Error }} [behaviour]
+ * @param {{ code?: number | null, error?: Error, stderr?: string }} [behaviour]
  */
 function fakeSpawn(behaviour = {}) {
   /** @type {{ command: string, args: string[], options: any }[]} */
@@ -87,11 +92,24 @@ function fakeSpawn(behaviour = {}) {
     calls.push({ command, args, options })
     /** @type {Record<string, (arg: any) => void>} */
     const handlers = {}
+    /** @type {Record<string, (arg: any) => void>} */
+    const stderrHandlers = {}
+    const stderr = {
+      setEncoding() {},
+      on(/** @type {string} */ event, /** @type {any} */ fn) {
+        stderrHandlers[event] = fn
+        return stderr
+      },
+    }
     queueMicrotask(() => {
-      if (behaviour.error) handlers.error?.(behaviour.error)
-      else handlers.close?.(behaviour.code ?? 0)
+      if (behaviour.error) {
+        handlers.error?.(behaviour.error)
+        return
+      }
+      if (behaviour.stderr) stderrHandlers.data?.(behaviour.stderr)
+      handlers.close?.(behaviour.code ?? 0)
     })
-    return { on: (/** @type {string} */ event, /** @type {any} */ fn) => { handlers[event] = fn } }
+    return { stderr, on: (/** @type {string} */ event, /** @type {any} */ fn) => { handlers[event] = fn } }
   }
   return { spawnFn, calls }
 }
@@ -170,7 +188,9 @@ test('send now spawns `hyp sync` on the inherited terminal and reports the relea
   assert.equal(call.command, process.execPath)
   assert.match(call.args[0], /bin\/hypaware\.js$/)
   assert.deepEqual(call.args.slice(1), ['sync'])
-  assert.equal(call.options.stdio, 'inherit')
+  // stdin and stdout stay on the terminal the child prompts on; only its
+  // diagnostics are piped, so setup can read what the child said about them.
+  assert.deepEqual(call.options.stdio, ['inherit', 'inherit', 'pipe'])
   assert.deepEqual(result, { asked: true, released: true })
   // Nothing claims the wait still stands; the child printed the sink report.
   assert.doesNotMatch(o.stdout.text(), /Nothing was sent/)
@@ -199,7 +219,10 @@ test('a child that exits 0 without releasing is reported as not sent', async () 
 // back at the command that just found nothing to send.
 // @ref LLP 0203#read-back [tests]: the exit code separates the two ways a held marker outlives the child
 test('a child that found no destinations is not counted as a declined plan', async () => {
-  const spawn = fakeSpawn({ code: SYNC_HELD_NO_DESTINATIONS_EXIT })
+  const spawn = fakeSpawn({
+    code: SYNC_HELD_NO_DESTINATIONS_EXIT,
+    stderr: NO_DESTINATIONS_STDERR,
+  })
   const o = opts({
     answer: 'now',
     spawnFn: spawn.spawnFn,
@@ -219,7 +242,10 @@ test('a child that found no destinations is not counted as a declined plan', asy
 // export, so it outranks whatever the re-read says.
 // @ref LLP 0203#read-back [tests]: a run that provably sent nothing is never reported as released
 test('a no-destinations child is not a release even when the marker reads absent', async () => {
-  const spawn = fakeSpawn({ code: SYNC_HELD_NO_DESTINATIONS_EXIT })
+  const spawn = fakeSpawn({
+    code: SYNC_HELD_NO_DESTINATIONS_EXIT,
+    stderr: NO_DESTINATIONS_STDERR,
+  })
   const o = opts({
     answer: 'now',
     spawnFn: spawn.spawnFn,
@@ -229,6 +255,27 @@ test('a no-destinations child is not a release even when the marker reads absent
 
   assert.deepEqual(result, { asked: true, released: false, reason: 'no-destinations' })
   assert.match(o.stdout.text(), /no destinations are configured/)
+})
+
+// Exit 3 is not proof on its own. It is a small integer any process can
+// return: Node itself exits 3 on an internal parse error, before a line of
+// `hyp sync` has run, and nothing stops a later `runSync` path from picking
+// the same code for something else. A child that never reached the
+// no-destinations branch never printed its notice either, so setup falls back
+// to the marker rather than explaining a machine state nobody observed.
+// @ref LLP 0203#read-back [tests]: the exit code is read alongside the sentence the child prints with it
+test('an exit 3 the child never explained falls back to the marker, not to no-destinations', async () => {
+  const spawn = fakeSpawn({ code: SYNC_HELD_NO_DESTINATIONS_EXIT })
+  const o = opts({
+    answer: 'now',
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => DEADLINE,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: false, reason: 'sync-declined' })
+  assert.match(o.stdout.text(), /Nothing was sent/)
+  assert.doesNotMatch(o.stdout.text(), /no destinations are configured/)
 })
 
 // @ref LLP 0203#read-back [tests]: an unreadable re-read is "still held", never a claimed release
