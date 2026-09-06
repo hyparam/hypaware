@@ -181,6 +181,11 @@ test('a declaration dedupes when the root pin satisfies it, not when it matches 
   // copy whatever is declared.
   assert.deepEqual(dedupeOffenders('dep', {}, undefined, pins), [])
   assert.deepEqual(dedupeOffenders('dep', { hyparquet: '1.27.1' }, { hyparquet: '1.29.2' }, pins), [])
+  // An override naming anything but the root pin is what installs the second
+  // copy, so it is judged on its own version rather than read past to a
+  // declaration the root pin happens to satisfy.
+  assert.match(dedupeOffenders('dep', { hyparquet: '^1.29.0' }, { hyparquet: '1.27.1' }, pins).join('\n'),
+    /entry pinning hyparquet@1\.27\.1/)
   assert.match(dedupeOffenders('dep', { hyparquet: '1.27.1' }, undefined, { hyparquet: undefined }).join('\n'),
     /no root pin/)
 })
@@ -305,8 +310,18 @@ function dedupeOffenders(name, declared, overridden, pins) {
       offenders.push(`no root pin for ${dep}, so nothing can be checked against it`)
       continue
     }
-    // An override forces the root copy whatever the declaration says.
-    if (overridden?.[dep] === pin) continue
+    // An override forces the version it names, whatever the declaration says,
+    // so it is the override and not the declaration that decides what resolves.
+    // One naming the root pin is the whole point; one naming anything else
+    // installs the second copy rather than preventing it, and reading past it
+    // to the declaration would call that green.
+    const override = overridden?.[dep]
+    if (override !== undefined) {
+      if (override === pin) continue
+      offenders.push(`${name} has an \`overrides\` entry pinning ${dep}@${override}, not the root ` +
+        `pin ${pin}, so npm resolves that copy under ${name} instead of the hoisted one`)
+      continue
+    }
     // Nothing declared is nothing to nest, which is how the floor check below
     // reads an absent declaration too. Calling it a violation would report a
     // package the dependency has dropped as a dedupe failure.
