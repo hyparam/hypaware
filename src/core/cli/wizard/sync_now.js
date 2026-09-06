@@ -118,19 +118,25 @@ export async function runWizardSyncNow(opts) {
         // about the one thing this screen exists to be honest about.
         // @ref LLP 0203#read-back [implements]: the outcome is read from the hold marker, never inferred from the exit code
         const stillHeld = await readHold(opts)
+        // The one exit code that outranks the marker, and only because it is
+        // returned before the child touched an export: nothing was sent, so
+        // no marker reading can make this a release. The re-read fails open
+        // (LLP 0101: a corrupt or lapsed marker reads as absent), and taking
+        // that as "released" here would be the false "your history is on its
+        // way" this step exists to prevent.
+        //
+        // A child that found no destination never rendered a plan either, so
+        // nobody declined one: counting it as a decline inflates the rate
+        // LLP 0203 #consequences sizes the window by, and answers it with
+        // advice to re-run the command that just found nothing to send.
+        // @ref LLP 0203#read-back [implements]: the exit code separates the ways a run that sent nothing outlives the child
+        if (result.code === SYNC_HELD_NO_DESTINATIONS_EXIT) {
+          span.setAttribute('released', false)
+          writeNoDestinations(opts, stillHeld ?? opts.deadline)
+          return { asked: true, released: false, reason: /** @type {const} */ ('no-destinations') }
+        }
         span.setAttribute('released', stillHeld === null)
         if (stillHeld !== null) {
-          // The marker still decides whether anything sent; the exit code only
-          // says why nothing did. A child that found no destination never
-          // rendered a plan, so nobody declined one: reading it as a decline
-          // inflates the rate LLP 0203 #consequences sizes the window by, and
-          // answers it with advice to re-run the command that just found
-          // nothing to send.
-          // @ref LLP 0203#read-back [implements]: the exit code separates the two ways a held marker outlives the child
-          if (result.code === SYNC_HELD_NO_DESTINATIONS_EXIT) {
-            writeNoDestinations(opts, stillHeld)
-            return { asked: true, released: false, reason: /** @type {const} */ ('no-destinations') }
-          }
           writeStillHeld(opts, stillHeld)
           return { asked: true, released: false, reason: /** @type {const} */ ('sync-declined') }
         }

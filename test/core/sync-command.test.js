@@ -614,6 +614,22 @@ test('a held machine with no destinations says so rather than exiting 0', async 
   assert.ok(await holdExists(hypHome), 'nothing was sent, so the window still stands')
 })
 
+// The report is for a run that offered to send. A dry run never did, so it
+// keeps the exit code an inspection script reads as "I looked, nothing to
+// see" - the same exemption `--dry-run` already has from the held refusals.
+test('a held machine with no destinations still exits 0 under --dry-run', async () => {
+  const hypHome = await makeHome('held-no-sinks-dry-run')
+  await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
+  const { ctx, stdout, stderr } = makeCtx({ hypHome, sinks: [], tty: true })
+
+  const code = await runSync(['--dry-run'], ctx)
+
+  assert.equal(code, 0)
+  assert.match(stdout.text, /no sinks instantiated; nothing to do/)
+  assert.doesNotMatch(stderr.text, /review window/)
+  assert.ok(await holdExists(hypHome))
+})
+
 test('no sinks at all is a no-op, not an error', async () => {
   const hypHome = await makeHome('no-sinks')
   const { ctx, stdout } = makeCtx({ hypHome, sinks: [] })

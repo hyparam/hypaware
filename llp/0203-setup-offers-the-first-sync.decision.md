@@ -127,9 +127,15 @@ and answered no, and a `hyp sync` that found no destination and so never
 rendered a plan for anyone to answer. The second exits with a code of its own
 rather than 0, which is what
 [LLP 0101 #no-release](./0101-first-sync-review-window.decision.md#no-release)
-already requires of a release that cannot happen. Setup reads that code only to
-pick which closing statement to print and which outcome to report; the release
-claim itself stays where this section puts it, on the marker.
+already requires of a release that cannot happen. Setup reads that code to pick
+which closing statement to print and which outcome to report, and it reads it
+before the marker, because the marker cannot contradict it: the code comes back
+before the child touched an export, so nothing was sent, while an absent marker
+is only weak evidence that something was ([LLP 0101](./0101-first-sync-review-window.decision.md)
+makes the read fail open, so a corrupt or lapsed marker also reads as absent).
+That is the same polarity as the paragraph above, not an exception to it -
+"released" is the claim that has to be earned, and no other exit code earns or
+forfeits it.
 
 ## Why not {#why-not}
 

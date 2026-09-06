@@ -103,8 +103,13 @@ export async function runSync(argv, ctx) {
     // and got back a success line that neither sent anything nor said the wait
     // still stands. Distinguishably, because a user who read the plan and
     // answered no also leaves the marker in place and exits 0.
+    //
+    // `--dry-run` is exempt, for the reason it is exempt from the held
+    // refusals below: it never offered to send, so it has no success line to
+    // correct, and an inspection run has to keep exiting 0 whether or not a
+    // window happens to be open behind it.
     // @ref LLP 0101#no-release [implements]: a release that cannot happen says so rather than exiting 0 having sent nothing
-    if (deadline !== null) {
+    if (deadline !== null && !dryRun) {
       ctx.stderr.write(
         'hyp sync: no destinations are configured, so there is nothing to send.\n' +
         `  The first-sync review window stays open until ${formatFirstSyncDeadline(deadline)},\n` +

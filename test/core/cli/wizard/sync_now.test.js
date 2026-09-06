@@ -213,6 +213,24 @@ test('a child that found no destinations is not counted as a declined plan', asy
   assert.doesNotMatch(o.stdout.text(), /run `hyp sync` any time/)
 })
 
+// The marker re-read fails open (LLP 0101: a corrupt or lapsed marker reads as
+// absent), so an absent marker on its own is not proof of a release. This exit
+// code is proof of the opposite: it comes back before the child touched an
+// export, so it outranks whatever the re-read says.
+// @ref LLP 0203#read-back [tests]: a run that provably sent nothing is never reported as released
+test('a no-destinations child is not a release even when the marker reads absent', async () => {
+  const spawn = fakeSpawn({ code: SYNC_HELD_NO_DESTINATIONS_EXIT })
+  const o = opts({
+    answer: 'now',
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => null,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: false, reason: 'no-destinations' })
+  assert.match(o.stdout.text(), /no destinations are configured/)
+})
+
 // @ref LLP 0203#read-back [tests]: an unreadable re-read is "still held", never a claimed release
 test('a re-read that throws is reported as not sent, not as a release', async () => {
   const spawn = fakeSpawn({ code: 0 })
