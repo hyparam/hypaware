@@ -23,6 +23,7 @@ import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
+import { BOOT_FAILED_WARNING_PREFIX } from './boot_failure.js'
 import {
   clearControlRequests,
   watchControlRequests,
@@ -308,7 +309,7 @@ export async function runDaemon(opts = {}) {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     fileLog.error('daemon.boot_failed', { message })
-    persist({ state: 'degraded', warnings: [`boot_failed: ${message}`] })
+    persist({ state: 'degraded', warnings: [`${BOOT_FAILED_WARNING_PREFIX}: ${message}`] })
     clearPidFile(stateRoot)
     await fileLog.close()
     throw err
