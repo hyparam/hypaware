@@ -47,6 +47,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { matchesSemverRange, isValidRange } from '../../src/core/semver.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const NODE_MODULES = path.join(REPO_ROOT, 'node_modules')
@@ -152,10 +153,36 @@ test('icebird uses the root parquet pins directly or through overrides', t => {
   // peer or optional dependency, and reading one key would call that absent.
   const declared = installedDeclarations('icebird')
   assert.ok(declared, 'icebird is not installed beside the resolved tree - run `npm i`')
-  for (const [name, version] of Object.entries(ROOT_PINS)) {
-    assert.equal(overrides.icebird?.[name] ?? declared[name], version,
-      `icebird must share the root ${name} pin, directly or through an override`)
+  const offenders = dedupeOffenders('icebird', declared, overrides.icebird, ROOT_PINS)
+  assert.deepEqual(offenders, [], 'LLP 0222 #hyparquet-floor claims one deduped copy ' +
+    `shared with icebird:\n  ${offenders.join('\n  ')}`)
+})
+
+// Synthetic declarations rather than the installed tree, so the shapes that are
+// hypothetical today are checked anyway and a later pin bump cannot change what
+// this proves.
+test('a declaration dedupes when the root pin satisfies it, not when it matches it', () => {
+  const pins = { hyparquet: '1.29.2' }
+  const against = spec => dedupeOffenders('dep', { hyparquet: spec }, undefined, pins).join('\n')
+  // Every range the pin satisfies resolves onto the hoisted copy, so none of
+  // these nests anything. The exact pin is only the narrowest of them.
+  for (const spec of ['1.29.2', '^1.29.2', '^1.28.2', '~1.29.0', '>=1.28.2', '*']) {
+    assert.equal(against(spec), '', `${spec} dedupes onto the root pin`)
   }
+  // A declaration the pin cannot satisfy is the failure this check is for, in
+  // both directions, and the message keeps the remedy directional.
+  assert.match(against('^1.30.0'), /move the ROOT pin up/)
+  assert.match(against('1.27.1'), /overrides/)
+  assert.match(against('~1.28.2'), /does not satisfy/)
+  // An unfamiliar range shape says that is what happened rather than claiming
+  // the declaration is out of range.
+  assert.match(against('>=1.28.0 <2.0.0'), /cannot judge/)
+  // An absent declaration is nothing to nest, and an override forces the root
+  // copy whatever is declared.
+  assert.deepEqual(dedupeOffenders('dep', {}, undefined, pins), [])
+  assert.deepEqual(dedupeOffenders('dep', { hyparquet: '1.27.1' }, { hyparquet: '1.29.2' }, pins), [])
+  assert.match(dedupeOffenders('dep', { hyparquet: '1.27.1' }, undefined, { hyparquet: undefined }).join('\n'),
+    /no root pin/)
 })
 
 test('no root dependency nests a hyparquet of its own', t => {
@@ -251,6 +278,51 @@ test('the read path resolves the one root hyparquet, not a nested copy', t => {
   assert.deepEqual(nested, [], 'LLP 0222 #hyparquet-floor: the overrides exist so ' +
     `these dedupe to the root copy:\n  ${nested.join('\n  ')}`)
 })
+
+/**
+ * Why a package's own declarations would not all resolve onto the hoisted root
+ * copies. Empty when every governed pin dedupes.
+ *
+ * The question is range satisfaction, not string equality: npm dedupes a
+ * declaration onto the hoisted copy whenever the root pin satisfies it, so an
+ * ordinary `^1.29.2` beside a 1.29.2 pin nests nothing, and failing on it would
+ * report a dedupe failure that is not there and name a remedy (move the root
+ * pin) that would not fix it. The matcher is the kernel's own, which is why
+ * there is no second one here.
+ *
+ * @param {string} name the package being judged
+ * @param {Record<string, string>} declared what it declares
+ * @param {Record<string, string> | undefined} overridden the root `overrides` entry for it
+ * @param {Record<string, string | undefined>} pins the root pins, by package
+ * @returns {string[]}
+ */
+function dedupeOffenders(name, declared, overridden, pins) {
+  const offenders = []
+  for (const [dep, pin] of Object.entries(pins)) {
+    // A pin read off the manifest as undefined satisfies nothing, so it would
+    // read as every declaration being out of range.
+    if (pin === undefined) {
+      offenders.push(`no root pin for ${dep}, so nothing can be checked against it`)
+      continue
+    }
+    // An override forces the root copy whatever the declaration says.
+    if (overridden?.[dep] === pin) continue
+    // Nothing declared is nothing to nest, which is how the floor check below
+    // reads an absent declaration too. Calling it a violation would report a
+    // package the dependency has dropped as a dedupe failure.
+    if (declared[dep] === undefined) continue
+    if (matchesSemverRange(pin, declared[dep])) continue
+    if (!isValidRange(declared[dep])) {
+      offenders.push(`${name} declares ${dep}@${declared[dep]}, a range shape this check cannot ` +
+        `judge against the root pin ${pin} - read it before trusting either answer`)
+      continue
+    }
+    offenders.push(`${name} declares ${dep}@${declared[dep]}, which the root pin ${pin} does not ` +
+      'satisfy, so npm nests a second copy: if that declaration is ABOVE the root pin, move the ' +
+      `ROOT pin up; only one BELOW it wants an \`overrides\` entry naming ${pin}`)
+  }
+  return offenders
+}
 
 /**
  * Everything a package declares that npm may install for it, read from the
