@@ -105,6 +105,22 @@ test('the root hyparquet pin is exact and at or above the floor', () => {
     `and the root pin is ${ROOT_PINS.hyparquet}`)
   assert.match(ROOT_PINS['hyparquet-writer'] ?? '', /^\d+\.\d+\.\d+$/,
     'the hyparquet-writer pin is exact too, so the overrides can name one version')
+  // A version-scoped key stops applying the moment the version it names is no
+  // longer the one installed, and nothing else here notices: npm still resolves
+  // the same tree, every check in this file stays green, and only a `npm ls`
+  // nobody runs in CI reports it invalid. So the key is checked against the pin
+  // rather than written out twice. Existence is not required - the entry is
+  // worth having only while no published writer declares the root pin, which is
+  // the same rule the icebird entry is held to - but a key that is present and
+  // stale is a decoration, and this is what says so.
+  for (const key of Object.keys(overrides)) {
+    if (!key.startsWith('hyparquet-writer@')) continue
+    assert.equal(key, `hyparquet-writer@${ROOT_PINS['hyparquet-writer']}`,
+      `\`${key}\` no longer names the hyparquet-writer pin, so npm applies nothing for it`)
+    assert.equal(overrides[key].hyparquet, ROOT_PINS.hyparquet,
+      `\`${key}\` exists to say the writer's binding to the root hyparquet is intended, ` +
+      'so it names that pin')
+  }
 })
 
 test('hypgrep is a plain dependency, held at the floor by an override', () => {
@@ -114,9 +130,15 @@ test('hypgrep is a plain dependency, held at the floor by an override', () => {
     'LLP 0264 #dependency: hypgrep belongs in `dependencies`')
   assert.match(dependencies.hypgrep, /^\d+\.\d+\.\d+$/,
     'hypgrep is pinned exactly, in the idiom of every other dependency here')
-  // The override is the whole of the adoption: hypgrep 0.5.1 declares hyparquet
-  // 1.27.1, so without this entry npm resolves that older copy privately under
-  // `node_modules/hypgrep`. Asserted straight off the manifest so a dropped or
+  // The override was the whole of the adoption while hypgrep 0.5.1 declared
+  // hyparquet 1.27.1: without the entry npm resolved that older copy privately
+  // under `node_modules/hypgrep`. 0.5.2 declares the root pin itself, so today
+  // the entry only restates what hypgrep already asks for, and it is asserted
+  // anyway because this is the one dependency whose declaration has already
+  // gone below the floor once. The header above says why the roles swap: a
+  // later hypgrep that declares below the pin resolves onto the hoisted copy
+  // with the entry in place and nests a private one without it, and that
+  // regression is silent. Asserted straight off the manifest so a dropped or
   // misspelled entry reddens on a checkout with nothing installed, not only
   // where the resolved half below can run. It names the root pin rather than
   // the floor so the copy it forces is the one already hoisted, not a second
