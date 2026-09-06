@@ -12,7 +12,7 @@
 //
 // @ref LLP 0156#renumber [tests]: a fresh number sits above the highest claimed anywhere, so a per-branch max is not the rule
 
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -78,13 +78,21 @@ function writeDoc(repo, file) {
 }
 
 /**
+ * @returns {string} an empty repo with a master branch, which the caller removes
+ */
+function initRepo() {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'llp-numbers-'))
+  git(repo, ['init', '-q', '-b', 'master'])
+  return repo
+}
+
+/**
  * @param {TestContext} t
  * @returns {string} an empty repo with a master branch
  */
 function emptyRepo(t) {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'llp-numbers-'))
+  const repo = initRepo()
   t.after(() => fs.rmSync(repo, { recursive: true, force: true }))
-  git(repo, ['init', '-q', '-b', 'master'])
   return repo
 }
 
@@ -97,7 +105,33 @@ function emptyRepo(t) {
  * @returns {string} the repo path
  */
 function collidedRepo(t) {
-  const repo = emptyRepo(t)
+  return buildCollided(emptyRepo(t))
+}
+
+/** @type {string | null} */
+let sharedCollided = null
+
+/**
+ * `collidedRepo` built once for the file, for the tests that only read it.
+ * Tests here run one at a time, so no reader sees another mid-scan; a test
+ * that checks out a branch or writes into the tree takes its own copy.
+ *
+ * @returns {string} the repo path
+ */
+function sharedCollidedRepo() {
+  if (sharedCollided === null) sharedCollided = buildCollided(initRepo())
+  return sharedCollided
+}
+
+after(() => {
+  if (sharedCollided !== null) fs.rmSync(sharedCollided, { recursive: true, force: true })
+})
+
+/**
+ * @param {string} repo
+ * @returns {string} the same repo
+ */
+function buildCollided(repo) {
   writeDoc(repo, 'llp/0264-grep-search.decision.md')
   writeDoc(repo, 'llp/0265-grep-search-implementation.plan.md')
   writeDoc(repo, 'llp/tombstones/0018-retired.decision.md')
@@ -153,8 +187,8 @@ test('a branch mints a number only when it adds a document at it', () => {
 
 // The reproduction. Reading one branch at a time is exactly what each of the
 // three workers did, and it is why all three answered 0266.
-test('the next free number is the highest claimed on any ref, not on the checked-out one', t => {
-  const repo = collidedRepo(t)
+test('the next free number is the highest claimed on any ref, not on the checked-out one', () => {
+  const repo = sharedCollidedRepo()
   const refs = ['refs/heads/master', ...COLLIDED.map(([branch]) => `refs/heads/${branch}`)]
   const perRef = refFilesFromGit(repo, refs)
   // Master alone is the tree all three workers read, and it answers 0266.
@@ -163,8 +197,8 @@ test('the next free number is the highest claimed on any ref, not on the checked
   assert.equal(nextFreeNumber(refFilesFromGit(repo, mergeableRefs(repo))), 267)
 })
 
-test('a number claimed by two documents on different refs is a collision', t => {
-  const repo = collidedRepo(t)
+test('a number claimed by two documents on different refs is a collision', () => {
+  const repo = sharedCollidedRepo()
   const found = collisions(refFilesFromGit(repo, mergeableRefs(repo)))
   assert.equal(found.length, 1)
   assert.equal(found[0].number, 266)
@@ -189,8 +223,8 @@ test('the check fails on the branch that minted the taken number, and names ever
   assert.match(report, /0267 or above \(LLP 0156\)/)
 })
 
-test('the check passes on the branch that mints nothing', t => {
-  const repo = collidedRepo(t)
+test('the check passes on the branch that mints nothing', () => {
+  const repo = sharedCollidedRepo()
   assert.deepEqual([...mintedNumbers(repo).numbers], [])
   /** @type {string[]} */
   const out = []
@@ -227,16 +261,16 @@ test('a settled collision surviving on a stale branch does not fail an unrelated
   assert.equal(run(['check'], repo, () => {}, () => {}), 0)
 })
 
-test('the next mode prints the free number zero-padded', t => {
-  const repo = collidedRepo(t)
+test('the next mode prints the free number zero-padded', () => {
+  const repo = sharedCollidedRepo()
   /** @type {string[]} */
   const out = []
   assert.equal(run(['next'], repo, text => out.push(text), () => {}), 0)
   assert.equal(out.join(''), '0267\n')
 })
 
-test('an unknown mode is a usage error, not a silent pass', t => {
-  const repo = collidedRepo(t)
+test('an unknown mode is a usage error, not a silent pass', () => {
+  const repo = sharedCollidedRepo()
   assert.equal(run([], repo, () => {}, () => {}), 2)
   assert.equal(run(['fix'], repo, () => {}, () => {}), 2)
 })
@@ -322,7 +356,7 @@ test('a claimant line names enough refs to locate it and counts the rest', () =>
 // `actions/checkout` hands exactly that to any job that does not ask for more,
 // so the condition is detected rather than assumed away.
 test('a checkout that cannot see the corpus says so instead of answering', t => {
-  assert.equal(partialScan(collidedRepo(t)), null)
+  assert.equal(partialScan(sharedCollidedRepo()), null)
 
   const alone = emptyRepo(t)
   writeDoc(alone, 'llp/0100-a.spec.md')
