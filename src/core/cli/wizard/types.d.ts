@@ -631,7 +631,9 @@ export type FirstAskResult =
  *
  * `asked` reports whether that wizard question was put, not how far the child
  * got afterwards: `spawn-failed` is an asked run whose answer was `now`, while
- * the `asked: false` arm is the three paths where nobody was offered anything.
+ * `no-hold` and `not-interactive` are the paths nobody was offered anything
+ * on. `error` is the one arm that spans both, because an unforeseen throw
+ * lands there whether it came before the question or after the answer.
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
