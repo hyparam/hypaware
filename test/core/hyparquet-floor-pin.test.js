@@ -186,6 +186,13 @@ test('a declaration dedupes when the root pin satisfies it, not when it matches 
   // An unfamiliar range shape says that is what happened rather than claiming
   // the declaration is out of range.
   assert.match(against('>=1.28.0 <2.0.0'), /cannot judge/)
+  // A declaration with nothing in it is unreadable, not satisfied: the matcher
+  // answers `true` for an empty or null range, so judging satisfaction first
+  // would wave these through as deduped.
+  for (const spec of ['', null]) {
+    assert.match(dedupeOffenders('dep', { hyparquet: spec }, undefined, pins).join('\n'),
+      /cannot judge/, 'a declaration with no range in it is unreadable, not satisfied')
+  }
   // An absent declaration is nothing to nest, and an override forces the root
   // copy whatever is declared.
   assert.deepEqual(dedupeOffenders('dep', {}, undefined, pins), [])
@@ -301,8 +308,14 @@ test('the read path resolves the one root hyparquet, not a nested copy', t => {
  * declaration onto the hoisted copy whenever the root pin satisfies it, so an
  * ordinary `^1.29.2` beside a 1.29.2 pin nests nothing, and failing on it would
  * report a dedupe failure that is not there and name a remedy (move the root
- * pin) that would not fix it. The matcher is the kernel's own, which is why
- * there is no second one here.
+ * pin) that would not fix it. The matcher is the kernel's own rather than a
+ * fresh one written here.
+ *
+ * `atOrAboveFloor` below is the other predicate in this file and deliberately
+ * not this one: the floor asks what a range's *lowest* admitted version is, so
+ * `^1.27.1` reads as below a 1.28.2 floor there while deduping onto the root
+ * pin here. The two disagree because they ask different questions, and the
+ * floor's answer is the conservative one on purpose.
  *
  * @param {string} name the package being judged
  * @param {Record<string, string>} declared what it declares
@@ -335,12 +348,16 @@ function dedupeOffenders(name, declared, overridden, pins) {
     // reads an absent declaration too. Calling it a violation would report a
     // package the dependency has dropped as a dedupe failure.
     if (declared[dep] === undefined) continue
-    if (matchesSemverRange(pin, declared[dep])) continue
+    // The shape is judged before the satisfaction, because the matcher answers
+    // `true` for a range it was given nothing to judge: an empty or null
+    // declaration would otherwise short-circuit as deduped and never reach the
+    // branch that says the shape was unreadable.
     if (!isValidRange(declared[dep])) {
       offenders.push(`${name} declares ${dep}@${declared[dep]}, a range shape this check cannot ` +
         `judge against the root pin ${pin} - read it before trusting either answer`)
       continue
     }
+    if (matchesSemverRange(pin, declared[dep])) continue
     offenders.push(`${name} declares ${dep}@${declared[dep]}, which the root pin ${pin} does not ` +
       'satisfy, so npm nests a second copy: if that declaration is ABOVE the root pin, move the ' +
       `ROOT pin up; only one BELOW it wants an \`overrides\` entry naming ${pin}`)
