@@ -626,18 +626,15 @@ export type FirstAskResult =
  * `released` is read back from the hold marker, never inferred from the
  * child's exit code: `hyp sync` exits 0 both when it sends and when the
  * user reads its destination list and answers no. `sync-declined` is that
- * second case, and it is deliberately distinct from `declined` (the wizard's
- * own question) - the two say different things about how far the user got.
- *
- * `asked` reports whether that wizard question was put, not how far the child
- * got afterwards: `spawn-failed` is an asked run whose answer was `now`, while
- * `no-hold` and `not-interactive` are the paths nobody was offered anything
- * on. `error` is the one arm that spans both, because an unforeseen throw
- * lands there whether it came before the question or after the answer.
+ * second case, and it is the only decline there is: the wizard puts no
+ * question of its own ahead of the child's (LLP 0203 #no-new-consent).
+ * `child-failed` is the still-held run whose child exited non-zero, which a
+ * decline never does: it never reached its plan, so it is not a decline and
+ * must not be counted as one.
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
-  | { asked: true; released: false; reason: 'declined' | 'sync-declined' | 'spawn-failed' }
+  | { asked: true; released: false; reason: 'sync-declined' | 'child-failed' | 'spawn-failed' }
   | { asked: false; reason: 'no-hold' | 'not-interactive' | 'error' }
 
 /** Options for `runWizardSyncNow`. */
@@ -657,7 +654,6 @@ export interface RunWizardSyncNowOptions {
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream
   /** Test seams; production callers pass none of these. */
-  confirm?: AsyncConfirmSelectPrompt
   spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess
   readDeadline?: () => Promise<number | null>
 }

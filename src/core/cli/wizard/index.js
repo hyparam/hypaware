@@ -942,15 +942,15 @@ async function runGuardedInitWizard(opts, guard) {
   // on the remembered join, like the abort narration above: enrollment
   // survives a back through the fork (LLP 0191 #join-not-undone).
   // `offerFollows` mirrors the sync offer's own gate below, so the
-  // narration drops its `hyp sync` sentence exactly when the offer is
-  // about to state the same thing as a choice.
+  // narration goes quiet exactly when `hyp sync`'s plan is about to state
+  // the same things and ask.
   const offerFollows = interactive && !cancelled && opts.finale?.dryRun !== true
   const holdDeadline = joined ? await narratePrivacyIfTeamPath(opts, { offerFollows }) : null
 
-  // ...and then the offer to end the wait. It sits between the narration
-  // and the question list because it is an action on what the narration just
-  // said.
-  // @ref LLP 0203#offer [implements]: the enrolled closing sequence offers the release, after stating the wait
+  // ...and then the offer to end the wait: `hyp sync` itself, whose plan
+  // and confirm are the one question about the first sync. It sits ahead of
+  // the question list because it is an action, and the list is output.
+  // @ref LLP 0203#offer [implements]: the enrolled closing sequence runs the release's own prompt, once
   /** @type {WizardSyncNowResult | undefined} */
   let syncNow
   // A question does not open on a dead surface; past the finale the run
@@ -969,7 +969,8 @@ async function runGuardedInitWizard(opts, guard) {
     })
   }
 
-  // The closing question list comes after the privacy narration, but it is
+  // The closing question list comes last, after whichever of the narration
+  // and the sync step this path ran, but it is
   // output only: onboarding never starts Claude Code or Codex. `hyp init`
   // may have been run from any directory, and that directory must not become
   // an agent session without an explicit launch command from the user.
@@ -1180,12 +1181,14 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
  * runs off the same read rather than racing a second one against a marker
  * `hyp sync` may have cleared in between.
  *
- * `offerFollows` trims the `hyp sync` sentence: when the closing sync
- * offer is about to render (the ordinary attended close), its "Send now"
- * row states the same command and the same asks-first promise, so the
- * sentence read as the wizard saying one thing twice in a row. Every path
- * that ends without the offer (aborts, non-interactive, dry runs) keeps
- * the sentence, because there it is the only sighting of the way out.
+ * `offerFollows` silences the narration: when the closing sync offer is
+ * about to run (the ordinary attended close), `hyp sync`'s own plan states
+ * the deadline, the backfill, the review hint, and asks, so a paragraph
+ * here said everything twice in a row. Every path that ends without the
+ * offer (aborts, non-interactive, dry runs) keeps the paragraph, because
+ * there it is the only sighting of the deadline and the way out. The
+ * deadline is still read and returned either way, since the offer runs
+ * off it.
  *
  * @param {Pick<RunInitWizardOptions, 'stdout' | 'env'>} opts
  * @param {{ offerFollows?: boolean }} [flags]
@@ -1201,16 +1204,15 @@ async function narratePrivacyIfTeamPath(opts, { offerFollows = false } = {}) {
     // Unreadable state dir: skip the narration rather than fail the run.
   }
   if (typeof deadline !== 'number') return null
+  if (offerFollows) return deadline
   opts.stdout.write(
     '\n' +
     'Nothing has been uploaded yet - nothing leaves this machine before\n' +
     `${formatFirstSyncDeadline(deadline)}. That first sync includes your imported history.\n` +
     'To review or exclude anything before then, run the hypaware-privacy\n' +
     'skill in Claude or Codex. `hyp status` shows the countdown.\n' +
-    (offerFollows
-      ? ''
-      : 'To send it sooner, run `hyp sync`: it shows what would leave and asks\n' +
-        'before sending anything.\n')
+    'To send it sooner, run `hyp sync`: it shows what would leave and asks\n' +
+    'before sending anything.\n'
   )
   return deadline
 }

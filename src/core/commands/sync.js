@@ -743,21 +743,22 @@ function formatResumeInstant(iso) {
  *
  * This is the one prompt in the CLI where the user has never sent anything
  * before, so it says so, states what confirming gives up (the rest of the
- * window), and names the command that excludes a folder - a warning that
- * only warns leaves the user with no move except yes or no.
+ * window), and names the skill and the command that exclude something
+ * first: a warning that only warns leaves the user with no move except yes
+ * or no. On an attended enrolling `hyp init` this is also the only place the
+ * review hint appears, since the wizard's own narration stands down for it.
  *
- * @ref LLP 0100#requirements [implements]: R2's review window ends by deadline or by informed consent
+ * @ref LLP 0100#requirements [implements]: R2's review window ends by deadline or by informed consent; R1's review hint rides here on the wizard path
  * @param {number} deadlineMs
  * @returns {string}
  */
 function renderFirstSyncWarning(deadlineMs) {
   return (
     '\n' +
-    '  FIRST SYNC - nothing has left this machine yet\n' +
-    '\n' +
-    `  Your review window runs until ${formatFirstSyncDeadline(deadlineMs)}.\n` +
-    '  Syncing now ends it early and sends your backfilled history.\n' +
-    '  What has been sent cannot be un-sent. To exclude a folder first:\n' +
+    '  FIRST SYNC: nothing has left this machine yet. Sending now ends the review\n' +
+    `  window (until ${formatFirstSyncDeadline(deadlineMs)}), includes your imported history,\n` +
+    '  and cannot be undone. To review or exclude anything first, run the\n' +
+    '  hypaware-privacy skill in Claude or Codex, or:\n' +
     '    hyp privacy set <path> local-only\n'
   )
 }
