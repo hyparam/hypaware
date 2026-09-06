@@ -508,14 +508,11 @@ test('a body refused with 421 is drained only up to a cap', async (t) => {
   const huge = Buffer.alloc(32 * 1024 * 1024, 'x')
   const streamed = await streamAtRefusal(rig.proxy.port, huge)
   assert.ok(streamed.sent < huge.length, `the listener read all ${huge.length} bytes of a refused body`)
-  assert.match(streamed.response, /^HTTP\/1\.1 421 /)
-  // The reset must not be answered as a reusable connection, or a pooling
-  // client meets it on a request it already considers finished.
-  assert.match(
-    streamed.response,
-    /\r\nconnection: close\r\n/i,
-    `the oversized sender got ${JSON.stringify(streamed.response.slice(0, 200))}`
-  )
+  // What this sender was answered is not asserted: it is still mid-write when
+  // the reset lands, and a TCP stack owes such a sender nothing already queued
+  // for it. Linux hands the refusal over first; macOS discards it and reports
+  // a broken pipe. The answer is read off the sender below, which has finished
+  // writing before it arrives.
   assert.deepEqual(rig.upstreamHits, [])
   assert.equal(rig.started.length, 0)
 
@@ -526,6 +523,13 @@ test('a body refused with 421 is drained only up to a cap', async (t) => {
   const overCap = Buffer.alloc(256 * 1024, 'x')
   const measured = await streamAtRefusal(rig.proxy.port, overCap)
   assert.match(measured.response, /^HTTP\/1\.1 421 /)
+  // The reset must not be answered as a reusable connection, or a pooling
+  // client meets it on a request it already considers finished.
+  assert.match(
+    measured.response,
+    /\r\nconnection: close\r\n/i,
+    `the oversized sender got ${JSON.stringify(measured.response.slice(0, 200))}`
+  )
   const served = serverSockets.find((entry) => entry.port === rig.proxy.port)?.socket
   assert.ok(served, 'the refused upload opened no listener connection to measure')
   if (!served.destroyed) await new Promise((resolve) => served.on('close', resolve))

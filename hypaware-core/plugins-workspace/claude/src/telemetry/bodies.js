@@ -71,6 +71,19 @@ const GAP_BLOCK_TYPES = new Set([
  *   refused: string[],
  * }>}
  */
+/**
+ * Unparseable body files this process is in the middle of removing. Two reads
+ * of the same `body_ref` can be in flight at once (the handler is not
+ * serialized, so an exporter retry overlaps the original it is retrying), and
+ * the file's bytes are only one of them's to report. The filesystem cannot be
+ * the arbiter: on macOS two concurrent `unlink` calls on one path both
+ * succeed, so each would subtract the bytes and `spool_bytes` would fall by
+ * 2x one deletion. Entries leave the set once the removal settles, so it
+ * never outgrows the reads in flight.
+ * @type {Set<string>}
+ */
+const removing = new Set()
+
 export async function loadSpooledBodies(events, opts) {
   /** @type {Map<string, SpooledClaudeBody>} */
   const bodies = new Map()
@@ -108,13 +121,14 @@ export async function loadSpooledBodies(events, opts) {
     const body = parseMaybeJson(raw.toString('utf8'))
     if (!isPlainObject(body)) {
       unparseable += 1
+      // An overlapping read already owns this removal (see `removing`): it
+      // reports the bytes, or reports nothing if the file would not go.
+      if (removing.has(file)) continue
+      removing.add(file)
       try {
         // `unlink`, not `fs.rm(..., { force: true })`: a forced remove RESOLVES
         // for a path that is already gone, and the bytes below are only ours to
-        // report if this call is the one that took the file off the disk. Two
-        // reads of the same `body_ref` can be in flight at once (the handler is
-        // not serialized, so an exporter retry overlaps the original it is
-        // retrying), and a forced remove would let both subtract those bytes.
+        // report if this call is the one that took the file off the disk.
         await fs.unlink(file)
         // Sized only once the file is gone: one that is still there (EPERM, a
         // read-only spool) is still spooled, so subtracting its bytes would
@@ -127,6 +141,8 @@ export async function loadSpooledBodies(events, opts) {
         // Already gone, or not removable at all: either way this batch has no
         // byte movement to report, and the content is recoverable from
         // transcript backfill.
+      } finally {
+        removing.delete(file)
       }
       continue
     }
