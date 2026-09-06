@@ -23,7 +23,8 @@ export function matchesSemverRange(version, range) {
   const v = parseSemver(version)
   if (!v) return false
   for (const alternative of trimmed.split('||')) {
-    if (matchesAlternative(v, alternative)) return true
+    const comparators = comparatorsOf(alternative)
+    if (comparators && comparators.every(c => satisfies(v, c))) return true
   }
   return false
 }
@@ -54,7 +55,7 @@ export function isValidRange(range) {
   const trimmed = range.trim()
   if (trimmed === '') return false
   if (isWildcard(trimmed)) return true
-  return trimmed.split('||').every((alternative) => comparatorsOf(alternative) !== null)
+  return trimmed.split('||').every(alternative => comparatorsOf(alternative) !== null)
 }
 
 /**
@@ -63,21 +64,6 @@ export function isValidRange(range) {
  */
 function isWildcard(range) {
   return range === '' || range === '*' || range === 'x' || range === 'X'
-}
-
-/**
- * @param {{ major: number, minor: number, patch: number }} v
- * @param {string} alternative one `||` branch, which every comparator in it
- *   must admit
- * @returns {boolean}
- */
-function matchesAlternative(v, alternative) {
-  const comparators = comparatorsOf(alternative)
-  if (comparators === null) return false
-  for (const c of comparators) {
-    if (!satisfies(v, c)) return false
-  }
-  return true
 }
 
 /** One simple range: an optional operator and a possibly partial version. */
