@@ -212,8 +212,14 @@ function runSyncChild(opts) {
   const binPath = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
   return new Promise((resolve) => {
     let settled = false
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let grace
+    // Whoever settles first cancels the wait, so the grace timer outlives the
+    // result it was there to produce in no ordering: `error` can arrive with
+    // the timer already armed, and `close` is only documented to follow `exit`,
+    // not to be the last word.
     /** @param {{ code: number | null, error?: string, noDestinations?: boolean }} r */
-    const done = (r) => { if (!settled) { settled = true; resolve(r) } }
+    const done = (r) => { if (!settled) { settled = true; clearTimeout(grace); resolve(r) } }
     try {
       const child = spawnFn(process.execPath, [binPath, 'sync'], {
         stdio: ['inherit', 'inherit', 'pipe'],
@@ -252,8 +258,6 @@ function runSyncChild(opts) {
         else pending = pending.slice(-SYNC_HELD_NO_DESTINATIONS_NOTICE.length * 2)
       })
       child.on('error', (err) => done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }))
-      /** @type {ReturnType<typeof setTimeout> | undefined} */
-      let grace
       // `close`, not `exit`: it fires once the piped stderr has closed too, so
       // the last thing the child said is in hand before the code is judged.
       // Bounded by `exit`, because the pipe outlives the process that wrote to
@@ -261,8 +265,11 @@ function runSyncChild(opts) {
       // lives, and `close` alone would leave setup's last step waiting on a
       // stranger. Nothing under `hyp sync` spawns today, so the bound decides
       // only how a future one fails.
-      child.on('close', (code) => { clearTimeout(grace); done({ code, noDestinations }) })
-      child.on('exit', (code) => { grace = setTimeout(() => done({ code, noDestinations }), STDERR_CLOSE_GRACE_MS) })
+      child.on('close', (code) => done({ code, noDestinations }))
+      child.on('exit', (code) => {
+        if (settled) return
+        grace = setTimeout(() => done({ code, noDestinations }), STDERR_CLOSE_GRACE_MS)
+      })
     } catch (err) {
       done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' })
     }
