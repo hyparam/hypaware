@@ -12,17 +12,21 @@
 //
 // `hypgrep` (LLP 0264 #dependency) is the first read-path dependency that
 // declares a hyparquet below the floor: 0.5.1 pins 1.27.1. It is adopted
-// behind a root `overrides` entry, so this is the gate on that entry. Two kinds
+// behind a root `overrides` entry, so this is the gate on that entry. Three kinds
 // of check live here and they prove different things:
 //
 //   - The manifest half (the first two tests) reads only the checked-in root
 //     `package.json`, so it runs on any checkout: the root pins are exact, and
 //     the override that holds hypgrep to them exists and names those versions.
 //     Deleting the override reddens here with nothing installed.
-//   - The resolved half (every test after those two) reads the installed tree,
-//     which is the only place a *dependency's own* declaration and npm's actual
-//     placement can be seen. It has no answer without `node_modules`, so it
-//     skips there rather than passing silently.
+//   - The resolved half (the installed-tree tests after those two) reads what
+//     npm actually placed, which is the only place a *dependency's own*
+//     declaration and npm's actual placement can be seen. It has no answer
+//     without `node_modules`, so it skips there rather than passing silently.
+//   - The synthetic half (`a declaration dedupes when the root pin satisfies
+//     it`) drives the shared predicate on declarations written here, so the
+//     shapes no installed tree happens to carry are checked anyway. It reads
+//     neither the manifest nor the tree, so it never skips.
 //
 // What neither half reaches: npm honours `overrides` only for the root
 // project, so the entry governs this checkout and any install that treats
@@ -170,10 +174,15 @@ test('a declaration dedupes when the root pin satisfies it, not when it matches 
     assert.equal(against(spec), '', `${spec} dedupes onto the root pin`)
   }
   // A declaration the pin cannot satisfy is the failure this check is for, in
-  // both directions, and the message keeps the remedy directional.
-  assert.match(against('^1.30.0'), /move the ROOT pin up/)
-  assert.match(against('1.27.1'), /overrides/)
-  assert.match(against('~1.28.2'), /does not satisfy/)
+  // both directions. One message serves both, so what is asserted is that it
+  // carries each remedy beside the direction that wants it: matching only
+  // "move the ROOT pin up" on an above-pin spec passes just as well against a
+  // template whose two remedies have been swapped.
+  for (const spec of ['^1.30.0', '1.27.1', '~1.28.2']) {
+    assert.match(against(spec), /does not satisfy/, `${spec} is out of range for the root pin`)
+    assert.match(against(spec), /ABOVE the root pin, move the ROOT pin up/)
+    assert.match(against(spec), /BELOW it wants an `overrides` entry naming 1\.29\.2/)
+  }
   // An unfamiliar range shape says that is what happened rather than claiming
   // the declaration is out of range.
   assert.match(against('>=1.28.0 <2.0.0'), /cannot judge/)
