@@ -7,13 +7,20 @@
 **Date:** 2026-08-07
 **Related:** LLP 0101 (#no-release: the release verb this offers), LLP 0100 (R1/R2: the announced deadline and the one permitted early tick), LLP 0198 (#onboarding-list: the closing question list this sits in front of), LLP 0135 (#privacy: the narration this acts on)
 
-> An enrolled attended `hyp init` now **asks** whether to send now or wait
-> out the first-sync review window, and starts a real `hyp sync` for the
-> user on "send now". Nothing about the hold, the deadline, or what
-> releasing it requires changes: the release still happens through the
-> unscoped, interactive `hyp sync` that [LLP 0100 R2](./0100-enrollment-privacy-review.spec.md#requirements)
-> permits, with its own plan and its own confirmation. What changes is that
-> setup hands the user that command instead of mentioning it.
+> An enrolled attended `hyp init` now starts a real `hyp sync` for the
+> user at its close, and that command's plan and confirmation are the one
+> question about the first sync: yes sends, no keeps the review window.
+> Nothing about the hold, the deadline, or what releasing it requires
+> changes: the release still happens through the unscoped, interactive
+> `hyp sync` that [LLP 0100 R2](./0100-enrollment-privacy-review.spec.md#requirements)
+> permits. What changes is that setup hands the user that prompt instead of
+> mentioning the command, and asks nothing of its own ahead of it.
+>
+> *(amended 2026-09-05: the first version put a two-row send-now/wait menu
+> of the wizard's own in front of the child's prompt, and kept a privacy
+> paragraph ahead of both. The attended path then stated the deadline four
+> times and asked twice. The menu and the paragraph are gone from the
+> attended path; the child's informed prompt is the only one.)*
 
 ## Context {#context}
 
@@ -40,36 +47,41 @@ experiences the window as the product not working yet.
 
 ## Decision {#decision}
 
-<a id="offer"></a>**Setup asks, after it narrates.** On an attended,
-non-cancelled, non-dry-run install that enrolled *and* carries a live hold,
-the wizard renders a two-row question between the privacy narration and the
-closing question list:
+<a id="offer"></a>**Setup runs the release's own prompt, once.** On an
+attended, non-cancelled, non-dry-run install that enrolled *and* carries a
+live hold, the wizard prints one lead line after the first look and starts
+`hyp sync` on the terminal. The child prints its plan (every destination,
+what is withheld), the first-sync warning (the deadline, that the send
+includes imported history and cannot be undone, and how to review or exclude
+something first), and asks its Y/n. Yes is the release; no is the wait.
 
-- **Send now** - "Runs `hyp sync`: it lists every destination and asks
-  before sending."
-- **Wait until `<deadline>`** - "Nothing leaves this machine before then."
-
-Sending is first and is the default
+Sending is the default of that prompt
 ([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md): confirms
 default yes unless a bare enter would destroy data, and sending is not
 destruction). The user enrolled to sync, so a bare enter takes the path they
-signed up for; waiting stays one arrow away, and `hyp sync`'s own confirm
-still stands between this answer and anything leaving the machine.
+signed up for, after seeing what it sends.
 
-A bare enter, and nothing else: the default here *acts*, so the question
-names waiting as its `eofValue`
-([LLP 0299 §eof-declines](./0299-confirm-prompts-default-to-yes.decision.md#eof-declines)).
-The child's confirm does not cover this case on its own, because it inherits
-the terminal rather than the stream, and a ctrl+D on a real tty is a keypress
-rather than a spent stream: it would ask again rather than decline, and a
-terminal that gave up would end on a sync it started.
+The wizard's own privacy paragraph stands down on this path: with the plan
+about to state the deadline, the backfill, and the review hint and then ask,
+the paragraph said each of them one screen earlier. It stays on every path
+the offer cannot reach at all (an abort, a non-interactive run, a dry run),
+where it is the only sighting of the deadline and the way out
+([LLP 0188 #never-silent](./0188-enrolled-default-sync-with-client-optout.decision.md#never-silent)).
+The join lane's one-line deadline stays too: it is the first moment the
+deadline is true, and it is one line.
 
-The narration keeps its place as the last
-thing HypAware *says* about privacy
-([LLP 0135 #privacy](./0135-install-experience-overhaul.design.md#privacy)),
-because a question about sending is only answerable by someone who has just
-been told what sending means. The question list keeps its place as the last thing
-on screen ([LLP 0198 #onboarding-list](./0198-setup-ends-on-a-question.decision.md#onboarding-list)):
+Some runs reach the step and still never see the plan: `hyp init` admits an
+attended run whose stdout is a terminal and whose stdin is not
+(`hyp init < file`), and nothing may be spawned to prompt on a stdin like
+that; a spawn can fail; a child can exit before rendering its plan; and an
+unforeseen throw can end the step. The paragraph has already stood down by
+then and nothing else on the run says any of it, so the step states the hold
+itself, carrying every fact the paragraph carried rather than only the
+release verb. Keeping the statement in the step rather than widening the
+paragraph's gate is what keeps the two from both printing.
+
+The question list keeps its place as the last thing on screen
+([LLP 0198 #onboarding-list](./0198-setup-ends-on-a-question.decision.md#onboarding-list)):
 it is output rather than a prompt, and a prompt placed after it would arrive
 under a block the reader has already started scrolling past.
 
@@ -78,20 +90,21 @@ every durable action succeeded minutes earlier, so a
 cancelled prompt, a failed spawn, or an unforeseen throw degrades to the wait
 the user already had.
 
-<a id="no-new-consent"></a>**The question is an offer, not the consent.**
-"Send now" does not release anything by itself. It runs `hyp sync`, which
-prints the destination plan, escalates its warning because the window is
-open, and asks its own y/N - and only that `y` clears the marker. So
+<a id="no-new-consent"></a>**The wizard adds no consent surface of its
+own.** Only `hyp sync`'s `y`, given under its plan, clears the marker. So
 [LLP 0101 #no-release](./0101-first-sync-review-window.decision.md#no-release)
 and R2 hold verbatim rather than by analogy: there is still exactly one
 release path in the codebase, and this decision does not add a second.
 
-Two prompts in a row is a real cost, and it is the right one. The wizard's
-question is answerable without knowing anything (do you want to wait?); the
-sync prompt is the one that can name the server, the local destinations, and
-the directories being withheld. Collapsing them would mean either asking the
-uninformed question and treating it as informed consent, or building a second
-plan renderer inside the wizard.
+The first version of this decision put a wizard question ("send now, or
+wait?") in front of the child's prompt, on the reasoning that the wizard's
+question was answerable without knowing anything and the child's was the
+informed one, so collapsing them would mean treating the uninformed answer
+as consent or building a second plan renderer. There was a third option it
+did not weigh: run the informed prompt directly and let its no be the wait.
+That asks the informed question exactly once, builds nothing, and drops the
+menu whose only job was to decide whether to show the real question. A user
+who does not want to see the plan presses n.
 
 <a id="child-process"></a>**The sync runs in a child process, and that is a
 correctness requirement rather than a convenience.** `hyp init` boots the
@@ -164,16 +177,29 @@ forfeits it.
 
 ## Consequences {#consequences}
 
-- A user with no privacy concern finishes setup with rows on the server, and
-  a user who wants the window keeps it by pressing enter.
-- The narration keeps its `hyp sync` sentence even though the question now
-  follows it. It is the standing control for the run that declines, and
-  [LLP 0101](./0101-first-sync-review-window.decision.md) requires all three
-  deadline surfaces to name it.
-- `wizard.finish` gains `sync_now` (`released`, `declined`, `sync-declined`,
-  `no-destinations`, `spawn-failed`, `skipped`), and the step emits a
-  `wizard.sync_now` span carrying the choice, the child's exit code, and whether the marker cleared.
-  The declined/released split is the measurement that says whether the
-  window's default sizing matches the people in it; a high `sync-declined`
-  rate would say the opposite - that the wizard's question is talking users
-  into a screen they then back out of.
+- A user with no privacy concern finishes setup with rows on the server by
+  pressing enter, and a user who wants the window keeps it by answering `n`.
+  That is the polarity of the child's own confirm
+  ([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md)); the
+  deleted wizard select's enter meant the opposite, and this decision no
+  longer puts it in front.
+- On the attended path the deadline is stated twice per run (the join
+  lane's line and the sync plan's warning) and asked about once. The
+  declining run still ends on a line that restates the deadline and names
+  `hyp sync`, since the child's own prompt scrolls away with its answer, and
+  [LLP 0101](./0101-first-sync-review-window.decision.md) requires the
+  deadline surfaces to name the release verb.
+- [LLP 0100 R1](./0100-enrollment-privacy-review.spec.md#requirements)'s
+  review hint (the `hypaware-privacy` skill) rides the sync plan's warning on
+  this path, so the warning names the skill alongside `hyp privacy set`.
+- `wizard.finish` gains `sync_now` (`released`, `sync-declined`,
+  `child-failed`, `no-destinations`, `spawn-failed`, `skipped`), and the step
+  emits a `wizard.sync_now` span carrying the child's exit code and whether
+  the marker cleared. The declined/released split is the measurement that says
+  whether the window's default sizing matches the people in it, which is why
+  a child that exited non-zero is `child-failed` rather than a decline: it
+  never reached its plan, and counting it as one would inflate the rate this
+  step exists to measure. `no-destinations` is the one such exit named rather
+  than lumped in, because its cause is known and it is not a failure either:
+  the machine had nowhere to send from the start, and the window is not being
+  declined on it.

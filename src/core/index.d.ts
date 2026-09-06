@@ -47,6 +47,7 @@ export type {
   QueryStorageService,
   QueryPartition,
   DatasetRegistration,
+  ScannableDataSource,
   DatasetDataSourceContext,
   DatasetSchema,
   ColumnSpec,

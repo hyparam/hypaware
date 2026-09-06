@@ -43,6 +43,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
+import { warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -1344,15 +1345,14 @@ export async function collectHypAwareStatus(opts = {}) {
   // The one ending the snapshot names outright, and the one `degraded` alone
   // gets wrong: a boot that threw never reached service and was owed no
   // shutdown, so "exited without shutting down" describes a shape it never
-  // had. `runDaemon` persists `degraded` with a `boot_failed:` warning before
-  // it clears the pid and rethrows, read here with the same prefix test that
-  // `previousBootLooksStuck` (`src/core/update/self_update.js`) already applies
-  // to that snapshot.
+  // had. `runDaemon` persists `degraded` with the boot-failure warning before
+  // it clears the pid and rethrows, read here through the same predicate
+  // `previousBootLooksStuck` (`src/core/update/self_update.js`) applies to that
+  // snapshot.
   // A `degraded` without that warning is a daemon that served with a failed
   // source, which the message below already describes.
-  const warnings = daemonStatusFile?.warnings
   const bootFailed = daemon.state === 'degraded'
-    && Array.isArray(warnings) && warnings.some((w) => String(w).startsWith('boot_failed'))
+    && warningsRecordBootFailure(daemonStatusFile?.warnings)
 
   // `stopping` is the other ending, and only time reads it. `shutdown()` writes
   // it as its first statement, so it marks a stop that started, and a process

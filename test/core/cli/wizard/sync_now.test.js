@@ -36,7 +36,6 @@ const DEADLINE = Date.now() + 6 * 60 * 60_000
 
 /**
  * @param {{
- *   answer?: string,
  *   deadline?: number | null,
  *   interactive?: boolean,
  *   spawnFn?: any,
@@ -46,23 +45,17 @@ const DEADLINE = Date.now() + 6 * 60 * 60_000
 function opts(over = {}) {
   const stdout = makeBuf()
   const stderr = makeBuf()
-  /** @type {{ title: string, options: { value: string, label: string }[], default?: string, eofValue?: string }[]} */
-  const asked = []
   return {
     stdout,
     stderr,
-    asked,
     args: {
       deadline: over.deadline === undefined ? DEADLINE : over.deadline,
       stdout,
       stderr,
       env: /** @type {NodeJS.ProcessEnv} */ ({}),
       interactive: over.interactive ?? true,
-      confirm: async (/** @type {any} */ question) => {
-        asked.push(question)
-        return over.answer ?? 'wait'
-      },
       // Default: a spawn that must not happen. Tests that expect one pass it.
+      // (An injected spawnFn is also what lets the step run without a tty.)
       spawnFn: over.spawnFn ?? (() => {
         throw new Error('spawn must not be called')
       }),
@@ -100,7 +93,6 @@ test('no hold means no question: an unenrolled install is never asked to sync', 
   const o = opts({ deadline: null })
   const result = await runWizardSyncNow(o.args)
   assert.deepEqual(result, { asked: false, reason: 'no-hold' })
-  assert.equal(o.asked.length, 0)
   assert.equal(o.stdout.text(), '')
 })
 
@@ -108,57 +100,85 @@ test('a non-interactive run is never asked, and never sends', async () => {
   const o = opts({ interactive: false })
   const result = await runWizardSyncNow(o.args)
   assert.deepEqual(result, { asked: false, reason: 'not-interactive' })
-  assert.equal(o.asked.length, 0)
-  // The narration upstream drops its `hyp sync` sentence whenever this step
-  // is expected to render, so the skip has to state the way out itself or
-  // the run ends without ever naming it.
+  // The narration upstream goes quiet whenever this step is expected to
+  // run, so the skip has to state the deadline, the way out, and the review
+  // hint itself or the run ends without ever naming them.
   // @ref LLP 0188#never-silent [tests]: the un-askable path still names the release verb
+  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
+  assert.match(o.stdout.text(), /includes your imported history/)
+  assert.match(o.stdout.text(), /`hyp status` shows the countdown/)
   assert.match(o.stdout.text(), /To send it sooner, run `hyp sync`/)
+  assert.match(o.stdout.text(), /hypaware-privacy/)
 })
 
-test('the question offers send-now first, as the default, and declining spawns nothing', async () => {
-  const o = opts({ answer: 'wait' })
-  const result = await runWizardSyncNow(o.args)
+// `spawnFn` is what lets every other test here run headless, and it is also
+// what bypasses the terminal gate, so the gate is only reachable with no seam
+// injected at all. Both halves of it matter: the child prompts on the
+// inherited terminal, so both ends have to be one. `hyp init` gates the
+// wizard on stdout alone, so the stdin half is a real attended run
+// (`hyp init < file`), not a hypothetical.
+// @ref LLP 0203#offer [tests]: attended-only means a terminal on both ends, and the un-askable attended run gets the full statement
+for (const surfaces of [
+  { name: 'a stdin that is not a terminal', stdin: false, stdout: true },
+  { name: 'a stdout that is not a terminal', stdin: true, stdout: false },
+]) {
+  test(`${surfaces.name} is never asked, and states the whole hold instead`, async () => {
+    const stdout = makeBuf()
+    const result = await runWizardSyncNow({
+      deadline: DEADLINE,
+      stdout,
+      stderr: makeBuf(),
+      env: /** @type {NodeJS.ProcessEnv} */ ({}),
+      interactive: true,
+      stdin: /** @type {any} */ ({ isTTY: surfaces.stdin }),
+      stdoutStream: /** @type {any} */ ({ isTTY: surfaces.stdout, write: () => true }),
+      readDeadline: async () => DEADLINE,
+    })
+    assert.deepEqual(result, { asked: false, reason: 'not-interactive' })
+    // Everything the privacy narration would have said, because it stood
+    // down for a question this run cannot be asked.
+    assert.match(stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
+    assert.match(stdout.text(), /includes your imported history/)
+    assert.match(stdout.text(), /`hyp status` shows the countdown/)
+    assert.match(stdout.text(), /To send it sooner, run `hyp sync`/)
+    assert.match(stdout.text(), /hypaware-privacy/)
+  })
+}
 
-  assert.equal(o.asked.length, 1)
-  const question = o.asked[0]
-  assert.equal(question.options[0].value, 'now')
-  assert.equal(question.default, 'now')
-  assert.equal(question.options[1].value, 'wait')
-  assert.match(question.options[1].label, /^Wait until /)
-  assert.deepEqual(result, { asked: true, released: false, reason: 'declined' })
-  // The narration upstream dropped its `hyp sync` sentence for this offer,
-  // and the offer's own frame is cleared when it resolves, so the wait has
-  // to leave the way out on screen or nothing names it.
-  // @ref LLP 0188#never-silent [tests]: the modal wait still names the release verb
-  assert.match(o.stdout.text(), /Nothing was sent/)
-  assert.match(o.stdout.text(), /run `hyp sync` any time/)
-})
-
-// The default here acts: `now` spawns `hyp sync` on this terminal. The child's
-// own confirm is not the backstop it looks like, because it inherits the
-// terminal rather than the stream - on a real tty a ctrl+D is a keypress, not
-// a spent stream, so the child asks again instead of declining, and a terminal
-// that gave up ends on a sync it started. So the question names waiting as the
-// answer for "there is nobody left to press enter".
-//
-// @ref LLP 0299#eof-declines [tests]: a select whose stated default acts names an eofValue that does not
-test('the send-now offer names waiting as its eofValue, so a spent stdin never starts the sync', async () => {
-  const spawn = fakeSpawn({ code: 0 })
-  const o = opts({ answer: 'wait', spawnFn: spawn.spawnFn })
-  await runWizardSyncNow(o.args)
-
-  assert.equal(o.asked.length, 1)
-  assert.equal(o.asked[0].eofValue, 'wait')
-  assert.notEqual(o.asked[0].eofValue, o.asked[0].default, 'the acting default must not also be the EOF answer')
-  assert.equal(spawn.calls.length, 0)
+// The narration stood down for this step, so a step that throws and says
+// nothing is the one remaining way an enrolled run ends with the deadline
+// nowhere on screen.
+// @ref LLP 0188#never-silent [tests]: even the unforeseen exit states the hold
+test('an unforeseen throw states the hold rather than ending on nothing', async () => {
+  const stdout = makeBuf()
+  let firstWrite = true
+  const result = await runWizardSyncNow({
+    deadline: DEADLINE,
+    stdout: {
+      write(/** @type {string} */ chunk) {
+        if (firstWrite) {
+          firstWrite = false
+          throw new Error('EPIPE')
+        }
+        return stdout.write(chunk)
+      },
+    },
+    stderr: makeBuf(),
+    env: /** @type {NodeJS.ProcessEnv} */ ({}),
+    interactive: true,
+    spawnFn: /** @type {any} */ (() => {
+      throw new Error('spawn must not be reached')
+    }),
+    readDeadline: async () => DEADLINE,
+  })
+  assert.deepEqual(result, { asked: false, reason: 'error' })
+  assert.match(stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
 })
 
 // @ref LLP 0203#child-process [tests]: the release is a real `hyp sync` in a fresh process, not an in-wizard reimplementation
-test('send now spawns `hyp sync` on the inherited terminal and reports the release', async () => {
+test('the step spawns `hyp sync` on the inherited terminal, as the one question, and reports the release', async () => {
   const spawn = fakeSpawn({ code: 0 })
   const o = opts({
-    answer: 'now',
     spawnFn: spawn.spawnFn,
     // The child released: the marker is gone.
     readDeadline: async () => null,
@@ -172,6 +192,10 @@ test('send now spawns `hyp sync` on the inherited terminal and reports the relea
   assert.deepEqual(call.args.slice(1), ['sync'])
   assert.equal(call.options.stdio, 'inherit')
   assert.deepEqual(result, { asked: true, released: true })
+  // The wizard put no question of its own: one lead line, then the child.
+  // @ref LLP 0203#no-new-consent [tests]: the informed prompt is the only prompt
+  assert.match(o.stdout.text(), /`hyp sync` shows what would leave and asks before sending/)
+  assert.doesNotMatch(o.stdout.text(), /Send now/)
   // Nothing claims the wait still stands; the child printed the sink report.
   assert.doesNotMatch(o.stdout.text(), /Nothing was sent/)
 })
@@ -180,7 +204,6 @@ test('send now spawns `hyp sync` on the inherited terminal and reports the relea
 test('a child that exits 0 without releasing is reported as not sent', async () => {
   const spawn = fakeSpawn({ code: 0 })
   const o = opts({
-    answer: 'now',
     spawnFn: spawn.spawnFn,
     readDeadline: async () => DEADLINE,
   })
@@ -191,17 +214,51 @@ test('a child that exits 0 without releasing is reported as not sent', async () 
   assert.match(o.stdout.text(), /run `hyp sync` any time/)
 })
 
-// The other way the marker survives the child, and not the same outcome: a
-// `hyp sync` that found no destination never rendered a plan, so nobody read
-// one and nobody declined it. Counting it as `sync-declined` puts a machine
-// that cannot send anything into the rate LLP 0203 #consequences reads as
-// "the window is sized wrong", and the plain restatement then points the user
-// back at the command that just found nothing to send.
-// @ref LLP 0203#read-back [tests]: the exit code separates the two ways a held marker outlives the child
+// A decline exits 0, so a non-zero exit is a child that never reached its
+// plan (an empty sink set, a boot that failed, a signal). Reading that as a
+// decline would leave the run with none of what the narration stood down for
+// and would count a crash as a user choosing the window.
+// @ref LLP 0188#never-silent [tests]: a child that never showed its plan states the hold
+test('a child that exits non-zero states the whole hold and is not counted as a decline', async () => {
+  const spawn = fakeSpawn({ code: 1 })
+  const o = opts({
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => DEADLINE,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: false, reason: 'child-failed' })
+  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
+  assert.match(o.stdout.text(), /hypaware-privacy/)
+  assert.doesNotMatch(o.stdout.text(), /Nothing was sent/)
+})
+
+// The read-back still decides first: a child that released and then failed
+// must never be told its history is still here.
+// @ref LLP 0203#read-back [tests]: a non-zero exit never overrides a marker that is gone
+test('a child that released and then exited non-zero is still a release', async () => {
+  const spawn = fakeSpawn({ code: 1 })
+  const o = opts({
+    spawnFn: spawn.spawnFn,
+    readDeadline: async () => null,
+  })
+  const result = await runWizardSyncNow(o.args)
+
+  assert.deepEqual(result, { asked: true, released: true })
+  assert.doesNotMatch(o.stdout.text(), /Nothing has been uploaded yet/)
+})
+
+// The one non-zero exit that is told apart from the rest, and not the same
+// outcome as a decline either: a `hyp sync` that found no destination never
+// rendered a plan, so nobody read one and nobody declined it. Counting it as
+// `sync-declined` puts a machine that cannot send anything into the rate
+// LLP 0203 #consequences reads as "the window is sized wrong", and the plain
+// restatement then points the user back at the command that just found
+// nothing to send.
+// @ref LLP 0203#read-back [tests]: the exit code separates the ways a held marker outlives the child
 test('a child that found no destinations is not counted as a declined plan', async () => {
   const spawn = fakeSpawn({ code: SYNC_HELD_NO_DESTINATIONS_EXIT })
   const o = opts({
-    answer: 'now',
     spawnFn: spawn.spawnFn,
     readDeadline: async () => DEADLINE,
   })
@@ -221,7 +278,6 @@ test('a child that found no destinations is not counted as a declined plan', asy
 test('a no-destinations child is not a release even when the marker reads absent', async () => {
   const spawn = fakeSpawn({ code: SYNC_HELD_NO_DESTINATIONS_EXIT })
   const o = opts({
-    answer: 'now',
     spawnFn: spawn.spawnFn,
     readDeadline: async () => null,
   })
@@ -235,7 +291,6 @@ test('a no-destinations child is not a release even when the marker reads absent
 test('a re-read that throws is reported as not sent, not as a release', async () => {
   const spawn = fakeSpawn({ code: 0 })
   const o = opts({
-    answer: 'now',
     spawnFn: spawn.spawnFn,
     readDeadline: async () => {
       throw new Error('EACCES')
@@ -250,14 +305,21 @@ test('a re-read that throws is reported as not sent, not as a release', async ()
   assert.match(o.stdout.text(), /Nothing was sent/)
 })
 
-test('a spawn failure never fails the install, and restates the wait', async () => {
+// A child that never started never printed its plan, so this run saw nothing
+// the narration would have said - the same hole as the run that could not be
+// asked, and it takes the same whole statement rather than the short one.
+// @ref LLP 0188#never-silent [tests]: a failed spawn states the hold, not only the wait
+test('a spawn failure never fails the install, and states the whole hold', async () => {
   const spawn = fakeSpawn({ error: new Error('ENOENT') })
-  const o = opts({ answer: 'now', spawnFn: spawn.spawnFn })
+  const o = opts({ spawnFn: spawn.spawnFn })
   const result = await runWizardSyncNow(o.args)
 
   assert.deepEqual(result, { asked: true, released: false, reason: 'spawn-failed' })
   assert.match(o.stderr.text(), /Could not start hyp sync: ENOENT/)
-  assert.match(o.stdout.text(), /Nothing was sent/)
+  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
+  assert.match(o.stdout.text(), /includes your imported history/)
+  assert.match(o.stdout.text(), /To send it sooner, run `hyp sync`/)
+  assert.match(o.stdout.text(), /hypaware-privacy/)
 })
 
 // Everything above replaces the re-read with the `readDeadline` seam, which
@@ -267,7 +329,7 @@ test('a spawn failure never fails the install, and restates the wait', async () 
 // wrong answer ("your history is on its way") cannot be walked back. A path
 // helper that drifted, or a state dir resolved from the wrong variable, would
 // find no marker, and every run would report a release that never happened -
-// invisible to all eight tests above, because none of them execute the code.
+// invisible to the tests above, because none of them execute the code.
 //
 // So these two drive it end to end against a real marker on disk, with no seam
 // at all: the only thing standing in for `hyp sync` is a spawn stub that either
@@ -286,7 +348,7 @@ for (const scenario of [
     const deadline = await writeFirstSyncHoldMarker({ stateDir })
     assert.equal(typeof deadline, 'number')
 
-    const o = opts({ answer: 'now', deadline })
+    const o = opts({ deadline })
     // The real environment resolution, and no `readDeadline` override.
     o.args.env = /** @type {NodeJS.ProcessEnv} */ ({ HYP_HOME: hypHome })
     delete (/** @type {{ readDeadline?: unknown }} */ (o.args)).readDeadline
@@ -308,16 +370,3 @@ for (const scenario of [
     else assert.match(o.stdout.text(), /Nothing was sent/)
   })
 }
-
-test('a cancelled prompt is a wait, not an error', async () => {
-  const o = opts()
-  o.args.confirm = async () => {
-    const err = new Error('cancelled')
-    err.name = 'PromptCancelledError'
-    throw err
-  }
-  const result = await runWizardSyncNow(o.args)
-  assert.deepEqual(result, { asked: true, released: false, reason: 'declined' })
-  // An esc is the same wait, and leaves the same erased frame behind it.
-  assert.match(o.stdout.text(), /run `hyp sync` any time/)
-})

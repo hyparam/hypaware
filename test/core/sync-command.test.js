@@ -194,9 +194,10 @@ test('the held prompt states the window, the irreversibility, and the way out', 
   await runSync([], ctx)
 
   const text = stdout.text
-  assert.match(text, /FIRST SYNC - nothing has left this machine yet/)
-  assert.match(text, /Your review window runs until /)
-  assert.match(text, /cannot be un-sent/)
+  assert.match(text, /FIRST SYNC: nothing has left this machine yet/)
+  assert.match(text, /ends the review\n  window \(until /)
+  assert.match(text, /cannot be undone/)
+  assert.match(text, /hypaware-privacy skill/)
   assert.match(text, /hyp privacy set <path> local-only/)
 })
 

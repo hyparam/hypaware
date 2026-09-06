@@ -19,8 +19,8 @@
 //     `package.json`, so it runs on any checkout: the root pins are exact, and
 //     the override that holds hypgrep to them exists and names those versions.
 //     Deleting the override reddens here with nothing installed.
-//   - The resolved half (the last two tests) reads the installed tree, which is
-//     the only place a *dependency's own* declaration and npm's actual
+//   - The resolved half (every test after those two) reads the installed tree,
+//     which is the only place a *dependency's own* declaration and npm's actual
 //     placement can be seen. It has no answer without `node_modules`, so it
 //     skips there rather than passing silently.
 //
@@ -129,21 +129,33 @@ test('hypgrep is a plain dependency, held at the floor by an override', () => {
 // and reading a dedupe failure as a correctness failure is how the floor tests
 // would start lying.
 //
-// The override that holds it is cheaper than it looks. icebird declares an
-// exact hyparquet, so the override moves it between two adjacent patch
-// releases and nothing else; hyparquet 1.29.1 -> 1.29.2 changed package.json
-// alone (it added `default` export conditions), with no `src/` delta. The
-// remedy when this goes red is therefore directional: if a dependency declares
-// a hyparquet ABOVE the root pin, move the ROOT pin up. Holding a dependency
-// down onto an older reader to win a dedupe would trade the property that
-// matters for the one that does not.
-test('icebird is held at the root hyparquet pin, not left to nest its own', () => {
+// icebird carries no override entry any more: 0.8.28 declares the root pins
+// itself, so npm dedupes without one, and an entry naming the same versions
+// would only be a second place to forget to bump. That is why this check reads
+// icebird's own installed declaration when no override names the pin, and why
+// it sits in the resolved half rather than the manifest half above. The remedy
+// when it goes red is still directional: if icebird declares a parquet package
+// ABOVE the root pin, move the ROOT pin up; only a declaration BELOW the pin
+// wants the override back. Holding a dependency down onto an older reader to
+// win a dedupe would trade the property that matters for the one that does
+// not.
+test('icebird uses the root parquet pins directly or through overrides', t => {
   assert.ok(dependencies.icebird, 'icebird is the read path; it belongs in `dependencies`')
-  assert.equal(overrides.icebird?.hyparquet, ROOT_PINS.hyparquet,
-    'LLP 0222 #hyparquet-floor: the icebird override holds hyparquet at the root pin, ' +
-    'which is what makes "a single deduped copy shared with icebird" true')
-  assert.equal(overrides.icebird?.['hyparquet-writer'], ROOT_PINS['hyparquet-writer'],
-    'the icebird override holds hyparquet-writer at the root pin')
+  if (!INSTALLED) {
+    t.skip('no node_modules, so icebird\'s own declaration is not readable')
+    return
+  }
+  // A resolved tree that is missing icebird fails rather than skips: the one
+  // package this test is about did not install, so nothing verified the pin.
+  // `installedDeclarations` rather than a bare `dependencies` read for the
+  // reason that helper exists - a package may declare a parquet reader as a
+  // peer or optional dependency, and reading one key would call that absent.
+  const declared = installedDeclarations('icebird')
+  assert.ok(declared, 'icebird is not installed beside the resolved tree - run `npm i`')
+  for (const [name, version] of Object.entries(ROOT_PINS)) {
+    assert.equal(overrides.icebird?.[name] ?? declared[name], version,
+      `icebird must share the root ${name} pin, directly or through an override`)
+  }
 })
 
 test('no root dependency nests a hyparquet of its own', t => {

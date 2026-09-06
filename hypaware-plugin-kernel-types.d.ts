@@ -11,22 +11,16 @@
  * When the two disagree the LLPs win; this file is updated to follow.
  */
 
-import type { AsyncDataSource, ScanOptions, ScanResults } from 'squirreling'
+import type { AsyncDataSource, ScanOptions, ScanResults, ScannableDataSource } from 'squirreling'
 import type { CachePartitioningDeclaration } from './src/core/iceberg/types.d.ts'
 import type { UsagePolicyDrop } from './src/core/usage-policy/types.d.ts'
 import type { GrepSearchBackend } from './src/core/search/types.d.ts'
 
-export type { AsyncDataSource, ScanOptions, ScanResults }
-
-/**
- * A data source that retains Squirreling's row interface. Hypaware's storage,
- * union, visibility, and legacy parquet adapters all guarantee this stronger
- * shape even when they also expose prepared native batches.
- */
-export type ScannableDataSource = AsyncDataSource & {
-  columns: string[]
-  scan(options: ScanOptions): ScanResults
-}
+// ScannableDataSource is the squirreling source that retains the row
+// interface. Hypaware's storage, union, visibility, and legacy parquet
+// adapters all guarantee this stronger shape even when they also expose
+// prepared native batches.
+export type { AsyncDataSource, ScanOptions, ScanResults, ScannableDataSource }
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
