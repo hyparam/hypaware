@@ -354,12 +354,10 @@ test('the child keeps its voice: everything on its stderr is written back out', 
   assert.equal(o.stderr.text(), 'hyp sync: something broke\n  and then more\n')
 })
 
-// Under `stdio: 'inherit'` the child painted its own diagnostics; on a pipe
-// it cannot (`useColor` is false there), so the parent's colorized stderr is
-// the only painter left and the echo has to hand it a cursor it can trust. The
-// send confirm ends without a newline and the tty, not this stream, echoes the
-// answer that ends the line - so without a resync the wrap still thinks it is
-// inside the question and the child's next diagnostic arrives plain.
+// On a pipe the child cannot paint (`useColor` is false there), so the
+// parent's colorized stderr is the only painter left, and the tty echo of the
+// answer that ends the confirm never reaches it: without a resync the wrap
+// still thinks it is inside the question and the diagnostic arrives plain.
 // @ref LLP 0203#child-process [tests]: the relayed child keeps the severity colour it had under inherit
 test('the diagnostic after the send confirm keeps its severity colour', async () => {
   const spawn = fakeSpawn({

@@ -230,11 +230,9 @@ function runSyncChild(opts) {
       // needs to be: `close` still fires, so the exit code is still judged,
       // only without the corroboration the pipe was there to collect.
       child.stderr?.on('error', () => {})
-      // Where the terminal's cursor really is. A chunk ending without a
-      // newline is this child asking a question, and the answer that ends
-      // that line is echoed by the tty rather than written here, so the next
-      // chunk opens a line the echo stream would otherwise read as the middle
-      // of the question and leave unpainted.
+      // The tty, not this stream, echoes the answer that ends a question, so
+      // a chunk following an unterminated one opens a line the echo would
+      // otherwise read as the middle of that question.
       let midLine = false
       child.stderr?.on('data', (chunk) => {
         const text = String(chunk)
