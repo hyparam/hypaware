@@ -27,7 +27,7 @@ import {
   formatFirstSyncDeadline,
   readFirstSyncDeadline,
 } from '../../usage-policy/first_sync_hold.js'
-import { stripSgr } from '../style.js'
+import { resyncLineStart, stripSgr } from '../style.js'
 import { isTty } from '../tui-router.js'
 
 /**
@@ -191,10 +191,11 @@ export async function runWizardSyncNow(opts) {
  * builds with `terminal: false`, which still writes the query and still reads
  * the answer, but takes no raw mode and does no cursor bookkeeping, leaving
  * the tty canonical and the terminal itself echoing what is typed; and the
- * question ends without a newline, which leaves the parent's `colorizeStderr`
- * mid-line, so the next line the child writes reaches the user unpainted.
- * Anything that narrows this pipe further has to keep the first of those
- * true: the prompt it carries is the one gate on sending.
+ * question ends without a newline, so the answer - and the newline the tty
+ * echoes beside it - never passes through the parent's `colorizeStderr`,
+ * which the echo below resyncs so the child's next diagnostic is still
+ * classified. Anything that narrows this pipe further has to keep the first
+ * of those true: the prompt it carries is the one gate on sending.
  *
  * @ref LLP 0203#child-process [implements]: the release runs in a fresh process so its plan names the real destinations
  * @param {RunWizardSyncNowOptions} opts
@@ -229,8 +230,14 @@ function runSyncChild(opts) {
       // needs to be: `close` still fires, so the exit code is still judged,
       // only without the corroboration the pipe was there to collect.
       child.stderr?.on('error', () => {})
+      // The tty, not this stream, echoes the answer that ends a question, so
+      // a chunk following an unterminated one opens a line the echo would
+      // otherwise read as the middle of that question.
+      let midLine = false
       child.stderr?.on('data', (chunk) => {
         const text = String(chunk)
+        if (midLine) resyncLineStart(echo)
+        midLine = !text.endsWith('\n')
         echo.write(text)
         if (noDestinations) return
         pending += text

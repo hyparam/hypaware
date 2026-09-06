@@ -178,6 +178,29 @@ export function paintChunk(text, atLineStart) {
   return parts.join('\n')
 }
 
+/** The hook a colorized wrap answers to, keyed so nothing reaches it by guessing. */
+const RESYNC = Symbol('colorizeStderr.resyncLineStart')
+
+/**
+ * Tell a colorized stream the terminal is back at a line start.
+ *
+ * {@link colorizeStderr} infers the cursor from its own writes, which is the
+ * whole truth only while it is the only thing writing to the terminal. The
+ * wizard's relay of a piped `hyp sync` is not: that child's send confirm ends
+ * without a newline, and the answer - with the newline the tty echoes beside
+ * it - reaches the terminal without passing through here, so the child's next
+ * diagnostic lands at a real line start this wrap reads as mid-sentence and
+ * {@link paintChunk}'s gate leaves plain.
+ *
+ * A no-op on an unwrapped stream, which is every stream not painting anyway.
+ *
+ * @param {{ write(chunk: string): unknown }} stream
+ */
+export function resyncLineStart(stream) {
+  const hook = /** @type {any} */ (stream)[RESYNC]
+  if (typeof hook === 'function') hook()
+}
+
 /**
  * Wrap a stderr-shaped stream so severity prefixes are coloured on the way
  * out, or return it untouched when colour is off.
@@ -207,6 +230,7 @@ export function colorizeStderr(stream, env) {
     /** @type {unknown} */ (stream)
   )
   let atLineStart = true
+  const resync = () => { atLineStart = true }
   /** @param {unknown} chunk @param {...unknown} rest */
   const write = (chunk, ...rest) => {
     // Only strings are classified. A Buffer write on stderr is raw bytes
@@ -221,6 +245,7 @@ export function colorizeStderr(stream, env) {
       new Proxy(/** @type {object} */ (/** @type {unknown} */ (stream)), {
         get(t, prop, _receiver) {
           if (prop === 'write') return write
+          if (prop === RESYNC) return resync
           const value = Reflect.get(t, prop, t)
           return typeof value === 'function' ? value.bind(t) : value
         },

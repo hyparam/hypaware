@@ -7,7 +7,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { paintLine } from '../../../../src/core/cli/style.js'
+import { ANSI, colorizeStderr, paintLine } from '../../../../src/core/cli/style.js'
 import { runWizardSyncNow } from '../../../../src/core/cli/wizard/sync_now.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
@@ -352,6 +352,31 @@ test('the child keeps its voice: everything on its stderr is written back out', 
   await runWizardSyncNow(o.args)
 
   assert.equal(o.stderr.text(), 'hyp sync: something broke\n  and then more\n')
+})
+
+// On a pipe the child cannot paint (`useColor` is false there), so the
+// parent's colorized stderr is the only painter left, and the tty echo of the
+// answer that ends the confirm never reaches it: without a resync the wrap
+// still thinks it is inside the question and the diagnostic arrives plain.
+// @ref LLP 0203#child-process [tests]: the relayed child keeps the severity colour it had under inherit
+test('the diagnostic after the send confirm keeps its severity colour', async () => {
+  const spawn = fakeSpawn({
+    code: 1,
+    stderr: [
+      'Send now to the central server? [Y/n] ',
+      'hyp sync: nothing was sent - the sink driver is holding every tick\n',
+    ],
+  })
+  const sink = Object.assign(makeBuf(), { isTTY: true })
+  const o = opts({ spawnFn: spawn.spawnFn })
+  o.args.stderr = colorizeStderr(sink, {})
+  await runWizardSyncNow(o.args)
+
+  assert.equal(
+    sink.text(),
+    `Send now to the central server? [Y/n] ${ANSI.red}hyp sync:${ANSI.reset} nothing was sent` +
+    ' - the sink driver is holding every tick\n'
+  )
 })
 
 // Piping a stream means owning its failures. An `error` nobody listens for is
