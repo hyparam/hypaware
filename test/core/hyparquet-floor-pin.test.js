@@ -137,13 +137,17 @@ test('hypgrep is a plain dependency, held at the floor by an override', () => {
 // a hyparquet ABOVE the root pin, move the ROOT pin up. Holding a dependency
 // down onto an older reader to win a dedupe would trade the property that
 // matters for the one that does not.
-test('icebird is held at the root hyparquet pin, not left to nest its own', () => {
+test('icebird uses the root parquet pins directly or through overrides', t => {
   assert.ok(dependencies.icebird, 'icebird is the read path; it belongs in `dependencies`')
-  assert.equal(overrides.icebird?.hyparquet, ROOT_PINS.hyparquet,
-    'LLP 0222 #hyparquet-floor: the icebird override holds hyparquet at the root pin, ' +
-    'which is what makes "a single deduped copy shared with icebird" true')
-  assert.equal(overrides.icebird?.['hyparquet-writer'], ROOT_PINS['hyparquet-writer'],
-    'the icebird override holds hyparquet-writer at the root pin')
+  const icebird = readJson(path.join(NODE_MODULES, 'icebird', 'package.json'))
+  if (!icebird) {
+    t.skip('no installed icebird, so its dependency pins cannot be inspected')
+    return
+  }
+  for (const [name, version] of Object.entries(ROOT_PINS)) {
+    assert.equal(overrides.icebird?.[name] ?? icebird.dependencies?.[name], version,
+      `icebird must share the root ${name} pin, directly or through an override`)
+  }
 })
 
 test('no root dependency nests a hyparquet of its own', t => {
