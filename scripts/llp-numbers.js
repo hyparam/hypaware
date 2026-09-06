@@ -42,8 +42,9 @@ const TREE_MODE = '40000'
 
 /**
  * Room for one level of the walk in `refFilesFromGit`: every distinct `llp/`
- * tree across every ref, at a few dozen bytes an entry. This clone's hundred
- * refs come to a couple of megabytes; the default 1 MiB would not hold them.
+ * tree across every ref, at a few dozen bytes an entry. This clone's 951 refs
+ * share 441 such trees and come to 5.5 MiB; the default 1 MiB would not hold
+ * them.
  */
 const BATCH_BUFFER_BYTES = 64 * 1024 * 1024
 

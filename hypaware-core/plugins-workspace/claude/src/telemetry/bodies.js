@@ -41,6 +41,19 @@ const GAP_BLOCK_TYPES = new Set([
 ])
 
 /**
+ * Unparseable body files this process is in the middle of removing. Two reads
+ * of the same `body_ref` can be in flight at once (the handler is not
+ * serialized, so an exporter retry overlaps the original it is retrying), and
+ * the file's bytes are only one of them's to report. The filesystem cannot be
+ * the arbiter: on macOS two concurrent `unlink` calls on one path both
+ * succeed, so each would subtract the bytes and `spool_bytes` would fall by
+ * 2x one deletion. Entries leave the set once the removal settles, so it
+ * never outgrows the reads in flight.
+ * @type {Set<string>}
+ */
+const removing = new Set()
+
+/**
  * Read the spooled body files a batch of events references.
  *
  * Only files inside the spool directory are touched: `body_ref` arrives
@@ -71,19 +84,6 @@ const GAP_BLOCK_TYPES = new Set([
  *   refused: string[],
  * }>}
  */
-/**
- * Unparseable body files this process is in the middle of removing. Two reads
- * of the same `body_ref` can be in flight at once (the handler is not
- * serialized, so an exporter retry overlaps the original it is retrying), and
- * the file's bytes are only one of them's to report. The filesystem cannot be
- * the arbiter: on macOS two concurrent `unlink` calls on one path both
- * succeed, so each would subtract the bytes and `spool_bytes` would fall by
- * 2x one deletion. Entries leave the set once the removal settles, so it
- * never outgrows the reads in flight.
- * @type {Set<string>}
- */
-const removing = new Set()
-
 export async function loadSpooledBodies(events, opts) {
   /** @type {Map<string, SpooledClaudeBody>} */
   const bodies = new Map()
