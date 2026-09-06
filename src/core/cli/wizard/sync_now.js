@@ -184,6 +184,18 @@ export async function runWizardSyncNow(opts) {
  * nothing but the child's own words separates. Everything read is written
  * straight back out, so the terminal still shows the child's diagnostics.
  *
+ * The echo is not decoration. `askYesNo` builds its readline over `ctx.stderr`
+ * (`src/core/cli/confirm.js`), so the send confirm itself rides the piped
+ * stream and this loop is its only path to the terminal. Two consequences,
+ * both measured rather than assumed: readline sees a non-TTY output and so
+ * builds with `terminal: false`, which still writes the query and still reads
+ * the answer, but takes no raw mode and does no cursor bookkeeping, leaving
+ * the tty canonical and the terminal itself echoing what is typed; and the
+ * question ends without a newline, which leaves the parent's `colorizeStderr`
+ * mid-line, so the next line the child writes reaches the user unpainted.
+ * Anything that narrows this pipe further has to keep the first of those
+ * true: the prompt it carries is the one gate on sending.
+ *
  * @ref LLP 0203#child-process [implements]: the release runs in a fresh process so its plan names the real destinations
  * @param {RunWizardSyncNowOptions} opts
  * @returns {Promise<{ code: number | null, error?: string, noDestinations?: boolean }>}
