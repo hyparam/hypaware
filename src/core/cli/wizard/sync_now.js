@@ -31,6 +31,13 @@ import { stripSgr } from '../style.js'
 import { isTty } from '../tui-router.js'
 
 /**
+ * How long the settle keeps waiting on the piped stderr after the child itself
+ * is already gone. The pipe outlives its writer, so this is the only bound on
+ * that wait.
+ */
+const STDERR_CLOSE_GRACE_MS = 250
+
+/**
  * Run the real `hyp sync`, whose plan and confirm are the one question.
  *
  * Never throws and never changes the wizard's exit code: setup finished
@@ -245,9 +252,17 @@ function runSyncChild(opts) {
         else pending = pending.slice(-SYNC_HELD_NO_DESTINATIONS_NOTICE.length * 2)
       })
       child.on('error', (err) => done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }))
+      /** @type {ReturnType<typeof setTimeout> | undefined} */
+      let grace
       // `close`, not `exit`: it fires once the piped stderr has closed too, so
       // the last thing the child said is in hand before the code is judged.
-      child.on('close', (code) => done({ code, noDestinations }))
+      // Bounded by `exit`, because the pipe outlives the process that wrote to
+      // it: any descendant that inherited fd 2 holds it open for as long as it
+      // lives, and `close` alone would leave setup's last step waiting on a
+      // stranger. Nothing under `hyp sync` spawns today, so the bound decides
+      // only how a future one fails.
+      child.on('close', (code) => { clearTimeout(grace); done({ code, noDestinations }) })
+      child.on('exit', (code) => { grace = setTimeout(() => done({ code, noDestinations }), STDERR_CLOSE_GRACE_MS) })
     } catch (err) {
       done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' })
     }
