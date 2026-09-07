@@ -1,6 +1,6 @@
 // @ts-check
 
-import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
+import { asyncBufferFromFile, cachedAsyncBuffer, parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
 import { parquetFind, queryIndex } from 'hypgrep'
 
 import { createLocalIcebergIO, urlToPath } from '../cache/iceberg/resolver.js'
@@ -32,10 +32,10 @@ import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from '
  * file-handle-backed `AsyncBuffer` that fetches only the byte ranges the
  * projection needs. Both halves are load-bearing: the row-group split
  * bounds the DECODED rows, and the handle-backed buffer bounds the RAW
- * bytes. The cache's own `resolver.reader` cannot do the second (it is
- * `readFileSync` of the whole file, which would leave a 128 MiB
- * `target_file_bytes` data file resident behind a walk that reads it a row
- * group at a time, and would block the loop for the read).
+ * bytes. A whole-file resident reader could not do the second (it would
+ * leave a 128 MiB `target_file_bytes` data file resident behind a walk
+ * that reads it a row group at a time, and would block the loop for the
+ * read).
  *
  * That makes the SCAN tier's bound one row group, decoded and raw. The
  * INDEXED tier's is looser, and it is hypgrep's to set rather than this
@@ -307,9 +307,9 @@ export async function executeGrepSearch(args) {
        *
        * `parquetFind` runs the same `queryIndex` internally and takes no way
        * to be handed the result, so a file that DOES have candidate blocks
-       * decodes its posting bitsets twice. That is CPU over a buffer
-       * `io.reader` already made resident, no second read, and it is what
-       * buys a PRUNED file a source it never opens.
+       * decodes its posting bitsets twice. That is CPU over ranges the
+       * memoized sidecar buffer already holds, no second read, and it is
+       * what buys a PRUNED file a source it never opens.
        *
        * Only a definite "no blocks" shortcuts. Every other outcome, a
        * failure included, falls through to the path below, so an unreadable
@@ -413,9 +413,9 @@ export async function executeGrepSearch(args) {
             // `cachedAsyncBuffer`, which holds every slice for the life of
             // this generator, so the residency here is the union of the
             // candidate ranges and NOT one row group: strictly less than
-            // the whole file the cache's resident reader would have held,
-            // and not the same bound the scan tier below gets. The sidecar
-            // is deliberately NOT read this way (see `searchFile`).
+            // the whole file a resident reader would have held, and not
+            // the same bound the scan tier below gets. The sidecar is
+            // memoized once, up front, in `searchFile`.
             // @ref LLP 0303#memory-bound [implements]: the source is opened per slice rather than read whole
             // @ref LLP 0304#indexed-tier-residency [constrained-by]: hypgrep memoizes the slices, so this tier's raw bound is the candidate ranges
             sourceFile,
@@ -505,12 +505,14 @@ export async function executeGrepSearch(args) {
           // and an unindexed file is the scan tier's problem, never the
           // caller's error.
           //
-          // The sidecar alone stays on the cache's resident reader. It is
-          // the pruning structure, read in many small random ranges by
-          // `queryIndex`, and a fraction of the data file it indexes; the
-          // 128 MiB file the memory bound is about is the source, and that
-          // one is handle-backed on both tiers.
-          indexFile = await io.reader(sidecarUrl)
+          // The sidecar is read through the same range reader as the
+          // source now, so it is memoized here ONCE for the life of this
+          // file's search. `queryIndex` reads it in many small random
+          // ranges, and `parquetFind` runs the same `queryIndex` again over
+          // the buffer it is handed (wrapping it in its own cache, which is
+          // a no-op over this one), so without this wrap every posting
+          // range and the footer went to disk twice per file.
+          indexFile = cachedAsyncBuffer(await io.reader(sidecarUrl))
         } catch (err) {
           if (isAbort(err, signal)) throw err
           indexFile = null
@@ -554,14 +556,13 @@ export async function executeGrepSearch(args) {
         // could not fire during that decode either, so the deadline did
         // not bound the step that dominates the wall clock.
         //
-        // Splitting the DECODE is only half of it: over the cache's own
-        // `resolver.reader` every slice comes out of a buffer that
-        // `readFileSync` already filled with the whole file, so the raw
-        // bytes stayed resident however finely the decode was cut, and the
-        // read itself blocked the loop. `asyncBufferFromFile` above reads
-        // per slice instead, so the projection's own byte ranges are all
-        // that is ever fetched: strictly less IO than the whole file, and
-        // none of it synchronous.
+        // Splitting the DECODE is only half of it: over a whole-file
+        // resident reader every slice comes out of a buffer a single read
+        // already filled, so the raw bytes stayed resident however finely
+        // the decode was cut, and the read itself blocked the loop.
+        // `asyncBufferFromFile` above reads per slice instead, so the
+        // projection's own byte ranges are all that is ever fetched:
+        // strictly less IO than the whole file, and none of it synchronous.
         //
         // The row group is the unit rather than a fixed row count for a
         // reason: without the offset index hyparquet fetches and decodes a
