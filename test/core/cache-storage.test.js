@@ -6,10 +6,12 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { collect, executeSql } from 'squirreling'
 
 import { readCursorSync } from '../../src/core/cache/partition.js'
+import { createLocalIcebergIO } from '../../src/core/cache/iceberg/resolver.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
 import { DEFAULT_SPOOL_BYTES_THRESHOLD, SPOOL_DIR } from '../../src/core/cache/spool.js'
 
@@ -31,6 +33,33 @@ const SIMPLE_COLUMNS = [
 
 test('default spool threshold is Iceberg-sized to avoid frequent small commits', () => {
   assert.equal(DEFAULT_SPOOL_BYTES_THRESHOLD, 512 * 1024 * 1024)
+})
+
+test('local cache reader reads ranges without loading the whole file', async (t) => {
+  const dir = await makeTmpDir('range-reader')
+  const filename = path.join(dir, 'file with spaces.bin')
+  try {
+    await fs.writeFile(filename, Buffer.from('0123456789'))
+    const { resolver } = await createLocalIcebergIO()
+    const readFileSync = fsSync.readFileSync
+    const wholeReads = t.mock.method(fsSync, 'readFileSync', function (...args) {
+      assert.notEqual(args[0], filename, 'range reads must not load the entire file')
+      return Reflect.apply(readFileSync, fsSync, args)
+    })
+    try {
+      for (const target of [filename, pathToFileURL(filename).href]) {
+        const file = await resolver.reader(target)
+        assert.equal(file.byteLength, 10)
+        assert.equal(Buffer.from(await file.slice(3, 7)).toString(), '3456')
+        assert.equal(Buffer.from(await file.slice(8)).toString(), '89')
+        assert.equal((await file.slice(5, 5)).byteLength, 0)
+      }
+    } finally {
+      wholeReads.mock.restore()
+    }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('storage.appendRowsToPartition writes data without error', async () => {

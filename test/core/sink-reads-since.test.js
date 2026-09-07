@@ -271,29 +271,28 @@ test('a watermark prunes data files below it: an idle tick opens no data file', 
 })
 
 /**
- * Run `fn` with `fs.readFileSync` instrumented, returning the basenames of the
- * data files it opened. The local Iceberg resolver reads every file through
- * `fs.readFileSync`, so this is what "the scan never opened that file" means.
+ * Run `fn` with `fs.stat` instrumented, returning the basenames of the
+ * data files requested. The local Iceberg resolver stats each file once
+ * when constructing its range reader, before any slices are requested.
  *
  * @param {() => Promise<void>} fn
  * @returns {Promise<string[]>}
  */
 async function parquetOpens(fn) {
-  const fsSync = await import('node:fs')
-  const realRead = fsSync.default.readFileSync
+  const realRead = fs.stat
   /** @type {string[]} */
   const opened = []
-  fsSync.default.readFileSync = /** @type {typeof realRead} */ ((...args) => {
+  fs.stat = /** @type {typeof realRead} */ ((...args) => {
     const target = String(args[0])
     // Sidecar indexes and delete files are not the data files under test.
     if (target.endsWith('.parquet') && !target.endsWith('.index.parquet') &&
         !target.endsWith('-deletes.parquet')) opened.push(path.basename(target))
-    return realRead.apply(fsSync.default, /** @type {any} */ (args))
+    return realRead.apply(fs, /** @type {any} */ (args))
   })
   try {
     await fn()
   } finally {
-    fsSync.default.readFileSync = realRead
+    fs.stat = realRead
   }
   return opened
 }
