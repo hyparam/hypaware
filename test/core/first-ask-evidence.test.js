@@ -69,6 +69,13 @@ test('computeSignals: reopened days are measured against the fresh ratio', () =>
   assert.equal(s.sink.reopenedDays, 1)
   assert.equal(s.sink.excess, 3000)
   assert.equal(s.sink.total, 7000)
+  // Cost-weighted: every row prices its context as cache reads (0.1) and its
+  // output at 5, so fresh days cost 15 per output token and day two of c
+  // costs 45, an excess of 300 of 900 units.
+  assert.equal(s.sink.excessCost, 300)
+  assert.equal(s.sink.totalCost, 900)
+  assert.ok(Math.abs(s.sink.share - 1 / 3) < 1e-9)
+  assert.ok(Math.abs(s.sink.rawShare - 3000 / 7000) < 1e-9)
   assert.equal(s.sink.continueTyped, 3)
   assert.equal(s.skill, undefined)
 })
@@ -113,8 +120,10 @@ test('computeSignals: inline reading is costed in tokens and needs a recurring t
     briefs: [{ brief: 'Audit one collection path', sessions: 3 }],
     recurring: [],
   })
-  assert.equal(s.subagent.inlineCost, 1_000_000)
-  assert.equal(s.subagent.costShare, 1)
+  // 100k tokens re-sent for ~10 turns, priced as cache reads at 0.1: 100k cost units,
+  // against a total spend of 100k (context as cache reads) + 5k (output at 5).
+  assert.equal(s.subagent.inlineCost, 100_000)
+  assert.ok(Math.abs(s.subagent.costShare - 100_000 / 105_000) < 1e-9)
   assert.deepEqual(s.subagent.recurring, { kind: 'brief', text: 'Audit one collection path', sessions: 3 })
   const typed = computeSignals({ sink: [], cont: [], skill: [], rule: [], subagent: [], briefs: [{ brief: 'x', sessions: 3 }], recurring: [{ line: 'check this pr for cpu pain points', sessions: 4 }] })
   assert.equal(typed.subagent.recurring?.kind, 'line', 'a typed request outranks a brief as the recurring task')

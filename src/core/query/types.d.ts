@@ -231,10 +231,14 @@ export type FirstAskRoute = 'sink' | 'skill' | 'subagent' | 'rule'
 export interface FirstAskSignals {
   record: { sessions: number; sessionDays: number }
   sink: {
-    /** Share of all context tokens that is excess on reopened days. */
+    /** Share of all spend, cost-weighted by PRICE_RATIO, that is excess on reopened days. */
     share: number
+    /** The same by raw token count, printed beside it so the weighting is visible. */
+    rawShare: number
     excess: number
+    excessCost: number
     total: number
+    totalCost: number
     reopenedDays: number
     /** Context tokens per output token on single-day sessions. */
     fresh: number
@@ -264,7 +268,7 @@ export interface FirstAskSignals {
     dispatches: number
     /** Estimated tokens re-sent because reads happened inline on no-dispatch heavy days. */
     inlineCost: number
-    /** That cost as a share of all context tokens, the sink's currency. */
+    /** That cost as a share of all spend, cost-weighted, the sink's currency. */
     costShare: number
     /** The task that recurs across those sessions, without which the route cannot be chosen. */
     recurring?: { kind: 'brief' | 'line'; text: string; sessions: number }

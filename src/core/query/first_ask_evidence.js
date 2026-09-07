@@ -111,6 +111,19 @@ export const ROUTE_FLOORS = Object.freeze({
   rule: 5,
 })
 
+/**
+ * Relative price per token, fresh input = 1. A cache read is cheap and
+ * there are billions of them; an output token is dear and there are
+ * millions. Counting them alike is how an earlier generation of reports
+ * fixated on cached tokens, so both token signals (sink, subagent) are
+ * measured in these units and `triage.txt` prints the raw share beside
+ * the cost share. Anthropic list ratios; OpenAI's cached-input discount
+ * is in the same range.
+ *
+ * @ref LLP 0388#route-rule [implements]: token signals are cost-weighted, never raw counts
+ */
+export const PRICE_RATIO = Object.freeze({ input: 1, cacheRead: 0.1, cacheWrite: 1.25, output: 5 })
+
 /** @type {ReadonlyArray<FirstAskRoute>} */
 const PRECEDENCE = Object.freeze(['sink', 'skill', 'subagent', 'rule'])
 
@@ -136,7 +149,7 @@ export function windowStart(now, days = EVIDENCE_WINDOW_DAYS) {
  */
 export function triageSql(from) {
   return {
-    sink: `select session_id, date, sum(${USAGE_CTX}) as ctx, sum(${USAGE_OUT}) as outp from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2`,
+    sink: `select session_id, date, sum(${USAGE_CTX}) as ctx, sum(${USAGE_OUT}) as outp, sum(coalesce(cast(json_extract(attributes, '$.usage.input_tokens') as bigint), 0)) as inp, sum(coalesce(cast(json_extract(attributes, '$.usage.cache_read_tokens') as bigint), 0)) as cr, sum(coalesce(cast(json_extract(attributes, '$.usage.cache_write_tokens') as bigint), 0)) as cw from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2`,
     cont: `select count(*) as typed, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and lower(content_text) like 'continue from where you left off%'`,
     skill: `select lower(substr(content_text, 1, 42)) as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and ${HUMAN_TURN} and lower(content_text) not like 'continue from where you left off%' and length(content_text) between 12 and 160 group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 order by sessions desc limit 8`,
     rule: `select tool_name, substr(content_text, 1, 80) as head, count(*) as n, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and part_type = 'tool_result' and is_error and ${NOT_DUPLICATE_LANE} and ${NOT_PERMISSION_PROMPT} group by 1, 2 having count(distinct session_id) >= 3 order by sessions desc limit 8`,
@@ -161,23 +174,32 @@ export function triageSql(from) {
  * @returns {FirstAskSignals}
  */
 export function computeSignals(rows) {
-  /** @type {Map<string, { ctx: number, outp: number }[]>} */
+  /** @type {Map<string, { ctx: number, outp: number, cost: number }[]>} */
   const bySession = new Map()
   for (const r of rows.sink) {
     const key = String(r.session_id ?? '')
     const list = bySession.get(key) ?? []
-    list.push({ ctx: num(r.ctx), outp: num(r.outp) })
+    // Cost in fresh-input units. A row from the raw count only (no split
+    // columns) is priced as if all context were cache reads, the common
+    // case, so a partial runner still ranks sensibly.
+    const ctx = num(r.ctx)
+    const split = r.inp !== undefined || r.cr !== undefined || r.cw !== undefined
+    const cost = split
+      ? num(r.inp) * PRICE_RATIO.input + num(r.cr) * PRICE_RATIO.cacheRead + num(r.cw) * PRICE_RATIO.cacheWrite + num(r.outp) * PRICE_RATIO.output
+      : ctx * PRICE_RATIO.cacheRead + num(r.outp) * PRICE_RATIO.output
+    list.push({ ctx, outp: num(r.outp), cost })
     bySession.set(key, list)
   }
-  let total = 0, singleCtx = 0, singleOut = 0, laterCtx = 0, laterOut = 0, sessionDays = 0
-  /** @type {{ ctx: number, outp: number }[]} */
+  let total = 0, totalCost = 0, singleCtx = 0, singleOut = 0, singleCost = 0, laterCtx = 0, laterOut = 0, sessionDays = 0
+  /** @type {{ ctx: number, outp: number, cost: number }[]} */
   const later = []
   for (const list of bySession.values()) {
     sessionDays += list.length
-    for (const r of list) total += r.ctx
+    for (const r of list) { total += r.ctx; totalCost += r.cost }
     if (list.length === 1) {
       singleCtx += list[0].ctx
       singleOut += list[0].outp
+      singleCost += list[0].cost
     } else {
       // The runner returns session-days in no promised order; the first
       // day of a session is the one with the fewest re-sent turns, so the
@@ -189,10 +211,13 @@ export function computeSignals(rows) {
   for (const r of later) { laterCtx += r.ctx; laterOut += r.outp }
   const fresh = singleCtx / Math.max(singleOut, 1)
   const reopened = laterCtx / Math.max(laterOut, 1)
-  let excess = 0
+  const freshCost = singleCost / Math.max(singleOut, 1)
+  let excess = 0, excessCost = 0
   for (const r of later) {
     const e = r.ctx - fresh * r.outp
     if (e > 0) excess += e
+    const ec = r.cost - freshCost * r.outp
+    if (ec > 0) excessCost += ec
   }
   const cont = rows.cont[0] ?? {}
   const topLine = rows.skill[0]
@@ -203,8 +228,9 @@ export function computeSignals(rows) {
   // is sent again on every later turn, so on average for half the turns
   // of its day. Four bytes per token is the usual English ratio and is
   // stated as an estimate wherever the number is printed.
+  // Re-sent bytes come back as cache reads, so they are priced as such.
   let inlineCost = 0
-  for (const r of noDispatch) inlineCost += (num(r.result_bytes) / 4) * (num(r.turns) / 2)
+  for (const r of noDispatch) inlineCost += (num(r.result_bytes) / 4) * (num(r.turns) / 2) * PRICE_RATIO.cacheRead
   const brief = (rows.briefs ?? [])[0]
   const line = (rows.recurring ?? [])[0]
   /** @type {{ kind: 'brief' | 'line', text: string, sessions: number } | undefined} */
@@ -214,9 +240,12 @@ export function computeSignals(rows) {
   return {
     record: { sessions: bySession.size, sessionDays },
     sink: {
-      share: total > 0 ? excess / total : 0,
+      share: totalCost > 0 ? excessCost / totalCost : 0,
+      rawShare: total > 0 ? excess / total : 0,
       excess,
+      excessCost,
       total,
+      totalCost,
       reopenedDays: later.length,
       fresh,
       reopened,
@@ -235,7 +264,7 @@ export function computeSignals(rows) {
       inlineReads: noDispatch.reduce((a, r) => a + num(r.reads), 0),
       dispatches: heavy.reduce((a, r) => a + num(r.dispatches), 0),
       inlineCost,
-      costShare: total > 0 ? inlineCost / total : 0,
+      costShare: totalCost > 0 ? inlineCost / totalCost : 0,
       recurring,
     },
   }
@@ -280,18 +309,19 @@ export function chooseRoutes(s) {
  */
 export function renderTriage(s, routes, meta) {
   const pct = (s.sink.share * 100).toFixed(1)
+  const raw = (s.sink.rawShare * 100).toFixed(1)
   const lines = [
     `# Triage signals, ${meta.scope}, ${meta.from} to today. Duplicate OTEL lane excluded.`,
     '',
     `record    ${s.record.sessions} sessions over ${s.record.sessionDays} session-days in the window`,
     '          counts every session with at least one assistant turn',
-    `sink      ${pct}% of all context tokens is excess on reopened days`,
+    `sink      ${pct}% of all spend (cost-weighted: cache read ${PRICE_RATIO.cacheRead}, cache write ${PRICE_RATIO.cacheWrite}, output ${PRICE_RATIO.output}, fresh input 1) is excess on reopened days; ${raw}% by raw token count`,
     `          ${s.sink.reopenedDays} reopened session-days at ${s.sink.reopened.toFixed(0)} ctx/out vs ${s.sink.fresh.toFixed(0)} fresh; excess ${fmt(s.sink.excess)} of ${fmt(s.sink.total)}; "continue from where you left off" typed ${s.sink.continueTyped} times in ${s.sink.continueSessions} sessions`,
     `skill     ${s.skill ? `"${s.skill.line}" typed in ${s.skill.sessions} sessions on ${s.skill.days} days` : 'no typed line repeats often enough (threshold 3 sessions on 3 days)'}`,
     `          ${s.skill ? s.skill.others.map((o) => `${o.line.slice(0, 30)}: ${o.sessions}s/${o.days}d`).join('; ') : ''}`,
     `rule      ${s.rule ? `"${s.rule.head.slice(0, 60)}" in ${s.rule.sessions} sessions (${s.rule.n} times)` : 'no error recurs often enough (threshold 3 sessions)'}`,
     `          ${s.rule ? s.rule.others.map((o) => `${o.head.slice(0, 36)}: ${o.sessions}s`).join('; ') : ''}`,
-    `subagent  ${(s.subagent.costShare * 100).toFixed(1)}% of all context tokens is the estimated re-sent cost of inline reading on heavy days with no dispatch`,
+    `subagent  ${(s.subagent.costShare * 100).toFixed(1)}% of all spend is the estimated re-sent cost of inline reading on heavy days with no dispatch (priced as cache reads)`,
     `          ${s.subagent.noDispatchDays} of ${s.subagent.heavyDays} heavy session-days (40+ calls) dispatched no subagent; ${s.subagent.dispatches} dispatches on the other ${s.subagent.heavyDays - s.subagent.noDispatchDays}; recurring task: ${s.subagent.recurring ? `"${s.subagent.recurring.text}" (${s.subagent.recurring.kind}, ${s.subagent.recurring.sessions} sessions)` : `none seen in ${ROUTE_FLOORS.subagentRecurring}+ sessions, so this route cannot be chosen`}`,
     '',
     '# Rule, as applied',

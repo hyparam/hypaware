@@ -60,12 +60,19 @@ Four signals are measured over the last 30 days, one per kind of change:
 
 | route | signal | floor |
 |---|---|---|
-| sink | share of all context tokens that is excess on reopened days | 10% |
+| sink | share of all spend, cost-weighted, that is excess on reopened days | 10% |
 | skill | most-typed human line, sessions on distinct days | 10 sessions on 5 days |
-| subagent | estimated re-sent cost of inline reading on heavy days with no dispatch, as a share of all context tokens, and only when a request or brief recurs in 3+ of those sessions | 10% |
+| subagent | estimated re-sent cost of inline reading on heavy days with no dispatch, priced as cache reads, as a share of all spend, and only when a request or brief recurs in 3+ of those sessions | 10% |
 | rule | error head recurring across sessions | 5 sessions |
 
-The sink and subagent signals share a currency and a floor, so they
+Both token signals are measured in cost units, fresh input at 1, a cache
+read at 0.1, a cache write at 1.25, an output token at 5 (`PRICE_RATIO`),
+because a raw count treats a cache read like a fresh token and that is how
+an earlier generation of reports fixated on cached tokens. On this
+machine the reopened-session excess is 24 percent of tokens and 21
+percent of spend, so the finding survives the weighting, but the raw
+share is printed beside the cost share in `triage.txt` so a reader can see
+when they diverge. The sink and subagent signals share a currency and a floor, so they
 compare directly: a count of heavy days does not, and a first version
 that scored days against tokens chose delegation on a machine whose
 measured loss was the reopened sessions. The subagent route also needs
