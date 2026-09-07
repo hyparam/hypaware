@@ -25,6 +25,7 @@ import process from 'node:process'
 import { Attr, withSpan } from '../../observability/index.js'
 import { PromptCancelledError, select } from '../tui/index.js'
 import { isPromptBackError } from '../tui/runtime.js'
+import { RECOMMEND_LAUNCH_PROMPT, RECOMMEND_PROMPT_ID } from '../../query/first_ask_evidence.js'
 
 /**
  * The questions setup offers.
@@ -84,6 +85,15 @@ import { isPromptBackError } from '../tui/runtime.js'
  * @type {ReadonlyArray<{ id: string, label: string, prompt: string }>}
  */
 export const SUGGESTED_PROMPTS = Object.freeze([
+  {
+    // The one row whose launch is preceded by a gather (LLP 0388): the
+    // prompt names the folder because the client will be started inside
+    // it, and a question about "this folder" asked anywhere else would be
+    // wrong. The other rows remain plain prompts in the caller's cwd.
+    id: RECOMMEND_PROMPT_ID,
+    label: 'The one change worth making',
+    prompt: RECOMMEND_LAUNCH_PROMPT,
+  },
   {
     id: 'tokens',
     label: "Last week's biggest token spend",
@@ -398,14 +408,35 @@ export async function runWizardFirstAsk(opts) {
         // Say what is about to happen before the terminal stops being
         // ours: a client that takes ~2s to draw its first frame reads as
         // a hang if nothing announced it.
-        stdout.write(`\nStarting ${chosen.launcher.label}...\n\n`)
+        // The recommendation row gathers first and starts the client in
+        // the run directory that holds what it gathered. A gather that is
+        // unavailable or fails degrades to the plain prompt in the
+        // caller's directory: the question still makes sense there, it is
+        // just answered from SQL the client writes itself.
+        // @ref LLP 0388#run-directory [implements]: the client starts inside the evidence, never in the user's home
+        /** @type {string | undefined} */
+        let cwd
+        if (chosen.prompt.id === RECOMMEND_PROMPT_ID && opts.prepareEvidence) {
+          try {
+            const evidence = await opts.prepareEvidence()
+            if (evidence) {
+              cwd = evidence.dir
+              span.setAttribute('evidence_routes', evidence.routes.join('+') || 'none')
+            }
+          } catch (err) {
+            span.setAttribute('evidence_error', err instanceof Error ? err.name : 'unknown')
+            opts.stderr?.write(`Could not gather evidence first (${err instanceof Error ? err.message : 'error'}); starting on the question alone.\n`)
+          }
+        }
+        stdout.write(`\nStarting ${chosen.launcher.label}${cwd ? ` in ${cwd}` : ''}...\n\n`)
         const result = await launchClient({
           launcher: chosen.launcher,
           prompt: chosen.prompt.prompt,
           env,
-          // No cwd override: the client starts where the user ran `hyp
-          // ask`, which is the boundary that made this a separate command
+          // Every other row keeps the caller's cwd: where the client starts
+          // is the boundary that made this a separate command
           // (`@ref LLP 0198#onboarding-list`).
+          ...(cwd ? { cwd } : {}),
           ...(opts.spawnFn ? { spawnFn: opts.spawnFn } : {}),
         })
         if (!result.ok) {

@@ -223,3 +223,60 @@ export interface TimestampScope {
   /** The enclosing select's scope, for a correlated reference; absent at the top level. */
   outer?: TimestampScope
 }
+
+/** One of the four kinds of change the recommendation ask can propose (LLP 0388). */
+export type FirstAskRoute = 'sink' | 'skill' | 'subagent' | 'rule'
+
+/** The triage signals, one per route, plus the record size. */
+export interface FirstAskSignals {
+  record: { sessions: number; sessionDays: number }
+  sink: {
+    /** Share of all context tokens that is excess on reopened days. */
+    share: number
+    excess: number
+    total: number
+    reopenedDays: number
+    /** Context tokens per output token on single-day sessions. */
+    fresh: number
+    /** The same on later days of multi-day sessions. */
+    reopened: number
+    continueTyped: number
+    continueSessions: number
+  }
+  skill?: {
+    line: string
+    sessions: number
+    days: number
+    typed: number
+    others: { line: string; sessions: number; days: number }[]
+  }
+  rule?: {
+    head: string
+    tool: string
+    sessions: number
+    n: number
+    others: { head: string; sessions: number }[]
+  }
+  subagent: {
+    heavyDays: number
+    noDispatchDays: number
+    inlineReads: number
+    dispatches: number
+  }
+}
+
+/** A file written into the run directory. */
+export interface FirstAskEvidenceFile {
+  name: string
+  content: string
+}
+
+/** What `prepareFirstAskEvidence` produced. */
+export interface FirstAskEvidence {
+  /** The run directory the client is started in. */
+  dir: string
+  from: string
+  routes: FirstAskRoute[]
+  signals: FirstAskSignals
+  files: string[]
+}

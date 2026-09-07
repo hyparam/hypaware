@@ -423,3 +423,75 @@ test('every suggested label fits a narrow terminal without wrapping', async () =
   const tooLong = SUGGESTED_PROMPTS.filter((p) => p.label.length > 72)
   assert.deepEqual(tooLong.map((p) => `${p.id} (${p.label.length} cols)`), [])
 })
+
+test('runWizardFirstAsk: the recommendation row gathers first and starts the client in the run directory', async () => {
+  // @ref LLP 0388#run-directory [tests]: the client starts inside the evidence, on the folder-relative prompt
+  const stdout = makeBuf()
+  const spawner = recordingSpawn()
+  const chooser = selectReturning('recommend')
+  let gathered = 0
+  const result = await runWizardFirstAsk({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    stdout,
+    env: {},
+    interactive: true,
+    resolve: async () => '/usr/local/bin/claude',
+    spawnFn: spawner.fn,
+    select: chooser.fn,
+    prepareEvidence: async () => {
+      gathered += 1
+      return { dir: '/hyp/ask/20260907T050000Z', from: '2026-08-08', routes: ['sink'], files: ['ASK.md'], signals: /** @type {any} */ ({}) }
+    },
+  })
+  assert.equal(gathered, 1)
+  assert.deepEqual(result, { launched: true, client: 'claude', promptId: 'recommend', exitCode: 0 })
+  assert.equal(spawner.calls[0].opts.cwd, '/hyp/ask/20260907T050000Z')
+  assert.match(spawner.calls[0].args[0], /Read ASK\.md first/)
+  assert.match(stdout.text(), /Starting Claude Code in \/hyp\/ask\/20260907T050000Z/)
+})
+
+test('runWizardFirstAsk: a failed gather degrades to the plain prompt in the caller\'s directory', async () => {
+  // @ref LLP 0388#run-directory [tests]: the gather is a courtesy, never a gate on the launch
+  const stdout = makeBuf()
+  const stderr = makeBuf()
+  const spawner = recordingSpawn()
+  const chooser = selectReturning('recommend')
+  const result = await runWizardFirstAsk({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    stdout,
+    stderr,
+    env: {},
+    interactive: true,
+    resolve: async () => '/usr/local/bin/claude',
+    spawnFn: spawner.fn,
+    select: chooser.fn,
+    prepareEvidence: async () => { throw new Error('cache locked') },
+  })
+  assert.equal(result.launched, true)
+  assert.equal(spawner.calls[0].opts.cwd, undefined)
+  assert.match(stderr.text(), /Could not gather evidence first \(cache locked\)/)
+})
+
+test('runWizardFirstAsk: the other rows never gather, even when a gather is available', async () => {
+  const spawner = recordingSpawn()
+  const tokens = SUGGESTED_PROMPTS.find((p) => p.id === 'tokens')
+  assert.ok(tokens)
+  const chooser = selectReturning(tokens.id)
+  let gathered = 0
+  await runWizardFirstAsk({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    stdout: makeBuf(),
+    env: {},
+    interactive: true,
+    resolve: async () => '/usr/local/bin/claude',
+    spawnFn: spawner.fn,
+    select: chooser.fn,
+    prepareEvidence: async () => { gathered += 1; return undefined },
+  })
+  assert.equal(gathered, 0)
+  assert.equal(spawner.calls[0].opts.cwd, undefined)
+  assert.deepEqual(spawner.calls[0].args, [tokens.prompt])
+})

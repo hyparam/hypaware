@@ -4,7 +4,11 @@ import { collectHypAwareStatus } from '../daemon/status.js'
 import { buildWalkthroughClientDescriptorMap } from '../cli/walkthrough.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { isTty } from '../cli/stdio.js'
+import os from 'node:os'
+import path from 'node:path'
+
 import { OVERVIEW_DATASET, OVERVIEW_PROBE_SQL, overviewRunnerFromCtx } from '../query/overview.js'
+import { prepareFirstAskEvidence } from '../query/first_ask_evidence.js'
 import {
   SUGGESTED_PROMPTS,
   launchClient,
@@ -16,6 +20,7 @@ import {
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
+ * @import { FirstAskEvidence } from '../../../src/core/query/types.js'
  */
 
 /**
@@ -83,6 +88,7 @@ export async function runAsk(argv, ctx) {
     interactive: isTty(ctx.stdout) && isTty(ctx.stdin),
     ...(hasRows === undefined ? {} : { hasRows }),
     ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+    prepareEvidence: () => prepareEvidenceFromCtx(ctx),
   })
   // `no-launcher` is the one outcome that is a failed invocation rather
   // than a choice: the user asked for the menu and there is nothing to
@@ -90,6 +96,31 @@ export async function runAsk(argv, ctx) {
   // cache are all 0 - in the last case nothing is broken, there is just
   // no history yet.
   return outcome.launched === false && outcome.reason === 'no-launcher' ? 1 : 0
+}
+
+/**
+ * The recommendation row's gather (LLP 0388), run in-process against the
+ * same runner the overview uses. Run directories live under
+ * `<HYP_HOME>/ask/`, a HypAware-owned place rather than the user's home
+ * or wherever `hyp ask` happened to be typed, because the client is
+ * started inside the directory and its transcript, cwd, and any test
+ * file it writes belong to this ask.
+ *
+ * @ref LLP 0388#run-directory [implements]: HYP_HOME owns the ask, not the caller's cwd
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<FirstAskEvidence | undefined>}
+ */
+async function prepareEvidenceFromCtx(ctx) {
+  const runner = overviewRunnerFromCtx(ctx)
+  if (!runner || !runner.hasDataset(OVERVIEW_DATASET)) return undefined
+  const homeDir = ctx.env.HOME || os.homedir()
+  const hypHome = ctx.env.HYP_HOME || path.join(homeDir, '.hyp')
+  return prepareFirstAskEvidence({
+    runner,
+    root: path.join(hypHome, 'ask'),
+    homeDir,
+    say: (line) => ctx.stdout.write(`${line}\n`),
+  })
 }
 
 /**

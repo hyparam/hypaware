@@ -1,7 +1,7 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { CollectStatusOptions, HypAwareStatusReport } from '../../daemon/types.d.ts'
-import type { OverviewQueryRunner } from '../../query/types.d.ts'
+import type { FirstAskEvidence, OverviewQueryRunner } from '../../query/types.d.ts'
 import type { LoginOutcomeReason } from '../../remote/types.d.ts'
 import type { ClientDescriptor, PickerDescriptor, PluginCatalog } from '../../types.d.ts'
 import type { FolderAskMode } from '../../usage-policy/types.d.ts'
@@ -684,8 +684,13 @@ export interface RunWizardFirstAskOptions {
    * which never withholds the offer.
    */
   hasRows?: boolean
-  /** Working directory the client is started in; defaults to the caller's. */
   stdin?: NodeJS.ReadableStream
+  /**
+   * Gathers the recommendation ask's evidence into a run directory and
+   * returns it (LLP 0388). Absent or failing, the question launches as a
+   * plain prompt in the caller's directory, like every other row.
+   */
+  prepareEvidence?: () => Promise<FirstAskEvidence | undefined>
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream
   /** Test seams; production callers pass none of these. */
