@@ -262,6 +262,12 @@ export interface FirstAskSignals {
     noDispatchDays: number
     inlineReads: number
     dispatches: number
+    /** Estimated tokens re-sent because reads happened inline on no-dispatch heavy days. */
+    inlineCost: number
+    /** That cost as a share of all context tokens, the sink's currency. */
+    costShare: number
+    /** The task that recurs across those sessions, without which the route cannot be chosen. */
+    recurring?: { kind: 'brief' | 'line'; text: string; sessions: number }
   }
 }
 

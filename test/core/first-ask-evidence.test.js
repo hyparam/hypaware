@@ -46,6 +46,7 @@ test('triageSql: every statement excludes the duplicate OTEL lane and is bounded
   }
   assert.ok(sql.skill.includes("user_type in ('external', 'user')"), 'the typed-line signal keeps Codex human turns and drops guardian reviews')
   assert.ok(sql.skill.includes('limit 8'))
+  assert.ok(sql.rule.includes("not like 'This Bash command contains multiple operations%'"), 'permission prompts are not agent mistakes')
 })
 
 test('computeSignals: reopened days are measured against the fresh ratio', () => {
@@ -78,12 +79,18 @@ test('chooseRoutes: below every floor is none; the largest multiple wins; a near
 
   const s = quietSignals()
   s.sink.share = 0.157
+  s.subagent.costShare = 0.40
   s.subagent.noDispatchDays = 136
-  // sink 1.57x its floor, subagent 6.8x: subagent alone
+  // Inline reading at four times the sink's share, but no recurring task:
+  // nothing a person can add would change it, so the sink wins alone.
+  assert.deepEqual(chooseRoutes(s), ['sink'])
+  s.subagent.recurring = { kind: 'line', text: 'review the pr for memory or cpu pain points', sessions: 4 }
+  // With a request that recurs, the same cost is 4x its floor against the sink's 1.57x.
   assert.deepEqual(chooseRoutes(s), ['subagent'])
 
   const t = quietSignals()
-  t.subagent.noDispatchDays = 44   // 2.2x
+  t.subagent.costShare = 0.22   // 2.2x
+  t.subagent.recurring = { kind: 'brief', text: 'Audit one collection path', sessions: 3 }
   t.rule = { head: 'x', tool: 'Bash', sessions: 9, n: 20, others: [] }   // 1.8x, within a fifth of 2.2x
   assert.deepEqual(chooseRoutes(t), ['subagent', 'rule'])
 
@@ -92,6 +99,25 @@ test('chooseRoutes: below every floor is none; the largest multiple wins; a near
   u.skill = { line: 'commit on appropriate branch', sessions: 15, days: 10, typed: 17, others: [] }
   assert.deepEqual(chooseRoutes(u), ['skill'])
   assert.equal(ROUTE_FLOORS.sink, 0.10)
+  assert.equal(ROUTE_FLOORS.subagent, ROUTE_FLOORS.sink, 'the two token routes share a floor so they compare')
+})
+
+test('computeSignals: inline reading is costed in tokens and needs a recurring task to count', () => {
+  const s = computeSignals({
+    sink: [{ session_id: 'a', date: '2026-08-10', ctx: 1_000_000, outp: 1000 }],
+    cont: [],
+    skill: [],
+    rule: [],
+    // 400 KB of results over 20 turns: 100k tokens re-sent for ~10 turns
+    subagent: [{ session_id: 'a', date: '2026-08-10', reads: 60, dispatches: 0, calls: 80, turns: 20, result_bytes: 400_000 }],
+    briefs: [{ brief: 'Audit one collection path', sessions: 3 }],
+    recurring: [],
+  })
+  assert.equal(s.subagent.inlineCost, 1_000_000)
+  assert.equal(s.subagent.costShare, 1)
+  assert.deepEqual(s.subagent.recurring, { kind: 'brief', text: 'Audit one collection path', sessions: 3 })
+  const typed = computeSignals({ sink: [], cont: [], skill: [], rule: [], subagent: [], briefs: [{ brief: 'x', sessions: 3 }], recurring: [{ line: 'check this pr for cpu pain points', sessions: 4 }] })
+  assert.equal(typed.subagent.recurring?.kind, 'line', 'a typed request outranks a brief as the recurring task')
 })
 
 test('renderTriage: the record line comes first and the applied rule names the route', () => {
@@ -145,7 +171,7 @@ test('askInstructions: route, files, and the answer shape the reader gets', () =
   assert.ok(text.includes('`session_days.tsv`'))
   assert.ok(text.includes('Line 1: the recommendation'))
   assert.ok(text.includes('Under 110 words before the code block'))
-  assert.ok(!text.includes('—'), 'no em dashes')
+  assert.ok(!text.includes('\u2014'), 'no em dashes')
   const none = askInstructions([], { scope: 'this machine', files: ['triage.txt'] })
   assert.ok(none.includes('Route: none.'))
 })
@@ -175,12 +201,16 @@ test('prepareFirstAskEvidence: writes the run directory, only the chosen route, 
     hasDataset: () => true,
     async run(sql) {
       seen.push(sql)
-      // The route's heavy-day table is checked before the triage probe,
-      // which shares its dispatch clause.
-      if (sql.includes('as result_bytes')) return { columns: [], rows: [{ s: 'a0000001', date: '2026-08-20', client: 'claude', calls: 60, read_calls: 50, shell_calls: 5, edit_calls: 0, dispatches: 0, result_bytes: 204800 }] }
-      // Triage: a strong subagent signal and nothing else.
-      if (sql.includes("tool_name = 'Agent') as dispatches")) {
-        return { columns: [], rows: Array.from({ length: 25 }, (_, i) => ({ session_id: `s${i}`, date: '2026-08-20', reads: 50, dispatches: 0, calls: 60 })) }
+      // The route's heavy-day table carries the client column; the triage
+      // probe carries turns. Both carry result bytes.
+      if (sql.includes('max(client_name) as client')) return { columns: [], rows: [{ s: 'a0000001', date: '2026-08-20', client: 'claude', calls: 60, read_calls: 50, shell_calls: 5, edit_calls: 0, dispatches: 0, result_bytes: 204800 }] }
+      // Triage: inline reading worth all of the context, on days that share one typed request.
+      if (sql.includes('as turns')) {
+        return { columns: [], rows: Array.from({ length: 25 }, (_, i) => ({ session_id: `a000000${i % 4}`, date: `2026-08-${10 + i}`, reads: 50, dispatches: 0, calls: 60, turns: 20, result_bytes: 400_000 })) }
+      }
+      if (sql.includes('as ctx')) return { columns: [], rows: [{ session_id: 'a0000001', date: '2026-08-10', ctx: 1_000_000, outp: 1000 }] }
+      if (sql.includes('having count(distinct session_id) >= 3 order by sessions desc limit 3') && sql.includes('as line')) {
+        return { columns: [], rows: [{ line: 'check this pr for cpu pain points', sessions: 4 }] }
       }
       if (sql.includes('as brief')) return { columns: [], rows: [] }
       if (sql.includes("in ('a0000001')")) return { columns: [], rows: [{ s: 'a0000001', date: '2026-08-20', i: 0, line: 'find every place we parse dates' }] }
@@ -204,8 +234,9 @@ test('prepareFirstAskEvidence: writes the run directory, only the chosen route, 
   assert.equal(kept.length, EVIDENCE_RUNS_KEPT)
   assert.ok(!kept.includes('20260801T000000Z'), 'the oldest run was pruned')
   assert.ok(kept.includes('20260907T050000Z'))
-  // Only the five triage statements ran before the route was chosen.
-  assert.equal(seen.filter((q) => q.includes("part_type = 'tool_call'") && q.includes('having count(*) >= 40')).length, 1)
+  // The triage probe ran once and the route's own gather once.
+  assert.equal(seen.filter((q) => q.includes('as turns')).length, 1)
+  assert.equal(seen.filter((q) => q.includes('max(client_name) as client')).length, 1)
 })
 
 test('pruneRuns: a missing root is not an error', async () => {

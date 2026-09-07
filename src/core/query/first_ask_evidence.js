@@ -30,6 +30,9 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 
+import { compareStrings } from '../util/compare_strings.js'
+import { groupThousands } from '../util/format_number.js'
+
 /** The suggested-prompt id whose launch is preceded by the gather. */
 export const RECOMMEND_PROMPT_ID = 'recommend'
 
@@ -57,6 +60,22 @@ const HUMAN_TURN = [
   "content_text not like 'From my HypAware history%'",
 ].join(' and ')
 
+/**
+ * Tool results that are the harness asking a person, not a tool failing.
+ * Left in, they dominate the rule signal on any machine that runs
+ * non-interactive sessions with an allowlist, and none of them is a
+ * mistake an instruction could prevent.
+ */
+const NOT_PERMISSION_PROMPT = [
+  "content_text not like 'The user doesn%'",
+  "content_text not like 'Permission for this action%'",
+  "content_text not like 'This Bash command contains multiple operations%'",
+  "content_text not like 'This command requires approval%'",
+  "content_text not like 'Claude requested permissions%'",
+  "content_text not like '%was blocked. For security%'",
+  "content_text not like '%cannot be auto-allowed%'",
+].join(' and ')
+
 const USAGE_CTX = [
   "coalesce(cast(json_extract(attributes, '$.usage.input_tokens') as bigint), 0)",
   "coalesce(cast(json_extract(attributes, '$.usage.cache_read_tokens') as bigint), 0)",
@@ -79,7 +98,16 @@ const USAGE_OUT = "coalesce(cast(json_extract(attributes, '$.usage.output_tokens
 export const ROUTE_FLOORS = Object.freeze({
   sink: 0.10,
   skill: { sessions: 10, days: 5 },
-  subagent: 20,
+  /**
+   * Estimated re-sent cost of inline reading on heavy days with no
+   * dispatch, as a share of all context tokens: the same currency as the
+   * sink, so the two compare. The route also needs a recurring task (a
+   * typed line or a brief seen in 3+ sessions), because "delegate more"
+   * is not a change a person can make; a named worker for a request they
+   * already type is.
+   */
+  subagent: 0.10,
+  subagentRecurring: 3,
   rule: 5,
 })
 
@@ -104,15 +132,16 @@ export function windowStart(now, days = EVIDENCE_WINDOW_DAYS) {
  * Every statement is bounded: an aggregate, or a `limit`ed list.
  *
  * @param {string} from
- * @returns {Record<'sink' | 'cont' | 'skill' | 'rule' | 'subagent', string>}
+ * @returns {Record<'sink' | 'cont' | 'skill' | 'rule' | 'subagent' | 'briefs', string>}
  */
 export function triageSql(from) {
   return {
     sink: `select session_id, date, sum(${USAGE_CTX}) as ctx, sum(${USAGE_OUT}) as outp from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2`,
     cont: `select count(*) as typed, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and lower(content_text) like 'continue from where you left off%'`,
     skill: `select lower(substr(content_text, 1, 42)) as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and ${HUMAN_TURN} and lower(content_text) not like 'continue from where you left off%' and length(content_text) between 12 and 160 group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 order by sessions desc limit 8`,
-    rule: `select tool_name, substr(content_text, 1, 80) as head, count(*) as n, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and part_type = 'tool_result' and is_error and ${NOT_DUPLICATE_LANE} and content_text not like 'The user doesn%' and content_text not like 'Permission for this action%' group by 1, 2 having count(distinct session_id) >= 3 order by sessions desc limit 8`,
-    subagent: `select session_id, date, count(*) filter (where tool_name in ('Read', 'Grep', 'Glob')) as reads, count(*) filter (where tool_name = 'Agent') as dispatches, count(*) as calls from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} group by 1, 2 having count(*) >= 40`,
+    rule: `select tool_name, substr(content_text, 1, 80) as head, count(*) as n, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and part_type = 'tool_result' and is_error and ${NOT_DUPLICATE_LANE} and ${NOT_PERMISSION_PROMPT} group by 1, 2 having count(distinct session_id) >= 3 order by sessions desc limit 8`,
+    subagent: `select session_id, date, count(*) filter (where part_type = 'tool_call' and tool_name in ('Read', 'Grep', 'Glob')) as reads, count(*) filter (where part_type = 'tool_call' and tool_name = 'Agent') as dispatches, count(*) filter (where part_type = 'tool_call') as calls, count(*) filter (where part_type = 'text' and role = 'assistant') as turns, sum(length(content_text)) filter (where part_type = 'tool_result') as result_bytes from ai_gateway_messages where date >= '${from}' and ${NOT_DUPLICATE_LANE} and (part_type in ('tool_call', 'tool_result') or (part_type = 'text' and role = 'assistant')) group by 1, 2 having count(*) filter (where part_type = 'tool_call') >= 40`,
+    briefs: `select substr(regexp_extract(cast(tool_args as varchar), '"description"\\s*:\\s*"([^"]{1,60})', 1), 1, 60) as brief, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and tool_name = 'Agent' and ${NOT_DUPLICATE_LANE} group by 1 having count(distinct session_id) >= ${ROUTE_FLOORS.subagentRecurring} order by sessions desc limit 3`,
   }
 }
 
@@ -126,6 +155,8 @@ export function triageSql(from) {
  *   skill: Record<string, unknown>[],
  *   rule: Record<string, unknown>[],
  *   subagent: Record<string, unknown>[],
+ *   briefs?: Record<string, unknown>[],
+ *   recurring?: Record<string, unknown>[],
  * }} rows
  * @returns {FirstAskSignals}
  */
@@ -168,6 +199,18 @@ export function computeSignals(rows) {
   const topRule = rows.rule[0]
   const heavy = rows.subagent
   const noDispatch = heavy.filter((r) => num(r.dispatches) === 0)
+  // Re-sent cost of inline reading, estimated: a result read into context
+  // is sent again on every later turn, so on average for half the turns
+  // of its day. Four bytes per token is the usual English ratio and is
+  // stated as an estimate wherever the number is printed.
+  let inlineCost = 0
+  for (const r of noDispatch) inlineCost += (num(r.result_bytes) / 4) * (num(r.turns) / 2)
+  const brief = (rows.briefs ?? [])[0]
+  const line = (rows.recurring ?? [])[0]
+  /** @type {{ kind: 'brief' | 'line', text: string, sessions: number } | undefined} */
+  let recurring
+  if (line && num(line.sessions) >= ROUTE_FLOORS.subagentRecurring) recurring = { kind: 'line', text: String(line.line ?? ''), sessions: num(line.sessions) }
+  else if (brief && num(brief.sessions) >= ROUTE_FLOORS.subagentRecurring) recurring = { kind: 'brief', text: String(brief.brief ?? ''), sessions: num(brief.sessions) }
   return {
     record: { sessions: bySession.size, sessionDays },
     sink: {
@@ -191,6 +234,9 @@ export function computeSignals(rows) {
       noDispatchDays: noDispatch.length,
       inlineReads: noDispatch.reduce((a, r) => a + num(r.reads), 0),
       dispatches: heavy.reduce((a, r) => a + num(r.dispatches), 0),
+      inlineCost,
+      costShare: total > 0 ? inlineCost / total : 0,
+      recurring,
     },
   }
 }
@@ -212,7 +258,9 @@ export function chooseRoutes(s) {
   if (s.skill && s.skill.sessions >= ROUTE_FLOORS.skill.sessions && s.skill.days >= ROUTE_FLOORS.skill.days) {
     scored.push({ route: 'skill', score: s.skill.sessions / ROUTE_FLOORS.skill.sessions })
   }
-  if (s.subagent.noDispatchDays >= ROUTE_FLOORS.subagent) scored.push({ route: 'subagent', score: s.subagent.noDispatchDays / ROUTE_FLOORS.subagent })
+  if (s.subagent.costShare >= ROUTE_FLOORS.subagent && s.subagent.recurring) {
+    scored.push({ route: 'subagent', score: s.subagent.costShare / ROUTE_FLOORS.subagent })
+  }
   if (s.rule && s.rule.sessions >= ROUTE_FLOORS.rule) scored.push({ route: 'rule', score: s.rule.sessions / ROUTE_FLOORS.rule })
   if (scored.length === 0) return []
   const best = Math.max(...scored.map((x) => x.score))
@@ -243,11 +291,11 @@ export function renderTriage(s, routes, meta) {
     `          ${s.skill ? s.skill.others.map((o) => `${o.line.slice(0, 30)}: ${o.sessions}s/${o.days}d`).join('; ') : ''}`,
     `rule      ${s.rule ? `"${s.rule.head.slice(0, 60)}" in ${s.rule.sessions} sessions (${s.rule.n} times)` : 'no error recurs often enough (threshold 3 sessions)'}`,
     `          ${s.rule ? s.rule.others.map((o) => `${o.head.slice(0, 36)}: ${o.sessions}s`).join('; ') : ''}`,
-    `subagent  ${s.subagent.noDispatchDays} of ${s.subagent.heavyDays} heavy session-days (40+ calls) dispatched no subagent, ${fmt(s.subagent.inlineReads)} read-type calls inline`,
-    `          ${s.subagent.dispatches} dispatches total on the other ${s.subagent.heavyDays - s.subagent.noDispatchDays}`,
+    `subagent  ${(s.subagent.costShare * 100).toFixed(1)}% of all context tokens is the estimated re-sent cost of inline reading on heavy days with no dispatch`,
+    `          ${s.subagent.noDispatchDays} of ${s.subagent.heavyDays} heavy session-days (40+ calls) dispatched no subagent; ${s.subagent.dispatches} dispatches on the other ${s.subagent.heavyDays - s.subagent.noDispatchDays}; recurring task: ${s.subagent.recurring ? `"${s.subagent.recurring.text}" (${s.subagent.recurring.kind}, ${s.subagent.recurring.sessions} sessions)` : `none seen in ${ROUTE_FLOORS.subagentRecurring}+ sessions, so this route cannot be chosen`}`,
     '',
     '# Rule, as applied',
-    `Floors: sink ${(ROUTE_FLOORS.sink * 100).toFixed(0)}% share; skill ${ROUTE_FLOORS.skill.sessions}+ sessions on ${ROUTE_FLOORS.skill.days}+ days; subagent ${ROUTE_FLOORS.subagent}+ heavy days with no dispatch; rule ${ROUTE_FLOORS.rule}+ sessions.`,
+    `Floors: sink ${(ROUTE_FLOORS.sink * 100).toFixed(0)}% share; skill ${ROUTE_FLOORS.skill.sessions}+ sessions on ${ROUTE_FLOORS.skill.days}+ days; subagent ${(ROUTE_FLOORS.subagent * 100).toFixed(0)}% share and a task recurring in ${ROUTE_FLOORS.subagentRecurring}+ sessions; rule ${ROUTE_FLOORS.rule}+ sessions.`,
     'The largest multiple of its floor wins; any other route within a fifth of it on that scale runs too; ties fall to sink, skill, subagent, rule.',
     routes.length > 0 ? `Route chosen by HypAware: ${routes.join(' and ')}.` : 'Route chosen by HypAware: none. Every signal is below its floor.',
     '',
@@ -274,10 +322,23 @@ export function gatherSql(from) {
     sinkOpeners: `select substr(session_id, 1, 8) as s, date, message_index as i, cwd, substr(content_text, 1, 160) as line from ai_gateway_messages where date >= '${from}' and ${humanUser} and length(content_text) >= 12 and message_index <= 2 order by date, s, i`,
     skillLines: `select substr(session_id, 1, 8) as s, session_id, date, message_index as i, cwd, substr(content_text, 1, 200) as line from ai_gateway_messages where date >= '${from}' and ${humanUser} and length(content_text) >= 12 order by date, s, i`,
     ruleHeads: `select tool_name, substr(content_text, 1, 90) as head, count(*) as n, count(distinct session_id) as sessions, max(date) as last from ai_gateway_messages where date >= '${from}' and part_type = 'tool_result' and is_error and ${NOT_DUPLICATE_LANE} group by 1, 2 having count(*) >= 3 order by n desc limit 40`,
-    ruleContext: `select substr(session_id, 1, 8) as s, date, message_index as i, tool_name, substr(content_text, 1, 160) as err from ai_gateway_messages where date >= '${from}' and part_type = 'tool_result' and is_error and ${NOT_DUPLICATE_LANE} and content_text not like 'The user doesn%' and content_text not like 'Permission for this action%' order by date, s, i limit 2000`,
+    ruleContext: `select substr(session_id, 1, 8) as s, date, message_index as i, tool_name, substr(content_text, 1, 160) as err from ai_gateway_messages where date >= '${from}' and part_type = 'tool_result' and is_error and ${NOT_DUPLICATE_LANE} and ${NOT_PERMISSION_PROMPT} order by date, s, i limit 2000`,
     subagentHeavy: `select substr(session_id, 1, 8) as s, date, max(client_name) as client, count(*) filter (where part_type = 'tool_call') as calls, count(*) filter (where part_type = 'tool_call' and tool_name in ('Read', 'Grep', 'Glob')) as read_calls, count(*) filter (where part_type = 'tool_call' and tool_name in ('Bash', 'exec')) as shell_calls, count(*) filter (where part_type = 'tool_call' and tool_name in ('Edit', 'Write')) as edit_calls, count(*) filter (where part_type = 'tool_call' and tool_name = 'Agent') as dispatches, sum(length(content_text)) filter (where part_type = 'tool_result') as result_bytes from ai_gateway_messages where date >= '${from}' and ${NOT_DUPLICATE_LANE} and part_type in ('tool_call', 'tool_result') group by 1, 2 having count(*) filter (where part_type = 'tool_call') >= 40 order by result_bytes desc limit 40`,
     subagentBriefs: `select substr(regexp_extract(cast(tool_args as varchar), '"description"\\s*:\\s*"([^"]{1,60})', 1), 1, 60) as brief, substr(regexp_extract(cast(tool_args as varchar), '"subagent_type"\\s*:\\s*"([^"]{1,30})', 1), 1, 30) as type, count(*) as n, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and tool_name = 'Agent' and ${NOT_DUPLICATE_LANE} group by 1, 2 order by n desc limit 30`,
   }
+}
+
+/**
+ * The most repeated typed line across a named set of sessions, for the
+ * subagent route's recurring-task condition.
+ *
+ * @param {string} from
+ * @param {string[]} prefixes
+ * @returns {string}
+ */
+export function recurringLineSql(from, prefixes) {
+  const list = prefixes.map((p) => `'${p.replace(/[^0-9a-f]/g, '')}'`).join(', ')
+  return `select lower(substr(content_text, 1, 42)) as line, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and ${HUMAN_TURN} and lower(content_text) not like 'continue from where you left off%' and length(content_text) between 12 and 160 and substr(session_id, 1, 8) in (${list}) group by 1 having count(distinct session_id) >= ${ROUTE_FLOORS.subagentRecurring} order by sessions desc limit 3`
 }
 
 /**
@@ -418,6 +479,7 @@ ${files}
 - Any hook, script, or command you propose must be run once against a real input before it appears, and the answer shows the command and its output. A hook that reads a transcript is tried on a file under ~/.claude/projects/. Do not write outside this folder to do the test.
 - If a rule on the subject already exists in an on_disk.txt file, say so and why it did not work. The change is then a mechanism, not another sentence.
 - A rule in an instruction file can only change what the agent does after it is already running; it cannot stop a person from resuming a session or opening the wrong one. So for the sink route the change must be a hook, and an instruction-file block may only accompany it to say what the agent does once the hook has fired.
+- For the subagent route the change is an agent definition whose description opens with the recurring request as the person types it, so the lead picks it for that request. Never a hook, rule, or sentence that says to delegate more in general: when to delegate is the client's decision, and only a named worker for a request the person already makes changes it.
 - Discount session ids that carry identical typed lines on the same day as another id; that is one conversation recorded twice.
 - If the route is none: two sentences, what was recorded (sessions and days, from the record line of triage.txt) and that there is not enough yet to recommend anything. Then the Sources line and stop; no question.
 
@@ -592,7 +654,7 @@ export function sinkFiles(days, openers) {
   const tot = { single: [0, 0, 0], multi_first: [0, 0, 0], multi_later: [0, 0, 0] }
   const out = ['session\tdate\tday_no\tdays_total\tcontext_tokens\toutput_tokens\tctx_per_out\ttool_calls']
   for (const [s, list] of by) {
-    list.sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    list.sort((a, b) => compareStrings(String(a.date), String(b.date)))
     list.forEach((r, j) => {
       const k = list.length === 1 ? 'single' : (j === 0 ? 'multi_first' : 'multi_later')
       const t = tot[k]
@@ -684,7 +746,12 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
     skill: (await runner.run(t.skill)).rows,
     rule: (await runner.run(t.rule)).rows,
     subagent: (await runner.run(t.subagent)).rows,
+    briefs: (await runner.run(t.briefs)).rows,
+    /** @type {Record<string, unknown>[]} */
+    recurring: [],
   }
+  const quiet = rows.subagent.filter((r) => num(r.dispatches) === 0).map((r) => String(r.session_id ?? '').slice(0, 8)).filter(Boolean)
+  if (quiet.length > 0) rows.recurring = (await runner.run(recurringLineSql(from, [...new Set(quiet)].slice(0, 60)))).rows
   const signals = computeSignals(rows)
   const routes = chooseRoutes(signals)
   /** @type {FirstAskEvidenceFile[]} */
@@ -737,7 +804,7 @@ function num(v) {
 
 /** @param {number} n */
 function fmt(n) {
-  return Math.round(n).toLocaleString('en-US')
+  return groupThousands(Math.round(n))
 }
 
 /** @param {string} s */

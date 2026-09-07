@@ -62,10 +62,16 @@ Four signals are measured over the last 30 days, one per kind of change:
 |---|---|---|
 | sink | share of all context tokens that is excess on reopened days | 10% |
 | skill | most-typed human line, sessions on distinct days | 10 sessions on 5 days |
-| subagent | heavy session-days (40+ calls) that dispatched no subagent | 20 |
+| subagent | estimated re-sent cost of inline reading on heavy days with no dispatch, as a share of all context tokens, and only when a request or brief recurs in 3+ of those sessions | 10% |
 | rule | error head recurring across sessions | 5 sessions |
 
-Each qualifying signal is scored as a multiple of its floor; the largest
+The sink and subagent signals share a currency and a floor, so they
+compare directly: a count of heavy days does not, and a first version
+that scored days against tokens chose delegation on a machine whose
+measured loss was the reopened sessions. The subagent route also needs
+a recurring task, because when to delegate is the client's decision;
+the one lever a person holds is a named worker whose description matches
+a request they already make. Each qualifying signal is scored as a multiple of its floor; the largest
 wins; any other qualifying route within a fifth of it on that scale runs
 too; ties fall to the order above. Below every floor the route is none,
 and the answer says what was recorded and that it is not enough yet.

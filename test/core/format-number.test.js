@@ -98,7 +98,7 @@ const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
  * this file holds this array to the set of shipped modules that import
  * `groupThousands`, and a third importer reds until it is named here.
  */
-const COUNT_RENDERERS = ['src/core/commands/sync.js', 'src/core/query/overview.js']
+const COUNT_RENDERERS = ['src/core/commands/sync.js', 'src/core/query/overview.js', 'src/core/query/first_ask_evidence.js']
 
 /**
  * Every route from these modules to the host's own formatting.
