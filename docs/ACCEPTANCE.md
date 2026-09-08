@@ -1274,13 +1274,17 @@ two-layer drift detection this discharges),
   event never arrived, so neither row had a usage record to claim. LLP 0390's
   Consequences record that as unchanged pre-existing behavior, not the order
   flip, and step 7's `api_request` count is where to confirm it.
-- Step 9 reports it did not run (no row with both counts above zero) on a turn
-  you know called a tool: the scheduled transcript sweep committed the same
-  tool block first and the `part_id` dedupe dropped the OTEL lane's copy
-  (LLP 0389). The sweep writes `conversation_source = 'claude'` and this query
-  reads `claude_code`, so a sweep-owned row is invisible here rather than
-  doubled. Hold another tool-calling turn and run step 9 before the next sweep
-  fires.
+- Step 9 reports it did not run (no row with both counts above zero) on a
+  turn you know called a tool: the scheduled transcript sweep committed the
+  turn's blocks first and the `part_id` dedupe dropped the OTEL lane's
+  copies (LLP 0389). Sweep-first can win just the tool block, leaving the
+  `claude_code` row with `text_rows = 1` and `tool_rows = 0`, or it can win
+  both blocks, in which case the whole `request_id` group is missing from
+  the `claude_code` result set rather than merely under-counted. The sweep
+  writes `conversation_source = 'claude'` and this query reads
+  `claude_code`, so a sweep-owned row is invisible here rather than doubled
+  either way. Hold another tool-calling turn and run step 9 before the next
+  sweep fires.
 - Step 10 shows `[capture gap]` right after a healthy step 6: the transcript
   probe sees session files newer than the last event, usually because the
   daemon was down for part of the run. Re-run steps 5 and 10 against a daemon
