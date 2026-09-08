@@ -353,24 +353,29 @@ export async function runWizardFirstAsk(opts) {
         // Say what is about to happen before the terminal stops being
         // ours: a client that takes ~2s to draw its first frame reads as
         // a hang if nothing announced it.
-        // The recommendation row gathers first and starts the client in
-        // the run directory that holds what it gathered. A gather that is
-        // unavailable or fails degrades to the plain prompt in the
-        // caller's directory: the question still makes sense there, it is
-        // just answered from SQL the client writes itself.
-        // @ref LLP 0388#run-directory [implements]: the client starts inside the evidence, never in the user's home
+        // The gather runs to completion, every file on disk, before the
+        // client is spawned. No evidence means no launch: a client started
+        // on the bare question would answer it the cold way, which is the
+        // failure this ask exists to remove, so the run reports and stops.
+        // @ref LLP 0388#run-directory [implements]: the client starts inside the evidence, never before it and never without it
         /** @type {string | undefined} */
         let cwd
-        if (chosen.prompt.id === RECOMMEND_PROMPT_ID && opts.prepareEvidence) {
+        if (chosen.prompt.id === RECOMMEND_PROMPT_ID) {
           try {
-            const evidence = await opts.prepareEvidence()
+            const evidence = opts.prepareEvidence ? await opts.prepareEvidence() : undefined
             if (evidence) {
               cwd = evidence.dir
               span.setAttribute('evidence_routes', evidence.routes.join('+') || 'none')
             }
           } catch (err) {
             span.setAttribute('evidence_error', err instanceof Error ? err.name : 'unknown')
-            opts.stderr?.write(`Could not gather evidence first (${err instanceof Error ? err.message : 'error'}); starting on the question alone.\n`)
+            opts.stderr?.write(`Could not gather the evidence: ${err instanceof Error ? err.message : 'error'}\n`)
+          }
+          if (!cwd) {
+            span.setAttribute('status', 'skipped')
+            span.setAttribute('skip_reason', 'no-evidence')
+            opts.stderr?.write('Nothing was started: the question is answered from evidence HypAware gathers first, and none could be gathered. Check `hyp status`, then run `hyp ask` again.\n')
+            return { launched: false, reason: /** @type {const} */ ('no-evidence') }
           }
         }
         stdout.write(`\nStarting ${chosen.launcher.label}${cwd ? ` in ${cwd}` : ''}...\n\n`)

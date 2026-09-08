@@ -90,12 +90,12 @@ export async function runAsk(argv, ctx) {
     ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
     prepareEvidence: () => prepareEvidenceFromCtx(ctx),
   })
-  // `no-launcher` is the one outcome that is a failed invocation rather
-  // than a choice: the user asked for the menu and there is nothing to
+  // `no-launcher` and `no-evidence` are the outcomes that are a failed
+  // invocation rather than a choice: the user asked for the menu and there is nothing to
   // put in it. Declining, a piped run that printed the list, and an empty
   // cache are all 0 - in the last case nothing is broken, there is just
   // no history yet.
-  return outcome.launched === false && outcome.reason === 'no-launcher' ? 1 : 0
+  return outcome.launched === false && (outcome.reason === 'no-launcher' || outcome.reason === 'no-evidence') ? 1 : 0
 }
 
 /**

@@ -71,6 +71,9 @@ function recordingSpawn() {
 /** The list is editable content; tests anchor on its shape, never on an id. */
 const FIRST = SUGGESTED_PROMPTS[0]
 
+/** A gather that succeeds into a fixed folder (the launch needs one). */
+const fakeEvidence = async () => ({ dir: '/hyp/ask', from: '2026-08-08', routes: [/** @type {const} */ ('sink')], files: ['ASK.md'], signals: /** @type {any} */ ({}) })
+
 /** @param {string|number} value */
 function selectReturning(value) {
   /** @type {any[]} */
@@ -132,6 +135,7 @@ test('runWizardFirstAsk: a pick spawns the client with the question as argv', as
     resolve: async () => '/usr/local/bin/claude',
     spawnFn: spawner.fn,
     select: chooser.fn,
+    prepareEvidence: fakeEvidence,
   })
 
   assert.deepEqual(result, { launched: true, client: 'claude', promptId: FIRST.id, exitCode: 0 })
@@ -141,8 +145,8 @@ test('runWizardFirstAsk: a pick spawns the client with the question as argv', as
   assert.deepEqual(spawner.calls[0].args, [expected])
   // The child must own the terminal, or it draws over the ask menu's frame.
   assert.equal(spawner.calls[0].opts.stdio, 'inherit')
-  // No cwd is set: the client starts where the user ran the command.
-  assert.equal(spawner.calls[0].opts.cwd, undefined)
+  // The client starts inside the evidence folder, never the caller's directory.
+  assert.equal(spawner.calls[0].opts.cwd, '/hyp/ask')
   // Announced before the handoff: a client that takes a moment to draw
   // must not read as a hang.
   assert.match(stdout.text(), /Starting Claude Code/)
@@ -182,6 +186,7 @@ test('runWizardFirstAsk: every `{prompt}` slot in a manifest arg template is fil
     resolve: async () => '/bin/x',
     spawnFn: spawner.fn,
     select: selectReturning(FIRST.id).fn,
+    prepareEvidence: fakeEvidence,
   })
   assert.equal(result.launched, true)
   assert.deepEqual(spawner.calls[0].args.slice(0, 2), ['run', '--prompt'])
@@ -288,6 +293,7 @@ test('runWizardFirstAsk: an unknown row count never withholds the offer', async 
     resolve: async () => '/usr/local/bin/claude',
     spawnFn: spawner.fn,
     select: selectReturning(FIRST.id).fn,
+    prepareEvidence: fakeEvidence,
   })
   assert.equal(result.launched, true)
   assert.equal(spawner.calls.length, 1)
@@ -353,6 +359,7 @@ test('runWizardFirstAsk: a spawn failure degrades to the list, never a throw', a
     resolve: async () => '/usr/local/bin/claude',
     spawnFn: failing,
     select: selectReturning(FIRST.id).fn,
+    prepareEvidence: fakeEvidence,
   })
   assert.deepEqual(result, { launched: false, reason: 'spawn-failed' })
   assert.match(stderr.text(), /Could not start claude: ENOENT/)
@@ -393,6 +400,7 @@ test('runWizardFirstAsk: two launchable clients ask which one answers', async ()
     resolve: async (bin) => `/usr/local/bin/${bin}`,
     spawnFn: spawner.fn,
     select: chooser,
+    prepareEvidence: fakeEvidence,
   })
   assert.deepEqual(result, { launched: true, client: 'codex', promptId: FIRST.id, exitCode: 0 })
   assert.equal(specs.length, 1)
@@ -450,25 +458,30 @@ test('runWizardFirstAsk: the recommendation row gathers first and starts the cli
   assert.match(stdout.text(), /Starting Claude Code in \/hyp\/ask\/20260907T050000Z/)
 })
 
-test('runWizardFirstAsk: a failed gather degrades to the plain prompt in the caller\'s directory', async () => {
-  // @ref LLP 0388#run-directory [tests]: the gather is a courtesy, never a gate on the launch
-  const stdout = makeBuf()
-  const stderr = makeBuf()
-  const spawner = recordingSpawn()
-  const chooser = selectReturning('recommend')
-  const result = await runWizardFirstAsk({
-    clients: ['claude'],
-    descriptors: descriptors(),
-    stdout,
-    stderr,
-    env: {},
-    interactive: true,
-    resolve: async () => '/usr/local/bin/claude',
-    spawnFn: spawner.fn,
-    select: chooser.fn,
-    prepareEvidence: async () => { throw new Error('cache locked') },
-  })
-  assert.equal(result.launched, true)
-  assert.equal(spawner.calls[0].opts.cwd, undefined)
-  assert.match(stderr.text(), /Could not gather evidence first \(cache locked\)/)
+test('runWizardFirstAsk: a failed or absent gather refuses to launch', async () => {
+  // @ref LLP 0388#run-directory [tests]: no evidence, no launch; the cold answer is the failure this ask removes
+  for (const prepareEvidence of [
+    async () => { throw new Error('cache locked') },
+    async () => undefined,
+    undefined,
+  ]) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const spawner = recordingSpawn()
+    const result = await runWizardFirstAsk({
+      clients: ['claude'],
+      descriptors: descriptors(),
+      stdout,
+      stderr,
+      env: {},
+      interactive: true,
+      resolve: async () => '/usr/local/bin/claude',
+      spawnFn: spawner.fn,
+      select: selectReturning(FIRST.id).fn,
+      ...(prepareEvidence ? { prepareEvidence } : {}),
+    })
+    assert.deepEqual(result, { launched: false, reason: 'no-evidence' })
+    assert.equal(spawner.calls.length, 0)
+    assert.match(stderr.text(), /Nothing was started/)
+  }
 })

@@ -122,7 +122,10 @@ boundary, for this one row only. The reasons are specific to it:
 `hyp ask "<question>"` keeps the caller's directory. There is one
 folder, not one per run: the files exist so the client can read them
 during that session and nothing reads them afterwards, so the folder is
-wiped before each gather and never grows.
+wiped before each gather and never grows. The gather completes, every
+file on disk, before the client is spawned, and no evidence means no
+launch: a client started on the bare question would answer it the cold
+way, so the run says nothing was started and exits non-zero instead.
 
 <a id="answer-shape"></a>**The answer leads with the recommendation.**
 Line one is one plain sentence starting with a verb, naming the thing to

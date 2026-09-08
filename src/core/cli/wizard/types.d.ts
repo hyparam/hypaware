@@ -618,7 +618,7 @@ export interface FirstAskLauncher {
  */
 export type FirstAskResult =
   | { launched: true; client: string; promptId: string; exitCode?: number }
-  | { launched: false; reason: 'no-launcher' | 'not-interactive' | 'declined' | 'spawn-failed' | 'no-rows' | 'error' }
+  | { launched: false; reason: 'no-launcher' | 'not-interactive' | 'declined' | 'spawn-failed' | 'no-rows' | 'no-evidence' | 'error' }
 
 /**
  * The closing "send now" offer's outcome (LLP 0203).
