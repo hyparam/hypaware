@@ -2293,6 +2293,7 @@ async function runFinaleBackfill(args) {
       // No announce line for a sweep-backed provider: the spinner below
       // already says an import is running, and the sweep itself was
       // disclosed where it was enabled.
+      // @ref LLP 0391#decision [implements]: the finale's sweep disclosure is left to the pick, so this loop treats sweep-backed and asked providers alike
       for (const provider of toRun) {
         try {
           // Importing local history reads and writes potentially
@@ -2345,13 +2346,23 @@ async function runFinaleBackfill(args) {
  * run that wrote or skipped rows. A clean zero says so plainly instead of
  * printing a three-number scan report.
  *
+ * The one zero that is still news is a nonzero scan that wrote and skipped
+ * nothing. "no history on disk" and "history found and none of it imported"
+ * are different faults with different fixes (a wrong path or an unreadable
+ * home, against a projection or dedupe that swallowed every row), and on
+ * this surface the scan count is the only thing that tells them apart, so
+ * that arm keeps it.
+ *
  * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }} entry
  * @returns {string}
  */
 export function describeBackfillResult(entry) {
   if (!entry.ok) return `failed (scanned ${entry.scanned}, wrote ${entry.rowsWritten}, skipped ${entry.skipped})`
-  if (entry.rowsWritten === 0 && entry.skipped === 0) return 'nothing to import'
-  return `imported ${entry.rowsWritten} rows (scanned ${entry.scanned}, skipped ${entry.skipped})`
+  if (entry.rowsWritten === 0 && entry.skipped === 0) {
+    return entry.scanned === 0 ? 'nothing to import' : `nothing new to import (scanned ${entry.scanned})`
+  }
+  const rows = entry.rowsWritten === 1 ? 'row' : 'rows'
+  return `imported ${entry.rowsWritten} ${rows} (scanned ${entry.scanned}, skipped ${entry.skipped})`
 }
 
 /**

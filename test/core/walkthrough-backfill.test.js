@@ -6,7 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runPickerFinale, runPickerWalkthrough, WALKTHROUGH_CANCEL_EXIT_CODE } from '../../src/core/cli/walkthrough.js'
+import { describeBackfillResult, runPickerFinale, runPickerWalkthrough, WALKTHROUGH_CANCEL_EXIT_CODE } from '../../src/core/cli/walkthrough.js'
 import { PromptCancelledError } from '../../src/core/cli/tui/runtime.js'
 
 /** @import { BackfillFinaleResult } from '../../src/core/cli/types.js' */
@@ -489,7 +489,7 @@ test('a failing provider does not abort the other selected providers', async () 
 // the sweep-backed one runs its first import with a disclosure line.
 // @ref LLP 0180#decision [tests]: a sweep-backed provider is disclosed and
 // imported rather than asked, and only a cancel takes it down with the rest
-test('a sweep-backed provider is disclosed and runs even when consent is declined', async () => {
+test('a sweep-backed provider runs, unannounced, even when consent is declined', async () => {
   const env = await tmpEnv('hypaware-bf-sweep-declined-')
   const stdout = makeBuf()
   const stderr = makeBuf()
@@ -521,7 +521,10 @@ test('a sweep-backed provider is disclosed and runs even when consent is decline
   assert.match(stdout.text(), /backfill: skipped \(declined\)/)
   // The sweep announce line is gone (the spinner announces the run); the
   // result line is the evidence the sweep-backed import still happened.
-  assert.match(stdout.text(), /backfill openclaw: /)
+  // Matched in full, because the spinner's own label starts `backfill
+  // openclaw: ` too and a prefix match would pass with no result at all.
+  assert.match(stdout.text(), /backfill openclaw: nothing to import/)
+  assert.doesNotMatch(stdout.text(), /periodic sweep/)
 })
 
 test('an openclaw-only pick asks no backfill question but still runs the first import', async () => {
@@ -549,7 +552,9 @@ test('an openclaw-only pick asks no backfill question but still runs the first i
   assert.deepEqual(result.clientsPicked, ['openclaw'])
   assert.equal(consentAsked, 0, 'nothing askable: every picked provider is sweep-backed')
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
-  assert.match(stdout.text(), /backfill openclaw: /)
+  // Full match for the same reason as the declined case above.
+  assert.match(stdout.text(), /backfill openclaw: nothing to import/)
+  assert.doesNotMatch(stdout.text(), /periodic sweep/)
 })
 
 test('cancelling consent skips sweep-backed providers too', async () => {
@@ -794,4 +799,32 @@ test('a dry run without skipDaemonRestart still previews the restart', async () 
 
   assert.match(stdout.text(), /\(dry-run\) Would restart the daemon/)
   assert.deepEqual(summary.daemonRestart, { skipped: false, dryRun: true, ok: true })
+})
+
+test('the result line keeps the counts that carry news and drops the rest', () => {
+  // A clean empty scan is the quiet case the line exists for.
+  assert.equal(
+    describeBackfillResult({ ok: true, scanned: 0, rowsWritten: 0, skipped: 0 }),
+    'nothing to import'
+  )
+  // Sessions found and none imported is a different fault from none found,
+  // so the scan count survives the quieting.
+  assert.equal(
+    describeBackfillResult({ ok: true, scanned: 12, rowsWritten: 0, skipped: 0 }),
+    'nothing new to import (scanned 12)'
+  )
+  assert.equal(
+    describeBackfillResult({ ok: true, scanned: 3, rowsWritten: 5, skipped: 1 }),
+    'imported 5 rows (scanned 3, skipped 1)'
+  )
+  assert.equal(
+    describeBackfillResult({ ok: true, scanned: 1, rowsWritten: 1, skipped: 0 }),
+    'imported 1 row (scanned 1, skipped 0)'
+  )
+  // A failure reports everything: which half of the run got anywhere is
+  // exactly what the next step needs.
+  assert.equal(
+    describeBackfillResult({ ok: false, scanned: 4, rowsWritten: 0, skipped: 2 }),
+    'failed (scanned 4, wrote 0, skipped 2)'
+  )
 })
