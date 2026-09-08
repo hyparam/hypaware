@@ -63,7 +63,7 @@ Four signals are measured over the last 30 days, one per kind of change:
 | sink | share of all spend, cost-weighted, that is excess on reopened days | 10% |
 | skill | most-typed human line, sessions on distinct days | 10 sessions on 5 days |
 | subagent | estimated re-sent cost of inline reading on heavy days with no dispatch, priced as cache reads, as a share of all spend, and only when a request or brief recurs in 3+ of those sessions | 10% |
-| rule | error head recurring across sessions | 5 sessions |
+| rule | error head recurring across sessions and days, scored on the smaller multiple | 5 sessions on 3 days |
 
 Both token signals are measured in cost units, fresh input at 1, a cache
 read at 0.1, a cache write at 1.25, an output token at 5 (`PRICE_RATIO`),

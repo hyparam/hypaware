@@ -258,6 +258,7 @@ export interface FirstAskSignals {
     head: string
     tool: string
     sessions: number
+    days: number
     n: number
     others: { head: string; sessions: number }[]
   }

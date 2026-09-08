@@ -98,7 +98,7 @@ test('chooseRoutes: below every floor is none; the largest multiple wins; a near
   const t = quietSignals()
   t.subagent.costShare = 0.22   // 2.2x
   t.subagent.recurring = { kind: 'brief', text: 'Audit one collection path', sessions: 3 }
-  t.rule = { head: 'x', tool: 'Bash', sessions: 9, n: 20, others: [] }   // 1.8x, within a fifth of 2.2x
+  t.rule = { head: 'x', tool: 'Bash', sessions: 9, days: 6, n: 20, others: [] }   // min(1.8x, 2x) = 1.8x, within a fifth of 2.2x
   assert.deepEqual(chooseRoutes(t), ['subagent', 'rule'])
 
   const u = quietSignals()
@@ -107,6 +107,15 @@ test('chooseRoutes: below every floor is none; the largest multiple wins; a near
   assert.deepEqual(chooseRoutes(u), ['skill'])
   assert.equal(ROUTE_FLOORS.sink, 0.10)
   assert.equal(ROUTE_FLOORS.subagent, ROUTE_FLOORS.sink, 'the two token routes share a floor so they compare')
+
+  const burst = quietSignals()
+  burst.sink.share = 0.216   // 2.16x
+  burst.rule = { head: 'Column "type" not found', tool: 'Bash', sessions: 47, days: 5, n: 48, others: [] }
+  // 47 sessions is 9.4x, but 5 days is 1.67x; the smaller wins, so a one-day
+  // burst from an eval harness does not outrank a month of reopened sessions.
+  assert.deepEqual(chooseRoutes(burst), ['sink'])
+  burst.rule.days = 2
+  assert.deepEqual(chooseRoutes(burst), ['sink'], 'under the day floor the rule route is out entirely')
 })
 
 test('computeSignals: inline reading is costed in tokens and needs a recurring task to count', () => {
@@ -137,10 +146,10 @@ test('renderTriage: the record line comes first and the applied rule names the r
   assert.match(lines[2], /^record\s+3 sessions over 3 session-days/)
   assert.ok(text.includes('threshold 3 sessions on 3 days'), 'a missing signal names its threshold, not a count')
   assert.ok(text.includes('Route chosen by HypAware: none'))
-  s.rule = { head: 'Column "type" not found', tool: 'Bash', sessions: 11, n: 11, others: [] }
+  s.rule = { head: 'Column "type" not found', tool: 'Bash', sessions: 11, days: 5, n: 11, others: [] }
   const routed = renderTriage(s, ['sink', 'rule'], { from: '2026-08-08', scope: 'this machine' })
   assert.ok(routed.includes('Route chosen by HypAware: sink (reopened sessions:'))
-  assert.ok(routed.includes('Route chosen by HypAware: rule (a mistake that keeps recurring: "Column "type" not found" failed in 11 sessions (11 times).)'))
+  assert.ok(routed.includes('Route chosen by HypAware: rule (a mistake that keeps recurring: "Column "type" not found" failed in 11 sessions on 5 days (11 times).)'))
   assert.equal(describeRoute('skill', s), 'something you keep typing.')
 })
 

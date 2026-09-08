@@ -105,7 +105,7 @@ export const ROUTE_FLOORS = Object.freeze({
    */
   subagent: 0.10,
   subagentRecurring: 3,
-  rule: 5,
+  rule: { sessions: 5, days: 3 },
 })
 
 /**
@@ -154,7 +154,7 @@ export function describeRoute(route, s) {
         : `${ROUTE_LABELS.subagent}.`
     case 'rule':
       return s.rule
-        ? `${ROUTE_LABELS.rule}: "${s.rule.head.slice(0, 80)}" failed in ${s.rule.sessions} sessions (${s.rule.n} times).`
+        ? `${ROUTE_LABELS.rule}: "${s.rule.head.slice(0, 80)}" failed in ${s.rule.sessions} sessions on ${s.rule.days} days (${s.rule.n} times).`
         : `${ROUTE_LABELS.rule}.`
     default:
       return String(route)
@@ -186,7 +186,7 @@ export function triageSql(from) {
     sink: `select session_id, date, sum(${USAGE_CTX}) as ctx, sum(${USAGE_OUT}) as outp, sum(coalesce(cast(json_extract(attributes, '$.usage.input_tokens') as bigint), 0)) as inp, sum(coalesce(cast(json_extract(attributes, '$.usage.cache_read_tokens') as bigint), 0)) as cr, sum(coalesce(cast(json_extract(attributes, '$.usage.cache_write_tokens') as bigint), 0)) as cw from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2`,
     cont: `select count(*) as typed, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and lower(content_text) like 'continue from where you left off%'`,
     skill: `select lower(substr(content_text, 1, 42)) as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and ${HUMAN_TURN} and lower(content_text) not like 'continue from where you left off%' and length(content_text) between 12 and 160 group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 order by sessions desc limit 8`,
-    rule: `select tool_name, substr(content_text, 1, 80) as head, count(*) as n, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and part_type = 'tool_result' and is_error and ${NOT_DUPLICATE_LANE} and ${NOT_PERMISSION_PROMPT} group by 1, 2 having count(distinct session_id) >= 3 order by sessions desc limit 8`,
+    rule: `select tool_name, substr(content_text, 1, 80) as head, count(*) as n, count(distinct session_id) as sessions, count(distinct date) as days from ai_gateway_messages where date >= '${from}' and part_type = 'tool_result' and is_error and ${NOT_DUPLICATE_LANE} and ${NOT_PERMISSION_PROMPT} group by 1, 2 having count(distinct session_id) >= 3 order by sessions desc limit 8`,
     subagent: `select session_id, date, count(*) filter (where part_type = 'tool_call' and tool_name in ('Read', 'Grep', 'Glob')) as reads, count(*) filter (where part_type = 'tool_call' and tool_name = 'Agent') as dispatches, count(*) filter (where part_type = 'tool_call') as calls, count(*) filter (where part_type = 'text' and role = 'assistant') as turns, sum(length(content_text)) filter (where part_type = 'tool_result') as result_bytes from ai_gateway_messages where date >= '${from}' and ${NOT_DUPLICATE_LANE} and (part_type in ('tool_call', 'tool_result') or (part_type = 'text' and role = 'assistant')) group by 1, 2 having count(*) filter (where part_type = 'tool_call') >= 40`,
     briefs: `select substr(regexp_extract(cast(tool_args as varchar), '"description"\\s*:\\s*"([^"]{1,60})', 1), 1, 60) as brief, count(distinct session_id) as sessions from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and tool_name = 'Agent' and ${NOT_DUPLICATE_LANE} group by 1 having count(distinct session_id) >= ${ROUTE_FLOORS.subagentRecurring} order by sessions desc limit 3`,
   }
@@ -290,7 +290,7 @@ export function computeSignals(rows) {
       ? { line: String(topLine.line ?? ''), sessions: num(topLine.sessions), days: num(topLine.days), typed: num(topLine.typed), others: rows.skill.slice(1, 4).map((r) => ({ line: String(r.line ?? ''), sessions: num(r.sessions), days: num(r.days) })) }
       : undefined,
     rule: topRule
-      ? { head: oneLine(String(topRule.head ?? '')), tool: String(topRule.tool_name ?? ''), sessions: num(topRule.sessions), n: num(topRule.n), others: rows.rule.slice(1, 4).map((r) => ({ head: oneLine(String(r.head ?? '')), sessions: num(r.sessions) })) }
+      ? { head: oneLine(String(topRule.head ?? '')), tool: String(topRule.tool_name ?? ''), sessions: num(topRule.sessions), days: num(topRule.days), n: num(topRule.n), others: rows.rule.slice(1, 4).map((r) => ({ head: oneLine(String(r.head ?? '')), sessions: num(r.sessions) })) }
       : undefined,
     subagent: {
       heavyDays: heavy.length,
@@ -324,7 +324,13 @@ export function chooseRoutes(s) {
   if (s.subagent.costShare >= ROUTE_FLOORS.subagent && s.subagent.recurring) {
     scored.push({ route: 'subagent', score: s.subagent.costShare / ROUTE_FLOORS.subagent })
   }
-  if (s.rule && s.rule.sessions >= ROUTE_FLOORS.rule) scored.push({ route: 'rule', score: s.rule.sessions / ROUTE_FLOORS.rule })
+  // Sessions and days both have to clear their floor, and the score is the
+  // smaller multiple: 41 eval-harness sessions on one afternoon are one
+  // day's burst, not a habit, and must not outrank a month of reopened
+  // sessions.
+  if (s.rule && s.rule.sessions >= ROUTE_FLOORS.rule.sessions && s.rule.days >= ROUTE_FLOORS.rule.days) {
+    scored.push({ route: 'rule', score: Math.min(s.rule.sessions / ROUTE_FLOORS.rule.sessions, s.rule.days / ROUTE_FLOORS.rule.days) })
+  }
   if (scored.length === 0) return []
   const best = Math.max(...scored.map((x) => x.score))
   return PRECEDENCE.filter((route) => scored.some((x) => x.route === route && x.score >= best * 0.8))
@@ -353,13 +359,13 @@ export function renderTriage(s, routes, meta) {
     `          ${s.sink.reopenedDays} reopened session-days at ${s.sink.reopened.toFixed(0)} ctx/out vs ${s.sink.fresh.toFixed(0)} fresh; excess ${fmt(s.sink.excess)} of ${fmt(s.sink.total)}; "continue from where you left off" typed ${s.sink.continueTyped} times in ${s.sink.continueSessions} sessions`,
     `skill     ${s.skill ? `"${s.skill.line}" typed in ${s.skill.sessions} sessions on ${s.skill.days} days` : 'no typed line repeats often enough (threshold 3 sessions on 3 days)'}`,
     `          ${s.skill ? s.skill.others.map((o) => `${o.line.slice(0, 30)}: ${o.sessions}s/${o.days}d`).join('; ') : ''}`,
-    `rule      ${s.rule ? `"${s.rule.head.slice(0, 60)}" in ${s.rule.sessions} sessions (${s.rule.n} times)` : 'no error recurs often enough (threshold 3 sessions)'}`,
+    `rule      ${s.rule ? `"${s.rule.head.slice(0, 60)}" in ${s.rule.sessions} sessions on ${s.rule.days} days (${s.rule.n} times)` : 'no error recurs often enough (threshold 3 sessions)'}`,
     `          ${s.rule ? s.rule.others.map((o) => `${o.head.slice(0, 36)}: ${o.sessions}s`).join('; ') : ''}`,
     `subagent  ${(s.subagent.costShare * 100).toFixed(1)}% of all spend is the estimated re-sent cost of inline reading on heavy days with no dispatch (priced as cache reads)`,
     `          ${s.subagent.noDispatchDays} of ${s.subagent.heavyDays} heavy session-days (40+ calls) dispatched no subagent; ${s.subagent.dispatches} dispatches on the other ${s.subagent.heavyDays - s.subagent.noDispatchDays}; recurring task: ${s.subagent.recurring ? `"${s.subagent.recurring.text}" (${s.subagent.recurring.kind}, ${s.subagent.recurring.sessions} sessions)` : `none seen in ${ROUTE_FLOORS.subagentRecurring}+ sessions, so this route cannot be chosen`}`,
     '',
     '# Rule, as applied',
-    `Floors: sink ${(ROUTE_FLOORS.sink * 100).toFixed(0)}% share; skill ${ROUTE_FLOORS.skill.sessions}+ sessions on ${ROUTE_FLOORS.skill.days}+ days; subagent ${(ROUTE_FLOORS.subagent * 100).toFixed(0)}% share and a task recurring in ${ROUTE_FLOORS.subagentRecurring}+ sessions; rule ${ROUTE_FLOORS.rule}+ sessions.`,
+    `Floors: sink ${(ROUTE_FLOORS.sink * 100).toFixed(0)}% share; skill ${ROUTE_FLOORS.skill.sessions}+ sessions on ${ROUTE_FLOORS.skill.days}+ days; subagent ${(ROUTE_FLOORS.subagent * 100).toFixed(0)}% share and a task recurring in ${ROUTE_FLOORS.subagentRecurring}+ sessions; rule ${ROUTE_FLOORS.rule.sessions}+ sessions on ${ROUTE_FLOORS.rule.days}+ days, scored on the smaller of the two.`,
     'The largest multiple of its floor wins; any other route within a fifth of it on that scale runs too; ties fall to sink, skill, subagent, rule.',
     ...(routes.length > 0
       ? routes.map((r) => `Route chosen by HypAware: ${r} (${describeRoute(r, s)})`)
