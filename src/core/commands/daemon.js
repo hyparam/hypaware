@@ -301,7 +301,7 @@ export async function runDaemonRestart(argv, ctx) {
   if (!parsed.ok) return parsed.code
   if (parsed.params.processing === true) {
     const { readStatusFile } = await import('../daemon/status.js')
-    const { readPidFile, processIsAlive } = await import('../daemon/pid.js')
+    const { readPidFile, processIsAlive, processingStateRoot } = await import('../daemon/pid.js')
     const { writeControlRequest } = await import('../daemon/control.js')
     const stateRoot = readObservabilityEnv(ctx.env).stateDir
     const status = readStatusFile(stateRoot)
@@ -310,7 +310,7 @@ export async function runDaemonRestart(argv, ctx) {
       ctx.stderr.write('hyp daemon restart --processing: no supervised processing daemon is running\n')
       return 1
     }
-    writeControlRequest(path.join(stateRoot, 'processing', 'supervisor'), 'stop')
+    writeControlRequest(path.join(processingStateRoot(stateRoot), 'supervisor'), 'stop')
     ctx.stdout.write('processing: restart requested; gateway forwarding continues\n')
     return 0
   }

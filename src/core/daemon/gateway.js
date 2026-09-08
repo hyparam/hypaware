@@ -9,7 +9,7 @@ import { bootKernel } from '../runtime/boot.js'
 import { cacheTablePath } from '../cache/paths.js'
 import { installObservability } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { clearPidFile, processIsAlive, readPidFile, writePidFile } from './pid.js'
+import { clearPidFile, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
 import { DAEMON_HEARTBEAT_STALE_MS, daemonHeartbeatAgeMs, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
 import { openDaemonLog } from './logs.js'
@@ -45,7 +45,7 @@ export async function runGatewayDaemon(opts = {}) {
   const env = opts.env ?? process.env
   const hypHome = opts.hypHome ?? readObservabilityEnv(env).hypHome
   const stateRoot = path.join(hypHome, 'hypaware')
-  const processingRoot = path.join(stateRoot, 'processing')
+  const processingRoot = processingStateRoot(stateRoot)
   const processingControlRoot = path.join(processingRoot, 'supervisor')
   const cacheRoot = path.join(stateRoot, 'cache')
   const startedAt = new Date().toISOString()

@@ -21,6 +21,20 @@ export function daemonRunDir(stateRoot) {
 }
 
 /**
+ * Resolve the state root the supervised processing daemon keeps its own
+ * runtime files under: `<HYP_HOME>/hypaware/processing`. Its pid, status,
+ * control and log paths are the ordinary ones rooted here, so a reader that
+ * wants the processor's copy of one derives it through this rather than
+ * repeating the segment. The gateway keeps the primary state root.
+ *
+ * @ref LLP 0038#lifecycle-and-operator-behavior [implements]: the processor's runtime files live below `hypaware/processing`
+ * @param {string} stateRoot
+ */
+export function processingStateRoot(stateRoot) {
+  return path.join(stateRoot, 'processing')
+}
+
+/**
  * Path to the PID file. There is exactly one daemon per `HYP_HOME`,
  * so a single fixed filename keeps `daemon stop` / `daemon status`
  * simple.

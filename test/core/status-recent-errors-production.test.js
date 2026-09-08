@@ -444,3 +444,32 @@ test('a dev-telemetry file smaller than the tail keeps its first record', async 
   const report = await collectHypAwareStatus(collectOpts(hypHome))
   assert.equal(report.recentErrorCount, 1, 'the first line of a short file is a whole record')
 })
+
+// The same defect one process boundary later. LLP 0038 moved every source,
+// sink, maintenance and config failure into the supervised processing child,
+// which appends to its own `daemon.log` below `processing/`. A counter that
+// read only the gateway's log would go back to reporting a quiet machine
+// while the half of the daemon that captures anything was failing, and it
+// would do it silently: a zero, not an error.
+// @ref LLP 0038#lifecycle-and-operator-behavior [tests]: the processor keeps its own runtime files, so a reader of the daemon log has two to read
+test('errors the processing daemon recorded are counted too', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  // The gateway's own log carries only its supervision lines.
+  await writeDaemonLog(stateRoot, [
+    { level: 'info', event: 'gateway.ready', agoMs: 90 * 60_000 },
+    { level: 'error', event: 'gateway.status_failed', agoMs: 80 * 60_000 },
+  ])
+  // Everything the kernel daemon emits is now under `processing/`.
+  await writeDaemonLog(path.join(stateRoot, 'processing'), [
+    { level: 'info', event: 'daemon.healthy', agoMs: 70 * 60_000 },
+    { level: 'error', event: 'daemon.tick_failed', agoMs: 60 * 60_000 },
+    { level: 'error', event: 'daemon.sink_materialize_failed', agoMs: 50 * 60_000 },
+    { level: 'warn', event: 'daemon.source_status_failed', agoMs: 40 * 60_000 },
+  ])
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  assert.equal(report.recentErrorCount, 3, 'one gateway error plus two processing errors')
+  const diag = report.diagnostics.find((d) => d.kind === 'recent_errors')
+  assert.ok(diag, 'a recent_errors diagnostic is raised')
+  assert.ok(diag.message.includes('3 in the daemon log'), diag.message)
+})

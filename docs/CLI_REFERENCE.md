@@ -1084,14 +1084,22 @@ hyp daemon stop
 ### `hyp daemon restart`
 
 ```text
-hyp daemon restart
+hyp daemon restart [--processing]
 ```
 
 Restarts an installed service. If no service is installed, it stops a
 foreground daemon and tells you how to relaunch or install it.
 
+`--processing` replaces only the supervised processing daemon (recording,
+sinks, backfill and maintenance) and leaves the gateway listener, its sockets
+and its in-flight streams alone. It asks the running gateway to bounce its
+child and returns as soon as the request is written; the gateway allows the
+child four seconds to stop before killing it. With no gateway supervising a
+processing daemon it prints that and returns `1`.
+
 ```sh
 hyp daemon restart
+hyp daemon restart --processing
 ```
 
 ## Validate configuration

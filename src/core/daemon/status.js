@@ -57,6 +57,7 @@ import {
 } from './linux.js'
 import {
   daemonRunDir,
+  processingStateRoot,
   processIsAlive,
   readPidFile,
 } from './pid.js'
@@ -3223,6 +3224,16 @@ const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\
  * to it at all, while the sink outbox carries one file per failed export batch
  * and nothing else writes one.
  *
+ * `daemon.log` is read twice because there are two of them (LLP 0038): the
+ * gateway keeps the one at the primary state root, and the processing child
+ * it supervises keeps its own below `processing/`. Every failure this counter
+ * was built for - tick, source, sink materialize, maintenance, config apply -
+ * is emitted by the kernel daemon, which is now the child, so reading only
+ * the primary log would report a quiet machine while the work that captures
+ * anything was failing. They are disjoint (one process appends to each), so
+ * the two counts add. A pre-split install has no `processing/` directory and
+ * the second read contributes nothing.
+ *
  * `dev-telemetry/logs-*.jsonl` is the third store, and it does overlap:
  * `recordFailure` in `src/core/sinks/driver.js` logs
  * `sink.export_batch.failed` through `getLogger` for the same batch
@@ -3239,11 +3250,13 @@ const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\
  */
 async function countRecentErrors(stateRoot, nowMs = Date.now()) {
   const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
-  const [daemonLog, sinkOutbox, devTelemetry] = await Promise.all([
+  const [gatewayLog, processingLog, sinkOutbox, devTelemetry] = await Promise.all([
     countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs),
+    countDaemonLogErrors(path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log'), sinceMs),
     countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs),
     countDevTelemetryErrors(devTelemetryDir(stateRoot), sinceMs),
   ])
+  const daemonLog = gatewayLog + processingLog
   /** @type {string[]} */
   const breakdown = []
   if (daemonLog > 0) breakdown.push(`${daemonLog} in the daemon log`)
