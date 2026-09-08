@@ -35,6 +35,25 @@ export interface SourceSnapshot {
   state: 'started' | 'failed' | 'stopped'
   error?: string
   details?: object
+  health?: SourceHealth
+}
+
+/**
+ * What a source last said about *itself*, as opposed to what the daemon
+ * observed about its lifecycle. Every field is the kernel contract's
+ * `SourceStatus` field of the same name, and every one is optional: a field
+ * that did not arrive usable is dropped rather than recorded wrong.
+ *
+ * It rides beside `SourceSnapshot.state` rather than replacing it because
+ * the two answer different questions and may disagree: `state` is the
+ * lifecycle's verdict ("this source started"), `health.state` is the
+ * source's own reading of how that is going ("and it is degraded").
+ */
+export interface SourceHealth {
+  state?: 'starting' | 'ready' | 'degraded' | 'stopped' | 'error'
+  message?: string
+  rowsWritten?: number
+  lastError?: string
 }
 
 /**

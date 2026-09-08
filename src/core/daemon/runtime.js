@@ -37,7 +37,7 @@ import {
   writePidFile,
 } from './pid.js'
 import { openDaemonLog } from './logs.js'
-import { statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
+import { sourceHealth, statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
 import {
   detectSupervisor,
   readSelfPackageIdentity,
@@ -46,7 +46,7 @@ import {
 } from '../update/self_update.js'
 
 /**
- * @import { AiGatewayCapability, ClientRegistry, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, ClientRegistry, JsonObject, SourceStatus } from '../../../hypaware-plugin-kernel-types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
@@ -56,6 +56,7 @@ import {
 /**
  * @import {
  *   DaemonStatus,
+ *   SourceHealth,
  *   SourceSnapshot,
  *   SinkSnapshot,
  *   DaemonHandle,
@@ -615,27 +616,40 @@ export async function runDaemon(opts = {}) {
   const sourceProbesInFlight = new Set()
 
   /**
-   * Probe one source's `status()` details under a timeout, and never let the
+   * Probe one source's `status()` under a timeout, and never let the
    * plugin's promise outlive our interest in it. A timed-out probe cannot be
    * cancelled, so the source is skipped until its previous call settles.
    * Otherwise a permanently hung probe would start (and hold open) a fresh
    * `source.status` span on every tick for the daemon's life.
    *
+   * `status()` is plugin code, so what it resolves is not necessarily a
+   * `SourceStatus`: `null` is as easy to return as an object. The answer is
+   * therefore taken apart *here*, inside the same try that already contains
+   * the plugin's promise, and what leaves this function is only values the
+   * kernel built. A dereference of the plugin's object on the caller's side
+   * would be a throw on the tick's critical path, which is an unhandled
+   * rejection that never reaches `persist()`, freezing the whole status file
+   * and, on the shutdown path, the stop (issue #1490 round 1).
+   *
+   * `answered` is what separates "the source said nothing" from "the probe
+   * never got an answer": both arrive with nothing to record, and only the
+   * first erases what was recorded before.
+   *
    * @param {string} name
-   * @returns {Promise<{ details: object | undefined, failure: string | undefined }>}
+   * @returns {Promise<{ answered: boolean, details: object | undefined, health: SourceHealth | undefined, failure: string | undefined }>}
    */
-  async function probeSourceDetails(name) {
+  async function probeSourceStatus(name) {
     if (sourceProbesInFlight.has(name)) {
-      return { details: undefined, failure: 'previous status probe has not settled' }
+      return { answered: false, details: undefined, health: undefined, failure: 'previous status probe has not settled' }
     }
     sourceProbesInFlight.add(name)
     const settle = () => sourceProbesInFlight.delete(name)
-    const probe = boot.runtime.sources.status(name).then((s) => s?.details ?? undefined)
+    const probe = boot.runtime.sources.status(name)
     probe.then(settle, settle)
     /** @type {NodeJS.Timeout | undefined} */
     let timer
     try {
-      const details = await Promise.race([
+      const reported = await Promise.race([
         probe,
         new Promise((_resolve, reject) => {
           timer = setTimeout(
@@ -645,9 +659,10 @@ export async function runDaemon(opts = {}) {
           if (typeof timer.unref === 'function') timer.unref()
         }),
       ])
-      return { details: /** @type {object | undefined} */ (details), failure: undefined }
+      const answer = /** @type {SourceStatus | null | undefined} */ (reported)
+      return { answered: true, details: answer?.details, health: sourceHealth(answer), failure: undefined }
     } catch (err) {
-      return { details: undefined, failure: err instanceof Error ? err.message : String(err) }
+      return { answered: false, details: undefined, health: undefined, failure: err instanceof Error ? err.message : String(err) }
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -681,27 +696,37 @@ export async function runDaemon(opts = {}) {
   }
 
   /**
-   * Re-read every started source's `status()` details into the snapshot
-   * list. Boot writes the details once (`startConfiguredSources`), which
-   * was enough while every detail was fixed at bind time (host, port,
-   * fallback marker). It is not enough for details that accrue as traffic
-   * flows: the gateway's `recent_entrypoints` would be frozen at "nothing
-   * seen yet" for the daemon's whole life, and `hyp status` reads exactly
-   * this file. Name, plugin, and state are left alone - liveness is the
-   * lifecycle's business, not a status probe's.
+   * Re-read every started source's `status()` into the snapshot list. Boot
+   * writes it once (`startConfiguredSources`), which was enough while every
+   * detail was fixed at bind time (host, port, fallback marker). It is not
+   * enough for what accrues as traffic flows: the gateway's
+   * `recent_entrypoints` would be frozen at "nothing seen yet" for the
+   * daemon's whole life, and `hyp status` reads exactly this file. Name,
+   * plugin, and `state` are left alone - liveness is the lifecycle's
+   * business, not a status probe's.
    *
-   * Best-effort per source: a source whose probe throws, times out, or
-   * returns nothing keeps the details it already had rather than losing
-   * them, and one bad source never blocks the next one or the persist
-   * below.
+   * Best-effort per source: a source whose probe throws, times out, or is
+   * skipped keeps what it already had rather than losing it, and one bad
+   * source never blocks the next one or the persist below. A probe that
+   * *did* answer replaces the health wholesale, including erasing it when
+   * the answer carried none: a `lastError` the source has stopped reporting
+   * is a failure that is over, and a stale copy of it would outlive the
+   * failure it describes. `details` is the deliberate exception, and keeps
+   * its last good value: each plugin shapes it differently and it accrues
+   * rather than reporting a condition, so an answer that omits it is not a
+   * source saying the detail is gone.
    *
-   * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: the tick refreshes source details so accruing details reach status.json
+   * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: the tick refreshes source status so accruing details reach status.json
+   * @ref LLP 0394#health-rides-beside-state [implements]: what the source says about itself is recorded, not only its details
    */
-  async function refreshSourceDetails() {
+  async function refreshSourceStatus() {
     for (const snap of status.sources) {
       if (snap.state !== 'started') continue
-      const { details, failure } = await probeSourceDetails(snap.name)
-      if (details !== undefined) snap.details = details
+      const { answered, details, health, failure } = await probeSourceStatus(snap.name)
+      if (answered) {
+        if (details !== undefined) snap.details = details
+        snap.health = health
+      }
       noteProbeOutcome(snap.name, failure)
     }
   }
@@ -744,7 +769,7 @@ export async function runDaemon(opts = {}) {
       fileLog.error('daemon.tick_failed', { message })
     })
     status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
-    await refreshSourceDetails()
+    await refreshSourceStatus()
     persist()
 
     // The daily self-update check rides this tick rather than owning a
@@ -1113,7 +1138,7 @@ export async function runDaemon(opts = {}) {
     // running here, and after `stopAllSources` below their probes are gone.
     // A daemon that never reached a tick (or stopped between ticks) would
     // otherwise leave a status file claiming no client was ever seen.
-    await refreshSourceDetails()
+    await refreshSourceStatus()
     persist({ state: 'stopping' })
     fileLog.info('daemon.stopping', { reason })
 
@@ -1489,12 +1514,13 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
     const plugin = contribution.plugin
     const existing = runtime.sources.started(contribution.name)
     if (existing) {
-      const details = await safeStatus(runtime, contribution.name)
+      const reported = await safeStatus(runtime, contribution.name)
       snapshots.push({
         name: contribution.name,
         plugin,
         state: 'started',
-        details,
+        details: reported?.details,
+        health: sourceHealth(reported),
       })
       log.info('daemon.source_already_started', {
         [Attr.PLUGIN]: plugin,
@@ -1520,12 +1546,13 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
     }
     try {
       await runtime.sources.start(contribution.name, ctx)
-      const details = await safeStatus(runtime, contribution.name)
+      const reported = await safeStatus(runtime, contribution.name)
       snapshots.push({
         name: contribution.name,
         plugin,
         state: 'started',
-        details,
+        details: reported?.details,
+        health: sourceHealth(reported),
       })
     } catch (err) {
       const message = describeSourceStartError(err, contribution.name)
@@ -1590,11 +1617,11 @@ async function stopAllSources({ runtime, fileLog }) {
  *
  * @param {KernelRuntime} runtime
  * @param {string} name
+ * @returns {Promise<SourceStatus | null | undefined>}
  */
 async function safeStatus(runtime, name) {
   try {
-    const status = await runtime.sources.status(name)
-    return status?.details ?? undefined
+    return await runtime.sources.status(name)
   } catch {
     return undefined
   }

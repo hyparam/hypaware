@@ -62,9 +62,9 @@ import {
 } from './pid.js'
 
 /**
- * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { HypAwareV2Config, PluginConfigInstance, SourceStatus } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceHealth, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { FileHandle } from 'node:fs/promises'
@@ -883,6 +883,49 @@ function liveStatusSources(stateRoot) {
     return undefined
   }
   return Array.isArray(status?.sources) ? status.sources : []
+}
+
+/**
+ * How much of a source-reported sentence the status file keeps. Nothing on
+ * the way in bounds a plugin-authored string, and this file is rewritten
+ * every tick and read back by a command that prints it. Wider than
+ * `sanitizeLabel`'s default because these are sentences, not names.
+ * @ref LLP 0164#gateway-tracks-what-core-cannot-name [constrained-by]: a plugin string bound for status.json is bounded where it is recorded
+ */
+const MAX_SOURCE_HEALTH_CHARS = 200
+
+/** The health words `SourceStatus.state` is allowed to carry. */
+const SOURCE_HEALTH_STATES = new Set(['starting', 'ready', 'degraded', 'stopped', 'error'])
+
+/**
+ * What a source said about itself, in the form the status file records it.
+ *
+ * Each field is validated on its own terms and dropped when it did not arrive
+ * usable, because a plugin may return anything: the alternative is a status
+ * file asserting `rowsWritten: NaN` or a state word no reader knows. The
+ * daemon runs this on the way in and `hyp status` again on the way out, one
+ * function rather than two because the file outlives the build that wrote it,
+ * so what comes back out of it is no more trusted than what a plugin handed
+ * in.
+ *
+ * @param {SourceStatus | SourceHealth | null | undefined} reported
+ * @returns {SourceHealth | undefined}
+ * @ref LLP 0394#health-rides-beside-state [implements]: the published fields are recorded under their published names, validated and bounded
+ */
+export function sourceHealth(reported) {
+  if (!reported || typeof reported !== 'object') return undefined
+  /** @type {SourceHealth} */
+  const health = {}
+  const state = reported.state
+  if (typeof state === 'string' && SOURCE_HEALTH_STATES.has(state)) health.state = state
+  const message = sanitizeLabel(reported.message, MAX_SOURCE_HEALTH_CHARS)
+  if (message !== undefined) health.message = message
+  if (typeof reported.rowsWritten === 'number' && Number.isFinite(reported.rowsWritten)) {
+    health.rowsWritten = reported.rowsWritten
+  }
+  const lastError = sanitizeLabel(reported.lastError, MAX_SOURCE_HEALTH_CHARS)
+  if (lastError !== undefined) health.lastError = lastError
+  return Object.keys(health).length > 0 ? health : undefined
 }
 
 /**
