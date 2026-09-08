@@ -270,7 +270,7 @@ function runSyncChild(opts) {
         if (stripSgr(pending).includes(SYNC_HELD_NO_DESTINATIONS_NOTICE)) noDestinations = true
         else pending = pending.slice(-SYNC_HELD_NO_DESTINATIONS_NOTICE.length * 2)
       })
-      child.on('error', (err) => done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }))
+      child.on('error', (err) => { settleLine(); done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }) })
       // `close`, not `exit`: it fires once the piped stderr has closed too, so
       // the last thing the child said is in hand before the code is judged.
       // Bounded by `exit`, because the pipe outlives the process that wrote to
@@ -279,10 +279,10 @@ function runSyncChild(opts) {
       // stranger. Nothing under `hyp sync` spawns today, so the bound decides
       // only how a future one fails.
       //
-      // Both settles resync the line, because either can be the run's last
-      // word on this pipe: the timed-out one relays no further chunk to carry
-      // the resync, so leaving it out would put the mid-line state back for
-      // exactly the run that never reaches `close`.
+      // Every settle resyncs the line, because any of them can be the run's
+      // last word on this pipe: none relays a further chunk to carry the
+      // resync, so leaving one out would put the mid-line state back for
+      // exactly the run that ends that way.
       child.on('close', (code) => { settleLine(); done({ code, noDestinations }) })
       child.on('exit', (code) => {
         if (settled) return
