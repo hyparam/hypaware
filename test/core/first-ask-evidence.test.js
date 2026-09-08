@@ -7,7 +7,6 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
-  EVIDENCE_RUNS_KEPT,
   ROUTE_FLOORS,
   askInstructions,
   chooseRoutes,
@@ -15,7 +14,6 @@ import {
   computeSignals,
   onDiskListing,
   prepareFirstAskEvidence,
-  pruneRuns,
   renderTriage,
   sinkFiles,
   toTsv,
@@ -197,13 +195,12 @@ test('onDiskListing: missing directories and files are lines, never errors', asy
   assert.ok(again.includes('SessionStart: hyp claude-hook session-context -'))
 })
 
-test('prepareFirstAskEvidence: writes the run directory, only the chosen route, and prunes old runs', async () => {
-  // @ref LLP 0388#run-directory [tests]: one bounded directory per ask, the client starts inside it
+test('prepareFirstAskEvidence: rewrites the one directory with only the chosen route', async () => {
+  // @ref LLP 0388#run-directory [tests]: one directory, wiped per ask, the client starts inside it
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-runs-'))
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
-  for (const stamp of ['20260801T000000Z', '20260802T000000Z', '20260803T000000Z', '20260804T000000Z', '20260805T000000Z']) {
-    await fsp.mkdir(path.join(root, stamp))
-  }
+  // A leftover from a previous ask on another route must not survive.
+  await fsp.writeFile(path.join(root, 'session_days.tsv'), 'stale\n')
   /** @type {string[]} */
   const seen = []
   const runner = {
@@ -233,21 +230,13 @@ test('prepareFirstAskEvidence: writes the run directory, only the chosen route, 
     now: new Date('2026-09-07T05:00:00Z'),
   })
   assert.deepEqual(evidence.routes, ['subagent'])
-  assert.equal(evidence.dir, path.join(root, '20260907T050000Z'))
+  assert.equal(evidence.dir, root)
   const names = (await fsp.readdir(evidence.dir)).sort()
   assert.deepEqual(names, ['ASK.md', 'agent_briefs.tsv', 'heavy_typed.tsv', 'on_disk.txt', 'read_heavy_sessions.tsv', 'triage.txt'])
-  assert.ok(!names.includes('session_days.tsv'), 'the sink route was not gathered')
+  assert.ok(!names.includes('session_days.tsv'), 'the sink route was not gathered and the stale file is gone')
   const typed = await fsp.readFile(path.join(evidence.dir, 'heavy_typed.tsv'), 'utf8')
   assert.match(typed, /a0000001\t2026-08-20\t0\tfind every place we parse dates/)
-  const kept = (await fsp.readdir(root)).sort()
-  assert.equal(kept.length, EVIDENCE_RUNS_KEPT)
-  assert.ok(!kept.includes('20260801T000000Z'), 'the oldest run was pruned')
-  assert.ok(kept.includes('20260907T050000Z'))
   // The triage probe ran once and the route's own gather once.
   assert.equal(seen.filter((q) => q.includes('as turns')).length, 1)
   assert.equal(seen.filter((q) => q.includes('max(client_name) as client')).length, 1)
-})
-
-test('pruneRuns: a missing root is not an error', async () => {
-  await pruneRuns(path.join(os.tmpdir(), 'hyp-ask-absent-' + Date.now()), 5)
 })

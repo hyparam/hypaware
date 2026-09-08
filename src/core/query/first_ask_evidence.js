@@ -39,9 +39,6 @@ export const RECOMMEND_PROMPT_ID = 'recommend'
 /** Days of history the evidence covers. */
 export const EVIDENCE_WINDOW_DAYS = 30
 
-/** Run directories kept under `<HYP_HOME>/ask`; older ones are removed. */
-export const EVIDENCE_RUNS_KEPT = 5
-
 /** The prompt the client is started with. Everything else is in `ASK.md`. */
 export const RECOMMEND_LAUNCH_PROMPT =
   'From my HypAware history: what one change would recover the most wasted effort in my sessions? The evidence is already gathered in this folder. Read ASK.md first and follow it exactly.'
@@ -752,10 +749,11 @@ export async function clusterFiles(runner, from, sessionIds, phrase) {
 
 /**
  * Run the whole gather for one launch: triage, route, files, `ASK.md`,
- * into a fresh run directory under `root`, pruning older runs so the
- * directory stays bounded.
+ * into `root`, which is emptied first. One folder, replaced on every ask:
+ * the files exist so the client can read them during that session, and
+ * nothing reads them afterwards, so keeping old runs would only grow.
  *
- * @ref LLP 0388#run-directory [implements]: one directory per ask, bounded in number, and the client starts inside it
+ * @ref LLP 0388#run-directory [implements]: one directory, wiped and rewritten per ask, and the client starts inside it
  * @param {{
  *   runner: OverviewQueryRunner,
  *   root: string,
@@ -793,37 +791,11 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
   files.push({ name: 'on_disk.txt', content: await onDiskListing({ homeDir }) })
   files.push({ name: 'ASK.md', content: askInstructions(routes, { scope, files: files.map((f) => f.name) }) })
 
-  const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
-  const dir = path.join(root, stamp)
+  const dir = root
+  await fsp.rm(dir, { recursive: true, force: true })
   await fsp.mkdir(dir, { recursive: true })
   for (const f of files) await fsp.writeFile(path.join(dir, f.name), f.content, 'utf8')
-  await pruneRuns(root, EVIDENCE_RUNS_KEPT)
   return { dir, from, routes, signals, files: files.map((f) => f.name) }
-}
-
-/**
- * Keep the newest `keep` run directories under `root`; remove the rest.
- * Names are timestamps, so lexical order is chronological.
- *
- * @param {string} root
- * @param {number} keep
- * @returns {Promise<void>}
- */
-export async function pruneRuns(root, keep) {
-  /** @type {string[]} */
-  let names
-  try {
-    names = (await fsp.readdir(root)).filter((n) => /^\d{8}T\d{6}Z$/.test(n)).sort()
-  } catch {
-    return
-  }
-  for (const stale of names.slice(0, Math.max(0, names.length - keep))) {
-    try {
-      await fsp.rm(path.join(root, stale), { recursive: true, force: true })
-    } catch {
-      // a run someone is still reading; try again next time
-    }
-  }
 }
 
 /** @param {unknown} v */

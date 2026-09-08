@@ -367,7 +367,7 @@ function buildCoreCommands(registry) {
         '30 days itself, picks what kind of change that is (reopened sessions, a',
         'skill for something you keep typing, a worker for a request you keep',
         'making, or a rule for a mistake that keeps failing), writes the evidence',
-        'into a folder under $HYP_HOME/ask, and starts an attached client in that',
+        'into $HYP_HOME/ask (one folder, rewritten each time), and starts an attached client in that',
         'folder so the session stays out of your home directory. The client',
         'answers with one recommendation and offers to apply it.',
         '',

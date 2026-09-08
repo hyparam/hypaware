@@ -99,12 +99,12 @@ export async function runAsk(argv, ctx) {
 }
 
 /**
- * The recommendation row's gather (LLP 0388), run in-process against the
- * same runner the overview uses. Run directories live under
- * `<HYP_HOME>/ask/`, a HypAware-owned place rather than the user's home
- * or wherever `hyp ask` happened to be typed, because the client is
- * started inside the directory and its transcript, cwd, and any test
- * file it writes belong to this ask.
+ * The recommendation ask's gather (LLP 0388), run in-process against the
+ * same runner the overview uses. The evidence lives in `<HYP_HOME>/ask/`,
+ * one HypAware-owned folder rewritten on every ask, rather than the
+ * user's home or wherever `hyp ask` happened to be typed, because the
+ * client is started inside it and its transcript, cwd, and any test file
+ * it writes belong to this ask.
  *
  * @ref LLP 0388#run-directory [implements]: HYP_HOME owns the ask, not the caller's cwd
  * @param {CommandRunContext} ctx

@@ -101,8 +101,9 @@ org run without these filters found "assess the exact planned action
 below" typed in 86 sessions: a Codex guardian review, not a person.
 
 <a id="run-directory"></a>**The client starts inside the evidence.** The
-files are written to `<HYP_HOME>/ask/<timestamp>/` and the client is
-spawned with that directory as its working directory. This narrows LLP
+files are written to `<HYP_HOME>/ask/`, one folder emptied and rewritten
+on every ask, and the client is spawned with that directory as its
+working directory. This narrows LLP
 0198 #onboarding-list, which chose the caller's directory at the launch
 boundary, for this one row only. The reasons are specific to it:
 
@@ -118,9 +119,10 @@ boundary, for this one row only. The reasons are specific to it:
   before it appears. The test writes a file. That file belongs in the
   run directory, not in a repo.
 
-The other four rows keep the caller's directory. Run directories are
-kept to the newest five; older ones are removed on the next ask, so the
-directory is bounded however often the command is run.
+`hyp ask "<question>"` keeps the caller's directory. There is one
+folder, not one per run: the files exist so the client can read them
+during that session and nothing reads them afterwards, so the folder is
+wiped before each gather and never grows.
 
 <a id="answer-shape"></a>**The answer leads with the recommendation.**
 Line one is one plain sentence starting with a verb, naming the thing to
