@@ -391,7 +391,7 @@ export function gatherSql(from) {
   const humanUser = `role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and ${HUMAN_TURN}`
   return {
     sinkDays: `select substr(session_id, 1, 8) as s, date, sum(${USAGE_CTX}) as ctx, sum(${USAGE_OUT}) as outp, count(*) filter (where part_type = 'tool_call') as calls from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2 order by 1, 2`,
-    sinkOpeners: `select substr(session_id, 1, 8) as s, date, message_index as i, cwd, substr(content_text, 1, 160) as line from ai_gateway_messages where date >= '${from}' and ${humanUser} and length(content_text) >= 12 and message_index <= 2 order by date, s, i`,
+    sinkOpeners: `select substr(session_id, 1, 8) as s, date, message_index as i, cwd, substr(content_text, 1, 160) as line from ai_gateway_messages where date >= '${from}' and ${humanUser} and length(content_text) >= 12 order by s, date, i`,
     skillLines: `select substr(session_id, 1, 8) as s, session_id, date, message_index as i, cwd, substr(content_text, 1, 200) as line from ai_gateway_messages where date >= '${from}' and ${humanUser} and length(content_text) >= 12 order by date, s, i`,
     ruleHeads: `select tool_name, substr(content_text, 1, 90) as head, count(*) as n, count(distinct session_id) as sessions, max(date) as last from ai_gateway_messages where date >= '${from}' and part_type = 'tool_result' and is_error and ${NOT_DUPLICATE_LANE} group by 1, 2 having count(*) >= 3 order by n desc limit 40`,
     ruleContext: `select substr(session_id, 1, 8) as s, date, message_index as i, tool_name, substr(content_text, 1, 160) as err from ai_gateway_messages where date >= '${from}' and part_type = 'tool_result' and is_error and ${NOT_DUPLICATE_LANE} and ${NOT_PERMISSION_PROMPT} order by date, s, i limit 2000`,
@@ -780,7 +780,7 @@ export function sinkFiles(days, openers) {
   return [
     { name: 'session_days_summary.txt', content: summary },
     { name: 'session_days.tsv', content: out.join('\n') + '\n' },
-    { name: 'day_openers.tsv', content: toTsv(['session', 'date', 'i', 'cwd', 'first_lines_that_day'], openers, (r) => [r.s, r.date, r.i, shortCwd(String(r.cwd ?? '')), r.line]) },
+    { name: 'day_openers.tsv', content: toTsv(['session', 'date', 'i', 'cwd', 'first_lines_that_day'], firstPerDay(openers, 2), (r) => [r.s, r.date, r.i, shortCwd(String(r.cwd ?? '')), r.line]) },
   ]
 }
 
@@ -868,6 +868,27 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
   await fsp.mkdir(dir, { recursive: true, mode: 0o700 })
   for (const f of files) await fsp.writeFile(path.join(dir, f.name), f.content, 'utf8')
   return { dir, from, routes, signals, files: files.map((f) => f.name) }
+}
+
+/**
+ * The first `keep` rows of each (session, date), in the order given.
+ * Message positions do not restart when a session is reopened on a later
+ * day, so "the first lines typed that day" cannot be a position filter;
+ * it has to be taken per day.
+ *
+ * @param {Record<string, unknown>[]} rows ordered by session, date, position
+ * @param {number} keep
+ * @returns {Record<string, unknown>[]}
+ */
+export function firstPerDay(rows, keep) {
+  /** @type {Map<string, number>} */
+  const seen = new Map()
+  return rows.filter((r) => {
+    const key = `${r.s}\t${r.date}`
+    const n = (seen.get(key) ?? 0) + 1
+    seen.set(key, n)
+    return n <= keep
+  })
 }
 
 /** @param {unknown} v */

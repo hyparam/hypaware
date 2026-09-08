@@ -13,6 +13,7 @@ import {
   commandHeads,
   computeSignals,
   describeRoute,
+  firstPerDay,
   frontMatterDescription,
   onDiskListing,
   prepareFirstAskEvidence,
@@ -175,13 +176,21 @@ test('sinkFiles: summary slices and the per-day table agree', () => {
       { s: 'bbbb2222', date: '2026-08-11', ctx: 1000, outp: 10, calls: 3 },
       { s: 'bbbb2222', date: '2026-08-12', ctx: 5000, outp: 10, calls: 1 },
     ],
-    [{ s: 'bbbb2222', date: '2026-08-12', i: 0, cwd: '/Users/someone/work', line: 'continue' }],
+    [
+      { s: 'bbbb2222', date: '2026-08-11', i: 0, cwd: '/Users/someone/work', line: 'add a grep command' },
+      { s: 'bbbb2222', date: '2026-08-11', i: 3, cwd: '/Users/someone/work', line: 'now the tests' },
+      { s: 'bbbb2222', date: '2026-08-11', i: 9, cwd: '/Users/someone/work', line: 'third line, dropped' },
+      // positions continue across the reopen, so day two starts at 40
+      { s: 'bbbb2222', date: '2026-08-12', i: 40, cwd: '/Users/someone/work', line: 'continue' },
+    ],
   )
   const byName = Object.fromEntries(files.map((f) => [f.name, f.content]))
   assert.match(byName['session_days_summary.txt'], /multi_later\t1\t5000\t10\t500/)
   assert.match(byName['session_days_summary.txt'], /excess context on later days, relative to the single-day ratio: 4000 tokens/)
   assert.match(byName['session_days.tsv'], /bbbb2222\t2026-08-12\t2\t2\t5000\t10\t500\t1/)
-  assert.match(byName['day_openers.tsv'], /~\/work\tcontinue/)
+  assert.match(byName['day_openers.tsv'], /bbbb2222\t2026-08-12\t40\t~\/work\tcontinue/, 'a reopened day keeps its first line even at a high position')
+  assert.ok(!byName['day_openers.tsv'].includes('third line, dropped'))
+  assert.equal(firstPerDay([{ s: 'a', date: 'd', i: 1 }, { s: 'a', date: 'd', i: 2 }, { s: 'a', date: 'e', i: 3 }], 1).length, 2)
 })
 
 test('askInstructions: route, files, and the answer shape the reader gets', () => {
