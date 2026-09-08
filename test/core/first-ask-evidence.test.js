@@ -47,6 +47,7 @@ test('triageSql: every statement excludes the duplicate OTEL lane and is bounded
   }
   assert.ok(sql.skill.includes("user_type in ('external', 'user')"), 'the typed-line signal keeps Codex human turns and drops guardian reviews')
   assert.ok(sql.skill.includes('limit 8'))
+  assert.ok(sql.skill.includes("not like 'Message Type:%'"), 'a pasted relay header is not a typed request')
   assert.ok(sql.rule.includes("not like 'This Bash command contains multiple operations%'"), 'permission prompts are not agent mistakes')
 })
 

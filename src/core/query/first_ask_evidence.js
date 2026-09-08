@@ -55,6 +55,9 @@ const HUMAN_TURN = [
   "content_text not like '[$%'",
   "content_text not like 'Base directory for this skill%'",
   "content_text not like 'From my HypAware history%'",
+  // A relay header some harnesses paste into Codex as user text; on the
+  // first org run it became the "recurring request" of a whole answer.
+  "content_text not like 'Message Type:%'",
 ].join(' and ')
 
 /**
