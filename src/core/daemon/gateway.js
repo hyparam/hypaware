@@ -10,7 +10,7 @@ import { cacheTablePath } from '../cache/paths.js'
 import { installObservability } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { clearPidFile, processIsAlive, readPidFile, writePidFile } from './pid.js'
-import { DAEMON_HEARTBEAT_STALE_MS, readStatusFile, writeStatusFile } from './status.js'
+import { DAEMON_HEARTBEAT_STALE_MS, daemonHeartbeatAgeMs, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
 import { openDaemonLog } from './logs.js'
 
@@ -27,6 +27,10 @@ const PROCESSOR_ENTRY = fileURLToPath(new URL('./processor.js', import.meta.url)
 // code, matching the kernel's existing entrypoint-only loader (../runtime/loader.js).
 const PROCESS_TRANSPORT_ENTRY = new URL('../../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js', import.meta.url).href
 const RESTART_DELAY_MS = 1000
+// `hyp status` dates the last write as `healthyAt + uptimeMs` against a
+// five-minute staleness window, so the status file has to keep being re-dated
+// even when nothing changed - but only on this cadence, not on every recompute.
+const STATUS_HEARTBEAT_MS = 30_000
 // Leave time for the CLI's five-second stop wait to observe the exit.
 const STOP_DEADLINE_MS = 4_000
 
@@ -68,6 +72,8 @@ export async function runGatewayDaemon(opts = {}) {
   let refreshing = false
   let restarts = 0
   let failureStreak = 0
+  let lastStatusShape = ''
+  let lastStatusWriteMs = 0
   /** @type {(code: number) => void} */
   let resolveDone = () => {}
   const done = new Promise(resolve => { resolveDone = resolve })
@@ -112,7 +118,10 @@ export async function runGatewayDaemon(opts = {}) {
       let processor = null
       try { processor = readStatusFile(processingRoot) } catch { /* incomplete/unreadable child status is not ready */ }
       const matches = !!child?.pid && processor?.pid === child.pid
-      const fresh = matches && processor?.healthyAt && Date.now() - (Date.parse(processor.healthyAt) + processor.uptimeMs) < DAEMON_HEARTBEAT_STALE_MS
+      // Derived exactly as `hyp status` derives it (LLP 0348), so the two can
+      // never disagree about whether the child stopped ticking.
+      const heartbeatAgeMs = matches ? daemonHeartbeatAgeMs(processor, Date.now()) : null
+      const fresh = heartbeatAgeMs !== null && heartbeatAgeMs < DAEMON_HEARTBEAT_STALE_MS
       const ready = Boolean(fresh && processor?.state === 'healthy')
       status.state = ready ? 'healthy' : 'degraded'
       status.uptimeMs = Date.now() - Date.parse(startedAt)
@@ -131,7 +140,17 @@ export async function runGatewayDaemon(opts = {}) {
       status.warnings = [...(matches ? processor?.warnings ?? [] : []), ...(!ready ? ['processing_unavailable: gateway forwarding remains available; recording and background work may be delayed or lost'] : [])]
       status.processes = { gateway: { pid: process.pid, state: gateway ? 'healthy' : 'disabled' }, processing: { pid: child?.pid, state: ready ? 'healthy' : 'degraded', restarts } }
       status.configPath = boot?.configPath ?? undefined
-      writeStatusFile(stateRoot, status)
+      // The aggregate is recomputed every tick so `snapshot()` and a child
+      // transition stay immediately observable, but rewriting an unchanged file
+      // once a second is ~86k idle disk writes a day on a daemon that runs for
+      // weeks. Write on a real change, or on the heartbeat cadence.
+      const shape = JSON.stringify([status.state, status.sources, status.sinks, status.maintenance, status.warnings, status.processes, status.configPath])
+      const nowMs = Date.now()
+      if (shape !== lastStatusShape || nowMs - lastStatusWriteMs >= STATUS_HEARTBEAT_MS) {
+        lastStatusShape = shape
+        lastStatusWriteMs = nowMs
+        writeStatusFile(stateRoot, status)
+      }
     } catch (error) {
       log.warn('gateway.status_failed', { message: String(error) })
     } finally { refreshing = false }
