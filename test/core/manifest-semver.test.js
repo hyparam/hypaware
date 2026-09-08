@@ -195,3 +195,21 @@ test('matchesSemverRange covers compound, alternative, x and hyphen ranges', () 
   assert.equal(matchesSemverRange('1.2.3', 'npm:other@1.2.3'), false)
   assert.equal(matchesSemverRange('1.2.3', '>=1.2.3 <garbage'), false)
 })
+
+test('matchesSemverRange lets a wildcard swallow the positions below it', () => {
+  // npm reads `1.x.2` as `1.x.x`, so the patch under a wildcard minor bounds
+  // nothing. Keeping it would answer false for 1.0.0 and, worse, answer at all.
+  assert.equal(matchesSemverRange('1.0.0', '1.x.2'), true)
+  assert.equal(matchesSemverRange('1.0.0', '^1.x.2'), true)
+  assert.equal(matchesSemverRange('1.0.0', '>=1.x.2'), true)
+  assert.equal(matchesSemverRange('1.0.0', '<1.x.2'), false)
+  assert.equal(matchesSemverRange('2.0.0', '1.x.2'), false)
+})
+
+test('matchesSemverRange reads an empty alternative as the wildcard npm reads', () => {
+  // A stray leading or trailing `||` widens the set to everything rather than
+  // voiding the branch, which is how npm resolves it.
+  assert.equal(matchesSemverRange('9.9.9', '|| ^1.0.0'), true)
+  assert.equal(matchesSemverRange('9.9.9', '^1.0.0 ||'), true)
+  assert.equal(matchesSemverRange('9.9.9', '1.2.3||'), true)
+})

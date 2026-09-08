@@ -79,7 +79,9 @@ const SIMPLE = /^(>=|<=|>|<|=|\^|~)?v?(\d+|[xX*])(?:\.(\d+|[xX*])(?:\.(\d+|[xX*]
  */
 function comparatorsOf(alternative) {
   const trimmed = alternative.trim()
-  if (trimmed === '') return null
+  // npm resolves an empty branch to `*`, so a stray leading or trailing `||`
+  // widens the set rather than voiding it.
+  if (trimmed === '') return []
   // `>= 1.2.3` is one comparator, not two tokens, so the space after an
   // operator closes up before the compound range splits on whitespace.
   const parts = trimmed.replace(/([<>=^~]+)\s+/g, '$1').split(/\s+/)
@@ -170,7 +172,12 @@ function exclusiveCeiling(op, major, minor, patch) {
 function parseSimple(part) {
   const m = SIMPLE.exec(part)
   if (!m) return null
-  return { op: m[1] ?? '', major: partNumber(m[2]), minor: partNumber(m[3]), patch: partNumber(m[4]) }
+  // A wildcard swallows every position below it: npm reads `1.x.2` as `1.x.x`,
+  // so a concrete patch under a wildcard minor must not survive as a bound.
+  const major = partNumber(m[2])
+  const minor = major === undefined ? undefined : partNumber(m[3])
+  const patch = minor === undefined ? undefined : partNumber(m[4])
+  return { op: m[1] ?? '', major, minor, patch }
 }
 
 /**
