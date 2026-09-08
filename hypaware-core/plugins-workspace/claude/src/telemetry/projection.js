@@ -339,8 +339,11 @@ function messageFromEvent(event, usageByRequestId) {
   if (requestId) message.request_id = requestId
   const model = stringAttr(event, 'model')
   if (model) message.model = model
-  // Usage lands on the assistant message, exactly where the proxy path
-  // puts the response's `usage` block.
+  // @ref LLP 0390#claim-order-arbitrates [implements]: one index entry per
+  // turn, taken by whichever row reaches it first. A turn ending in a tool_use
+  // has a body-derived row that is the response's last, and the exporter emits
+  // `api_response_body` ahead of `assistant_response`, so that row claims the
+  // record and nothing is left here.
   const usage = requestId ? usageByRequestId.get(requestId) : undefined
   if (usage) {
     message.attributes = /** @type {any} */ (usage)
