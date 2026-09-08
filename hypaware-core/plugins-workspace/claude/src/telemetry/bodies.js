@@ -295,9 +295,12 @@ export function requestBodyFacts(spooled) {
  * thinking signature the events do not carry at all.
  *
  * Each block becomes its own projected message, mirroring the proxy
- * path's per-block decomposition, so the gateway's fallback content
- * hash gives the same block the same identity from either producer and
- * the repeated history of the next turn's request dedupes away.
+ * path's per-block decomposition, so the gateway's fallback content hash
+ * gives the same block the same identity every time this lane sees it and
+ * the repeated history of the next turn's request dedupes away. That hash
+ * is not the transcript's uuid, though, so the caller stamps the LLP 0027
+ * match-key on these messages and settlement collapses them onto the row
+ * the transcript sweep writes (LLP 0389 #match-key-on-bodies).
  *
  * A response with no text block never produces an `assistant_response`
  * event, so its usage would otherwise go unclaimed: the last gap block

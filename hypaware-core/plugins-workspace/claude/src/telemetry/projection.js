@@ -1,6 +1,7 @@
 // @ts-check
 
 import { BODY_EVENT_NAMES, requestBodyFacts, spooledBodyGapMessages } from './bodies.js'
+import { matchKey } from '../transcripts.js'
 
 /**
  * @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage } from '../../../../../hypaware-plugin-kernel-types.js'
@@ -70,7 +71,9 @@ export const SESSION_BODY_FACTS_LIMIT = 64
  * @ref LLP 0252#events-first [implements]: each content event is projected
  *   once, from the event that carries it, with `message.uuid` as the identity
  * @ref LLP 0254#identity-at-ingest [implements]: native identity, so no
- *   settlement enricher runs on these rows
+ *   settlement enricher runs on the rows a content event produces
+ * @ref LLP 0389#match-key-on-bodies [implements]: a block only a body carries
+ *   has no uuid, so it is stamped with the match-key and does settle
  * @param {ClaudeTelemetryEvent[]} events
  * @param {{
  *   clientName: string,
@@ -124,6 +127,15 @@ export function projectClaudeTelemetryEvents(events, opts) {
         event,
         usageByRequestId: opts.usageByRequestId,
       })) {
+        // A block only a body carries (tool_use, tool_result, thinking) has no
+        // uuid on the event or in the body, so the gateway synthesizes a
+        // content hash for it while the transcript sweep writes the same block
+        // under the transcript line's uuid: two ids for one tool call, and the
+        // `part_id` dedupe never fires (issue #1464). The match-key is what
+        // lets settlement upgrade the row to that uuid.
+        // @ref LLP 0389#match-key-on-bodies [implements]: a body-derived row is
+        // provisional, so it carries the LLP 0027 match-key
+        foldClaudeAttributes(gap, { match_key: matchKey(gap.role, gap.content) })
         entry.messages.push(attributeMessageToEvent(gap, event))
       }
       continue
@@ -160,7 +172,9 @@ export function projectClaudeTelemetryEvents(events, opts) {
     if (entry.facts.querySource) {
       for (const message of entry.messages) {
         if (message.is_sidechain || message.agent_id) continue
-        if (querySourceOf(message) === undefined) stampQuerySource(message, entry.facts.querySource)
+        if (querySourceOf(message) === undefined) {
+          foldClaudeAttributes(message, { query_source: entry.facts.querySource })
+        }
       }
     }
     projections.push(buildProjection({
@@ -258,7 +272,7 @@ function attributeMessageToEvent(message, event) {
     message.is_sidechain = true
   }
   const querySource = stringAttr(event, 'query_source')
-  if (querySource) stampQuerySource(message, querySource)
+  if (querySource) foldClaudeAttributes(message, { query_source: querySource })
   return message
 }
 
@@ -273,21 +287,21 @@ function querySourceOf(message) {
 }
 
 /**
- * Fold `query_source` into the message's `claude` attribute block without
- * disturbing the usage block an `api_request` event may already have put
- * there.
+ * Fold fields into the message's `claude` attribute block without disturbing
+ * the usage block an `api_request` event, or a body's own `usage`, may
+ * already have put there.
  *
  * @param {AiGatewayProjectedMessage} message
- * @param {string} querySource
+ * @param {Record<string, unknown>} fields
  */
-function stampQuerySource(message, querySource) {
+function foldClaudeAttributes(message, fields) {
   const attributes = /** @type {Record<string, unknown>} */ (message.attributes ?? {})
   const claude = /** @type {Record<string, unknown>} */ (
     typeof attributes.claude === 'object' && attributes.claude !== null ? attributes.claude : {}
   )
   message.attributes = /** @type {any} */ ({
     ...attributes,
-    claude: { ...claude, query_source: querySource },
+    claude: { ...claude, ...fields },
   })
 }
 
