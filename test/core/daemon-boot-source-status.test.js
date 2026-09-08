@@ -129,6 +129,23 @@ async function bootWith(prefix, autoStart) {
   }
 }
 
+/**
+ * Stop the daemon and remove the temp home. The removal sits in a `finally`
+ * for the same reason `bootWith` cleans up in its `catch`: a shutdown that
+ * throws is one of the failing runs this file exists to report, and it must
+ * not also be the run that leaves its temp home behind.
+ *
+ * @param {Awaited<ReturnType<typeof bootWith>>} booted
+ */
+async function closeBoot(booted) {
+  try {
+    await booted.handle.stop()
+    await booted.handle.done
+  } finally {
+    await fs.rm(booted.hypHome, { recursive: true, force: true })
+  }
+}
+
 test('a source already started in activate() whose status answer cannot be read does not abort boot', async () => {
   let booted
   try {
@@ -144,11 +161,7 @@ test('a source already started in activate() whose status answer cannot be read 
     const log = await fs.readFile(path.join(booted.stateRoot, 'logs', 'daemon.log'), 'utf8')
     assert.match(log, /daemon\.source_status_failed/, 'an unreadable boot probe went unreported')
   } finally {
-    if (booted) {
-      await booted.handle.stop()
-      await booted.handle.done
-      await fs.rm(booted.hypHome, { recursive: true, force: true })
-    }
+    if (booted) await closeBoot(booted)
   }
 })
 
@@ -165,10 +178,6 @@ test('a source the daemon starts itself is not mislabelled failed when its statu
     assert.equal(snapshot.state, 'started', 'a running source was recorded as failed')
     assert.equal(snapshot.error, undefined, 'and no start error was invented for it')
   } finally {
-    if (booted) {
-      await booted.handle.stop()
-      await booted.handle.done
-      await fs.rm(booted.hypHome, { recursive: true, force: true })
-    }
+    if (booted) await closeBoot(booted)
   }
 })
