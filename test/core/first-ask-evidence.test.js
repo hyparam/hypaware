@@ -264,6 +264,7 @@ test('prepareFirstAskEvidence: rewrites the one directory with only the chosen r
   })
   assert.deepEqual(evidence.routes, ['subagent'])
   assert.equal(evidence.dir, root)
+  assert.equal((await fsp.stat(root)).mode & 0o777, 0o700, 'the folder quotes the person\'s typed lines, so it is user-only')
   const names = (await fsp.readdir(evidence.dir)).sort()
   assert.deepEqual(names, ['ASK.md', 'agent_briefs.tsv', 'heavy_typed.tsv', 'on_disk.txt', 'read_heavy_sessions.tsv', 'triage.txt'])
   assert.ok(!names.includes('session_days.tsv'), 'the sink route was not gathered and the stale file is gone')

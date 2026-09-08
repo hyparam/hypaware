@@ -103,9 +103,13 @@ org run without these filters found "assess the exact planned action
 below" typed in 86 sessions: a Codex guardian review, not a person.
 
 <a id="run-directory"></a>**The client starts inside the evidence.** The
-files are written to `<HYP_HOME>/ask/`, one folder emptied and rewritten
-on every ask, and the client is spawned with that directory as its
-working directory. This narrows LLP
+files are written to `<tmpdir>/hypaware/ask/`, one user-only folder
+emptied and rewritten on every ask, and the client is spawned with that
+directory as its working directory. Under the temp directory rather than
+`HYP_HOME`, because `HYP_HOME` is inside the home directory by default
+and the point is that the session lands in neither the home directory
+nor a repo. The path is fixed, not random: Claude Code asks once whether
+to trust a new folder, and a random path would ask on every run. This narrows LLP
 0198 #onboarding-list, which chose the caller's directory at the launch
 boundary, for this one row only. The reasons are specific to it:
 

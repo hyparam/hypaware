@@ -823,7 +823,7 @@ export async function clusterFiles(runner, from, sessionIds, phrase) {
 
 /**
  * Run the whole gather for one launch: triage, route, files, `ASK.md`,
- * into `root`, which is emptied first. One folder, replaced on every ask:
+ * into `root`, which is emptied first and created user-only. One folder, replaced on every ask:
  * the files exist so the client can read them during that session, and
  * nothing reads them afterwards, so keeping old runs would only grow.
  *
@@ -867,7 +867,9 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
 
   const dir = root
   await fsp.rm(dir, { recursive: true, force: true })
-  await fsp.mkdir(dir, { recursive: true })
+  // User-only: the files quote the person's own typed lines, and on a
+  // shared machine the temp directory is not private by default.
+  await fsp.mkdir(dir, { recursive: true, mode: 0o700 })
   for (const f of files) await fsp.writeFile(path.join(dir, f.name), f.content, 'utf8')
   return { dir, from, routes, signals, files: files.map((f) => f.name) }
 }

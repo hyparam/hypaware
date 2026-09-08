@@ -100,13 +100,15 @@ export async function runAsk(argv, ctx) {
 
 /**
  * The recommendation ask's gather (LLP 0388), run in-process against the
- * same runner the overview uses. The evidence lives in `<HYP_HOME>/ask/`,
- * one HypAware-owned folder rewritten on every ask, rather than the
- * user's home or wherever `hyp ask` happened to be typed, because the
- * client is started inside it and its transcript, cwd, and any test file
- * it writes belong to this ask.
+ * same runner the overview uses. The evidence lives in one folder under
+ * the system temp directory, `<tmpdir>/hypaware/ask/`, rewritten on every
+ * ask: the client is started inside it, so its transcript label, cwd,
+ * and any test file it writes stay out of the person's home directory
+ * and out of whatever repo `hyp ask` was typed in. The path is fixed
+ * rather than random because Claude Code asks once whether to trust a
+ * new folder; a fresh random path would ask on every run.
  *
- * @ref LLP 0388#run-directory [implements]: HYP_HOME owns the ask, not the caller's cwd
+ * @ref LLP 0388#run-directory [implements]: a fixed temp folder owns the ask, not the caller's cwd and not the home directory
  * @param {CommandRunContext} ctx
  * @returns {Promise<FirstAskEvidence | undefined>}
  */
@@ -114,10 +116,9 @@ async function prepareEvidenceFromCtx(ctx) {
   const runner = overviewRunnerFromCtx(ctx)
   if (!runner || !runner.hasDataset(OVERVIEW_DATASET)) return undefined
   const homeDir = ctx.env.HOME || os.homedir()
-  const hypHome = ctx.env.HYP_HOME || path.join(homeDir, '.hyp')
   return prepareFirstAskEvidence({
     runner,
-    root: path.join(hypHome, 'ask'),
+    root: path.join(ctx.env.TMPDIR || os.tmpdir(), 'hypaware', 'ask'),
     homeDir,
     say: (line) => ctx.stdout.write(`${line}\n`),
   })
