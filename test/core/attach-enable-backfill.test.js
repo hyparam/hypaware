@@ -243,7 +243,7 @@ test('accept-then-yes: the provider runs with the expected shape and its result 
     assert.equal(typeof seenRunCtx?.retentionDays, 'number')
     assert.equal(typeof seenRunCtx?.until, 'string')
 
-    assert.match(stdout.text(), /backfill claude: ok \(scanned 0, wrote 0, skipped 0\)/)
+    assert.match(stdout.text(), /backfill claude: nothing to import/)
   })
 })
 

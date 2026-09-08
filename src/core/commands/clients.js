@@ -33,7 +33,7 @@ import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import { askYesNo } from '../cli/confirm.js'
 import { isTty } from '../cli/stdio.js'
-import { defaultBackfillConsentPromptFactory, resolveSingleSourceEnablement } from '../cli/walkthrough.js'
+import { defaultBackfillConsentPromptFactory, describeBackfillResult, resolveSingleSourceEnablement } from '../cli/walkthrough.js'
 import { resolveRetentionDays, runBackfillProvider } from './backfill.js'
 import {
   CLASS_RANK,
@@ -1165,10 +1165,7 @@ async function maybeBackfillAfterEnable({ name, ctx }) {
   try {
     ctx.stdout.write(`backfill ${name}: importing local history…\n`)
     const result = await runBackfillProvider({ ctx, provider: name, dryRun: false, retentionDays, until })
-    ctx.stdout.write(
-      `backfill ${name}: ${result.ok ? 'ok' : 'failed'} ` +
-      `(scanned ${result.scanned}, wrote ${result.rowsWritten}, skipped ${result.skipped})\n`
-    )
+    ctx.stdout.write(`backfill ${name}: ${describeBackfillResult(result)}\n`)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`backfill ${name} failed: ${message}\n`)

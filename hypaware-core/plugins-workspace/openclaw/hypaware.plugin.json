@@ -35,7 +35,7 @@
       {
         "name": "openclaw",
         "label": "OpenClaw",
-        "summary": "Records OpenClaw's live traffic and imports its session history. Setup rewrites OpenClaw's gateway config; finish with 'openclaw gateway restart'.",
+        "summary": "Records OpenClaw's live traffic and imports its session history on a repeating schedule. Setup rewrites OpenClaw's gateway config; finish with 'openclaw gateway restart'.",
         "detect": { "settings_file": ".openclaw/openclaw.json" },
         "compose": {
           "plugin": { "name": "@hypaware/openclaw" },

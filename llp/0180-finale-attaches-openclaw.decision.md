@@ -6,7 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-08-03
 **Related:** LLP 0177 (the issue this resolves), LLP 0169 (OpenClaw attach surface), LLP 0174 (manual-path sibling; its non-goal), LLP 0170 (sweep consent stance), LLP 0130 (manifest-sourced picker), LLP 0011 (init finale), LLP 0135 (wizard orchestration), LLP 0115 (Claude Desktop is not an attach-on-join client)
-**Extended-by:** [LLP 0185](./0185-unpicked-client-stays-attached.decision.md) (the finale still only attaches; a re-run that leaves a previously attached client unpicked now names it and the detach that clears it)
+**Extended-by:** [LLP 0185](./0185-unpicked-client-stays-attached.decision.md) (the finale still only attaches; a re-run that leaves a previously attached client unpicked now names it and the detach that clears it), [LLP 0391](./0391-the-finale-states-results-not-plans.decision.md) (the finale prints no disclosure line; the sweep is disclosed on the picker row this decision already named as the consent)
 
 > Picking OpenClaw in `hyp init` enables the adapter and then drops it
 > from the finale: no attach, no import, a `client_attach_missing` limbo
@@ -88,7 +88,12 @@ question as-is would promise a control the wizard does not have.
   within the interval, brought forward so first queries see data;
   consent for it was the pick itself, whose row summary discloses the
   sweep (mirroring LLP 0174#openclaw's disclosure posture for the
-  manual path). A cancelled consent prompt still cancels the whole
+  manual path).
+  (**Extended-by: [LLP 0391 §decision](./0391-the-finale-states-results-not-plans.decision.md#decision)** - the
+  finale's printed disclosure is dropped and the schedule is stated on the
+  picker row instead; not asking a sweep-backed provider, and bringing its
+  first import forward, are unchanged.)
+  A cancelled consent prompt still cancels the whole
   backfill step, sweep-backed providers included: cancel means "stop
   the wizard", not "skip the question".
 - **No wizard copy of the restart instruction.** The finale dispatches
@@ -114,6 +119,8 @@ question as-is would promise a control the wizard does not have.
 - The consent prompt's provider list can now be empty while backfill
   still runs (an OpenClaw-only pick): no question is asked, the
   disclosure and import still happen.
+  (**Extended-by: [LLP 0391 §decision](./0391-the-finale-states-results-not-plans.decision.md#decision)** - the
+  import still happens; the printed disclosure does not.)
 - The derivation widens `clientsPicked` by two clients against the
   bundled catalog: `openclaw` (the fix) and `claude-desktop` (whose
   skills and agents now install when its row is picked, and whose
