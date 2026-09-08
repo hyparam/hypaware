@@ -1193,9 +1193,10 @@ two-layer drift detection this discharges),
    emission-order flip: hold the release and file it.
 
    If no row has both counts above zero the check did not run, rather than
-   passed: no turn in the window answered with text *and* a tool call in one
-   response. Hold another turn, phrased so the answer needs a file read, and
-   re-run this query before moving on.
+   passed: usually no turn in the window answered with text *and* a tool call
+   in one response, and **If it fails** below names the other cause. Hold
+   another turn, phrased so the answer needs a file read, and re-run this
+   query before moving on.
 
 10. Confirm the capture-health line agrees, which is the production half of
     the same duty:
@@ -1261,11 +1262,18 @@ two-layer drift detection this discharges),
   degrades to the pre-#1470 behavior, so nothing errors and no column reads
   null, and both of #1470's token shapes come back on turns the transcript
   sweep also captured.
-- Step 9 reads `usage_on_tool = 2` with `turn_output_tokens` at exactly twice
-  step 8's `output_tokens`: the scheduled transcript sweep has committed its
-  own copy of the turn and the two rows have not collapsed onto one uuid yet
-  (LLP 0389). Re-run the query after the next flush; only a split that
-  persists is a finding.
+- Step 9 reads `usage_on_tool = 0` and `usage_on_text = 0` on a turn whose
+  `text_rows` and `tool_rows` are both above zero: that turn's `api_request`
+  event never arrived, so neither row had a usage record to claim. LLP 0390's
+  Consequences record that as unchanged pre-existing behavior, not the order
+  flip, and step 7's `api_request` count is where to confirm it.
+- Step 9 reports it did not run (no row with both counts above zero) on a turn
+  you know called a tool: the scheduled transcript sweep committed the same
+  tool block first and the `part_id` dedupe dropped the OTEL lane's copy
+  (LLP 0389). The sweep writes `conversation_source = 'claude'` and this query
+  reads `claude_code`, so a sweep-owned row is invisible here rather than
+  doubled. Hold another tool-calling turn and run step 9 before the next sweep
+  fires.
 - Step 10 shows `[capture gap]` right after a healthy step 6: the transcript
   probe sees session files newer than the last event, usually because the
   daemon was down for part of the run. Re-run steps 5 and 10 against a daemon
