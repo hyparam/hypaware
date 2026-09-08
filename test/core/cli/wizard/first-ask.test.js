@@ -147,7 +147,7 @@ test('runWizardFirstAsk: a pick spawns the client with the question as argv', as
   // must not read as a hang.
   assert.match(stdout.text(), /Starting Claude Code/)
   // A launch replaces the list; it is not also printed.
-  assert.doesNotMatch(stdout.text(), /Questions worth asking/)
+  assert.doesNotMatch(stdout.text(), /Worth asking your AI client/)
 })
 
 test('launchClient: an explicit cwd is honoured, so the low-level seam stays parameterised', () => {
@@ -204,7 +204,7 @@ test('runWizardFirstAsk: no launchable client prints the list and launches nothi
   assert.deepEqual(result, { launched: false, reason: 'no-launcher' })
   assert.equal(spawner.calls.length, 0)
   const text = stdout.text()
-  assert.match(text, /Questions worth asking/)
+  assert.match(text, /Worth asking your AI client/)
   for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
   // Nothing to start here, so the fallback names the manual route.
   assert.match(text, /Paste one into an AI client session/)
@@ -216,7 +216,7 @@ test('onboarding only prints the questions and tells the user to choose the laun
   writeSuggestedPrompts({ stdout, footer: 'onboarding', hasRows: true })
   const text = stdout.text()
   for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
-  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want an attached AI client to start/)
+  assert.match(text, /To ask it, run `hyp ask`: HypAware gathers the evidence first and starts an attached AI client on it/)
   assert.doesNotMatch(text, /Starting Claude Code|Starting Codex/)
 })
 
@@ -330,7 +330,7 @@ test('runWizardFirstAsk: a non-interactive run prints the list and never prompts
   })
   assert.deepEqual(result, { launched: false, reason: 'not-interactive' })
   assert.equal(chooser.seen.length, 0)
-  assert.match(stdout.text(), /Questions worth asking/)
+  assert.match(stdout.text(), /Worth asking your AI client/)
 })
 
 test('runWizardFirstAsk: a spawn failure degrades to the list, never a throw', async () => {
@@ -356,7 +356,7 @@ test('runWizardFirstAsk: a spawn failure degrades to the list, never a throw', a
   })
   assert.deepEqual(result, { launched: false, reason: 'spawn-failed' })
   assert.match(stderr.text(), /Could not start claude: ENOENT/)
-  assert.match(stdout.text(), /Questions worth asking/)
+  assert.match(stdout.text(), /Worth asking your AI client/)
 })
 
 test('runWizardFirstAsk: an unforeseen error is contained', async () => {
@@ -371,7 +371,7 @@ test('runWizardFirstAsk: an unforeseen error is contained', async () => {
     select: /** @type {any} */ (async () => { throw new TypeError('boom') }),
   })
   assert.deepEqual(result, { launched: false, reason: 'error' })
-  assert.match(stdout.text(), /Questions worth asking/)
+  assert.match(stdout.text(), /Worth asking your AI client/)
 })
 
 test('runWizardFirstAsk: two launchable clients ask which one answers', async () => {
@@ -399,13 +399,11 @@ test('runWizardFirstAsk: two launchable clients ask which one answers', async ()
   assert.equal(spawner.calls[0].cmd, '/usr/local/bin/codex')
 })
 
-test('the suggested prompts are a short list of distinct, routable questions', async () => {
+test('the suggested prompt is one routable question that names no machinery', async () => {
   // @ref LLP 0198#split [tests]: core owns the questions, and they name no machinery
-  // The exact count is editable content, not a contract. What is pinned is
-  // that the list stays short enough to scan and long enough to teach: a
-  // menu of one is not a curriculum, and one of ten is a wall.
-  assert.ok(SUGGESTED_PROMPTS.length >= 3 && SUGGESTED_PROMPTS.length <= 6,
-    `expected 3-6 questions, got ${SUGGESTED_PROMPTS.length}`)
+  // One question (LLP 0388 #one-question): the earlier rows became the
+  // routes it chooses between, so a second row here would be a regression.
+  assert.equal(SUGGESTED_PROMPTS.length, 1)
   assert.equal(new Set(SUGGESTED_PROMPTS.map((p) => p.id)).size, SUGGESTED_PROMPTS.length, 'ids must be unique')
   for (const p of SUGGESTED_PROMPTS) {
     assert.ok(p.id && p.label && p.prompt, 'every question needs an id, a label, and a prompt')
@@ -472,26 +470,4 @@ test('runWizardFirstAsk: a failed gather degrades to the plain prompt in the cal
   assert.equal(result.launched, true)
   assert.equal(spawner.calls[0].opts.cwd, undefined)
   assert.match(stderr.text(), /Could not gather evidence first \(cache locked\)/)
-})
-
-test('runWizardFirstAsk: the other rows never gather, even when a gather is available', async () => {
-  const spawner = recordingSpawn()
-  const tokens = SUGGESTED_PROMPTS.find((p) => p.id === 'tokens')
-  assert.ok(tokens)
-  const chooser = selectReturning(tokens.id)
-  let gathered = 0
-  await runWizardFirstAsk({
-    clients: ['claude'],
-    descriptors: descriptors(),
-    stdout: makeBuf(),
-    env: {},
-    interactive: true,
-    resolve: async () => '/usr/local/bin/claude',
-    spawnFn: spawner.fn,
-    select: chooser.fn,
-    prepareEvidence: async () => { gathered += 1; return undefined },
-  })
-  assert.equal(gathered, 0)
-  assert.equal(spawner.calls[0].opts.cwd, undefined)
-  assert.deepEqual(spawner.calls[0].args, [tokens.prompt])
 })

@@ -145,6 +145,18 @@ runs showed:
   instruction file cannot stop a person from resuming a session; it only
   takes effect once the session is open.
 
+<a id="one-question"></a>**`hyp ask` asks one question.** The list of
+LLP 0198 #first-ask had four rows: token spend, a repeated mistake, a
+missing skill, a subagent worth adding. Each sent a cold client at the
+cache with a sentence and a skill, and the recorded runs of those rows
+are the evidence in the Context above that this does not produce a
+change anyone acts on. The four are now the routes the gather chooses
+between, with evidence, so the menu collapses to the one question and
+"Not now". The framed screen, the client pick when two clients could
+answer, and the decline path are unchanged; the printed list in setup and
+`hyp ask --list` name the one question. `hyp ask "<question>"` still
+skips everything and starts straight on what was typed.
+
 <a id="not-preauthorized"></a>**The launch is still not pre-authorized.**
 LLP 0198 #no-preauth stands. The client will ask before its first Bash
 command, which is the hook test; reading the evidence files needs no
@@ -168,9 +180,8 @@ The server-side, per-org version of this ask exists as operator tooling
 outside the product and is not part of this decision. Its findings are
 what set the floors.
 
-`SUGGESTED_PROMPTS` gains a fifth row at the top. Setup's printed list and
-`hyp ask --list` show it like the others; only the interactive pick
-triggers the gather.
+`SUGGESTED_PROMPTS` holds the one question. Setup's printed list and
+`hyp ask --list` show it; only the interactive pick triggers the gather.
 
 ## Telemetry
 

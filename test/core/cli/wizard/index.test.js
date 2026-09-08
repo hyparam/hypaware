@@ -1312,8 +1312,8 @@ test('runInitWizard: the suggested questions come last, after the privacy narrat
   assert.doesNotMatch(text, /Starting Claude Code|Starting Codex/)
   // Order: rows, then what leaves this machine, then the question.
   assert.ok(text.indexOf('First look') < text.indexOf('Nothing has been uploaded yet'))
-  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Questions worth asking'))
-  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want an attached AI client to start/)
+  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Worth asking your AI client'))
+  assert.match(text, /To ask it, run `hyp ask`: HypAware gathers the evidence first and starts an attached AI client on it/)
 })
 
 // @ref LLP 0203#offer [tests]: the sync offer sits between the first look it follows and the closing question list
@@ -1346,7 +1346,7 @@ test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync quest
   assert.doesNotMatch(text, /Nothing has been uploaded yet/)
   assert.doesNotMatch(text, /Send your recorded history/)
   assert.ok(text.indexOf('First look') < text.indexOf('`hyp sync` shows what would leave'))
-  assert.ok(text.indexOf('`hyp sync` shows what would leave') < text.indexOf('Questions worth asking'))
+  assert.ok(text.indexOf('`hyp sync` shows what would leave') < text.indexOf('Worth asking your AI client'))
   // A run that ends on the wait still leaves the deadline and the release
   // verb on screen.
   assert.match(text, /Nothing was sent\. Your history stays on this machine until /)
@@ -1407,7 +1407,7 @@ test('runInitWizard: a non-interactive or dry run does not print the question li
     picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
   })
   await runInitWizard(opts)
-  assert.ok(!stdout.text().includes('Questions worth asking'))
+  assert.ok(!stdout.text().includes('Worth asking your AI client'))
 
   const { opts: dryOpts } = wizardOpts(await tmpHome(), {
     finale: { dryRun: true },

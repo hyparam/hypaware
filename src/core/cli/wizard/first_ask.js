@@ -28,91 +28,39 @@ import { isPromptBackError } from '../tui/runtime.js'
 import { RECOMMEND_LAUNCH_PROMPT, RECOMMEND_PROMPT_ID } from '../../query/first_ask_evidence.js'
 
 /**
- * The questions setup offers.
+ * The question setup offers, and `hyp ask` starts.
  *
- * Every one asks what to *change*, not what happened: where the tokens
- * went, why agents stall, what repeated work deserves a skill, which
- * subagents would pay for themselves. A question whose best answer is a
- * number teaches the user that HypAware is a dashboard; a question whose
- * answer is a change teaches them it is a feedback loop, which is the
- * thing worth learning in the first minute.
+ * One question, whose answer is a change rather than a number: what
+ * single addition would recover the most wasted effort. A question whose
+ * best answer is a number teaches the user that HypAware is a dashboard;
+ * one whose answer is a change teaches them it is a feedback loop, which
+ * is the thing worth learning in the first minute. The four earlier
+ * questions (token spend, repeated mistakes, a missing skill, a subagent
+ * worth adding) are not gone: they are the routes the gather chooses
+ * between from the record, with evidence, instead of a cold client
+ * guessing at SQL (LLP 0388 #one-question).
  *
- * Phrased as a user would phrase them, never as skill invocations
- * (`@ref LLP 0011#no-architectural-names`): the skills' own `description`
- * fields do the routing, and a prompt naming one would teach the user a
- * vocabulary they should never need.
- *
- * Each does name HypAware, in a leading "From my HypAware history"
- * clause. The product name is not an architectural name - it is the thing
- * the user just installed, and the words they would reach for themselves.
- * What the earlier "Based on the hypaware logs." prefix got wrong was
- * naming the *artifact* (a dataset the user has never seen) in a sentence
- * fragment bolted on ahead of the question. The clause has to stay,
- * though: `hyp ask` opens a session with no context, and a question about
- * "my sessions" with nothing pointing at the history is one a cold client
- * may answer from its own conversation, or refuse for want of data.
- *
- * `which` and `what` are not interchangeable here. `which` presupposes a
- * set the reader could point at, so it is correct only for things already
- * in the recorded history (a task, a request, a stage of a workflow) and
- * wrong for a skill or a subagent that does not exist yet - "which skill
- * should I build" reads as a menu of skills the user already has. The
- * proposed thing takes `what`, the evidence it is proposed from takes
- * `which`, which is why the two forward-looking questions carry one of
- * each.
- *
- * Each is one subject with one criterion, closing on a short clause that
- * asks for the *mechanism* rather than restating the subject: "what drove
- * the cost", not "how much did it cost". The mechanism is the half only
- * the user's own sessions can answer, and the half that is actionable.
- * Each is scoped (a week, "across sessions", "over and over") so the
- * answer is a specific thing rather than a survey, which keeps it fast
- * under `@ref LLP 0054`'s bounded execution as well as pointed.
+ * Phrased as a user would phrase it, never as a skill invocation
+ * (`@ref LLP 0011#no-architectural-names`), and opening with "From my
+ * HypAware history" because `hyp ask` opens a session with no context.
  *
  * `label` is what the menu shows; `prompt` is what the client is started
- * with. They differ because a menu row wants to be scannable and an
- * opening prompt wants to be specific.
+ * with.
  *
- * The labels are noun phrases rather than questions, and no two lean on
- * the same noun (spend, mistake, skill, subagent). The screen's own title already asks the question ("Ask
- * your first question"), so four rows repeating the interrogative spend
- * their first words on grammar the reader has had; and a set where three
- * rows said "tokens" scanned as one topic listed three times rather than
- * as four choices. Each row now differentiates on its own axis: spend,
- * friction, repetition, delegation.
- *
- * @ref LLP 0198#split [implements]: the questions are core's, because they are about core's datasets
+ * @ref LLP 0198#split [implements]: the question is core's, because it is about core's datasets
+ * @ref LLP 0388#one-question [implements]: one question, routed from evidence, replaces the list
  * @type {ReadonlyArray<{ id: string, label: string, prompt: string }>}
  */
 export const SUGGESTED_PROMPTS = Object.freeze([
   {
-    // The one row whose launch is preceded by a gather (LLP 0388): the
-    // prompt names the folder because the client will be started inside
-    // it, and a question about "this folder" asked anywhere else would be
-    // wrong. The other rows remain plain prompts in the caller's cwd.
+    // The one question (LLP 0388 #one-question). Its launch is preceded by
+    // a gather, and the prompt names the folder because the client is
+    // started inside it. The earlier four rows asked the same things a
+    // cold client could not answer well from SQL it wrote itself; they are
+    // now the routes this one question chooses between.
     id: RECOMMEND_PROMPT_ID,
     label: 'The one change worth making',
     prompt: RECOMMEND_LAUNCH_PROMPT,
-  },
-  {
-    id: 'tokens',
-    label: "Last week's biggest token spend",
-    prompt: 'From my HypAware history, which task took the biggest share of my tokens last week, and what drove the cost?',
-  },
-  {
-    id: 'errors',
-    label: 'The mistake my agents repeat',
-    prompt: 'From my HypAware history, what mistake do my agents keep repeating across sessions, and what triggers it?',
-  },
-  {
-    id: 'skills',
-    label: "The skill I'm missing",
-    prompt: 'From my HypAware history, what additional skill would save me the most repeated work, and which requests would it replace?',
-  },
-  {
-    id: 'subagents',
-    label: 'The subagent worth adding',
-    prompt: 'From my HypAware history, what subagent could I add to cut the most wasted effort, and which tasks would I delegate to it?',
   },
 ])
 
@@ -249,9 +197,9 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
 export function writeSuggestedPrompts({ stdout, footer, hasRows }) {
   if (hasRows === false) {
     stdout.write('\nNothing recorded yet: HypAware captures from your next session onward.\n')
-    stdout.write('Once you have some history, these are worth asking your AI client:\n')
+    stdout.write('Once you have some history, this is worth asking your AI client:\n')
   } else {
-    stdout.write('\nQuestions worth asking your AI client about this data:\n')
+    stdout.write('\nWorth asking your AI client about this data:\n')
   }
   for (const p of SUGGESTED_PROMPTS) {
     stdout.write(`  ${p.prompt}\n`)
@@ -279,11 +227,11 @@ function promptListFooter(footer, hasRows) {
       // point at the screen they are already looking at.
       return 'Paste one into an AI client session to get started.'
     case 'onboarding':
-      return 'To ask any of these, run `hyp ask` from the directory where you want an attached AI client to start.'
+      return 'To ask it, run `hyp ask`: HypAware gathers the evidence first and starts an attached AI client on it.'
     default:
       return hasRows === false
-        ? 'Run `hyp ask` then, to pick one and start your client on it.'
-        : 'Run `hyp ask` to pick one of these and start your client on it.'
+        ? 'Run `hyp ask` then, to start your client on it.'
+        : 'Run `hyp ask` to start your client on it.'
   }
 }
 
@@ -498,8 +446,8 @@ async function chooseQuestion(opts, launchers) {
       box: true,
       title: 'Ask your first question',
       items: launchers.length === 1
-        ? [`Starts ${launchers[0].label} on the question you pick.`]
-        : ['Starts your AI client on the question you pick.'],
+        ? [`Measures your last 30 days, then starts ${launchers[0].label} on what it found, in a HypAware folder.`]
+        : ['Measures your last 30 days, then starts your AI client on what it found, in a HypAware folder.'],
       // The default hint says "esc cancel", which is wrong here: there is
       // nothing left to cancel, and escape means the same as the last row.
       hint: 'up/down · enter start · esc not now',

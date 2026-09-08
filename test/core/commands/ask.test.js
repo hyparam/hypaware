@@ -101,7 +101,7 @@ test('runAsk: no-launcher exits 1 on a fresh install with nothing attached', asy
   const code = await runAsk([], ctx)
   assert.equal(code, 1)
   // The no-launcher variant is the printed list, not a client launch.
-  assert.match(stdout.text(), /Questions worth asking/)
+  assert.match(stdout.text(), /Worth asking your AI client/)
 })
 
 test('runAsk: --list exits 0 regardless of launchability', async () => {
@@ -109,7 +109,7 @@ test('runAsk: --list exits 0 regardless of launchability', async () => {
   const { ctx, stdout } = makeCtx({ env: { HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' } })
   const code = await runAsk(['--list'], ctx)
   assert.equal(code, 0)
-  assert.match(stdout.text(), /Questions worth asking/)
+  assert.match(stdout.text(), /Worth asking your AI client/)
 })
 
 // A hint that cannot be typed is not a repair. `hyp client attach <client>`
@@ -141,5 +141,5 @@ test('runAsk: --list on a host with nothing launchable prints the manual fallbac
   await runAsk(['--list'], ctx)
   const text = stdout.text()
   assert.match(text, /Paste one into an AI client session/)
-  assert.doesNotMatch(text, /Run `hyp ask` to pick one of these/)
+  assert.doesNotMatch(text, /Run `hyp ask` to start your client on it/)
 })
