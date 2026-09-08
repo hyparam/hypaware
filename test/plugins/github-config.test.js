@@ -137,7 +137,7 @@ test('hypaware.plugin.json declares the bundled-graph-source shape (LLP 0005/036
   // Both dependency kinds are required (LLP 0001 §both-dependency-kinds): the
   // plugin dep pins activation order; the capability dep is the contract interface.
   assert.equal(manifest.requires.plugins['@hypaware/context-graph'], '^0.1.0')
-  assert.equal(manifest.requires.capabilities['hypaware.context-graph'], '^1.0.0')
+  assert.equal(manifest.requires.capabilities['hypaware.context-graph'], '^1.1.0')
   // Outbound + state permissions (network for the GitHub API; state for cursors).
   assert.deepEqual([...manifest.permissions].sort(), ['network', 'read_state', 'write_state'])
   // Contributions: one dataset, one config section, one source, and its command group.

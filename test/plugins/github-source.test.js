@@ -8,7 +8,10 @@ import test from 'node:test'
 
 import { setGithubRuntime } from '../../hypaware-core/plugins-workspace/github/src/runtime.js'
 import { BACKLOG_RETRY_MS, nextCaptureDelay, startGithubSource } from '../../hypaware-core/plugins-workspace/github/src/source.js'
-import { fakeClient } from './github-fake-client.js'
+import { emptyGraph, fakeClient } from './github-fake-client.js'
+import { runCaptureTick } from '../../hypaware-core/plugins-workspace/github/src/tick.js'
+import { readCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
+import { runGithubBackfill } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
 
 test('unfinished work resumes on the bounded backlog cadence', () => {
   assert.equal(nextCaptureDelay(24 * 60 * 60_000, true), BACKLOG_RETRY_MS)
@@ -24,6 +27,7 @@ test('source runs shortly after boot and reports structured completion-relative 
 
   setGithubRuntime(/** @type {any} */ ({
     stateDir,
+    graph: emptyGraph,
     config: {
       ignore: [],
       token_env: 'GITHUB_TOKEN',
@@ -69,6 +73,7 @@ test('status reports the repositories the last tick reached, and the inventory i
   // the first repository and the budget stops it there.
   setGithubRuntime(/** @type {any} */ ({
     stateDir,
+    graph: emptyGraph,
     config: {
       ignore: [],
       token_env: 'GITHUB_TOKEN',
@@ -112,6 +117,7 @@ test('source never overlaps slow ticks', async (t) => {
 
   setGithubRuntime(/** @type {any} */ ({
     stateDir,
+    graph: emptyGraph,
     config: {
       ignore: [],
       token_env: 'GITHUB_TOKEN',
@@ -154,4 +160,117 @@ test('source never overlaps slow ticks', async (t) => {
 
   assert.ok(scans >= 2)
   assert.equal(maxActive, 1)
+})
+
+// @ref LLP 0392#retry [tests]: capture cursors survive projection failure; idle ticks retry without re-appending
+test('automatic projection catches up, skips idle ticks, and retries failure without rolling back capture', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-project-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const issues = []
+  const rows = []
+  const projectedSources = []
+  const logs = []
+  let fail = false
+  const runtime = /** @type {any} */ ({
+    stateDir,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
+    observedRepos: { async list() { return ['o/r'] } },
+    clientFactory: () => fakeClient({ repos: { 'o/r': { issues } } }),
+    storage: {
+      cacheTablePath() { return '/cache/github_events' },
+      async appendRows(_path, _columns, batch) { rows.push(...batch) },
+    },
+    graph: {
+      async project(source) {
+        projectedSources.push(source)
+        if (fail) {
+          assert.equal(readCursors(stateDir).repos['o/r'].since?.issues, '2026-09-08T00:00:00Z')
+          throw new Error('graph storage unavailable')
+        }
+        return { nodes: 1, edges: 1, nodesWritten: 1, edgesWritten: 1 }
+      },
+    },
+    log: {
+      info(name, attrs) { logs.push({ name, attrs }) },
+      error(name, attrs) { logs.push({ name, attrs }) },
+    },
+  })
+
+  await runCaptureTick(runtime, { mode: 'poll' })
+  assert.deepEqual(projectedSources, ['github_events'], 'startup catches up existing durable events, even with no new capture')
+  await runCaptureTick(runtime, { mode: 'poll' })
+  assert.equal(projectedSources.length, 1, 'an idle tick does not scan graph history again')
+
+  issues.push({ number: 1, created_at: '2026-09-08T00:00:00Z', state: 'open' })
+  fail = true
+  const failed = await runCaptureTick(runtime, { mode: 'poll' })
+  assert.equal(failed.events, 1)
+  assert.deepEqual(failed.errors, [{ repo: '(graph)', error: 'graph storage unavailable' }])
+  assert.equal(failed.pending, false, 'projection failure does not create a fast retry loop')
+  assert.equal(rows.length, 1)
+  assert.ok(logs.some((entry) => entry.name === 'github.projection_failed'
+    && entry.attrs.error_kind === 'github_projection_failed'))
+
+  fail = false
+  const retried = await runCaptureTick(runtime, { mode: 'poll' })
+  assert.equal(retried.events, 0)
+  assert.deepEqual(retried.errors, [])
+  assert.equal(projectedSources.length, 3, 'projection retries even though capture advanced its cursor')
+  assert.equal(rows.length, 1, 'projection retry does not repeat captured rows')
+  await runCaptureTick(runtime, { mode: 'poll' })
+  assert.equal(projectedSources.length, 3, 'success clears the pending retry')
+
+  // A fresh activation forgets only the idle optimization, so a crash between
+  // capture and projection cannot strand durable events.
+  const restarted = { ...runtime, projectionNeeded: undefined }
+  await runCaptureTick(restarted, { mode: 'poll' })
+  assert.equal(projectedSources.length, 4)
+
+  fail = true
+  setGithubRuntime(runtime)
+  let stderr = ''
+  const code = await runGithubBackfill([], /** @type {any} */ ({
+    stdout: { write() {} },
+    stderr: { write(text) { stderr += text } },
+  }))
+  assert.equal(code, 1, 'backfill reports projection failure as a nonzero exit')
+  assert.match(stderr, /\(graph\): graph storage unavailable/)
+})
+
+test('daemon stop waits for projection and status reports its failure', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-project-stop-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  let release = () => {}
+  let began = () => {}
+  const started = new Promise((resolve) => { began = () => resolve(undefined) })
+  const blocked = new Promise((resolve) => { release = () => resolve(undefined) })
+  setGithubRuntime(/** @type {any} */ ({
+    stateDir,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '5ms', inventory: 'session_repos' },
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => fakeClient({}),
+    storage: { cacheTablePath() { return '/cache/github_events' } },
+    graph: {
+      async project() {
+        began()
+        await blocked
+        throw new Error('projection refused')
+      },
+    },
+    log: { info() {}, error() {} },
+  }))
+  const source = await startGithubSource()
+  const timeout = setTimeout(began, 1000)
+  t.after(() => clearTimeout(timeout))
+  await started
+  assert.equal((await source.status?.())?.details?.in_flight, true)
+  let stopped = false
+  const stopping = source.stop().then(() => { stopped = true })
+  await new Promise((resolve) => setTimeout(resolve, 15))
+  assert.equal(stopped, false)
+  release()
+  await stopping
+  const status = await source.status?.()
+  assert.equal(status?.lastError, 'projection refused')
+  assert.equal(status?.details?.last_success_at, null)
 })

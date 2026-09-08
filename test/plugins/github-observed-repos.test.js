@@ -14,6 +14,7 @@ import { writeCursors } from '../../hypaware-core/plugins-workspace/github/src/c
 import { createLocalObservedReposIndex } from '../../hypaware-core/plugins-workspace/github/src/observed-repos.js'
 import { setGithubRuntime } from '../../hypaware-core/plugins-workspace/github/src/runtime.js'
 import { runCaptureTick } from '../../hypaware-core/plugins-workspace/github/src/tick.js'
+import { emptyGraph } from './github-fake-client.js'
 
 /** @import { QueryStorageService } from '../../hypaware-core/plugins-workspace/github/src/types.d.ts' */
 
@@ -90,6 +91,7 @@ test('default capture tick uses local session evidence without GitHub enumeratio
   const report = await runCaptureTick(
     /** @type {any} */ ({
       stateDir,
+      graph: emptyGraph,
       config: {
         ignore: [],
         token_env: 'GITHUB_TOKEN',
@@ -394,6 +396,7 @@ test('an incomplete revalidation surfaces as bounded pending work on the capture
   const report = await runCaptureTick(
     /** @type {any} */ ({
       stateDir,
+      graph: emptyGraph,
       config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
       observedRepos: {
         async list() { return [] },
@@ -426,6 +429,7 @@ test('an incomplete revalidation surfaces as bounded pending work on the capture
 function failingInventoryRuntime(stateDir, err, onError = () => {}) {
   return /** @type {any} */ ({
     stateDir,
+    graph: emptyGraph,
     config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
     observedRepos: {
       async list() { throw err },

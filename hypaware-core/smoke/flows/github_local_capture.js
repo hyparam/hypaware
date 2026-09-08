@@ -29,7 +29,7 @@ import {
 /**
  * Hermetic proof that the bundled source discovers a repository from local
  * agent evidence, captures GitHub structure without network access, and
- * converges with the session graph after explicit projection.
+ * projects it automatically, and converges with the separately projected session graph.
  *
  * @param {{ harness: any, expect: any }} args
  * @ref LLP 0360#inventory [tests]: the default inventory is session evidence, not every repository visible to GitHub
@@ -114,8 +114,17 @@ export async function run({ harness, expect }) {
     )
   })
 
-  await step('project', async () => {
-    const result = await dispatchText(['graph', 'project'], lifetime)
+  await step('verify_automatic_projection', async () => {
+    const issues = await sqlCount("select count(*) as n from node where node_type = 'Issue' and natural_key = 'acme/widgets#7'", lifetime)
+    expect.that('automatic projection: GitHub issue exists before graph project', issues, (n) => n === 1)
+    const edges = await sqlCount("select count(*) as n from edge where source_dataset = 'github_events'", lifetime)
+    expect.that('automatic projection: GitHub edges exist before graph project', edges, (n) => n > 0)
+    const sessions = await sqlCount("select count(*) as n from node where node_type = 'Session'", lifetime)
+    expect.that('automatic projection: other source contracts were not run', sessions, (n) => n === 0)
+  })
+
+  await step('project_sessions', async () => {
+    const result = await dispatchText(['graph', 'project', '--source', 'ai_gateway_messages'], lifetime)
     expect.that('graph project: command exited 0', result.code, (value) => value === 0)
     expect.that('graph project: no stderr', result.stderr, (value) => value === '')
   })
@@ -154,6 +163,14 @@ export async function run({ harness, expect }) {
     )
   )
   const logs = await expect.logs()
+  expect.that(
+    'telemetry: GitHub projection completed automatically',
+    logs,
+    (rows) => rows.some((row) => row.body === 'github.projection_completed'
+      && row.attributes?.source_dataset === 'github_events'
+      && row.attributes?.nodes_written > 0
+      && row.attributes?.edges_written > 0)
+  )
   expect.that(
     'telemetry: inventory resolution reports one selected repository without naming it',
     logs,
