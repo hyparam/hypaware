@@ -60,11 +60,22 @@ late, and only for the blocks a body carries.
 
 - Body-derived rows are hashed twice at projection (once for the match-key,
   once for the gateway's fallback id) exactly as proxy-projected fallback rows
-  already are. The added work is one sha256 over content already canonicalized
-  for the fallback id, on a path that only runs for blocks a body carries.
-- A block whose transcript line has not landed yet stays on its fallback id and
-  is repaired by the LLP 0027 re-settle sweep, the same backstop the proxy path
-  uses.
+  already are. The two formulas differ (the fallback id folds in thread scope
+  and agent), so the canonicalization is repeated rather than shared: the added
+  work is one `canonicalJson` plus one sha256 per gap block. It rides the
+  request body's history replay, so it is quadratic in a session's turns, on
+  the same shape and by the same constant the fallback id already paid.
+- A block whose transcript line has not landed yet stays on its fallback id.
+  The LLP 0027 re-settle sweep still gives it the transcript uuid at
+  compaction, but it does not collapse the twin the way it does on the proxy
+  path: its de-twin is a single-partition rewrite, resting on LLP 0027
+  #re-settle-sweep's "twins always live in the same partition". That holds for
+  a pair one lane produced. It does not hold for this pair, whose rows sit in
+  sibling source partitions (`conversation_source = 'claude'` for the sweep,
+  `claude_code` for the body-derived row). The flush-time pass is what
+  collapses this pair, and its committed scan is dataset-wide; a row that
+  misses that pass keeps its duplicate, which is the pre-fix duplicate and no
+  worse.
 - Rows written before this decision carry no match-key, so nothing can re-match
   them: the duplicates already in a cache stay there, and a report over that
   window has to collapse them itself (group on `session_id` plus
