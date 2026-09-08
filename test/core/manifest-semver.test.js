@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { validateManifest } from '../../src/core/manifest.js'
-import { matchesSemverRange } from '../../src/core/semver.js'
+import { isValidRange, matchesSemverRange } from '../../src/core/semver.js'
 
 test('validateManifest accepts the plugin manifest fields the kernel consumes', () => {
   const result = validateManifest({
@@ -212,4 +212,16 @@ test('matchesSemverRange reads an empty alternative as the wildcard npm reads', 
   assert.equal(matchesSemverRange('9.9.9', '|| ^1.0.0'), true)
   assert.equal(matchesSemverRange('9.9.9', '^1.0.0 ||'), true)
   assert.equal(matchesSemverRange('9.9.9', '1.2.3||'), true)
+})
+
+test('matchesSemverRange refuses a range whose other alternative is unreadable', () => {
+  // npm rejects the whole range when one alternative is not a range at all, and
+  // the callers that gate on this answer have no validity check in front of
+  // them, so answering off the readable half alone would call a manifest
+  // declaring one satisfied. `isValidRange` already says the whole shape is
+  // unreadable; the matcher agrees rather than guessing from what it could read.
+  for (const range of ['^1.0.0 || file:../fork', '^1.0.0 || npm:other@1', 'garbage || ^1.0.0']) {
+    assert.equal(isValidRange(range), false, `${range} is not a readable range`)
+    assert.equal(matchesSemverRange('1.0.0', range), false, `${range} is not satisfied`)
+  }
 })

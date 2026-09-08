@@ -22,11 +22,19 @@ export function matchesSemverRange(version, range) {
   if (isWildcard(trimmed)) return true
   const v = parseSemver(version)
   if (!v) return false
+  // One unreadable branch makes the whole range unreadable, which is what
+  // `isValidRange` already says of it, so every branch is read before the
+  // answer is given. Returning on the first branch that matches would answer
+  // off the readable half alone, calling `^1.0.0 || file:../fork` satisfied
+  // where npm rejects the range outright and the narrower matcher this
+  // replaces answered `false`.
+  let matched = false
   for (const alternative of trimmed.split('||')) {
     const comparators = comparatorsOf(alternative)
-    if (comparators && comparators.every(c => satisfies(v, c))) return true
+    if (comparators === null) return false
+    if (!matched && comparators.every(c => satisfies(v, c))) matched = true
   }
-  return false
+  return matched
 }
 
 /**
@@ -69,6 +77,9 @@ function isWildcard(range) {
 /** One simple range: an optional operator and a possibly partial version. */
 const SIMPLE = /^(>=|<=|>|<|=|\^|~)?v?(\d+|[xX*])(?:\.(\d+|[xX*])(?:\.(\d+|[xX*])(?:[-+][\w.-]+)?)?)?$/
 
+/** The space between an operator and its version, which is not a token break. */
+const OPERATOR_SPACE = /([<>=^~]+)\s+/g
+
 /**
  * Every primitive comparator a `||` branch expands to, or null when any part
  * of it is a shape this matcher does not know. An empty array is a branch that
@@ -84,7 +95,7 @@ function comparatorsOf(alternative) {
   if (trimmed === '') return []
   // `>= 1.2.3` is one comparator, not two tokens, so the space after an
   // operator closes up before the compound range splits on whitespace.
-  const parts = trimmed.replace(/([<>=^~]+)\s+/g, '$1').split(/\s+/)
+  const parts = trimmed.replace(OPERATOR_SPACE, '$1').split(/\s+/)
   if (parts.length === 3 && parts[1] === '-') return hyphenComparators(parts[0], parts[2])
   const comparators = []
   for (const part of parts) {
