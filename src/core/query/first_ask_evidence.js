@@ -536,6 +536,8 @@ export function askInstructions(routes, meta) {
   const files = meta.files.map((f) => `- \`${f}\`: ${fileNotes[/** @type {keyof typeof fileNotes} */ (f)] ?? ''}`).join('\n')
   return `# What to do with this folder
 
+HypAware records this machine's AI coding sessions (Claude Code, Codex, and others) into a local cache: every prompt the person typed, every tool the agent ran, every response and its token usage. The files in this folder are what HypAware measured over the last 30 days of that record, prepared so you can recommend one change. The person reading your answer is the one whose sessions these are; \`hyp\` is HypAware's command line, and the hypaware-query skill is how to read the cache if you need one more figure.
+
 Scope: ${meta.scope}.
 
 ${routeLine}

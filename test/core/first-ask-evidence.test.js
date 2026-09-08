@@ -196,6 +196,7 @@ test('askInstructions: route, files, and the answer shape the reader gets', () =
   assert.ok(text.includes("read the hypaware-query skill's SKILL.md"), 'the skill is read before a query, and only then')
   assert.ok(text.includes('`session_days.tsv`'))
   assert.ok(text.includes('Based on your logs from the last 30 days,'))
+  assert.ok(text.startsWith('# What to do with this folder\n\nHypAware records'), 'a cold session is told what HypAware is before anything else')
   assert.ok(text.includes('Under 110 words before the code block'))
   assert.ok(!text.includes('\u2014'), 'no em dashes')
   const none = askInstructions([], { scope: 'this machine', files: ['triage.txt'] })
