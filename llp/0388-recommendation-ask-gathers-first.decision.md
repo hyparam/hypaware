@@ -133,14 +133,17 @@ file on disk, before the client is spawned, and no evidence means no
 launch: a client started on the bare question would answer it the cold
 way, so the run says nothing was started and exits non-zero instead.
 
-<a id="answer-shape"></a>**The answer leads with the recommendation.**
-Line one opens "Based on your logs from the last 30 days," and carries
-the recommendation, the thing to add and where it goes, in the same
-sentence. Line two is one plain sentence saying what is happening. Then two or three bullets, each with at most one number, one
-of them a real example in words. Then the file and the block to add.
-Then "Apply this now?". Then one line beginning "Sources:" carrying
-every file:line, session id, and, for a hook, the test command and its
-output. Under 110 words before the block.
+<a id="answer-shape"></a>**The answer reads like Claude telling you what it
+found, not like a report.** It opens by saying what it looked through
+and what stood out, gives the recommendation and why in a sentence or
+two, then the evidence in prose with one real example told as a story,
+then the file and the block to add, then a one-line offer to apply it,
+then one "Sources:" line carrying every file:line, session id, and, for
+any command, the test command and its output. No headings, no bold
+labels, no citations in the text, under 150 words before the block. An
+earlier shape with a fixed opening phrase and "Why" and "What I would
+add" headings was correct and read as generated; this one is the same
+content in a colleague's voice.
 
 Everything the earlier shape verified is still verified. It moved to the
 last line. The rules that produce it each close a failure the recorded

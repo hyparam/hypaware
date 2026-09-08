@@ -563,25 +563,21 @@ ${files}
 
 ## Answer shape
 
-This is the first thing a person sees after installing. They will give it ten seconds. Plain words a non-engineer would follow: no jargon, no citations in the text, no session ids, no em dashes, no bold labels except the two headings below. Print nothing before line 1.
+This is the first thing a person sees after installing, and they will give it about ten seconds. Write it the way you would tell a colleague what you found: short paragraphs, plain words a non-engineer would follow, no headings, no bold labels, no em dashes, no citations, file names, or session ids in the text. Print nothing before the first sentence.
 
-Line 1: "Based on your logs from the last 30 days," then the recommendation in the same sentence: what to add and where it goes, e.g. "Based on your logs from the last 30 days, I'd add a short handoff skill to your Claude skills folder so a day's work can be picked up in a fresh session."
-Line 2: the reason, one plain sentence saying what is happening, e.g. "Sessions you reopen the next day are costing about twice as much per unit of work as fresh ones."
+Open by saying what you did and what stood out, in your own words: that you looked through their last 30 days of sessions and the one thing worth changing. Then the recommendation itself, what to add and where, and why, in a sentence or two. Then the evidence in prose: two or three plain facts with at most one number each, and one real example with its date and what was typed, told as a story rather than a citation. If you skipped something you had to skip, say so in a clause. A short bullet list is fine if it reads better than a paragraph; a table is not.
 
-**Why**
-- two or three bullets, each one plain sentence with at most one number in it
-- one of the bullets is a real example: the date, what was typed, and what it cost, in words
+Then, on its own line, something like "Here's what I'd add:", the file path, and the exact text in a fenced code block. A CLAUDE.md block under 12 lines, a skill under 25, an agent definition under 20.
 
-**What I would add**
-The file path on its own line, then the exact text in a fenced code block. A CLAUDE.md block under 12 lines, a skill under 25, an agent definition under 20.
-
-Then the single question: Apply this now?
+Then ask whether to apply it, in one short sentence.
 
 Then one line that starts with "Sources:" carrying everything you verified, compact: the file:line references, the sessions by id, and for any command the test command and its output. This line is for checking, not reading.
 
+If nothing was over its floor: say what you looked through (sessions and days, from the record line of triage.txt), that there is not enough yet to recommend a change, and when it would be worth asking again. Then "Sources:" and stop; no question.
+
 When the answer is yes: create or edit the file with the Write or Edit tool in that same turn and print the result. Do not ask again.
 
-Under 110 words before the code block.
+Under 150 words before the code block.
 `
 }
 
