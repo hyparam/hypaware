@@ -7,7 +7,7 @@ import path from 'node:path'
 import os from 'node:os'
 
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
-import { appendRowsToTable, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
+import { appendRowsToTable, dataSourceForTable, deleteMatchingRows, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
 
 /**
@@ -24,6 +24,84 @@ const COLS = [
   { name: 'id', type: 'INT64', nullable: false },
   { name: 'msg', type: 'STRING', nullable: false },
 ]
+
+test('batch-backed internal scans preserve typed values, projections and deleted positions across files', async () => {
+  const root = await makeTmpDir()
+  try {
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      ...COLS,
+      { name: 'flag', type: 'BOOLEAN', nullable: true },
+      { name: 'score', type: 'DOUBLE', nullable: true },
+      { name: 'at', type: 'TIMESTAMP', nullable: true },
+      { name: 'attrs', type: 'JSON', nullable: true },
+      INGEST_SEQ_COLUMN,
+    ]
+    // More than one native batch; deleting both leading and interior rows
+    // catches reading vector indices without composing the source selection.
+    for (let file = 0; file < 2; file++) {
+      await appendRowsToTable(root, columns, Array.from({ length: 1100 }, (_, i) => ({
+        id: file * 1100 + i,
+        msg: `row-${file}-${i}`,
+        flag: i % 3 === 0 ? null : i % 2 === 0,
+        score: i % 5 === 0 ? null : i / 3,
+        at: i % 7 === 0 ? null : new Date('2026-09-01T00:00:00Z'),
+        attrs: i % 11 === 0 ? null : { label: `value-${i}`, n: i },
+        [INGEST_SEQ_COLUMN.name]: i % 13 === 0 ? null : BigInt(file * 1100 + i),
+      })))
+    }
+    await deleteMatchingRows(root, (row) => Number(row.id) % 19 === 0, { columns: ['id'] })
+    const source = await dataSourceForTable(root)
+    assert.ok(source?.prepareScan)
+    for (const projection of [undefined, [], ['msg', 'score', 'attrs', 'at', 'flag'], ['id', 'unknown_column']]) {
+      const names = projection?.length ? projection : source.columns
+      /** @type {Record<string, unknown>[]} */
+      const expected = []
+      for await (const row of source.scan({ columns: names }).rows()) {
+        const resolved = row.resolved ? { ...row.resolved } : {}
+        for (const name of names) {
+          if (!Object.hasOwn(resolved, name)) resolved[name] = await row.cells[name]?.()
+        }
+        expected.push(resolved)
+      }
+      const actual = []
+      for await (const row of scanRowsFromTable(root, projection)) actual.push(row)
+      assert.deepEqual(actual, expected)
+    }
+    for (const includeLegacy of [true, false]) {
+      const actual = []
+      for await (const row of scanRowsFromTable(root, ['id'], { since: 1100n, includeLegacy })) {
+        actual.push(Number(row.id))
+      }
+      const expected = Array.from({ length: 2200 }, (_, id) => id).filter((id) =>
+        id % 19 !== 0 && ((id % 1100) % 13 === 0 ? includeLegacy : id > 1100))
+      assert.deepEqual(actual, expected)
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('lookup columns outside projection still filter rows before the incremental sequence check', async () => {
+  const root = await makeTmpDir()
+  try {
+    await appendRowsToTable(root, [...COLS, INGEST_SEQ_COLUMN], [
+      { id: 1, msg: 'keep', [INGEST_SEQ_COLUMN.name]: null },
+      { id: 2, msg: 'other', [INGEST_SEQ_COLUMN.name]: 20n },
+      { id: 3, msg: 'keep', [INGEST_SEQ_COLUMN.name]: 10n },
+      { id: 4, msg: 'keep', [INGEST_SEQ_COLUMN.name]: 20n },
+    ])
+    for (const includeLegacy of [true, false]) {
+      const actual = []
+      for await (const row of scanRowsFromTable(root, ['id'], {
+        since: 10n, includeLegacy, whereIn: { msg: ['keep'] },
+      })) actual.push(Number(row.id))
+      assert.deepEqual(actual, includeLegacy ? [1, 4] : [4])
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
 
 test('readRows back-compat: no opts is unchanged, internal fields never leak', async () => {
   const cacheRoot = await makeTmpDir()

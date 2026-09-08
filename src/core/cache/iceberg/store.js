@@ -2,6 +2,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { readBatchColumn, selectedRowCount, valueAt } from 'squirreling'
 
 import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
 import {
@@ -603,7 +604,7 @@ export async function listLiveDataFiles(tablePath) {
  * The yielded-row filter below is always the authority on what comes out. On
  * top of it, and only when `includeLegacy` is false and no `whereIn`
  * accompanies it, the same predicate is
- * ALSO pushed into icebird's `scan({ where })` so whole data files whose
+ * ALSO pushed into icebird's scan so whole data files whose
  * manifest bound on the seq column sits at or below the watermark are never
  * opened (LLP 0040 §2's file-skip). The push is confined to that case because
  * icebird couples file/row-group pruning with a per-row match that DROPS nulls
@@ -654,15 +655,11 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   // is a predicate callers rely on rather than a pruning hint. No caller passes
   // both today, and this gate means none can start to without noticing.
   const pushSince = filtering && hasSeqColumn && !includeLegacy && opts?.whereIn === undefined
-  const scan = source.scan({
-    columns: projected,
-    where: andExpr(
-      whereInExpr(source, opts?.whereIn),
-      pushSince ? seqAfterExpr(/** @type {bigint} */ (since)) : undefined,
-    ),
-  })
-  for await (const row of scan.rows()) {
-    const resolved = await resolveAsyncRow(row, projected)
+  const where = andExpr(
+    whereInExpr(source, opts?.whereIn),
+    pushSince ? seqAfterExpr(/** @type {bigint} */ (since)) : undefined,
+  )
+  for await (const resolved of scanResolvedRows(source, projected, where, opts?.whereIn === undefined)) {
     if (filtering) {
       const seq = hasSeqColumn ? seqValue(resolved[INGEST_SEQ_COLUMN.name]) : null
       if (seq === null) {
@@ -674,6 +671,46 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
       }
     }
     yield resolved
+  }
+}
+
+/**
+ * Materialize only the current batch into row objects at the consumer boundary.
+ * The native filter is a pruning hint: its only possible residual here is the
+ * seq predicate that scanRowsFromTable rechecks. Lookups retain the row reader,
+ * whose WHERE enforcement is authoritative, as do unknown projected columns.
+ *
+ * @param {ScannableDataSource} source
+ * @param {string[]} columns
+ * @param {ExprNode | undefined} where
+ * @param {boolean} nativeAllowed
+ * @returns {AsyncGenerator<Record<string, unknown>>}
+ */
+async function* scanResolvedRows(source, columns, where, nativeAllowed) {
+  const schema = source.schema
+  if (nativeAllowed && schema && source.prepareScan) {
+    const fields = columns.map((name) => schema.fields.find((field) => field.name === name))
+    if (fields.every((field) => field !== undefined)) {
+      // @ref LLP 0040#storage-api-extension [constrained-by]: native pruning cannot replace the authoritative seq/legacy check at the row boundary
+      const prepared = source.prepareScan({
+        columns: fields.map((field) => ({ field: field.id, phase: 0, purpose: 'output', mode: 'required' })),
+        filter: where,
+      })
+      for await (const batch of prepared.batches()) {
+        const vectors = await Promise.all(columns.map((_, columnIndex) => readBatchColumn({ batch, columnIndex })))
+        const count = selectedRowCount(batch.selection)
+        for (let i = 0; i < count; i++) {
+          /** @type {Record<string, unknown>} */
+          const row = {}
+          for (let j = 0; j < columns.length; j++) row[columns[j]] = valueAt(vectors[j], i)
+          yield row
+        }
+      }
+      return
+    }
+  }
+  for await (const row of source.scan({ columns, where }).rows()) {
+    yield await resolveAsyncRow(row, columns)
   }
 }
 
