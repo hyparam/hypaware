@@ -169,10 +169,11 @@ Written acceptance procedures:
   marker-owned plugin file. See `docs/ACCEPTANCE.md`.
 - `claude_otel_shape_check`: opt-in/manual, needs a real Claude Code 2.1.214
   or newer. The release gate against upstream drift on the OTEL attach path:
-  proves the installed Claude Code still honors the managed `env` block and
-  still emits the event names, attributes, and raw body fields the telemetry
-  listener reads, then checks the rows and the `hyp status` capture-health
-  line agree. See `docs/ACCEPTANCE.md`.
+  proves the installed Claude Code still honors the managed `env` block, still
+  emits the event names, attributes, and raw body fields the telemetry listener
+  reads, and still emits them in the order that puts a turn's tokens on the row
+  both capture lanes name, then checks the rows and the `hyp status`
+  capture-health line agree. See `docs/ACCEPTANCE.md`.
 - `launchd_supervisor_env`: opt-in/manual, needs a real Mac with the daemon
   installed and started as a LaunchAgent. Reads `XPC_SERVICE_NAME` out of the
   running daemon's own environment and proves the shipped `detectSupervisor`
@@ -347,8 +348,12 @@ smokes: `claude_telemetry_capture` POSTs a fixture we wrote, so it agrees with
 itself no matter what upstream did. Only a real Claude Code can tell you it
 renamed an event, dropped a flag, or changed the raw body format, and the
 failure mode is silent (null columns, not an error). Record the observed
-`claude --version` and the full event-name list in the release notes so the
-next release has a baseline to diff against.
+`claude --version`, the full event-name list, and step 9's
+`usage_on_tool` / `usage_on_text` split in the release notes so the next
+release has a baseline to diff against. That split is the emission-order
+baseline: which row carries a turn's usage depends on the order Claude Code
+emits `api_response_body` and `assistant_response` in (LLP 0390), and the
+order is not queryable any other way.
 
 If the release changed `detectSupervisor`, `LAUNCH_LABEL`, or the LaunchAgent
 plist the macOS installer writes, run
