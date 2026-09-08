@@ -35,6 +35,20 @@ export interface RecorderOptions {
   redactHeaders?: readonly string[]
 }
 
+/** Private process boundary. Captures travel in memory, never on disk here. */
+export interface GatewayProcessTransport {
+  role: 'gateway' | 'processing'
+  configure?(redactHeaders: readonly string[]): void
+  recorder?: {
+    startExchange(init: ExchangeInit): Exchange
+    drain(timeoutMs?: number): Promise<void>
+  }
+  finish?(exchange: Exchange, ignoredSessions: Set<string>): void
+  receive?(handler: (exchange: Exchange, ignoredSessions: Set<string>) => Promise<void>): () => Promise<void>
+  endpoint?: { host: string; port: number }
+  snapshot?(): Record<string, number | boolean>
+}
+
 export interface FinishedRow {
   exchange_id: string
   ts_start: string

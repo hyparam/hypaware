@@ -172,7 +172,7 @@ different path, `executeQuerySql` → `squirreling` → `parquet-source.js`
 construction *and* leaves local query untouched, making "recorded locally,
 queryable, never forwarded" a **structural property of the read-path split**
 rather than a flag every sink and every query must remember to check. (The
-[LLP 0038](./0038-split-query-export-daemon-from-gateway.todo.md) query/export
+[LLP 0038](./0038-split-query-export-daemon-from-gateway.rfc.md) query/export
 daemon split does not move this seam; `readRowsSince` stays the sinks' read
 regardless of which process runs the driver.)
 

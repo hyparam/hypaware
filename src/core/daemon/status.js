@@ -1244,6 +1244,7 @@ export async function collectHypAwareStatus(opts = {}) {
     if (!daemon.runId) daemon.runId = daemonStatusFile.runId
     if (!daemon.mode) daemon.mode = daemonStatusFile.mode
     daemon.state = daemonStatusFile.state
+    daemon.processes = daemonStatusFile.processes
   }
 
   // ----- is the process that owns the pid still running its loop? -----

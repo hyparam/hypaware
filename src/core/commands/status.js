@@ -331,6 +331,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       mode: report.daemon.mode ?? null,
       run_id: report.daemon.runId ?? null,
       platform: report.daemon.platform,
+      ...(report.daemon.processes ? { processes: report.daemon.processes } : {}),
       ...(report.daemon.error ? { error: report.daemon.error } : {}),
     },
     ...(report.selfUpdate ? { self_update: report.selfUpdate.json } : {}),

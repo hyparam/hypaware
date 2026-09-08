@@ -67,7 +67,7 @@ CLI and the `query_sql` MCP tool. The fix belongs where the buffering lives, the
 kernel query plane, not behind any one caller.
 
 This spec **bounds the common case**. It is defense-in-depth with the
-separately-owned process-isolation track ([LLP 0038](./0038-split-query-export-daemon-from-gateway.todo.md)):
+separately-owned process-isolation track ([LLP 0038](./0038-split-query-export-daemon-from-gateway.rfc.md)):
 bounding keeps well-formed-but-large queries from OOMing in the first place;
 isolation contains the pathological query that escapes any bound. Neither
 replaces the other.
@@ -184,7 +184,7 @@ adds options to `ExecuteSqlOptions`, not a new import surface or a shim.
 - [LLP 0056](./0056-refuse-over-spill-or-truncate.decision.md): refuse over
   spill/truncate on budget exceed.
 - [LLP 0057](./0057-bounded-query-execution.plan.md): implementation plan.
-- [LLP 0038](./0038-split-query-export-daemon-from-gateway.todo.md): process
+- [LLP 0038](./0038-split-query-export-daemon-from-gateway.rfc.md): process
   isolation (defense-in-depth sibling).
 - HypAware Server LLP 0006 `#result-caps`: the response-edge cap and its V1
   note naming this kernel budget primitive as the follow-up.

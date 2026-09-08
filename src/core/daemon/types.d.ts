@@ -131,6 +131,11 @@ export interface MaintenanceSkipSnapshot {
 }
 
 export interface DaemonStatus {
+  /** Independent process health; absent on pre-split status files. */
+  processes?: {
+    gateway: { pid?: number; state: string }
+    processing: { pid?: number; state: string; restarts: number }
+  }
   state: DaemonState
   pid: number
   /** ISO timestamp of the daemon process boot. */
@@ -395,6 +400,7 @@ export interface CacheFlushFailureReport {
 
 /** Service-level daemon state surfaced by `hyp status`. */
 export interface ServiceState {
+  processes?: DaemonStatus['processes']
   /** Service file present at the platform path. */
   installed: boolean
   /** Service registered with launchd/systemd. */
@@ -857,6 +863,10 @@ export interface DaemonHandle {
 }
 
 export interface RunDaemonOptions {
+  /** Internal process-launch seam for resource limits and hermetic fault tests. */
+  processingExecArgv?: string[]
+  /** Private runtime files for a supervised processor; data/config keep hypHome. */
+  runtimeStateRoot?: string
   /** Override HYP_HOME (defaults from env). */
   hypHome?: string
   /** Explicit config file path. */

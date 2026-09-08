@@ -38,7 +38,7 @@ export async function runDaemonRun(argv, ctx) {
     )
     return 2
   }
-  const { runDaemon } = await import('../daemon/runtime.js')
+  const { runGatewayDaemon: runDaemon } = await import('../daemon/gateway.js')
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would put the daemon's state root at ./.hyp)
   const hypHome = ctx.env.HYP_HOME || path.join(ctx.env.HOME || os.homedir(), '.hyp')
   try {
@@ -195,6 +195,12 @@ export async function runDaemonStatus(argv, ctx) {
   const stateText = staleNote ? 'degraded' : printable(status.state)
   ctx.stdout.write(`daemon: ${stateText}${running ? '' : ' (no live process)'}${staleNote}\n`)
   ctx.stdout.write(`  pid:        ${printableNumber(status.pid)}\n`)
+  if (status.processes && typeof status.processes === 'object') {
+    for (const role of ['gateway', 'processing']) {
+      const part = /** @type {Record<string, { pid?: number, state?: string }>} */ (status.processes)[role]
+      if (part && typeof part === 'object') ctx.stdout.write(`  ${role}: ${printable(part.state)} (pid=${printableNumber(part.pid)})\n`)
+    }
+  }
   ctx.stdout.write(`  startedAt:  ${printable(status.startedAt)}\n`)
   if (status.healthyAt) ctx.stdout.write(`  healthyAt:  ${printable(status.healthyAt)}\n`)
   if (status.stoppedAt) ctx.stdout.write(`  stoppedAt:  ${printable(status.stoppedAt)}\n`)
@@ -293,6 +299,21 @@ export async function runDaemonStop(argv, ctx) {
 export async function runDaemonRestart(argv, ctx) {
   const parsed = parseCoreCommandArgv('daemon restart', argv, ctx)
   if (!parsed.ok) return parsed.code
+  if (parsed.params.processing === true) {
+    const { readStatusFile } = await import('../daemon/status.js')
+    const { readPidFile, processIsAlive } = await import('../daemon/pid.js')
+    const { writeControlRequest } = await import('../daemon/control.js')
+    const stateRoot = readObservabilityEnv(ctx.env).stateDir
+    const status = readStatusFile(stateRoot)
+    const owner = readPidFile(stateRoot)
+    if (!owner || !processIsAlive(owner.pid) || status?.pid !== owner.pid || !status.processes) {
+      ctx.stderr.write('hyp daemon restart --processing: no supervised processing daemon is running\n')
+      return 1
+    }
+    writeControlRequest(path.join(stateRoot, 'processing', 'supervisor'), 'stop')
+    ctx.stdout.write('processing: restart requested; gateway forwarding continues\n')
+    return 0
+  }
   const { restartServiceDaemon, serviceDaemonStatus } = await import('../daemon/install.js')
   const homeDir = ctx.env.HOME
   const status = await serviceDaemonStatus({ homeDir })
