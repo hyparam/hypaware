@@ -108,17 +108,25 @@ async function writeInstall(hypHome, installDir) {
  */
 async function bootWith(prefix, autoStart) {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
-  const configPath = await writeInstall(hypHome, await stageUnreadableStatusPlugin(hypHome, autoStart))
-  const handle = await runDaemon({
-    hypHome,
-    configPath,
-    env: { ...process.env, HYP_HOME: hypHome },
-    runId: prefix,
-    // No tick loop: the boot snapshot is the only thing written to disk.
-    tickIntervalMs: 0,
-    installSignalHandlers: false,
-  })
-  return { hypHome, handle, stateRoot: path.join(hypHome, 'hypaware') }
+  try {
+    const configPath = await writeInstall(hypHome, await stageUnreadableStatusPlugin(hypHome, autoStart))
+    const handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: prefix,
+      // No tick loop: the boot snapshot is the only thing written to disk.
+      tickIntervalMs: 0,
+      installSignalHandlers: false,
+    })
+    return { hypHome, handle, stateRoot: path.join(hypHome, 'hypaware') }
+  } catch (err) {
+    // The regression this file guards is a boot that throws, so the failing
+    // run is the expected one: it must not be the run that leaves the temp
+    // home behind, because the caller has no handle to clean up with.
+    await fs.rm(hypHome, { recursive: true, force: true })
+    throw err
+  }
 }
 
 test('a source already started in activate() whose status answer cannot be read does not abort boot', async () => {

@@ -1617,9 +1617,12 @@ async function stopAllSources({ runtime, fileLog }) {
  * `status()` is plugin code, and resolving an answer is not the same as being
  * able to read one: a plugin is free to compute any field in a getter. The
  * answer is therefore taken apart *here*, inside the same try that already
- * contains the plugin's promise, and only values the kernel built leave this
- * function - the shape `probeSourceStatus` uses on the tick path, so a reader
- * does not have to remember which of the two is the safe one (issue #1504).
+ * contains the plugin's promise, and every field the caller reads off the
+ * result is one the kernel built - the shape `probeSourceStatus` uses on the
+ * tick path, so a reader does not have to remember which of the two is the
+ * safe one (issue #1504). `details` is the one value passed through by
+ * reference rather than rebuilt, exactly as on the tick path, so it is still
+ * the plugin's object when it reaches `JSON.stringify` (issue #1505).
  *
  * A probe that fails says nothing about liveness, so nothing here does: the
  * source is left running and its snapshot carries no details and no health,
