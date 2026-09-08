@@ -540,7 +540,7 @@ Scope: ${meta.scope}.
 
 ${routeLine}
 
-The evidence is gathered. Every file you need is in this folder. Run no queries of your own against the cache or a server, and never insert a sleep: if a figure or a typed line you want is not here, say it is not available and go on.
+The evidence is gathered; the files in this folder are what you work from. If one specific figure you need is not here, you may run at most two \`hyp query\` commands through the hypaware-query skill to get it, and you say in the Sources line what you ran. Never more than two, never against a server, and never a sleep: if it is still not available, say so and go on.
 
 ## Files
 
@@ -548,7 +548,7 @@ ${files}
 
 ## Rules
 
-- Every figure comes from a file in this folder, and every session is named by its eight-character id with the date and what was typed there.
+- Every number you state traces to a file in this folder (or to one of your two queries). The reader never sees session ids or file names in the answer itself; those go in the Sources line at the end, where each session is its eight-character id with the date and what was typed.
 - A fact about a command, an error, or a tool must come from a file you read this session, cited path:line, or be written as a pointer. This applies to the text of the change itself, not only to the evidence for it.
 - Any command you put in the change must be run once against a real input before it appears, and the answer shows the command and its output. Do not write outside this folder to do the test.
 - The change is one of three things: a skill (a SKILL.md the person triggers by a phrase they already type), an agent definition (a worker for a request they already make), or a block in a CLAUDE.md. Never a hook, a settings entry, or anything else the person cannot read and edit as plain text.
@@ -563,8 +563,8 @@ ${files}
 
 This is the first thing a person sees after installing. They will give it ten seconds. Plain words a non-engineer would follow: no jargon, no citations in the text, no session ids, no em dashes, no bold labels except the two headings below. Print nothing before line 1.
 
-Line 1: the recommendation, one plain sentence that starts with a verb and names the thing to add and where it goes.
-Line 2: why, one plain sentence saying what is happening.
+Line 1: "Based on your logs from the last 30 days," then the recommendation in the same sentence: what to add and where it goes, e.g. "Based on your logs from the last 30 days, I'd add a short handoff skill to your Claude skills folder so a day's work can be picked up in a fresh session."
+Line 2: the reason, one plain sentence saying what is happening, e.g. "Sessions you reopen the next day are costing about twice as much per unit of work as fresh ones."
 
 **Why**
 - two or three bullets, each one plain sentence with at most one number in it

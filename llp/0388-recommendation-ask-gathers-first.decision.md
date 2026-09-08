@@ -49,8 +49,10 @@ duplicate lane or every count is a third too high.
 <a id="in-process"></a>**HypAware gathers; the client reads.** For the
 recommendation row, `hyp ask` runs the evidence queries itself, through
 the same runner the overview uses, and writes the results as files. The
-client is told the evidence is in its folder and that it may run no
-queries of its own. The model's effort goes to the part only a model can
+client is told the evidence is in its folder and that it may run at
+most two `hyp query` commands, through the query skill, for a figure the
+files lack; the run that fetched its own evidence one slow query at a
+time is the reason for the cap. The model's effort goes to the part only a model can
 do: reading the evidence, finding the pattern, writing and testing the
 change. This is the split LLP 0140 made for the server's report agents,
 applied to the first ask.
@@ -128,9 +130,9 @@ launch: a client started on the bare question would answer it the cold
 way, so the run says nothing was started and exits non-zero instead.
 
 <a id="answer-shape"></a>**The answer leads with the recommendation.**
-Line one is one plain sentence starting with a verb, naming the thing to
-add and where it goes. Line two is one plain sentence saying what is
-happening. Then two or three bullets, each with at most one number, one
+Line one opens "Based on your logs from the last 30 days," and carries
+the recommendation, the thing to add and where it goes, in the same
+sentence. Line two is one plain sentence saying what is happening. Then two or three bullets, each with at most one number, one
 of them a real example in words. Then the file and the block to add.
 Then "Apply this now?". Then one line beginning "Sources:" carrying
 every file:line, session id, and, for a hook, the test command and its
