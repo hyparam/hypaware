@@ -207,6 +207,8 @@ test('askInstructions: route, files, and the answer shape the reader gets', () =
   assert.ok(text.includes('the way you would tell a colleague what you found'), 'a conversational reply, not a report')
   assert.ok(!text.includes('**Why**'), 'no report headings')
   assert.ok(text.startsWith('# What to do with this folder\n\nHypAware keeps your AI agents'), 'a cold session is told what HypAware is, in the product\'s own words, before anything else')
+  assert.ok(text.includes('over the last 30 days of that history for this machine,'))
+  assert.ok(askInstructions([], { scope: 'org acme on the central server', files: [], windowDays: 14 }).includes('over the last 14 days of that history for org acme on the central server,'))
   assert.ok(text.includes('Under 150 words before the code block'))
   assert.ok(!text.includes('\u2014'), 'no em dashes')
   const none = askInstructions([], { scope: 'this machine', files: ['triage.txt'] })

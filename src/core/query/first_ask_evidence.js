@@ -511,7 +511,7 @@ export function toTsv(columns, rows, pick) {
  *
  * @ref LLP 0388#answer-shape [implements]: recommendation first, evidence last, under 110 words before the block
  * @param {FirstAskRoute[]} routes
- * @param {{ scope: string, files: string[], signals?: FirstAskSignals }} meta
+ * @param {{ scope: string, files: string[], signals?: FirstAskSignals, windowDays?: number }} meta
  * @returns {string}
  */
 export function askInstructions(routes, meta) {
@@ -536,7 +536,7 @@ export function askInstructions(routes, meta) {
   const files = meta.files.map((f) => `- \`${f}\`: ${fileNotes[/** @type {keyof typeof fileNotes} */ (f)] ?? ''}`).join('\n')
   return `# What to do with this folder
 
-HypAware keeps your AI agents' sessions, logs, and telemetry in one queryable history on this machine. This folder holds what it measured over the last 30 days of that history, prepared so you can recommend one change to the person whose sessions these are. \`hyp\` is its command line, and the hypaware-query skill is how to read the history if you need one more figure.
+HypAware keeps your AI agents' sessions, logs, and telemetry in one queryable history. This folder holds what it measured over the last ${meta.windowDays ?? EVIDENCE_WINDOW_DAYS} days of that history for ${meta.scope}, prepared so you can recommend one change to the person whose sessions these are. \`hyp\` is its command line, and the hypaware-query skill is how to read the history if you need one more figure.
 
 Scope: ${meta.scope}.
 
@@ -565,7 +565,7 @@ ${files}
 
 This is the first thing a person sees after installing, and they will give it about ten seconds. Write it the way you would tell a colleague what you found: short paragraphs, plain words a non-engineer would follow, no headings, no bold labels, no em dashes, no citations, file names, or session ids in the text. Print nothing before the first sentence.
 
-Open by saying what you did and what stood out, in your own words: that you looked through their last 30 days of sessions and the one thing worth changing. Then the recommendation itself, what to add and where, and why, in a sentence or two. Then the evidence in prose: two or three plain facts with at most one number each, and one real example with its date and what was typed, told as a story rather than a citation. If you skipped something you had to skip, say so in a clause. A short bullet list is fine if it reads better than a paragraph; a table is not.
+Open by saying what you did and what stood out, in your own words: that you looked through the last ${meta.windowDays ?? EVIDENCE_WINDOW_DAYS} days of sessions for ${meta.scope} and the one thing worth changing. Then the recommendation itself, what to add and where, and why, in a sentence or two. Then the evidence in prose: two or three plain facts with at most one number each, and one real example with its date and what was typed, told as a story rather than a citation. If you skipped something you had to skip, say so in a clause. A short bullet list is fine if it reads better than a paragraph; a table is not.
 
 Then, on its own line, something like "Here's what I'd add:", the file path, and the exact text in a fenced code block. A CLAUDE.md block under 12 lines, a skill under 25, an agent definition under 20.
 
@@ -830,14 +830,15 @@ export async function clusterFiles(runner, from, sessionIds, phrase) {
  *   homeDir: string,
  *   now?: Date,
  *   scope?: string,
+ *   windowDays?: number,
  *   say?: (line: string) => void,
  * }} args
  * @returns {Promise<FirstAskEvidence>}
  */
-export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new Date(), scope = 'this machine', say = () => {} }) {
-  const from = windowStart(now)
+export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new Date(), scope = 'this machine', windowDays = EVIDENCE_WINDOW_DAYS, say = () => {} }) {
+  const from = windowStart(now, windowDays)
   const t = triageSql(from)
-  say('Measuring the last 30 days...')
+  say(`Measuring the last ${windowDays} days...`)
   const rows = {
     sink: (await runner.run(t.sink)).rows,
     cont: (await runner.run(t.cont)).rows,
@@ -859,7 +860,7 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
     files.push(...await gatherRoute(route, runner, from, signals))
   }
   files.push({ name: 'on_disk.txt', content: await onDiskListing({ homeDir }) })
-  files.push({ name: 'ASK.md', content: askInstructions(routes, { scope, files: files.map((f) => f.name), signals }) })
+  files.push({ name: 'ASK.md', content: askInstructions(routes, { scope, files: files.map((f) => f.name), signals, windowDays }) })
 
   const dir = root
   await fsp.rm(dir, { recursive: true, force: true })
