@@ -887,8 +887,10 @@ procedure checks, R11 in particular), [LLP 0172](../llp/0172-openclaw-two-lane-c
 telemetry HypAware's `otel` attach depends on: the nine-key `env` block is
 honored, the expected event names arrive with the attributes the listener
 reads, the raw body files still carry the fields the projector fills its
-column gaps from, and the whole path lands `ai_gateway_messages` and
-`claude_telemetry_events` rows with nothing null that should not be.
+column gaps from, the events still arrive in the order that puts a turn's
+tokens on the row both capture lanes name, and the whole path lands
+`ai_gateway_messages` and `claude_telemetry_events` rows with nothing null
+that should not be.
 
 This is the release-gate half of LLP 0262's flag-stability duty (open
 question 5). The other half runs in production: the `hyp status` capture-health
@@ -1139,23 +1141,83 @@ two-layer drift detection this discharges),
    `--max-bytes 0` or the display truncates the JSON and you will read a short
    value as a missing one.
 
-9. Confirm the capture-health line agrees, which is the production half of the
-   same duty:
+9. Assert **which row** the turn's tokens landed on. This is the one step that
+   reads the upstream emission *order* rather than the event set, and this
+   query is the only place that order surfaces at all: the two events whose
+   order decides it, `api_response_body` and `assistant_response`, are absent
+   from `claude_telemetry_events` by design (step 7), so no step above can
+   see them.
+
+   The OTEL lane parks a response's `usage` on its LAST content block
+   ([LLP 0390#carrier-is-the-last-block](../llp/0390-otel-usage-rides-the-response-last-block.decision.md#carrier-is-the-last-block)),
+   which on the ordinary `[text, tool_use]` turn is the `tool_use` block, the
+   same row the transcript sweep picks. It lands there only because Claude
+   Code emits `api_response_body` ahead of `assistant_response`: the two rows
+   reach one pending `api_request` record in the order the events arrived,
+   and the first one there claims it
+   ([LLP 0390#claim-order-arbitrates](../llp/0390-otel-usage-rides-the-response-last-block.decision.md#claim-order-arbitrates)).
+   Flip that emission order upstream and the tokens move back to the text row,
+   the two lanes stop naming the same carrier, and both of #1470's shapes
+   return: a turn that totals zero once the lanes' rows collapse, and a turn
+   counted twice. Nothing else in this procedure fails when that happens.
 
    ```sh
-   hyp status
+   hyp query sql "
+     select request_id,
+            sum(case when part_type = 'text' then 1 else 0 end) as text_rows,
+            sum(case when part_type = 'tool_call' then 1 else 0 end) as tool_rows,
+            sum(case when part_type = 'text'
+                      and json_extract(attributes, '$.usage.output_tokens') is not null
+                     then 1 else 0 end) as usage_on_text,
+            sum(case when part_type = 'tool_call'
+                      and json_extract(attributes, '$.usage.output_tokens') is not null
+                     then 1 else 0 end) as usage_on_tool,
+            coalesce(sum(cast(json_extract(attributes, '$.usage.output_tokens') as bigint)), 0)
+              as turn_output_tokens
+     from ai_gateway_messages
+     where conversation_source = 'claude_code'
+       and role = 'assistant'
+       and request_id is not null
+       and message_created_at >= '$SINCE'
+     group by request_id
+     order by request_id"
    ```
 
-   Pass condition: a `capture health:` block with a `- claude  last event
-   <minutes> ago, last transcript activity <minutes> ago` line, the two ages
-   within a few minutes of each other, and **no** `[capture gap]` tag or
-   `capture_gap` diagnostic.
+   Pass condition: at least one row has both `text_rows` and `tool_rows` above
+   zero (that is step 5's tool-calling turn: the response said something and
+   then called a tool), and **every** such row reads `usage_on_tool = 1` and
+   `usage_on_text = 0`, with `turn_output_tokens` equal to that `request_id`'s
+   `api_request` `output_tokens` from step 8, counted exactly once.
 
-10. Record in the release notes: the `claude --version` you ran against, the
-    full event-name list from step 7, the body top-level keys from step 3, and
-    any field from steps 4, 6, or 8 that came back null. Those four items are
-    the release-to-release diff that makes upstream drift visible; a bare
-    "passed" makes the next run start from nothing.
+   `usage_on_text = 1` on a turn that also has a `tool_call` row is the
+   emission-order flip: hold the release and file it.
+
+   If no row has both counts above zero the check did not run, rather than
+   passed: no turn in the window answered with text *and* a tool call in one
+   response. Hold another turn, phrased so the answer needs a file read, and
+   re-run this query before moving on.
+
+10. Confirm the capture-health line agrees, which is the production half of
+    the same duty:
+
+    ```sh
+    hyp status
+    ```
+
+    Pass condition: a `capture health:` block with a `- claude  last event
+    <minutes> ago, last transcript activity <minutes> ago` line, the two ages
+    within a few minutes of each other, and **no** `[capture gap]` tag or
+    `capture_gap` diagnostic.
+
+11. Record in the release notes: the `claude --version` you ran against, the
+    full event-name list from step 7, the body top-level keys from step 3, the
+    `usage_on_tool` / `usage_on_text` split from step 9, and any field from
+    steps 4, 6, or 8 that came back null. Those five items are the
+    release-to-release diff that makes upstream drift visible; a bare "passed"
+    makes the next run start from nothing. The step 9 split is the
+    emission-order baseline: the order itself is not queryable, so which row
+    carries the tokens is the only record of it a later release can diff
+    against.
 
 ### If it fails
 
@@ -1190,9 +1252,23 @@ two-layer drift detection this discharges),
 - Step 7 finds no rows at all while step 6 found messages: the logs exporter is
   arriving and the metrics exporter is not, or vice versa. Check
   `OTEL_METRICS_EXPORTER` in the env block before suspecting the dataset.
-- Step 9 shows `[capture gap]` right after a healthy step 6: the transcript
+- Step 9 reads `usage_on_text = 1` on a turn whose `tool_rows` is above zero:
+  Claude Code has flipped the emission order and now sends
+  `assistant_response` ahead of `api_response_body`. That is upstream drift,
+  not a capture fault, and it is the residual
+  [LLP 0390#claim-order-arbitrates](../llp/0390-otel-usage-rides-the-response-last-block.decision.md#claim-order-arbitrates)
+  names. File it with the observed split and hold the release: the placement
+  degrades to the pre-#1470 behavior, so nothing errors and no column reads
+  null, and both of #1470's token shapes come back on turns the transcript
+  sweep also captured.
+- Step 9 reads `usage_on_tool = 2` with `turn_output_tokens` at exactly twice
+  step 8's `output_tokens`: the scheduled transcript sweep has committed its
+  own copy of the turn and the two rows have not collapsed onto one uuid yet
+  (LLP 0389). Re-run the query after the next flush; only a split that
+  persists is a finding.
+- Step 10 shows `[capture gap]` right after a healthy step 6: the transcript
   probe sees session files newer than the last event, usually because the
-  daemon was down for part of the run. Re-run steps 5 and 9 against a daemon
+  daemon was down for part of the run. Re-run steps 5 and 10 against a daemon
   that stayed up before filing anything.
 
 ---
