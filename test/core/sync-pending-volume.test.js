@@ -10,6 +10,10 @@ import { PassThrough } from 'node:stream'
 import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { runSync } from '../../src/core/commands/sync.js'
 import { previewPendingRows } from '../../src/core/sinks/pending.js'
+import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { createSourceWithholdResolver } from '../../src/core/cache/source-withhold.js'
+import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
+import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
 
 // `hyp sync`'s plan is the consent surface: it is where a person decides
 // whether to let captured data leave the machine. Naming the destinations
@@ -1348,3 +1352,90 @@ test('a partition named after some other dataset is counted in full, not skipped
   assert.equal(volume.rows, 12)
   assert.equal(volume.resume.kind, 'beginning')
 })
+
+for (const scenario of ['plain', 'withholding', 'legacy', 'absent-policy-columns']) {
+  test(`pending preview counts real Parquet rows without decoding nested payloads: ${scenario}`, async (t) => {
+    const hypHome = await makeHome(`projection-${scenario}`)
+    const legacy = scenario === 'legacy'
+    const withPolicy = scenario === 'withholding' || scenario === 'absent-policy-columns'
+    const policyColumns = scenario !== 'absent-policy-columns'
+    const storage = createQueryStorageService({
+      cacheRoot: cacheRoot(hypHome),
+      ...(withPolicy ? {
+        usagePolicyResolver: /** @type {any} */ ({
+          resolve: (/** @type {string} */ cwd) => ({ class: cwd === '/local' ? 'local-only' : 'full' }),
+        }),
+        sourceWithholdResolver: createSourceWithholdResolver({
+          withheldSourceIds: ['hermes', 'claude-desktop'],
+          datasetAttributionColumns: new Map([['ai_gateway_messages', 'client_name']]),
+          datasetOwnedSourceIds: new Map([['ai_gateway_messages', ['hermes', 'claude']]]),
+          clientEntrypointOwners: new Map([['cli', 'claude'], ['desktop', 'claude-desktop']]),
+        }),
+      } : {}),
+    })
+    const marker = 'sync-preview-payload:'
+    const payload = { content: [{ nested: { text: marker + 'x'.repeat(64 * 1024) } }] }
+    await appendRowsToTable(tablePathFor(hypHome), [
+      { name: 'attributes', type: 'JSON', nullable: true },
+      ...(legacy ? [] : [INGEST_SEQ_COLUMN]),
+      ...(policyColumns ? /** @type {const} */ ([
+        { name: 'cwd', type: 'STRING', nullable: true },
+        { name: 'client_name', type: 'STRING', nullable: true },
+        { name: 'entrypoint', type: 'STRING', nullable: true },
+      ]) : []),
+    ], [
+      { cwd: '/full', client_name: 'claude', entrypoint: 'cli', seq: null },
+      { cwd: '/full', client_name: 'claude', entrypoint: 'cli', seq: 1n },
+      { cwd: '/local', client_name: 'claude', entrypoint: 'cli', seq: 2n },
+      { cwd: '/full', client_name: 'hermes', entrypoint: 'cli', seq: 3n },
+      { cwd: '/full', client_name: 'claude', entrypoint: 'desktop', seq: 4n },
+      { cwd: '/full', client_name: null, entrypoint: null, seq: 5n },
+    ].map(({ seq, ...row }) => ({ ...row, attributes: payload, ...(legacy ? {} : { [INGEST_SEQ_COLUMN.name]: seq }) })))
+
+    // Observe the actual nested string decoder, not just the options passed to
+    // a stub. The full export read must exercise the probe before the preview
+    // proves it avoided that work, including on a table with no seq column.
+    let payloadDecodes = 0
+    const decode = TextDecoder.prototype.decode
+    t.mock.method(TextDecoder.prototype, 'decode', function (...args) {
+      const result = Reflect.apply(decode, this, args)
+      if (result.includes(marker)) payloadDecodes += 1
+      return result
+    })
+    for (const since of [undefined, { v: 1, seq: '1' }]) {
+      let rows = 0
+      let withheldRows = 0
+      for await (const entry of storage.readRowsSince(tablePathFor(hypHome), {
+        since: /** @type {any} */ (since), includeLegacy: since === undefined,
+      })) {
+        if (entry.dropped) withheldRows += 1
+        else rows += 1
+      }
+      if (since === undefined) {
+        assert.ok(payloadDecodes > 0, 'the full export read decodes the large nested payload')
+        assert.equal(rows, scenario === 'withholding' ? 2 : scenario === 'absent-policy-columns' ? 0 : 6)
+        assert.equal(withheldRows, scenario === 'withholding' ? 4 : scenario === 'absent-policy-columns' ? 6 : 0)
+      }
+      if (since) await writeWatermark({ hypHome, plugin: '@hypaware/fake', instance: 'dest', seq: since.seq, updatedAt: '2026-09-08T00:00:00.000Z' })
+      payloadDecodes = 0
+      const args = {
+        handles: /** @type {any[]} */ ([fakeSink('dest', {})]),
+        query: /** @type {any} */ (fakeQuery(hypHome)),
+        storage,
+        stateRoot: stateDir(hypHome),
+        now: () => 0,
+      }
+      const volume = (await previewPendingRows(args)).get('dest')
+      assert.equal(volume?.status, 'counted')
+      assert.equal(volume?.rows, rows, 'same eligible rows as a full export at this cursor')
+      assert.equal(volume?.withheldRows, withheldRows, 'same withheld rows as a full export at this cursor')
+      assert.equal(payloadDecodes, 0, 'counting must never decode the payload column')
+      if (rows + withheldRows > 0) {
+        const floor = (await previewPendingRows({ ...args, rowLimit: 2 })).get('dest')
+        assert.equal(floor?.status, 'partial')
+        assert.equal((floor?.rows ?? 0) + (floor?.withheldRows ?? 0), 2)
+        assert.equal(payloadDecodes, 0, 'the bounded count also avoids decoding payloads')
+      }
+    }
+  })
+}

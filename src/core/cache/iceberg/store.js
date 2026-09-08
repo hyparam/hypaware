@@ -638,7 +638,10 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   // seq field: every row is implicitly null-seq, so the seq is read as `null`
   // and the `includeLegacy` policy decides it.
   const hasSeqColumn = source.columns.includes(INGEST_SEQ_COLUMN.name)
-  let projected = columns && columns.length > 0 ? columns : source.columns
+  // Incremental count-only reads may request no payload columns. Preserve
+  // that empty projection even on legacy tables without seq; the cursor is
+  // forced below when present. Ordinary reads retain [] meaning all columns.
+  let projected = columns && (columns.length > 0 || filtering) ? columns : source.columns
   if (filtering && hasSeqColumn && !projected.includes(INGEST_SEQ_COLUMN.name)) {
     projected = [...projected, INGEST_SEQ_COLUMN.name]
   }
