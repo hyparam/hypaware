@@ -1755,6 +1755,12 @@ export interface QueryStorageService {
    * drop, so a partition tail of withheld rows checkpoints once and is durably
    * passed, not re-scanned each tick, not re-sent if the directory is later
    * un-excluded (LLP 0070 #incremental: drop-but-advance).
+   *
+   * Omitting `columns` reads every column; an EMPTY `columns` reads none, and
+   * is how a consumer that wants only the verdict and the cursor (a pending-row
+   * count) avoids decoding payloads it will discard. The columns the
+   * withholding rules need are forced into the scan either way, so no
+   * projection can turn a `dropped` entry into a forwarded row.
    */
   readRowsSince(
     tablePath: string,

@@ -415,7 +415,10 @@ async function countForHandle({ handle, discovered, storage, stateRoot, rowLimit
       // derived exactly as every sink derives it, so a preview never counts a
       // pre-upgrade null-seq backlog the destination has already shipped.
       const includeLegacy = since === undefined
-      for await (const entry of storage.readRowsSince(tablePath, { since, includeLegacy })) {
+      // Counting needs only the withholding verdict. The storage seam forces
+      // cursor and policy columns into the scan; decoding message payloads here
+      // can exhaust the heap before the first row reaches our budget check.
+      for await (const entry of storage.readRowsSince(tablePath, { since, includeLegacy, columns: [] })) {
         if (entry.dropped) withheldRows += 1
         else rows += 1
         scanned += 1
