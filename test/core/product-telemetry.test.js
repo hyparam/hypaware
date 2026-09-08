@@ -35,6 +35,7 @@ import {
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { createProductClient } from '../../src/core/product_telemetry/client.js'
 
 /** @param {any} t */
 function temp(t) {
@@ -666,4 +667,91 @@ test('corrupt complete JSON slots and torn writes are reclaimed after the grace 
   }
   assert.equal(queue.prune(binding), 2)
   assert.deepEqual(fs.readdirSync(path.join(root, 'queue-v1')), [])
+})
+
+for (const phase of ['capability', 'post', 'refresh']) {
+  test(`delivery aborts unread ${phase} error bodies when the pass ends`, async (t) => {
+    const root = temp(t)
+    const policy = enroll(root)
+    assert(policy.binding)
+    createOutbox(root, { now: () => NOW }).append(batch(), policy.binding)
+    let signal
+    const fetchFn = /** @type {typeof fetch} */ (async (_, init) => {
+      signal = init?.signal
+      if (phase === 'post' && !init?.method) return capability()
+      if (phase === 'refresh' && !init?.method)
+        return new Response(null, { status: 401 })
+      return new Response(new ReadableStream({
+        start(controller) { controller.enqueue(new Uint8Array(8192)) }
+      }), { status: 503 })
+    })
+    const delivery = createDelivery(root, { fetchFn, now: () => NOW })
+    await delivery.drain()
+    assert.equal(signal?.aborted, true)
+    delivery.close()
+  })
+}
+
+test('organization startup and persisted backoff do not read queue payloads', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  const policy = enroll(root)
+  assert(policy.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  queue.append(batch(), policy.binding)
+  queue.saveDelivery({ binding: policy.binding, next_at: NOW + 86400000 })
+  const open = fs.openSync
+  let queueReads = 0
+  t.mock.method(fs, 'openSync', (...args) => {
+    if (String(args[0]).startsWith(path.join(root, 'queue-v1') + path.sep))
+      queueReads++
+    return Reflect.apply(open, fs, args)
+  })
+  const client = createProductClient({ env, now: () => NOW })
+  client.close()
+  assert.equal(queueReads, 0, 'startup must not scan the queue')
+  for (let i = 0; i < 3; i++) {
+    const delivery = createDelivery(root, {
+      now: () => NOW,
+      fetchFn: async () => { throw new Error('backoff must prevent requests') }
+    })
+    await delivery.drain()
+    delivery.close()
+  }
+  assert.equal(queueReads, 0, 'backoff must survive new senders without queue reads')
+})
+
+test('eligible delivery scans once and sends the oldest surviving batch', async (t) => {
+  const root = temp(t)
+  const policy = enroll(root)
+  assert(policy.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  queue.append(batch(NOW - 1000), policy.binding)
+  const oldest = batch(NOW - 2000)
+  queue.append(oldest, policy.binding)
+  queue.append(batch(), binding)
+  const oldQueue = createOutbox(root, { now: () => NOW - 8 * 86400000 })
+  oldQueue.append(batch(NOW - 8 * 86400000), policy.binding)
+  const open = fs.openSync
+  let queueReads = 0
+  t.mock.method(fs, 'openSync', (...args) => {
+    if (String(args[0]).startsWith(path.join(root, 'queue-v1') + path.sep))
+      queueReads++
+    return Reflect.apply(open, fs, args)
+  })
+  let sent
+  await createDelivery(root, {
+    now: () => NOW,
+    fetchFn: /** @type {typeof fetch} */ (async (_, init) => {
+      if (!init?.method) return capability()
+      sent = JSON.parse(String(init.body))
+      return new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+    })
+  }).drain()
+  assert.equal(sent?.batch_id, oldest?.batch_id)
+  // One enumeration plus identity checks before unlinking three copies.
+  assert.equal(queueReads, QUEUE_SLOTS + 3)
+  assert.equal(queue.entries().length, 1)
 })

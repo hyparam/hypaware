@@ -11,8 +11,8 @@ export const QUEUE_AGE_MS = 7 * 86400_000
 // Fixed reservations make the aggregate byte cap independent of writer races.
 export const QUEUE_SLOTS = QUEUE_BYTES / MAX_BATCH_BYTES
 
-/** @param {string} file @param {number} [max] @returns {any} */
-export function readSmallJson(file, max = MAX_BATCH_BYTES) {
+/** @param {string} file @param {number} max */
+function readSmallText(file, max) {
   try {
     const fd = fs.openSync(
       file,
@@ -20,10 +20,20 @@ export function readSmallJson(file, max = MAX_BATCH_BYTES) {
     )
     try {
       if (fs.fstatSync(fd).size > max) return null
-      return JSON.parse(fs.readFileSync(fd, 'utf8'))
+      return fs.readFileSync(fd, 'utf8')
     } finally {
       fs.closeSync(fd)
     }
+  } catch {
+    return null
+  }
+}
+
+/** @param {string} file @param {number} [max] @returns {any} */
+export function readSmallJson(file, max = MAX_BATCH_BYTES) {
+  try {
+    const text = readSmallText(file, max)
+    return text === null ? null : JSON.parse(text)
   } catch {
     return null
   }
@@ -96,36 +106,38 @@ export function createOutbox(root, { now = Date.now } = {}) {
     noteDrop()
     return false
   }
-  function entries() {
-    /** @type {Array<{slot:number,binding:string,wire:string,at:number,bytes:number,id:string}>} */
-    const found = []
+  // Maintenance and status retain one decoded slot at a time. Only explicit
+  // preview enumeration needs to materialize the whole queue.
+  function* scan() {
     for (let slot = 0; slot < QUEUE_SLOTS; slot++) {
-      const entry = readSmallJson(slotPath(slot))
-      if (
-        !entry ||
-        typeof entry.wire !== 'string' ||
-        typeof entry.binding !== 'string'
-      )
-        continue
+      const text = readSmallText(slotPath(slot), MAX_BATCH_BYTES)
+      if (text === null) continue
       try {
-        const batch = JSON.parse(entry.wire)
-        const at = Math.min(
-          ...batch.records.map((/** @type {any} */ r) =>
-            Date.parse(r.timestamp)
-          )
+        const entry = JSON.parse(text)
+        if (
+          !entry ||
+          typeof entry.wire !== 'string' ||
+          typeof entry.binding !== 'string'
         )
+          continue
+        const batch = JSON.parse(entry.wire)
+        let at = Infinity
+        for (const record of batch.records)
+          at = Math.min(at, Date.parse(record.timestamp))
         if (Number.isFinite(at))
-          found.push({
+          yield {
             slot,
             binding: entry.binding,
             wire: entry.wire,
             at,
-            bytes: Buffer.byteLength(JSON.stringify(entry)),
+            bytes: Buffer.byteLength(text),
             id: batch.batch_id
-          })
+          }
       } catch {}
     }
-    return found.sort((a, b) => a.at - b.at || a.slot - b.slot)
+  }
+  function entries() {
+    return [...scan()].sort((a, b) => a.at - b.at || a.slot - b.slot)
   }
   /** @param {{slot:number,id:string}} entry */
   function remove(entry) {
@@ -135,14 +147,18 @@ export function createOutbox(root, { now = Date.now } = {}) {
       fs.unlinkSync(slotPath(entry.slot))
   }
   /** @param {string|null} binding */
-  function prune(binding) {
+  function maintain(binding) {
     let dropped = 0
-    const list = entries()
-    const validSlots = new Set(list.map((entry) => entry.slot))
-    for (const entry of list) {
+    /** @type {ReturnType<typeof entries>[number] | null} */
+    let next = null
+    const validSlots = new Set()
+    for (const entry of scan()) {
+      validSlots.add(entry.slot)
       if (entry.binding !== binding || entry.at < now() - QUEUE_AGE_MS) {
         remove(entry)
         dropped++
+      } else if (!next || entry.at < next.at) {
+        next = entry
       }
     }
     // An interrupted synchronous append leaves an invalid slot. Only reclaim
@@ -160,7 +176,7 @@ export function createOutbox(root, { now = Date.now } = {}) {
       } catch {}
     }
     if (dropped) noteDrop()
-    return dropped
+    return { dropped, next }
   }
   function claim() {
     try {
@@ -201,12 +217,19 @@ export function createOutbox(root, { now = Date.now } = {}) {
     }
   }
   function status() {
-    const list = entries()
+    let bytes = 0
+    let batches = 0
+    let oldest = Infinity
+    for (const entry of scan()) {
+      bytes += entry.bytes
+      batches++
+      oldest = Math.min(oldest, entry.at)
+    }
     return {
-      queue_bytes: list.reduce((n, e) => n + e.bytes, 0),
-      queue_batches: list.length,
-      oldest_age_seconds: list.length
-        ? Math.max(0, (now() - list[0].at) / 1000)
+      queue_bytes: bytes,
+      queue_batches: batches,
+      oldest_age_seconds: batches
+        ? Math.max(0, (now() - oldest) / 1000)
         : 0,
       dropped_lower_bound: fs.existsSync(loss) ? 1 : 0,
       delivery: readSmallJson(stateFile, 4096)
@@ -220,7 +243,8 @@ export function createOutbox(root, { now = Date.now } = {}) {
     append,
     entries,
     remove,
-    prune,
+    prune: (/** @type {string|null} */ binding) => maintain(binding).dropped,
+    next: (/** @type {string|null} */ binding) => maintain(binding).next,
     claim,
     status,
     noteDrop,

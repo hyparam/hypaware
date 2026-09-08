@@ -134,7 +134,9 @@ export function createProductClient({
   let closed = false
   let inventoryDue = true
   let adapters = /** @type {string[]} */ ([])
-  if (initial.binding) {
+  // Organization queues are maintained by eligible sends and the daemon's
+  // five-minute flush, so foreground startup never duplicates that scan.
+  if (initial.mode === 'local') {
     try {
       queue.prune(initial.binding)
     } catch {}

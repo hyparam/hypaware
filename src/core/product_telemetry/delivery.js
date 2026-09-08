@@ -45,13 +45,15 @@ export function createDelivery(
     timeout.unref()
     try {
       const effective = effectivePolicy(root)
-      outbox.prune(effective.binding)
-      if (effective.mode !== 'organization') return
+      if (effective.mode !== 'organization') {
+        outbox.prune(effective.binding)
+        return
+      }
       const binding = effective.binding
       const prior = outbox.readDelivery()
       const previous = prior?.binding === binding ? prior : {}
       if (previous.next_at > now()) return
-      const entry = outbox.entries().find((e) => e.binding === binding)
+      const entry = outbox.next(binding)
       if (!entry) return
       // Disk is a trust boundary too: corruption or an old writer must not
       // turn the exact-byte replay path into an arbitrary payload exporter.
@@ -224,6 +226,10 @@ export function createDelivery(
         })
       } catch {}
     } finally {
+      // fetch resolves on headers. Error responses may still own a streaming
+      // body and socket, so ending the pass must abort them before disarming
+      // the deadline or making the controller unreachable to close().
+      controller?.abort()
       clearTimeout(timeout)
       controller = null
       running = false
