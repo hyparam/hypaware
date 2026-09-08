@@ -12,6 +12,7 @@ import {
   chooseRoutes,
   commandHeads,
   computeSignals,
+  frontMatterDescription,
   onDiskListing,
   prepareFirstAskEvidence,
   renderTriage,
@@ -183,16 +184,29 @@ test('askInstructions: route, files, and the answer shape the reader gets', () =
   assert.ok(none.includes('Route: none.'))
 })
 
-test('onDiskListing: missing directories and files are lines, never errors', async () => {
+test('onDiskListing: skills and agents carry their descriptions; hooks are not listed', async () => {
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
   const text = await onDiskListing({ homeDir: home })
-  assert.ok(text.includes('## ~/.claude/skills\n(none)'))
+  assert.ok(text.includes('## ~/.claude/skills (name: what it is for)\n(none)'))
   assert.ok(text.includes('## ~/.claude/CLAUDE.md\nabsent'))
-  await fsp.mkdir(path.join(home, '.claude', 'skills', 'x'), { recursive: true })
+  await fsp.mkdir(path.join(home, '.claude', 'skills', 'hypaware-query'), { recursive: true })
+  await fsp.writeFile(path.join(home, '.claude', 'skills', 'hypaware-query', 'SKILL.md'), '---\nname: hypaware-query\ndescription: Query this machine\'s recorded AI session history.\nuser-invocable: false\n---\n# body\n')
+  await fsp.mkdir(path.join(home, '.claude', 'skills', '.DS_Store'), { recursive: true })
+  await fsp.mkdir(path.join(home, '.claude', 'agents'), { recursive: true })
+  await fsp.writeFile(path.join(home, '.claude', 'agents', 'hypaware-analyst.md'), '---\nname: hypaware-analyst\ndescription: "Worker for fan-out analysis."\ntools: Bash\n---\n')
   await fsp.writeFile(path.join(home, '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'hyp claude-hook session-context -' }] }] } }))
   const again = await onDiskListing({ homeDir: home })
-  assert.ok(again.includes('## ~/.claude/skills\nx'))
-  assert.ok(again.includes('SessionStart: hyp claude-hook session-context -'))
+  assert.ok(again.includes("hypaware-query: Query this machine's recorded AI session history."))
+  assert.ok(again.includes('hypaware-analyst: Worker for fan-out analysis.'))
+  assert.ok(!again.includes('.DS_Store'))
+  assert.ok(!again.includes('hook'), 'hooks are not a change the ask proposes, so they are not evidence')
+})
+
+test('frontMatterDescription: one line, unquoted, capped, empty without front matter', () => {
+  assert.equal(frontMatterDescription('---\nname: x\ndescription: "Does a thing."\n---\nbody'), 'Does a thing.')
+  assert.equal(frontMatterDescription('---\ndescription: spans\n---\n'), 'spans')
+  assert.equal(frontMatterDescription('# no front matter\ndescription: nope'), '')
+  assert.equal(frontMatterDescription('---\ndescription: ' + 'x'.repeat(300) + '\n---\n').length, 200)
 })
 
 test('prepareFirstAskEvidence: rewrites the one directory with only the chosen route', async () => {

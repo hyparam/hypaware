@@ -486,7 +486,7 @@ export function askInstructions(routes, meta) {
     'read_heavy_sessions.tsv': 'session-days with 40+ calls ranked by KB of tool output pulled into the main context, with client, read and shell calls, edits, and dispatches.',
     'heavy_typed.tsv': 'the first lines typed on each of those session-days.',
     'agent_briefs.tsv': 'every subagent dispatch, grouped by its description, with count and sessions.',
-    'on_disk.txt': 'skills, agents, CLAUDE.md files, and hooks already installed on this machine.',
+    'on_disk.txt': 'the skills and agents already installed on this machine, each with what it is for, and whether a user-level CLAUDE.md exists.',
   }
   const files = meta.files.map((f) => `- \`${f}\`: ${fileNotes[/** @type {keyof typeof fileNotes} */ (f)] ?? ''}`).join('\n')
   return `# What to do with this folder
@@ -502,10 +502,12 @@ ${files}
 ## Rules
 
 - Every figure comes from a file in this folder, and every session is named by its eight-character id with the date and what was typed there.
-- A fact about a command, an error, a hook, or a tool must come from a file you read this session, cited path:line, or be written as a pointer. This applies to the text of the change itself, not only to the evidence for it.
-- Any hook, script, or command you propose must be run once against a real input before it appears, and the answer shows the command and its output. A hook that reads a transcript is tried on a file under ~/.claude/projects/. Do not write outside this folder to do the test.
-- If a rule on the subject already exists in an on_disk.txt file, say so and why it did not work. The change is then a mechanism, not another sentence.
-- A rule in an instruction file can only change what the agent does after it is already running; it cannot stop a person from resuming a session or opening the wrong one. So for the sink route the change must be a hook, and an instruction-file block may only accompany it to say what the agent does once the hook has fired.
+- A fact about a command, an error, or a tool must come from a file you read this session, cited path:line, or be written as a pointer. This applies to the text of the change itself, not only to the evidence for it.
+- Any command you put in the change must be run once against a real input before it appears, and the answer shows the command and its output. Do not write outside this folder to do the test.
+- The change is one of three things: a skill (a SKILL.md the person triggers by a phrase they already type), an agent definition (a worker for a request they already make), or a block in a CLAUDE.md. Never a hook, a settings entry, or anything else the person cannot read and edit as plain text.
+- If a skill, agent, or CLAUDE.md line on the subject already exists per on_disk.txt, say so and why it did not work, and change it rather than adding a second one.
+- If the mistake is a trap in something HypAware ships (a skill under ~/.claude/skills/hypaware-*, a command, an error message), say so in the Why: the lasting fix is in that skill or command, and what you propose here is a stopgap until it lands.
+- For the sink route, be honest that a written rule cannot stop a person from resuming a session. The change is a handoff skill (writes goal, files touched, decisions, next step to a short note at the end of a day's work) plus one CLAUDE.md line saying when the agent offers it, so that starting fresh becomes cheap enough to prefer.
 - For the subagent route the change is an agent definition whose description opens with the recurring request as the person types it, so the lead picks it for that request. Never a hook, rule, or sentence that says to delegate more in general: when to delegate is the client's decision, and only a named worker for a request the person already makes changes it.
 - Discount session ids that carry identical typed lines on the same day as another id; that is one conversation recorded twice.
 - If the route is none: two sentences, what was recorded (sessions and days, from the record line of triage.txt) and that there is not enough yet to recommend anything. Then the Sources line and stop; no question.
@@ -522,11 +524,11 @@ Line 2: why, one plain sentence saying what is happening.
 - one of the bullets is a real example: the date, what was typed, and what it cost, in words
 
 **What I would add**
-The file path on its own line, then the exact text in a fenced code block. A rule or hook under 15 lines, a skill under 25, an agent definition under 20.
+The file path on its own line, then the exact text in a fenced code block. A CLAUDE.md block under 12 lines, a skill under 25, an agent definition under 20.
 
 Then the single question: Apply this now?
 
-Then one line that starts with "Sources:" carrying everything you verified, compact: the file:line references, the sessions by id, and for a hook the test command and its output. This line is for checking, not reading.
+Then one line that starts with "Sources:" carrying everything you verified, compact: the file:line references, the sessions by id, and for any command the test command and its output. This line is for checking, not reading.
 
 When the answer is yes: create or edit the file with the Write or Edit tool in that same turn and print the result. Do not ask again.
 
@@ -536,9 +538,14 @@ Under 110 words before the code block.
 
 /**
  * What is already installed for the client on this machine, so the
- * answer can say whether a rule on the subject exists and why it did
- * not work. Best-effort and bounded: a missing directory is a line, not
- * an error.
+ * answer can say whether something on the subject exists and why it
+ * did not work. Skills and agents are listed with the description their
+ * front matter declares, because the name alone ("hypaware-query") says
+ * nothing about what a session would reach for it. Hooks are not listed:
+ * they are invisible to the person, fragile across client updates, and
+ * not a change the ask proposes. Best-effort and bounded: a missing
+ * directory is a line, not an error, and a description is cut at 200
+ * characters.
  *
  * @param {{ homeDir: string, readdir?: typeof fsp.readdir, readFile?: typeof fsp.readFile }} args
  * @returns {Promise<string>}
@@ -547,13 +554,35 @@ export async function onDiskListing({ homeDir, readdir = fsp.readdir, readFile =
   /** @param {string} dir */
   const list = async (dir) => {
     try {
-      return (await readdir(dir)).slice(0, 200).sort()
+      return (await readdir(dir)).filter((n) => !n.startsWith('.')).slice(0, 200).sort()
     } catch {
       return []
     }
   }
-  const skills = await list(path.join(homeDir, '.claude', 'skills'))
-  const agents = await list(path.join(homeDir, '.claude', 'agents'))
+  /** @param {string} file */
+  const description = async (file) => {
+    try {
+      const text = await readFile(file, 'utf8')
+      return frontMatterDescription(text)
+    } catch {
+      return ''
+    }
+  }
+  const skillsDir = path.join(homeDir, '.claude', 'skills')
+  const agentsDir = path.join(homeDir, '.claude', 'agents')
+  /** @type {string[]} */
+  const skills = []
+  for (const name of await list(skillsDir)) {
+    const d = await description(path.join(skillsDir, name, 'SKILL.md'))
+    skills.push(d ? `${name}: ${d}` : name)
+  }
+  /** @type {string[]} */
+  const agents = []
+  for (const name of await list(agentsDir)) {
+    if (!name.endsWith('.md')) continue
+    const d = await description(path.join(agentsDir, name))
+    agents.push(d ? `${name.slice(0, -3)}: ${d}` : name.slice(0, -3))
+  }
   let claudeMd = 'absent'
   try {
     await readFile(path.join(homeDir, '.claude', 'CLAUDE.md'), 'utf8')
@@ -561,40 +590,36 @@ export async function onDiskListing({ homeDir, readdir = fsp.readdir, readFile =
   } catch {
     // absent
   }
-  /** @type {string[]} */
-  const hooks = []
-  try {
-    const raw = await readFile(path.join(homeDir, '.claude', 'settings.json'), 'utf8')
-    const settings = JSON.parse(raw)
-    const h = settings && typeof settings === 'object' ? settings.hooks : undefined
-    if (h && typeof h === 'object') {
-      for (const [event, entries] of Object.entries(h)) {
-        if (!Array.isArray(entries)) continue
-        for (const entry of entries) {
-          for (const c of Array.isArray(entry?.hooks) ? entry.hooks : []) {
-            const cmd = typeof c?.command === 'string' ? c.command.slice(0, 80) : ''
-            hooks.push(`${event}: ${cmd}`)
-          }
-        }
-      }
-    }
-  } catch {
-    // no settings, or not JSON
-  }
   return [
-    '## ~/.claude/skills',
+    '## ~/.claude/skills (name: what it is for)',
     ...(skills.length > 0 ? skills : ['(none)']),
     '',
-    '## ~/.claude/agents',
+    '## ~/.claude/agents (name: what it is for)',
     ...(agents.length > 0 ? agents : ['(none)']),
     '',
     '## ~/.claude/CLAUDE.md',
     claudeMd,
     '',
-    '## hooks in ~/.claude/settings.json',
-    ...(hooks.length > 0 ? hooks : ['(none)']),
-    '',
   ].join('\n')
+}
+
+/**
+ * The `description:` value of a Markdown file's front matter, one line,
+ * cut at 200 characters. Empty when there is no front matter or no
+ * description.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function frontMatterDescription(text) {
+  if (!text.startsWith('---')) return ''
+  const end = text.indexOf('\n---', 3)
+  const head = end >= 0 ? text.slice(3, end) : text.slice(3, 4000)
+  const m = /^description:\s*(.*)$/m.exec(head)
+  if (!m) return ''
+  let value = m[1].trim()
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1)
+  return oneLine(value).slice(0, 200)
 }
 
 /**

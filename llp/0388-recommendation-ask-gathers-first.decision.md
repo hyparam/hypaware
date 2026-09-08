@@ -140,15 +140,24 @@ Everything the earlier shape verified is still verified. It moved to the
 last line. The rules that produce it each close a failure the recorded
 runs showed:
 
-- Facts about a command, an error, or a hook come from a file read this
+- Facts about a command, an error, or a tool come from a file read this
   session, cited, or are written as pointers.
-- A proposed hook or script is run once against a real input, and the
+- Any command in the change is run once against a real input, and the
   output is shown.
-- If a rule on the subject already exists on disk, the answer says why it
-  did not work, and the change is a mechanism.
-- For the sink route the change must be a hook, because a sentence in an
-  instruction file cannot stop a person from resuming a session; it only
-  takes effect once the session is open.
+- The change is a skill, an agent definition, or a CLAUDE.md block, and
+  nothing else. Not a hook or a settings entry: those are invisible to
+  the person, fragile across client updates, and not something a new
+  user reads or maintains, so they are a poor first suggestion however
+  well they would work. The on-disk listing the answer consults names the
+  installed skills and agents with what each is for, and does not list
+  hooks at all.
+- If a skill, agent, or CLAUDE.md line on the subject already exists, the
+  answer says why it did not work and changes it rather than adding a
+  second.
+- For the sink route the answer says plainly that a written rule cannot
+  stop a person from resuming a session. Its change is a handoff skill
+  plus one CLAUDE.md line on when the agent offers it, so that starting
+  fresh becomes the cheaper habit.
 
 <a id="one-question"></a>**`hyp ask` asks one question.** The list of
 LLP 0198 #first-ask had four rows: token spend, a repeated mistake, a
