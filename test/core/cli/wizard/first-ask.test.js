@@ -241,8 +241,8 @@ test('runWizardFirstAsk: the ask is framed, so it reads as a screen and not as m
     spawnFn: recordingSpawn().fn,
     select: chooser.fn,
   })
-  // Both halves of the step: the question, then which client answers it.
-  assert.equal(chooser.seen.length, 2)
+  // One question, so the only screen is which client answers it.
+  assert.equal(chooser.seen.length, 1)
   for (const spec of chooser.seen) assert.equal(spec.box, true)
 })
 
@@ -293,20 +293,20 @@ test('runWizardFirstAsk: an unknown row count never withholds the offer', async 
   assert.equal(spawner.calls.length, 1)
 })
 
-test('runWizardFirstAsk: "Not now" and a cancelled prompt both decline, and keep the list', async () => {
+test('runWizardFirstAsk: cancelling the client pick declines, and keeps the list', async () => {
+  // @ref LLP 0388#one-question [tests]: with no question menu, the client pick is the one place to say not now
   for (const chooser of [
-    selectReturning('__not_now__').fn,
     /** @type {any} */ (async () => { throw new PromptCancelledError() }),
   ]) {
     const stdout = makeBuf()
     const spawner = recordingSpawn()
     const result = await runWizardFirstAsk({
-      clients: ['claude'],
+      clients: ['claude', 'codex'],
       descriptors: descriptors(),
       stdout,
       env: {},
       interactive: true,
-      resolve: async () => '/usr/local/bin/claude',
+      resolve: async (bin) => `/usr/local/bin/${bin}`,
       spawnFn: spawner.fn,
       select: chooser,
     })
@@ -360,14 +360,15 @@ test('runWizardFirstAsk: a spawn failure degrades to the list, never a throw', a
 })
 
 test('runWizardFirstAsk: an unforeseen error is contained', async () => {
+  // Two clients, so the client pick (the one remaining prompt) is reached and throws.
   const stdout = makeBuf()
   const result = await runWizardFirstAsk({
-    clients: ['claude'],
+    clients: ['claude', 'codex'],
     descriptors: descriptors(),
     stdout,
     env: {},
     interactive: true,
-    resolve: async () => '/usr/local/bin/claude',
+    resolve: async (bin) => `/usr/local/bin/${bin}`,
     select: /** @type {any} */ (async () => { throw new TypeError('boom') }),
   })
   assert.deepEqual(result, { launched: false, reason: 'error' })
@@ -381,7 +382,7 @@ test('runWizardFirstAsk: two launchable clients ask which one answers', async ()
   /** @type {any} */
   const chooser = async (spec) => {
     specs.push(spec)
-    return specs.length === 1 ? FIRST.id : 'codex'
+    return 'codex'
   }
   const result = await runWizardFirstAsk({
     clients: ['claude', 'codex'],
@@ -394,8 +395,8 @@ test('runWizardFirstAsk: two launchable clients ask which one answers', async ()
     select: chooser,
   })
   assert.deepEqual(result, { launched: true, client: 'codex', promptId: FIRST.id, exitCode: 0 })
-  assert.equal(specs.length, 2)
-  assert.match(specs[1].title, /Which client/)
+  assert.equal(specs.length, 1)
+  assert.match(specs[0].title, /Which client/)
   assert.equal(spawner.calls[0].cmd, '/usr/local/bin/codex')
 })
 

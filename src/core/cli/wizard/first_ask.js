@@ -64,9 +64,6 @@ export const SUGGESTED_PROMPTS = Object.freeze([
   },
 ])
 
-/** Menu value for the row that declines. Not a prompt id. */
-const NOT_NOW = '__not_now__'
-
 /**
  * Resolve an executable name against `$PATH`, returning its absolute
  * path or `undefined`.
@@ -418,13 +415,13 @@ export async function runWizardFirstAsk(opts) {
 }
 
 /**
- * The menu half: which question, and (only when it is genuinely
- * ambiguous) which client answers it.
+ * Which client answers, when that is genuinely ambiguous. There is one
+ * question (LLP 0388 #one-question), so there is nothing to pick among
+ * and no screen for it: `hyp ask` goes straight from the gather to the
+ * launch. A machine with two launchable clients still gets asked which,
+ * framed as its own screen; cancelling that is "not now".
  *
- * Cancel is not a failure here. Escape and ctrl+c both mean "not now",
- * the same as the menu's own last row, because there is nothing left to
- * abandon: this runs after the last durable write.
- *
+ * @ref LLP 0388#one-question [implements]: no question menu; the only prompt left is the client pick
  * @param {RunWizardFirstAskOptions} opts
  * @param {FirstAskLauncher[]} launchers
  * @returns {Promise<{ prompt: (typeof SUGGESTED_PROMPTS)[number], launcher: FirstAskLauncher } | undefined>}
@@ -436,37 +433,7 @@ async function chooseQuestion(opts, launchers) {
     ...(opts.stdoutStream ? { stdout: opts.stdoutStream } : {}),
     env: opts.env,
   }
-  /** @type {string | number} */
-  let picked
-  try {
-    picked = await ask({
-      // Framed so the explicit command's interactive menu is visually
-      // distinct from its plain printed-list mode.
-      // @ref LLP 0198#frame [implements]: the explicit ask is drawn as its own screen
-      box: true,
-      title: 'Ask your first question',
-      items: launchers.length === 1
-        ? [`Measures your last 30 days, then starts ${launchers[0].label} on what it found, in a HypAware folder.`]
-        : ['Measures your last 30 days, then starts your AI client on what it found, in a HypAware folder.'],
-      // The default hint says "esc cancel", which is wrong here: there is
-      // nothing left to cancel, and escape means the same as the last row.
-      hint: 'up/down · enter start · esc not now',
-      options: [
-        ...SUGGESTED_PROMPTS.map((p) => ({ value: p.id, label: p.label })),
-        { value: NOT_NOW, label: 'Not now' },
-      ],
-      ...io,
-    })
-  } catch (err) {
-    if (err instanceof PromptCancelledError || isPromptBackError(err) || (err instanceof Error && err.name === 'PromptCancelledError')) {
-      return undefined
-    }
-    throw err
-  }
-  if (picked === NOT_NOW) return undefined
-  const prompt = SUGGESTED_PROMPTS.find((p) => p.id === picked)
-  if (!prompt) return undefined
-
+  const prompt = SUGGESTED_PROMPTS[0]
   if (launchers.length === 1) return { prompt, launcher: launchers[0] }
   /** @type {string | number} */
   let client

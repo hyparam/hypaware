@@ -151,10 +151,11 @@ missing skill, a subagent worth adding. Each sent a cold client at the
 cache with a sentence and a skill, and the recorded runs of those rows
 are the evidence in the Context above that this does not produce a
 change anyone acts on. The four are now the routes the gather chooses
-between, with evidence, so the menu collapses to the one question and
-"Not now". The framed screen, the client pick when two clients could
-answer, and the decline path are unchanged; the printed list in setup and
-`hyp ask --list` name the one question. `hyp ask "<question>"` still
+between, with evidence, so there is no question menu at all: `hyp ask`
+goes straight from the gather to the launch. The one screen left is the
+client pick when two clients could answer, still framed, and cancelling
+it is "not now". The printed list in setup and `hyp ask --list` name the
+one question. `hyp ask "<question>"` still
 skips everything and starts straight on what was typed.
 
 <a id="not-preauthorized"></a>**The launch is still not pre-authorized.**
