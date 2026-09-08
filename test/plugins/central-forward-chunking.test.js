@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { createForwardSink, initializeOpenDatasetRollouts } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { abortableSleep } from '../../hypaware-core/plugins-workspace/central/src/backoff.js'
+import { readRequestBody } from '../helpers/request_body.js'
 
 function makeLog() {
   /** @type {Array<{ level: string, message: string, fields: Record<string, unknown> }>} */
@@ -191,7 +192,7 @@ function makeFetch(responder) {
   /** @type {typeof fetch} */
   const fn = /** @type {any} */ (async (url, init) => {
     const headers = /** @type {Record<string, string>} */ (init?.headers ?? {})
-    const body = String(init?.body ?? '')
+    const body = await readRequestBody(init?.body)
     const lines = body.split('\n').filter((l) => l.length > 0)
     const call = {
       url: String(url),
@@ -1404,7 +1405,7 @@ test('an unordered scan never skips a lower-seq row when a later chunk fails (BL
   const acked = []
   /** @type {typeof fetch} */
   const fetchFn = /** @type {any} */ (async (_url, init) => {
-    const body = String(init?.body ?? '')
+    const body = await readRequestBody(init?.body)
     const ids = body.split('\n').filter((l) => l.length > 0).map((l) => Number(JSON.parse(l).id))
     const isChunk1 = ids.includes(5000)
     let status = 202
