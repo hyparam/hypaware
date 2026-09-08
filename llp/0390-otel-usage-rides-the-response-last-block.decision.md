@@ -75,19 +75,24 @@ stamped, so a SUM over this lane's rows is right either way. The body's own
 no `assistant_response` event that could have claimed the record.
 
 WHICH row is stamped does depend on the order, and only one of the two orders
-also satisfies #carrier-is-the-last-block. Claude Code emits `api_request`,
-then `api_response_body`, then `assistant_response`, and the body event's
-`event.timestamp` precedes the response event's, so the body row claims the
-record and the two lanes name the same carrier. A stream that put
-`assistant_response` first would have the text row claim it, which is the
-pre-fix placement, and hyparam/hypaware#1470's zero-token collapse would still
-be reachable for that turn: one claimable record keeps the turn counted once
-within this lane, it does not by itself make the two lanes agree. That residual
-is accepted rather than designed out, because the emission order is the
-client's and the body event is always the earlier of the two. Buying
-order-independence would mean holding every `assistant_response` row back until
-its body event is known not to be coming, and the event stream carries no
-end-of-turn marker to wait on.
+also satisfies #carrier-is-the-last-block. The claim happens where the event
+sits in the batch the projector walks: it does not sort, and `event.timestamp`
+is never read for this, so what decides is the order Claude Code emitted the
+two events in. Claude Code emits `api_request`, then `api_response_body`, then
+`assistant_response` (an order its `event.timestamp` values corroborate), so
+the body row claims the record and the two lanes name the same carrier. A
+stream that put `assistant_response` first would have the text row claim it,
+which is exactly the pre-fix placement, so BOTH of hyparam/hypaware#1470's
+shapes stay reachable for that turn: the zero-token collapse and the 2x
+over-count the Consequences below record. One claimable record keeps the
+turn counted once within this lane, it does not by itself make the two lanes
+agree. That residual is accepted rather than designed out. The emission order
+is the client's and no fixture here can pin it, so a reordering upstream is
+drift of the kind `claude_otel_shape_check` exists to catch, and it degrades to
+the pre-fix behavior rather than to anything worse. Buying order-independence
+would mean holding every `assistant_response` row back until its body event is
+known not to be coming, and the event stream carries no end-of-turn marker to
+wait on.
 
 ## Consequences
 
@@ -99,7 +104,8 @@ end-of-turn marker to wait on.
   row, the OTEL lane the text row) counted a `[text, tool_use]` turn TWICE
   before, because each lane's surviving row carried its own copy of the usage.
   That is the pre-existing over-count hyparam/hypaware#1470's table lists, and
-  naming one carrier removes it along with the zero.
+  naming one carrier removes it along with the zero, in the emission order
+  #claim-order-arbitrates records and only there.
 - The per-request `cost_usd`, `duration_ms`, and `speed` that ride the same
   `api_request` record move with it, because the record is claimed whole: on a
   `[text, tool_use]` turn they move from the OTEL text row to the body-derived
