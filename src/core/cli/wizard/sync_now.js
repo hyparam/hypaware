@@ -27,7 +27,7 @@ import {
   formatFirstSyncDeadline,
   readFirstSyncDeadline,
 } from '../../usage-policy/first_sync_hold.js'
-import { stripSgr } from '../style.js'
+import { resyncLineStart, stripSgr } from '../style.js'
 import { isTty } from '../tui-router.js'
 
 /**
@@ -198,8 +198,10 @@ export async function runWizardSyncNow(opts) {
  * builds with `terminal: false`, which still writes the query and still reads
  * the answer, but takes no raw mode and does no cursor bookkeeping, leaving
  * the tty canonical and the terminal itself echoing what is typed; and the
- * question ends without a newline, which leaves the parent's `colorizeStderr`
- * mid-line, so the next line the child writes reaches the user unpainted.
+ * question ends without a newline, so the answer - and the newline the tty
+ * echoes beside it - never passes through the parent's `colorizeStderr`,
+ * which the echo below resyncs, at the next chunk and again when the child
+ * settles, so the diagnostics after the confirm are still classified.
  * Anything that narrows this pipe further has to keep the first of those
  * true: the prompt it carries is the one gate on sending.
  *
@@ -242,8 +244,19 @@ function runSyncChild(opts) {
       // needs to be: `close` still fires, so the exit code is still judged,
       // only without the corroboration the pipe was there to collect.
       child.stderr?.on('error', () => {})
+      // The tty, not this stream, echoes the answer that ends a question, so
+      // a chunk following an unterminated one opens a line the echo would
+      // otherwise read as the middle of that question. Settled when the child
+      // settles as well as at the next chunk, because the commonest path has
+      // no next chunk: a decline says `sync cancelled` on stdout, leaving the
+      // confirm as the child's last word here, and a wrap left mid-line then
+      // stays that way for every diagnostic the rest of the run writes.
+      let midLine = false
+      const settleLine = () => { if (midLine) { midLine = false; resyncLineStart(echo) } }
       child.stderr?.on('data', (chunk) => {
         const text = String(chunk)
+        settleLine()
+        midLine = !text.endsWith('\n')
         echo.write(text)
         if (noDestinations) return
         pending += text
@@ -257,7 +270,7 @@ function runSyncChild(opts) {
         if (stripSgr(pending).includes(SYNC_HELD_NO_DESTINATIONS_NOTICE)) noDestinations = true
         else pending = pending.slice(-SYNC_HELD_NO_DESTINATIONS_NOTICE.length * 2)
       })
-      child.on('error', (err) => done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }))
+      child.on('error', (err) => { settleLine(); done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }) })
       // `close`, not `exit`: it fires once the piped stderr has closed too, so
       // the last thing the child said is in hand before the code is judged.
       // Bounded by `exit`, because the pipe outlives the process that wrote to
@@ -265,10 +278,15 @@ function runSyncChild(opts) {
       // lives, and `close` alone would leave setup's last step waiting on a
       // stranger. Nothing under `hyp sync` spawns today, so the bound decides
       // only how a future one fails.
-      child.on('close', (code) => done({ code, noDestinations }))
+      //
+      // Every settle resyncs the line, because any of them can be the run's
+      // last word on this pipe: none relays a further chunk to carry the
+      // resync, so leaving one out would put the mid-line state back for
+      // exactly the run that ends that way.
+      child.on('close', (code) => { settleLine(); done({ code, noDestinations }) })
       child.on('exit', (code) => {
         if (settled) return
-        grace = setTimeout(() => done({ code, noDestinations }), STDERR_CLOSE_GRACE_MS)
+        grace = setTimeout(() => { settleLine(); done({ code, noDestinations }) }, STDERR_CLOSE_GRACE_MS)
       })
     } catch (err) {
       done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' })

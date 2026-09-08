@@ -7,7 +7,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { paintLine } from '../../../../src/core/cli/style.js'
+import { ANSI, colorizeStderr, paintLine } from '../../../../src/core/cli/style.js'
 import { runWizardSyncNow } from '../../../../src/core/cli/wizard/sync_now.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
@@ -363,6 +363,50 @@ test('the child keeps its voice: everything on its stderr is written back out', 
   assert.equal(o.stderr.text(), 'hyp sync: something broke\n  and then more\n')
 })
 
+// On a pipe the child cannot paint (`useColor` is false there), so the
+// parent's colorized stderr is the only painter left, and the tty echo of the
+// answer that ends the confirm never reaches it: without a resync the wrap
+// still thinks it is inside the question and the diagnostic arrives plain.
+// @ref LLP 0203#child-process [tests]: the relayed child keeps the severity colour it had under inherit
+test('the diagnostic after the send confirm keeps its severity colour', async () => {
+  const spawn = fakeSpawn({
+    code: 1,
+    stderr: [
+      'Send now to the central server? [Y/n] ',
+      'hyp sync: nothing was sent - the sink driver is holding every tick\n',
+    ],
+  })
+  const sink = Object.assign(makeBuf(), { isTTY: true })
+  const o = opts({ spawnFn: spawn.spawnFn })
+  o.args.stderr = colorizeStderr(sink, {})
+  await runWizardSyncNow(o.args)
+
+  assert.equal(
+    sink.text(),
+    `Send now to the central server? [Y/n] ${ANSI.red}hyp sync:${ANSI.reset} nothing was sent` +
+    ' - the sink driver is holding every tick\n'
+  )
+})
+
+// The decline is the path with no next chunk to resync on: the child says
+// `sync cancelled` on stdout and exits, leaving the confirm as its last word
+// on this stream. A wrap left mid-line there loses the colour of every later
+// diagnostic in the run, which is #1452 again one step further out.
+test('a child that ends mid-confirm leaves the wrap able to classify the run', async () => {
+  const spawn = fakeSpawn({ code: 0, stderr: ['Send now to the central server? [Y/n] '] })
+  const sink = Object.assign(makeBuf(), { isTTY: true })
+  const o = opts({ spawnFn: spawn.spawnFn })
+  const stderr = colorizeStderr(sink, {})
+  o.args.stderr = stderr
+  await runWizardSyncNow(o.args)
+  stderr.write('hyp init: something else broke later\n')
+
+  assert.equal(
+    sink.text(),
+    `Send now to the central server? [Y/n] ${ANSI.red}hyp init:${ANSI.reset} something else broke later\n`
+  )
+})
+
 // Piping a stream means owning its failures. An `error` nobody listens for is
 // an uncaught exception, and it would land on a setup that had already done
 // every one of its acts - the same defect `installStreamErrorHandlers` exists
@@ -500,4 +544,23 @@ test('a child whose stderr never closes still resolves, and still reports its ex
   // exit is a child that never reached its plan.
   assert.deepEqual(result, { asked: true, released: false, reason: 'child-failed' })
   assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
+})
+
+// The seam the two fixes share: a run bounded by the settle timer never sees
+// `close`, so the resync #1452 hangs on that event would not run and the wrap
+// would stay mid-confirm for the rest of setup. Both settles have to clear it.
+// @ref LLP 0203#child-process [tests]: the line is resynced on the bounded settle too, not only on close
+test('a mid-confirm child whose pipe never closes still leaves the wrap able to classify', { timeout: 5000 }, async () => {
+  const { spawnFn } = fakeSpawn({ code: 0, stderr: ['Send now to the central server? [Y/n] '], holdOpen: true })
+  const sink = Object.assign(makeBuf(), { isTTY: true })
+  const o = opts({ spawnFn })
+  const stderr = colorizeStderr(sink, {})
+  o.args.stderr = stderr
+  await runWizardSyncNow(o.args)
+  stderr.write('hyp init: something else broke later\n')
+
+  assert.equal(
+    sink.text(),
+    `Send now to the central server? [Y/n] ${ANSI.red}hyp init:${ANSI.reset} something else broke later\n`
+  )
 })
