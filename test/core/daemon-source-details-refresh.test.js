@@ -356,6 +356,99 @@ test('a source that answers null keeps the tick alive, and says nothing about it
   }
 })
 
+// Resolving an answer is not the same as being able to read one. A plugin is
+// free to compute `details` or `lastError` in a getter, and a getter that
+// throws is a throw on the tick's critical path unless the answer is taken
+// apart inside the probe's own try: `runTick` is invoked as `void runTick()`,
+// so the rejection never reaches `persist()` and the whole status file stops
+// being written.
+// @ref LLP 0394#health-rides-beside-state [tests]: a probe whose answer cannot be read changes nothing, rather than taking the tick down
+
+/**
+ * Stage a plugin whose source answers once and then hands back a status
+ * object whose `details` cannot be read.
+ *
+ * @param {string} hypHome
+ * @returns {Promise<string>}
+ */
+async function stageUnreadableReportPlugin(hypHome) {
+  const installDir = path.join(hypHome, 'hypaware', 'plugins', PLUGIN)
+  await fs.mkdir(installDir, { recursive: true })
+  await fs.writeFile(path.join(installDir, 'hypaware.plugin.json'), JSON.stringify({
+    schema_version: 1,
+    name: PLUGIN,
+    version: '0.1.0',
+    hypaware_api: '^1.0.0',
+    runtime: 'node',
+    entrypoint: './index.js',
+  }))
+  await fs.writeFile(
+    path.join(installDir, 'index.js'),
+    `
+export async function activate(ctx) {
+  ctx.sources.register({
+    name: 'accruing-fixture',
+    plugin: '${PLUGIN}',
+    async start() {
+      let probes = 0
+      return {
+        async status() {
+          probes += 1
+          if (probes === 1) return { state: 'ready', details: { probes: 1 } }
+          return { state: 'error', get details() { throw new TypeError('details is not readable') } }
+        },
+        async stop() {},
+      }
+    },
+  })
+}
+`
+  )
+  return installDir
+}
+
+test('a source whose answer cannot be read leaves the tick, and the status file, alive', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-source-unreadable-status-'))
+  const stateRoot = path.join(hypHome, 'hypaware')
+  let handle
+  try {
+    const configPath = await writeInstall(hypHome, await stageUnreadableReportPlugin(hypHome))
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'source-unreadable-status',
+      tickIntervalMs: 1,
+      installSignalHandlers: false,
+    })
+
+    const booted = readStatusFile(stateRoot)
+    assert.deepEqual(/** @type {any} */ (booted?.sources?.[0])?.details, { probes: 1 })
+    const bootedUptimeMs = booted?.uptimeMs ?? 0
+
+    // Every tick from here throws where the answer is read. `persist()` runs
+    // at the end of the tick, so a rising `uptimeMs` is the proof that the
+    // throw was contained rather than swallowing the tick.
+    const deadline = Date.now() + 20_000
+    /** @type {any} */
+    let later
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      later = readStatusFile(stateRoot)
+      if ((later?.uptimeMs ?? 0) > bootedUptimeMs) break
+    }
+    assert.ok((later?.uptimeMs ?? 0) > bootedUptimeMs, 'the tick stopped writing the status file')
+    assert.deepEqual(later?.sources?.[0]?.details, { probes: 1 }, 'an unreadable answer changes nothing')
+    assert.equal(later?.sources?.[0]?.health?.state, 'ready', 'nor rewrites the health it could not read')
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 // The refresh put plugin code on the tick loop's critical path, and the
 // kernel contract puts no bound on `status()`. A probe that never settles
 // used to be able to hang only boot, which is at least loud. On the tick path

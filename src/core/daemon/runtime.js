@@ -56,6 +56,7 @@ import {
 /**
  * @import {
  *   DaemonStatus,
+ *   SourceHealth,
  *   SourceSnapshot,
  *   SinkSnapshot,
  *   DaemonHandle,
@@ -622,15 +623,24 @@ export async function runDaemon(opts = {}) {
    * `source.status` span on every tick for the daemon's life.
    *
    * `status()` is plugin code, so what it resolves is not necessarily a
-   * `SourceStatus`: `null` is as easy to return as an object, and every
-   * reader below has to survive one.
+   * `SourceStatus`: `null` is as easy to return as an object. The answer is
+   * therefore taken apart *here*, inside the same try that already contains
+   * the plugin's promise, and what leaves this function is only values the
+   * kernel built. A dereference of the plugin's object on the caller's side
+   * would be a throw on the tick's critical path, which is an unhandled
+   * rejection that never reaches `persist()`, freezing the whole status file
+   * and, on the shutdown path, the stop (issue #1490 round 1).
+   *
+   * `answered` is what separates "the source said nothing" from "the probe
+   * never got an answer": both arrive with nothing to record, and only the
+   * first erases what was recorded before.
    *
    * @param {string} name
-   * @returns {Promise<{ reported: SourceStatus | null | undefined, failure: string | undefined }>}
+   * @returns {Promise<{ answered: boolean, details: object | undefined, health: SourceHealth | undefined, failure: string | undefined }>}
    */
   async function probeSourceStatus(name) {
     if (sourceProbesInFlight.has(name)) {
-      return { reported: undefined, failure: 'previous status probe has not settled' }
+      return { answered: false, details: undefined, health: undefined, failure: 'previous status probe has not settled' }
     }
     sourceProbesInFlight.add(name)
     const settle = () => sourceProbesInFlight.delete(name)
@@ -649,9 +659,10 @@ export async function runDaemon(opts = {}) {
           if (typeof timer.unref === 'function') timer.unref()
         }),
       ])
-      return { reported: /** @type {SourceStatus | null | undefined} */ (reported), failure: undefined }
+      const answer = /** @type {SourceStatus | null | undefined} */ (reported)
+      return { answered: true, details: answer?.details, health: sourceHealth(answer), failure: undefined }
     } catch (err) {
-      return { reported: undefined, failure: err instanceof Error ? err.message : String(err) }
+      return { answered: false, details: undefined, health: undefined, failure: err instanceof Error ? err.message : String(err) }
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -694,12 +705,16 @@ export async function runDaemon(opts = {}) {
    * plugin, and `state` are left alone - liveness is the lifecycle's
    * business, not a status probe's.
    *
-   * Best-effort per source: a source whose probe throws, times out, or
-   * returns nothing keeps what it already had rather than losing it, and
-   * one bad source never blocks the next one or the persist below. A probe
-   * that *did* answer replaces the health wholesale, including erasing it:
-   * a `lastError` the source has stopped reporting is fixed, and a stale
-   * copy of it would outlive the failure it describes.
+   * Best-effort per source: a source whose probe throws, times out, or is
+   * skipped keeps what it already had rather than losing it, and one bad
+   * source never blocks the next one or the persist below. A probe that
+   * *did* answer replaces the health wholesale, including erasing it when
+   * the answer carried none: a `lastError` the source has stopped reporting
+   * is a failure that is over, and a stale copy of it would outlive the
+   * failure it describes. `details` is the deliberate exception, and keeps
+   * its last good value: each plugin shapes it differently and it accrues
+   * rather than reporting a condition, so an answer that omits it is not a
+   * source saying the detail is gone.
    *
    * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: the tick refreshes source status so accruing details reach status.json
    * @ref LLP 0394#health-rides-beside-state [implements]: what the source says about itself is recorded, not only its details
@@ -707,10 +722,10 @@ export async function runDaemon(opts = {}) {
   async function refreshSourceStatus() {
     for (const snap of status.sources) {
       if (snap.state !== 'started') continue
-      const { reported, failure } = await probeSourceStatus(snap.name)
-      if (reported !== undefined) {
-        if (reported?.details !== undefined) snap.details = reported.details
-        snap.health = sourceHealth(reported)
+      const { answered, details, health, failure } = await probeSourceStatus(snap.name)
+      if (answered) {
+        if (details !== undefined) snap.details = details
+        snap.health = health
       }
       noteProbeOutcome(snap.name, failure)
     }
