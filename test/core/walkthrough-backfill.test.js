@@ -99,7 +99,7 @@ test('onboarding with claude selected runs the backfill step and records stats',
   assert.deepEqual(result.finale?.backfill, [
     { provider: 'claude', dryRun: false, ok: true, scanned: 3, rowsWritten: 5, skipped: 1 },
   ])
-  assert.match(stdout.text(), /backfill claude: ok \(scanned 3, wrote 5, skipped 1\)/)
+  assert.match(stdout.text(), /backfill claude: imported 5 rows \(scanned 3, skipped 1\)/)
 })
 
 test('--dry-run onboarding includes the backfill plan but writes nothing', async () => {
@@ -379,7 +379,7 @@ test('onboarding with codex selected runs the backfill step and records stats', 
   assert.deepEqual(result.finale?.backfill, [
     { provider: 'codex', dryRun: false, ok: true, scanned: 4, rowsWritten: 6, skipped: 2 },
   ])
-  assert.match(stdout.text(), /backfill codex: ok \(scanned 4, wrote 6, skipped 2\)/)
+  assert.match(stdout.text(), /backfill codex: imported 6 rows \(scanned 4, skipped 2\)/)
 })
 
 test('onboarding with both claude and codex selected runs both providers', async () => {
@@ -408,8 +408,8 @@ test('onboarding with both claude and codex selected runs both providers', async
     { provider: 'claude', dryRun: false, ok: true, scanned: 3, rowsWritten: 5, skipped: 0 },
     { provider: 'codex', dryRun: false, ok: true, scanned: 2, rowsWritten: 4, skipped: 1 },
   ])
-  assert.match(stdout.text(), /backfill claude: ok/)
-  assert.match(stdout.text(), /backfill codex: ok/)
+  assert.match(stdout.text(), /backfill claude: imported 5 rows/)
+  assert.match(stdout.text(), /backfill codex: imported 4 rows/)
 })
 
 test('interactive onboarding prompts codex backfill consent and runs it on yes', async () => {
@@ -519,7 +519,9 @@ test('a sweep-backed provider is disclosed and runs even when consent is decline
   // Declining skipped claude but not the sweep-backed openclaw.
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
   assert.match(stdout.text(), /backfill: skipped \(declined\)/)
-  assert.match(stdout.text(), /backfill openclaw: the enabled periodic sweep imports its history on schedule/)
+  // The sweep announce line is gone (the spinner announces the run); the
+  // result line is the evidence the sweep-backed import still happened.
+  assert.match(stdout.text(), /backfill openclaw: /)
 })
 
 test('an openclaw-only pick asks no backfill question but still runs the first import', async () => {
@@ -547,7 +549,7 @@ test('an openclaw-only pick asks no backfill question but still runs the first i
   assert.deepEqual(result.clientsPicked, ['openclaw'])
   assert.equal(consentAsked, 0, 'nothing askable: every picked provider is sweep-backed')
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
-  assert.match(stdout.text(), /backfill openclaw: the enabled periodic sweep imports its history on schedule/)
+  assert.match(stdout.text(), /backfill openclaw: /)
 })
 
 test('cancelling consent skips sweep-backed providers too', async () => {

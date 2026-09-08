@@ -2290,12 +2290,10 @@ async function runFinaleBackfill(args) {
       // Guard each provider so one failure neither aborts sibling
       // providers nor the daemon (re)start that resumes live capture.
       // This matches the attach/restart resilience above.
+      // No announce line for a sweep-backed provider: the spinner below
+      // already says an import is running, and the sweep itself was
+      // disclosed where it was enabled.
       for (const provider of toRun) {
-        if (sweeping.has(provider)) {
-          stdout.write(
-            `backfill ${provider}: the enabled periodic sweep imports its history on schedule; running the first import now\n`
-          )
-        }
         try {
           // Importing local history reads and writes potentially
           // thousands of rows with no other output. Without this the
@@ -2310,10 +2308,9 @@ async function runFinaleBackfill(args) {
           )
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
-          stdout.write(
-            `${tag}backfill ${entry.provider}: ${entry.ok ? 'ok' : 'failed'} ` +
-            `(scanned ${entry.scanned}, wrote ${entry.rowsWritten}, skipped ${entry.skipped})\n`
-          )
+          // The counts matter when something was imported or went wrong;
+          // a clean zero is one short line, not a scan report.
+          stdout.write(`${tag}backfill ${entry.provider}: ${describeBackfillResult(entry)}\n`)
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           // Guarded for the same reason the dead-surface notice above is,
@@ -2340,6 +2337,21 @@ async function runFinaleBackfill(args) {
     },
     { component: 'walkthrough' }
   )
+}
+
+/**
+ * One line for a finished import, shared with `hyp client attach`'s own
+ * backfill report. Full counts only where they carry news: a failure, or a
+ * run that wrote or skipped rows. A clean zero says so plainly instead of
+ * printing a three-number scan report.
+ *
+ * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }} entry
+ * @returns {string}
+ */
+export function describeBackfillResult(entry) {
+  if (!entry.ok) return `failed (scanned ${entry.scanned}, wrote ${entry.rowsWritten}, skipped ${entry.skipped})`
+  if (entry.rowsWritten === 0 && entry.skipped === 0) return 'nothing to import'
+  return `imported ${entry.rowsWritten} rows (scanned ${entry.scanned}, skipped ${entry.skipped})`
 }
 
 /**
