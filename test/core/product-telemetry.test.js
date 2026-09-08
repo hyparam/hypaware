@@ -210,6 +210,39 @@ test('sampler omits stalls, invalid memory, and missing samples rather than zero
   assert.deepEqual(sampler.flush(), [])
 })
 
+// A window whose samples never move is the ordinary idle daemon, and summing
+// equal products can put the weighted mean one ulp above the observed peak.
+test('a flat sample window still validates instead of discarding the batch', () => {
+  for (let trial = 0; trial < 200; trial++) {
+    let wall = NOW
+    let mono = 0
+    const rss = 60_000_000 + trial * 4096
+    const sampler = createRuntimeSummary({
+      now: () => wall,
+      monotonicNow: () => mono,
+      cpuUsage: () => ({ user: 0, system: 0 }),
+      memoryUsage: () => ({ rss, heapUsed: rss / 3 })
+    })
+    for (let i = 0; i < 10; i++) {
+      // performance.now() deltas are fractional, so the per-sample products
+      // are inexact and their sum need not divide back to the flat value.
+      mono +=
+        29_990 + ((trial * 7 + i * 13) % 21) + ((i * 37 + trial * 11) % 97) / 97
+      wall += 30_000
+      sampler.sample()
+    }
+    const points = sampler.flush()
+    assert.equal(points.length, 3)
+    assert.equal(
+      validateBatch(
+        productBatch(createProductResource({ role: 'daemon' }), points, wall),
+        wall
+      ),
+      null
+    )
+  }
+})
+
 test('concurrent writers share an aggregate fixed byte and count cap', async (t) => {
   const root = temp(t)
   const url = new URL(
@@ -258,6 +291,46 @@ test('queue rejects oversized, malformed and non-allowlisted batches without thr
     ),
     false
   )
+})
+
+// The default has to be pinned through the CLI, not only through the policy
+// reader: an installation nobody has opted in has no queue to preview later.
+test('an installation with no policy queues nothing and creates no telemetry state', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  await dispatch(['--version'], {
+    env,
+    stdout: { write() {} },
+    stderr: { write() {} }
+  })
+  await dispatch(['query', 'sql', 'select secret from t'], {
+    env,
+    stdout: { write() {} },
+    stderr: { write() {} }
+  })
+  assert.equal(effectivePolicy(root).mode, 'off')
+  assert.equal(fs.existsSync(root), false)
+  assert.deepEqual(createOutbox(root).entries(), [])
+})
+
+// Local mode is a preview queue, not a network permission.
+test('local collection queues copies but never contacts a destination', async (t) => {
+  const root = temp(t)
+  writePolicy(root, 'local')
+  const local = effectivePolicy(root)
+  const queue = createOutbox(root, { now: () => NOW })
+  assert(queue.append(batch(), /** @type {string} */ (local.binding)))
+  let requests = 0
+  const fetchFn = /** @type {typeof fetch} */ (
+    async () => {
+      requests++
+      return capability()
+    }
+  )
+  await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+  assert.equal(requests, 0)
+  assert.equal(queue.entries().length, 1)
 })
 
 test('local identity exists only after enable, and consent/enrollment changes invalidate copies', (t) => {

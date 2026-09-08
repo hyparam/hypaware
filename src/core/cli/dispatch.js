@@ -249,9 +249,11 @@ async function dispatchInternal(argv, opts) {
     return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length, discovery: helpDiscovery })
   }
 
-  // Boot the kernel so plugin-contributed commands, sources, sinks,
+  // Past the help and version returns above, an empty argv is the walkthrough.
   if (argv.length === 0) noteInvocation({ command: 'setup', kind: 'execution' })
   if (earlyMatch?.command.name !== 'version' && !isHelpFlag(earlyMatch?.rest[0])) startInvocationDelivery()
+
+  // Boot the kernel so plugin-contributed commands, sources, sinks,
   // capabilities, skills, and init presets are visible to dispatch.
   // Callers that already built a kernel (test flows pre-activating a
   // specific plugin set) pass `opts.kernel` and we skip boot.

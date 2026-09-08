@@ -287,7 +287,12 @@ export function createRuntimeSummary({
             unit: METRICS[name].unit,
             attributes: {},
             value: g.value,
-            average: g.sum / g.coverage,
+            // A weighted mean of the samples cannot exceed the largest one,
+            // but summing equal products and dividing can land one ulp above
+            // it, and the contract rejects average > max. A flat idle RSS
+            // window is the common case, so the unclamped form would discard
+            // the whole five-minute batch rather than one series.
+            average: Math.min(g.max, g.sum / g.coverage),
             max: g.max,
             sampleCount: g.count,
             coverageMs: Math.min(g.coverage, duration)
