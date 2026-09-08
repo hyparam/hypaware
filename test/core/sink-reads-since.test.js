@@ -103,6 +103,70 @@ test('lookup columns outside projection still filter rows before the incremental
   }
 })
 
+test('targeted batches intersect lookup keys and deletes without exposing filter-only columns', async () => {
+  const root = await makeTmpDir()
+  try {
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      ...COLS, { name: 'session_id', type: 'STRING', nullable: true },
+      { name: 'role', type: 'STRING', nullable: true },
+    ]
+    const rows = Array.from({ length: 2200 }, (_, id) => ({
+      id, msg: `message-${id}`,
+      session_id: id % 5 === 0 ? null : id % 2 === 0 ? 'a' : 'b',
+      role: id % 3 === 0 ? 'assistant' : 'user',
+    }))
+    await appendRowsToTable(root, columns, rows)
+    await deleteMatchingRows(root, (row) => Number(row.id) % 7 === 0, { columns: ['id'] })
+    for (const keys of [['a'], ['a', 'b', 'a'], ['absent']]) {
+      const actual = []
+      for await (const row of scanRowsFromTable(root, ['msg', 'id'], {
+        whereIn: { session_id: keys, role: ['assistant'] },
+      })) {
+        assert.deepEqual(Object.keys(row), ['msg', 'id'])
+        actual.push(Number(row.id))
+      }
+      assert.deepEqual(actual, rows.filter((row) => row.session_id !== null && keys.includes(row.session_id) &&
+        row.role === 'assistant' && row.id % 7 !== 0).map((row) => row.id))
+    }
+    // An absent projected field retains the row fallback's padding behavior.
+    const fallback = []
+    for await (const row of scanRowsFromTable(root, ['id', 'absent'], { whereIn: { session_id: ['a'] } })) {
+      assert.equal(row.absent, undefined)
+      fallback.push(Number(row.id))
+    }
+    assert.deepEqual(fallback, rows.filter((row) => row.session_id === 'a' && row.id % 7 !== 0).map((row) => row.id))
+    // Numeric coercion follows the same batch path, including deleted keys and
+    // a second predicate on a column absent from the output projection.
+    const numeric = []
+    for await (const row of scanRowsFromTable(root, ['msg'], {
+      whereIn: { id: ['6', '12', '42', '2106'], role: ['assistant'] },
+    })) numeric.push(row)
+    assert.deepEqual(numeric, [6, 12, 2106].map((id) => ({ msg: `message-${id}` })))
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('targeted scans preserve numeric lookup coercion and reject invalid lookup requests', async () => {
+  const root = await makeTmpDir()
+  try {
+    await appendRowsToTable(root, COLS, [{ id: 1, msg: 'one' }, { id: 2, msg: 'two' }])
+    const actual = []
+    for await (const row of scanRowsFromTable(root, ['msg'], { whereIn: { id: ['2'] } })) actual.push(row.msg)
+    assert.deepEqual(actual, ['two'])
+    /** @type {Record<string, string[]>[]} */
+    const invalid = [{ msg: [] }, { missing: ['x'] }]
+    for (const whereIn of invalid) {
+      await assert.rejects(async () => {
+        for await (const _ of scanRowsFromTable(root, ['id'], { whereIn })) {}
+      }, /cache lookup/)
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('readRows back-compat: no opts is unchanged, internal fields never leak', async () => {
   const cacheRoot = await makeTmpDir()
   const svc = createQueryStorageService({ cacheRoot })

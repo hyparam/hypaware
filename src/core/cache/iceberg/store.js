@@ -2,7 +2,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { readBatchColumn, selectedRowCount, valueAt } from 'squirreling'
+import { executePlan, readBatchColumn, selectedRowCount, valueAt } from 'squirreling'
 
 import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
 import {
@@ -651,15 +651,14 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   // WHOLE filter for a data file missing any column the filter names, so on a
   // file written before the seq column existed the lookup clause would be
   // dropped along with the seq clause. `since` is re-checked on every yielded
-  // row below and survives that; `whereIn` is not re-checked, and its contract
-  // is a predicate callers rely on rather than a pruning hint. No caller passes
-  // both today, and this gate means none can start to without noticing.
+  // row below and survives that; the lookup's row fallback relies on the
+  // source's WHERE enforcement. Keep the same pruning gate for both readers.
   const pushSince = filtering && hasSeqColumn && !includeLegacy && opts?.whereIn === undefined
   const where = andExpr(
     whereInExpr(source, opts?.whereIn),
     pushSince ? seqAfterExpr(/** @type {bigint} */ (since)) : undefined,
   )
-  for await (const resolved of scanResolvedRows(source, projected, where, opts?.whereIn === undefined)) {
+  for await (const resolved of scanResolvedRows(source, projected, where)) {
     if (filtering) {
       const seq = hasSeqColumn ? seqValue(resolved[INGEST_SEQ_COLUMN.name]) : null
       if (seq === null) {
@@ -676,28 +675,27 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
 
 /**
  * Materialize only the current batch into row objects at the consumer boundary.
- * The native filter is a pruning hint: its only possible residual here is the
- * seq predicate that scanRowsFromTable rechecks. Lookups retain the row reader,
- * whose WHERE enforcement is authoritative, as do unknown projected columns.
+ * Let the SQL engine schedule predicate columns, apply residual filters, and
+ * compose selections before reading output vectors. This preserves its equality
+ * semantics across types without allocating an AsyncRow per candidate row.
+ * Unknown projected columns retain the row reader's padding behavior.
  *
  * @param {ScannableDataSource} source
  * @param {string[]} columns
  * @param {ExprNode | undefined} where
- * @param {boolean} nativeAllowed
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
-async function* scanResolvedRows(source, columns, where, nativeAllowed) {
-  const schema = source.schema
-  if (nativeAllowed && schema && source.prepareScan) {
-    const fields = columns.map((name) => schema.fields.find((field) => field.name === name))
-    if (fields.every((field) => field !== undefined)) {
-      // @ref LLP 0040#storage-api-extension [constrained-by]: native pruning cannot replace the authoritative seq/legacy check at the row boundary
-      const prepared = source.prepareScan({
-        columns: fields.map((field) => ({ field: field.id, phase: 0, purpose: 'output', mode: 'required' })),
-        filter: where,
-      })
-      for await (const batch of prepared.batches()) {
-        const vectors = await Promise.all(columns.map((_, columnIndex) => readBatchColumn({ batch, columnIndex })))
+async function* scanResolvedRows(source, columns, where) {
+  if (source.schema && source.prepareScan && columns.every((name) => source.schema?.fields.some((field) => field.name === name))) {
+    // @ref LLP 0040#storage-api-extension [constrained-by]: seq/legacy policy is still checked at the row boundary
+    const result = executePlan({
+      plan: { type: 'Scan', table: 'cache', hints: { columns, where } },
+      context: { tables: { cache: source } },
+    })
+    if (result.batches) {
+      const indices = columns.map((name) => result.columns.indexOf(name))
+      for await (const batch of result.batches()) {
+        const vectors = await Promise.all(indices.map((columnIndex) => readBatchColumn({ batch, columnIndex })))
         const count = selectedRowCount(batch.selection)
         for (let i = 0; i < count; i++) {
           /** @type {Record<string, unknown>} */
@@ -706,8 +704,10 @@ async function* scanResolvedRows(source, columns, where, nativeAllowed) {
           yield row
         }
       }
-      return
+    } else {
+      for await (const row of result.rows()) yield await resolveAsyncRow(row, columns)
     }
+    return
   }
   for await (const row of source.scan({ columns, where }).rows()) {
     yield await resolveAsyncRow(row, columns)
