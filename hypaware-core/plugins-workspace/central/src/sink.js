@@ -634,7 +634,12 @@ async function writeHistoryBaseline({ dataset, tablePath, storage, watermarks, w
   /** @type {SinkContinuation} */
   let continuation = { v: 1, seq: '0' }
   let skippedRowCount = 0
-  for await (const entry of storage.readRowsSince(tablePath, { includeLegacy: false })) {
+  // Nothing but the continuation is read, so ask for no payload columns:
+  // otherwise establishing this watermark decodes the whole local history,
+  // large text columns included, to count rows it discards. The withholding
+  // rules' own columns are forced into the scan whatever the caller projects,
+  // so the verdicts, and the seq each entry carries, are unchanged.
+  for await (const entry of storage.readRowsSince(tablePath, { includeLegacy: false, columns: [] })) {
     continuation = entry.after
     skippedRowCount += 1
   }
