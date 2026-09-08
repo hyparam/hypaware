@@ -33,7 +33,6 @@ import { parquetDataSource } from '../../src/core/query/parquet-source.js'
 import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
 
 /**
- * @import { AsyncBuffer } from 'hyparquet'
  * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
  * @import { AsyncDataSource, ExprNode, ScanColumnResults, SelectStatement, SqlPrimitive } from 'squirreling/src/types.js'
  */
@@ -152,22 +151,6 @@ async function makeTmpDir(prefix) {
 }
 
 /**
- * @param {Uint8Array} bytes
- * @returns {AsyncBuffer}
- */
-function asyncBufferFromBytes(bytes) {
-  return {
-    byteLength: bytes.byteLength,
-    slice(start, end) {
-      const sliced = bytes.subarray(start, end)
-      const out = new ArrayBuffer(sliced.byteLength)
-      new Uint8Array(out).set(sliced)
-      return out
-    },
-  }
-}
-
-/**
  * The parquet-file backend over the fixture, at the small row-group size the
  * differential harness uses so multi-row-group iteration is exercised.
  *
@@ -176,7 +159,7 @@ function asyncBufferFromBytes(bytes) {
 async function makeParquetSource() {
   const columnData = rowsToColumnSources(NULLABLE_COLUMNS, NULLABLE_ROWS)
   const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY', rowGroupSize: 2 })
-  const file = asyncBufferFromBytes(new Uint8Array(arrayBuffer))
+  const file = arrayBuffer
   return parquetDataSource(file, await parquetMetadataAsync(file))
 }
 

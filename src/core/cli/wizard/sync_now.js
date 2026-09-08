@@ -31,6 +31,13 @@ import { resyncLineStart, stripSgr } from '../style.js'
 import { isTty } from '../tui-router.js'
 
 /**
+ * How long the settle keeps waiting on the piped stderr after the child itself
+ * is already gone. The pipe outlives its writer, so this is the only bound on
+ * that wait.
+ */
+const STDERR_CLOSE_GRACE_MS = 250
+
+/**
  * Run the real `hyp sync`, whose plan and confirm are the one question.
  *
  * Never throws and never changes the wizard's exit code: setup finished
@@ -194,7 +201,7 @@ export async function runWizardSyncNow(opts) {
  * question ends without a newline, so the answer - and the newline the tty
  * echoes beside it - never passes through the parent's `colorizeStderr`,
  * which the echo below resyncs, at the next chunk and again when the child
- * closes, so the diagnostics after the confirm are still classified.
+ * settles, so the diagnostics after the confirm are still classified.
  * Anything that narrows this pipe further has to keep the first of those
  * true: the prompt it carries is the one gate on sending.
  *
@@ -207,8 +214,14 @@ function runSyncChild(opts) {
   const binPath = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
   return new Promise((resolve) => {
     let settled = false
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let grace
+    // Whoever settles first cancels the wait, so the grace timer outlives the
+    // result it was there to produce in no ordering: `error` can arrive with
+    // the timer already armed, and `close` is only documented to follow `exit`,
+    // not to be the last word.
     /** @param {{ code: number | null, error?: string, noDestinations?: boolean }} r */
-    const done = (r) => { if (!settled) { settled = true; resolve(r) } }
+    const done = (r) => { if (!settled) { settled = true; clearTimeout(grace); resolve(r) } }
     try {
       const child = spawnFn(process.execPath, [binPath, 'sync'], {
         stdio: ['inherit', 'inherit', 'pipe'],
@@ -233,9 +246,9 @@ function runSyncChild(opts) {
       child.stderr?.on('error', () => {})
       // The tty, not this stream, echoes the answer that ends a question, so
       // a chunk following an unterminated one opens a line the echo would
-      // otherwise read as the middle of that question. Settled at the child's
-      // close as well as at the next chunk, because the commonest path has no
-      // next chunk: a decline says `sync cancelled` on stdout, leaving the
+      // otherwise read as the middle of that question. Settled when the child
+      // settles as well as at the next chunk, because the commonest path has
+      // no next chunk: a decline says `sync cancelled` on stdout, leaving the
       // confirm as the child's last word here, and a wrap left mid-line then
       // stays that way for every diagnostic the rest of the run writes.
       let midLine = false
@@ -260,7 +273,21 @@ function runSyncChild(opts) {
       child.on('error', (err) => done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }))
       // `close`, not `exit`: it fires once the piped stderr has closed too, so
       // the last thing the child said is in hand before the code is judged.
+      // Bounded by `exit`, because the pipe outlives the process that wrote to
+      // it: any descendant that inherited fd 2 holds it open for as long as it
+      // lives, and `close` alone would leave setup's last step waiting on a
+      // stranger. Nothing under `hyp sync` spawns today, so the bound decides
+      // only how a future one fails.
+      //
+      // Both settles resync the line, because either can be the run's last
+      // word on this pipe: the timed-out one relays no further chunk to carry
+      // the resync, so leaving it out would put the mid-line state back for
+      // exactly the run that never reaches `close`.
       child.on('close', (code) => { settleLine(); done({ code, noDestinations }) })
+      child.on('exit', (code) => {
+        if (settled) return
+        grace = setTimeout(() => { settleLine(); done({ code, noDestinations }) }, STDERR_CLOSE_GRACE_MS)
+      })
     } catch (err) {
       done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' })
     }

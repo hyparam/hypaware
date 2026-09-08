@@ -16,26 +16,9 @@ import { parquetDataSource } from '../../src/core/query/parquet-source.js'
 import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
 
 /**
- * @import { AsyncBuffer } from 'hyparquet'
  * @import { ColumnSpec, ScannableDataSource } from '../../hypaware-plugin-kernel-types.js'
  * @import { SqlPrimitive } from 'squirreling'
  */
-
-/**
- * @param {Uint8Array} bytes
- * @returns {AsyncBuffer}
- */
-export function asyncBufferFromBytes(bytes) {
-  return {
-    byteLength: bytes.byteLength,
-    slice(start, end) {
-      const sliced = bytes.subarray(start, end)
-      const out = new ArrayBuffer(sliced.byteLength)
-      new Uint8Array(out).set(sliced)
-      return out
-    },
-  }
-}
 
 /**
  * Build an in-memory parquet file from `rows` and wrap it as a data source,
@@ -53,6 +36,6 @@ export async function parquetSourceFromRows(columns, rows, options = {}) {
     codec: 'SNAPPY',
     rowGroupSize: options.rowGroupSize,
   })
-  const file = asyncBufferFromBytes(new Uint8Array(arrayBuffer))
+  const file = arrayBuffer
   return parquetDataSource(file, await parquetMetadataAsync(file))
 }

@@ -10,7 +10,7 @@ import { collect, executeSql, parseSql } from 'squirreling'
 import { parquetDataSource } from '../../src/core/query/parquet-source.js'
 import { whereToParquetFilter } from '../../src/core/query/parquet-pushdown.js'
 import { rowsToColumnSources } from '../../hypaware-core/plugins-workspace/format-parquet/src/columns.js'
-import { asyncBufferFromBytes, parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
+import { parquetSourceFromRows } from '../helpers/parquet_source_fixture.js'
 
 /**
  * @import { ExprNode, SelectStatement } from 'squirreling/src/types.js'
@@ -91,7 +91,7 @@ const TIMESTAMP_ROWS = [
 async function makeTimestampSource() {
   const columnData = rowsToColumnSources(TIMESTAMP_COLUMNS, TIMESTAMP_ROWS)
   const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY', rowGroupSize: 2 })
-  const file = asyncBufferFromBytes(new Uint8Array(arrayBuffer))
+  const file = arrayBuffer
   const metadata = await parquetMetadataAsync(file)
   return parquetDataSource(file, metadata)
 }
@@ -415,24 +415,22 @@ test('predicates that are not always-UNKNOWN keep their ordinary handling (issue
 test('a NULL member in an IN list does not cost row-group pruning (issue #734)', async () => {
   const columnData = rowsToColumnSources(NULLABLE_COLUMNS, NULLABLE_ROWS)
   const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY', rowGroupSize: 2 })
-  const bytes = new Uint8Array(arrayBuffer)
 
   /**
    * @param {string} predicate
    * @returns {Promise<{ read: number, ids: number[] }>}
    */
   async function scanReading(predicate) {
-    const counting = asyncBufferFromBytes(bytes)
     let read = 0
     const file = {
-      byteLength: counting.byteLength,
+      byteLength: arrayBuffer.byteLength,
       /**
        * @param {number} start
        * @param {number} [end]
        */
       slice(start, end) {
-        read += (end ?? bytes.byteLength) - start
-        return counting.slice(start, end)
+        read += (end ?? arrayBuffer.byteLength) - start
+        return arrayBuffer.slice(start, end)
       },
     }
     const source = parquetDataSource(file, await parquetMetadataAsync(file))
@@ -521,7 +519,6 @@ test('WHERE on a non-projected column still filters correctly', async () => {
 test('a pushed-down filter does not widen the projection', async () => {
   const columnData = rowsToColumnSources(COLUMNS, ROWS)
   const arrayBuffer = parquetWriteBuffer({ columnData, codec: 'SNAPPY', rowGroupSize: 2 })
-  const bytes = new Uint8Array(arrayBuffer)
 
   /**
    * Scan `columns` under a filter on `score`, reporting the bytes pulled from
@@ -533,16 +530,15 @@ test('a pushed-down filter does not widen the projection', async () => {
    */
   async function scanWithFilter(columns) {
     let read = 0
-    const counting = asyncBufferFromBytes(bytes)
     const file = {
-      byteLength: counting.byteLength,
+      byteLength: arrayBuffer.byteLength,
       /**
        * @param {number} start
        * @param {number} [end]
        */
       slice(start, end) {
-        read += (end ?? bytes.byteLength) - start
-        return counting.slice(start, end)
+        read += (end ?? arrayBuffer.byteLength) - start
+        return arrayBuffer.slice(start, end)
       },
     }
     const source = parquetDataSource(file, await parquetMetadataAsync(file))

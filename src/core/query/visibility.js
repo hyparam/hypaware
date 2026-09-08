@@ -1,12 +1,13 @@
 // @ts-check
 
 import path from 'node:path'
+import { readBatchColumn, selectBatch, selectedRowCount, valueAt } from 'squirreling'
 
 import { CLASS_RANK, createUsagePolicyResolver } from '../usage-policy/matcher.js'
 import { localOnlyListPath } from '../usage-policy/local_only.js'
 
 /**
- * @import { AsyncRow } from 'squirreling'
+ * @import { AsyncRow, PrepareScan, RelationSchema } from 'squirreling'
  * @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { UsageClass, UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
@@ -135,6 +136,9 @@ export function cwdWithheldFromCaller(resolver, callerRank, cwd) {
  * - `cwd` is forced into every projected scan and stripped back off the
  *   yielded row, so a `columns` projection that omits it cannot blind the
  *   filter.
+ * - schema-aligned sources with cwd and no content declaration also expose
+ *   a prepared scan that filters batch selections before yielding. It keeps
+ *   lazy output vectors, but never forwards exact counts or range hints.
  *
  * @ref LLP 0105 [implements]: the one shared filter at the query read path; caller class >= row class on the lattice, never per-command
  * @ref LLP 0105#graph-provenance [implements]: rows lacking per-row cwd provenance get their declared content-bearing columns suppressed, never surfaced
@@ -199,7 +203,92 @@ export function withLocalOnlyVisibility(source, opts) {
       }
     },
   }
+  // @ref LLP 0388#batch-filter [implements]: only withholding-only, schema-aligned sources gain the native path; content suppression retains its row semantics
+  const schema = source.schema
+  if (schema && source.prepareScan && hasCwd && declaredContent.length === 0 &&
+    schema.fields.length === source.columns.length &&
+    schema.fields.every((field, index) => field.name === source.columns[index])) {
+    guarded.schema = schema
+    guarded.prepareScan = prepareVisibleScan(source.prepareScan.bind(source), schema, opts)
+  }
   return guarded
+}
+
+/**
+ * Read provenance before exposing a batch, preserving the source's base row
+ * domain and lazy output reads. Range hints and exact counts cannot cross
+ * withholding: the engine applies them to the visible stream instead.
+ *
+ * @param {PrepareScan} prepareScan
+ * @param {RelationSchema} schema
+ * @param {{ resolver: UsagePolicyResolver, callerRank: number, report: LocalOnlyVisibilityReport }} opts
+ * @returns {PrepareScan}
+ */
+function prepareVisibleScan(prepareScan, schema, { resolver, callerRank, report }) {
+  const cwdField = /** @type {NonNullable<ReturnType<typeof schema.fields.find>>} */ (schema.fields.find((field) => field.name === 'cwd'))
+  return (request) => {
+    const columns = request.columns.map((demand) => demand.field === cwdField.id
+      ? { ...demand, mode: /** @type {const} */ ('required'), phase: 0 }
+      : demand)
+    if (!columns.some((demand) => demand.field === cwdField.id)) {
+      columns.push({ field: cwdField.id, phase: 0, purpose: 'filter', mode: 'required' })
+    }
+    const inner = prepareScan({ ...request, columns, limit: undefined, offset: undefined })
+    const requestedFields = request.columns.map((demand) => {
+      const field = schema.fields.find((field) => field.id === demand.field)
+      if (!field) throw new Error(`Visibility scan requested unknown field id ${demand.field}`)
+      return field
+    })
+    const indexOf = (/** @type {string} */ name) => {
+      const index = inner.schema.fields.findIndex((field) => field.name === name)
+      if (index < 0) throw new Error(`Visibility scan missing field ${name}`)
+      return index
+    }
+    const cwdIndex = indexOf('cwd')
+    const outputIndices = requestedFields.map((field) => indexOf(field.name))
+    return {
+      schema: { fields: requestedFields },
+      residual: { filter: inner.residual.filter, limit: request.limit, offset: request.offset },
+      properties: inner.properties.maxRows === undefined ? {} : { maxRows: inner.properties.maxRows },
+      async *batches({ signal } = {}) {
+        for await (const batch of inner.batches({ signal })) {
+          signal?.throwIfAborted()
+          const cwd = await readBatchColumn({ batch, columnIndex: cwdIndex, signal })
+          const count = selectedRowCount(batch.selection)
+          /** @type {Uint32Array | undefined} */
+          let indices
+          let kept = 0
+          for (let i = 0; i < count; i++) {
+            if (i % 4096 === 0) signal?.throwIfAborted()
+            if (cwdWithheldFromCaller(resolver, callerRank, valueAt(cwd, i))) {
+              report.withheldRows++
+              if (!indices) {
+                indices = new Uint32Array(count)
+                for (let j = 0; j < kept; j++) indices[j] = j
+              }
+            } else {
+              if (indices) indices[kept] = i
+              kept++
+            }
+          }
+          if (kept === 0) continue
+          const visible = indices
+            ? selectBatch(batch, { type: 'indices', indices: indices.subarray(0, kept), length: count })
+            : batch
+          yield {
+            selection: visible.selection,
+            columns: outputIndices.map((columnIndex) => {
+              const column = batch.columns[columnIndex]
+              if (!('read' in column)) return column
+              // Keep the original batch and its read cache: deferred readers
+              // may address sibling columns or physical row ordinals.
+              return { read: ({ selection, signal }) => readBatchColumn({ batch, columnIndex, selection, signal }) }
+            }),
+          }
+        }
+      },
+    }
+  }
 }
 
 /**

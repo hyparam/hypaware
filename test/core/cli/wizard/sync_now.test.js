@@ -85,7 +85,10 @@ function opts(over = {}) {
  * with nobody listening has to throw here the way it throws on the real pipe,
  * or a test cannot tell the difference.
  *
- * @param {{ code?: number | null, error?: Error, stderr?: string | string[], stderrError?: Error }} [behaviour]
+ * `holdOpen` is the pipe that outlives its writer: the child exits, and fd 2
+ * stays open behind it the way a surviving descendant would hold it.
+ *
+ * @param {{ code?: number | null, error?: Error, stderr?: string | string[], stderrError?: Error, holdOpen?: boolean }} [behaviour]
  */
 function fakeSpawn(behaviour = {}) {
   /** @type {{ command: string, args: string[], options: any }[]} */
@@ -101,12 +104,18 @@ function fakeSpawn(behaviour = {}) {
         handlers.error?.(behaviour.error)
         return
       }
+      const code = behaviour.code ?? 0
+      // Ordered as the real child orders it: 'exit' first, then whatever the
+      // pipe still has to hand over, then 'close'. The notice arrives on the
+      // far side of the exit, so a settle that did not wait would lose it.
+      handlers.exit?.(code)
       const chunks = behaviour.stderr === undefined
         ? []
         : (Array.isArray(behaviour.stderr) ? behaviour.stderr : [behaviour.stderr])
       for (const chunk of chunks) stderr.emit('data', chunk)
       if (behaviour.stderrError) stderr.emit('error', behaviour.stderrError)
-      handlers.close?.(behaviour.code ?? 0)
+      if (behaviour.holdOpen) return
+      handlers.close?.(code)
     })
     return { stderr, on: (/** @type {string} */ event, /** @type {any} */ fn) => { handlers[event] = fn } }
   }
@@ -519,3 +528,39 @@ for (const scenario of [
     else assert.match(o.stdout.text(), /Nothing was sent/)
   })
 }
+
+// The pipe outlives the process that wrote to it: `close` fires only once the
+// piped stderr has closed, and any descendant that inherited the child's fd 2
+// holds it open for as long as it lives, so waiting on `close` alone leaves
+// setup's last step waiting on a stranger. Without the bound this test does
+// not fail, it hangs, so it carries its own deadline.
+// @ref LLP 0203#read-back [tests]: the exit code is still judged when the pipe never closes
+test('a child whose stderr never closes still resolves, and still reports its exit code', { timeout: 5000 }, async () => {
+  const { spawnFn } = fakeSpawn({ code: 1, holdOpen: true })
+  const o = opts({ spawnFn })
+  const result = await runWizardSyncNow(o.args)
+
+  // Judged exactly as it would be had the pipe closed on time: a non-zero
+  // exit is a child that never reached its plan.
+  assert.deepEqual(result, { asked: true, released: false, reason: 'child-failed' })
+  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
+})
+
+// The seam the two fixes share: a run bounded by the settle timer never sees
+// `close`, so the resync #1452 hangs on that event would not run and the wrap
+// would stay mid-confirm for the rest of setup. Both settles have to clear it.
+// @ref LLP 0203#child-process [tests]: the line is resynced on the bounded settle too, not only on close
+test('a mid-confirm child whose pipe never closes still leaves the wrap able to classify', { timeout: 5000 }, async () => {
+  const { spawnFn } = fakeSpawn({ code: 0, stderr: ['Send now to the central server? [Y/n] '], holdOpen: true })
+  const sink = Object.assign(makeBuf(), { isTTY: true })
+  const o = opts({ spawnFn })
+  const stderr = colorizeStderr(sink, {})
+  o.args.stderr = stderr
+  await runWizardSyncNow(o.args)
+  stderr.write('hyp init: something else broke later\n')
+
+  assert.equal(
+    sink.text(),
+    `Send now to the central server? [Y/n] ${ANSI.red}hyp init:${ANSI.reset} something else broke later\n`
+  )
+})

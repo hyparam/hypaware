@@ -1256,7 +1256,7 @@ test('a partition already due for compaction skips the resettle-candidate row sc
   // change `shouldCompact`, so it must not run at all. `hasResettleCandidate`
   // is module-private and its `scanRowsFromTable` is an unpatchable ESM named
   // import, so there is no direct call-count hook to assert against; instead
-  // this mocks `readFileSync` and captures a stack trace per `.parquet` read,
+  // this mocks `fs.stat` and captures a stack per Parquet reader construction,
   // then asserts none of those stacks pass through `hasResettleCandidate`.
   // That frame name survives the async boundary between the scan and the
   // read, so it attributes each read to its caller instead of only counting
@@ -1296,9 +1296,9 @@ test('a partition already due for compaction skips the resettle-candidate row sc
 
     /** @type {string[]} */
     const stacks = []
-    const original = fsSync.readFileSync
+    const original = fs.stat
     Error.stackTraceLimit = 50
-    t.mock.method(fsSync, 'readFileSync', function (p, ...rest) {
+    t.mock.method(fs, 'stat', function (p, ...rest) {
       if (String(p).endsWith('.parquet')) stacks.push(new Error().stack ?? '')
       return original.call(this, p, ...rest)
     })

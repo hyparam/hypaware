@@ -6,6 +6,7 @@
 **Author:** Kenny / Codex
 **Date:** 2026-08-18
 **Related:** LLP 0015, LLP 0055, LLP 0097, LLP 0098, LLP 0105, LLP 0241, LLP 0261
+**Extended-by:** LLP 0388 (native visibility filtering for withholding-only sources)
 
 > Squirreling 0.16.1 and Icebird 0.8.25 add schema-addressed native batch
 > scans. Hypaware forwards that path through semantically transparent source
