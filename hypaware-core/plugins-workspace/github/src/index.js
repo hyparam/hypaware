@@ -46,7 +46,7 @@ export async function activate(ctx) {
   const config = validated.config
 
   const graph = /** @type {ContextGraphCapabilityLike} */ (
-    ctx.requireCapability('hypaware.context-graph', '^1.0.0')
+    ctx.requireCapability('hypaware.context-graph', '^1.1.0')
   )
 
   ctx.query.registerDataset(githubEventsDatasetRegistration())
@@ -58,6 +58,7 @@ export async function activate(ctx) {
     stateDir: ctx.paths.stateDir,
     storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
     env: ctx.env,
+    graph,
     observedRepos: createLocalObservedReposIndex({
       storage: ctx.storage,
       stateDir: ctx.paths.stateDir,

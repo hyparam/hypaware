@@ -23,6 +23,8 @@ never has its second snapshot captured)
 **Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
 (#capture-regimes and #cursoring together entail that a repeat backfill
 re-appends; 0374 records that as the design and refuses a committed-row dedup)
+**Extended-by:** [LLP 0392](./0392-github-capture-projects-automatically.spec.md)
+(GitHub capture projects its dataset automatically after each changed tick)
 
 > `@hypaware/github` ships under `hypaware-core/plugins-workspace/github`.
 > Bundling does not activate it by default: adding it to `plugins[]` remains the

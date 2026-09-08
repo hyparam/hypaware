@@ -26,8 +26,9 @@ test('activate provides the context-graph capability and registers node/edge dat
   // The capability source plugins/connectors contribute contracts through.
   assert.equal(caps.length, 1)
   assert.equal(caps[0].name, 'hypaware.context-graph')
-  assert.equal(caps[0].version, '1.0.0')
+  assert.equal(caps[0].version, '1.1.0')
   assert.equal(typeof caps[0].value.registerContract, 'function')
+  await assert.rejects(caps[0].value.project('missing'), /no contract registered/)
   assert.equal(typeof caps[0].value.kit.makeRowBuilders, 'function')
   assert.equal(typeof caps[0].value.kit.nodeId, 'function')
   assert.equal(typeof caps[0].value.kit.edgeId, 'function')
@@ -53,6 +54,7 @@ test('activate provides the context-graph capability and registers node/edge dat
   )
   for (const group of groups) {
     assert.match(group.help, /hyp graph project/)
+    assert.match(group.help, /GitHub capture projects its data automatically/)
     assert.match(group.help, /hyp query graph neighbors/)
   }
 

@@ -136,6 +136,7 @@ export interface GraphKit {
 /** The `hypaware.context-graph` capability value, as this plugin consumes it. */
 export interface ContextGraphCapabilityLike {
   registerContract(contract: unknown): void
+  project(sourceDataset: string): Promise<{ nodes: number; edges: number; nodesWritten: number; edgesWritten: number }>
   kit: GraphKit
 }
 
@@ -195,6 +196,9 @@ export interface GithubRuntime {
   storage: ExtendedQueryStorageService
   env: NodeJS.ProcessEnv
   observedRepos: ObservedReposIndex
+  graph: ContextGraphCapabilityLike
+  /** Undefined on activation: catch up existing rows once, then skip idle ticks. */
+  projectionNeeded?: boolean
   /** Test seam; production defaults to the real fetch client. */
   clientFactory?: () => GithubClient
   /** Test seam; production uses the fixed whole-tick request limit. */

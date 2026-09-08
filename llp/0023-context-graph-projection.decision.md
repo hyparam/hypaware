@@ -7,6 +7,8 @@
 **Date:** 2026-06-12
 **Revised:** 2026-06-15
 **Related:** LLP 0005, LLP 0006, LLP 0013, LLP 0015, LLP 0016, LLP 0021
+**Extended-by:** [LLP 0392](./0392-github-capture-projects-automatically.spec.md)
+(source-scoped projection capability and automatic GitHub projection)
 
 > `@hypaware/context-graph` materializes a node/edge **activity graph** from any
 > source that contributes a projection contract. The first is `ai_gateway_messages`
@@ -140,6 +142,11 @@ from, and **eventual freshness is acceptable** for an activity graph: the
 graph answers "what happened", not "what is happening". Registering the
 command (not a source or sink) keeps the plugin out of the daemon loop
 entirely; nothing here can block or OOM the daemon.
+
+**Extended-by:** [LLP 0392 #capability](./0392-github-capture-projects-automatically.spec.md#capability).
+The graph plugin still registers no source or timer, but a source may now
+request its own dataset projection through the capability, so GitHub capture
+runs one inside the daemon tick that captured the rows.
 
 ## Merge policy
 

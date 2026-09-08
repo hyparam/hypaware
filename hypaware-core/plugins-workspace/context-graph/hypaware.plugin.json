@@ -10,7 +10,7 @@
   "permissions": ["read_state", "write_state"],
   "compose_with": ["@hypaware/ai-gateway"],
   "provides": {
-    "capabilities": { "hypaware.context-graph": "1.0.0" }
+    "capabilities": { "hypaware.context-graph": "1.1.0" }
   },
   "contributes": {
     "datasets": [{ "name": "node" }, { "name": "edge" }],

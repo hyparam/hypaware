@@ -2,14 +2,21 @@
 
 import { captureRepos } from './capture.js'
 import { readCursors, writeCursors } from './cursors.js'
-import { GITHUB_EVENTS_COLUMNS, githubEventsTablePath } from './dataset.js'
+import { DATASET_NAME, GITHUB_EVENTS_COLUMNS, githubEventsTablePath } from './dataset.js'
 import { getClient } from './runtime.js'
+
+/**
+ * The `repo` slot a projection failure occupies in a tick's error list. Not a
+ * repository, so a caller reading that list for a capture verdict can tell the
+ * two apart.
+ */
+export const GRAPH_ERROR_REPO = '(graph)'
 
 /**
  * Run one capture tick: read the per-repo cursors, capture every selected repo
  * (appending `github_events` rows through the kernel cache), then persist the
- * advanced cursors. Shared by the daemon poll source and the `sync`/`backfill`
- * commands - the only difference is `mode` (and the optional `only` filter).
+ * advanced cursors, then project GitHub rows. Shared by the daemon poll source
+ * and the `sync`/`backfill` commands; only `mode` and the optional `only` differ.
  *
  * Cursors are persisted even when a repo errors mid-run, so progress is never
  * lost (the next tick resumes past what was captured).
@@ -21,6 +28,41 @@ import { getClient } from './runtime.js'
  * @returns {Promise<{ repos: number, visited: number, events: number, requests: number, pending: boolean, errors: Array<{ repo: string, error: string }> }>}
  */
 export async function runCaptureTick(runtime, opts) {
+  const result = await captureTick(runtime, opts)
+  // @ref LLP 0392#retry [implements]: first tick catches up durable rows; failed projections remain due even on an idle tick
+  if (runtime.projectionNeeded !== false) {
+    const started = Date.now()
+    runtime.log.info('github.projection_started', { operation: 'graph.project', source_dataset: DATASET_NAME })
+    try {
+      const projected = await runtime.graph.project(DATASET_NAME)
+      runtime.projectionNeeded = false
+      runtime.log.info('github.projection_completed', {
+        operation: 'graph.project',
+        source_dataset: DATASET_NAME,
+        nodes_written: projected.nodesWritten,
+        edges_written: projected.edgesWritten,
+        duration_ms: Date.now() - started,
+      })
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err)
+      runtime.log.error('github.projection_failed', {
+        operation: 'graph.project',
+        source_dataset: DATASET_NAME,
+        error_kind: /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind ?? 'github_projection_failed',
+        error,
+        duration_ms: Date.now() - started,
+      })
+      result.errors.push({ repo: GRAPH_ERROR_REPO, error })
+    }
+  }
+  return result
+}
+
+/**
+ * @param {GithubRuntime} runtime
+ * @param {{ mode: 'backfill' | 'poll', only?: string[], observedRepos?: string[] }} opts
+ */
+async function captureTick(runtime, opts) {
   const cursors = readCursors(runtime.stateDir)
   const client = getClient(runtime)
   /** @type {string[] | undefined} */
@@ -80,6 +122,7 @@ export async function runCaptureTick(runtime, opts) {
   async function append(rows) {
     if (rows.length === 0) return
     await runtime.storage.appendRows(tablePath, columns, rows)
+    runtime.projectionNeeded = true
   }
 
   try {

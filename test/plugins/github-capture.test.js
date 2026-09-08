@@ -10,7 +10,7 @@ import { captureRepos, resolveRepos } from '../../hypaware-core/plugins-workspac
 import { runGithubSync } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
 import { readCursors, writeCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
 import { setGithubRuntime } from '../../hypaware-core/plugins-workspace/github/src/runtime.js'
-import { fakeClient, silentLog } from './github-fake-client.js'
+import { emptyGraph, fakeClient, silentLog } from './github-fake-client.js'
 
 /** @import { CursorState, GithubClient, GithubConfig } from '../../hypaware-core/plugins-workspace/github/src/types.d.ts' */
 
@@ -418,6 +418,7 @@ test('hyp github sync counts the repositories the budget let it visit', async (t
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
   setGithubRuntime(/** @type {any} */ ({
     stateDir,
+    graph: emptyGraph,
     config: cfg(),
     captureRequestLimit: 1,
     observedRepos: { async list() { return ['o/a', 'o/b', 'o/c'] } },
