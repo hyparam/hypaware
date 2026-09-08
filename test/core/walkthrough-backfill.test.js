@@ -126,7 +126,10 @@ test('--dry-run onboarding includes the backfill plan but writes nothing', async
   assert.equal(backfill.calls[0].dryRun, true)
   assert.equal(result.finale?.backfill[0].dryRun, true)
   assert.equal(result.finale?.backfill[0].rowsWritten, 0)
-  assert.match(stdout.text(), /\(dry-run\) backfill claude:/)
+  // A dry run's zero write is the contract, not a finding about the
+  // history on disk, so the line reports the scan and claims no outcome.
+  assert.match(stdout.text(), /\(dry-run\) backfill claude: scanned 2\n/)
+  assert.doesNotMatch(stdout.text(), /nothing new to import/)
 })
 
 test('--yes mode runs bounded backfill automatically without a consent prompt', async () => {
@@ -228,7 +231,7 @@ test('interactive onboarding lets the user decline backfill', async () => {
   assert.equal(result.exitCode, 0)
   assert.equal(backfill.calls.length, 0, 'declining must skip the backfill run')
   assert.deepEqual(result.finale?.backfill, [])
-  assert.match(stdout.text(), /backfill: skipped \(declined\)/)
+  assert.match(stdout.text(), /backfill claude: skipped \(declined\)/)
   // The other half of the dead-surface notice below: a decline was read
   // and answered on a surface that still works, so it says so where the
   // user is looking and leaves the surviving stream alone. Keying that
@@ -518,7 +521,10 @@ test('a sweep-backed provider runs, unannounced, even when consent is declined',
   assert.deepEqual(consentCalls[0].providers, ['claude'])
   // Declining skipped claude but not the sweep-backed openclaw.
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
-  assert.match(stdout.text(), /backfill: skipped \(declined\)/)
+  // The decline names claude: openclaw's own result line lands directly
+  // below it, so an unqualified "backfill: skipped" is contradicted by
+  // the next line on screen.
+  assert.match(stdout.text(), /backfill claude: skipped \(declined\)/)
   // The sweep announce line is gone (the spinner announces the run); the
   // result line is the evidence the sweep-backed import still happened.
   // Matched in full, because the spinner's own label starts `backfill
@@ -625,7 +631,7 @@ test('a dead consent surface declines the backfill instead of taking its default
 })
 
 // The skip above is silent on the surface that can still be read. The
-// `backfill: skipped (declined)` line it would otherwise print goes to
+// `backfill <asked>: skipped (declined)` line it would otherwise print goes to
 // stdout, which is exactly the stream that just died, so someone whose
 // terminal went away mid-finale gets no signal at all that their local
 // history was not imported. The post-commit cancel already narrates its
@@ -670,8 +676,9 @@ test('a dead consent surface says on stderr which backfill was skipped', async (
   assert.doesNotMatch(stderr.text(), /openclaw/, 'the sweep-backed import below is not something to re-run for')
   assert.deepEqual(backfill.calls.map((c) => c.provider), ['openclaw'])
   // The decline line stays off stdout: nothing can read it, and "declined"
-  // is not what happened.
-  assert.doesNotMatch(stdout.text(), /backfill: skipped \(declined\)/)
+  // is not what happened. Matched on the phrase alone so the assertion
+  // cannot pass merely because the line now names its provider.
+  assert.doesNotMatch(stdout.text(), /skipped \(declined\)/)
 })
 
 // Whatever took stdout can have taken stderr with it (a closed terminal
@@ -812,6 +819,21 @@ test('the result line keeps the counts that carry news and drops the rest', () =
   assert.equal(
     describeBackfillResult({ ok: true, scanned: 12, rowsWritten: 0, skipped: 0 }),
     'nothing new to import (scanned 12)'
+  )
+  // The re-run: every item is already committed, so each one is skipped
+  // and nothing is written. Still "nothing new", not "imported 0 rows".
+  assert.equal(
+    describeBackfillResult({ ok: true, scanned: 12, rowsWritten: 0, skipped: 12 }),
+    'nothing new to import (scanned 12)'
+  )
+  // A dry run never writes, so it reports what it found and nothing else.
+  assert.equal(
+    describeBackfillResult({ ok: true, dryRun: true, scanned: 12, rowsWritten: 0, skipped: 0 }),
+    'scanned 12'
+  )
+  assert.equal(
+    describeBackfillResult({ ok: true, dryRun: true, scanned: 0, rowsWritten: 0, skipped: 0 }),
+    'nothing to import'
   )
   assert.equal(
     describeBackfillResult({ ok: true, scanned: 3, rowsWritten: 5, skipped: 1 }),

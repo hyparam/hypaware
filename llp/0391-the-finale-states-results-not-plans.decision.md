@@ -5,7 +5,7 @@
 **Systems:** Onboarding, CLI
 **Author:** Kenny / Claude
 **Date:** 2026-09-08
-**Related:** LLP 0180 (extended here: the finale's sweep disclosure), LLP 0174 (the manual path's disclosure, unchanged), LLP 0170 (the sweep itself), LLP 0021 (observability)
+**Related:** LLP 0180 (extended here: the finale's sweep disclosure), LLP 0174 (the manual path's disclosure, unchanged), LLP 0170 (the sweep itself), LLP 0341 (the dead-surface and decline notices this line sits beside), LLP 0021 (observability)
 **Tracker:** hyparam/hypaware#1479
 
 > Every setup run printed a scan report per backfill provider, and a
@@ -47,8 +47,8 @@ all.
   recurs on a schedule. The manual `hyp client attach` path keeps its own
   enable-prompt disclosure unchanged ([LLP 0174 §openclaw](./0174-attach-prompts-to-enable.design.md#openclaw)).
 - **The result line keeps only counts that carry news.** A failure prints
-  all three counts. A run that wrote or skipped rows prints what it wrote
-  and what it scanned and skipped. A clean zero over an empty scan prints
+  all three counts. A run that wrote rows prints what it wrote and what it
+  scanned and skipped. A clean zero over an empty scan prints
   `nothing to import`.
 - **A zero write over a nonzero scan is news.** It prints
   `nothing new to import (scanned N)`. "No history on disk" and "history
@@ -56,7 +56,21 @@ all.
   (a wrong path or an unreadable home, against a projection or dedupe that
   swallowed every row), and this line is the only place a user sees either.
   Collapsing them into one silent phrase would be a diagnostic loss, which
-  is the constraint the quieting has to respect.
+  is the constraint the quieting has to respect. A nonzero `skipped` does
+  not move a run off this arm: a skip is an item that yielded no rows, so
+  the re-run whose every item is already committed skips all of them, and
+  that is the second most common run there is. An item that genuinely
+  failed fails its whole provider, which the failure arm already covers.
+- **A dry run reports its scan, not an outcome.** It writes nothing by
+  construction, so `nothing new to import` would be a false statement
+  about the history on disk. It prints `scanned N` under the existing
+  `(dry-run)` tag, and an empty scan still prints `nothing to import`.
+- **The decline line names what it declined.** With the sweep announce
+  line gone, `backfill: skipped (declined)` would sit directly above a
+  sweep-backed provider's own result line, so it says
+  `backfill <asked>: skipped (declined)` instead. This is the reasoning
+  LLP 0341's dead-surface notice already applies one branch above, and the
+  wording the manual `hyp client attach` path already uses.
 - **One helper, both surfaces.** `describeBackfillResult` renders the line
   for the finale and for `hyp client attach`'s post-enable import, so the
   two cannot drift.
@@ -78,4 +92,4 @@ all.
 
 ## References
 
-- LLP 0180, LLP 0174, LLP 0170, LLP 0021
+- LLP 0180, LLP 0174, LLP 0170, LLP 0341, LLP 0021

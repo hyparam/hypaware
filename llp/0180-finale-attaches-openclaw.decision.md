@@ -119,6 +119,8 @@ question as-is would promise a control the wizard does not have.
 - The consent prompt's provider list can now be empty while backfill
   still runs (an OpenClaw-only pick): no question is asked, the
   disclosure and import still happen.
+  (**Extended-by: [LLP 0391 §decision](./0391-the-finale-states-results-not-plans.decision.md#decision)** - the
+  import still happens; the printed disclosure does not.)
 - The derivation widens `clientsPicked` by two clients against the
   bundled catalog: `openclaw` (the fix) and `claude-desktop` (whose
   skills and agents now install when its row is picked, and whose
