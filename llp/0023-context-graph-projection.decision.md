@@ -143,6 +143,11 @@ graph answers "what happened", not "what is happening". Registering the
 command (not a source or sink) keeps the plugin out of the daemon loop
 entirely; nothing here can block or OOM the daemon.
 
+**Extended-by:** [LLP 0392 #capability](./0392-github-capture-projects-automatically.spec.md#capability).
+The graph plugin still registers no source or timer, but a source may now
+request its own dataset projection through the capability, so GitHub capture
+runs one inside the daemon tick that captured the rows.
+
 ## Merge policy
 
 Duplicate rows for the same id (same entity seen by multiple rules/runs) merge
