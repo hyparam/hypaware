@@ -3,13 +3,17 @@
 import process from 'node:process'
 import os from 'node:os'
 import { installObservability } from '../observability/index.js'
-import { createCaptureReceiver, setGatewayProcessTransport } from '../../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js'
 
 /** @import { DaemonHandle, RunDaemonOptions } from '../../../src/core/daemon/types.js' */
 /** @type {DaemonHandle | undefined} */
 let handle
 let starting = false
 let stopping = false
+
+// Resolved as a URL and dynamically imported (never a static specifier) so the
+// declaration build's `rootDir: src` never has to contain plugin-workspace
+// code, matching the kernel's existing entrypoint-only loader (../runtime/loader.js).
+const PROCESS_TRANSPORT_ENTRY = new URL('../../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js', import.meta.url).href
 
 /** @param {object} message */
 function send(message) {
@@ -29,6 +33,7 @@ process.on('message', async input => {
   if (msg.type !== 'processing.start' || starting || stopping) return
   starting = true
   try { os.setPriority(0, os.constants.priority.PRIORITY_BELOW_NORMAL) } catch { /* unavailable on this host */ }
+  const { createCaptureReceiver, setGatewayProcessTransport } = await import(PROCESS_TRANSPORT_ENTRY)
   setGatewayProcessTransport({
     role: 'processing',
     endpoint: msg.endpoint,

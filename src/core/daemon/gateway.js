@@ -13,7 +13,6 @@ import { clearPidFile, processIsAlive, readPidFile, writePidFile } from './pid.j
 import { DAEMON_HEARTBEAT_STALE_MS, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
 import { openDaemonLog } from './logs.js'
-import { createCaptureSender, setGatewayProcessTransport } from '../../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js'
 
 /**
  * @import { ChildProcess } from 'node:child_process'
@@ -23,6 +22,10 @@ import { createCaptureSender, setGatewayProcessTransport } from '../../../hypawa
  */
 
 const PROCESSOR_ENTRY = fileURLToPath(new URL('./processor.js', import.meta.url))
+// Resolved as a URL and dynamically imported (never a static specifier) so the
+// declaration build's `rootDir: src` never has to contain plugin-workspace
+// code, matching the kernel's existing entrypoint-only loader (../runtime/loader.js).
+const PROCESS_TRANSPORT_ENTRY = new URL('../../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js', import.meta.url).href
 const RESTART_DELAY_MS = 1000
 // Leave time for the CLI's five-second stop wait to observe the exit.
 const STOP_DEADLINE_MS = 4_000
@@ -70,6 +73,7 @@ export async function runGatewayDaemon(opts = {}) {
   const done = new Promise(resolve => { resolveDone = resolve })
   /** @type {DaemonStatus} */
   const status = { state: 'starting', pid: process.pid, startedAt, healthyAt: startedAt, uptimeMs: 0, runId, mode: 'foreground', sources: [], sinks: [] }
+  const { createCaptureSender, setGatewayProcessTransport } = await import(PROCESS_TRANSPORT_ENTRY)
   const sender = createCaptureSender({ getChild: () => child, log })
   setGatewayProcessTransport({ role: 'gateway', ...sender })
 
