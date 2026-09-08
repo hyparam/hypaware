@@ -67,6 +67,56 @@ export function isValidRange(range) {
 }
 
 /**
+ * The lowest version `range` admits, as `X.Y.Z`, or undefined when it is a
+ * shape this matcher cannot read or one that is unbounded below (`*`,
+ * `<2.0.0`, a `||` set with any such branch). Read off the comparators
+ * `matchesSemverRange` matches against, so a caller asking whether a
+ * declaration can only resolve at or above some version reads the same grammar
+ * the satisfaction answer was given over.
+ *
+ * Pre-release versions do not order here, and nothing this reads ships one, so
+ * an exclusive `>1.2.3` bottoms out at 1.2.4.
+ *
+ * @param {unknown} range
+ * @returns {string|undefined}
+ */
+export function lowestVersion(range) {
+  if (typeof range !== 'string') return undefined
+  const trimmed = range.trim()
+  if (isWildcard(trimmed)) return undefined
+  let lowest
+  for (const alternative of trimmed.split('||')) {
+    const comparators = comparatorsOf(alternative)
+    if (comparators === null) return undefined
+    const low = lowerBound(comparators)
+    // A branch with no lower bound admits everything below every other branch,
+    // so it leaves the whole set unbounded.
+    if (!low) return undefined
+    if (!lowest || cmp(low, lowest) < 0) lowest = low
+  }
+  return lowest && `${lowest.major}.${lowest.minor}.${lowest.patch}`
+}
+
+/**
+ * The lowest version one `||` branch admits: the highest of its lower bounds,
+ * since every comparator in a branch has to hold. Undefined when it has none.
+ *
+ * @param {{ op: string, v: { major: number, minor: number, patch: number } }[]} comparators
+ * @returns {{ major: number, minor: number, patch: number }|undefined}
+ */
+function lowerBound(comparators) {
+  let low
+  for (const c of comparators) {
+    let v
+    if (c.op === '>=' || c.op === '=') v = c.v
+    else if (c.op === '>') v = { major: c.v.major, minor: c.v.minor, patch: c.v.patch + 1 }
+    else continue
+    if (!low || cmp(v, low) > 0) low = v
+  }
+  return low
+}
+
+/**
  * @param {string} range
  * @returns {boolean}
  */
