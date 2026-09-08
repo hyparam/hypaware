@@ -1,5 +1,7 @@
 // @ts-check
 
+import http from 'node:http'
+
 import {
   Attr,
   getKernelInstruments,
@@ -24,6 +26,7 @@ import { createEntrypointActivity } from './entrypoint_activity.js'
 import { createAiGatewayMessageProjector, rollbackAiGatewayStateJournal } from './message_projector.js'
 import { createChainedAgent, startProxy } from './proxy.js'
 import { createRecorder } from './recorder.js'
+import { getGatewayProcessTransport } from './process_transport.js'
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'
 
@@ -130,6 +133,7 @@ export function createStartSource(state) {
             // cache read (LLP 0164).
             // @ref LLP 0164#status-reads-it-from-the-status-file [implements]: last-seen entrypoints ride the gateway source's status details
             recent_entrypoints: liveState.entrypoints.snapshot(),
+            ...getGatewayProcessTransport()?.snapshot?.(),
             // Proxy mode is the difference between a listener that only sees
             // what a client points at it and one that terminates TLS, so it is
             // never left to be inferred. The fingerprint and expiry are what a
@@ -272,7 +276,9 @@ async function launchListener(ctx, state, liveState) {
       reason: 'an upstream needs both a name and a base_url to compile to a route',
     })
   }
-  const recorder = createRecorder({ redactHeaders: config.redactHeaders })
+  const transport = getGatewayProcessTransport()
+  transport?.configure?.(config.redactHeaders)
+  const recorder = transport?.recorder ?? createRecorder({ redactHeaders: config.redactHeaders })
   const projector = createAiGatewayMessageProjector({
     gatewayId: config.gatewayId,
     projectors: state.projectors,
@@ -296,8 +302,12 @@ async function launchListener(ctx, state, liveState) {
 
   const tablePath = aiGatewayTablePath(ctx.storage)
 
-  /** @param {Exchange} exchange */
-  async function onExchangeFinished(exchange) {
+  /** @param {Exchange} exchange @param {Set<string>} [ignoredSessions] */
+  async function onExchangeFinished(exchange, ignoredSessions = state.ignoredSessions) {
+    if (transport?.role === 'gateway') {
+      transport.finish?.(exchange, ignoredSessions)
+      return
+    }
     /** @type {FinishedRow} */
     const row = exchange.finalize()
     const totalBytes = (row.request_bytes ?? 0) + (row.response_bytes ?? 0)
@@ -328,7 +338,7 @@ async function launchListener(ctx, state, liveState) {
     // told about.
     let appended = false
     try {
-      const messageRows = await projector.projectExchange(row, { journal })
+      const messageRows = await projector.projectExchange(row, { journal, isSessionIgnored: id => ignoredSessions.has(id) })
       if (messageRows.length > 0) {
         await ctx.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], messageRows)
         appended = true
@@ -368,6 +378,17 @@ async function launchListener(ctx, state, liveState) {
         error: message,
       })
     }
+  }
+
+  // The processing source exposes the gateway's proven endpoint to attach,
+  // but owns no provider-facing socket. Its stop/reload cannot close a stream.
+  // @ref LLP 0038#implemented-boundary [implements]: reconstruction and projection run only in the processing heap
+  if (transport?.role === 'processing') {
+    const endpoint = transport.endpoint
+    if (!endpoint || !transport.receive) throw new Error('gateway process endpoint unavailable')
+    state.listen = endpoint
+    const close = transport.receive(onExchangeFinished)
+    return { ...endpoint, server: http.createServer(), stopped: Promise.resolve(), stop: close }
   }
 
   // Proxy mode: mint the machine-local CA for exactly the hosts the routing

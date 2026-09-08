@@ -184,6 +184,7 @@ export async function bootKernel(opts = {}) {
       const runtime = createKernelRuntime({
         commandRegistry,
         cacheRoot,
+        ...(opts.storage ? { storage: opts.storage } : {}),
         ...(opts.configControl ? { configControl: opts.configControl } : {}),
         sourceWithholdResolver: buildSourceWithholdResolver({ catalog, layered: merged, stateDir: stateRoot }),
       })
@@ -650,6 +651,32 @@ function computeSelectedPlugins({ bootProfile, config, discovered, installedName
     if (entry.enabled === false) continue
     const name = /** @type {PluginName} */ (entry.name)
     if (available.has(name)) out.add(name)
+  }
+  if (bootProfile === 'gateway') {
+    // Adapter routing registrations stay in the forwarding process. No source
+    // other than ai-gateway is started there, and its storage rejects access.
+    // @ref LLP 0038#implemented-boundary [implements]: activate gateway contributors without background sources or sinks
+    const selected = new Set(discovered.filter(({ manifest }) => out.has(manifest.name) && (
+      manifest.name === '@hypaware/ai-gateway' ||
+      manifest.requires?.capabilities?.['hypaware.ai-gateway'] !== undefined
+    )).map(({ manifest }) => manifest.name))
+    // Include configured dependencies of routing contributors. The ordinary
+    // dependency resolver still diagnoses a missing/unconfigured dependency.
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const { manifest } of discovered) {
+        if (!selected.has(manifest.name)) continue
+        for (const { manifest: candidate } of discovered) {
+          if (!out.has(candidate.name) || selected.has(candidate.name)) continue
+          if (manifest.requires?.plugins?.[candidate.name] !== undefined || Object.keys(manifest.requires?.capabilities ?? {}).some(cap => candidate.provides?.capabilities?.[cap] !== undefined)) {
+            selected.add(candidate.name)
+            changed = true
+          }
+        }
+      }
+    }
+    return selected
   }
   return out
 }

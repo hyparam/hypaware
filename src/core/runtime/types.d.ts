@@ -43,7 +43,7 @@ import type {
  *   allowlist. Reserved for the daemon and future installer paths
  *   that resolve plugin names from a different source.
  */
-export type BootProfile = 'config' | 'all-bundled' | 'all-available' | { activate: PluginName[] }
+export type BootProfile = 'config' | 'gateway' | 'all-bundled' | 'all-available' | { activate: PluginName[] }
 
 export interface BootKernelOptions {
   /** Override HYP_HOME (defaults from env). */
@@ -60,6 +60,8 @@ export interface BootKernelOptions {
   workspaceDir?: string
   /** Cache root for the kernel storage service. */
   cacheRoot?: string
+  /** Internal runtime override, used to deny cache access in the forwarding process. */
+  storage?: ExtendedQueryStorageService
   /** Pre-built command registry to inject into the kernel. */
   commandRegistry?: ReturnType<typeof createCommandRegistry>
   /** Override env (tests). */

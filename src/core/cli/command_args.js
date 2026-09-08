@@ -77,8 +77,8 @@ export const CORE_COMMAND_ARGS = {
     schema: { type: 'object', properties: {} },
   },
   'daemon restart': {
-    usage: 'hyp daemon restart',
-    schema: { type: 'object', properties: {} },
+    usage: 'hyp daemon restart [--processing]',
+    schema: { type: 'object', properties: { processing: { type: 'boolean', default: false } } },
   },
   'daemon uninstall': {
     usage: 'hyp daemon uninstall',

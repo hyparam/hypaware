@@ -189,6 +189,7 @@ installing or restarting the daemon.
 | `<HYP_HOME>/hypaware/sinks/<name>/outbox/`     | Failed export rows awaiting retry                         |
 | `<HYP_HOME>/hypaware/dev-telemetry/`           | Daemon self-telemetry (logs, traces, metrics)             |
 | `<HYP_HOME>/hypaware/logs/daemon.{out,err}.log`| Daemon stdout / stderr (launchd / systemd)                |
+| `<HYP_HOME>/hypaware/processing/`              | Processing daemon runtime files (its own pid, status and `logs/daemon.log`) |
 | `<HYP_HOME>/exports/`                          | Local Parquet exports (when the local-fs sink is enabled) |
 
 `HYP_HOME` defaults to `~/.hyp`. Override it by exporting `HYP_HOME=...`
@@ -554,7 +555,7 @@ run directly. The common Phase 8 conditions:
 | `daemon_loaded_no_pid`                | the daemon service file is installed but launchd / systemd is not loading it; an `error` rather than a warning when the service manager answered and no daemon process is running either, because nothing is being captured | `hyp daemon install` for the `error` case, which runs the load step that is missing; otherwise `hyp daemon restart` |
 | `daemon_heartbeat_stale`              | the daemon process is alive but its status snapshot has stopped advancing, so its tick is not completing | `hyp daemon restart`                                                     |
 | `daemon_exited_abnormally`            | launchd / systemd still has the service loaded but no daemon process is running, and the last status snapshot never recorded a completed stop | `hyp daemon restart`                                                     |
-| `recent_errors`                       | failures recorded in the last 24h: `error` lines in the daemon log, failed sink export batches in an outbox, and dev-telemetry error records | inspect `~/.hyp/hypaware/logs/daemon.log` and `~/.hyp/hypaware/sinks/*/outbox`, then `hyp daemon restart` |
+| `recent_errors`                       | failures recorded in the last 24h: `error` lines in either daemon log (the gateway keeps one, the processing daemon another), failed sink export batches in an outbox, and dev-telemetry error records | inspect `~/.hyp/hypaware/logs/daemon.log`, `~/.hyp/hypaware/processing/logs/daemon.log` and `~/.hyp/hypaware/sinks/*/outbox`, then `hyp daemon restart` |
 
 Useful follow-on commands when a diagnostic fires:
 

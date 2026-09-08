@@ -145,6 +145,7 @@ export async function runDaemon(opts = {}) {
   const obsEnv = readObservabilityEnv(env)
   const hypHome = opts.hypHome ?? obsEnv.hypHome
   const stateRoot = `${hypHome}/hypaware`
+  const runtimeStateRoot = opts.runtimeStateRoot ?? stateRoot
   const tickIntervalMs = clampTickInterval(opts.tickIntervalMs)
   const installSignals = opts.installSignalHandlers !== false
   const runId = opts.runId ?? obsEnv.devRunId ?? `daemon-${process.pid}-${Date.now()}`
@@ -154,7 +155,7 @@ export async function runDaemon(opts = {}) {
   installObservability()
   const log = getLogger('daemon')
   const instruments = getKernelInstruments()
-  const fileLog = openDaemonLog({ stateRoot, runId, mode })
+  const fileLog = openDaemonLog({ stateRoot: runtimeStateRoot, runId, mode })
 
   /** @type {DaemonStatus} */
   const status = {
@@ -202,7 +203,7 @@ export async function runDaemon(opts = {}) {
   // later, and without the handoff it would mistake that leftover for a
   // live request and stop the freshly booted daemon.
   // @ref LLP 0300#boot-clears-stale [implements]: leftovers are cleared, or recorded so they can never dispatch
-  const staleControlRequests = clearControlRequests(stateRoot)
+  const staleControlRequests = clearControlRequests(runtimeStateRoot)
   for (const [request, info] of Object.entries(staleControlRequests)) {
     fileLog.warn('daemon.control_clear_failed', { request, message: info.message })
   }
@@ -211,13 +212,13 @@ export async function runDaemon(opts = {}) {
   // crash during `bootKernel` still leaves something `daemon stop`
   // can detect (rather than the operator wondering where the daemon
   // went).
-  writePidFile(stateRoot, {
+  writePidFile(runtimeStateRoot, {
     pid: process.pid,
     startedAt: status.startedAt,
     runId,
     mode,
   })
-  writeStatusFile(stateRoot, status)
+  writeStatusFile(runtimeStateRoot, status)
   fileLog.info('daemon.starting', { config_path: opts.configPath ?? null })
 
   // ----- Config apply engine (LLP 0025 / LLP 0031) -----
@@ -269,7 +270,7 @@ export async function runDaemon(opts = {}) {
     instruments.daemonUptimeMs.record(status.uptimeMs, {
       hyp_daemon_state: status.state,
     })
-    writeStatusFile(stateRoot, status)
+    writeStatusFile(runtimeStateRoot, status)
   }
 
   /** @type {BootKernelResult} */
@@ -311,7 +312,7 @@ export async function runDaemon(opts = {}) {
     const message = err instanceof Error ? err.message : String(err)
     fileLog.error('daemon.boot_failed', { message })
     persist({ state: 'degraded', warnings: [`${BOOT_FAILED_WARNING_PREFIX}: ${message}`] })
-    clearPidFile(stateRoot)
+    clearPidFile(runtimeStateRoot)
     await fileLog.close()
     throw err
   }
@@ -1177,7 +1178,7 @@ export async function runDaemon(opts = {}) {
     // regression test) that reads `daemon.log` right after the daemon stops
     // must see every line, not a buffer the process abandoned on exit.
     await fileLog.close()
-    clearPidFile(stateRoot)
+    clearPidFile(runtimeStateRoot)
 
     if (installSignals) {
       removeSignalHandlers()
@@ -1312,7 +1313,7 @@ export async function runDaemon(opts = {}) {
     // boot that hangs has no win32 stop path at all. When the Windows
     // service installer lands, arm the handlers next to writePidFile with
     // the same forward-reference/park pattern triggerShutdown already uses.
-    controlWatcher = watchControlRequests(stateRoot, {
+    controlWatcher = watchControlRequests(runtimeStateRoot, {
       onStop: () => { void shutdown('control') },
       onReload: () => { reloadSafely() },
       log: fileLog,
