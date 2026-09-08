@@ -1,7 +1,7 @@
 // @ts-check
 
 import { requireGithubRuntime } from './runtime.js'
-import { runCaptureTick } from './tick.js'
+import { GRAPH_ERROR_REPO, runCaptureTick } from './tick.js'
 
 /**
  * @import { CommandRunContext } from './types.js'
@@ -51,10 +51,15 @@ export async function runGithubBackfill(argv, ctx) {
     ctx.stdout.write(`github backfill: ${result.events} event(s) across ${result.visited} repo(s)\n`)
     if (result.pending) ctx.stdout.write('github backfill: bounded work remains and will resume on the next GitHub capture tick\n')
     reportErrors(ctx, result.errors)
-    // Zero repos with an error reported is an inventory that never resolved,
-    // not a selection that missed: `reportErrors` already printed the real
-    // cause, so do not contradict it with a claim about the user's config.
-    if (only && result.repos === 0 && result.errors.length === 0) {
+    // Zero repos with a *capture* error reported is an inventory that never
+    // resolved, not a selection that missed: `reportErrors` already printed the
+    // real cause, so do not contradict it with a claim about the user's config.
+    // A failed projection shares that list (LLP 0392#retry) and is never that
+    // cause, so it must not stand in for one: letting it swallow this line
+    // leaves a user who named a repository outside the inventory reading a
+    // graph error instead of the reason their selection captured nothing.
+    const captured = result.errors.filter((e) => e.repo !== GRAPH_ERROR_REPO)
+    if (only && result.repos === 0 && captured.length === 0) {
       ctx.stderr.write(`hyp github backfill: none of [${only.join(', ')}] are in the active repository inventory\n`)
       return 1
     }

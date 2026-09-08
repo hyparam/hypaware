@@ -7,8 +7,6 @@
 **Date:** 2026-09-02
 **Related:** LLP 0005, LLP 0006, LLP 0010, LLP 0012, LLP 0023, LLP 0032,
 LLP 0121, LLP 0213, LLP 0350; hyparam/hypaware-server#413
-**Extended-by:** [LLP 0392](./0392-github-capture-projects-automatically.spec.md)
-(GitHub capture projects its dataset automatically after each changed tick)
 **Supersedes:** The standalone `@hypaware/github` packaging premise recorded in
 LLP 0032 and used as the comparison in LLP 0121
 **Extended-by:** [LLP 0361](./0361-github-capture-is-work-budgeted.decision.md)
@@ -25,6 +23,8 @@ never has its second snapshot captured)
 **Extended-by:** [LLP 0374](./0374-repeat-github-backfill-re-appends.decision.md)
 (#capture-regimes and #cursoring together entail that a repeat backfill
 re-appends; 0374 records that as the design and refuses a committed-row dedup)
+**Extended-by:** [LLP 0392](./0392-github-capture-projects-automatically.spec.md)
+(GitHub capture projects its dataset automatically after each changed tick)
 
 > `@hypaware/github` ships under `hypaware-core/plugins-workspace/github`.
 > Bundling does not activate it by default: adding it to `plugins[]` remains the

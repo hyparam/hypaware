@@ -6,6 +6,13 @@ import { DATASET_NAME, GITHUB_EVENTS_COLUMNS, githubEventsTablePath } from './da
 import { getClient } from './runtime.js'
 
 /**
+ * The `repo` slot a projection failure occupies in a tick's error list. Not a
+ * repository, so a caller reading that list for a capture verdict can tell the
+ * two apart.
+ */
+export const GRAPH_ERROR_REPO = '(graph)'
+
+/**
  * Run one capture tick: read the per-repo cursors, capture every selected repo
  * (appending `github_events` rows through the kernel cache), then persist the
  * advanced cursors, then project GitHub rows. Shared by the daemon poll source
@@ -45,7 +52,7 @@ export async function runCaptureTick(runtime, opts) {
         error,
         duration_ms: Date.now() - started,
       })
-      result.errors.push({ repo: '(graph)', error })
+      result.errors.push({ repo: GRAPH_ERROR_REPO, error })
     }
   }
   return result
