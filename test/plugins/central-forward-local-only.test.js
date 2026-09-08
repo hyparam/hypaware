@@ -10,6 +10,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
+import { readRequestBody } from '../helpers/request_body.js'
 
 const TABLE = '/cache/ai_gateway_messages/source=claude'
 const batch = { partitions: [{ dataset: 'ai_gateway_messages', tablePath: TABLE }] }
@@ -91,7 +92,7 @@ function makeSink({ storage, watermarks, responder }) {
   const calls = []
   /** @type {typeof fetch} */
   const fetchFn = /** @type {any} */ (async (_url, init) => {
-    const body = String(init?.body ?? '')
+    const body = await readRequestBody(init?.body)
     const ids = body.split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l).id)
     const call = { ids }
     calls.push(call)

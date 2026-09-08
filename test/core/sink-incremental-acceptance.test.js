@@ -40,6 +40,7 @@ import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { createSinkDriver } from '../../src/core/sinks/driver.js'
 import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { activate as activateLocalFs } from '../../hypaware-core/plugins-workspace/local-fs/src/index.js'
+import { readRequestBody } from '../helpers/request_body.js'
 
 /**
  * @import { ColumnSpec, QueryPartition, SinkEncoder } from '../../hypaware-plugin-kernel-types.d.ts'
@@ -147,7 +148,7 @@ function makeForwardSink({ storage, watermarks, responder, query }) {
   /** @type {typeof fetch} */
   const fetchFn = /** @type {any} */ (async (url, init) => {
     const headers = /** @type {Record<string, string>} */ (init?.headers ?? {})
-    const body = String(init?.body ?? '')
+    const body = await readRequestBody(init?.body)
     const ids = body.split('\n').filter((l) => l.length > 0).map((l) => Number(JSON.parse(l).id))
     const status = responder ? responder({ url: String(url) }) : 202
     calls.push({ url: String(url), batchId: headers['x-hyp-batch-id'], ids, status })

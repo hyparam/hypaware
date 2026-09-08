@@ -31,6 +31,9 @@ const MAX_BACKPRESSURE_WAIT_MS = 5 * 60_000
 const MAX_CHUNK_ROWS = 5000
 const MAX_CHUNK_BYTES = 4 * 1024 * 1024
 
+// Slice size for the streamed chunk body (see `postNdjson`).
+const BODY_STREAM_SLICE_BYTES = 64 * 1024
+
 // An older server answers the additive registration route with 404/405. Hold
 // the dataset locally and probe infrequently so normal client-before-server
 // version skew does not create an outbox and warning every sink tick.
@@ -1048,15 +1051,41 @@ async function postNdjson(args) {
   // encode-invariant, so their URLs are byte-identical to before.
   const url = joinUrl(centralUrl, `/v1/ingest/${encodeURIComponent(signal)}`)
 
+  // The chunk goes out as a stream, not one string. Node 26's fetch speaks
+  // HTTP/2, and its HTTP/2 client keeps a request body's unsent remainder
+  // counted against the connection's 10 MB session budget when the server
+  // answers before the upload finishes, which the server does for every
+  // ledger hit (a re-sent chunk is acked 202 before the body is read). Two
+  // early-acked 4 MB string bodies exhausted the budget and the client then
+  // reset every later response on the connection with ENHANCE_YOUR_CALM, so
+  // a retry after any partial failure died on its third chunk forever. A
+  // streamed body queues at most one flow-control window, which stays far
+  // under the budget however many chunks are re-sent. `content-length` is
+  // set explicitly because a streamed body carries none by default and the
+  // server charges backpressure from it. Each attempt builds a fresh stream:
+  // a ReadableStream is single-use and the loop below re-sends the same
+  // chunk after a 401 refresh or 429/503 pause.
+  const bytes = Buffer.from(body, 'utf8')
+  const streamBody = () => {
+    let offset = 0
+    return new ReadableStream({
+      pull(controller) {
+        if (offset >= bytes.byteLength) return controller.close()
+        controller.enqueue(bytes.subarray(offset, offset += BODY_STREAM_SLICE_BYTES))
+      },
+    })
+  }
   /** @param {string} jwt */
   const send = (jwt) => fetchFn(url, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${jwt}`,
       'content-type': 'application/x-ndjson',
+      'content-length': String(bytes.byteLength),
       'x-hyp-batch-id': batchId,
     },
-    body,
+    body: streamBody(),
+    duplex: 'half',
   })
 
   let refreshed = false

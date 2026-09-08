@@ -79,6 +79,7 @@ import { createSinkDriver } from '../../src/core/sinks/driver.js'
 import { openIncrementalRows } from '../../src/core/sinks/incremental.js'
 import { previewPendingRows } from '../../src/core/sinks/pending.js'
 import { createSinkWatermarkStore } from '../../src/core/sinks/watermarks.js'
+import { readRequestBody } from '../helpers/request_body.js'
 
 const DATASET = 'ai_gateway_messages'
 const PARTITION_KEY = 'source=claude'
@@ -436,7 +437,7 @@ function centralOverDatasets(home) {
     }),
     log: /** @type {any} */ ({ debug: noop, info: noop, warn: noop, error: noop }),
     fetchFn: /** @type {any} */ (async (/** @type {any} */ url, /** @type {any} */ init) => {
-      posts.push({ url: String(url), body: String(init?.body ?? '') })
+      posts.push({ url: String(url), body: await readRequestBody(init?.body) })
       return {
         status: 202, ok: true,
         headers: { get: () => null },
@@ -591,7 +592,7 @@ function centralOverGrowingOpenDataset(home) {
     }),
     log: /** @type {any} */ ({ debug: noop, info: noop, warn: noop, error: noop }),
     fetchFn: /** @type {any} */ (async (/** @type {any} */ url, /** @type {any} */ init) => {
-      posts.push({ url: String(url), body: String(init?.body ?? '') })
+      posts.push({ url: String(url), body: await readRequestBody(init?.body) })
       return { status: 202, ok: true, headers: { get: () => null }, async text() { return '' }, body: { cancel: async () => {} } }
     }),
     sleepFn: async () => {},
