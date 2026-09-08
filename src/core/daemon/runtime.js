@@ -621,8 +621,12 @@ export async function runDaemon(opts = {}) {
    * Otherwise a permanently hung probe would start (and hold open) a fresh
    * `source.status` span on every tick for the daemon's life.
    *
+   * `status()` is plugin code, so what it resolves is not necessarily a
+   * `SourceStatus`: `null` is as easy to return as an object, and every
+   * reader below has to survive one.
+   *
    * @param {string} name
-   * @returns {Promise<{ reported: SourceStatus | undefined, failure: string | undefined }>}
+   * @returns {Promise<{ reported: SourceStatus | null | undefined, failure: string | undefined }>}
    */
   async function probeSourceStatus(name) {
     if (sourceProbesInFlight.has(name)) {
@@ -645,7 +649,7 @@ export async function runDaemon(opts = {}) {
           if (typeof timer.unref === 'function') timer.unref()
         }),
       ])
-      return { reported: /** @type {SourceStatus | undefined} */ (reported), failure: undefined }
+      return { reported: /** @type {SourceStatus | null | undefined} */ (reported), failure: undefined }
     } catch (err) {
       return { reported: undefined, failure: err instanceof Error ? err.message : String(err) }
     } finally {
@@ -705,7 +709,7 @@ export async function runDaemon(opts = {}) {
       if (snap.state !== 'started') continue
       const { reported, failure } = await probeSourceStatus(snap.name)
       if (reported !== undefined) {
-        if (reported.details !== undefined) snap.details = reported.details
+        if (reported?.details !== undefined) snap.details = reported.details
         snap.health = sourceHealth(reported)
       }
       noteProbeOutcome(snap.name, failure)
@@ -1598,7 +1602,7 @@ async function stopAllSources({ runtime, fileLog }) {
  *
  * @param {KernelRuntime} runtime
  * @param {string} name
- * @returns {Promise<SourceStatus | undefined>}
+ * @returns {Promise<SourceStatus | null | undefined>}
  */
 async function safeStatus(runtime, name) {
   try {

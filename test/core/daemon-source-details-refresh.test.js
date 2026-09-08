@@ -267,6 +267,95 @@ test('a source that reports a failure has it recorded, and cleared once it stops
   }
 })
 
+// `status()` is plugin code and the registry hands its result back
+// unfiltered, so a source is free to resolve `null` where the contract asks
+// for a `SourceStatus`. Reading a field off that answer rejects the tick
+// before `persist()`, which freezes every field in the status file and, on
+// the shutdown path, the stop.
+// @ref LLP 0394#health-rides-beside-state [tests]: a probe that answers with nothing usable is recorded as nothing, not thrown over
+
+/**
+ * Stage a plugin whose source reports itself once, at boot, and answers
+ * `null` on every probe after that.
+ *
+ * @param {string} hypHome
+ * @returns {Promise<string>}
+ */
+async function stageNullReportingPlugin(hypHome) {
+  const installDir = path.join(hypHome, 'hypaware', 'plugins', PLUGIN)
+  await fs.mkdir(installDir, { recursive: true })
+  await fs.writeFile(path.join(installDir, 'hypaware.plugin.json'), JSON.stringify({
+    schema_version: 1,
+    name: PLUGIN,
+    version: '0.1.0',
+    hypaware_api: '^1.0.0',
+    runtime: 'node',
+    entrypoint: './index.js',
+  }))
+  await fs.writeFile(
+    path.join(installDir, 'index.js'),
+    `
+export async function activate(ctx) {
+  ctx.sources.register({
+    name: 'accruing-fixture',
+    plugin: '${PLUGIN}',
+    async start() {
+      let probes = 0
+      return {
+        async status() {
+          probes += 1
+          if (probes > 1) return null
+          return { state: 'degraded', lastError: 'upstream returned 503', details: { probes } }
+        },
+        async stop() {},
+      }
+    },
+  })
+}
+`
+  )
+  return installDir
+}
+
+test('a source that answers null keeps the tick alive, and says nothing about its health', async () => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-source-null-status-'))
+  const stateRoot = path.join(hypHome, 'hypaware')
+  let handle
+  try {
+    const configPath = await writeInstall(hypHome, await stageNullReportingPlugin(hypHome))
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env: { ...process.env, HYP_HOME: hypHome },
+      runId: 'source-null-status',
+      tickIntervalMs: 1,
+      installSignalHandlers: false,
+    })
+
+    assert.equal(/** @type {any} */ (readStatusFile(stateRoot)?.sources?.[0])?.health?.state, 'degraded')
+
+    // Every tick from here reads a `null`. The file must go on being written
+    // (a rejected tick never reaches `persist()`), and the health the source
+    // has stopped standing behind must go.
+    const deadline = Date.now() + 20_000
+    /** @type {any} */
+    let snapshot
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      snapshot = readStatusFile(stateRoot)?.sources?.[0]
+      if (snapshot?.health === undefined) break
+    }
+    assert.equal(snapshot?.health, undefined, 'a null answer left the old health standing')
+    assert.deepEqual(snapshot?.details, { probes: 1 }, 'details keep their last good value')
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 // The refresh put plugin code on the tick loop's critical path, and the
 // kernel contract puts no bound on `status()`. A probe that never settles
 // used to be able to hang only boot, which is at least loud. On the tick path

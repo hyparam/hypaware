@@ -908,7 +908,7 @@ const SOURCE_HEALTH_STATES = new Set(['starting', 'ready', 'degraded', 'stopped'
  * so what comes back out of it is no more trusted than what a plugin handed
  * in.
  *
- * @param {SourceStatus | SourceHealth | undefined} reported
+ * @param {SourceStatus | SourceHealth | null | undefined} reported
  * @returns {SourceHealth | undefined}
  * @ref LLP 0394#health-rides-beside-state [implements]: the published fields are recorded under their published names, validated and bounded
  */
