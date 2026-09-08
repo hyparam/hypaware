@@ -379,6 +379,25 @@ test('the diagnostic after the send confirm keeps its severity colour', async ()
   )
 })
 
+// The decline is the path with no next chunk to resync on: the child says
+// `sync cancelled` on stdout and exits, leaving the confirm as its last word
+// on this stream. A wrap left mid-line there loses the colour of every later
+// diagnostic in the run, which is #1452 again one step further out.
+test('a child that ends mid-confirm leaves the wrap able to classify the run', async () => {
+  const spawn = fakeSpawn({ code: 0, stderr: ['Send now to the central server? [Y/n] '] })
+  const sink = Object.assign(makeBuf(), { isTTY: true })
+  const o = opts({ spawnFn: spawn.spawnFn })
+  const stderr = colorizeStderr(sink, {})
+  o.args.stderr = stderr
+  await runWizardSyncNow(o.args)
+  stderr.write('hyp init: something else broke later\n')
+
+  assert.equal(
+    sink.text(),
+    `Send now to the central server? [Y/n] ${ANSI.red}hyp init:${ANSI.reset} something else broke later\n`
+  )
+})
+
 // Piping a stream means owning its failures. An `error` nobody listens for is
 // an uncaught exception, and it would land on a setup that had already done
 // every one of its acts - the same defect `installStreamErrorHandlers` exists

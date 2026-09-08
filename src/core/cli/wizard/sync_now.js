@@ -193,9 +193,10 @@ export async function runWizardSyncNow(opts) {
  * the tty canonical and the terminal itself echoing what is typed; and the
  * question ends without a newline, so the answer - and the newline the tty
  * echoes beside it - never passes through the parent's `colorizeStderr`,
- * which the echo below resyncs so the child's next diagnostic is still
- * classified. Anything that narrows this pipe further has to keep the first
- * of those true: the prompt it carries is the one gate on sending.
+ * which the echo below resyncs, at the next chunk and again when the child
+ * closes, so the diagnostics after the confirm are still classified.
+ * Anything that narrows this pipe further has to keep the first of those
+ * true: the prompt it carries is the one gate on sending.
  *
  * @ref LLP 0203#child-process [implements]: the release runs in a fresh process so its plan names the real destinations
  * @param {RunWizardSyncNowOptions} opts
@@ -232,11 +233,16 @@ function runSyncChild(opts) {
       child.stderr?.on('error', () => {})
       // The tty, not this stream, echoes the answer that ends a question, so
       // a chunk following an unterminated one opens a line the echo would
-      // otherwise read as the middle of that question.
+      // otherwise read as the middle of that question. Settled at the child's
+      // close as well as at the next chunk, because the commonest path has no
+      // next chunk: a decline says `sync cancelled` on stdout, leaving the
+      // confirm as the child's last word here, and a wrap left mid-line then
+      // stays that way for every diagnostic the rest of the run writes.
       let midLine = false
+      const settleLine = () => { if (midLine) { midLine = false; resyncLineStart(echo) } }
       child.stderr?.on('data', (chunk) => {
         const text = String(chunk)
-        if (midLine) resyncLineStart(echo)
+        settleLine()
         midLine = !text.endsWith('\n')
         echo.write(text)
         if (noDestinations) return
@@ -254,7 +260,7 @@ function runSyncChild(opts) {
       child.on('error', (err) => done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' }))
       // `close`, not `exit`: it fires once the piped stderr has closed too, so
       // the last thing the child said is in hand before the code is judged.
-      child.on('close', (code) => done({ code, noDestinations }))
+      child.on('close', (code) => { settleLine(); done({ code, noDestinations }) })
     } catch (err) {
       done({ code: null, error: err instanceof Error ? err.message : 'spawn failed' })
     }
