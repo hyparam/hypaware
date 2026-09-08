@@ -540,7 +540,7 @@ Scope: ${meta.scope}.
 
 ${routeLine}
 
-The evidence is gathered; the files in this folder are what you work from. If one specific figure you need is not here, you may run at most two \`hyp query\` commands through the hypaware-query skill to get it, and you say in the Sources line what you ran. Never more than two, never against a server, and never a sleep: if it is still not available, say so and go on.
+The evidence is gathered; the files in this folder are what you work from. If one specific figure you need is not here, you may run at most two \`hyp query\` commands to get it, and you say in the Sources line what you ran. Before the first of them, read the hypaware-query skill's SKILL.md (listed in on_disk.txt) for the dialect and the column names, so the query is right the first time; do not read it if you run no query. Never more than two, never against a server, and never a sleep: if it is still not available, say so and go on.
 
 ## Files
 
