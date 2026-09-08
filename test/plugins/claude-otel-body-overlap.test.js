@@ -540,6 +540,21 @@ test('a [text, tool_use] turn split across the two lanes still totals its tokens
       TEXT_USAGE.output_tokens,
       'the collapsed turn must keep exactly one copy of its tokens'
     )
+
+    // The other mixed order, which #1470's table lists as the pre-existing
+    // OVER-count: the sweep committed the tool row, so the OTEL lane lands the
+    // text row. Two carriers made that turn total 68; one carrier makes it 34.
+    const sweptTool = fromBackfill.filter((r) => r.part_type === 'tool_call')
+    const afterTool = await settleBatch(
+      env,
+      await textToolOtelRows(env),
+      sweptTool.map((r) => String(r.part_id))
+    )
+    assert.equal(
+      outputTokens([...sweptTool, ...afterTool]),
+      TEXT_USAGE.output_tokens,
+      'the collapsed turn must not count its tokens twice either'
+    )
   } finally {
     await env.cleanup()
   }
