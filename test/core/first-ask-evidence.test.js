@@ -12,6 +12,7 @@ import {
   chooseRoutes,
   commandHeads,
   computeSignals,
+  describeRoute,
   frontMatterDescription,
   onDiskListing,
   prepareFirstAskEvidence,
@@ -136,8 +137,11 @@ test('renderTriage: the record line comes first and the applied rule names the r
   assert.match(lines[2], /^record\s+3 sessions over 3 session-days/)
   assert.ok(text.includes('threshold 3 sessions on 3 days'), 'a missing signal names its threshold, not a count')
   assert.ok(text.includes('Route chosen by HypAware: none'))
+  s.rule = { head: 'Column "type" not found', tool: 'Bash', sessions: 11, n: 11, others: [] }
   const routed = renderTriage(s, ['sink', 'rule'], { from: '2026-08-08', scope: 'this machine' })
-  assert.ok(routed.includes('Route chosen by HypAware: sink and rule.'))
+  assert.ok(routed.includes('Route chosen by HypAware: sink (reopened sessions:'))
+  assert.ok(routed.includes('Route chosen by HypAware: rule (a mistake that keeps recurring: "Column "type" not found" failed in 11 sessions (11 times).)'))
+  assert.equal(describeRoute('skill', s), 'something you keep typing.')
 })
 
 test('toTsv: cells lose their newlines and tabs', () => {
@@ -173,15 +177,19 @@ test('sinkFiles: summary slices and the per-day table agree', () => {
 
 test('askInstructions: route, files, and the answer shape the reader gets', () => {
   // @ref LLP 0388#answer-shape [tests]: recommendation first, no self-serve queries, sources last
-  const text = askInstructions(['sink'], { scope: 'this machine', files: ['triage.txt', 'session_days.tsv', 'ASK.md'] })
-  assert.ok(text.includes('Route: sink, chosen by HypAware'))
+  const s = quietSignals()
+  s.sink.share = 0.209
+  s.sink.reopenedDays = 64
+  const text = askInstructions(['sink'], { scope: 'this machine', files: ['triage.txt', 'session_days.tsv', 'ASK.md'], signals: s })
+  assert.ok(text.includes('- reopened sessions: 20.9% of all spend is excess on the 64 days a session was reopened.'), 'the route is a finding in words, never a bare id')
+  assert.ok(!text.includes('Route: sink'))
   assert.ok(text.includes('Run no queries of your own'))
   assert.ok(text.includes('`session_days.tsv`'))
   assert.ok(text.includes('Line 1: the recommendation'))
   assert.ok(text.includes('Under 110 words before the code block'))
   assert.ok(!text.includes('\u2014'), 'no em dashes')
   const none = askInstructions([], { scope: 'this machine', files: ['triage.txt'] })
-  assert.ok(none.includes('Route: none.'))
+  assert.ok(none.includes('nothing over its floor'))
 })
 
 test('onDiskListing: skills and agents carry their descriptions; hooks are not listed', async () => {

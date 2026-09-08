@@ -124,6 +124,43 @@ export const PRICE_RATIO = Object.freeze({ input: 1, cacheRead: 0.1, cacheWrite:
 /** @type {ReadonlyArray<FirstAskRoute>} */
 const PRECEDENCE = Object.freeze(['sink', 'skill', 'subagent', 'rule'])
 
+/** What each route means, in the reader's words; the ids are internal. */
+export const ROUTE_LABELS = Object.freeze({
+  sink: 'reopened sessions',
+  skill: 'something you keep typing',
+  subagent: 'a request that should go to a worker',
+  rule: 'a mistake that keeps recurring',
+})
+
+/**
+ * One sentence per chosen route naming what was found, so a reader of
+ * `ASK.md` or `triage.txt` never meets a bare route id.
+ *
+ * @param {FirstAskRoute} route
+ * @param {FirstAskSignals} s
+ * @returns {string}
+ */
+export function describeRoute(route, s) {
+  switch (route) {
+    case 'sink':
+      return `${ROUTE_LABELS.sink}: ${(s.sink.share * 100).toFixed(1)}% of all spend is excess on the ${s.sink.reopenedDays} days a session was reopened.`
+    case 'skill':
+      return s.skill
+        ? `${ROUTE_LABELS.skill}: "${s.skill.line}" typed in ${s.skill.sessions} sessions on ${s.skill.days} days.`
+        : `${ROUTE_LABELS.skill}.`
+    case 'subagent':
+      return s.subagent.recurring
+        ? `${ROUTE_LABELS.subagent}: "${s.subagent.recurring.text}" recurs in ${s.subagent.recurring.sessions} sessions, and inline reading on such days is ${(s.subagent.costShare * 100).toFixed(1)}% of all spend.`
+        : `${ROUTE_LABELS.subagent}.`
+    case 'rule':
+      return s.rule
+        ? `${ROUTE_LABELS.rule}: "${s.rule.head.slice(0, 80)}" failed in ${s.rule.sessions} sessions (${s.rule.n} times).`
+        : `${ROUTE_LABELS.rule}.`
+    default:
+      return String(route)
+  }
+}
+
 /**
  * First day of the window, `days` calendar days before `now`, as
  * `YYYY-MM-DD` in UTC. Dates in the cache are UTC partition dates.
@@ -324,7 +361,9 @@ export function renderTriage(s, routes, meta) {
     '# Rule, as applied',
     `Floors: sink ${(ROUTE_FLOORS.sink * 100).toFixed(0)}% share; skill ${ROUTE_FLOORS.skill.sessions}+ sessions on ${ROUTE_FLOORS.skill.days}+ days; subagent ${(ROUTE_FLOORS.subagent * 100).toFixed(0)}% share and a task recurring in ${ROUTE_FLOORS.subagentRecurring}+ sessions; rule ${ROUTE_FLOORS.rule}+ sessions.`,
     'The largest multiple of its floor wins; any other route within a fifth of it on that scale runs too; ties fall to sink, skill, subagent, rule.',
-    routes.length > 0 ? `Route chosen by HypAware: ${routes.join(' and ')}.` : 'Route chosen by HypAware: none. Every signal is below its floor.',
+    ...(routes.length > 0
+      ? routes.map((r) => `Route chosen by HypAware: ${r} (${describeRoute(r, s)})`)
+      : ['Route chosen by HypAware: none. Every signal is below its floor.']),
     '',
   ]
   return lines.join('\n')
@@ -466,13 +505,13 @@ export function toTsv(columns, rows, pick) {
  *
  * @ref LLP 0388#answer-shape [implements]: recommendation first, evidence last, under 110 words before the block
  * @param {FirstAskRoute[]} routes
- * @param {{ scope: string, files: string[] }} meta
+ * @param {{ scope: string, files: string[], signals?: FirstAskSignals }} meta
  * @returns {string}
  */
 export function askInstructions(routes, meta) {
   const routeLine = routes.length === 0
-    ? 'Route: none. Every signal is below its floor.'
-    : `Route: ${routes.join(' and ')}, chosen by HypAware from the signals in triage.txt.`
+    ? 'What HypAware found: nothing over its floor. Every signal is below the level worth acting on.'
+    : `What HypAware found, and the kind of change to propose for each:\n${routes.map((r) => `- ${meta.signals ? describeRoute(r, meta.signals) : r}`).join('\n')}\nThe rule that chose this is printed in triage.txt.`
   const fileNotes = {
     'triage.txt': 'the four signals, the record size, the rule as applied, and the route. Read first.',
     'session_days_summary.txt': 'context tokens per output token for single-day sessions, first days, and later days of multi-day sessions, plus the excess on later days.',
@@ -491,7 +530,9 @@ export function askInstructions(routes, meta) {
   const files = meta.files.map((f) => `- \`${f}\`: ${fileNotes[/** @type {keyof typeof fileNotes} */ (f)] ?? ''}`).join('\n')
   return `# What to do with this folder
 
-Scope: ${meta.scope}. ${routeLine}
+Scope: ${meta.scope}.
+
+${routeLine}
 
 The evidence is gathered. Every file you need is in this folder. Run no queries of your own against the cache or a server, and never insert a sleep: if a figure or a typed line you want is not here, say it is not available and go on.
 
@@ -507,10 +548,10 @@ ${files}
 - The change is one of three things: a skill (a SKILL.md the person triggers by a phrase they already type), an agent definition (a worker for a request they already make), or a block in a CLAUDE.md. Never a hook, a settings entry, or anything else the person cannot read and edit as plain text.
 - If a skill, agent, or CLAUDE.md line on the subject already exists per on_disk.txt, say so and why it did not work, and change it rather than adding a second one.
 - If the mistake is a trap in something HypAware ships (a skill under ~/.claude/skills/hypaware-*, a command, an error message), say so in the Why: the lasting fix is in that skill or command, and what you propose here is a stopgap until it lands.
-- For the sink route, be honest that a written rule cannot stop a person from resuming a session. The change is a handoff skill (writes goal, files touched, decisions, next step to a short note at the end of a day's work) plus one CLAUDE.md line saying when the agent offers it, so that starting fresh becomes cheap enough to prefer.
-- For the subagent route the change is an agent definition whose description opens with the recurring request as the person types it, so the lead picks it for that request. Never a hook, rule, or sentence that says to delegate more in general: when to delegate is the client's decision, and only a named worker for a request the person already makes changes it.
+- For reopened sessions, be honest that a written rule cannot stop a person from resuming a session. The change is a handoff skill (writes goal, files touched, decisions, next step to a short note at the end of a day's work) plus one CLAUDE.md line saying when the agent offers it, so that starting fresh becomes cheap enough to prefer.
+- For a request that should go to a worker, the change is an agent definition whose description opens with the recurring request as the person types it, so the lead picks it for that request. Never a hook, rule, or sentence that says to delegate more in general: when to delegate is the client's decision, and only a named worker for a request the person already makes changes it.
 - Discount session ids that carry identical typed lines on the same day as another id; that is one conversation recorded twice.
-- If the route is none: two sentences, what was recorded (sessions and days, from the record line of triage.txt) and that there is not enough yet to recommend anything. Then the Sources line and stop; no question.
+- If nothing was over its floor: two sentences, what was recorded (sessions and days, from the record line of triage.txt) and that there is not enough yet to recommend anything. Then the Sources line and stop; no question.
 
 ## Answer shape
 
@@ -814,7 +855,7 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
     files.push(...await gatherRoute(route, runner, from, signals))
   }
   files.push({ name: 'on_disk.txt', content: await onDiskListing({ homeDir }) })
-  files.push({ name: 'ASK.md', content: askInstructions(routes, { scope, files: files.map((f) => f.name) }) })
+  files.push({ name: 'ASK.md', content: askInstructions(routes, { scope, files: files.map((f) => f.name), signals }) })
 
   const dir = root
   await fsp.rm(dir, { recursive: true, force: true })
