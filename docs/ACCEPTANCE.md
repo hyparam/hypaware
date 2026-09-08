@@ -1028,13 +1028,16 @@ two-layer drift detection this discharges),
    ```
 
 5. Hold the real conversation, daemon up, in a **fresh** session in the same
-   scratch repo. Drive three things on purpose, because each one is a separate
-   event this procedure asserts:
+   scratch repo. Drive four things on purpose, because each one is a separate
+   assertion below:
 
    - let it run one tool call to completion (`tool_result`),
    - **reject** one tool call when it asks (`tool_decision` with
      `decision = reject`),
-   - change permission mode once, e.g. accept-edits (`permission_mode_changed`).
+   - change permission mode once, e.g. accept-edits (`permission_mode_changed`),
+   - get one answer that says something and *then* calls a tool in the same
+     response (ask a question whose answer needs a file read), which is the
+     `[text, tool_use]` shape step 9 reads.
 
    Then wait out one export interval and confirm the spool drained. Claude
    Code batches its exports, so an immediate check reads "not yet" as
@@ -1184,10 +1187,14 @@ two-layer drift detection this discharges),
    ```
 
    Pass condition: at least one row has both `text_rows` and `tool_rows` above
-   zero (that is step 5's tool-calling turn: the response said something and
-   then called a tool), and **every** such row reads `usage_on_tool = 1` and
-   `usage_on_text = 0`, with `turn_output_tokens` equal to that `request_id`'s
-   `api_request` `output_tokens` from step 8, counted exactly once.
+   zero (that is the turn step 5's fourth bullet drove: the response said
+   something and then called a tool), and **every** such row reads
+   `usage_on_tool = 1` and `usage_on_text = 0`, with `turn_output_tokens` equal
+   to the `output_tokens` step 8's `api_request` row for the same `request_id`
+   carries, counted exactly once. Match that row on `attributes.request_id`,
+   which is where the event carries it (`claude_telemetry_events` has no
+   `request_id` column), and widen step 8's `limit 12` if the turn's row falls
+   past it.
 
    `usage_on_text = 1` on a turn that also has a `tool_call` row is the
    emission-order flip: hold the release and file it.
