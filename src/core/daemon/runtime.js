@@ -1,6 +1,8 @@
 // @ts-check
 
 import process from 'node:process'
+import { createProductClient, productAdapters } from '../product_telemetry/client.js'
+import { productEvent } from '../product_telemetry/collection.js'
 
 import {
   Attr,
@@ -149,6 +151,12 @@ export async function runDaemon(opts = {}) {
   const runId = opts.runId ?? obsEnv.devRunId ?? `daemon-${process.pid}-${Date.now()}`
   const mode = opts.foreground === false ? 'detached' : 'foreground'
   const startedAtMs = Date.now()
+  const product = createProductClient({ env: { ...env, HYP_HOME: hypHome }, role: 'daemon' })
+  const lifecycle = (transition, outcome, error_code = 'other') => {
+    const event = productEvent('daemon.lifecycle', { transition, outcome, error_code })
+    if (event) product.emit([event])
+  }
+  lifecycle('start', 'success')
 
   installObservability()
   const log = getLogger('daemon')
@@ -309,6 +317,8 @@ export async function runDaemon(opts = {}) {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     fileLog.error('daemon.boot_failed', { message })
+    lifecycle('ready', 'failure', 'startup_failed')
+    product.close()
     persist({ state: 'degraded', warnings: [`${BOOT_FAILED_WARNING_PREFIX}: ${message}`] })
     clearPidFile(stateRoot)
     await fileLog.close()
@@ -318,6 +328,8 @@ export async function runDaemon(opts = {}) {
   status.configPath = boot.configPath ?? undefined
   status.sources = sourceSnapshots
   const anySourceFailed = sourceSnapshots.some((s) => s.state === 'failed')
+  product.setAdapters(productAdapters(boot.config?.plugins ?? []))
+  lifecycle('ready', anySourceFailed ? 'degraded' : 'success')
   if (sourceSnapshots.length === 0 || anySourceFailed) {
     status.state = anySourceFailed ? 'degraded' : 'healthy'
   } else {
@@ -1040,6 +1052,7 @@ export async function runDaemon(opts = {}) {
   async function shutdown(reason) {
     if (shutdownInFlight) return done
     shutdownInFlight = true
+    product.pause()
     // Record that an orderly stop began, before anything that can block. The
     // settle below deliberately waits out an in-flight reconcile pass, which
     // is a multi-minute `hyp backfill` import by design, and `hyp daemon stop`
@@ -1147,6 +1160,8 @@ export async function runDaemon(opts = {}) {
 
     const stoppedAt = new Date()
     persist({ state: 'stopped', stoppedAt: stoppedAt.toISOString() })
+    lifecycle('stop', 'success')
+    product.close()
     fileLog.info('daemon.stopped')
     // Await the flush before resolving `done`: a caller (or the #138
     // regression test) that reads `daemon.log` right after the daemon stops

@@ -2,6 +2,11 @@
 // @ts-check
 
 import process from 'node:process'
+import { withProductInvocation } from '../src/core/product_telemetry/client.js'
+
+// performance.now() is relative to process startup, so zero includes static
+// imports and bootstrap as well as dispatch and command-body work.
+const invocationStarted = 0
 
 // The two leaf modules the palette needs, imported statically because they
 // are pure - no observability, no HYP_HOME, nothing the `__smoke_internal`
@@ -41,7 +46,9 @@ if (argv[0] === '__smoke_internal') {
     const message = err instanceof Error ? err.message : String(err)
     // `FAIL` is the verdict the eye looks for in a scrollback of smoke runs,
     // and it is not a prefix any severity rule recognizes, so paint it here.
-    stderr.write(`smoke ${flow}: ${paint('FAIL', ANSI.red, color)}\n${message}\n`)
+    stderr.write(
+      `smoke ${flow}: ${paint('FAIL', ANSI.red, color)}\n${message}\n`
+    )
     const detail = err && /** @type {{ detail?: string }} */ (err).detail
     if (typeof detail === 'string') stderr.write(`  ${detail}\n`)
     process.exit(1)
@@ -75,8 +82,9 @@ function readConfigFlag(args) {
 // @ref LLP 0309#unstick-from-the-front [implements]: pre-boot lane; only the import-light updater loads before it runs
 if (argv[0] === 'daemon' && argv[1] === 'run') {
   try {
-    const { runSelfUpdatePass, SELF_UPDATE_RESTART_EXIT_CODE } =
-      await import('../src/core/update/self_update.js')
+    const { runSelfUpdatePass, SELF_UPDATE_RESTART_EXIT_CODE } = await import(
+      '../src/core/update/self_update.js'
+    )
     const result = await runSelfUpdatePass({
       // The installed service unit always renders `--config <path>` (both
       // the launchd and the systemd writer do), and that file is where an
@@ -88,39 +96,76 @@ if (argv[0] === 'daemon' && argv[1] === 'run') {
       // here; only events an operator would act on reach stderr.
       log: (event, fields) => {
         if (event === 'self_update.skipped') return
-        try { stderr.write(`${event} ${JSON.stringify(fields ?? {})}\n`) } catch { /* stderr gone */ }
-      },
+        try {
+          stderr.write(`${event} ${JSON.stringify(fields ?? {})}\n`)
+        } catch {
+          /* stderr gone */
+        }
+      }
     })
     if (result.action === 'updated') process.exit(SELF_UPDATE_RESTART_EXIT_CODE)
-  } catch { /* the updater must never block a boot */ }
+  } catch {
+    /* the updater must never block a boot */
+  }
 }
 
-const { dispatch } = await import('../src/core/cli/dispatch.js')
-const { installObservability } = await import('../src/core/observability/index.js')
-const { flushStream } = await import('../src/core/cli/flush-streams.js')
-const { installStreamErrorHandlers } = await import('../src/core/cli/stream_errors.js')
+const result = await withProductInvocation(
+  argv,
+  process.env,
+  async () => {
+    try {
+      const { dispatch } = await import('../src/core/cli/dispatch.js')
+      const { installObservability } = await import(
+        '../src/core/observability/index.js'
+      )
+      const { flushStream } = await import('../src/core/cli/flush-streams.js')
+      const { installStreamErrorHandlers } = await import(
+        '../src/core/cli/stream_errors.js'
+      )
 
-// Before anything writes: an asynchronous stdout/stderr failure (EPIPE when
-// a reader like `head` walks away mid-write) is delivered as an 'error'
-// event, which bypasses the try/catch below and every one inside the
-// commands. Unlistened, it crashes a run that had already succeeded.
-installStreamErrorHandlers([process.stdout, process.stderr], (message) => {
-  try { stderr.write(message) } catch { /* the stream is what failed */ }
-})
+      // Before anything writes: an asynchronous stdout/stderr failure (EPIPE when
+      // a reader like `head` walks away mid-write) is delivered as an 'error'
+      // event, which bypasses the try/catch below and every one inside the
+      // commands. Unlistened, it crashes a run that had already succeeded.
+      installStreamErrorHandlers(
+        [process.stdout, process.stderr],
+        (message) => {
+          try {
+            stderr.write(message)
+          } catch {
+            /* the stream is what failed */
+          }
+        }
+      )
 
-const obs = installObservability()
-let exitCode = 1
-try {
-  exitCode = await dispatch(argv)
-} catch (err) {
-  const message = err instanceof Error ? err.message : String(err)
-  stderr.write(`hyp: ${message}\n`)
-  exitCode = 1
-} finally {
-  await obs.shutdown()
-}
+      const obs = installObservability()
+      let exitCode = 1
+      try {
+        exitCode = await dispatch(argv)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        stderr.write(`hyp: ${message}\n`)
+        exitCode = 1
+      } finally {
+        await obs.shutdown()
+      }
 
-// Flush stdout/stderr before exiting: `process.exit()` is synchronous and
-// would drop output still buffered in a pipe (the >64KiB truncation).
-await Promise.all([flushStream(process.stdout), flushStream(process.stderr)])
-process.exit(exitCode)
+      // Flush stdout/stderr before exiting: `process.exit()` is synchronous and
+      // would drop output still buffered in a pipe (the >64KiB truncation).
+      await Promise.all([
+        flushStream(process.stdout),
+        flushStream(process.stderr)
+      ])
+      return exitCode
+    } catch (error) {
+      try {
+        stderr.write(
+          `hyp: ${error instanceof Error ? error.message : String(error)}\n`
+        )
+      } catch {}
+      return 1
+    }
+  },
+  { startedAt: invocationStarted, outer: true }
+)
+process.exit(result)

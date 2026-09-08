@@ -31,6 +31,7 @@ import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synt
 import { colorizeStderr } from './style.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { materializeSinks } from '../sinks/materialize.js'
+import { noteCommandTransition, noteInvocation, productAdapters, startInvocationDelivery, withProductInvocation } from '../product_telemetry/client.js'
 
 /**
  * @import { ActivePlugin, BlobSinkConfigInstance, CommandRunContext, HypAwareV2Config, JsonObject, PluginManifest, PluginName, RequestSinkConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
@@ -190,6 +191,11 @@ function sinkPluginExcludedByBootProfile(err, { config, activePlugins, withheldB
  * @returns {Promise<number>}
  */
 export async function dispatch(argv, opts = {}) {
+  return withProductInvocation(argv, opts.env ?? process.env, () => dispatchInternal(argv, opts))
+}
+
+/** @param {string[]} argv @param {DispatchOptions} opts */
+async function dispatchInternal(argv, opts) {
   const stdout = opts.stdout ?? process.stdout
   // Every diagnostic in the CLI - this function's own, and every core or
   // plugin command's, since they all receive this binding as `ctx.stderr` -
@@ -211,6 +217,8 @@ export async function dispatch(argv, opts = {}) {
 
   const registry = opts.registry ?? createCommandRegistry()
   if (!opts.registry) registerCoreCommands(registry)
+  const earlyMatch = registry.match(argv)
+  if (earlyMatch) noteInvocation({ command: earlyMatch.command.name, kind: 'execution' })
 
   const obsEnv = readObservabilityEnv(env)
   const cacheRoot = path.join(obsEnv.stateDir, 'cache')
@@ -226,19 +234,24 @@ export async function dispatch(argv, opts = {}) {
   }
 
   if (argv.length === 0 && !isInteractiveStream(stdout)) {
+    noteInvocation({ command: 'help', kind: 'help' })
     return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: 0, discovery: helpDiscovery })
   }
   if (argv.length > 0 && VERSION_FLAGS.has(argv[0])) {
+    noteInvocation({ command: 'version', kind: 'version' })
     const require = createRequire(import.meta.url)
     const { version } = require('../../../package.json')
     stdout.write(`hypaware ${version}\n`)
     return 0
   }
   if (argv.length > 0 && HELP_FLAGS.has(argv[0])) {
+    noteInvocation({ command: 'help', kind: 'help' })
     return runHelp({ stdout, registry, devRunId: env.DEV_RUN_ID, argvCount: argv.length, discovery: helpDiscovery })
   }
 
   // Boot the kernel so plugin-contributed commands, sources, sinks,
+  if (argv.length === 0) noteInvocation({ command: 'setup', kind: 'execution' })
+  if (earlyMatch?.command.name !== 'version' && !isHelpFlag(earlyMatch?.rest[0])) startInvocationDelivery()
   // capabilities, skills, and init presets are visible to dispatch.
   // Callers that already built a kernel (test flows pre-activating a
   // specific plugin set) pass `opts.kernel` and we skip boot.
@@ -279,7 +292,9 @@ export async function dispatch(argv, opts = {}) {
     // short never put a plugin there at all
     // (LLP 0219 #incomplete-activation-prunes-nothing).
     failedPlugins = boot.unavailablePlugins
+    if (failedPlugins.length) noteInvocation({ degraded: true })
     if (boot.config) activeConfig = boot.config
+    noteInvocation({ adapters: productAdapters(activeConfig.plugins ?? []) })
 
     // Lifecycle/read-only commands boot with no plugins, so no sink can
     // ever materialize; skip the pass rather than emit a guaranteed
@@ -301,6 +316,7 @@ export async function dispatch(argv, opts = {}) {
           withheldByProfile: boot.withheldByProfile,
         })
         if (excluded) continue
+        noteInvocation({ degraded: true })
         stderr.write(
           `warning: sink '${err.instance}' not materialized [${err.errorKind}]: ${err.message}\n`
         )
@@ -333,6 +349,7 @@ export async function dispatch(argv, opts = {}) {
     // above and renders its own help, so the explicit registration wins.
     const group = resolveGroupHelp(registry, argv)
     if (group) {
+      noteInvocation({ command: 'help', kind: group.unknownSub === undefined ? 'help' : 'unknown' })
       if (group.unknownSub !== undefined) {
         stderr.write(`hyp ${group.prefix}: unknown subcommand '${group.unknownSub}'\n`)
         stderr.write(`  expected one of: ${group.children.map((c) => c.name).join(', ')}\n`)
@@ -419,6 +436,7 @@ export async function dispatch(argv, opts = {}) {
   }
 
   const devRunId = env.DEV_RUN_ID
+  noteInvocation({ command: matched.command.name, kind: isHelpFlag(matched.rest[0]) || matched.command.group ? 'help' : matched.command.name === 'version' ? 'version' : 'execution' })
   const attrs = buildAttrs({
     [Attr.COMPONENT]: 'cmd-dispatch',
     [Attr.OPERATION]: 'command.run',
@@ -529,6 +547,8 @@ export async function dispatch(argv, opts = {}) {
           stderr.write(`hyp ${matched.command.name}: ${err.message}\n`)
           exitCode = 1
         } finally {
+          if (!isHelpFlag(matched.rest[0])) noteCommandTransition(matched.command.name, matched.rest, exitCode)
+          if (matched.command.group && matched.rest.length > 0 && !isHelpFlag(matched.rest[0]) && exitCode !== 0) noteInvocation({ kind: 'unknown' })
           if (ownsKernel) {
             await stopBootStartedSources(kernel)
           }
