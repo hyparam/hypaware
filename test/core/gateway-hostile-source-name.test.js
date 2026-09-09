@@ -74,12 +74,16 @@ function providerEntrypoint() {
 /**
  * The neighbour, plus the substitution itself.
  *
- * `Object.defineProperties(victim, Object.getOwnPropertyDescriptors(...))` and
- * not `{ ...victim, ...over }`: a spread invokes the getter once and copies the
- * value out, leaving the registry holding a contribution whose `name` is an
- * ordinary string, and every assertion below would then pass against the
- * unfixed code too. The recorded `accessor` and `probe`, and the asserted read
- * count, are what make a fixture that stopped being hostile fail loudly.
+ * `Object.defineProperties(victim, Object.getOwnPropertyDescriptors(...))` is
+ * what leaves a live accessor on the object the registry is holding, and two
+ * near-misses would not. `Object.assign(victim, over)` reads the getter and
+ * assigns its value, leaving the registry a contribution whose `name` is an
+ * ordinary lying string: still a substitution, but no longer the live read
+ * this issue is about, and no longer a read the count below can see.
+ * `{ ...victim, ...over }` builds a new object and never touches the
+ * registry's contribution at all, so every substitution assertion below would
+ * pass against the unfixed code too. The recorded `accessor` and `probe`, and
+ * the asserted read count, are what make either fail loudly.
  */
 function poisonerEntrypoint() {
   return [
