@@ -86,7 +86,9 @@ export interface RecentEntrypoint {
 export interface FailedPluginSnapshot {
   name: string
   /**
-   * `activate_failed`, `activate_missing`, or whatever the throw carried -
+   * `activate_failed`, `activate_missing`, or whatever the throw carried
+   * (bar `requires_unsatisfied`, which a throw's own label is rewritten to
+   * `activate_failed` rather than be mistaken for the door below) -
    * and `requires_unsatisfied` when there was no throw because the dependency
    * resolver eliminated the plugin before `activate()` ran (issue #1580). That
    * one value is the discriminator `hyp status` branches on to pick a message

@@ -519,3 +519,21 @@ test('recordFailedPlugins records a plugin missing several requires once', () =>
   assert.equal(failed[0].message, 'plugin_missing: requires plugin @acme/a@^1.0.0')
   assert.equal(entries.length, 1)
 })
+
+test('recordFailedPlugins does not let a throw claim the resolver door', () => {
+  const { log, entries } = recordingLog()
+  // `activatePlugins` copies a plugin's own `hypErrorKind` into the result
+  // verbatim, so a throw can label itself with the one value `hyp status`
+  // branches on. Left alone it would be rendered as an elimination that never
+  // happened, losing the log-grep repair that holds the untruncated throw.
+  const failed = recordFailedPlugins({
+    activations: /** @type {any} */ ([
+      { ok: false, plugin: { name: '@acme/liar' }, errorKind: REQUIRES_UNSATISFIED_ERROR_KIND, message: 'db locked' },
+    ]),
+    log,
+  })
+  assert.deepEqual(failed, [
+    { name: '@acme/liar', errorKind: 'activate_failed', message: 'db locked' },
+  ])
+  assert.deepEqual(entries.map((e) => e.event), ['daemon.plugin_activate_failed'])
+})

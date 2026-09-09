@@ -53,6 +53,9 @@ export const BOOT_FAILED_WARNING_PREFIX = 'boot_failed'
  * a message and a repair, and a kind added to the resolver later would then
  * arrive at that branch as a throw that never happened. The resolver's kind is
  * kept in front of its detail in `message`, which nothing matches on.
+ *
+ * Owned by this door alone: the activation loop below rewrites a throw that
+ * labelled itself with this value, so the discriminator stays exclusive.
  */
 export const REQUIRES_UNSATISFIED_ERROR_KIND = 'requires_unsatisfied'
 
@@ -121,9 +124,18 @@ export function recordFailedPlugins({ activations, unsatisfied = [], log }) {
       activated.add(result.plugin.name)
       continue
     }
-    const { errorKind, message } = result
+    const { message } = result
     const name = result.plugin.name
     recorded.add(name)
+    // A throw is an activate failure whatever it labels itself. The loader
+    // copies a plugin's own `hypErrorKind` into the result verbatim, so a
+    // plugin that threw one carrying the resolver door's value would otherwise
+    // be rendered by `hyp status` as an elimination that never happened, with
+    // the log-grep repair that holds the untruncated throw dropped for a
+    // config edit that repairs nothing.
+    const errorKind = result.errorKind === REQUIRES_UNSATISFIED_ERROR_KIND
+      ? 'activate_failed'
+      : result.errorKind
     failed.push({
       name,
       errorKind,
