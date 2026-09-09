@@ -157,8 +157,9 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * capabilities are excluded so only what the plugin itself provided
  * shows up.
  *
- * Every name here is the key its registry validated and indexed by, taken
- * through `registeredName`, not a fresh read of the record. The source,
+ * Every name here but a skill's and an agent's is the key its registry
+ * validated and indexed by, taken through `registeredName`, not a fresh read
+ * of the record (those two are contained only, below). The source,
  * dataset, init-preset and group registries store the object the plugin
  * passed, by reference, and `CommandRegistry`'s shallow copy still carries
  * the plugin's own `aliases`, so a re-read is the plugin answering the
@@ -171,6 +172,21 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * `{ name, version, provider }` objects built from the string arguments
  * `provide` was called with, so there is nothing plugin-controlled left to
  * read.
+ *
+ * A listing is taken through `listed` wherever producing it reads a
+ * plugin-controlled property itself. `CommandRegistry.list` and
+ * `listGroups` order with `compareStrings(a.name, b.name)` over the records
+ * they hold, and `initPresets.list` does the same, so a `name` accessor that
+ * throws, or that merely stops answering with a string, throws from inside
+ * `list()` before a single entry is handed back: one frame above the guard,
+ * where it escapes `snapshotRegistry`, `dryRunActivate` and `hyp plugin
+ * doctor` alike (nothing between here and the command catches). The other
+ * five listings order by their own keys or build fresh objects, and read
+ * nothing plugin-controlled. `SourceRegistry.list` and
+ * `DatasetRegistry.listDatasets` order by key for exactly this reason
+ * (issue #1524); the three that still order by `a.name` are
+ * hyparam/hypaware#1555, and until they change, the containment here costs
+ * the bucket rather than the run.
  *
  * `skills` and `agents` are contained but not verified. `skills.register` and
  * `agents.register` do build a registry-owned record out of the fields they
@@ -219,7 +235,11 @@ function snapshotRegistry(runtime, commandRegistry) {
     // trivially true: what this buys is the containment, not the check.
     skills: registeredNames(runtime.skills.list(), 'skill', itself),
     agents: registeredNames(runtime.agents.list(), 'agent', itself),
-    init_presets: registeredNames(runtime.initPresets.list(), 'init preset', (_, name) => runtime.initPresets.get(name)),
+    init_presets: registeredNames(
+      listed('init preset', () => runtime.initPresets.list()),
+      'init preset',
+      (_, name) => runtime.initPresets.get(name)
+    ),
     capabilities: runtime.capabilities
       .list()
       .filter((c) => c.provider !== STUB_PROVIDER)
@@ -318,7 +338,7 @@ function registeredNames(records, kind, resolve, stored) {
 function readCommands(commandRegistry) {
   /** @type {RegisteredCommand[]} */
   const details = []
-  for (const record of commandRegistry.list()) {
+  for (const record of listed('command', () => commandRegistry.list())) {
     const name = registeredName(record, 'command', (_, claimed) => commandRegistry.get(claimed))
     if (name === undefined) continue
     // `summary` and `hidden` are plugin-controlled too, and are read here
@@ -402,7 +422,7 @@ function registeredAliases(commandRegistry, record) {
 function readCommandGroups(commandRegistry) {
   /** @type {{ name: string, summary?: string }[]} */
   const groups = []
-  for (const record of commandRegistry.listGroups()) {
+  for (const record of listed('command group', () => commandRegistry.listGroups())) {
     const name = registeredName(record, 'command group', (_, claimed) => commandRegistry.getGroup(claimed))
     if (name === undefined) continue
     // Contained for the same reason the command detail above is: a throwing
@@ -417,6 +437,34 @@ function readCommandGroups(commandRegistry) {
     groups.push({ name, ...(summary !== undefined ? { summary } : {}) })
   }
   return groups
+}
+
+/**
+ * One registry's listing, or an empty one when producing it threw.
+ *
+ * The listings that sort on `a.name` run a plugin accessor inside a
+ * comparator, so the throw arrives from `list()` itself rather than from
+ * anything this file reads, and `Array.prototype.sort` abandons the whole
+ * array when a comparator throws. There is no per-entry recovery to make: the
+ * consumer never sees an entry. Losing the bucket makes the doctor report
+ * every declared member of it as unregistered, which is wrong about the
+ * plugin, but it is the same wrongness a single refused name already carries,
+ * it is announced on stderr, and the alternative is no report at all.
+ *
+ * Costs nothing on the honest path: one closure per bucket and no catch taken.
+ *
+ * @template T
+ * @param {string} kind
+ * @param {() => T[]} list
+ * @returns {T[]}
+ */
+function listed(kind, list) {
+  try {
+    return list()
+  } catch {
+    reportUnlistable(kind)
+    return []
+  }
 }
 
 /**
@@ -437,17 +485,39 @@ function readCommandGroups(commandRegistry) {
  */
 function reportUnreadable(kind, claimed, why = 'is not registered under it') {
   const named = claimed.length > 0 ? `'${claimed}'` : 'an unreadable name'
+  warnDegraded(`hyp plugin doctor: a registered ${kind} claiming ${named} ${why}; left out of the report`, {
+    [Attr.ERROR_KIND]: 'unregistered_contribution_name',
+    contribution_kind: kind,
+    claimed_name: claimed,
+  })
+}
+
+/**
+ * Say that a whole bucket was left out, because the registry could not produce
+ * its listing at all. No name to carry: the throw came before any entry did.
+ *
+ * @param {string} kind
+ */
+function reportUnlistable(kind) {
+  warnDegraded(`hyp plugin doctor: the registered ${kind} listing could not be read; every ${kind} left out of the report`, {
+    [Attr.ERROR_KIND]: 'unlistable_contributions',
+    contribution_kind: kind,
+  })
+}
+
+/**
+ * Both reports go out the same way: WARN, degraded, on the stderr mirror.
+ *
+ * @param {string} message
+ * @param {Record<string, unknown>} attrs
+ */
+function warnDegraded(message, attrs) {
   try {
-    getLogger('plugin-doctor', { mirrorStderr: true }).warn(
-      `hyp plugin doctor: a registered ${kind} claiming ${named} ${why}; left out of the report`,
-      {
-        [Attr.OPERATION]: 'doctor.snapshot',
-        [Attr.STATUS]: 'degraded',
-        [Attr.ERROR_KIND]: 'unregistered_contribution_name',
-        contribution_kind: kind,
-        claimed_name: claimed,
-      }
-    )
+    getLogger('plugin-doctor', { mirrorStderr: true }).warn(message, {
+      [Attr.OPERATION]: 'doctor.snapshot',
+      [Attr.STATUS]: 'degraded',
+      ...attrs,
+    })
   } catch {
     // Nothing to say it on: the channel that would carry the report is the
     // thing that just failed. The entry stays out of the snapshot either way.

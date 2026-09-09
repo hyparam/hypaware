@@ -55,6 +55,9 @@ const PLUGIN = '@test/hostile'
 /** The token the guard's structured report carries. */
 const REFUSAL = 'unregistered_contribution_name'
 
+/** The token the bucket-level report carries when a listing threw. */
+const UNLISTABLE = 'unlistable_contributions'
+
 /**
  * Counters the fixtures write and the assertions read. A fixture is imported
  * into this same process, so the probe is shared through the global rather
@@ -300,6 +303,94 @@ test('a skill name accessor that throws costs the skill one entry, not the whole
   assert.equal(result.ok, true)
   assert.deepEqual(result.registered.skills, ['aaa-honest'])
   assert.match(stderr, new RegExp(REFUSAL))
+})
+
+test('a command name accessor that throws costs the command bucket, not the whole doctor run', async () => {
+  // A read the guard never reaches: `CommandRegistry.list()` orders with
+  // `compareStrings(a.name, b.name)` over the records it holds, so the
+  // accessor runs inside the comparator, one frame above `registeredName`,
+  // and the throw leaves `snapshotRegistry` before an entry is handed back.
+  // Two commands, because a one-element sort never calls the comparator.
+  const { result, stderr } = await dryRun(
+    `export async function activate(ctx) {\n` +
+    `  const run = async () => 0\n` +
+    `  ctx.commands.register({ name: 'aaa-honest', plugin: '${PLUGIN}', summary: 'a', usage: 'u', run })\n` +
+    `  ctx.commands.register({ name: 'bbb-hostile', plugin: '${PLUGIN}', summary: 'b', usage: 'u', run })\n` +
+    `  const over = { get name() { throw new Error('no name for you') } }\n` +
+    `  Object.defineProperties(ctx.commands.get('bbb-hostile'), Object.getOwnPropertyDescriptors(over))\n` +
+    `}\n`
+  )
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.registered.commands, [])
+  assert.deepEqual(result.registered.commandDetails, [])
+  assert.match(stderr, new RegExp(UNLISTABLE))
+})
+
+test('a command name that stops being a string costs the command bucket, not the whole doctor run', async () => {
+  // `compareStrings` refuses a non-string, so an accessor that never throws is
+  // the same outage as one that does.
+  const { result, stderr } = await dryRun(
+    `export async function activate(ctx) {\n` +
+    `  const run = async () => 0\n` +
+    `  ctx.commands.register({ name: 'aaa-honest', plugin: '${PLUGIN}', summary: 'a', usage: 'u', run })\n` +
+    `  ctx.commands.register({ name: 'bbb-hostile', plugin: '${PLUGIN}', summary: 'b', usage: 'u', run })\n` +
+    `  Object.defineProperty(ctx.commands.get('bbb-hostile'), 'name', { get() { return 42 } })\n` +
+    `}\n`
+  )
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.registered.commands, [])
+  assert.match(stderr, new RegExp(UNLISTABLE))
+})
+
+test('a group name accessor that throws costs the group bucket, not the whole doctor run', async () => {
+  const { result, stderr } = await dryRun(
+    `export async function activate(ctx) {\n` +
+    `  ctx.commands.registerGroup({ name: 'aaa', plugin: '${PLUGIN}', summary: 'a' })\n` +
+    `  const hostile = { name: 'bbb', plugin: '${PLUGIN}', summary: 'b' }\n` +
+    `  ctx.commands.registerGroup(hostile)\n` +
+    `  const over = { get name() { throw new Error('no name for you') } }\n` +
+    `  Object.defineProperties(hostile, Object.getOwnPropertyDescriptors(over))\n` +
+    `}\n`
+  )
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.registered.commandGroups, [])
+  assert.match(stderr, new RegExp(UNLISTABLE))
+})
+
+test('an init preset name accessor that throws costs the preset bucket, not the whole doctor run', async () => {
+  const { result, stderr } = await dryRun(
+    `export async function activate(ctx) {\n` +
+    `  const run = async () => {}\n` +
+    `  ctx.initPresets.register({ name: 'aaa', plugin: '${PLUGIN}', summary: 'a', run })\n` +
+    `  const hostile = { name: 'bbb', plugin: '${PLUGIN}', summary: 'b', run }\n` +
+    `  ctx.initPresets.register(hostile)\n` +
+    `  const over = { get name() { throw new Error('no name for you') } }\n` +
+    `  Object.defineProperties(hostile, Object.getOwnPropertyDescriptors(over))\n` +
+    `}\n`
+  )
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.registered.init_presets, [])
+  assert.match(stderr, new RegExp(UNLISTABLE))
+})
+
+test('the bucket-level report is structured too, and names no contribution', async () => {
+  const { stderr } = await dryRun(
+    `export async function activate(ctx) {\n` +
+    `  const run = async () => 0\n` +
+    `  ctx.commands.register({ name: 'aaa-honest', plugin: '${PLUGIN}', summary: 'a', usage: 'u', run })\n` +
+    `  ctx.commands.register({ name: 'bbb-hostile', plugin: '${PLUGIN}', summary: 'b', usage: 'u', run })\n` +
+    `  const over = { get name() { throw new Error('no name for you') } }\n` +
+    `  Object.defineProperties(ctx.commands.get('bbb-hostile'), Object.getOwnPropertyDescriptors(over))\n` +
+    `}\n`
+  )
+  const line = stderr.split('\n').find((l) => l.includes(UNLISTABLE))
+  assert.ok(line, `no bucket refusal on stderr:\n${stderr}`)
+  assert.match(line, /\[hypaware:plugin-doctor\] WARN/)
+  assert.match(line, /"hyp_operation":"doctor\.snapshot"/)
+  assert.match(line, /"status":"degraded"/)
+  assert.match(line, /"contribution_kind":"command"/)
+  // No entry was ever handed back, so there is no name to claim.
+  assert.doesNotMatch(line, /"claimed_name"/)
 })
 
 test('an honest plugin registers exactly what the report says it does', async () => {
