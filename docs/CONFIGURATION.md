@@ -120,7 +120,7 @@ All paths below are relative to `HYP_HOME`:
 | Path | Purpose |
 | --- | --- |
 | `hypaware-config.json` | Local configuration |
-| `config-control/` | Central enrollment and managed configuration |
+| `hypaware/config-control/` | Central enrollment and managed configuration |
 | `hypaware/cache/` | Local query cache |
 | `hypaware/plugins/` | Per-plugin state |
 | `hypaware/sinks/` | Export state and retry outboxes |

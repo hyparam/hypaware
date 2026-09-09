@@ -1596,6 +1596,8 @@ See [updating and recovery](CLI.md#upgrade-within-a-compatible-major-version).
 
 ## Control optional product telemetry
 
+### `hyp telemetry`
+
 ```text
 hyp telemetry [status|preview|off|enable local|enable organization]
 ```
