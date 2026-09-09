@@ -1,5 +1,6 @@
 // @ts-check
 
+import { Attr, getLogger } from '../observability/index.js'
 import { jsonReplacer } from '../query/format.js'
 import { toJsonSchema, validateToolArguments } from '../cli/verb_codec.js'
 import { verbAuthClass, verbExposure } from '../registry/verbs.js'
@@ -19,6 +20,9 @@ import {
 /** Protocol version advertised when the client sends none. */
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18'
 const SERVER_NAME = 'hypaware'
+/** Telemetry identity for the records this assembly emits. */
+const SERVER_COMPONENT = 'mcp-server'
+const LIST_OPERATION = 'mcp.tools_list'
 
 /**
  * Build the **one server assembly** (verbs → MCP tools, datasets → MCP
@@ -50,6 +54,8 @@ export function createMcpServer(opts) {
   const allowOperator = opts.allowOperator ?? (transport === 'stdio')
   const serverVersion = opts.serverVersion ?? '0.0.0'
 
+  const log = getLogger(SERVER_COMPONENT)
+
   /** @param {VerbRegistration} verb */
   function toolVisible(verb) {
     const exposure = verbExposure(verb)
@@ -59,12 +65,77 @@ export function createMcpServer(opts) {
     return true
   }
 
+  /**
+   * The `tools/list` entry for one verb, or `undefined` when the verb has
+   * none that can be advertised honestly.
+   *
+   * `callTool` dispatches on the registry's key (`verbs.getByTool`), and a
+   * registration is held by reference, so `verb.tool` is plugin code free to
+   * answer a different key each time it is asked. Advertising one read of it
+   * put another plugin's registered name on this verb's `description` and
+   * `inputSchema`, so the text a model reads to decide how to call a tool came
+   * from one plugin while the code that ran came from another. Resolving the
+   * name back through the dispatch map is what makes the advertised entry the
+   * one that would run.
+   *
+   * The rest of the entry is read inside the same guard, the visibility filter
+   * included: it costs no extra read, and `listTools` is called outside any
+   * handler try/catch (`src/core/commands/mcp.js`), so an accessor that throws
+   * costs the whole tool surface rather than the one verb.
+   *
+   * @param {VerbRegistration} verb
+   * @returns {{ name: string, description: string, inputSchema: object } | undefined}
+   */
+  function toolEntry(verb) {
+    /** @type {string | undefined} */
+    let named
+    try {
+      if (!toolVisible(verb)) return undefined
+      const tool = verb.tool
+      if (verbs.getByTool(tool) !== verb) {
+        warnNotAdvertised('tool_name_not_registered', typeof tool === 'string' ? tool : '')
+        return undefined
+      }
+      named = tool
+      return {
+        name: tool,
+        description: verb.summary,
+        inputSchema: toJsonSchema(verb.inputSchema),
+      }
+    } catch (err) {
+      warnNotAdvertised('unreadable_verb', named ?? '', describeThrown(err))
+      return undefined
+    }
+  }
+
+  /**
+   * A verb dropped from the advertised list says so: it stays registered and
+   * callable by name, so nothing else reports that clients can no longer see
+   * it.
+   *
+   * @param {string} errorKind
+   * @param {string} tool
+   * @param {string} [error]
+   */
+  function warnNotAdvertised(errorKind, tool, error) {
+    log.warn('mcp.tool_not_advertised', {
+      [Attr.COMPONENT]: SERVER_COMPONENT,
+      [Attr.OPERATION]: LIST_OPERATION,
+      [Attr.ERROR_KIND]: errorKind,
+      [Attr.STATUS]: 'degraded',
+      tool,
+      error,
+    })
+  }
+
   function listTools() {
-    return verbs.list().filter(toolVisible).map((verb) => ({
-      name: verb.tool,
-      description: verb.summary,
-      inputSchema: toJsonSchema(verb.inputSchema),
-    }))
+    /** @type {{ name: string, description: string, inputSchema: object }[]} */
+    const tools = []
+    for (const verb of verbs.list()) {
+      const entry = toolEntry(verb)
+      if (entry !== undefined) tools.push(entry)
+    }
+    return tools
   }
 
   function listResources() {
@@ -165,6 +236,20 @@ export function createMcpServer(opts) {
   }
 
   return { handleMessage, listTools, listResources }
+}
+
+/**
+ * Describe a thrown value for a log field, including one that throws on the
+ * way out: the throw being reported here came from plugin code.
+ *
+ * @param {unknown} err
+ */
+function describeThrown(err) {
+  try {
+    return String(err instanceof Error ? err.message : err)
+  } catch {
+    return 'unreadable error'
+  }
 }
 
 /** @param {string} name */
