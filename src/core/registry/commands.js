@@ -224,16 +224,21 @@ export function createCommandRegistry() {
     if (!group || typeof group !== 'object') {
       throw new TypeError('CommandRegistry.registerGroup: group must be an object')
     }
-    if (typeof group.name !== 'string' || group.name.length === 0) {
+    // Read once, and key the map on what this line validated. Unlike
+    // `register` above there is no copy, so `group.name` is a live plugin
+    // property: reading it again for the `set` would store the group under a
+    // name nothing had checked, which is also the key `listGroups` orders by.
+    const name = group.name
+    if (typeof name !== 'string' || name.length === 0) {
       throw new TypeError('CommandRegistry.registerGroup: group.name must be a non-empty string')
     }
     if (group.summary !== undefined && typeof group.summary !== 'string') {
-      throw new TypeError(`CommandRegistry.registerGroup: '${group.name}' summary must be a string when present`)
+      throw new TypeError(`CommandRegistry.registerGroup: '${name}' summary must be a string when present`)
     }
     if (group.help !== undefined && typeof group.help !== 'string') {
-      throw new TypeError(`CommandRegistry.registerGroup: '${group.name}' help must be a string when present`)
+      throw new TypeError(`CommandRegistry.registerGroup: '${name}' help must be a string when present`)
     }
-    groups.set(group.name, group)
+    groups.set(name, group)
   }
 
   /** @param {string} name */
@@ -247,13 +252,37 @@ export function createCommandRegistry() {
    * to see what a plugin described is to already know the name. The agreement
    * check between a manifest and what `activate()` registers needs the set,
    * not a lookup.
+   *
+   * The order comes from the keys, not from `a.name`: the key is the name
+   * `registerGroup` validated, while `group.name` is a live property of the
+   * plugin's own object, which that function stores by reference. Reading it
+   * here would run plugin code inside a comparator, where a throw escapes
+   * into every caller of `listGroups()` before a single group has been handed
+   * back, and where `compareStrings` refuses a non-string, so an accessor
+   * that merely stops answering with a string is the same outage
+   * (issue #1555, after #1524 in the dataset registry).
    */
   function listGroups() {
-    return Array.from(groups.values()).sort((a, b) => compareStrings(a.name, b.name))
+    return Array.from(groups.keys())
+      .sort(compareStrings)
+      .map((name) => /** @type {CommandGroupRegistration} */ (groups.get(name)))
   }
 
+  /**
+   * Every registered command, ordered by name.
+   *
+   * Ordered by the keys for the reason {@link listGroups} gives, which
+   * survives the copy `register` takes: the key is the name validated off
+   * that copy, but `get()` hands the copy itself back to the registering
+   * plugin during `activate()`, so `record.name` can be redefined as an
+   * accessor afterwards. The callers a throw would escape into are
+   * `hyp --help`, group help, every dispatch that renders a command list,
+   * and the plugin doctor's dry run.
+   */
   function list() {
-    return Array.from(byName.values()).sort((a, b) => compareStrings(a.name, b.name))
+    return Array.from(byName.keys())
+      .sort(compareStrings)
+      .map((name) => /** @type {CommandRegistration} */ (byName.get(name)))
   }
 
   /** @param {string} name */
