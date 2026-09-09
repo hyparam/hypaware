@@ -91,7 +91,6 @@ export function createSinkDriver(opts) {
     const instance = handle.instanceName
     const batchId = nextBatchId(now, instance)
     const partitions = await discoverReadyPartitions(handle)
-    const format = handle.encoder?.format ?? 'native'
     return withSpan(
       'sink.export_batch',
       {
@@ -109,6 +108,14 @@ export function createSinkDriver(opts) {
         /** @type {ExportResult} */
         let result
         try {
+          // `handle.encoder` is the writer plugin's own object and `format` is
+          // the one field on it `instantiate` does not validate, so this read is
+          // a call into plugin code on every tick. It belongs inside the try
+          // that already guards `exportBatch`: an encoder the kernel cannot read
+          // is this batch failing, not the tick, which the daemon swallows as
+          // `daemon.tick_failed` - stopping every sink's export for the daemon's
+          // life while `hyp status` still reads healthy (issue #1514).
+          const format = handle.encoder?.format ?? 'native'
           const reported = await handle.sink.exportBatch(
             { batchId, partitions },
             { format, schedule }
