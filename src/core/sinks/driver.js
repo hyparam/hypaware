@@ -108,10 +108,11 @@ export function createSinkDriver(opts) {
         /** @type {ExportResult} */
         let result
         try {
-          result = await handle.sink.exportBatch(
+          const reported = await handle.sink.exportBatch(
             { batchId, partitions },
             { format, schedule }
           )
+          result = readExportResult(reported, partitions)
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           /** @type {ExportResult} */
@@ -120,9 +121,9 @@ export function createSinkDriver(opts) {
           recordFailure(handle, batchId, partitions.length, message, span)
           return summarize(instance, failed)
         }
-        const status = normalizeStatus(result)
-        const exported = typeof result.partitionsExported === 'number' ? result.partitionsExported : 0
-        const bytesWritten = typeof result.bytesWritten === 'number' ? result.bytesWritten : 0
+        const status = result.status
+        const exported = result.partitionsExported
+        const bytesWritten = result.bytesWritten ?? 0
         span.setAttribute('partitions_exported', exported)
         span.setAttribute('bytes_written', bytesWritten)
         if (status === 'exported') {
@@ -142,15 +143,13 @@ export function createSinkDriver(opts) {
             bytes_written: bytesWritten,
           })
         } else {
-          const retryParts = Array.isArray(result.retryPartitions)
-            ? result.retryPartitions
-            : partitions
+          const retryParts = result.retryPartitions ?? partitions
           const message = result.error ?? 'sink reported non-ok status'
           await persistOutbox(handle, batchId, retryParts, message)
           recordFailure(handle, batchId, retryParts.length, message, span)
           span.setAttribute('status', status === 'partial' ? 'degraded' : 'failed')
         }
-        return summarize(instance, { ...result, status })
+        return summarize(instance, result)
       },
       { component: 'sinks' }
     )
@@ -298,6 +297,39 @@ export function createSinkDriver(opts) {
 }
 
 /**
+ * Rebuild a sink's `exportBatch` answer as an `ExportResult` the kernel owns.
+ *
+ * `exportBatch` is plugin code, so resolving an answer is not the same as
+ * being able to read one: any field is free to be an accessor that throws.
+ * Every read of the plugin's object happens here, called from inside the try
+ * that already contains the plugin's promise, so an unreadable answer is the
+ * same recorded `failed` batch a throwing `exportBatch` is. Read after that
+ * try, it is instead a throw on the daemon's tick path, swallowed as
+ * `daemon.tick_failed` and costing the backfill sweep and every sink snapshot
+ * behind it (issue #1510).
+ *
+ * The partitions inside `retryPartitions` are the exception, passed through by
+ * reference rather than rebuilt: they are read again only inside
+ * `persistOutbox`'s own try, and rebuilding them is the nested-value hazard
+ * tracked as issue #1505 rather than this one. The array itself is copied, so
+ * what the driver counts and iterates is a kernel-owned list.
+ *
+ * @param {ExportResult | null | undefined} reported
+ * @param {QueryPartition[]} partitions
+ * @returns {ExportResult}
+ */
+function readExportResult(reported, partitions) {
+  const status = reported?.status
+  return {
+    status: status === 'exported' || status === 'partial' ? status : 'failed',
+    partitionsExported: typeof reported?.partitionsExported === 'number' ? reported.partitionsExported : 0,
+    bytesWritten: typeof reported?.bytesWritten === 'number' ? reported.bytesWritten : 0,
+    retryPartitions: Array.isArray(reported?.retryPartitions) ? reported.retryPartitions.slice() : partitions,
+    error: typeof reported?.error === 'string' ? reported.error : undefined,
+  }
+}
+
+/**
  * @param {string} instance
  * @param {ExportResult} result
  * @returns {{ instance: string, status: ExportResult['status'], partitionsExported: number, bytesWritten: number, error?: string }}
@@ -306,22 +338,10 @@ function summarize(instance, result) {
   return {
     instance,
     status: result.status,
-    partitionsExported: typeof result.partitionsExported === 'number' ? result.partitionsExported : 0,
-    bytesWritten: typeof result.bytesWritten === 'number' ? result.bytesWritten : 0,
+    partitionsExported: result.partitionsExported,
+    bytesWritten: result.bytesWritten ?? 0,
     error: result.error,
   }
-}
-
-/**
- * @param {ExportResult} result
- * @returns {ExportResult['status']}
- */
-function normalizeStatus(result) {
-  if (!result || typeof result !== 'object') return 'failed'
-  const s = result.status
-  if (s === 'exported') return 'exported'
-  if (s === 'partial') return 'partial'
-  return 'failed'
 }
 
 // ---------------------------------------------------------------------

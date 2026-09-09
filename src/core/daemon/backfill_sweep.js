@@ -124,8 +124,9 @@ export function createBackfillSweepDriver(opts) {
     /** @type {string[]} */
     const fired = []
     for (const provider of backfills.list()) {
-      if (!provider.sweep) continue
-      if (!isDue(provider, now, tickOpts.force === true)) continue
+      const schedule = readSweepSchedule(provider)
+      if (schedule === undefined) continue
+      if (!isDue(provider, schedule, now, tickOpts.force === true)) continue
       // A due provider whose previous run is still going is skipped, not
       // queued: the sweep is level-triggered, so the next tick that finds it
       // due and idle picks up whatever this one would have.
@@ -136,7 +137,7 @@ export function createBackfillSweepDriver(opts) {
           [Attr.ERROR_KIND]: 'already_running',
           [Attr.PLUGIN]: provider.plugin,
           provider: provider.name,
-          hyp_sweep_schedule: provider.sweep.cron,
+          hyp_sweep_schedule: schedule,
           status: 'ok',
         })
         continue
@@ -150,7 +151,7 @@ export function createBackfillSweepDriver(opts) {
         [Attr.PLUGIN]: provider.plugin,
         [Attr.DEV_RUN_ID]: devRunId,
         provider: provider.name,
-        hyp_sweep_schedule: provider.sweep.cron,
+        hyp_sweep_schedule: schedule,
         status: 'ok',
       })
       const effectiveConfig = config ?? { version: 2 }
@@ -229,6 +230,45 @@ export function createBackfillSweepDriver(opts) {
   }
 
   /**
+   * Read one contribution's sweep schedule, or `undefined` when it did not opt
+   * in or cannot be read.
+   *
+   * `sweep` is the one contribution field `BackfillRegistry.register` does not
+   * validate, and the registry stores the contribution by reference, so this
+   * due-check is the first read of it and a plugin is free to compute it in an
+   * accessor. Reading it inside a guard is what keeps an unreadable schedule
+   * one provider's problem: a throw out of `tick()` is swallowed by the daemon
+   * as `daemon.tick_failed`, which disables the sweep for every provider for
+   * the daemon's life and freezes the sink snapshots behind it (issue #1510).
+   * Only the kernel-built string leaves, the shape `probeSourceStatus` uses
+   * for a source's status answer (`src/core/daemon/runtime.js`).
+   *
+   * An opted-in contribution with no usable `cron` resolves to the empty
+   * string, which `cronMatches` reads as "every tick".
+   *
+   * @param {BackfillContribution} provider
+   * @returns {string | undefined}
+   */
+  function readSweepSchedule(provider) {
+    try {
+      const sweep = provider.sweep
+      if (!sweep) return undefined
+      return typeof sweep.cron === 'string' ? sweep.cron : ''
+    } catch (err) {
+      log.warn('backfill.sweep_schedule_unreadable', {
+        [Attr.COMPONENT]: SWEEP_COMPONENT,
+        [Attr.OPERATION]: SWEEP_OPERATION,
+        [Attr.ERROR_KIND]: 'unreadable_sweep',
+        [Attr.PLUGIN]: provider.plugin,
+        provider: provider.name,
+        status: 'failed',
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return undefined
+    }
+  }
+
+  /**
    * Whether a contribution's schedule is due at `now`. A malformed cron
    * expression throws out of `cronMatches`; here that is one provider's
    * scheduling metadata being wrong, not a reason to skip every later
@@ -236,14 +276,15 @@ export function createBackfillSweepDriver(opts) {
    * is logged and treated as not due.
    *
    * @param {BackfillContribution} provider
+   * @param {string} schedule
    * @param {Date} now
    * @param {boolean} force
    * @returns {boolean}
    */
-  function isDue(provider, now, force) {
+  function isDue(provider, schedule, now, force) {
     if (force) return true
     try {
-      return cronMatches(provider.sweep?.cron ?? '', now)
+      return cronMatches(schedule, now)
     } catch (err) {
       log.warn('backfill.sweep_schedule_invalid', {
         [Attr.COMPONENT]: SWEEP_COMPONENT,
@@ -251,7 +292,7 @@ export function createBackfillSweepDriver(opts) {
         [Attr.ERROR_KIND]: 'invalid_cron',
         [Attr.PLUGIN]: provider.plugin,
         provider: provider.name,
-        hyp_sweep_schedule: provider.sweep?.cron,
+        hyp_sweep_schedule: schedule,
         status: 'failed',
       })
       return false
