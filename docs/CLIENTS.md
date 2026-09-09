@@ -26,7 +26,7 @@ choices are locked; local additions remain yours to configure.
 | OpenClaw (`openclaw`) | Gateway routing plus a scheduled transcript recovery lane. |
 
 Available integrations depend on active plugins and the installed version.
-Check `hyp client attach --help` and `hyp client history providers` for your
+Check `hyp plugin list` and `hyp client history providers` for your
 installation. Raw proxy sources do not configure an AI client; use a client
 integration for conversation capture.
 

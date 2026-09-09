@@ -101,13 +101,16 @@ local-only or ignored-folder exclusions. A confirmed all-destination sync can
 release an attended enrollment's first-sync hold early. See [privacy](PRIVACY.md)
 and [headless setup](HEADLESS.md) for enrollment-specific behavior.
 
-The generated Parquet sink instance is named `local`. You can inspect export
-maintenance separately from cache maintenance:
+The generated Parquet sink instance is named `local`. Inspect cache
+maintenance with:
 
 ```sh
 hyp cache maintain ai_gateway_messages --dry-run
-hyp sink maintain local --dry-run
 ```
+
+`hyp sink maintain` is a separate command, and it covers iceberg table-format
+export sinks only. The Parquet sink the guided setup composes is a blob sink,
+so that command does not accept it.
 
 For custom destinations, keep writer and destination plugin settings in their
 documented config blocks and run `hyp config validate` before restarting.
