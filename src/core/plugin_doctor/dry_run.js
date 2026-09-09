@@ -347,12 +347,25 @@ function readCommands(commandRegistry) {
     // which runs outside the dry run's own catch, and cost `hyp plugin doctor`
     // the whole run over one plugin. Contained to the same one entry a
     // refused name costs.
+    //
+    // Containing the read is not enough on its own, because the value it
+    // answers with leaves: `RegisteredSnapshot` types `summary` a `string` and
+    // `checkCommandHelp` interpolates it, one module past this catch, so a
+    // `toString` that throws costs the run from there instead (issue #1557).
+    // `hidden` is narrowed to a boolean by `=== true`; `summary` is refused
+    // unless it is still the string `register` validated, which keeps the type
+    // every consumer acts on true rather than hardening each use of it.
     /** @type {RegisteredCommand} */
     let detail
     try {
+      const summary = record.summary
+      if (typeof summary !== 'string') {
+        reportUnreadable('command', name, 'answered with a summary that is not the string it registered')
+        continue
+      }
       detail = {
         name,
-        summary: record.summary,
+        summary,
         aliases: registeredAliases(commandRegistry, record),
         hidden: record.hidden === true,
       }
@@ -425,13 +438,18 @@ function readCommandGroups(commandRegistry) {
   for (const record of listed('command group', () => commandRegistry.listGroups())) {
     const name = registeredName(record, 'command group', (_, claimed) => commandRegistry.getGroup(claimed))
     if (name === undefined) continue
-    // Contained for the same reason the command detail above is: a throwing
-    // `summary` accessor must cost this group its row, not the doctor its run.
+    // Contained, and checked, for the two reasons the command detail above is.
+    // No check reads a group summary today, so the value half is the same hole
+    // one field over rather than a second live crash.
     let summary
     try {
       summary = record.summary
     } catch {
       reportUnreadable('command group', name, 'did not answer for its summary')
+      continue
+    }
+    if (summary !== undefined && typeof summary !== 'string') {
+      reportUnreadable('command group', name, 'answered with a summary that is not the string it registered')
       continue
     }
     groups.push({ name, ...(summary !== undefined ? { summary } : {}) })
