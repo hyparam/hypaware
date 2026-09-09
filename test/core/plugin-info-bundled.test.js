@@ -173,10 +173,12 @@ test('plugin info leaves the installed-plugin block unchanged', async () => {
 })
 
 // A lock entry under a bundled name is real, but it never runs: boot drops it
-// and activates the bundled copy (LLP 0380). The install record on its own
-// describes code the machine does not execute, and contradicts the
+// from selection in favor of the bundled copy (LLP 0380). The install record on
+// its own describes code the machine does not execute, and contradicts the
 // `(shadowed by the bundled copy)` mark `plugin list` puts on the same entry.
-test('plugin info says which copy runs when an install shadows a bundled name', async () => {
+// The line claims selection and not execution, which is what the manifest set
+// settles: a boot can select the bundled copy and still fail to activate it.
+test('plugin info says which copy boot selects when an install shadows a bundled name', async () => {
   const github = await bundledManifest('@hypaware/github')
   const hypHome = await makeHome('hyp-plugin-info-shadow-', {
     lock: { '@hypaware/github': lockEntry('@hypaware/github', '0.9.0') },
@@ -189,8 +191,8 @@ test('plugin info says which copy runs when an install shadows a bundled name', 
     assert.match(info.stdout, /^ {2}install_dir: {3}\/fixtures\/@hypaware\/github$/m)
     assert.equal(
       info.stdout.split('\n')[1],
-      `  shadowed:      the bundled copy ${github.manifest.version} at ${github.rootDir}`
-        + ' runs instead; hyp plugin remove @hypaware/github'
+      `  shadowed:      boot selects the bundled copy ${github.manifest.version} at ${github.rootDir};`
+        + ' this install never runs (hyp plugin remove @hypaware/github)'
     )
     // The two surfaces reach the same verdict about the same lock entry.
     const list = runCli(hypHome, ['plugin', 'list'])

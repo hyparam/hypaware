@@ -424,13 +424,17 @@ export async function runPluginInfo(argv, ctx) {
   }
   ctx.stdout.write(`${entry.name}@${entry.version}\n`)
   // A lock entry under a bundled name is real and removable, but it never runs:
-  // boot drops it from selection and activates the bundled copy. Read off the
-  // bundled manifest set rather than off what this boot activated, exactly as
-  // the listing's `(shadowed by the bundled copy)` mark is, so the two agree.
-  // @ref LLP 0380#bundled-copy-wins [implements]: the install record says which copy actually runs
+  // boot drops it from selection in favor of the bundled copy. The claim is
+  // selection, not execution, because that is the part the manifest set settles
+  // on its own: whether the selected copy then activated is this boot's
+  // business and `hyp plugin list`'s to report. Read off the bundled manifest
+  // set rather than off what this boot activated, exactly as the listing's
+  // `(shadowed by the bundled copy)` mark is, so the two agree under every
+  // profile.
+  // @ref LLP 0380#bundled-copy-wins [implements]: the install record says which copy boot selects
   if (bundled) {
     ctx.stdout.write(
-      `  shadowed:      the bundled copy ${bundled.manifest.version} at ${bundled.rootDir} runs instead; hyp plugin remove ${name}\n`
+      `  shadowed:      boot selects the bundled copy ${bundled.manifest.version} at ${bundled.rootDir}; this install never runs (hyp plugin remove ${name})\n`
     )
   }
   ctx.stdout.write(`  source:        ${entry.source.kind} (${entry.source.raw})\n`)
