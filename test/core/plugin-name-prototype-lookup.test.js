@@ -91,20 +91,31 @@ test('plugin info answers a prototype name with the ordinary miss message', asyn
   }
 })
 
-// The same hazard on the destructive command, where the wrong answer is worse
-// than an opaque one: the inherited function read as an install record, so the
-// command deleted a directory it derived from the name and then reported a
-// removal that never happened.
-test('plugin remove refuses a prototype name and leaves the lock alone', async () => {
+// The same hazard on the destructive command, where a wrong answer costs more
+// than an opaque one. On the released CLI the argv crash above preempted this,
+// so no operator could reach it; guarding only the argv half is what exposed
+// it, and that half alone is a plausible fix. With the lock read still bare,
+// the inherited function read as an install record: the command exited 0,
+// reported `removed toString`, and deleted the directory it derived from the
+// name. Hence the decoy, which pins the harm the message alone cannot: an
+// unchanged lock proves nothing about what came off the disk beside it.
+test('plugin remove refuses a prototype name and removes nothing', async () => {
   const hypHome = await makeHome('hyp-plugin-proto-remove-')
   const lockPath = path.join(hypHome, 'hypaware', 'plugin-lock.json')
   try {
     const before = await fs.readFile(lockPath, 'utf8')
+    /** @param {string} name */
+    const decoy = (name) => path.join(hypHome, 'hypaware', 'plugins', name, 'CANARY')
+    for (const name of PROTOTYPE_NAMES) {
+      await fs.mkdir(path.dirname(decoy(name)), { recursive: true })
+      await fs.writeFile(decoy(name), 'decoy\n')
+    }
     for (const name of PROTOTYPE_NAMES) {
       const out = runCli(hypHome, ['plugin', 'remove', name])
       assert.equal(out.status, 1, `${name}: expected exit 1, got ${out.status}: ${out.stderr}`)
       assert.equal(out.stdout, '', `${name}: expected no stdout`)
       assert.equal(out.stderr, `hyp plugin remove: plugin not installed: ${name}\n`)
+      assert.equal(await fs.readFile(decoy(name), 'utf8'), 'decoy\n', `${name}: decoy removed`)
     }
     assert.equal(await fs.readFile(lockPath, 'utf8'), before)
   } finally {
