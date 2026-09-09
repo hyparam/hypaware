@@ -1,6 +1,7 @@
 // @ts-check
 
 import { spawn } from 'node:child_process'
+import { accessSync, constants as fsConstants } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -95,6 +96,41 @@ export function isNpxBinPath(binPath, env = process.env) {
   const cache = env.npm_config_cache ? path.resolve(env.npm_config_cache) : undefined
   if (cache && isInside(normalized, path.join(cache, '_npx'))) return true
   return normalized.split(path.sep).includes('_npx')
+}
+
+/**
+ * The absolute path of an already-installed HypAware CLI, or `undefined`.
+ *
+ * The read-only counterpart to `ensureDurableBinForNpx`, for a caller that must
+ * record a CLI path on disk but cannot spend an `npm install -g` to get one: it
+ * finds only what is already there, so it stays synchronous and total.
+ *
+ * `$PATH` is the search, not the answer - what comes back is absolute, so a
+ * consumer that cannot depend on `PATH` at run time spends the lookup once,
+ * here. npx's own `_npx` shim directory sits in front of `PATH` and is skipped:
+ * resolving it would re-record the very path such a caller is avoiding.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {NodeJS.Platform} [platform]
+ * @returns {string | undefined}
+ */
+export function findInstalledHypawareBin(env = process.env, platform = process.platform) {
+  const exts = platform === 'win32'
+    ? (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+    : ['']
+  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+    if (!dir || isNpxBinPath(dir, env)) continue
+    for (const ext of exts) {
+      const candidate = path.resolve(dir, 'hypaware' + ext)
+      try {
+        accessSync(candidate, fsConstants.X_OK)
+        return candidate
+      } catch {
+        // not here, or not executable: keep walking
+      }
+    }
+  }
+  return undefined
 }
 
 /**

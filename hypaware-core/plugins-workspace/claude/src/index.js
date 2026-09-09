@@ -11,6 +11,7 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
+import { findInstalledHypawareBin, isNpxBinPath } from '../../../../src/core/cli/global_install.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
 import { resolveClaudeCodeVersion } from './claude_version.js'
@@ -218,6 +219,7 @@ export async function activate(ctx) {
               return
             }
             const port = endpointPort(attachCtx.endpoint)
+            const hookBin = resolveHookBinPath(ctx.env)
 
             // The base URL is never written and no proxy keys appear, which is
             // what keeps Remote Control's first-party predicate true with no
@@ -229,7 +231,7 @@ export async function activate(ctx) {
               version: ctx.plugin.version,
               stateFile,
               settingsPath,
-              binPath: resolveHookBinPath(ctx.env),
+              binPath: hookBin.binPath,
               mode: MODE_OTEL,
               telemetryPort,
               spoolDir,
@@ -282,8 +284,25 @@ export async function activate(ctx) {
             // apart: `malformed_blocks_repaired` names one specific repair, and
             // folding an unrelated warning into it would make the count lie.
             const warnings = spoolWarning === undefined
-              ? malformedWarnings
+              ? [...malformedWarnings]
               : [...malformedWarnings, spoolWarning]
+            // Nothing else will ever mention an npx-cache hook path: the hook
+            // exits 0 and says nothing once its command is gone, so the first
+            // symptom is columns that stopped arriving. Pushed onto a copy, so
+            // `malformed_blocks_repaired` keeps counting only repairs.
+            if (hookBin.ephemeral) {
+              warnings.push(
+                `the managed hook records ${hookBin.binPath}, inside npm's npx cache; ` +
+                'capture of cwd and git branch stops without warning once npm prunes it. ' +
+                "Run 'npm install -g hypaware', then 'hyp client attach claude' again, to " +
+                'record a durable path'
+              )
+              logger.warn('client.attach.ephemeral_hook_bin', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                bin_path: hookBin.binPath,
+              })
+            }
 
             // A prior proxy marker makes this attach a migration. The settings
             // write above already released the proxy keys (the LLP 0232
@@ -487,13 +506,27 @@ export async function activate(ctx) {
  * Claude runs hooks from arbitrary working directories, so the managed hook
  * must use a concrete CLI entrypoint instead of assuming `hyp` is on PATH.
  *
+ * Under `npx hypaware` that entrypoint is inside npm's `_npx` cache, which npm
+ * prunes on its own schedule, so recording it writes a path that outlives what
+ * owns it. The hook exits 0 and says nothing when its command is missing, so
+ * the loss is silent: `cwd` and `git_branch` just stop arriving. An installed
+ * CLI is durable, and resolving it here still yields a concrete absolute path -
+ * the PATH lookup is spent once, at attach, which is the point.
+ *
+ * With nothing installed, the npx path still captures until npm prunes it, so
+ * it is written and flagged `ephemeral` rather than refused.
+ *
  * @param {NodeJS.ProcessEnv} env
+ * @returns {{ binPath: string, ephemeral: boolean }}
  */
 function resolveHookBinPath(env) {
   const explicit = firstNonEmpty(env.HYPAWARE_BIN, env.HYP_BIN)
-  if (explicit) return path.resolve(explicit)
-  if (process.argv[1]) return path.resolve(process.argv[1])
-  return FALLBACK_BIN_PATH
+  if (explicit) return { binPath: path.resolve(explicit), ephemeral: false }
+  const running = process.argv[1] ? path.resolve(process.argv[1]) : FALLBACK_BIN_PATH
+  if (!isNpxBinPath(running, env)) return { binPath: running, ephemeral: false }
+  const installed = findInstalledHypawareBin(env)
+  if (installed !== undefined) return { binPath: installed, ephemeral: false }
+  return { binPath: running, ephemeral: true }
 }
 
 /**
