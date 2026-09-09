@@ -109,7 +109,18 @@ export function createCommandRegistry() {
     if (byName.has(record.name) || aliasIndex.has(record.name)) {
       throw new Error(`CommandRegistry.register: duplicate command name '${record.name}'`)
     }
-    for (const alias of record.aliases ?? []) {
+    // The copy above is shallow, so `record.aliases` is still the plugin's
+    // own value, and iterating it twice puts the same question to a
+    // plugin-controlled `Symbol.iterator` with nothing making it answer
+    // alike. One that names an unclaimed alias to the collision check and a
+    // claimed one to the write overwrites the alias it would have been
+    // refused; one that yields cleanly and then throws leaves `byName`
+    // holding the command with the alias index half written. Drained once,
+    // the names checked are the names written and every step after
+    // `byName.set` is total, so a registration claims both indexes or
+    // neither.
+    const aliases = [...(record.aliases ?? [])]
+    for (const alias of aliases) {
       if (byName.has(alias) || aliasIndex.has(alias)) {
         throw new Error(
           `CommandRegistry.register: alias '${alias}' for '${record.name}' collides with an existing command`
@@ -117,7 +128,7 @@ export function createCommandRegistry() {
       }
     }
     byName.set(record.name, record)
-    for (const alias of record.aliases ?? []) {
+    for (const alias of aliases) {
       aliasIndex.set(alias, record.name)
     }
     warnDroppedOptionals(record.name, dropped)
