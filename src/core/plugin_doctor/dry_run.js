@@ -192,10 +192,9 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * capability registry of its own, seeded from manifests before any plugin
  * activates, and no caller passes it the runtime's.
  *
- * A listing is taken through `listed` wherever producing it once read a
- * plugin-controlled property itself: `CommandRegistry.list`, `listGroups` and
- * `initPresets.list`. All three order by the keys their registries validated
- * (hyparam/hypaware#1555), as `SourceRegistry.list` and
+ * Three listings are taken through `listed`: `CommandRegistry.list`,
+ * `listGroups` and `initPresets.list`. All three order by the keys their
+ * registries validated (hyparam/hypaware#1555), as `SourceRegistry.list` and
  * `DatasetRegistry.listDatasets` already did (issue #1524), so the `name` a
  * plugin left on a stored command, group or preset is asked for only by
  * `registeredName` below, where it costs the one contribution rather than the
@@ -485,11 +484,11 @@ function readCommandGroups(refused, commandRegistry) {
 /**
  * One registry's listing, or an empty one when producing it threw.
  *
- * Kept as defence in depth rather than against a live hazard. Its three
- * callers are `CommandRegistry.list`, `listGroups` and `initPresets.list`,
- * and all three order by the keys their registries validated
- * (hyparam/hypaware#1555), so producing one of those listings reads no
- * accessor a plugin left on a stored record and no hostile `name` reaches
+ * Kept as defence in depth rather than against a live hazard. The three
+ * listings it wraps are `CommandRegistry.list`, `listGroups` and
+ * `initPresets.list`, and all three order by the keys their registries
+ * validated (hyparam/hypaware#1555), so producing one of those listings reads
+ * no accessor a plugin left on a stored record and no hostile `name` reaches
  * this catch. That is a fact about how those three list, not a rule about
  * listings and not a claim that a `list()` cannot throw for some other
  * reason: one that went back to reading a record would land here again,
