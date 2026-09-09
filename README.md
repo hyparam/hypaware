@@ -20,6 +20,8 @@ There are two ways to run it:
 
 > Part of **[HypStack](https://hypstack.ai/)**, an open-source stack for AI observability.
 
+**[Documentation](./docs/README.md):** setup, clients, querying, configuration, privacy, and troubleshooting.
+
 **Contents:**
 [Requirements](#requirements) ·
 [Quickstart](#quickstart-solo-fully-local) ·
@@ -64,8 +66,10 @@ On a TTY this launches the interactive walkthrough:
    nothing. They remain real sources: `hyp setup --source raw-anthropic`
    still composes one, and a config that already collects one keeps it
    through a reconfigure (LLP 0202).
-2. Pick an **export** strategy: keep the local query cache only, write
-   Parquet files under `<HYP_HOME>/exports`, or configure later.
+2. New guided setups keep the local query cache and also write local
+   Parquet exports under `<HYP_HOME>/exports`. Use `--export keep-local`,
+   `--export local-parquet`, or `--export configure-later` to select a strategy
+   explicitly. Interactive reconfiguration preserves the existing choice.
 3. The **retention window** is not asked: the pathway sets it, `90` days on
    a team install and `120` on a local-only one. `hyp setup --retention-days
    <N>` overrides it, and `query.cache.retention` in the written config
@@ -104,7 +108,7 @@ Other init flags:
 | `--client claude\|claude-desktop\|codex\|opencode` | Capture a client (repeatable)      |
 | `--source <id>`            | Add a capture source (repeatable)                       |
 | `--export <choice>`        | `keep-local`, `local-parquet`, or `configure-later`     |
-| `--retention-days <N>`     | Override the default 90-day retention window            |
+| `--retention-days <N>`     | Override the pathway retention default            |
 | `--from-file <config.json>`| Skip the picker and load a known-good config            |
 | `--bin <path>`             | Override the binary path the daemon installer uses      |
 
@@ -686,9 +690,14 @@ forwarded to a team server or exported to Parquet are not affected; see
 
 ## Project documents
 
-User-facing guides live under [`docs/`](./docs/):
+Start at the [documentation index](./docs/README.md) for guides organized by task.
+User-facing guides include:
 
 - [`docs/CLI.md`](./docs/CLI.md): install, operate, upgrade, and recover HypAware with the task-oriented CLI
+- [Clients and history](./docs/CLIENTS.md): attach integrations and import existing sessions
+- [Querying and reports](./docs/QUERYING.md): search, SQL, remote queries, activity graphs, MCP, and reports
+- [Configuration and storage](./docs/CONFIGURATION.md): retention, exports, paths, and plugins
+- [Troubleshooting](./docs/TROUBLESHOOTING.md): diagnose capture, query, export, and daemon problems
 - [`docs/CLI_REFERENCE.md`](./docs/CLI_REFERENCE.md): complete syntax and behavior for every visible CLI command
 - [`docs/TEAM_SETUP.md`](./docs/TEAM_SETUP.md): rolling HypAware out across a team
 - [`docs/HEADLESS.md`](./docs/HEADLESS.md): headless deploys on CI runners and servers with a pre-minted token

@@ -1,5 +1,7 @@
 # Acceptance procedures (manual)
 
+[Documentation](README.md)
+
 Acceptance checks are the third tier of the test model in `AGENTS.md`. They
 cross boundaries the current-code hermetic harness cannot prove. Most use the
 packaged CLI, a real daemon, a real user home, and real client traffic. The

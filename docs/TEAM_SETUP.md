@@ -1,5 +1,7 @@
 # Set up HypAware for your team
 
+[Documentation](README.md)
+
 Get an organization on the central server, then set up each machine to join
 it.
 

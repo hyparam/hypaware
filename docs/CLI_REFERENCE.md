@@ -1,10 +1,39 @@
 # HypAware CLI command reference
 
+[Documentation](README.md)
+
 This reference documents the visible commands shipped with HypAware. It uses
 the canonical `hyp` spelling. The `hypaware` binary accepts the same arguments.
 
 For installation, upgrade, recovery, and task-oriented workflows, see
 [Use the HypAware CLI](./CLI.md).
+
+## On this page
+
+- [Read command syntax](#read-command-syntax)
+- [Plugin-owned commands](#plugin-owned-commands)
+- [Set up and inspect HypAware](#set-up-and-inspect-hypaware)
+- [Query recorded data](#query-recorded-data)
+- [Render and manage reports](#render-and-manage-reports)
+- [Send data now](#send-data-now)
+- [Control the current session](#control-the-current-session)
+- [Manage AI clients and history](#manage-ai-clients-and-history)
+- [Control privacy](#control-privacy)
+- [Connect to or leave a central server](#connect-to-or-leave-a-central-server)
+- [Manage the daemon](#manage-the-daemon)
+- [Validate configuration](#validate-configuration)
+- [Manage the local cache](#manage-the-local-cache)
+- [Maintain exports](#maintain-exports)
+- [Manage plugins](#manage-plugins)
+- [Manage remote query targets](#manage-remote-query-targets)
+- [Serve MCP tools](#serve-mcp-tools)
+- [Build and maintain the activity graph](#build-and-maintain-the-activity-graph)
+- [Inspect vector indexes](#inspect-vector-indexes)
+- [Enrich the activity graph](#enrich-the-activity-graph)
+- [Update HypAware](#update-hypaware)
+- [Control optional product telemetry](#control-optional-product-telemetry)
+- [Print version information](#print-version-information)
+- [Develop plugins](#develop-plugins)
 
 ## Read command syntax
 
@@ -1557,6 +1586,39 @@ committed-knowledge counts. It is read-only.
 ```sh
 hyp enrichment status
 ```
+
+## Update HypAware
+
+### `hyp update`
+
+```text
+hyp update
+```
+
+Checks the npm registry and installs a newer HypAware release into a global
+installation, then restarts the installed daemon. It also repairs a daemon
+still running an older version than the package on disk. Foreground daemons
+need a separate relaunch; source checkouts and npx-cache copies do not
+self-update. Failures return `1` with a reason and repair guidance.
+
+See [updating and recovery](CLI.md#upgrade-within-a-compatible-major-version).
+
+## Control optional product telemetry
+
+### `hyp telemetry`
+
+```text
+hyp telemetry [status|preview|off|enable local|enable organization]
+```
+
+Product telemetry defaults off. `status` reports consent, destination, and queue
+state; `preview` prints the next serialized batch or `null`. `enable local`
+retains an allowlisted preview queue without delivery. `enable organization`
+requires an eligible enrolled central destination. `off` removes pending copies
+and stops collection, but cannot retract records already accepted remotely.
+
+See [product telemetry](PRODUCT_TELEMETRY.md) for daemon restart requirements,
+the current draft implementation, and rollout limitations.
 
 ## Print version information
 

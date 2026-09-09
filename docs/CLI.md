@@ -1,5 +1,7 @@
 # Use the HypAware CLI
 
+[Documentation](README.md)
+
 Use the HypAware command-line interface (CLI) to set up capture, inspect your
 installation, explore recorded data, and control what leaves your machine.
 This guide uses `hyp`, the short binary name. You can use `hypaware` instead;
@@ -26,9 +28,10 @@ To start the guided setup, use `npx`:
 npx hypaware
 ```
 
-The setup asks what you want to record and where you want to save it. It then
-writes the configuration, installs a durable global CLI, installs the daemon,
-attaches the clients you selected, and imports supported client history.
+The setup asks whether to collect locally or with a team and what to record.
+New guided setups also configure local Parquet exports; use `--export` to choose
+another strategy. It writes the configuration, installs a durable global CLI
+and the daemon, attaches the clients you selected, and imports supported client history.
 
 If a valid configuration already exists, `hyp setup` shows the current setup
 and lets you reconfigure it, open full status, or quit. Quit is the default, so
@@ -54,6 +57,10 @@ actions. If a configuration already exists, add `--force` to replace it.
 HypAware backs up the existing configuration before replacement.
 
 ## Follow the command journey
+
+For worked examples, see [clients and history](CLIENTS.md),
+[querying and reports](QUERYING.md), [configuration and storage](CONFIGURATION.md),
+and [troubleshooting](TROUBLESHOOTING.md).
 
 Start with the command that matches your task:
 
@@ -168,9 +175,25 @@ hyp status
 
 ## Upgrade within a compatible major version
 
-HypAware doesn't currently provide a `setup update` command. For a compatible
-1.x upgrade, update the global package, reinstall the service definition, and
-check the installation:
+For a normal global installation, check for and apply the latest release:
+
+```sh
+hyp update
+hyp status
+```
+
+`hyp update` installs a newer HypAware package through npm and restarts the
+installed daemon. It also handles a daemon left running an older version after
+the package was updated. A foreground daemon must be relaunched separately.
+Source checkouts and npx-cache installations do not self-update.
+
+Supervised global installations also update automatically by default. Status
+reports update failures or a held release. `hyp update` selects the latest
+release; it is not a major-version pin. If you specifically need to install a
+1.x release, use npm's version selector. To keep automatic updates from later
+selecting another release, set top-level `"auto_update": false` in the effective
+configuration and restart the daemon; centrally managed policy may own that
+choice. Then run:
 
 ```sh
 npm install -g hypaware@1
@@ -186,7 +209,8 @@ configuration and recordings.
 
 ## Upgrade across a breaking version
 
-HypAware doesn't currently automate breaking-version acceptance or rollback.
+HypAware doesn't provide a general operator-controlled migration rollback.
+The updater's boot-failure recovery is not a backup of your data.
 Before you install a new major version, read its release notes and save a copy
 of `~/.hyp` at a new backup path. Then install the exact reviewed version and
 validate before you resume ordinary use:

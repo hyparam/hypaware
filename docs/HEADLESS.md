@@ -1,5 +1,7 @@
 # Run HypAware headless (CI and servers)
 
+[Documentation](README.md)
+
 Capture agent sessions on a machine with no browser and no interactive user:
 a CI runner, a container, or a long-lived server. Enrollment happens with a
 token minted ahead of time on your own machine, so the headless machine never

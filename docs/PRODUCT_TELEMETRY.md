@@ -1,5 +1,7 @@
 # Product telemetry (draft client increment)
 
+[Documentation](README.md)
+
 Collection defaults **off**. This feature has no vendor endpoint, shared secret,
 registration request, or automatic permission derived from organization enrollment.
 
