@@ -84,6 +84,36 @@ test('OpenCode backfill selects a bounded time window then exports only exact se
   assert.equal(projection.attributes.opencode.entrypoint_source, 'historical-export')
 })
 
+test('OpenCode backfill recognizes the CLI empty-store response and logs the selection', async () => {
+  const calls = []
+  const logged = []
+  const ctx = runContext()
+  ctx.log.info = (event, attrs) => { logged.push({ event, attrs }) }
+  const provider = createOpenCodeBackfillProvider({
+    async runCommand(args) {
+      calls.push(args)
+      // OpenCode 1.18.22 returns before JSON formatting when no sessions exist.
+      return ''
+    },
+  })
+
+  assert.deepEqual(await collect(provider.run(ctx)), { items: [], events: [] })
+  assert.deepEqual(calls, [['session', 'list', '--format', 'json', '--max-count', '1000']])
+  assert.deepEqual(logged.map(({ event }) => event), ['opencode.backfill.selection'])
+  assert.equal(logged[0].attrs.selected_sessions, 0)
+  assert.equal(logged[0].attrs.reason, 'opencode_cli_empty_stdout')
+  assert.equal(logged[0].attrs.status, 'ok')
+})
+
+test('OpenCode backfill rejects malformed nonempty lists and non-array JSON', async () => {
+  for (const raw of [' ', '\n', '[', 'not json', '{}', 'null']) {
+    const provider = createOpenCodeBackfillProvider({
+      async runCommand() { return raw },
+    })
+    await assert.rejects(collect(provider.run(runContext())))
+  }
+})
+
 test('exact-id recovery does not list or inspect unrelated OpenCode history', async () => {
   const calls = []
   const provider = createOpenCodeBackfillProvider({
