@@ -31,7 +31,8 @@ test('isNpxBinPath detects npm _npx cache entries', () => {
 
 // Whatever this returns gets written down and executed later, so every entry it
 // accepts has to be a file that can still be run from somewhere else, some time
-// from now. The three it must walk past all look executable to `access(X_OK)`.
+// from now. Three of the four it must walk past look executable to
+// `access(X_OK)`, and the fourth is executable and real but temporary.
 test('findInstalledHypawareBin only accepts a durable, runnable entry', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-find-bin-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
@@ -54,15 +55,27 @@ test('findInstalledHypawareBin only accepts a durable, runnable entry', async (t
   const danglingDir = path.join(root, 'dangling')
   await fs.mkdir(danglingDir, { recursive: true })
   await fs.symlink(path.join(root, 'gone'), path.join(danglingDir, 'hypaware'))
+  // A project-local install. Real, executable, and on `$PATH` for the whole of
+  // an `npx` or `npm run`, but the next `npm ci` deletes it, so recording it
+  // rots the same way the cache path does and with no `_npx` to give it away.
+  const projectBinDir = path.join(root, 'proj', 'node_modules', '.bin')
+  await writeExecutable(path.join(projectBinDir, 'hypaware'))
   const globalBinDir = path.join(root, 'npm-global', 'bin')
   await writeExecutable(path.join(globalBinDir, 'hypaware'))
 
   const npmCache = path.join(root, '.npm')
   const env = {
     npm_config_cache: npmCache,
-    PATH: [npxBinDir, dirTrap, danglingDir, globalBinDir].join(path.delimiter),
+    PATH: [npxBinDir, dirTrap, danglingDir, projectBinDir, globalBinDir].join(path.delimiter),
   }
   assert.equal(findInstalledHypawareBin(env), path.join(globalBinDir, 'hypaware'))
+
+  // And with nothing durable at all behind it, a project-local copy is still
+  // not the answer: `undefined` sends the caller to its own fallback.
+  assert.equal(
+    findInstalledHypawareBin({ npm_config_cache: npmCache, PATH: projectBinDir }),
+    undefined
+  )
 
   // A relative entry resolves against the cwd the caller happened to run in,
   // which is not a path anything can record.
