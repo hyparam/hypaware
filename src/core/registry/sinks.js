@@ -85,7 +85,12 @@ export function createSinkRegistry() {
     // A copy, so the tags this registry reports and resolves are the ones it
     // validated: the plugin keeps a reference to its own array and is free to
     // mutate it in place after the check.
-    const supports = declaredSupports.slice()
+    //
+    // `Array.from`, not `slice()`: `slice` builds its result through
+    // `Symbol.species`, so an `Array` subclass naming its own constructor
+    // gets the copy back plugin-controlled and the tags drift again through
+    // the field meant to pin them. `Array.from` always yields a plain array.
+    const supports = Array.from(declaredSupports)
     if (typeof contribution.create !== 'function') {
       throw new TypeError(`SinkRegistry.register: '${name}' missing create()`)
     }

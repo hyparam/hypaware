@@ -489,6 +489,47 @@ test('the tags the listing hands out are a copy of the ones the registry resolve
   await reg.closeAll()
 })
 
+test('the copy the registry keeps is a plain array the plugin cannot own', async () => {
+  // The copy has to be one the plugin has no handle on. `slice()` builds its
+  // result through `Symbol.species`, so an `Array` subclass that names its own
+  // constructor is handed back the "copy" and answers a different tag list each
+  // time it is read, which is #1568's drift through the field added to end it.
+  let reads = 0
+  const Species = /** @type {any} */ (class extends Array {})
+  // Defined off the class body: TypeScript refuses a `Symbol.species` that is
+  // not an `ArrayConstructor`, which is the whole point of the fixture.
+  Object.defineProperty(Species, Symbol.species, {
+    get() {
+      return function () {
+        return {
+          length: 0,
+          join() { return '' },
+          slice() { return this },
+          [Symbol.iterator]() {
+            reads += 1
+            return (reads === 1 ? [] : ['queryable'])[Symbol.iterator]()
+          },
+        }
+      }
+    },
+  })
+  const reg = createSinkRegistry()
+  const contribution = sinkOf({ name: 'species', plugin: '@third-party/drifting-supports', supports: new Species() })
+  reg.register(contribution)
+
+  const first = await reg.instantiate(requestArgs('species-1', contribution))
+  const second = await reg.instantiate(requestArgs('species-2', contribution))
+  assert.deepEqual(first.supports, [])
+  assert.deepEqual(second.supports, [], 'the second instance resolved tags the registry never validated')
+
+  // Non-vacuity: the fixture is still hostile (its species is what `slice`
+  // would have used), and the registry kept a plain array instead.
+  assert.equal(Array.isArray(new Species().slice()), false, 'the fixture stopped hijacking slice')
+  assert.equal(Array.isArray(reg.listContributions()[0].supports), true)
+  assert.equal(reads, 0, 'the registry read the plugin-controlled stand-in')
+  await reg.closeAll()
+})
+
 test('the sink.contribute, sink.resolved and sink.register records agree on supports', async () => {
   const reg = createSinkRegistry()
   let reads = 0
