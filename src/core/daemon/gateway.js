@@ -280,7 +280,13 @@ export async function runGatewayDaemon(opts = {}) {
     if (source) {
       const ctx = boot.runtime.activationContexts?.get(source.plugin)
       if (!ctx) throw new Error('gateway activation context missing')
-      await boot.runtime.sources.start(source.name, ctx)
+      // The key it was looked up by, never `source.name`: that is a live read
+      // of a plugin property on a contribution the registry stores by
+      // reference, and `start` resolves whatever name it is handed. `stop()`
+      // and `gatewaySnapshot()` stay on this literal, so a name that answered
+      // differently would start a source this process can neither stop nor
+      // report (#1540).
+      await boot.runtime.sources.start('ai-gateway', ctx)
     }
     log.info(source ? 'gateway.ready' : 'gateway.disabled', { gateway_pid: process.pid })
     if (opts.installSignalHandlers !== false) {
