@@ -12,6 +12,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { clearPidFile, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
 import { DAEMON_HEARTBEAT_STALE_MS, daemonHeartbeatAgeMs, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
+import { BOOT_FAILED_WARNING_PREFIX } from './boot_failure.js'
 import { openDaemonLog } from './logs.js'
 
 /**
@@ -209,8 +210,12 @@ export async function runGatewayDaemon(opts = {}) {
     if (target.connected) target.send({ type: 'processing.stop' }, () => {})
   }
 
-  /** @param {number} [code] */
-  async function stop(code = 0) {
+  /**
+   * @param {number} [code]
+   * @param {string} [bootFailure] The message of a boot that threw, when this
+   *   is the unwind of a boot rather than a stop anyone asked for.
+   */
+  async function stop(code = 0, bootFailure) {
     if (stopping) return done
     stopping = true
     clearTimeout(restartTimer)
@@ -240,13 +245,20 @@ export async function runGatewayDaemon(opts = {}) {
     } finally {
       clearTimeout(deadline)
       setGatewayProcessTransport(undefined)
-      status.state = 'stopped'
+      // `stopped` is the record that a shutdown completed, and a boot that
+      // threw never served, so writing it here reads a relaunch loop as the
+      // operator's own `hyp daemon stop` (#1501). A failed boot takes the
+      // shape `runDaemon` persists for one instead, which `hyp status` and the
+      // self-updater's stuck-boot re-probe both already read.
+      // @ref LLP 0383#the-signal-is-the-daemons-last-state [constrained-by]: only a shutdown that ran may write `stopped`, so a boot that threw writes the failure instead
+      status.state = bootFailure ? 'degraded' : 'stopped'
       status.sources = status.sources.map(source => ({ ...source, state: 'stopped' }))
       if (status.processes) {
         status.processes.gateway.state = 'stopped'
         status.processes.processing.state = 'stopped'
       }
-      status.stoppedAt = new Date().toISOString()
+      if (bootFailure) status.warnings = [`${BOOT_FAILED_WARNING_PREFIX}: ${bootFailure}`]
+      else status.stoppedAt = new Date().toISOString()
       writeStatusFile(stateRoot, status)
       clearPidFile(stateRoot)
       log.info('gateway.stopped', { code })
@@ -283,7 +295,11 @@ export async function runGatewayDaemon(opts = {}) {
     await refreshStatus()
     return { done, stop, snapshot: () => status, runtime: boot.runtime, restartProcessing: () => writeControlRequest(processingControlRoot, 'stop', log) }
   } catch (error) {
-    await stop(1)
+    const message = error instanceof Error ? error.message : String(error)
+    // Onto the gateway's own log, so `recent_errors` counts the failure rather
+    // than it reaching only stderr and the service's `daemon.err.log`.
+    log.error('daemon.boot_failed', { message })
+    await stop(1, message)
     throw error
   }
 }
