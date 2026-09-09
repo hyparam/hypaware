@@ -131,6 +131,26 @@ export function isAuthStatus(status) {
 }
 
 /**
+ * The terminal message for a request the server refused under an explicit
+ * `--org`. The likely cause is the *selector*, not the credential, and a
+ * refresh cannot buy operator standing, so the request is not re-sent (a retry
+ * only earns a second denial in that org's audit trail). But the client cannot
+ * see which layer answered: a deployment that returns 403 for a revoked
+ * credential, or a proxy in front of it, produces the same status, so name that
+ * cause and its remedy too rather than telling the operator not to try. Says
+ * "refused" of the request, not of a read: the same 403 can answer the MCP
+ * handshake. Shared by the verb attach path and the stdio proxy so the two
+ * never drift.
+ *
+ * @param {string} target
+ * @param {string} org
+ * @returns {string}
+ */
+export function orgReadRefusedMessage(target, org) {
+  return `'${target}' refused --org '${org}' (HTTP 403), not retried - either this account may not read that org (re-login cannot grant operator standing), or its credential was revoked, in which case re-run 'hyp remote login ${target}'`
+}
+
+/**
  * Tag the error so the attach path can recognize an auth rejection and attempt
  * a single silent refresh + retry.
  *

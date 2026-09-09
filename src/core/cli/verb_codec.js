@@ -40,10 +40,10 @@ const REFRESH_MODES = new Set(['never', 'auto', 'always'])
  * param), so neither belongs in the MCP tool schema.
  *
  * @param {string[]} argv
- * @returns {{ ok: true, controls: VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined }, rest: string[] } | { ok: false, error: string }}
+ * @returns {{ ok: true, controls: VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined, org?: string }, rest: string[] } | { ok: false, error: string }}
  */
 export function parseControlFlags(argv) {
-  /** @type {VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined }} */
+  /** @type {VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined, org?: string }} */
   const controls = {
     format: 'table',
     json: false,
@@ -111,6 +111,12 @@ export function parseControlFlags(argv) {
         controls.refreshExplicit = true
         break
       }
+      case '--org': {
+        const v = takeVal()
+        if (!v) return { ok: false, error: '--org expects an org label or *' }
+        controls.org = v
+        break
+      }
       case '--remote': {
         // Bare `--remote` (no value) selects the default target, resolved
         // downstream against config + built-ins; `--remote <name>` names one.
@@ -125,6 +131,9 @@ export function parseControlFlags(argv) {
     }
   }
 
+  if (controls.org !== undefined && controls.remote === undefined) {
+    return { ok: false, error: '--org requires --remote' }
+  }
   return { ok: true, controls, rest }
 }
 
@@ -351,7 +360,7 @@ export function usageForVerb(name, inputSchema) {
       parts.push(`[${flag} <${prop.type === 'array' ? `${propName}...` : propName}>]`)
     }
   }
-  parts.push('[--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]')
+  parts.push('[--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]')
   return parts.join(' ')
 }
 

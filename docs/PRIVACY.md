@@ -114,6 +114,9 @@ records a proxy attach.
   are forwarded to your organization's central server, including
   conversation content. The controls below decide which rows that covers.
 
+The deployment's operators can read forwarded data across every org on the
+server, and each such read is recorded in that org's audit trail.
+
 ## The three usage classes
 
 Every directory subtree resolves to one class. Classes are evaluated from

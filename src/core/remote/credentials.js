@@ -97,10 +97,11 @@ const MCP_PATH = '/v1/mcp'
  * the single registered target URL, so no second URL is ever configured.
  *
  * @param {string} url the registered target URL (a base, or a full /v1/mcp URL)
+ * @param {string} [org] operator read selector, carried only on the MCP URL
  * @returns {string}
  * @ref LLP 0084#derive [implements]: MCP endpoint derives from the registered base; a path already ending /v1/mcp is honored verbatim
  */
-export function deriveMcpEndpoint(url) {
+export function deriveMcpEndpoint(url, org) {
   /** @type {URL} */
   let parsed
   try {
@@ -113,6 +114,16 @@ export function deriveMcpEndpoint(url) {
   // only normalizing a trailing slash. Otherwise treat the URL as a base and
   // append the MCP path after any existing path prefix.
   parsed.pathname = trimmedPath.endsWith(MCP_PATH) ? trimmedPath : `${trimmedPath}${MCP_PATH}`
+  // Rewrite the raw query string rather than calling `searchParams.set`: that
+  // setter re-serializes every existing parameter as form encoding, so a
+  // registered `%20` would come back as `+`, a `~` as `%7E`, and a valueless
+  // `?flag` would grow an `=`, all only when an operator passes --org. This way
+  // the target's own parameters reach the server exactly as registered.
+  if (org !== undefined) {
+    const kept = parsed.search.replace(/^\?/, '').split('&')
+      .filter((part) => part !== '' && part !== 'org' && !part.startsWith('org='))
+    parsed.search = `?${[...kept, `org=${encodeURIComponent(org)}`].join('&')}`
+  }
   return parsed.toString()
 }
 

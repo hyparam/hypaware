@@ -4,9 +4,10 @@ import process from 'node:process'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
+import { effectiveRemotes } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, describeAuthRejection, resolveAccessJwt, resolveToken } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
-import { isAuthStatus, mcpRequestHeaders, parseRpcResponse } from './client.js'
+import { isAuthStatus, mcpRequestHeaders, orgReadRefusedMessage, parseRpcResponse } from './client.js'
 import { INTERNAL_ERROR, jsonRpcError } from './jsonrpc.js'
 import { serveStdio } from './stdio.js'
 
@@ -26,12 +27,15 @@ import { serveStdio } from './stdio.js'
  * without remote-MCP support, or environments still issuing the unscoped
  * token.
  *
- * @param {{ target: string, ctx: CommandRunContext }} args
+ * @param {{ target: string, org?: string, ctx: CommandRunContext }} args
  * @returns {Promise<number>}
  * @ref LLP 0034#proxy-fallback [implements]: stdio proxy injecting the 0600-stored credential; the fallback, not the primary path
  */
-export async function runMcpProxy({ target, ctx }) {
-  const remotes = ctx.config?.query?.remotes ?? {}
+export async function runMcpProxy({ target, org, ctx }) {
+  // Built-in targets layered under the user's own `query.remotes`, exactly as
+  // the verb attach path resolves them, so `--remote hyperparam` reaches the
+  // shipped central server here too rather than reporting an unknown target.
+  const remotes = effectiveRemotes(ctx.config)
   const entry = remotes[target]
   if (!entry) {
     ctx.stderr.write(`hyp mcp serve: unknown remote target '${target}' - add it with 'hyp remote add ${target} <url>'\n`)
@@ -42,7 +46,7 @@ export async function runMcpProxy({ target, ctx }) {
   // The registered URL is the server **base**; MCP is served at <base>/v1/mcp,
   // so forward each message to the derived endpoint, not the base verbatim.
   // @ref LLP 0084#derive [implements]: derive the MCP endpoint from the registered base
-  const mcpUrl = deriveMcpEndpoint(entry.url)
+  const mcpUrl = deriveMcpEndpoint(entry.url, org)
   // Fail fast (exit 2) if there is no usable credential at all. This is a
   // presence check only - resolveToken never refreshes - so a near-expiry OIDC
   // JWT does not trigger a network refresh here that the first handleMessage
@@ -107,7 +111,11 @@ export async function runMcpProxy({ target, ctx }) {
       const op = async (token) => {
         try {
           const res = await forward(message, token)
-          return { authFailed: isAuthStatus(res.status), value: { res } }
+          // With an explicit --org, a 403 refuses the operator *read*, not the
+          // credential, so no refresh can fix it and a retry only earns a
+          // second denial in that org's audit trail.
+          const authFailed = isAuthStatus(res.status) && !(org !== undefined && res.status === 403)
+          return { authFailed, value: { res } }
         } catch (err) {
           return { authFailed: false, value: { err } }
         }
@@ -138,14 +146,17 @@ export async function runMcpProxy({ target, ctx }) {
       if (sid) sessionId = sid
       if (isNotify) return null
       if (!res.ok) {
-        // A 401/403 that survives the refresh + retry above is a dead
-        // credential. Explain by why it is dead - a refreshable OIDC session is
+        // A 403 answering an explicit --org most likely refused the selector,
+        // not the credential, so it carries its own message naming both. Any
+        // other 401/403 survived the refresh + retry above and is a dead
+        // credential: explain by why it is dead - a refreshable OIDC session is
         // an expired session (re-login), a per-target env override re-login
         // cannot fix, a static file token re-login replaces - via the shared
         // policy the verb attach path also uses, so the two never drift.
-        const detail = !isAuthStatus(res.status)
-          ? `remote returned HTTP ${res.status}`
-          : describeAuthRejection({ target, status: res.status, resolved }).message
+        let detail
+        if (org !== undefined && res.status === 403) detail = orgReadRefusedMessage(target, org)
+        else if (!isAuthStatus(res.status)) detail = `remote returned HTTP ${res.status}`
+        else detail = describeAuthRejection({ target, status: res.status, resolved }).message
         return jsonRpcError(id, INTERNAL_ERROR, detail)
       }
       try {
