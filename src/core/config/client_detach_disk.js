@@ -17,7 +17,9 @@ import { isOwnedProviderEntry } from './provider_entry_ownership.js'
 // Bump when an on-disk Claude marker must be rewritten for Claude Code to
 // accept or correctly interpret settings.json. Both daemon reconciliation and
 // manual attach use this token to force exactly one migration pass.
-export const CLAUDE_SETTINGS_MARKER_SCHEMA = 3
+// Revision 4 repairs hooks written with the 1.32 processor entrypoint. Reuse
+// the existing migration token so even a completed attach is rewritten once.
+export const CLAUDE_SETTINGS_MARKER_SCHEMA = 4
 
 /**
  * @import { Dirent } from 'node:fs'

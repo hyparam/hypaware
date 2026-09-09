@@ -36,7 +36,7 @@ import { claudeBodySpoolDir, ensureClaudeBodySpool } from './telemetry/spool.js'
 const PLUGIN_NAME = '@hypaware/claude'
 const CLIENT_NAME = 'claude'
 const UPSTREAM_NAME = 'anthropic'
-const FALLBACK_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
+const CLI_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
 
 /**
  * The plugin's `config_sections` validator, surfaced as a side-effect-free
@@ -505,6 +505,8 @@ export async function activate(ctx) {
 /**
  * Claude runs hooks from arbitrary working directories, so the managed hook
  * must use a concrete CLI entrypoint instead of assuming `hyp` is on PATH.
+ * Daemon reconciliation runs in processor.js, so process.argv[1] is not
+ * necessarily a CLI. Resolve the entrypoint from this installed package.
  *
  * Under `npx hypaware` that entrypoint is inside npm's `_npx` cache, which npm
  * prunes on its own schedule, so recording it writes a path that outlives what
@@ -516,17 +518,24 @@ export async function activate(ctx) {
  * With nothing installed, the npx path still captures until npm prunes it, so
  * it is written and flagged `ephemeral` rather than refused.
  *
+ * An explicit `HYPAWARE_BIN`/`HYP_BIN` is taken as given: it names a path the
+ * operator chose, and second-guessing it would defeat the override.
+ *
+ * `cliBinPath` defaults to this package's own CLI and is a parameter only so
+ * a test can present an `_npx` entrypoint: nothing short of a real `npx` run
+ * puts this package inside that cache.
+ *
  * @param {NodeJS.ProcessEnv} env
+ * @param {string} [cliBinPath]
  * @returns {{ binPath: string, ephemeral: boolean }}
  */
-function resolveHookBinPath(env) {
+export function resolveHookBinPath(env, cliBinPath = CLI_BIN_PATH) {
   const explicit = firstNonEmpty(env.HYPAWARE_BIN, env.HYP_BIN)
   if (explicit) return { binPath: path.resolve(explicit), ephemeral: false }
-  const running = process.argv[1] ? path.resolve(process.argv[1]) : FALLBACK_BIN_PATH
-  if (!isNpxBinPath(running, env)) return { binPath: running, ephemeral: false }
+  if (!isNpxBinPath(cliBinPath, env)) return { binPath: cliBinPath, ephemeral: false }
   const installed = findInstalledHypawareBin(env)
   if (installed !== undefined) return { binPath: installed, ephemeral: false }
-  return { binPath: running, ephemeral: true }
+  return { binPath: cliBinPath, ephemeral: true }
 }
 
 /**
