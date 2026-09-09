@@ -82,9 +82,9 @@ export function createMcpServer(opts) {
    * one that would run.
    *
    * The rest of the entry is read inside the same guard, the visibility filter
-   * included: it costs no extra read, and `listTools` is called outside any
-   * handler try/catch (`src/core/commands/mcp.js`), so an accessor that throws
-   * costs the whole tool surface rather than the one verb.
+   * included: it costs no extra read, and `listTools` has a call site outside
+   * any handler try/catch (`src/core/commands/mcp.js`), so an accessor that
+   * throws costs the whole tool surface rather than the one verb.
    *
    * @param {VerbRegistration} verb
    * @returns {{ name: string, description: string, inputSchema: object } | undefined}
@@ -106,11 +106,20 @@ export function createMcpServer(opts) {
         return undefined
       }
       named = tool
-      return {
+      // Proved serializable here, where a throw costs this verb its listing
+      // and nothing else. `serveStdio` writes the whole response with one
+      // `JSON.stringify`, and both remaining fields are second reads of
+      // plugin properties the registry type-checked once: `verb.summary`, and
+      // the property objects `toJsonSchema` spreads wholesale. A value JSON
+      // cannot take (a BigInt, a cycle, a throwing `toJSON`) made that write
+      // raise, and `serveStdio` answered with no line at all - the same
+      // forever-wait `handleMessage`'s catch ends one layer out, on the one
+      // method every client calls first, so it hung the session, not a call.
+      return JSON.parse(JSON.stringify({
         name: tool,
         description: verb.summary,
         inputSchema: toJsonSchema(verb.inputSchema),
-      }
+      }))
     } catch (err) {
       warnNotAdvertised({
         event: 'mcp.tool_not_advertised',
@@ -277,8 +286,10 @@ export function createMcpServer(opts) {
       case 'resources/list':
         return jsonRpcResult(id, { resources: listResources() })
       case 'tools/call':
-        // Awaited, not returned: an unawaited promise rejects past the caller's
-        // catch, which is the whole point of having it.
+        // `return await`, not `return`: the caller's catch sees this rejection
+        // either way, because an async function's promise adopts the one it
+        // returns. The `await` is kept so it still would if a `try` were ever
+        // added inside this function, where the difference is real.
         return await callTool(id, params)
       case 'resources/read':
         return readResource(id, params)
@@ -316,7 +327,10 @@ export function createMcpServer(opts) {
       // A tool execution failure is a tool *result* (isError), not a
       // protocol error: the client sees it as a failed call, not a dead
       // connection.
-      const text = err instanceof Error ? err.message : String(err)
+      // Coerced, not passed through: `err.message` is whatever the plugin's
+      // throw carried, and a non-string one broke the transport's own
+      // `JSON.stringify` the same way, for no reply at all.
+      const text = describeThrown(err)
       return jsonRpcResult(id, { content: [{ type: 'text', text }], isError: true })
     }
   }

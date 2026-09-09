@@ -14,10 +14,12 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { Readable } from 'node:stream'
 
 import { CORE_VERBS } from '../../src/core/cli/core_verbs.js'
 import { toJsonSchema } from '../../src/core/cli/verb_codec.js'
 import { createMcpServer } from '../../src/core/mcp/server.js'
+import { serveStdio } from '../../src/core/mcp/stdio.js'
 import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { createVerbRegistry } from '../../src/core/registry/verbs.js'
 import { Attr } from '../../src/core/observability/attrs.js'
@@ -393,4 +395,103 @@ test('a throwing dataset schema on resources/read gets a -32603 reply, not silen
   }))
   assert.equal(read.id, 5)
   assert.equal(read.error.code, -32603)
+})
+
+// `handleMessage` returning a reply is not yet a reply on the wire: `serveStdio`
+// writes it with one `JSON.stringify`, so a response holding a value JSON
+// cannot take makes that write raise, and the transport logs it off-channel and
+// writes no line - the same forever-wait the `-32603` above exists to end. Both
+// remaining plugin values on a `tools/list` entry are second reads of members
+// `registerVerb` type-checked once, so both need proving here rather than there.
+
+/**
+ * Drive one message through the real stdio transport and report what the
+ * client would actually have received.
+ *
+ * @param {any} server
+ * @param {object} message
+ * @returns {Promise<{ lines: string[], errors: string[] }>}
+ */
+async function overStdio(server, message) {
+  /** @type {string[]} */
+  const lines = []
+  /** @type {string[]} */
+  const errors = []
+  await serveStdio({
+    server,
+    stdin: Readable.from([JSON.stringify(message) + '\n']),
+    stdout: { write: (/** @type {string} */ chunk) => lines.push(chunk.trim()) },
+    onError: (err) => errors.push(err instanceof Error ? err.message : String(err)),
+  })
+  return { lines, errors }
+}
+
+for (const [label, answer] of /** @type {[string, () => unknown][]} */ ([
+  ['a BigInt', () => 1n],
+  ['a cycle', () => { const o = /** @type {any} */ ({}); o.self = o; return o }],
+  ['a throwing toJSON', () => ({ toJSON() { throw new Error('no summary for you') } })],
+])) {
+  test(`a summary answering ${label} costs that verb its listing, not every reply`, async () => {
+    const honest = makeVerb({ name: 'query sql', tool: 'query_sql', summary: 'Run SQL' })
+    const hostile = makeVerb({ name: 'evil op', tool: 'evil_op', summary: 'plain at register time' })
+    const verbs = createVerbRegistry()
+    verbs.register(honest)
+    verbs.register(hostile)
+    Object.defineProperty(hostile, 'summary', { get: answer, configurable: true })
+
+    const { lines, errors } = await overStdio(mcp(verbs), { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+
+    // One line, not none: the drifted verb is dropped, the honest one is served.
+    assert.deepEqual(errors, [])
+    assert.equal(lines.length, 1)
+    const tools = JSON.parse(lines[0]).result.tools
+    assert.deepEqual(tools.map((/** @type {any} */ t) => t.name), ['query_sql'])
+    assert.equal(tools[0].description, 'Run SQL')
+  })
+}
+
+test('an inputSchema default JSON cannot take costs that verb its listing', async () => {
+  const honest = makeVerb({ name: 'query sql', tool: 'query_sql', summary: 'Run SQL' })
+  // `toJsonSchema` spreads each property object wholesale, so a plugin value
+  // parked on one reaches the wire untouched.
+  const hostile = makeVerb({ name: 'evil op', tool: 'evil_op', summary: 'evil' })
+  const verbs = createVerbRegistry()
+  verbs.register(honest)
+  verbs.register(hostile)
+  Object.defineProperty(hostile, 'inputSchema', {
+    get: () => ({ type: 'object', properties: { x: { type: 'string', default: 1n } } }),
+    configurable: true,
+  })
+
+  const { lines, errors } = await overStdio(mcp(verbs), { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+
+  assert.deepEqual(errors, [])
+  assert.equal(lines.length, 1)
+  assert.deepEqual(JSON.parse(lines[0]).result.tools.map((/** @type {any} */ t) => t.name), ['query_sql'])
+})
+
+test('a tool failure whose message is not a string is still a reply', async () => {
+  const verbs = createVerbRegistry()
+  const verb = makeVerb({
+    name: 'boom op',
+    tool: 'boom_op',
+    operation: async () => {
+      const err = new Error('placeholder')
+      // An `Error` whose `message` is not a string: `instanceof` still holds,
+      // so the isError text took it verbatim and the transport could not write.
+      err.message = /** @type {any} */ (1n)
+      throw err
+    },
+  })
+  verbs.register(verb)
+
+  const { lines, errors } = await overStdio(mcp(verbs), {
+    jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'boom_op', arguments: {} },
+  })
+
+  assert.deepEqual(errors, [])
+  assert.equal(lines.length, 1)
+  const result = JSON.parse(lines[0]).result
+  assert.equal(result.isError, true)
+  assert.equal(result.content[0].text, '1')
 })
