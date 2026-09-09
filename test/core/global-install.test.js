@@ -3,11 +3,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 
 import {
   GlobalInstallError,
   ensureDurableBinForNpx,
+  findInstalledHypawareBin,
   globalHypawareBin,
   isNpxBinPath,
 } from '../../src/core/cli/global_install.js'
@@ -25,6 +27,58 @@ test('isNpxBinPath detects npm _npx cache entries', () => {
     }),
     false
   )
+})
+
+// Whatever this returns gets written down and executed later, so every entry it
+// accepts has to be a file that can still be run from somewhere else, some time
+// from now. The three it must walk past all look executable to `access(X_OK)`.
+test('findInstalledHypawareBin only accepts a durable, runnable entry', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-find-bin-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+
+  /** @param {string} file */
+  async function writeExecutable(file) {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, '#!/bin/sh\nexit 0\n')
+    await fs.chmod(file, 0o755)
+  }
+
+  // npx's own shim directory, which sits at the FRONT of `$PATH` on the run
+  // this helper exists for: resolving it re-records the cache path.
+  const npxBinDir = path.join(root, '.npm', '_npx', 'a1b2c3', 'node_modules', '.bin')
+  await writeExecutable(path.join(npxBinDir, 'hypaware'))
+  // A directory named `hypaware`: searchable, so `access(X_OK)` says yes.
+  const dirTrap = path.join(root, 'dir-trap')
+  await fs.mkdir(path.join(dirTrap, 'hypaware'), { recursive: true })
+  // A dangling link, the residue of an uninstall or a node version switch.
+  const danglingDir = path.join(root, 'dangling')
+  await fs.mkdir(danglingDir, { recursive: true })
+  await fs.symlink(path.join(root, 'gone'), path.join(danglingDir, 'hypaware'))
+  const globalBinDir = path.join(root, 'npm-global', 'bin')
+  await writeExecutable(path.join(globalBinDir, 'hypaware'))
+
+  const npmCache = path.join(root, '.npm')
+  const env = {
+    npm_config_cache: npmCache,
+    PATH: [npxBinDir, dirTrap, danglingDir, globalBinDir].join(path.delimiter),
+  }
+  assert.equal(findInstalledHypawareBin(env), path.join(globalBinDir, 'hypaware'))
+
+  // A relative entry resolves against the cwd the caller happened to run in,
+  // which is not a path anything can record.
+  const relative = path.relative(process.cwd(), globalBinDir)
+  assert.notEqual(relative, path.resolve(relative), 'the rig did not build a relative entry')
+  assert.equal(
+    findInstalledHypawareBin({ npm_config_cache: npmCache, PATH: relative }),
+    undefined
+  )
+
+  // Nothing durable behind the shim, and no `$PATH` at all, are both "no".
+  assert.equal(
+    findInstalledHypawareBin({ npm_config_cache: npmCache, PATH: npxBinDir }),
+    undefined
+  )
+  assert.equal(findInstalledHypawareBin({}), undefined)
 })
 
 test('ensureDurableBinForNpx installs the current package globally and returns the global bin', async () => {

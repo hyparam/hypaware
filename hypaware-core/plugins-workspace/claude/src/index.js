@@ -290,12 +290,20 @@ export async function activate(ctx) {
             // exits 0 and says nothing once its command is gone, so the first
             // symptom is columns that stopped arriving. Pushed onto a copy, so
             // `malformed_blocks_repaired` keeps counting only repairs.
+            //
+            // The repair names detach first on purpose. On a daemon-managed
+            // install `hyp client attach claude` takes the already-attached
+            // exit, which compares the marker's mode, format and port and
+            // never the recorded hook command, so a plain re-run would report
+            // success and leave this very path in settings.json.
             if (hookBin.ephemeral) {
               warnings.push(
                 `the managed hook records ${hookBin.binPath}, inside npm's npx cache; ` +
                 'capture of cwd and git branch stops without warning once npm prunes it. ' +
-                "Run 'npm install -g hypaware', then 'hyp client attach claude' again, to " +
-                'record a durable path'
+                "Run 'npm install -g hypaware', then 'hyp client detach claude' and " +
+                "'hyp client attach claude', to record a durable path. Detach first: a " +
+                'plain re-attach is a no-op while the marker is current, so it would ' +
+                'leave this path in place'
               )
               logger.warn('client.attach.ephemeral_hook_bin', {
                 hyp_plugin: PLUGIN_NAME,

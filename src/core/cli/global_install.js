@@ -1,7 +1,7 @@
 // @ts-check
 
 import { spawn } from 'node:child_process'
-import { accessSync, constants as fsConstants } from 'node:fs'
+import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -119,14 +119,22 @@ export function findInstalledHypawareBin(env = process.env, platform = process.p
     ? (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
     : ['']
   for (const dir of (env.PATH ?? '').split(path.delimiter)) {
-    if (!dir || isNpxBinPath(dir, env)) continue
+    // A relative entry (or the empty string, which `$PATH` uses to mean the
+    // cwd) would resolve against whatever directory the caller happened to run
+    // in, which is the same kind of path that does not survive being written
+    // down. Only an absolute entry can answer the question being asked.
+    if (!path.isAbsolute(dir) || isNpxBinPath(dir, env)) continue
     for (const ext of exts) {
       const candidate = path.resolve(dir, 'hypaware' + ext)
       try {
+        // `X_OK` alone is true for a directory, because directories are
+        // searchable. A caller that records the answer would pin itself to
+        // something that can never execute, with nothing to say so.
+        if (!statSync(candidate).isFile()) continue
         accessSync(candidate, fsConstants.X_OK)
         return candidate
       } catch {
-        // not here, or not executable: keep walking
+        // not here, not a file, or not executable: keep walking
       }
     }
   }
