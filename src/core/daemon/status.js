@@ -1621,6 +1621,17 @@ export async function collectHypAwareStatus(opts = {}) {
   const activationLogGrep = reportedFailures.length === 0 ? ''
     : `grep -s plugin_activate_failed ${path.join(daemonLogDir(stateRoot), 'daemon.log')} `
       + `${path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log')}`
+  // The daemon's *own* sink rows, not the `sinks` list this collector builds
+  // further down: that one starts from `config.sinks`, where a request
+  // instance names its plugin whether or not anything came of it, so it would
+  // report a sink running for a plugin that failed in both processes. A row
+  // here is a handle the child materialized, and `materializeRequest` builds
+  // one only for a plugin with a live activation context that registered the
+  // contribution. Same shape guard as every other borrowed list here
+  // (LLP 0164#status-reads-it-from-the-status-file).
+  const liveSinks = reportedFailures.length === 0 || !Array.isArray(daemonStatusFile?.sinks)
+    ? []
+    : daemonStatusFile.sinks.filter((s) => !!s && typeof s === 'object')
   for (const entry of reportedFailures) {
     const name = sanitizeLabel(entry?.name)
     if (name === undefined) continue
@@ -1635,8 +1646,18 @@ export async function collectHypAwareStatus(opts = {}) {
     // on every cache call, so one that reads storage in `activate()` fails
     // there and comes up in the processing daemon: its source is `started` in
     // this very report while the entry says it never activated. "Nothing of it
-    // is running" is a claim this collector can check, so it checks it.
+    // is running" is a claim this collector can check, so it checks it - for
+    // sinks as well as sources, because the same split state materializes a
+    // configured request-sink instance in the child (issue #1571).
+    //
+    // Commands are not in the sentence at all. A `DaemonStatus` has no field
+    // for them, so there is nothing to read; and asserting them anyway is not
+    // merely unchecked but wrong, since commands are dispatched from the CLI's
+    // own boot, where a plugin that only the gateway's storage proxy defeats
+    // activates normally. This very process can run the command in the same
+    // breath as calling it stopped.
     const stillContributing = sources.some((s) => s.plugin === name && s.state === 'started')
+      || liveSinks.some((s) => s.plugin === name)
     diagnostics.push({
       severity: 'error',
       kind: 'plugin_activate_failed',
@@ -1645,7 +1666,7 @@ export async function collectHypAwareStatus(opts = {}) {
         + `${sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'}`
         + (stillContributing
           ? ' - it came up in only one of the daemon\'s two processes, so part of what it contributes is not running'
-          : ' - none of its sources, sinks or commands are running'),
+          : ' - none of its sources or sinks are running'),
       // Not `hyp plugin list`: it prints the plugins *this* CLI boot activated
       // plus the install lock, so the plugin that just failed is either missing
       // from the output entirely (a bundled adapter, the likeliest subject) or

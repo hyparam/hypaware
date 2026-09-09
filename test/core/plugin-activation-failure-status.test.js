@@ -64,15 +64,43 @@ const QUIET_ENTRYPOINT = [
   '',
 ].join('\n')
 
+// Issue #1571. The other half of the split state: a routing contributor that
+// also contributes a sink. It activates in both processes; in the gateway the
+// storage proxy defeats it, and in the processing child it comes up whole and
+// its configured instance materializes. One snapshot then carries the failure
+// and the running sink at once.
+const SPLIT_ENTRYPOINT = [
+  'export async function activate(ctx) {',
+  '  ctx.sinks.register({',
+  "    name: 'acme-split',",
+  "    plugin: '@acme/split',",
+  '    supports: [],',
+  '    async create() {',
+  '      return {',
+  '        async exportBatch() { return { ok: true, exported: [] } },',
+  '        async close() {},',
+  '      }',
+  '    },',
+  '  })',
+  "  await ctx.storage.tableExists('acme_split')",
+  '}',
+  '',
+].join('\n')
+
+const SPLIT_MANIFEST = {
+  requires: { capabilities: { 'hypaware.ai-gateway': '^2.0.0' } },
+  contributes: { sinks: [{ name: 'acme-split', supports: [] }] },
+}
+
 /**
  * Materialise an installed-plugin fixture under `<hypHome>/hypaware/plugins`,
  * the way `test/core/boot-installed.test.js` does: what `hyp plugin install`
  * lands on disk, without running the install pipeline.
  *
- * @param {{ hypHome: string, name: string, entrypoint: string }} args
+ * @param {{ hypHome: string, name: string, entrypoint: string, manifest?: object }} args
  * @returns {Promise<{ name: string, version: string, installDir: string }>}
  */
-async function stageInstalledPlugin({ hypHome, name, entrypoint }) {
+async function stageInstalledPlugin({ hypHome, name, entrypoint, manifest }) {
   const installDir = path.join(hypHome, 'hypaware', 'plugins', name)
   await fs.mkdir(installDir, { recursive: true })
   await fs.writeFile(path.join(installDir, 'hypaware.plugin.json'), JSON.stringify({
@@ -82,6 +110,7 @@ async function stageInstalledPlugin({ hypHome, name, entrypoint }) {
     hypaware_api: '^1.0.0',
     runtime: 'node',
     entrypoint: './index.js',
+    ...manifest,
   }, null, 2))
   await fs.writeFile(path.join(installDir, 'index.js'), entrypoint)
   return { name, version: '1.0.0', installDir }
@@ -92,10 +121,16 @@ async function stageInstalledPlugin({ hypHome, name, entrypoint }) {
  * gateway process comes up `disabled` and still supervises the processing
  * child, which is where a configured plugin activates.
  *
- * @param {{ thrower: boolean }} args
+ * `split` is the exception, and needs the opposite: `@acme/split` is selected
+ * into the gateway boot by its `hypaware.ai-gateway` requirement, and the
+ * dependency resolver only activates it if something configured provides that
+ * capability, so that home configures the real gateway plugin and a request
+ * sink instance bound to `@acme/split`.
+ *
+ * @param {{ thrower?: boolean, split?: boolean }} args
  * @returns {Promise<{ hypHome: string, stateRoot: string, configPath: string }>}
  */
-async function makeHome({ thrower }) {
+async function makeHome({ thrower = false, split = false }) {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-activate-failure-'))
   /** @type {Array<{ name: string, version: string, installDir: string }>} */
   const staged = [await stageInstalledPlugin({
@@ -108,6 +143,14 @@ async function makeHome({ thrower }) {
       hypHome,
       name: '@acme/thrower',
       entrypoint: THROWING_ENTRYPOINT,
+    }))
+  }
+  if (split) {
+    staged.push(await stageInstalledPlugin({
+      hypHome,
+      name: '@acme/split',
+      entrypoint: SPLIT_ENTRYPOINT,
+      manifest: SPLIT_MANIFEST,
     }))
   }
   /** @type {Record<string, any>} */
@@ -129,10 +172,18 @@ async function makeHome({ thrower }) {
   await fs.writeFile(configPath, JSON.stringify({
     version: 2,
     auto_update: false,
-    plugins: staged.map((entry) => ({ name: entry.name })),
+    plugins: [
+      ...staged.map((entry) => ({ name: entry.name })),
+      ...(split ? [{ name: '@hypaware/ai-gateway' }] : []),
+    ],
+    ...(split ? { sinks: { split: { plugin: '@acme/split' } } } : {}),
   }))
   return { hypHome, stateRoot: path.join(hypHome, 'hypaware'), configPath }
 }
+
+// The gateway's aggregate carries a reported processing child.
+const CHILD_REPORTED = 'snapshot?.processes?.processing?.pid && snapshot.processes.processing.state !== undefined'
+  + " && (snapshot.processes.processing.state !== 'degraded' || snapshot.failedPlugins)"
 
 /**
  * Boot one daemon against `hypHome` on the shipped defaults, wait for the
@@ -141,10 +192,15 @@ async function makeHome({ thrower }) {
  * question is what an operator sees on a *running* install: a snapshot left by
  * an exited daemon is a record, not a claim about now (LLP 0383).
  *
- * @param {{ hypHome: string, configPath: string, runId: string }} opts
+ * `ready` is the JavaScript source of the condition the wait loop polls
+ * `snapshot` with. It is a parameter because what "the child has reported" is
+ * differs by fixture: the default is a reported child process, and the split
+ * run also needs the sink row the child materializes a moment later.
+ *
+ * @param {{ hypHome: string, configPath: string, runId: string, ready?: string }} opts
  * @returns {{ booted: boolean, bootError: string | null, stopError: string | null, waited: boolean, report: any, snapshot: any }}
  */
-function runDaemonOutsideTestRunner({ hypHome, configPath, runId }) {
+function runDaemonOutsideTestRunner({ hypHome, configPath, runId, ready = CHILD_REPORTED }) {
   const scriptPath = path.join(hypHome, 'daemon-run.mjs')
   const resultPath = path.join(hypHome, 'daemon-run.json')
   const errPath = path.join(hypHome, 'daemon-run.err')
@@ -168,8 +224,7 @@ function runDaemonOutsideTestRunner({ hypHome, configPath, runId }) {
     '  const deadline = Date.now() + 45000',
     '  while (Date.now() < deadline) {',
     `    const snapshot = readStatusFile(${JSON.stringify(stateRoot)})`,
-    '    if (snapshot?.processes?.processing?.pid && snapshot.processes.processing.state !== undefined',
-    "        && (snapshot.processes.processing.state !== 'degraded' || snapshot.failedPlugins)) {",
+    `    if (${ready}) {`,
     '      result.waited = true',
     '      break',
     '    }',
@@ -352,12 +407,16 @@ test('a boot where every plugin activates adds no new noise', async () => {
  * A live snapshot for this process's pid: the daemon is up and the file is
  * its own, which is the only state the activation diagnostic is raised from.
  *
- * @param {{ hypHome: string, failedPlugins: object[], sources: object[] }} args
+ * @param {{ hypHome: string, failedPlugins: object[], sources: object[], sinks?: object[], configSinks?: object }} args
  */
-async function writeLiveSnapshot({ hypHome, failedPlugins, sources }) {
+async function writeLiveSnapshot({ hypHome, failedPlugins, sources, sinks = [], configSinks }) {
   const stateRoot = path.join(hypHome, 'hypaware')
   await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
-  await fs.writeFile(path.join(hypHome, 'hypaware-config.json'), JSON.stringify({ version: 2, plugins: [] }) + '\n')
+  await fs.writeFile(path.join(hypHome, 'hypaware-config.json'), JSON.stringify({
+    version: 2,
+    plugins: [],
+    ...(configSinks ? { sinks: configSinks } : {}),
+  }) + '\n')
   const { writePidFile } = await import('../../src/core/daemon/pid.js')
   const { writeStatusFile } = await import('../../src/core/daemon/status.js')
   writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
@@ -367,7 +426,7 @@ async function writeLiveSnapshot({ hypHome, failedPlugins, sources }) {
     healthyAt: new Date().toISOString(),
     uptimeMs: 0,
     sources,
-    sinks: [],
+    sinks,
     failedPlugins,
   }))
   return stateRoot
@@ -416,7 +475,92 @@ test('a plugin with nothing left running still says so', async (t) => {
   const report = await collectFrom(hypHome)
   const diag = report.diagnostics.find((/** @type {any} */ d) => d.kind === 'plugin_activate_failed')
   assert.ok(diag)
-  assert.match(diag.message, / - none of its sources, sinks or commands are running$/)
+  assert.match(diag.message, / - none of its sources or sinks are running$/)
+})
+
+// Issue #1571. The sinks half of the same sentence, which #1564 left asserted.
+
+test('a plugin whose configured sink materialized in the other process is not reported as wholly stopped', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-activate-sink-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeLiveSnapshot({
+    hypHome,
+    failedPlugins: [{ name: '@acme/split', errorKind: 'activate_failed', message: 'gateway process cannot access storage.tableExists' }],
+    // No source of its own: the sink row is the only thing left to read, so a
+    // check that only looks at sources cannot see it.
+    sources: [],
+    sinks: [{ instance: 'split', plugin: '@acme/split', kind: 'request' }],
+    configSinks: { split: { plugin: '@acme/split' } },
+  })
+  const report = await collectFrom(hypHome)
+  const diag = report.diagnostics.find((/** @type {any} */ d) => d.kind === 'plugin_activate_failed')
+  assert.ok(diag, 'the failure must still be reported')
+  // The contradiction is inside one report: this same object lists the sink.
+  assert.deepEqual(report.sinks, [{ instance: 'split', plugin: '@acme/split', kind: 'request' }])
+  assert.ok(
+    !diag.message.includes('none of its sources or sinks'),
+    `the diagnostic contradicts the sink list in its own report: ${diag.message}`
+  )
+  assert.match(diag.message, /only one of the daemon's two processes/)
+})
+
+test('a configured sink instance the daemon never materialized is not read as one that is running', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-activate-sink-config-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // The trap in reading the report's own `sinks` list instead of the
+  // snapshot's: that list starts from `config.sinks`, where a request
+  // instance names its plugin whether or not anything materialized. Here the
+  // plugin failed in both processes, so the daemon materialized nothing.
+  await writeLiveSnapshot({
+    hypHome,
+    failedPlugins: [{ name: '@acme/split', errorKind: 'activate_failed', message: 'boom' }],
+    sources: [],
+    sinks: [],
+    configSinks: { split: { plugin: '@acme/split' } },
+  })
+  const report = await collectFrom(hypHome)
+  const diag = report.diagnostics.find((/** @type {any} */ d) => d.kind === 'plugin_activate_failed')
+  assert.ok(diag)
+  assert.deepEqual(report.sinks, [{ instance: 'split', plugin: '@acme/split', kind: 'request' }],
+    'fixture invariant: the config-derived list names the plugin even with nothing running')
+  assert.match(diag.message, / - none of its sources or sinks are running$/)
+})
+
+test('a real daemon that fails a sink-contributing plugin in the gateway only reports what its snapshot holds', async () => {
+  const home = await makeHome({ split: true })
+  try {
+    const run = runDaemonOutsideTestRunner({
+      hypHome: home.hypHome,
+      configPath: home.configPath,
+      runId: 'activate-split-test',
+      ready: `${CHILD_REPORTED} && snapshot.sinks?.length`,
+    })
+    assert.equal(run.bootError, null, 'fixture invariant: the gateway process must boot')
+    assert.equal(run.waited, true, 'fixture invariant: the child must materialize its sink before status is read')
+
+    // The reachable state, off the live daemon's own file: one snapshot
+    // carrying the gateway's activation failure and the child's running sink.
+    assert.deepEqual(
+      run.snapshot.failedPlugins.map((/** @type {any} */ f) => f.name),
+      ['@acme/split'],
+      'fixture invariant: the gateway storage proxy must defeat the plugin'
+    )
+    assert.deepEqual(run.snapshot.sinks, [{ instance: 'split', plugin: '@acme/split', kind: 'request' }])
+
+    const diag = run.report.diagnostics.find((/** @type {any} */ d) => d.kind === 'plugin_activate_failed')
+    assert.ok(diag, `hyp status raised nothing: ${JSON.stringify(run.report.diagnostics.map((/** @type {any} */ d) => d.kind))}`)
+    assert.ok(
+      run.report.sinks.some((/** @type {any} */ s) => s.instance === 'split'),
+      'fixture invariant: the report prints the sink the diagnostic is about'
+    )
+    assert.ok(
+      !diag.message.includes('none of its sources or sinks'),
+      `the diagnostic contradicts the sink list two sections above it: ${diag.message}`
+    )
+    assert.match(diag.message, /only one of the daemon's two processes/)
+  } finally {
+    await fs.rm(home.hypHome, { recursive: true, force: true })
+  }
 })
 
 test('the message a plugin throws is bounded in the snapshot and whole in the log', async () => {
