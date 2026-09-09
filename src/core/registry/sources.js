@@ -29,28 +29,49 @@ export function createSourceRegistry() {
   const instruments = getKernelInstruments()
 
   // @ref LLP 0012#contribution-surface [implements]: name/plugin/start required, unique source names
-  /** @param {SourceContribution} contribution */
+  /**
+   * `name`, `plugin` and `configSection` are each read once, before the Map is
+   * touched, and every later step uses what this registry took.
+   *
+   * The contribution is stored by reference, so a plugin's `name` is free to be
+   * an accessor answering differently each time it is asked, and it is both the
+   * key `get()` addresses a source by and the key `list()` orders by. A second
+   * read for the `set` is not a refusal a hostile accessor has to beat: it
+   * answers an unclaimed name for `contributions.has()` and a claimed one for
+   * `contributions.set()`, and so replaces another plugin's source, taking over
+   * whatever the kernel starts under that name.
+   *
+   * `plugin` and `configSection` are read before the `set` for the same reason,
+   * even though neither is a key: an accessor raising in the `source.register`
+   * record below leaves this registry holding a contribution while the loader
+   * marks the plugin's whole activation failed (`src/core/runtime/loader.js`).
+   *
+   * @param {SourceContribution} contribution
+   */
   function register(contribution) {
     if (!contribution || typeof contribution !== 'object') {
       throw new TypeError('SourceRegistry.register: contribution must be an object')
     }
-    if (typeof contribution.name !== 'string' || contribution.name.length === 0) {
+    const name = contribution.name
+    if (typeof name !== 'string' || name.length === 0) {
       throw new TypeError('SourceRegistry.register: contribution.name must be a non-empty string')
     }
-    if (typeof contribution.plugin !== 'string' || contribution.plugin.length === 0) {
-      throw new TypeError(`SourceRegistry.register: '${contribution.name}' missing plugin`)
+    const plugin = contribution.plugin
+    if (typeof plugin !== 'string' || plugin.length === 0) {
+      throw new TypeError(`SourceRegistry.register: '${name}' missing plugin`)
     }
     if (typeof contribution.start !== 'function') {
-      throw new TypeError(`SourceRegistry.register: '${contribution.name}' missing start()`)
+      throw new TypeError(`SourceRegistry.register: '${name}' missing start()`)
     }
-    if (contributions.has(contribution.name)) {
-      throw new Error(`SourceRegistry.register: duplicate source name '${contribution.name}'`)
+    if (contributions.has(name)) {
+      throw new Error(`SourceRegistry.register: duplicate source name '${name}'`)
     }
-    contributions.set(contribution.name, contribution)
+    const configSection = contribution.configSection ?? ''
+    contributions.set(name, contribution)
     log.info('source.register', {
-      [Attr.PLUGIN]: contribution.plugin,
-      hyp_source: contribution.name,
-      hyp_config_section: contribution.configSection ?? '',
+      [Attr.PLUGIN]: plugin,
+      hyp_source: name,
+      hyp_config_section: configSection,
     })
   }
 
@@ -59,8 +80,21 @@ export function createSourceRegistry() {
     return contributions.get(name)
   }
 
+  /**
+   * Every registered contribution, ordered by name.
+   *
+   * The order comes from the keys, not from `a.name`: the key is the name this
+   * registry validated, while `contribution.name` is a live plugin property.
+   * Reading it here runs plugin code inside a comparator, where a throw escapes
+   * into every caller of `list()` - the daemon's source walk and the plugin
+   * doctor's dry run - before a single source has been handed back, and where
+   * an accessor that merely stops answering with a string is the same outage,
+   * because `compareStrings` refuses a non-string.
+   */
   function list() {
-    return Array.from(contributions.values()).sort((a, b) => compareStrings(a.name, b.name))
+    return Array.from(contributions.keys())
+      .sort(compareStrings)
+      .map((name) => /** @type {SourceContribution} */ (contributions.get(name)))
   }
 
   /**
@@ -77,12 +111,15 @@ export function createSourceRegistry() {
     if (started.has(name)) {
       throw new Error(`SourceRegistry.start: source '${name}' already started`)
     }
+    // One read for the span and the counter both, so a single start cannot be
+    // spanned under one plugin and counted under another.
+    const plugin = contribution.plugin
     return withSpan(
       'source.start',
       {
         [Attr.COMPONENT]: 'sources',
         [Attr.OPERATION]: 'source.start',
-        [Attr.PLUGIN]: contribution.plugin,
+        [Attr.PLUGIN]: plugin,
         hyp_source: name,
         status: 'ok',
       },
@@ -92,7 +129,7 @@ export function createSourceRegistry() {
           throw new Error(`SourceRegistry.start: source '${name}' did not return a StartedSource`)
         }
         started.set(name, handle)
-        instruments.sourcesStarted.add(1, { hyp_source: name, [Attr.PLUGIN]: contribution.plugin })
+        instruments.sourcesStarted.add(1, { hyp_source: name, [Attr.PLUGIN]: plugin })
         return handle
       },
       { component: 'sources' }

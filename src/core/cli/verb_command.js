@@ -47,19 +47,23 @@ const VERB_PROJECTION = Symbol('hypaware.verbProjection')
  * the **same** `render` turns the structured result into stdout text.
  *
  * @param {VerbRegistration} verb
+ * @param {string} [name] the name to project under, defaulting to the verb's
+ *   own. `VerbRegistry.register` passes the name it validated and keyed by, so
+ *   the command lands under the same string as the verb rather than under
+ *   another read of an accessor free to answer differently.
  * @returns {CommandRegistration}
  * @ref LLP 0034#verbs [implements]: one declaration → a CLI command and an MCP tool; the kernel owns both adapters so the flag set and the tool schema never drift
  */
-export function verbToCommand(verb) {
+export function verbToCommand(verb, name = verb.name) {
   /** @type {CommandRegistration} */
   const command = {
-    name: verb.name,
+    name,
     ...(verb.aliases ? { aliases: verb.aliases } : {}),
     ...(verb.category ? { category: verb.category } : {}),
     ...(verb.audience ? { audience: verb.audience } : {}),
     ...(verb.plugin ? { plugin: verb.plugin } : {}),
     summary: verb.summary,
-    usage: usageForVerb(verb.name, verb.inputSchema),
+    usage: usageForVerb(name, verb.inputSchema),
     // A verb that needs more than a usage line says so here, and dispatch's
     // central `--help` interception renders it exactly as it does for a core
     // command. Without the passthrough a verb could not explain itself at
