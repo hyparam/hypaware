@@ -192,9 +192,18 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * carried the kernel-side lifecycle members too, and `@hypaware/otel` starts
  * its own listener through them from `activate()`.
  *
- * A registry without `registeringAs` is called exactly as before, for a host
- * substituting a registry of its own. The plugin doctor's stand-in spreads the
- * real registry, so it has it.
+ * A registry without `registeringAs` is called exactly as before. The plugin
+ * doctor's stand-in spreads the real registry, so it has it.
+ *
+ * "The rest" is what the registry holds on itself, not what it inherits: a
+ * spread copies own enumerable properties and nothing else, so a substitute
+ * keeping `get`/`list`/the lifecycle members on a prototype would reach a
+ * plugin without them. Every registry that exists is an object literal
+ * (`createSourceRegistry`, and the doctor's stand-in spread over it), and
+ * `createKernelRuntime` is not on the package's export map, so this constrains
+ * a future in-repo stand-in rather than any host that can be written today. It
+ * is the same own-versus-inherited trap `neuter` documents in
+ * `src/core/plugin_doctor/dry_run.js`.
  *
  * @param {PluginName} pluginName
  * @param {ExtendedSourceRegistry} registry
