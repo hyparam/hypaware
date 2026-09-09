@@ -194,13 +194,15 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  *
  * Three listings are taken through `listed`: `CommandRegistry.list`,
  * `listGroups` and `initPresets.list`. All three order by the keys their
- * registries validated (hyparam/hypaware#1555), as `SourceRegistry.list` and
- * `DatasetRegistry.listDatasets` already did (issue #1524), so the `name` a
- * plugin left on a stored command, group or preset is asked for only by
- * `registeredName` below, where it costs the one contribution rather than the
- * bucket. The other five listings order by their own keys or build fresh
- * objects, and read nothing plugin-controlled. The three calls stay routed
- * through `listed`; what it still guards is on that function.
+ * registries validated (hyparam/hypaware#1555), as
+ * `DatasetRegistry.listDatasets` (issue #1524) and `SourceRegistry.list`
+ * (issue #1530) already did, so the `name` a plugin left on a stored
+ * command, group or preset is asked for only by `registeredName` below,
+ * where it costs the one contribution rather than the bucket. The other
+ * five (`sources`, `sinks`, `datasets`, `skills` and `agents`) order by
+ * their own keys, build fresh objects, or copy the registry's own array,
+ * and none of them reads anything plugin-controlled. The three calls stay
+ * routed through `listed`; what it still guards is on that function.
  *
  * `skills` and `agents` are contained but not verified. `skills.register` and
  * `agents.register` do build a registry-owned record out of the fields they
@@ -484,11 +486,13 @@ function readCommandGroups(refused, commandRegistry) {
 /**
  * One registry's listing, or an empty one when producing it threw.
  *
- * Kept as defence in depth rather than against a live hazard. The three
+ * Defence in depth today. It went in against a live hazard: the three
  * listings it wraps are `CommandRegistry.list`, `listGroups` and
- * `initPresets.list`, and all three order by the keys their registries
- * validated (hyparam/hypaware#1555), so producing one of those listings reads
- * no accessor a plugin left on a stored record and no hostile `name` reaches
+ * `initPresets.list`, and at the commit that added this guard (issue #1538)
+ * all three still sorted through `compareStrings(a.name, b.name)` over the
+ * records they hold. They order by the keys their registries validated now
+ * (hyparam/hypaware#1555), so producing one of those listings reads no
+ * accessor a plugin left on a stored record and no hostile `name` reaches
  * this catch. That is a fact about how those three list, not a rule about
  * listings and not a claim that a `list()` cannot throw for some other
  * reason: one that went back to reading a record would land here again,
