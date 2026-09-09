@@ -704,8 +704,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   } else {
     // The list is the configured set, so a plugin that did not activate still
     // belongs on it, tagged: unqualified, the line claims it is running when
-    // none of its sources, sinks or commands exist. The reason and the repair
-    // are in the diagnostics block.
+    // some or all of what it contributes is not. How much is not, the reason,
+    // and the repair are in the diagnostics block.
     const failed = new Set(report.failedPlugins)
     for (const name of report.activePlugins) {
       const tag = failed.has(name) ? '  [failed to activate]' : ''

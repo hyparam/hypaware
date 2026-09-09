@@ -278,12 +278,23 @@ test('a plugin whose activate() throws is reported on the surfaces a shipped ins
     assert.ok(diag, `hyp status raised nothing: ${JSON.stringify(report.diagnostics.map((/** @type {any} */ d) => d.kind))}`)
     assert.equal(diag.severity, 'error')
     assert.match(diag.message, /@acme\/thrower/)
-    // Quoted whole: the reason is the only thing this diagnostic is for, and
-    // the repair must name a command that answers for a bundled plugin too
-    // (`hyp plugin info` reads the install lock, so it reports every bundled
-    // name as "not installed").
+    // Quoted whole: the reason is the only thing this diagnostic is for.
     assert.ok(diag.message.includes(THROWN_MESSAGE), `the reason was truncated: ${diag.message}`)
-    assert.deepEqual(diag.repair, ['hyp plugin list', 'hyp daemon restart'])
+    // And the repair is the record that keeps it whole past the clamp, not a
+    // plugin listing: `hyp plugin list` prints the plugins the CLI's own boot
+    // activated plus the install lock, so a bundled adapter that failed to
+    // activate is absent from its output entirely, and an installed one sits
+    // under "Installed plugins" with nothing marking it broken. Both log files
+    // are named because either process can be the one that could not activate.
+    assert.equal(diag.repair.length, 2)
+    assert.match(diag.repair[0], /^grep -s plugin_activate_failed /)
+    for (const logFile of [
+      path.join(home.stateRoot, 'logs', 'daemon.log'),
+      path.join(home.stateRoot, 'processing', 'logs', 'daemon.log'),
+    ]) {
+      assert.ok(diag.repair[0].includes(logFile), `the repair does not name ${logFile}: ${diag.repair[0]}`)
+    }
+    assert.equal(diag.repair[1], 'hyp daemon restart')
     assert.equal(report.overall, 'degraded', 'a configured plugin that is not running is not a healthy install')
 
     // And the plugin list stops claiming the plugin is running.
@@ -327,4 +338,83 @@ test('a boot where every plugin activates adds no new noise', async () => {
   } finally {
     await fs.rm(home.hypHome, { recursive: true, force: true })
   }
+})
+
+// The two daemon runs above cover the plugin that failed in the one process
+// that was going to run it. A routing contributor is the other shape: it
+// activates in the gateway *and* in the processing child, and the gateway
+// hands it a storage proxy that throws on every cache call, so one that reads
+// storage in `activate()` fails there and comes up here. Driven off a written
+// snapshot rather than a second daemon because the whole question is what the
+// collector says about a snapshot holding both facts at once.
+
+/**
+ * A live snapshot for this process's pid: the daemon is up and the file is
+ * its own, which is the only state the activation diagnostic is raised from.
+ *
+ * @param {{ hypHome: string, failedPlugins: object[], sources: object[] }} args
+ */
+async function writeLiveSnapshot({ hypHome, failedPlugins, sources }) {
+  const stateRoot = path.join(hypHome, 'hypaware')
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(hypHome, 'hypaware-config.json'), JSON.stringify({ version: 2, plugins: [] }) + '\n')
+  const { writePidFile } = await import('../../src/core/daemon/pid.js')
+  const { writeStatusFile } = await import('../../src/core/daemon/status.js')
+  writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'healthy',
+    pid: process.pid,
+    healthyAt: new Date().toISOString(),
+    uptimeMs: 0,
+    sources,
+    sinks: [],
+    failedPlugins,
+  }))
+  return stateRoot
+}
+
+/** @param {string} hypHome */
+async function collectFrom(hypHome) {
+  const { collectHypAwareStatus } = await import('../../src/core/daemon/status.js')
+  return collectHypAwareStatus({
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    platform: 'linux',
+    homeDir: hypHome,
+    isLaunchAgentInstalled: () => false,
+  })
+}
+
+test('a plugin that failed in one process and came up in the other is not reported as wholly stopped', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-activate-partial-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeLiveSnapshot({
+    hypHome,
+    failedPlugins: [{ name: '@acme/router', errorKind: 'activate_failed', message: 'gateway process cannot access storage.tableExists' }],
+    sources: [{ name: 'acme-router', plugin: '@acme/router', state: 'started' }],
+  })
+  const report = await collectFrom(hypHome)
+  const diag = report.diagnostics.find((/** @type {any} */ d) => d.kind === 'plugin_activate_failed')
+  assert.ok(diag, 'the failure must still be reported')
+  // The claim the collector must not make: this same report lists the
+  // plugin's source as started, so "none of its sources ... are running"
+  // would be contradicted two fields away.
+  assert.ok(
+    !diag.message.includes('none of its sources'),
+    `the diagnostic contradicts the source list in its own report: ${diag.message}`
+  )
+  assert.match(diag.message, /only one of the daemon's two processes/)
+})
+
+test('a plugin with nothing left running still says so', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-activate-whole-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeLiveSnapshot({
+    hypHome,
+    failedPlugins: [{ name: '@acme/router', errorKind: 'activate_failed', message: 'boom' }],
+    sources: [{ name: 'other', plugin: '@acme/other', state: 'started' }],
+  })
+  const report = await collectFrom(hypHome)
+  const diag = report.diagnostics.find((/** @type {any} */ d) => d.kind === 'plugin_activate_failed')
+  assert.ok(diag)
+  assert.match(diag.message, / - none of its sources, sinks or commands are running$/)
 })

@@ -1623,6 +1623,13 @@ export async function collectHypAwareStatus(opts = {}) {
   const reportedFailures = snapshotIsLive && Array.isArray(daemonStatusFile?.failedPlugins)
     ? daemonStatusFile.failedPlugins
     : []
+  // Where the untruncated reason is. Both files, because either process can be
+  // the one that could not activate the plugin, and the entry does not say
+  // which. Same two paths `recent_errors` counts (LLP 0349), derived the same
+  // way, so the pointer cannot drift from the store it points at.
+  const activationLogGrep = reportedFailures.length === 0 ? ''
+    : `grep -s plugin_activate_failed ${path.join(daemonLogDir(stateRoot), 'daemon.log')} `
+      + `${path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log')}`
   for (const entry of reportedFailures) {
     const name = sanitizeLabel(entry?.name)
     if (name === undefined) continue
@@ -1631,14 +1638,31 @@ export async function collectHypAwareStatus(opts = {}) {
     // The daemon is up and the rest of the install works, but a plugin the
     // operator configured is capturing nothing, and a machine that silently
     // stopped capturing is the outage this surface exists to name.
+    // What is left of the plugin, read off the same snapshot the failure came
+    // from rather than asserted. A routing contributor activates in *both*
+    // daemon processes, and in the gateway it gets a storage proxy that throws
+    // on every cache call, so one that reads storage in `activate()` fails
+    // there and comes up in the processing daemon: its source is `started` in
+    // this very report while the entry says it never activated. "Nothing of it
+    // is running" is a claim this collector can check, so it checks it.
+    const stillContributing = sources.some((s) => s.plugin === name && s.state === 'started')
     diagnostics.push({
       severity: 'error',
       kind: 'plugin_activate_failed',
       message: `plugin '${name}' failed to activate `
         + `(${sanitizeLabel(entry.errorKind) ?? 'activate_failed'}): `
         + `${sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'}`
-        + ' - none of its sources, sinks or commands are running',
-      repair: ['hyp plugin list', 'hyp daemon restart'],
+        + (stillContributing
+          ? ' - it came up in only one of the daemon\'s two processes, so part of what it contributes is not running'
+          : ' - none of its sources, sinks or commands are running'),
+      // Not `hyp plugin list`: it prints the plugins *this* CLI boot activated
+      // plus the install lock, so the plugin that just failed is either missing
+      // from the output entirely (a bundled adapter, the likeliest subject) or
+      // sits under "Installed plugins" with nothing marking it as broken. The
+      // reason above is clamped to a sentence and the commonest real one is a
+      // module-resolution error longer than that, so the first repair is the
+      // record that kept it whole.
+      repair: [activationLogGrep, 'hyp daemon restart'],
     })
   }
 
