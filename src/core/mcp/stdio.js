@@ -78,7 +78,8 @@ export function serveStdio({ server, stdin, stdout, onError }) {
  * coerced by {@link describeThrown}, which cannot raise; a string, a number or
  * `null` then always stringifies. It is **not** total for an id JSON-RPC does
  * not sanction: V8 parses deeper than it stringifies, so a structural id nested
- * past roughly 4200 levels raises a `RangeError` out of `JSON.stringify` that
+ * past a few thousand levels (where exactly is a stack-size artifact, not a
+ * language constant) raises a `RangeError` out of `JSON.stringify` that
  * `JSON.parse` never raised, defeating the fallback exactly as it defeated the
  * response carrying it, and the inner catch leaves the line unsent. That is the
  * one id this backstop cannot answer, and nothing could: a reply is correlated

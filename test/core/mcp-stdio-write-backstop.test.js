@@ -178,14 +178,40 @@ test('a stdout that throws on an honest write still reaches onError', async () =
   assert.equal(/** @type {Error} */ (errors[0]).message, 'EPIPE')
 })
 
+/**
+ * A depth `JSON.parse` takes and `JSON.stringify` will not, found by probing
+ * rather than pinned. Where `JSON.stringify` gives up is a stack artifact, not
+ * a language constant: measured here it is 4165 on Node 22 and 4459 on Node 24,
+ * and it moves linearly with `--stack-size` (2100 at 500KB, 8500 at 2000KB), so
+ * a hard number would make the test a bet on one box's stack and would fail red
+ * on any runtime that stringifies deeper. The first failing power of two is
+ * doubled so the transport's own call site is past the boundary too rather than
+ * sitting on it, where a few frames of difference could decide the result.
+ *
+ * @returns {number} the depth to use, or 0 if nothing in range defeated stringify
+ */
+function depthPastStringify() {
+  for (let depth = 1024; depth <= 1 << 20; depth *= 2) {
+    const nested = JSON.parse('['.repeat(depth) + ']'.repeat(depth))
+    try {
+      JSON.stringify(nested)
+    } catch (err) {
+      if (err instanceof RangeError) return depth * 2
+      throw err
+    }
+  }
+  return 0
+}
+
 test('an id too deep for JSON.stringify defeats the backstop, and says so rather than crashing', async () => {
   // The limit of "serializable by construction". V8 parses deeper than it
-  // stringifies, so a structural id nested past roughly 4200 levels arrives
+  // stringifies, so a structural id nested past a few thousand levels arrives
   // intact and then raises a RangeError out of `JSON.stringify` - both out of
   // the response that carries it and out of the backstop that would answer it.
   // No line can correlate to an id that cannot be written down. Pinned so the
   // gap is an executable statement rather than a claim that it cannot happen.
-  const depth = 6000
+  const depth = depthPastStringify()
+  assert.ok(depth > 0, 'no depth in range defeated JSON.stringify')
   const line = '{"jsonrpc":"2.0","id":' + '['.repeat(depth) + ']'.repeat(depth) + ',"method":"ping"}'
   const wire = JSON.parse(line)
   assert.throws(() => JSON.stringify(wire.id), RangeError)
@@ -237,4 +263,23 @@ test('a write that fails on an honest response is reported as itself, with no se
   assert.equal(attempts, 1, 'the failed honest write must not be retried or followed by a fallback')
   assert.equal(errors.length, 1)
   assert.equal(/** @type {Error} */ (errors[0]).message, 'EPIPE')
+})
+
+test('a toJSON that throws a value String() cannot take still gets its line', async () => {
+  // `describeThrown`'s catch is load-bearing, not decoration. The reason string
+  // is built from whatever a `toJSON` threw, and `String()` raises on a value
+  // with no primitive conversion; that build happens before the fallback write,
+  // so a raise there escapes `writeResponse` with no line written at all and
+  // turns an answerable id straight back into the forever-wait. `Object.create(null)`
+  // is the shape: JSON.stringify propagates a thrown value verbatim.
+  const { chunks, errors } = await drive(
+    async () => ({ jsonrpc: '2.0', id: 5, result: { toJSON() { throw Object.create(null) } } }),
+    [{ jsonrpc: '2.0', id: 5, method: 'ping' }],
+  )
+  assert.equal(chunks.length, 1)
+  const reply = JSON.parse(chunks[0])
+  assert.equal(reply.id, 5)
+  assert.equal(reply.error.code, -32603)
+  assert.equal(typeof reply.error.message, 'string')
+  assert.equal(errors.length, 1)
 })
