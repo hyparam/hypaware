@@ -49,14 +49,19 @@ export function createVerbRegistry(opts = {}) {
       }
       // Project the CLI command so `hyp <verb>` and `hyp --help` work, and do
       // the whole projection *before* the Maps are written, because the two
-      // `set`s are the only steps left that cannot fail. Building the command
-      // is the last step that runs plugin code, and registering it refuses a
-      // colliding alias or an out-of-range `audience`/`bootProfile` read off
-      // values the verb supplied, so with either after the `set`s a refused
-      // registration left this registry holding a verb whose plugin the loader
-      // then marked failed: a plugin reported as not loaded and an MCP tool the
-      // kernel would still answer. That one needs no hostile accessor at all.
-      // `register` now claims all three namespaces or none of them.
+      // `set`s are the only steps left that cannot fail. Both halves of the
+      // line below still can. Building the command runs the registration's
+      // accessors; registering it refuses an out-of-range `audience` and an
+      // alias that collides with a registered command, and iterates whatever
+      // `aliases` answered, so a value that is not iterable throws there.
+      // (The same boundary refuses an out-of-range `bootProfile`, but a verb
+      // never reaches that one: `verbToCommand` does not project the member,
+      // so the registry's own default is the only value it ever sees.) With
+      // either half after the `set`s a refusal left this registry holding a
+      // verb whose plugin the loader then marked failed: a plugin reported as
+      // not loaded and an MCP tool the kernel would still answer, and that one
+      // needs no hostile accessor at all. `register` now claims all three
+      // namespaces or none of them.
       // Idempotent: a runtime re-created over a shared command registry (or a
       // verb whose name a command already occupies) must not double-register.
       if (commandRegistry && !commandAlreadyRegistered(commandRegistry, name)) {
@@ -130,9 +135,16 @@ export function verbAuthClass(verb) {
  *
  * The keys are returned rather than left for the caller to read again, because
  * every read of a plugin property is a fresh answer and what is checked here
- * has to be the string the Maps are keyed from. `exposure` and `authClass` are
- * read once each for the same reason: a truthiness test and a membership test
- * on two reads can pass on a value that is not the one checked.
+ * has to be the string the Maps are keyed from. `exposure`, `authClass` and
+ * `inputSchema` are read once each for the same reason: a truthiness test and
+ * a membership (or `typeof`) test on two reads can pass on a value that is not
+ * the one checked.
+ *
+ * `summary` and `inputSchema` are read again by the projection, which is not a
+ * second answer this function can prevent and does not need to: neither is a
+ * key, the command registry re-checks its own copy of `summary`, and the whole
+ * projection runs ahead of both `set`s, so a divergent second answer costs the
+ * registration itself and never another plugin's.
  *
  * @param {VerbRegistration} verb
  * @returns {{ name: string, tool: string }}
@@ -152,7 +164,8 @@ function validateVerb(verb) {
   if (typeof verb.summary !== 'string') {
     throw new TypeError(`registerVerb '${name}': summary is required`)
   }
-  if (!verb.inputSchema || typeof verb.inputSchema !== 'object') {
+  const inputSchema = verb.inputSchema
+  if (!inputSchema || typeof inputSchema !== 'object') {
     throw new TypeError(`registerVerb '${name}': inputSchema is required`)
   }
   if (typeof verb.operation !== 'function') {

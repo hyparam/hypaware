@@ -321,12 +321,14 @@ test('register runs no plugin code after either Map is written', () => {
 
 test('a registration the command registry refuses claims no namespace at all', () => {
   // Building the command is not the last step that can fail: registering it
-  // refuses a colliding alias, and an `audience` or `bootProfile` outside its
-  // vocabulary, all read off values the verb supplied. With that call after the
-  // two `set`s the refusal left both Maps holding a verb whose plugin the
-  // loader then marked failed, so the kernel reported a plugin that had not
-  // loaded and an MCP tool it would still answer. No hostile accessor is needed
-  // for this one, only an honest registration the boundary rejects.
+  // refuses an `audience` outside its vocabulary and an alias that collides
+  // with a registered command, and it iterates whatever `aliases` answered, so
+  // a value that is not iterable throws there too. All three are read off
+  // values the verb supplied. With that call after the two `set`s the refusal
+  // left both Maps holding a verb whose plugin the loader then marked failed,
+  // so the kernel reported a plugin that had not loaded and an MCP tool it
+  // would still answer. No hostile accessor is needed for any of them, only an
+  // honest registration the boundary rejects.
   const commands = createCommandRegistry()
   commands.register({ name: 'taken', summary: 'somebody else', usage: 'u', run: async () => 0 })
   const verbs = createVerbRegistry({ commandRegistry: commands })
@@ -345,6 +347,14 @@ test('a registration the command registry refuses claims no namespace at all', (
   )
   assert.equal(other.get('rude verb'), undefined, 'a refused registration was left in the name map')
   assert.equal(other.getByTool('rude_tool'), undefined, 'a refused registration was left in the tool map')
+
+  // The third one is a throw rather than a refusal, from inside the alias loop
+  // the registration's own `aliases` value drives.
+  const third = createVerbRegistry({ commandRegistry: createCommandRegistry() })
+  assert.throws(() => third.register(makeVerb({ name: 'uniterable verb', tool: 'uniterable_tool', aliases: 42 })))
+  assert.equal(third.get('uniterable verb'), undefined, 'a refused registration was left in the name map')
+  assert.equal(third.getByTool('uniterable_tool'), undefined, 'a refused registration was left in the tool map')
+  assert.deepEqual(third.list(), [])
 })
 
 test('verbToCommand reads each optional member once', () => {
