@@ -1382,7 +1382,10 @@ export async function collectHypAwareStatus(opts = {}) {
   // daemon's.
   const snapshotIsThisProcess =
     typeof daemonStatusFile?.pid !== 'number' || daemonStatusFile.pid === daemon.pid
-  const heartbeatAgeMs = daemon.running && snapshotIsThisProcess
+  // Is the snapshot a live daemon's own, and so readable in the present tense
+  // at all? Every reader below that makes a claim about *now* is gated on it.
+  const snapshotIsLive = daemon.running && snapshotIsThisProcess
+  const heartbeatAgeMs = snapshotIsLive
     ? daemonHeartbeatAgeMs(daemonStatusFile, Date.now())
     : null
   if (heartbeatAgeMs !== null && heartbeatAgeMs > DAEMON_HEARTBEAT_STALE_MS) {
@@ -1587,7 +1590,6 @@ export async function collectHypAwareStatus(opts = {}) {
     // dereferences `.name`, so a `null` in the list takes the whole report out
     // at the render rather than here.
     // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
-    const snapshotIsLive = daemon.running && snapshotIsThisProcess
     sources.push(...daemonStatusFile.sources
       .filter((s) => !!s && typeof s === 'object')
       .map((s) => (
@@ -1597,6 +1599,38 @@ export async function collectHypAwareStatus(opts = {}) {
       )))
   } else {
     sources.push(...inferConfiguredSources(activePlugins))
+  }
+
+  // ----- plugins the running daemon could not activate (issue #1556) -----
+  // `activePlugins` above is the configured set: the right answer to what this
+  // machine is set up to do, the only answer available with no daemon running,
+  // and no answer at all to whether a plugin is running. The daemon is the only
+  // process that knows that, so it comes from the snapshot, whose entries are
+  // validated the way every borrowed list here is: the file is only known to
+  // hold an object (LLP 0164#status-reads-it-from-the-status-file).
+  // @ref LLP 0383#a-record-not-a-claim [constrained-by]: an `error` diagnostic is present tense, so it is raised off a live daemon's snapshot only
+  /** @type {string[]} */
+  const failedPlugins = []
+  const reportedFailures = snapshotIsLive && Array.isArray(daemonStatusFile?.failedPlugins)
+    ? daemonStatusFile.failedPlugins
+    : []
+  for (const entry of reportedFailures) {
+    const name = sanitizeLabel(entry?.name)
+    if (name === undefined) continue
+    failedPlugins.push(name)
+    // An error, so it degrades `overall` through the existing severity rule.
+    // The daemon is up and the rest of the install works, but a plugin the
+    // operator configured is capturing nothing, and a machine that silently
+    // stopped capturing is the outage this surface exists to name.
+    diagnostics.push({
+      severity: 'error',
+      kind: 'plugin_activate_failed',
+      message: `plugin '${name}' failed to activate `
+        + `(${sanitizeLabel(entry.errorKind) ?? 'activate_failed'}): `
+        + `${sanitizeLabel(entry.message) ?? 'no message recorded'}`
+        + ' - none of its sources, sinks or commands are running',
+      repair: [`hyp plugin info ${name}`, 'hyp daemon restart'],
+    })
   }
 
   // ----- recent client surfaces (LLP 0164) -----
@@ -2371,6 +2405,7 @@ export async function collectHypAwareStatus(opts = {}) {
     configValid,
     configRecordsAnswer,
     activePlugins,
+    failedPlugins,
     layered,
     daemon,
     sources,
