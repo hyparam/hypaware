@@ -101,7 +101,9 @@ const SOURCE_STATUS_TIMEOUT_MS = 5000
  * handles yet - the control watcher installs at the tail of `runDaemon`, after
  * every source has started - so an unref'd wait there empties the event loop
  * and the process exits mid-boot, which is the same "no daemon, no status
- * file" outcome the bound exists to prevent, only sooner.
+ * file" outcome the bound exists to prevent, only sooner. Neither direction is
+ * observable through `runDaemon`, so both are pinned by a test against this
+ * function, which is why it is exported.
  *
  * @param {Promise<unknown>} probe
  * @param {{ keepAlive?: boolean }} [opts]
@@ -1792,4 +1794,5 @@ export {
   pidFilePath,
   statusFilePath,
   resolveClientActionSeam,
+  withStatusTimeout,
 }

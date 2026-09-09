@@ -7,7 +7,7 @@ import { rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { runDaemon } from '../../src/core/daemon/runtime.js'
+import { runDaemon, withStatusTimeout } from '../../src/core/daemon/runtime.js'
 import { readStatusFile } from '../../src/core/daemon/status.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
@@ -212,17 +212,20 @@ test('a source the daemon starts itself is not mislabelled failed when its statu
 /** Generous enough that only a boot with no bound at all trips it. */
 const BOOT_DEADLINE_MS = 20_000
 
-test('a source whose status() never settles does not hang daemon boot', async () => {
+test('a source whose status() never settles does not hang daemon boot', async (t) => {
   // Made here rather than inside `bootWith` so the regression run has
   // something to clean up with: a boot still pending hands back no handle.
-  // The removal is an exit hook because the run this test exists to report
-  // is one where nothing else gets a turn: an unbounded boot probe drains
-  // the loop and Node tears the runner down without unwinding this test, so
-  // neither a `finally` here nor `closeBoot` below would ever run. `force`
-  // makes it a no-op on the passing run, where `closeBoot` got there first.
+  // The removal is an `after` hook because the run this test exists to report
+  // is one where the test body itself never gets another turn: an unbounded
+  // boot probe drains the event loop, and Node abandons the pending test
+  // without unwinding it, so neither a `finally` here nor `closeBoot` below
+  // would run. The runner still runs its own hooks on that path. `rmSync`
+  // rather than `fs.rm` for the same reason: nothing is left to await on.
+  // `force` makes it a no-op on the passing run, where `closeBoot` got there
+  // first.
   const prefix = 'hypaware-boot-status-hang-'
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
-  process.on('exit', () => { rmSync(hypHome, { recursive: true, force: true }) })
+  t.after(() => { rmSync(hypHome, { recursive: true, force: true }) })
   /** @type {NodeJS.Timeout | undefined} */
   let deadline
   let outcome
@@ -271,4 +274,33 @@ test('a source whose status() never settles does not hang daemon boot', async ()
       clearInterval(keepAlive)
     }
   }
+})
+
+// The two callers disagree about one thing, and the whole suite above is blind
+// to it. A boot deadline that is not ref'd empties the event loop and the
+// process exits mid-boot, which is #1508's missing daemon again by another
+// route; a tick deadline that *is* ref'd holds the daemon open for up to five
+// seconds past its own `stop`, waiting on a probe nobody is listening to any
+// more. The boot direction fails a test above if it is flipped, the tick
+// direction failed none: `keepAlive` defaulting the other way passed the
+// entire suite. Neither is reachable through `runDaemon`, so both are asserted
+// here against the helper itself.
+test("the status probe's deadline holds the loop at boot and not on the tick", async () => {
+  const liveTimers = () => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+
+  /** @type {(value?: unknown) => void} */
+  let answer = () => {}
+  const probe = new Promise((resolve) => { answer = resolve })
+
+  // Read back to back with no await between, so nothing else can create or
+  // retire a timer in the gap and the deltas are this helper's alone.
+  const before = liveTimers()
+  const tick = withStatusTimeout(probe)
+  assert.equal(liveTimers(), before, "a tick probe's deadline must not keep the process alive past shutdown")
+  const boot = withStatusTimeout(probe, { keepAlive: true })
+  assert.equal(liveTimers(), before + 1, "a boot probe's deadline is all that holds the loop while boot waits")
+
+  answer()
+  await Promise.all([tick, boot])
+  assert.equal(liveTimers(), before, 'a probe that answered leaves no deadline behind')
 })
