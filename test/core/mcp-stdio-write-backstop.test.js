@@ -78,10 +78,11 @@ test('the -32603 backstop carries the reason, so the client is told why', async 
   assert.match(JSON.parse(chunks[0]).error.message, /BigInt/)
 })
 
-test('a response id off the wire is serializable by construction, so the backstop line always forms', async () => {
+test('the backstop line forms for every id off the wire that JSON can write down', async () => {
   // Every id the backstop can use arrived through `JSON.parse`, which cannot
   // produce a BigInt, a cycle, a `toJSON`, or an `undefined`. Ids JSON-RPC does
-  // not sanction still parse, so the backstop must survive them too.
+  // not sanction still parse, so the backstop must survive them too. It is not
+  // total, though: see the depth case below for the one id it cannot answer.
   const ids = /** @type {any[]} */ ([0, -1, 1.5, '', 'x'.repeat(1000), null, [1, 2], { a: { b: 1 } }, true])
   for (const id of ids) {
     const { chunks } = await drive(
@@ -173,6 +174,67 @@ test('a stdout that throws on an honest write still reaches onError', async () =
     [{ jsonrpc: '2.0', id: 9, method: 'ping' }],
     { write: () => { throw new Error('EPIPE') } },
   )
+  assert.equal(errors.length, 1)
+  assert.equal(/** @type {Error} */ (errors[0]).message, 'EPIPE')
+})
+
+test('an id too deep for JSON.stringify defeats the backstop, and says so rather than crashing', async () => {
+  // The limit of "serializable by construction". V8 parses deeper than it
+  // stringifies, so a structural id nested past roughly 4200 levels arrives
+  // intact and then raises a RangeError out of `JSON.stringify` - both out of
+  // the response that carries it and out of the backstop that would answer it.
+  // No line can correlate to an id that cannot be written down. Pinned so the
+  // gap is an executable statement rather than a claim that it cannot happen.
+  const depth = 6000
+  const line = '{"jsonrpc":"2.0","id":' + '['.repeat(depth) + ']'.repeat(depth) + ',"method":"ping"}'
+  const wire = JSON.parse(line)
+  assert.throws(() => JSON.stringify(wire.id), RangeError)
+
+  /** @type {string[]} */
+  const chunks = []
+  /** @type {unknown[]} */
+  const errors = []
+  await serveStdio({
+    server: { handleMessage: async (m) => ({ jsonrpc: '2.0', id: m.id, result: {} }) },
+    stdin: Readable.from([line + '\n']),
+    stdout: { write: (chunk) => chunks.push(chunk) },
+    onError: (err) => errors.push(err),
+  })
+  assert.deepEqual(chunks, [])
+  // Reported once and off-channel, not swallowed and not looped.
+  assert.equal(errors.length, 1)
+  assert.ok(errors[0] instanceof RangeError)
+})
+
+test('the backstop answers the id off the wire, not the one on the response', async () => {
+  // The wire id came through `JSON.parse`; the response id is whatever the
+  // handler built, and can be exactly the kind of value that made the write
+  // fail. Answering with the response's own id would let the poison choose the
+  // id of its own error reply and take the backstop line down with it.
+  const { chunks, errors } = await drive(
+    async () => ({ jsonrpc: '2.0', id: 1n, result: {} }),
+    [{ jsonrpc: '2.0', id: 5, method: 'ping' }],
+  )
+  assert.equal(chunks.length, 1)
+  assert.equal(JSON.parse(chunks[0]).id, 5)
+  assert.equal(JSON.parse(chunks[0]).error.code, -32603)
+  assert.equal(errors.length, 1)
+})
+
+test('a write that fails on an honest response is reported as itself, with no second write', async () => {
+  // The `try` covers the `JSON.stringify` and not the `write`. A stream that
+  // refuses one write must not be told the response could not be serialized
+  // (it could), and must not be handed a second line it did not ask for. The
+  // stream here accepts the second write, so a stray fallback would show up.
+  /** @type {string[]} */
+  const seen = []
+  let attempts = 0
+  const { errors } = await drive(
+    async () => ({ jsonrpc: '2.0', id: 5, result: {} }),
+    [{ jsonrpc: '2.0', id: 5, method: 'ping' }],
+    { write: (chunk) => { seen.push(chunk); if (++attempts === 1) throw new Error('EPIPE') } },
+  )
+  assert.equal(attempts, 1, 'the failed honest write must not be retried or followed by a fallback')
   assert.equal(errors.length, 1)
   assert.equal(/** @type {Error} */ (errors[0]).message, 'EPIPE')
 })
