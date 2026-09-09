@@ -110,6 +110,18 @@ export function isNpxBinPath(binPath, env = process.env) {
  * here. npx's own `_npx` shim directory sits in front of `PATH` and is skipped:
  * resolving it would re-record the very path such a caller is avoiding.
  *
+ * It answers "where is an installed `hypaware`", not "where is *this*
+ * `hypaware`": the first executable of that name wins and no version is
+ * compared, which is the one place it parts company with
+ * `ensureDurableBinForNpx` and its deliberate `name@version` pin. Telling the
+ * difference means resolving the candidate's own `package.json` across every
+ * install layout (npm, pnpm, yarn, and volta/nvm/asdf shims) or spawning it
+ * for `--version`, and each would cost the caller either correctness on a
+ * layout nobody enumerated or the synchronous, total contract above. The trade
+ * is bounded by how the two ends fail: an older CLI answers `unknown command`
+ * and exits nonzero, in front of whoever ran the hook, while the `_npx` path
+ * this helper exists to displace exits 0 and says nothing at all.
+ *
  * @param {NodeJS.ProcessEnv} [env]
  * @param {NodeJS.Platform} [platform]
  * @returns {string | undefined}
