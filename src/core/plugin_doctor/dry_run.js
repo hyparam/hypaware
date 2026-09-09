@@ -192,20 +192,17 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * capability registry of its own, seeded from manifests before any plugin
  * activates, and no caller passes it the runtime's.
  *
- * A listing is taken through `listed` wherever producing it reads a
- * plugin-controlled property itself. `CommandRegistry.list` and
- * `listGroups` order with `compareStrings(a.name, b.name)` over the records
- * they hold, and `initPresets.list` does the same, so a `name` accessor that
- * throws, or that merely stops answering with a string, throws from inside
- * `list()` before a single entry is handed back: one frame above the guard,
- * where it escapes `snapshotRegistry`, `dryRunActivate` and `hyp plugin
- * doctor` alike (nothing between here and the command catches). The other
- * five listings order by their own keys or build fresh objects, and read
- * nothing plugin-controlled. `SourceRegistry.list` and
- * `DatasetRegistry.listDatasets` order by key for exactly this reason
- * (issue #1524); the three that still order by `a.name` are
- * hyparam/hypaware#1555, and until they change, the containment here costs
- * the bucket rather than the run.
+ * Three listings are taken through `listed`: `CommandRegistry.list`,
+ * `listGroups` and `initPresets.list`. All three order by the keys their
+ * registries validated (hyparam/hypaware#1555), as
+ * `DatasetRegistry.listDatasets` (issue #1524) and `SourceRegistry.list`
+ * (issue #1530) already did, so the `name` a plugin left on a stored
+ * command, group or preset is asked for only by `registeredName` below,
+ * where it costs the one contribution rather than the bucket. The other
+ * five (`sources`, `sinks`, `datasets`, `skills` and `agents`) order by
+ * their own keys, build fresh objects, or copy the registry's own array,
+ * and none of them reads anything plugin-controlled. The three calls stay
+ * routed through `listed`; what it still guards is on that function.
  *
  * `skills` and `agents` are contained but not verified. `skills.register` and
  * `agents.register` do build a registry-owned record out of the fields they
@@ -489,15 +486,26 @@ function readCommandGroups(refused, commandRegistry) {
 /**
  * One registry's listing, or an empty one when producing it threw.
  *
- * The listings that sort on `a.name` run a plugin accessor inside a
- * comparator, so the throw arrives from `list()` itself rather than from
- * anything this file reads, and `Array.prototype.sort` abandons the whole
- * array when a comparator throws. There is no per-entry recovery to make: the
- * consumer never sees an entry. Losing the bucket still makes the doctor
- * report every declared member of it as unregistered, which is wrong about the
- * plugin, and the alternative is no report at all. The refusal itself is on
- * `refused`, so the report says the bucket went missing rather than presenting
- * a diff taken against nothing.
+ * Defence in depth today. It went in against a live hazard: the three
+ * listings it wraps are `CommandRegistry.list`, `listGroups` and
+ * `initPresets.list`, and at the commit that added this guard (issue #1538)
+ * all three still sorted through `compareStrings(a.name, b.name)` over the
+ * records they hold. They order by the keys their registries validated now
+ * (hyparam/hypaware#1555), so producing one of those listings reads no
+ * accessor a plugin left on a stored record and no hostile `name` reaches
+ * this catch. That is a fact about how those three list, not a rule about
+ * listings and not a claim that a `list()` cannot throw for some other
+ * reason: one that went back to reading a record would land here again,
+ * silently, and it costs a whole bucket.
+ *
+ * What it costs, when something does reach it: the throw arrives from
+ * `list()` itself rather than from anything this file reads, so there is no
+ * per-entry recovery to make and the consumer never sees an entry. Losing the
+ * bucket makes the doctor report every declared member of it as unregistered,
+ * which is wrong about the plugin, and the alternative is no report at all,
+ * because `snapshotRegistry` runs outside the dry run's own catch. The
+ * refusal itself is on `refused`, so the report says the bucket went missing
+ * rather than presenting a diff taken against nothing.
  *
  * Costs nothing on the honest path: one closure per bucket and no catch taken.
  *
