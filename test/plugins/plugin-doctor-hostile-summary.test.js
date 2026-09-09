@@ -134,11 +134,13 @@ test('a summary whose toString throws costs the command one entry, not the whole
       `}\n`,
   })
   assert.equal(probe.summaryReads, 1, 'the doctor never read the drifting accessor: the fixture is vacuous')
-  // The refused command is reported as unregistered, which is the honest
-  // degraded answer: the doctor cannot vouch for what it registered.
+  // The refusal is the finding. Reporting it as unregistered was the honest
+  // *degradation* and a false statement about the plugin, which is what
+  // hyparam/hypaware#1569 closed: `activate()` did register 'hs cmd'.
+  assert.deepEqual(report.diagnostics.filter((d) => d.kind === 'contribution_not_registered'), [])
   assert.deepEqual(
-    report.diagnostics.filter((d) => d.kind === 'contribution_not_registered').map((d) => d.message),
-    [`manifest declares command 'hs cmd' but activate() never registered it`]
+    report.diagnostics.filter((d) => d.kind === 'contribution_unreadable').map((d) => d.message),
+    [`a registered command claiming 'hs cmd' answered with a summary that is not the string it registered; left out of the report`]
   )
   // The neighbour is untouched, and its own drift finding still renders.
   assert.deepEqual(report.diagnostics.filter((d) => d.kind === 'command_help_drift'), [])
@@ -163,9 +165,10 @@ test('a summary that stops being a string is refused too, though it never throws
   })
   assert.equal(probe.summaryReads, 1, 'the doctor never read the drifting accessor: the fixture is vacuous')
   assert.deepEqual(report.diagnostics.filter((d) => d.kind === 'command_help_drift'), [])
+  assert.deepEqual(report.diagnostics.filter((d) => d.kind === 'contribution_not_registered'), [])
   assert.deepEqual(
-    report.diagnostics.filter((d) => d.kind === 'contribution_not_registered').map((d) => d.message),
-    [`manifest declares command 'hs cmd' but activate() never registered it`]
+    report.diagnostics.filter((d) => d.kind === 'contribution_unreadable').map((d) => d.message),
+    [`a registered command claiming 'hs cmd' answered with a summary that is not the string it registered; left out of the report`]
   )
   assert.match(stderr, new RegExp(REFUSAL))
 })
@@ -211,9 +214,18 @@ test('a group summary that stops being a string is refused at the same boundary'
   })
   assert.equal(probe.summaryReads, 1, 'the doctor never read the drifting accessor: the fixture is vacuous')
   // The group row is gone, so the group warning does not fire, and the command
-  // under it is untouched.
-  assert.deepEqual(report.diagnostics, [])
-  assert.equal(report.ok, true)
+  // under it is untouched. The refusal itself is the report's one finding: a
+  // run whose only trace of a lost row was on stderr answered `ok: true` to
+  // `--json` (hyparam/hypaware#1569).
+  assert.deepEqual(report.diagnostics.map((d) => ({ kind: d.kind, message: d.message })), [
+    {
+      kind: 'contribution_unreadable',
+      message:
+        `a registered command group claiming 'hs' answered with a summary that is not ` +
+        `the string it registered; left out of the report`,
+    },
+  ])
+  assert.equal(report.ok, false)
   assert.match(stderr, new RegExp(REFUSAL))
   assert.match(stderr, /"contribution_kind":"command group"/)
 })
