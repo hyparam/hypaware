@@ -99,13 +99,16 @@ const SOURCE_STATUS_TIMEOUT_MS = 5000
  * daemon unrefs its own timers (the tick interval included) and stays alive on
  * its handles instead. On the tick path the timer must not be one of those
  * handles: a probe still outstanding when the daemon is asked to stop would
- * hold the process open past its own shutdown. At boot there are no such
- * handles yet - the control watcher installs at the tail of `runDaemon`, after
- * every source has started - so an unref'd wait there empties the event loop
- * and the process exits mid-boot, which is the same "no daemon, no status
- * file" outcome the bound exists to prevent, only sooner. Neither direction is
- * observable through `runDaemon`, so both are pinned by a test against this
- * function, which is why it is exported.
+ * hold the process open past its own shutdown. At boot the daemon has none of
+ * its own yet - the control watcher installs at the tail of `runDaemon`, after
+ * every source has started - and an earlier source's own handle (a gateway's
+ * listening socket, say) is not something this probe can rely on: it depends
+ * on start order and on that source having bound one at all. So an unref'd
+ * wait here can still empty the event loop and exit the process mid-boot,
+ * which is the same "no daemon, no status file" outcome the bound exists to
+ * prevent, only sooner. Neither direction is observable through `runDaemon`,
+ * so both are pinned by a test against this function, which is why it is
+ * exported.
  *
  * @param {Promise<unknown>} probe
  * @param {{ keepAlive?: boolean }} [opts]
