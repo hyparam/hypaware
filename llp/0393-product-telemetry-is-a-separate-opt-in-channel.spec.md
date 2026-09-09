@@ -1,7 +1,7 @@
 # LLP 0393: Product telemetry is a separate opt-in channel
 
 **Type:** Spec
-**Status:** Draft
+**Status:** Accepted
 **Systems:** Observability, CLI, Daemon, Privacy
 **Author:** Phil / Codex
 **Date:** 2026-09-08
