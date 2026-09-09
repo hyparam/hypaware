@@ -1255,11 +1255,14 @@ hyp plugin list --json
 hyp plugin info <plugin>
 ```
 
-Prints manifest, source, lock, version, permissions, and update details for one
-installed plugin.
+Prints version, source, and lock details for one installed plugin, including
+its update state when a check has run. Answers for a bundled plugin too: those
+have no install record, so it prints the version and root directory from the
+manifest instead. A name that is neither installed nor bundled exits 1.
 
 ```sh
 hyp plugin info @example/hypaware-plugin-widget
+hyp plugin info @hypaware/claude
 ```
 
 ### `hyp plugin outdated`
