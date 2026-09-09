@@ -86,6 +86,44 @@ test('a sink whose export result cannot be read is recorded failed, not thrown o
   }
 })
 
+// No hostile accessor is needed to reach this: `readExportResult` declares
+// `ExportResult | null | undefined` because the likeliest off-contract answer
+// is a plugin author who simply forgot to return one. Before this change that
+// answer was the whole #1510 symptom on the plainest possible mistake, and it
+// never reached the catch: `normalizeStatus` folded a non-object to `failed`,
+// and the very next line read `result.partitionsExported` off it and threw
+// `TypeError` straight out of `tick()`.
+test('a sink that resolves no result at all is recorded failed, not thrown out of the tick', async () => {
+  const stateRoot = await tmpStateRoot()
+  try {
+    const driver = driverOver(stateRoot, [
+      handleReturning('forgot', () => undefined),
+      handleReturning('nulled', () => null),
+    ])
+
+    const report = await driver.tick({ force: true, now: new Date('2026-09-09T00:00:00.000Z') })
+
+    assert.deepEqual(
+      report.sinks.map((s) => [s.instance, s.status, s.error]),
+      [
+        ['forgot', 'failed', undefined],
+        ['nulled', 'failed', undefined],
+      ],
+      'an absent answer is a failure the kernel describes, and neither sink stops the other',
+    )
+    for (const instance of ['forgot', 'nulled']) {
+      const names = await outboxEntries(stateRoot, instance)
+      assert.equal(names.length, 1, `${instance} did not spool its batch`)
+      const payload = JSON.parse(
+        await fs.readFile(path.join(stateRoot, 'sinks', instance, 'outbox', names[0]), 'utf8')
+      )
+      assert.equal(payload.error, 'sink reported non-ok status')
+    }
+  } finally {
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
 // The spread in the summary made *any* own enumerable accessor lethal, not
 // only the five fields the driver names.
 test('an own enumerable accessor beside the named fields does not reach the summary', async () => {
