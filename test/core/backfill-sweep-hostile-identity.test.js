@@ -217,6 +217,28 @@ test('the unreadable-sweep warning does not throw a second time reporting the fi
   assert.deepEqual(ran, ['z-readable'])
 })
 
+test('the registry keys a contribution by the name it validated, not by a later read', () => {
+  // What `list()`'s ordering now rests on. `register` used to read `name`
+  // five times on the success path and key the Map from the fourth, so a
+  // getter that answered once and then differently was validated under one
+  // string and stored under another: `get()` could no longer address the
+  // provider, and `list()` ordered it by the name nobody validated.
+  const backfills = createBackfillRegistry()
+  let reads = 0
+  backfills.register({
+    get name() { reads += 1; return reads === 1 ? 'a-honest' : 'z-mutated' },
+    plugin: '@third-party/mutating-name',
+    datasets: ['ai_gateway_messages'],
+    async *run() {},
+  })
+  backfills.register(readableSweep())
+
+  assert.equal(reads, 1, 'register read the plugin\'s `name` more than once')
+  assert.notEqual(backfills.get('a-honest'), undefined, 'the validated name no longer addresses the provider')
+  assert.equal(backfills.get('z-mutated'), undefined)
+  assert.deepEqual(backfills.list().map((c) => (c === backfills.get('a-honest') ? 'a-honest' : 'z-readable')), ['a-honest', 'z-readable'])
+})
+
 /** Let every already-queued microtask and immediate settle. */
 function tickOver() {
   return new Promise((resolve) => { setTimeout(resolve, 0) })

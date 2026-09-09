@@ -425,9 +425,12 @@ export function createBackfillSweepDriver(opts) {
  * it, so the schedule cannot disagree with the join-time reconciler about what
  * a given `window_days` means.
  *
- * Takes the plugin name the sweep already read, not the contribution: this
- * runs in `tick()`'s loop body, where a throwing accessor is the whole
- * sweep's problem rather than one provider's.
+ * Takes the plugin name `readIdentity` already read, not the contribution, so
+ * the plugin's object never reaches this helper and no read here can be an
+ * accessor. What that buys is the same answer on every path: this call sits in
+ * the argument list of the queued `runBackfill`, so it runs a microtask later
+ * than the loop body that wrote it, and a throw would surface as a rejected
+ * run rather than as the unreadable-provider skip the sweep decided on.
  *
  * @ref LLP 0359#sweep-context [implements]: a positive `backfill.window_days` narrows that provider's sweep, else cache retention applies
  * @param {string} pluginName

@@ -22,37 +22,51 @@ export function createBackfillRegistry() {
   const contributions = new Map()
   const log = getLogger('backfills')
 
-  /** @param {BackfillContribution} contribution */
+  /**
+   * `name` is read once and every later step uses that string, so the key
+   * this registry stores under is the exact value it validated.
+   * `contribution.name` is free to be an accessor answering differently each
+   * time it is asked, and the key is both what `get()` addresses a provider by
+   * and what `list()` now orders by. A second read landing in the Map leaves
+   * neither checked: the validated name stops resolving, and the order comes
+   * from a key nobody validated. That key does not even have to raise to be
+   * wrong - `compareStrings` refuses a non-string, but `undefined` is the one
+   * value `Array.prototype.sort` never hands a comparator, so it sorts last in
+   * silence.
+   *
+   * @param {BackfillContribution} contribution
+   */
   function register(contribution) {
     if (!contribution || typeof contribution !== 'object') {
       throw new TypeError('BackfillRegistry.register: contribution must be an object')
     }
-    if (typeof contribution.name !== 'string' || contribution.name.length === 0) {
+    const name = contribution.name
+    if (typeof name !== 'string' || name.length === 0) {
       throw new TypeError('BackfillRegistry.register: contribution.name must be a non-empty string')
     }
     if (typeof contribution.plugin !== 'string' || contribution.plugin.length === 0) {
       throw new TypeError(
-        `BackfillRegistry.register: '${contribution.name}' missing plugin`
+        `BackfillRegistry.register: '${name}' missing plugin`
       )
     }
     if (!Array.isArray(contribution.datasets) || contribution.datasets.length === 0) {
       throw new TypeError(
-        `BackfillRegistry.register: '${contribution.name}' datasets must be a non-empty array`
+        `BackfillRegistry.register: '${name}' datasets must be a non-empty array`
       )
     }
     if (typeof contribution.run !== 'function') {
-      throw new TypeError(`BackfillRegistry.register: '${contribution.name}' missing run()`)
+      throw new TypeError(`BackfillRegistry.register: '${name}' missing run()`)
     }
     if (contribution.plan !== undefined && typeof contribution.plan !== 'function') {
-      throw new TypeError(`BackfillRegistry.register: '${contribution.name}' plan must be a function when supplied`)
+      throw new TypeError(`BackfillRegistry.register: '${name}' plan must be a function when supplied`)
     }
-    if (contributions.has(contribution.name)) {
-      throw new Error(`BackfillRegistry.register: duplicate provider '${contribution.name}'`)
+    if (contributions.has(name)) {
+      throw new Error(`BackfillRegistry.register: duplicate provider '${name}'`)
     }
-    contributions.set(contribution.name, contribution)
+    contributions.set(name, contribution)
     log.info('backfill.register', {
       [Attr.PLUGIN]: contribution.plugin,
-      provider: contribution.name,
+      provider: name,
       datasets: contribution.datasets.join(','),
     })
   }
