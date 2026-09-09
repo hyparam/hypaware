@@ -168,10 +168,23 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * divergence has no symptom: the report renders as a well-formed list, of a
  * registry holding something else.
  *
- * `capabilities` is read plainly: `capabilities.list()` returns fresh
- * `{ name, version, provider }` objects built from the string arguments
- * `provide` was called with, so there is nothing plugin-controlled left to
- * read.
+ * `capabilities` is read plainly: `capabilities.list()` builds a fresh
+ * `{ name, version, provider }` per registration, so there is no live
+ * accessor left to contain. The values in it are still the plugin's:
+ * `provide` type-checks neither `name` nor `version`
+ * (hyparam/hypaware#1559), so this bucket, alone among the snapshot's, can
+ * hold something other than the `string` its type declares. It reaches no
+ * interpolation today only because `capabilities` is not in `CONTRIBUTIONS`
+ * and `checkProvidedCapabilities` only does `has()` against manifest keys,
+ * which is a fact about the current check set rather than a guarantee. The
+ * fix belongs in `provide`, the one place they enter: what it stores goes on
+ * to `findMatches`, so `require`, `has` and `fromProvider` all match on
+ * `name` and hand `version` to `matchesSemverRange`, and refusing the value
+ * here would leave the registry holding it for all three. `dep_graph` calls
+ * the same `provide`, so a check there covers that caller too, but nothing a
+ * plugin provides ever reaches it: `resolveDependencies` resolves over a
+ * capability registry of its own, seeded from manifests before any plugin
+ * activates, and no caller passes it the runtime's.
  *
  * A listing is taken through `listed` wherever producing it reads a
  * plugin-controlled property itself. `CommandRegistry.list` and
@@ -347,12 +360,25 @@ function readCommands(commandRegistry) {
     // which runs outside the dry run's own catch, and cost `hyp plugin doctor`
     // the whole run over one plugin. Contained to the same one entry a
     // refused name costs.
+    //
+    // Containing the read is not enough on its own, because the value it
+    // answers with leaves: `RegisteredSnapshot` types `summary` a `string` and
+    // `checkCommandHelp` interpolates it, one module past this catch, so a
+    // `toString` that throws costs the run from there instead (issue #1557).
+    // `hidden` is narrowed to a boolean by `=== true`; `summary` is refused
+    // unless it is still the string `register` validated, which keeps the type
+    // every consumer acts on true rather than hardening each use of it.
     /** @type {RegisteredCommand} */
     let detail
     try {
+      const summary = record.summary
+      if (typeof summary !== 'string') {
+        reportUnreadable('command', name, 'answered with a summary that is not the string it registered')
+        continue
+      }
       detail = {
         name,
-        summary: record.summary,
+        summary,
         aliases: registeredAliases(commandRegistry, record),
         hidden: record.hidden === true,
       }
@@ -425,13 +451,18 @@ function readCommandGroups(commandRegistry) {
   for (const record of listed('command group', () => commandRegistry.listGroups())) {
     const name = registeredName(record, 'command group', (_, claimed) => commandRegistry.getGroup(claimed))
     if (name === undefined) continue
-    // Contained for the same reason the command detail above is: a throwing
-    // `summary` accessor must cost this group its row, not the doctor its run.
+    // Contained, and checked, for the two reasons the command detail above is.
+    // No check reads a group summary today, so the value half is the same hole
+    // one field over rather than a second live crash.
     let summary
     try {
       summary = record.summary
     } catch {
       reportUnreadable('command group', name, 'did not answer for its summary')
+      continue
+    }
+    if (summary !== undefined && typeof summary !== 'string') {
+      reportUnreadable('command group', name, 'answered with a summary that is not the string it registered')
       continue
     }
     groups.push({ name, ...(summary !== undefined ? { summary } : {}) })
