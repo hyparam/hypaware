@@ -32,7 +32,7 @@ import { compareStrings } from '../util/compare_strings.js'
  * @ref LLP 0014#sinks-are-export-targets-not-the-write-path: instances driven from config; sources never reach here
  */
 export function createSinkRegistry() {
-  /** @type {Map<string, { plugin: string, contribution: SinkContribution }>} */
+  /** @type {Map<string, { plugin: string, contribution: SinkContribution, supports: SinkSupportTag[] }>} */
   const contributions = new Map()
   /** @type {Map<string, ExtendedSinkHandle>} */
   const handles = new Map()
@@ -52,10 +52,17 @@ export function createSinkRegistry() {
    * this registry holds. That round trip is what the plugin doctor's dry run
    * does (issue #1553).
    *
-   * `supports` is joined before the `set` for the reason `SourceRegistry`
-   * reads `configSection` early: a value that raises below the write leaves
-   * this registry holding a contribution while the loader marks the plugin's
-   * whole activation failed (`src/core/runtime/loader.js`).
+   * `supports` is copied and joined before the `set` for the reason
+   * `SourceRegistry` reads `configSection` early: a value that raises below
+   * the write leaves this registry holding a contribution while the loader
+   * marks the plugin's whole activation failed (`src/core/runtime/loader.js`).
+   *
+   * The validated tags go into the wrapper rather than being read again at
+   * instantiate time (issue #1568). `supports` is a declaration made once,
+   * matching the manifest's `contributes.sinks[].supports`
+   * (LLP 0014 #queryable-sinks), not a per-instance negotiation, so what this
+   * registry checked, and published in `sink.contribute`, is what every later
+   * step gets.
    *
    * @param {SinkContribution} contribution
    */
@@ -71,10 +78,19 @@ export function createSinkRegistry() {
     if (typeof plugin !== 'string' || plugin.length === 0) {
       throw new TypeError(`SinkRegistry.register: '${name}' missing plugin`)
     }
-    const supports = contribution.supports
-    if (!Array.isArray(supports)) {
+    const declaredSupports = contribution.supports
+    if (!Array.isArray(declaredSupports)) {
       throw new TypeError(`SinkRegistry.register: '${name}' supports must be an array`)
     }
+    // A copy, so the tags this registry reports and resolves are the ones it
+    // validated: the plugin keeps a reference to its own array and is free to
+    // mutate it in place after the check.
+    //
+    // `Array.from`, not `slice()`: `slice` builds its result through
+    // `Symbol.species`, so an `Array` subclass naming its own constructor
+    // gets the copy back plugin-controlled and the tags drift again through
+    // the field meant to pin them. `Array.from` always yields a plain array.
+    const supports = Array.from(declaredSupports)
     if (typeof contribution.create !== 'function') {
       throw new TypeError(`SinkRegistry.register: '${name}' missing create()`)
     }
@@ -85,7 +101,7 @@ export function createSinkRegistry() {
         `SinkRegistry.register: duplicate sink contribution '${name}' from plugin '${plugin}'`
       )
     }
-    contributions.set(key, { plugin, contribution })
+    contributions.set(key, { plugin, contribution, supports })
     log.info('sink.contribute', {
       [Attr.PLUGIN]: plugin,
       hyp_sink: name,
@@ -110,8 +126,37 @@ export function createSinkRegistry() {
     return contributions.get(contributionKey(plugin, sinkName))?.contribution
   }
 
+  /**
+   * Fresh wrappers carrying a copy of the validated tags. The copy at
+   * `register` guards the plugin's array; this one guards the registry's own,
+   * which the listing is the only route to: `ctx.sinks` is this registry
+   * (`src/core/runtime/activation.js`), so a plugin that could edit the array
+   * it is handed here would decide `supports` after the check, which is the
+   * drift #1568 closed arriving by the other door.
+   */
   function listContributions() {
-    return Array.from(contributions.values())
+    return Array.from(contributions.values(), (entry) => ({ ...entry, supports: entry.supports.slice() }))
+  }
+
+  /**
+   * The `supports` this registry validated for `contribution`, found by object
+   * identity so no plugin-controlled property picks the record.
+   *
+   * `instantiate` is handed the contribution by its caller
+   * (`src/core/sinks/materialize.js`), not by this index, and what the caller
+   * has is the object `listContributions()` gave it, so identity finds the
+   * registration behind every configured sink. A contribution that was never
+   * registered has no validated tags to prefer, so its own are read, once.
+   *
+   * @param {SinkContribution} contribution
+   * @returns {SinkSupportTag[]}
+   */
+  function registeredSupports(contribution) {
+    for (const entry of contributions.values()) {
+      if (entry.contribution === contribution) return entry.supports
+    }
+    const declared = contribution.supports
+    return Array.isArray(declared) ? declared : []
   }
 
   function listHandles() {
@@ -158,7 +203,7 @@ export function createSinkRegistry() {
     // instantiation across the two records, the span, the counter, and the
     // handle's own `plugin` and `destination`.
     const contributionPlugin = contribution.plugin
-    const supports = resolveSupports(contribution, args.kind === 'blob' ? args.encoder : undefined)
+    const supports = resolveSupports(registeredSupports(contribution), args.kind === 'blob' ? args.encoder : undefined)
     // Emit `sink.resolved` ahead of the destination's `create()` so the
     // resolved writer+destination+supports tuple lands in logs even when
     // `create` is slow or fails. Status code (`hyp_status`) and `hyp_sink_*`
@@ -392,20 +437,19 @@ function resolveTableFormatSupports(provider, encoder) {
 }
 
 /**
- * Compose the resolved `supports` set for a sink instance. The
- * contribution's own tags are the base; encoders contribute their tags
+ * Compose the resolved `supports` set for a sink instance. The tags
+ * `register` validated are the base; encoders contribute their tags
  * too so `queryable` lights up only when the writer+destination pair
  * agree (e.g. parquet+local-fs is queryable, jsonl+local-fs is not).
  *
- * @param {SinkContribution} contribution
+ * @param {SinkSupportTag[]} baseSupports
  * @param {SinkEncoder | undefined} encoder
  * @returns {SinkSupportTag[]}
  * @ref LLP 0014#queryable-sinks [implements]: queryable is a property of the writer+destination pair, not either alone
  */
-function resolveSupports(contribution, encoder) {
+function resolveSupports(baseSupports, encoder) {
   /** @type {Set<SinkSupportTag>} */
-  const set = new Set()
-  for (const tag of contribution.supports ?? []) set.add(tag)
+  const set = new Set(baseSupports)
   // Intersect: a tag survives only when both sides claim it. This
   // mirrors the design's "Parquet+local-fs queryable, JSONL+local-fs
   // not" rule without a tag-by-tag table in the kernel. Encoders

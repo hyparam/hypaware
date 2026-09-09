@@ -13,6 +13,7 @@ import type {
   SinkHandle,
   SinkInstanceConfig,
   SinkRegistry,
+  SinkSupportTag,
   SourceRegistry,
   StartedSource,
   SourceStatus,
@@ -108,7 +109,7 @@ export type ExtendedSinkHandle = SinkHandle & {
 export type ExtendedSinkRegistry = SinkRegistry & {
   instantiate(args: InstantiateArgs): Promise<ExtendedSinkHandle>
   getContribution(plugin: string, sinkName: string): SinkContribution | undefined
-  listContributions(): Array<{ plugin: string; contribution: SinkContribution }>
+  listContributions(): Array<{ plugin: string; contribution: SinkContribution; supports: SinkSupportTag[] }>
   listHandles(): ExtendedSinkHandle[]
   closeAll(): Promise<void>
 }
