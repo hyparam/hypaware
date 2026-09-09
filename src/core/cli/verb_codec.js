@@ -288,7 +288,12 @@ export function validateToolArguments(inputSchema, args) {
   /** @type {Record<string, unknown>} */
   const params = {}
   for (const [key, raw] of Object.entries(args ?? {})) {
-    const prop = props[key]
+    // `Object.hasOwn`, not truthiness: `key` comes off the MCP wire, so an
+    // `Object.prototype` name ('constructor', '__proto__') would otherwise
+    // resolve to the inherited member and pass as a declared property. The CLI
+    // half refuses it (see `resolveFlag`); the two projections of one schema
+    // must not disagree about what an unknown argument is (issue #1601).
+    const prop = Object.hasOwn(props, key) ? props[key] : undefined
     if (!prop) return { ok: false, error: `unknown argument '${key}'` }
     if (raw === undefined || raw === null) continue
     if (prop.type === 'array') {

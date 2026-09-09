@@ -151,3 +151,20 @@ test('validateToolArguments coerces, applies defaults, enforces required + unkno
   assert.equal(validateToolArguments(NEIGHBORS_SCHEMA, {}).ok, false) // missing node
   assert.equal(validateToolArguments(NEIGHBORS_SCHEMA, { node: 'n', bogus: 1 }).ok, false)
 })
+
+// An argument name is refused for being undeclared, not for being unfamiliar:
+// an `Object.prototype` member resolved through the prototype and passed the
+// truthiness test, so the MCP path accepted a junk argument the CLI path
+// refuses. `__proto__` is parsed rather than written as a literal key: an
+// object literal's `__proto__: v` sets the prototype instead of adding the
+// own property JSON.parse gives an MCP request.
+test('validateToolArguments refuses a prototype-named argument like any other unknown', () => {
+  for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    const out = validateToolArguments(NEIGHBORS_SCHEMA, { node: 'n', [name]: 'x' })
+    assert.equal(out.ok, false, `${name}: expected a refusal`)
+    assert.equal(/** @type {any} */ (out).error, `unknown argument '${name}'`)
+  }
+  const proto = validateToolArguments(NEIGHBORS_SCHEMA, JSON.parse('{"node":"n","__proto__":"x"}'))
+  assert.equal(proto.ok, false)
+  assert.equal(/** @type {any} */ (proto).error, "unknown argument '__proto__'")
+})
