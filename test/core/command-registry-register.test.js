@@ -484,11 +484,20 @@ test('an aliases iterable that throws on a second pass leaves no half-registrati
 
 // The drain must not soften the boundary: a non-iterable `aliases` is still a
 // TypeError out of `register`, and still raises it before anything is written.
+//
+// And it must not blur the diagnosis, which is the half `not iterable` alone
+// does not hold: draining with a spread makes V8 name the expression that did
+// the reading ("(record.aliases ?? []) is not iterable") where the loop makes
+// it name the value ("number 7 is not iterable"), and a plugin author has no
+// `record` to go look at. The assertion is the negative rather than the
+// engine's exact wording, which differs by V8 version and by the shape of the
+// expression: what must stay true is that the error names what the caller
+// passed and never how the registry read it.
 test('a non-iterable aliases is still refused at the boundary', () => {
   const commands = createCommandRegistry()
   assert.throws(
     () => commands.register(makeCommand({ name: 'bad', aliases: 7 })),
-    (err) => err instanceof TypeError && /not iterable/.test(err.message)
+    (err) => err instanceof TypeError && /not iterable/.test(err.message) && !/record\.aliases/.test(err.message)
   )
   assert.equal(commands.has('bad'), false)
   assert.equal(commands.size(), 0)

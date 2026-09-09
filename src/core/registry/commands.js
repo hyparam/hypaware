@@ -119,7 +119,18 @@ export function createCommandRegistry() {
     // the names checked are the names written and every step after
     // `byName.set` is total, so a registration claims both indexes or
     // neither.
-    const aliases = [...(record.aliases ?? [])]
+    //
+    // Drained with the loop the two passes already used, not a spread: for a
+    // non-iterable `aliases` V8 names the offending value ("number 7 is not
+    // iterable"), where a spread names the expression that read it
+    // ("(record.aliases ?? []) is not iterable"). Every boundary error here
+    // exists to point a plugin author at their own registration, which is the
+    // whole reason `copyMiss` below says which member the copy did not carry,
+    // so an error naming a registry internal instead of the value passed is
+    // the one worth spending a second line to avoid.
+    /** @type {string[]} */
+    const aliases = []
+    for (const alias of record.aliases ?? []) aliases.push(alias)
     for (const alias of aliases) {
       if (byName.has(alias) || aliasIndex.has(alias)) {
         throw new Error(
