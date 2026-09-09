@@ -57,6 +57,15 @@ export const BOOT_FAILED_WARNING_PREFIX = 'boot_failed'
 export const REQUIRES_UNSATISFIED_ERROR_KIND = 'requires_unsatisfied'
 
 /**
+ * The one `DepGraphErrorKind` that eliminates nothing. `resolveDependencies`
+ * pushes it straight onto `unsatisfied` for *every* provider of a clashing
+ * capability, without the `recordReject` that adds a plugin to the eliminated
+ * set, so it is never the reason a plugin is absent - not even when the same
+ * plugin is eliminated by a later entry.
+ */
+const CAP_VERSION_CLASH = 'cap_version_clash'
+
+/**
  * Does a persisted snapshot's `warnings` carry that label? The caller decides
  * which `state` it accepts alongside; this reads the label alone, over
  * whatever the file held.
@@ -124,9 +133,17 @@ export function recordFailedPlugins({ activations, unsatisfied = [], log }) {
   }
   for (const entry of unsatisfied) {
     const name = entry.plugin
-    // A `cap_version_clash` is recorded against a plugin the resolver did not
-    // eliminate, and one plugin can miss several requires at once. Neither is a
-    // second broken plugin, and the first is not a broken plugin at all.
+    // Skipped by kind, not only by whether the plugin came up: a clash names
+    // every provider, and a provider can *also* be eliminated by a later entry,
+    // in which case taking the first leaves `hyp status` reporting the clash as
+    // the reason a plugin is missing, the require that actually eliminated it
+    // named nowhere, and the repair pointing at the wrong config line. A plugin
+    // whose only entry is a clash needs no skip of its own: it stays in
+    // `resolution.order`, so it always carries an activation record below.
+    if (entry.errorKind === CAP_VERSION_CLASH) continue
+    // One broken plugin per name, whatever the resolver's kind: a plugin can
+    // miss several requires at once, and a kind added to the resolver later
+    // must not be read as a second failure or as a throw.
     if (activated.has(name) || recorded.has(name)) continue
     recorded.add(name)
     const message = entry.detail ? `${entry.errorKind}: ${entry.detail}` : entry.errorKind

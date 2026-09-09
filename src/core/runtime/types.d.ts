@@ -111,10 +111,13 @@ export interface BootKernelResult {
    * needs the reason too, and the daemon's status snapshot is one
    * (issue #1580).
    *
-   * Not every entry is a plugin that failed to activate: a
-   * `cap_version_clash` is recorded against every provider of the clashing
-   * capability and eliminates none of them, so a reader making a claim about a
-   * plugin must check `activations` before making it.
+   * Not every entry is a plugin that failed to activate, and not every entry
+   * for a plugin that did is the reason it did: a `cap_version_clash` is
+   * recorded against every provider of the clashing capability and eliminates
+   * none of them, and it is recorded before the pass that eliminates on
+   * `requires`, so a provider can carry a clash in front of the entry that
+   * actually eliminated it. A reader making a claim about a plugin must check
+   * `activations`, and one quoting a reason must skip the clash.
    */
   unsatisfiedRequirements: UnsatisfiedRequirement[]
   /**

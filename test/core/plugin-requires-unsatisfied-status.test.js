@@ -482,6 +482,29 @@ test('recordFailedPlugins reports no plugin the resolver named but did not elimi
   assert.deepEqual(entries, [])
 })
 
+test('recordFailedPlugins reports the require that eliminated a plugin, not a clash that did not', () => {
+  const { log, entries } = recordingLog()
+  // The resolver pushes every clash before it walks the topo order, so a
+  // provider that clashes *and* is eliminated carries the clash first. Reading
+  // the first entry would print a reason that eliminated nothing, leave the
+  // require that did unnamed, and send the repair at the wrong config line.
+  const failed = recordFailedPlugins({
+    activations: [],
+    unsatisfied: /** @type {any} */ ([
+      { plugin: '@acme/one', errorKind: 'cap_version_clash', detail: 'capability=acme.enc providers=@acme/one,@acme/two' },
+      { plugin: '@acme/two', errorKind: 'cap_version_clash', detail: 'capability=acme.enc providers=@acme/one,@acme/two' },
+      { plugin: '@acme/one', errorKind: 'cap_missing', detail: 'capability acme.blob@^1.0.0' },
+      { plugin: '@acme/two', errorKind: 'cap_missing', detail: 'capability acme.blob@^1.0.0' },
+    ]),
+    log,
+  })
+  assert.deepEqual(failed, [
+    { name: '@acme/one', errorKind: REQUIRES_UNSATISFIED_ERROR_KIND, message: 'cap_missing: capability acme.blob@^1.0.0' },
+    { name: '@acme/two', errorKind: REQUIRES_UNSATISFIED_ERROR_KIND, message: 'cap_missing: capability acme.blob@^1.0.0' },
+  ])
+  assert.deepEqual(entries.map((e) => e.attrs.error_kind), ['cap_missing', 'cap_missing'])
+})
+
 test('recordFailedPlugins records a plugin missing several requires once', () => {
   const { log, entries } = recordingLog()
   const failed = recordFailedPlugins({
