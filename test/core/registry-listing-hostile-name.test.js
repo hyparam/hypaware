@@ -23,16 +23,21 @@ import { createKernelRuntime } from '../../src/core/runtime/activation.js'
  * Install `over`'s property descriptors - accessors included - onto the object
  * the registry is actually holding, after it was registered.
  *
- * `Object.assign` and a spread both read a getter and copy the value, which
- * would leave a plain string behind and prove nothing. The read counters in
- * each test are the other half: a fixture whose accessor is never live leaves
- * them at zero and fails.
+ * `Object.assign` and a spread would each read the getter here and copy the
+ * value away, leaving a plain data property behind. The read counters do not
+ * catch that: a copy reads once at the install site, so `reads` is 1 either
+ * way and every count below still passes. So the check is here instead - what
+ * was installed has to still be an accessor.
  *
  * @param {object} target
  * @param {object} over
  */
 function arm(target, over) {
   Object.defineProperties(target, Object.getOwnPropertyDescriptors(over))
+  for (const key of Object.keys(over)) {
+    const installed = Object.getOwnPropertyDescriptor(target, key)
+    assert.equal(typeof installed?.get, 'function', `arm() left '${key}' a plain value, so the fixture is a copy`)
+  }
 }
 
 /** @param {Record<string, unknown>} [overrides] */
