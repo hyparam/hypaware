@@ -177,9 +177,14 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * interpolation today only because `capabilities` is not in `CONTRIBUTIONS`
  * and `checkProvidedCapabilities` only does `has()` against manifest keys,
  * which is a fact about the current check set rather than a guarantee. The
- * fix belongs in `provide`, where the same values also reach `dep_graph` and
- * `requireCapability`; refusing them here would leave the registry holding
- * them.
+ * fix belongs in `provide`, the one place they enter: what it stores goes on
+ * to `findMatches`, so `require`, `has` and `fromProvider` all match on
+ * `name` and hand `version` to `matchesSemverRange`, and refusing the value
+ * here would leave the registry holding it for all three. `dep_graph` calls
+ * the same `provide`, so a check there covers that caller too, but nothing a
+ * plugin provides ever reaches it: `resolveDependencies` resolves over a
+ * capability registry of its own, seeded from manifests before any plugin
+ * activates, and no caller passes it the runtime's.
  *
  * A listing is taken through `listed` wherever producing it reads a
  * plugin-controlled property itself. `CommandRegistry.list` and
