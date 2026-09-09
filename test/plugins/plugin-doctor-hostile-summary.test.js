@@ -20,10 +20,13 @@
  * Every hostile fixture installs its accessor with
  * `Object.defineProperties(base, Object.getOwnPropertyDescriptors(over))` AFTER
  * `register` has validated the honest string, onto the record the registry
- * stored, so the live getter is the one the snapshot reads. The read counters
- * say the accessor was reached at all: a spread copy would leave the registry's
- * record untouched and `Object.assign` would leave a plain string, and either
- * way the count reads zero and the assertion fails.
+ * stored, so the live getter is the one the snapshot reads. The counter is
+ * zeroed once the install is done, so it counts only the reads the doctor
+ * itself makes. That is what makes it a non-vacuity guard: `Object.assign` and
+ * a spread both invoke the getter at the install site and leave the registry
+ * holding whatever it answered that once, so a fixture that stopped being
+ * hostile that way reads zero here. Counting from the top would score both of
+ * them 1 as well and prove nothing.
  *
  * @ref LLP 0267#consequences [tests]: the snapshot is what the doctor's checks read, so a value in it that is not the type it declares is a finding the report cannot render
  */
@@ -99,7 +102,8 @@ function manifestFor(overrides = {}) {
 /**
  * The fixture preamble: a live `summary` getter that counts its reads and
  * answers with whatever `expr` evaluates to, installed onto an
- * already-registered record.
+ * already-registered record. The counter is zeroed after the install, so what
+ * it reports is what the doctor read, not what installing it read.
  *
  * @param {string} expr A JavaScript expression, evaluated on every read.
  */
@@ -109,6 +113,7 @@ function driftingSummary(expr) {
     `function drift(record) {\n` +
     `  const over = { get summary() { probe.summaryReads += 1; return ${expr} } }\n` +
     `  Object.defineProperties(record, Object.getOwnPropertyDescriptors(over))\n` +
+    `  probe.summaryReads = 0\n` +
     `}\n`
   )
 }
@@ -128,7 +133,7 @@ test('a summary whose toString throws costs the command one entry, not the whole
       `  drift(ctx.commands.get('hs cmd'))\n` +
       `}\n`,
   })
-  assert.equal(probe.summaryReads, 1, 'the drifting accessor was never live: the fixture is vacuous')
+  assert.equal(probe.summaryReads, 1, 'the doctor never read the drifting accessor: the fixture is vacuous')
   // The refused command is reported as unregistered, which is the honest
   // degraded answer: the doctor cannot vouch for what it registered.
   assert.deepEqual(
@@ -156,7 +161,7 @@ test('a summary that stops being a string is refused too, though it never throws
       `  drift(ctx.commands.get('hs cmd'))\n` +
       `}\n`,
   })
-  assert.equal(probe.summaryReads, 1, 'the drifting accessor was never live: the fixture is vacuous')
+  assert.equal(probe.summaryReads, 1, 'the doctor never read the drifting accessor: the fixture is vacuous')
   assert.deepEqual(report.diagnostics.filter((d) => d.kind === 'command_help_drift'), [])
   assert.deepEqual(
     report.diagnostics.filter((d) => d.kind === 'contribution_not_registered').map((d) => d.message),
@@ -204,7 +209,7 @@ test('a group summary that stops being a string is refused at the same boundary'
       `  drift(group)\n` +
       `}\n`,
   })
-  assert.equal(probe.summaryReads, 1, 'the drifting accessor was never live: the fixture is vacuous')
+  assert.equal(probe.summaryReads, 1, 'the doctor never read the drifting accessor: the fixture is vacuous')
   // The group row is gone, so the group warning does not fire, and the command
   // under it is untouched.
   assert.deepEqual(report.diagnostics, [])

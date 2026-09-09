@@ -168,10 +168,18 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * divergence has no symptom: the report renders as a well-formed list, of a
  * registry holding something else.
  *
- * `capabilities` is read plainly: `capabilities.list()` returns fresh
- * `{ name, version, provider }` objects built from the string arguments
- * `provide` was called with, so there is nothing plugin-controlled left to
- * read.
+ * `capabilities` is read plainly: `capabilities.list()` builds a fresh
+ * `{ name, version, provider }` per registration, so there is no live
+ * accessor left to contain. The values in it are still the plugin's:
+ * `provide` type-checks neither `name` nor `version`
+ * (hyparam/hypaware#1559), so this bucket, alone among the snapshot's, can
+ * hold something other than the `string` its type declares. It reaches no
+ * interpolation today only because `capabilities` is not in `CONTRIBUTIONS`
+ * and `checkProvidedCapabilities` only does `has()` against manifest keys,
+ * which is a fact about the current check set rather than a guarantee. The
+ * fix belongs in `provide`, where the same values also reach `dep_graph` and
+ * `requireCapability`; refusing them here would leave the registry holding
+ * them.
  *
  * A listing is taken through `listed` wherever producing it reads a
  * plugin-controlled property itself. `CommandRegistry.list` and
