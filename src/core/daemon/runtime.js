@@ -1633,7 +1633,12 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
       })
       continue
     }
-    const ctx = runtime.activationContexts.get(plugin)
+    // The empty string is what an unreadable `plugin` degrades to, and no
+    // manifest can carry it as a name (`validateManifest` requires a non-empty
+    // one), so it is not asked of the context map as though it were one: a
+    // contribution that would not say which plugin it belongs to must not be
+    // handed whatever that key happens to hold.
+    const ctx = plugin === '' ? undefined : runtime.activationContexts.get(plugin)
     if (!ctx) {
       const message = `no activation context recorded for plugin '${plugin}'`
       fileLog.error('daemon.source_start_failed', {

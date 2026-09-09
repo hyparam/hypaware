@@ -946,9 +946,14 @@ export function sourceHealth(reported) {
  * provider in `src/core/daemon/backfill_sweep.js`.
  *
  * `plugin` is read in the same guarded pass because the boot walk hoisted it
- * outside every try, and it picks the activation context beside the name. A
- * `plugin` that is no longer a string degrades to the empty string: unlike the
- * name it is only ever a label on the row.
+ * outside every try, and it picks the activation context beside the name, so it
+ * is no more a bare label than the name is. Unlike the name there is nothing to
+ * resolve it back through: the registry keys by source name and keeps no record
+ * of the plugin that registered one, so what this returns is still the
+ * contribution's own claim. A `plugin` that is no longer a string degrades to
+ * the empty string, which every caller must treat as "no plugin" rather than as
+ * a key to look up: it collapses the non-strings onto one string, and a string
+ * is the shape an activation-context lookup takes.
  *
  * `registered` false is the refusal, and the `name` beside it is whatever the
  * contribution claimed before it (the empty string when it claimed nothing

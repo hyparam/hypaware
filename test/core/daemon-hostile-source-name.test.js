@@ -274,3 +274,38 @@ test('hyp status lists a source under the name it registered under, or not at al
   assert.ok(nameIsStillAnAccessor(/** @type {any} */ (staged.hostile.contribution)), 'the fixture stopped being hostile')
   assert.equal(staged.reads(), 1, `the status walk read the hostile name ${staged.reads()} times, so its probe and its row can disagree`)
 })
+
+test('a contribution that will not name its plugin is not started under whatever the empty key holds', async () => {
+  // `readSourceIdentity` degrades an unreadable `plugin` to the empty string,
+  // which collapses every non-string onto one *string*, and a string is the
+  // shape the activation-context lookup takes. No manifest can be named the
+  // empty string (`validateManifest` requires a non-empty name), so the walk
+  // must not ask the map for it: a source that would not say whose it is has to
+  // fail, not inherit the context sitting under that key.
+  const registry = createSourceRegistry()
+  const solo = fixtureSource('solo', HONEST)
+  registry.register(solo.contribution)
+  beHostile(/** @type {any} */ (solo.contribution), {
+    get plugin() {
+      return 7
+    },
+  })
+  const log = makeLog()
+  const fileLog = makeLog()
+
+  const snapshots = await startConfiguredSources({
+    runtime: /** @type {any} */ ({
+      sources: registry,
+      activationContexts: new Map([['', { marker: 'empty-key-activation' }], [HONEST, { marker: 'honest-activation' }]]),
+    }),
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+
+  assert.equal(solo.seen.starts, 0, 'a source that would not name its plugin was started anyway')
+  assert.deepEqual(
+    snapshots.map((s) => ({ name: s.name, plugin: s.plugin, state: s.state })),
+    [{ name: 'solo', plugin: '', state: 'failed' }],
+    'the refused source must be reported failed under the name it registered under'
+  )
+})
