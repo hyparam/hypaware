@@ -40,6 +40,7 @@ export function createOpenCodeBackfillProvider(opts = {}) {
 /** @param {{ ctx: BackfillRunContext, resolver: ReturnType<typeof createUsagePolicyResolver>, runCommand: (args: string[]) => Promise<string>, exactSessionIds?: string[], ignoredSessions?: Set<string> }} deps */
 async function* runBackfill(deps) {
   const window = resolveWindow(deps.ctx)
+  let emptyStdout = false
   /** @type {Array<{ id: string, updated?: number, created?: number, directory?: string }>} */
   let selected = []
   if (deps.exactSessionIds && deps.exactSessionIds.length > 0) {
@@ -66,7 +67,11 @@ async function* runBackfill(deps) {
       })
       return
     }
-    const parsed = JSON.parse(rawList)
+    // OpenCode 1.18.22 returns before JSON formatting when its list is empty.
+    // Accept only that exact successful response; malformed nonempty output
+    // must still fail, and exports must always contain JSON.
+    emptyStdout = rawList === ''
+    const parsed = emptyStdout ? [] : JSON.parse(rawList)
     if (!Array.isArray(parsed)) throw new Error('opencode session list did not return an array')
     selected = parsed
       .filter(isPlainObject)
@@ -85,6 +90,7 @@ async function* runBackfill(deps) {
     selected_sessions: selected.length,
     selection_cap: MAX_SESSION_LIST,
     exact_ids: deps.exactSessionIds?.length ?? 0,
+    ...(emptyStdout ? { reason: 'opencode_cli_empty_stdout' } : {}),
     status: 'ok',
   })
 
@@ -181,7 +187,13 @@ function isMissingBinary(err) {
   return err instanceof Error && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT'
 }
 
-/** @param {string[]} args */
+/**
+ * Stdout is returned verbatim. The empty-list check above reads exact
+ * emptiness, so trimming here would silently turn a truncated whitespace-only
+ * response into a successful "no sessions" import instead of the failure it is.
+ *
+ * @param {string[]} args
+ */
 async function runOpenCode(args) {
   const result = await execFileAsync('opencode', args, {
     encoding: 'utf8',

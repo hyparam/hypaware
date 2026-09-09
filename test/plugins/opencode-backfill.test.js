@@ -84,6 +84,47 @@ test('OpenCode backfill selects a bounded time window then exports only exact se
   assert.equal(projection.attributes.opencode.entrypoint_source, 'historical-export')
 })
 
+test('OpenCode backfill recognizes the CLI empty-store response and logs the selection', async () => {
+  const calls = []
+  const logged = []
+  const ctx = runContext()
+  ctx.log.info = (event, attrs) => { logged.push({ event, attrs }) }
+  const provider = createOpenCodeBackfillProvider({
+    async runCommand(args) {
+      calls.push(args)
+      // OpenCode 1.18.22 returns before JSON formatting when no sessions exist.
+      return ''
+    },
+  })
+
+  assert.deepEqual(await collect(provider.run(ctx)), { items: [], events: [] })
+  assert.deepEqual(calls, [['session', 'list', '--format', 'json', '--max-count', '1000']])
+  assert.deepEqual(logged.map(({ event }) => event), ['opencode.backfill.selection'])
+  assert.equal(logged[0].attrs.selected_sessions, 0)
+  assert.equal(logged[0].attrs.reason, 'opencode_cli_empty_stdout')
+  assert.equal(logged[0].attrs.status, 'ok')
+})
+
+test('OpenCode backfill rejects malformed nonempty lists and non-array JSON', async () => {
+  // Assert which rejection each shape earns. Without that, a later change that
+  // made the run fail earlier would keep all six green while proving nothing
+  // about malformed nonempty stdout, which is the whole point of the guard.
+  const cases = [
+    { raw: ' ', error: SyntaxError },
+    { raw: '\n', error: SyntaxError },
+    { raw: '[', error: SyntaxError },
+    { raw: 'not json', error: SyntaxError },
+    { raw: '{}', error: /did not return an array/ },
+    { raw: 'null', error: /did not return an array/ },
+  ]
+  for (const { raw, error } of cases) {
+    const provider = createOpenCodeBackfillProvider({
+      async runCommand() { return raw },
+    })
+    await assert.rejects(collect(provider.run(runContext())), error, JSON.stringify(raw))
+  }
+})
+
 test('exact-id recovery does not list or inspect unrelated OpenCode history', async () => {
   const calls = []
   const provider = createOpenCodeBackfillProvider({
