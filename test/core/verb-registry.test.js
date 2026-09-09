@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
+import { verbToCommand } from '../../src/core/cli/verb_command.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createVerbRegistry, verbAuthClass, verbExposure } from '../../src/core/registry/verbs.js'
 
@@ -316,6 +317,57 @@ test('register runs no plugin code after either Map is written', () => {
   })), /help is not readable/)
   assert.equal(verbs.get('evil verb'), undefined, 'a refused registration was left in the name map')
   assert.equal(verbs.getByTool('evil_tool'), undefined, 'a refused registration was left in the tool map')
+})
+
+test('a registration the command registry refuses claims no namespace at all', () => {
+  // Building the command is not the last step that can fail: registering it
+  // refuses a colliding alias, and an `audience` or `bootProfile` outside its
+  // vocabulary, all read off values the verb supplied. With that call after the
+  // two `set`s the refusal left both Maps holding a verb whose plugin the
+  // loader then marked failed, so the kernel reported a plugin that had not
+  // loaded and an MCP tool it would still answer. No hostile accessor is needed
+  // for this one, only an honest registration the boundary rejects.
+  const commands = createCommandRegistry()
+  commands.register({ name: 'taken', summary: 'somebody else', usage: 'u', run: async () => 0 })
+  const verbs = createVerbRegistry({ commandRegistry: commands })
+  assert.throws(
+    () => verbs.register(makeVerb({ name: 'aliasing verb', tool: 'aliasing_tool', aliases: ['taken'] })),
+    /alias 'taken'/
+  )
+  assert.equal(verbs.get('aliasing verb'), undefined, 'a refused registration was left in the name map')
+  assert.equal(verbs.getByTool('aliasing_tool'), undefined, 'a refused registration was left in the tool map')
+  assert.deepEqual(verbs.list(), [])
+
+  const other = createVerbRegistry({ commandRegistry: createCommandRegistry() })
+  assert.throws(
+    () => other.register(makeVerb({ name: 'rude verb', tool: 'rude_tool', audience: 'nonsense' })),
+    /invalid audience/
+  )
+  assert.equal(other.get('rude verb'), undefined, 'a refused registration was left in the name map')
+  assert.equal(other.getByTool('rude_tool'), undefined, 'a refused registration was left in the tool map')
+})
+
+test('verbToCommand reads each optional member once', () => {
+  // The presence test and the value that lands in the command were separate
+  // reads of the same plugin property, so a command could carry a value nothing
+  // had tested: `plugin` answered truthy for the test and `undefined` for the
+  // copy, which re-derives `category` from the command name. Same shape as the
+  // `exposure`/`authClass` pair `validateVerb` already reads once.
+  const counts = { aliases: 0, category: 0, audience: 0, plugin: 0, help: 0 }
+  const command = verbToCommand(hostileVerb({
+    get aliases() { counts.aliases += 1; return ['ev'] },
+    get category() { counts.category += 1; return 'dev' },
+    get audience() { counts.audience += 1; return 'developer' },
+    get plugin() { counts.plugin += 1; return '@evil/x' },
+    get help() { counts.help += 1; return 'long help' },
+  }), 'evil verb')
+
+  assert.deepEqual(counts, { aliases: 1, category: 1, audience: 1, plugin: 1, help: 1 })
+  assert.deepEqual(command.aliases, ['ev'])
+  assert.equal(command.plugin, '@evil/x')
+  assert.equal(command.category, 'dev')
+  assert.equal(command.audience, 'developer')
+  assert.equal(command.help, 'long help')
 })
 
 test('validation reads exposure and authClass once each', () => {

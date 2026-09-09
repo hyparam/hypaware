@@ -47,18 +47,23 @@ export function createVerbRegistry(opts = {}) {
       if (byTool.has(tool)) {
         throw new Error(`registerVerb: tool '${tool}' already registered (verb '${name}')`)
       }
-      // Project the CLI command so `hyp <verb>` and `hyp --help` work, and
-      // build it *before* the Maps are written: it is the last step that runs
-      // plugin code, and an accessor raising there would leave this registry
-      // holding a verb whose plugin the loader has just marked failed.
+      // Project the CLI command so `hyp <verb>` and `hyp --help` work, and do
+      // the whole projection *before* the Maps are written, because the two
+      // `set`s are the only steps left that cannot fail. Building the command
+      // is the last step that runs plugin code, and registering it refuses a
+      // colliding alias or an out-of-range `audience`/`bootProfile` read off
+      // values the verb supplied, so with either after the `set`s a refused
+      // registration left this registry holding a verb whose plugin the loader
+      // then marked failed: a plugin reported as not loaded and an MCP tool the
+      // kernel would still answer. That one needs no hostile accessor at all.
+      // `register` now claims all three namespaces or none of them.
       // Idempotent: a runtime re-created over a shared command registry (or a
       // verb whose name a command already occupies) must not double-register.
-      const command = commandRegistry && !commandAlreadyRegistered(commandRegistry, name)
-        ? verbToCommand(verb, name)
-        : undefined
+      if (commandRegistry && !commandAlreadyRegistered(commandRegistry, name)) {
+        commandRegistry.register(verbToCommand(verb, name))
+      }
       byName.set(name, verb)
       byTool.set(tool, verb)
-      if (command) commandRegistry?.register(command)
     },
     // Release a claimed verb name: both maps, plus the CLI command a verb
     // projection put under that name (and only that one). By-name,

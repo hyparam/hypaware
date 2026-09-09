@@ -55,13 +55,24 @@ const VERB_PROJECTION = Symbol('hypaware.verbProjection')
  * @ref LLP 0034#verbs [implements]: one declaration → a CLI command and an MCP tool; the kernel owns both adapters so the flag set and the tool schema never drift
  */
 export function verbToCommand(verb, name = verb.name) {
+  // One read each. The presence test and the value that lands in the command
+  // were two reads of the same plugin property, so the registration built here
+  // could carry a value nothing had tested, and a member that answered truthy
+  // for the test could land as `undefined`. Same rule `validateVerb` follows
+  // for `exposure` and `authClass`, and the reason the command registry checks
+  // its own copy rather than the registration it was handed.
+  const aliases = verb.aliases
+  const category = verb.category
+  const audience = verb.audience
+  const plugin = verb.plugin
+  const help = verb.help
   /** @type {CommandRegistration} */
   const command = {
     name,
-    ...(verb.aliases ? { aliases: verb.aliases } : {}),
-    ...(verb.category ? { category: verb.category } : {}),
-    ...(verb.audience ? { audience: verb.audience } : {}),
-    ...(verb.plugin ? { plugin: verb.plugin } : {}),
+    ...(aliases ? { aliases } : {}),
+    ...(category ? { category } : {}),
+    ...(audience ? { audience } : {}),
+    ...(plugin ? { plugin } : {}),
     summary: verb.summary,
     usage: usageForVerb(name, verb.inputSchema),
     // A verb that needs more than a usage line says so here, and dispatch's
@@ -69,7 +80,7 @@ export function verbToCommand(verb, name = verb.name) {
     // command. Without the passthrough a verb could not explain itself at
     // all, which is what kept `graph neighbors` at one line of help.
     // @ref LLP 0214#d1 [implements]: verbs carry long help through the registration dispatch already renders
-    ...(verb.help !== undefined ? { help: verb.help } : {}),
+    ...(help !== undefined ? { help } : {}),
     run: (argv, ctx) => runVerbCommand(verb, argv, ctx),
   }
   return markVerbProjection(command)
