@@ -1334,6 +1334,12 @@ export async function runDaemon(opts = {}) {
         // based on a diff of loaded config is still deferred.
         for (const snap of status.sources) {
           if (snap.state !== 'started') continue
+          // The empty string is what a row carries when the boot walk could
+          // not read a plugin off the contribution, and it is no more a
+          // context key here than it is in `startConfiguredSources`: a source
+          // that would not say whose it is does not get reloaded under
+          // whatever that key holds, nor handed that key's config slice below.
+          if (snap.plugin === '') continue
           const ctx = boot.runtime.activationContexts.get(snap.plugin)
           if (!ctx) continue
           ctx.config = /** @type {JsonObject} */ (
@@ -1612,7 +1618,7 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
         status: 'skipped',
         source: identity.name,
         plugin: identity.plugin,
-        message: 'source did not answer with the name it registered under; not started',
+        message: 'source could not be read back to the name it registered under; not started',
       })
       continue
     }

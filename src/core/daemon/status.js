@@ -955,10 +955,14 @@ export function sourceHealth(reported) {
  * a key to look up: it collapses the non-strings onto one string, and a string
  * is the shape an activation-context lookup takes.
  *
- * `registered` false is the refusal, and the `name` beside it is whatever the
+ * `registered` false is the refusal, and it covers both ways the read can end
+ * badly: a name that resolves to another contribution or to none, and a read
+ * that threw, including one that got the name and threw on the plugin. A
+ * caller reporting the skip should say the identity would not read back rather
+ * than name one of the two. The `name` beside the refusal is whatever the
  * contribution claimed before it (the empty string when it claimed nothing
- * readable), so the caller reporting the skip can name it without reading the
- * plugin's object again from inside its own handler.
+ * readable), so that caller can name it without reading the plugin's object
+ * again from inside its own handler.
  *
  * @param {ExtendedSourceRegistry | undefined} sources
  * @param {SourceContribution} contribution
@@ -1521,7 +1525,7 @@ export async function collectHypAwareStatus(opts = {}) {
   if (runtimeSources.length > 0) {
     // The `started()` probe and the row it labels have to be asking about the
     // same source, so both come from one guarded read (issue #1535). A
-    // contribution that will not answer with its registered name is left off
+    // contribution that cannot be read back to its registered name is left off
     // the list rather than listed under a name that is not its own.
     let unregistered = 0
     for (const contribution of runtimeSources) {
@@ -1542,8 +1546,8 @@ export async function collectHypAwareStatus(opts = {}) {
         severity: 'warning',
         kind: 'source_name_unregistered',
         message: unregistered === 1
-          ? 'a registered source did not answer with the name it registered under and is left off this list'
-          : `${unregistered} registered sources did not answer with the name they registered under and are left off this list`,
+          ? 'a registered source could not be read back to the name it registered under and is left off this list'
+          : `${unregistered} registered sources could not be read back to the names they registered under and are left off this list`,
         repair: ['hyp plugin list'],
       })
     }
