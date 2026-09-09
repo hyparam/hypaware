@@ -213,22 +213,25 @@ function parsePluginInstallArgs(argv) {
 }
 
 /**
- * Every plugin name the package ships, both buckets. An installed copy of one
- * of these never runs: boot activates the bundled copy and skips the lock
- * entry (LLP 0380). Read from the manifests rather than from what this boot
- * activated, so the list agrees with the `installed_plugin_shadowed`
- * diagnostic `hyp status` raises from the same rule under every profile.
+ * Every plugin name the package ships, both buckets, mapped to the version its
+ * manifest declares. An installed copy of one of these never runs: boot
+ * activates the bundled copy and skips the lock entry (LLP 0380). Read from the
+ * manifests rather than from what this boot activated, so the list agrees with
+ * the `installed_plugin_shadowed` diagnostic `hyp status` raises from the same
+ * rule under every profile, and so a bundled plugin this boot did not get can
+ * still be named with its version: it never became an `ActivePlugin` and a
+ * bundled plugin is not in the lock, so nothing else here knows either fact.
  * Discovery failure degrades to empty (no marks), never throws: a listing is
  * not the place to fail.
  *
- * @returns {Promise<Set<string>>}
+ * @returns {Promise<Map<string, string>>}
  */
-async function discoverBundledNames() {
+async function discoverBundledVersions() {
   try {
     const bundled = await discoverBundledPlugins()
-    return new Set([...bundled.loaded, ...bundled.excluded].map((m) => m.manifest.name))
+    return new Map([...bundled.loaded, ...bundled.excluded].map((m) => [m.manifest.name, m.manifest.version]))
   } catch {
-    return new Set()
+    return new Map()
   }
 }
 
@@ -243,21 +246,55 @@ export async function runPluginList(argv, ctx) {
   const stateDir = pluginStateDir(ctx)
   const installed = await listInstalledPlugins(stateDir)
   const active = ctx.plugins ?? []
-  const bundledNames = await discoverBundledNames()
+  const bundledVersions = await discoverBundledVersions()
+  const installedByName = new Map(installed.map((e) => [e.name, e]))
+  const activeByName = new Map(active.map((p) => [p.name, p]))
+
+  // The third source, alongside `ctx.plugins` and the lock, because neither can
+  // name a plugin this boot did not get: a throwing `activate()` never produces
+  // an `ActivePlugin`, and a bundled plugin is not in the lock (issue #1570).
+  // Two bounds on what goes in. Only names attributable to a manifest the
+  // package ships or to a lock entry: `unavailablePlugins` also carries the
+  // *directory* of a manifest that would not load, which has no plugin name and
+  // would put a filesystem path in the `--json` `name` field. And never a name
+  // that is also active, so the sections cannot contradict each other in front
+  // of an operator with no way to settle it.
+  const unavailable = new Set(
+    (ctx.failedPlugins ?? []).filter((name) => (
+      !activeByName.has(name) && (bundledVersions.has(name) || installedByName.has(name))
+    ))
+  )
+
+  /**
+   * The copy this boot would have run for a name it did not get: the bundled
+   * one whenever the package ships that name, since boot selects it over any
+   * installed copy (LLP 0380 #bundled-copy-wins), and the lock entry otherwise.
+   * Both output forms read it, so they cannot disagree about which copy failed.
+   *
+   * @param {string} name
+   * @returns {{ version: string, source: 'bundled' | 'installed' }}
+   */
+  function unavailableCopy(name) {
+    const bundled = bundledVersions.get(name)
+    if (bundled !== undefined) return { version: bundled, source: 'bundled' }
+    return { version: installedByName.get(name)?.version ?? '', source: 'installed' }
+  }
 
   if (json) {
-    const installedByName = new Map(installed.map((e) => [e.name, e]))
-    const activeByName = new Map(active.map((p) => [p.name, p]))
     const allNames = new Set([
       ...installedByName.keys(),
       ...activeByName.keys(),
+      ...unavailable,
     ])
-    /** @type {Array<{name: string, version: string, source: 'bundled'|'installed', active: boolean, shadowed?: true, installed_at?: string, update?: unknown}>} */
+    /** @type {Array<{name: string, version: string, source: 'bundled'|'installed', active: boolean, unavailable?: true, shadowed?: true, installed_at?: string, update?: unknown}>} */
     const plugins = []
     for (const name of Array.from(allNames).sort()) {
       const inst = installedByName.get(name)
       const act = activeByName.get(name)
-      const version = act?.version ?? inst?.version ?? ''
+      // Undefined for every entry that already resolved, so those keep the
+      // version and source they reported before.
+      const copy = unavailable.has(name) ? unavailableCopy(name) : undefined
+      const version = act?.version ?? copy?.version ?? inst?.version ?? ''
       // Provenance is what runs, read off the active plugin's root directory:
       // an installed copy of a bundled name is in the lock but never active
       // (boot runs the bundled copy), so the name reports the bundled source
@@ -269,12 +306,17 @@ export async function runPluginList(argv, ctx) {
       // about) is inert all the same, and `hyp status` already says so.
       // @ref LLP 0380#bundled-copy-wins [implements]: the list says which copy runs, by root directory, not by lock membership
       const runsInstalled = !!act && !!inst && act.rootDir === inst.install_dir
-      const shadowed = !!inst && bundledNames.has(name)
+      const shadowed = !!inst && bundledVersions.has(name)
       plugins.push({
         name,
         version,
-        source: act ? (runsInstalled ? 'installed' : 'bundled') : 'installed',
+        source: act ? (runsInstalled ? 'installed' : 'bundled') : (copy?.source ?? 'installed'),
         active: !!act,
+        // `active: false` alone cannot tell an idle lock entry apart from one
+        // this boot could not bring up. Scoped to this CLI boot exactly like
+        // `active`: the daemon boots separately, so a plugin can be up there and
+        // not here, or the reverse.
+        ...(copy ? { unavailable: true } : {}),
         ...(shadowed ? { shadowed: true } : {}),
         ...(inst ? { installed_at: inst.installed_at } : {}),
         ...(inst?.update !== undefined ? { update: inst.update } : {}),
@@ -284,7 +326,7 @@ export async function runPluginList(argv, ctx) {
     return 0
   }
 
-  if (active.length === 0 && installed.length === 0) {
+  if (active.length === 0 && installed.length === 0 && unavailable.size === 0) {
     ctx.stdout.write('No plugins active or installed.\n')
     return 0
   }
@@ -306,11 +348,32 @@ export async function runPluginList(argv, ctx) {
     ctx.stdout.write('Installed plugins:\n')
     for (const entry of installed) {
       const available = entry.update?.available ? '  (update available)' : ''
-      const shadowed = bundledNames.has(entry.name)
+      const isBundledName = bundledVersions.has(entry.name)
+      const shadowed = isBundledName
         ? `  (shadowed by the bundled copy; hyp plugin remove ${entry.name})`
         : ''
-      ctx.stdout.write(`  ${entry.name}@${entry.version}${available}${shadowed}\n`)
+      // Only for a lock entry that is itself the copy boot selected. When the
+      // name is also bundled, the bundled copy is what ran and failed, and the
+      // shadow marker above already says this entry never runs.
+      const failed = !isBundledName && unavailable.has(entry.name)
+        ? '  (did not activate in this boot)'
+        : ''
+      ctx.stdout.write(`  ${entry.name}@${entry.version}${available}${shadowed}${failed}\n`)
     }
+  }
+  if (unavailable.size > 0) {
+    // The name, which is what the two sections above cannot supply. The header
+    // says neither "configured" (true under the `config` profile, false under
+    // the walkthrough's `all-available`, which selects plugins the config never
+    // named) nor why, since four different shortfalls land in this one list. The
+    // closing line says which boot is missing from the answer: this CLI process
+    // is not the daemon, and a plugin can fail in either one alone.
+    ctx.stdout.write('Plugins this boot did not activate:\n')
+    for (const name of [...unavailable].sort()) {
+      const { version, source } = unavailableCopy(name)
+      ctx.stdout.write(`  ${name}@${version}  (${source})\n`)
+    }
+    ctx.stdout.write('  The daemon boots separately; hyp status reports the running daemon\'s own plugin failures.\n')
   }
   return 0
 }
