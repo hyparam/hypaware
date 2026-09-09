@@ -418,3 +418,31 @@ test('a plugin with nothing left running still says so', async (t) => {
   assert.ok(diag)
   assert.match(diag.message, / - none of its sources, sinks or commands are running$/)
 })
+
+test('the message a plugin throws is bounded in the snapshot and whole in the log', async () => {
+  const { recordFailedPlugins, MAX_ACTIVATION_MESSAGE_CHARS } = await import('../../src/core/daemon/boot_failure.js')
+  // A plugin's `Error.message` is plugin-authored and nothing on the way in
+  // bounds it, and `status.json` is rewritten for the life of the daemon: the
+  // snapshot copy is clamped where it is recorded, the way source health is.
+  // The log record is written once per boot and is what the diagnostic's
+  // repair sends the operator to read, so it keeps the message whole.
+  const huge = 'x'.repeat(5000) + " imported from '/opt/plugins/@acme/loud/index.js'"
+  /** @type {Array<{ event: string, fields: any }>} */
+  const logged = []
+  const failed = recordFailedPlugins({
+    activations: /** @type {any} */ ([
+      { ok: true, plugin: { name: '@acme/fine' } },
+      { ok: false, errorKind: 'activate_failed', message: huge, plugin: { name: '@acme/loud' } },
+    ]),
+    log: /** @type {any} */ ({ error: (/** @type {string} */ event, /** @type {any} */ fields) => logged.push({ event, fields }) }),
+  })
+  assert.equal(failed.length, 1)
+  assert.equal(failed[0].name, '@acme/loud')
+  assert.ok(
+    failed[0].message.length <= MAX_ACTIVATION_MESSAGE_CHARS,
+    `an unbounded plugin string reached the status snapshot: ${failed[0].message.length} chars`
+  )
+  assert.equal(logged.length, 1)
+  assert.equal(logged[0].event, 'daemon.plugin_activate_failed')
+  assert.equal(logged[0].fields.message, huge)
+})

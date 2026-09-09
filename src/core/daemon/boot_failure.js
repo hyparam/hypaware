@@ -11,6 +11,24 @@
  * @import { DaemonLogger, FailedPluginSnapshot } from '../../../src/core/daemon/types.js'
  */
 
+import { sanitizeLabel } from '../util/json_util.js'
+
+/**
+ * How much of a failed `activate()`'s message the status snapshot keeps, and
+ * so how much of it `hyp status` can quote. Wider than `sanitizeLabel`'s
+ * default because this is a sentence, not a name, and the commonest one by far
+ * is a module-resolution error whose operative half is the second path it
+ * names ("... imported from <file>"), which the 120-character default cuts
+ * off. The same width, for the same reason, as `MAX_SOURCE_HEALTH_CHARS` in
+ * `status.js`, and applied in the same place: a plugin-authored string bound
+ * for `status.json` is bounded where it is recorded, because nothing on the
+ * way in bounds it and that file is rewritten for the life of the daemon. The
+ * `daemon.log` record keeps the message whole - it is written once per boot,
+ * and it is what the diagnostic's repair sends the operator to read.
+ * @ref LLP 0164#gateway-tracks-what-core-cannot-name [constrained-by]: a plugin string bound for status.json is bounded where it is recorded
+ */
+export const MAX_ACTIVATION_MESSAGE_CHARS = 200
+
 /**
  * The label a daemon process stamps on the warning it persists when its boot
  * throws. In a `degraded` snapshot it is the only thing separating a boot that
@@ -61,7 +79,11 @@ export function recordFailedPlugins({ activations, log }) {
     if (result.ok) continue
     const { errorKind, message } = result
     const name = result.plugin.name
-    failed.push({ name, errorKind, message })
+    failed.push({
+      name,
+      errorKind,
+      message: sanitizeLabel(message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded',
+    })
     log.error('daemon.plugin_activate_failed', { plugin: name, error_kind: errorKind, message })
   }
   return failed

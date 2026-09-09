@@ -43,7 +43,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
-import { warningsRecordBootFailure } from './boot_failure.js'
+import { MAX_ACTIVATION_MESSAGE_CHARS, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -895,15 +895,6 @@ function liveStatusSources(stateRoot) {
  * @ref LLP 0164#gateway-tracks-what-core-cannot-name [constrained-by]: a plugin string bound for status.json is bounded where it is recorded
  */
 const MAX_SOURCE_HEALTH_CHARS = 200
-
-/**
- * How much of a failed `activate()`'s message the diagnostic quotes. Wider
- * than `sanitizeLabel`'s default for the reason above: this is a sentence,
- * not a name, and the commonest one by far is a module-resolution error whose
- * operative half is the second path it names ("... imported from <file>"),
- * which the 120-character default cuts off.
- */
-const MAX_ACTIVATION_MESSAGE_CHARS = 200
 
 /** The health words `SourceStatus.state` is allowed to carry. */
 const SOURCE_HEALTH_STATES = new Set(['starting', 'ready', 'degraded', 'stopped', 'error'])
