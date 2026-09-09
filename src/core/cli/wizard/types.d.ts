@@ -687,7 +687,7 @@ export interface RunWizardFirstAskOptions {
   stdin?: NodeJS.ReadableStream
   /**
    * Gathers the recommendation ask's evidence into a run directory and
-   * returns it (LLP 0388). Absent or failing, the question launches as a
+   * returns it (LLP 0395). Absent or failing, the question launches as a
    * plain prompt in the caller's directory, like every other row.
    */
   prepareEvidence?: () => Promise<FirstAskEvidence | undefined>

@@ -224,7 +224,7 @@ export interface TimestampScope {
   outer?: TimestampScope
 }
 
-/** One of the four kinds of change the recommendation ask can propose (LLP 0388). */
+/** One of the four kinds of change the recommendation ask can propose (LLP 0395). */
 export type FirstAskRoute = 'sink' | 'skill' | 'subagent' | 'rule'
 
 /** The triage signals, one per route, plus the record size. */

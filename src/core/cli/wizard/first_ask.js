@@ -30,15 +30,15 @@ import { RECOMMEND_LAUNCH_PROMPT, RECOMMEND_PROMPT_ID } from '../../query/first_
 /**
  * The question setup offers, and `hyp ask` starts.
  *
- * One question, whose answer is a change rather than a number: what
- * single addition would recover the most wasted effort. A question whose
+ * One question, whose answer is a skill rather than a number: which
+ * skill would be the most useful to add first. A question whose
  * best answer is a number teaches the user that HypAware is a dashboard;
  * one whose answer is a change teaches them it is a feedback loop, which
  * is the thing worth learning in the first minute. The four earlier
  * questions (token spend, repeated mistakes, a missing skill, a subagent
  * worth adding) are not gone: they are the routes the gather chooses
  * between from the record, with evidence, instead of a cold client
- * guessing at SQL (LLP 0388 #one-question).
+ * guessing at SQL (LLP 0395 #one-question).
  *
  * Phrased as a user would phrase it, never as a skill invocation
  * (`@ref LLP 0011#no-architectural-names`), and opening with "From my
@@ -48,18 +48,18 @@ import { RECOMMEND_LAUNCH_PROMPT, RECOMMEND_PROMPT_ID } from '../../query/first_
  * with.
  *
  * @ref LLP 0198#split [implements]: the question is core's, because it is about core's datasets
- * @ref LLP 0388#one-question [implements]: one question, routed from evidence, replaces the list
+ * @ref LLP 0395#one-question [implements]: one question, routed from evidence, replaces the list
  * @type {ReadonlyArray<{ id: string, label: string, prompt: string }>}
  */
 export const SUGGESTED_PROMPTS = Object.freeze([
   {
-    // The one question (LLP 0388 #one-question). Its launch is preceded by
+    // The one question (LLP 0395 #one-question). Its launch is preceded by
     // a gather, and the prompt names the folder because the client is
     // started inside it. The earlier four rows asked the same things a
     // cold client could not answer well from SQL it wrote itself; they are
     // now the routes this one question chooses between.
     id: RECOMMEND_PROMPT_ID,
-    label: 'The one change worth making',
+    label: 'The skill worth adding first',
     prompt: RECOMMEND_LAUNCH_PROMPT,
   },
 ])
@@ -357,7 +357,7 @@ export async function runWizardFirstAsk(opts) {
         // client is spawned. No evidence means no launch: a client started
         // on the bare question would answer it the cold way, which is the
         // failure this ask exists to remove, so the run reports and stops.
-        // @ref LLP 0388#run-directory [implements]: the client starts inside the evidence, never before it and never without it
+        // @ref LLP 0395#run-directory [implements]: the client starts inside the evidence, never before it and never without it
         /** @type {string | undefined} */
         let cwd
         if (chosen.prompt.id === RECOMMEND_PROMPT_ID) {
@@ -421,12 +421,12 @@ export async function runWizardFirstAsk(opts) {
 
 /**
  * Which client answers, when that is genuinely ambiguous. There is one
- * question (LLP 0388 #one-question), so there is nothing to pick among
+ * question (LLP 0395 #one-question), so there is nothing to pick among
  * and no screen for it: `hyp ask` goes straight from the gather to the
  * launch. A machine with two launchable clients still gets asked which,
  * framed as its own screen; cancelling that is "not now".
  *
- * @ref LLP 0388#one-question [implements]: no question menu; the only prompt left is the client pick
+ * @ref LLP 0395#one-question [implements]: no question menu; the only prompt left is the client pick
  * @param {RunWizardFirstAskOptions} opts
  * @param {FirstAskLauncher[]} launchers
  * @returns {Promise<{ prompt: (typeof SUGGESTED_PROMPTS)[number], launcher: FirstAskLauncher } | undefined>}

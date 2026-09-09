@@ -99,7 +99,7 @@ export async function runAsk(argv, ctx) {
 }
 
 /**
- * The recommendation ask's gather (LLP 0388), run in-process against the
+ * The recommendation ask's gather (LLP 0395), run in-process against the
  * same runner the overview uses. The evidence lives in one folder under
  * the system temp directory, `<tmpdir>/hypaware/ask/`, rewritten on every
  * ask: the client is started inside it, so its transcript label, cwd,
@@ -108,7 +108,7 @@ export async function runAsk(argv, ctx) {
  * rather than random because Claude Code asks once whether to trust a
  * new folder; a fresh random path would ask on every run.
  *
- * @ref LLP 0388#run-directory [implements]: a fixed temp folder owns the ask, not the caller's cwd and not the home directory
+ * @ref LLP 0395#run-directory [implements]: a fixed temp folder owns the ask, not the caller's cwd and not the home directory
  * @param {CommandRunContext} ctx
  * @returns {Promise<FirstAskEvidence | undefined>}
  */

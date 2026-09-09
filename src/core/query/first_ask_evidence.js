@@ -1,10 +1,10 @@
 // @ts-check
 
 /**
- * Evidence for the recommendation ask (LLP 0388).
+ * Evidence for the recommendation ask (LLP 0395).
  *
- * `hyp ask` offers one question whose answer is a change rather than a
- * number: "what one change would recover the most wasted effort". A cold
+ * `hyp ask` offers one question whose answer is a skill rather than a
+ * number: "what one skill would be the most useful to add first". A cold
  * client cannot answer that well from SQL it writes itself, and the
  * recorded attempts show why: runs that saw only aggregate rows proposed
  * changes that were wrong, and runs that fetched their own evidence spent
@@ -20,8 +20,8 @@
  * to human turns: Codex guardian reviews and subagent relays arrive as
  * `role = 'user'` and swamped the typed-line signal on the first org run.
  *
- * @ref LLP 0388#in-process [implements]: HypAware gathers, the client reads; the model never writes SQL for this question
- * @ref LLP 0388#route-rule [implements]: the route is chosen here, by a stated rule, not by the model
+ * @ref LLP 0395#in-process [implements]: HypAware gathers, the client reads; the model never writes SQL for this question
+ * @ref LLP 0395#route-rule [implements]: the route is chosen here, by a stated rule, not by the model
  *
  * @import { OverviewQueryRunner } from '../../../src/core/query/types.js'
  * @import { FirstAskRoute, FirstAskSignals, FirstAskEvidence, FirstAskEvidenceFile } from '../../../src/core/query/types.js'
@@ -41,7 +41,7 @@ export const EVIDENCE_WINDOW_DAYS = 30
 
 /** The prompt the client is started with. Everything else is in `ASK.md`. */
 export const RECOMMEND_LAUNCH_PROMPT =
-  'From my HypAware history: what one change would recover the most wasted effort in my sessions? The evidence is already gathered in this folder. Read ASK.md first and follow it exactly.'
+  'From my HypAware history: what one skill would be the most useful to add first? The evidence is already gathered in this folder. Read ASK.md first and follow it exactly.'
 
 const NOT_DUPLICATE_LANE = "conversation_source <> 'claude_code'"
 
@@ -93,7 +93,7 @@ const USAGE_OUT = "coalesce(cast(json_extract(attributes, '$.usage.output_tokens
  * for, so it is a number an operator may want to revisit and it lives
  * here, once.
  *
- * @ref LLP 0388#route-rule [implements]: floors and precedence in one place
+ * @ref LLP 0395#route-rule [implements]: floors and precedence in one place
  */
 export const ROUTE_FLOORS = Object.freeze({
   sink: 0.10,
@@ -120,12 +120,27 @@ export const ROUTE_FLOORS = Object.freeze({
  * the cost share. Anthropic list ratios; OpenAI's cached-input discount
  * is in the same range.
  *
- * @ref LLP 0388#route-rule [implements]: token signals are cost-weighted, never raw counts
+ * @ref LLP 0395#route-rule [implements]: token signals are cost-weighted, never raw counts
  */
 export const PRICE_RATIO = Object.freeze({ input: 1, cacheRead: 0.1, cacheWrite: 1.25, output: 5 })
 
 /** @type {ReadonlyArray<FirstAskRoute>} */
 const PRECEDENCE = Object.freeze(['sink', 'skill', 'subagent', 'rule'])
+
+/**
+ * The skill each route points to. The answer is always one skill: a
+ * SKILL.md the person can read, trigger by a phrase they already type,
+ * and edit, which is the most actionable place to start and the one
+ * change that lands on the first day. The signals decide which skill.
+ *
+ * @ref LLP 0395#always-a-skill [implements]: four signals, one kind of answer
+ */
+export const ROUTE_SKILLS = Object.freeze({
+  sink: "a handoff skill: at the end of a day's work it writes a short note (goal, files touched, decisions, next step) so tomorrow starts in a fresh session from the note instead of reopening the old one",
+  skill: 'a skill for exactly that procedure, triggered by the phrase as the person types it, whose steps are the commands the record shows ran after it',
+  subagent: 'a skill for that recurring request whose body hands the reading to a worker (an Explore or general-purpose subagent, or a shell reduction where the client has no subagent) and keeps the raw output out of the main conversation',
+  rule: 'a skill for the task in which the mistake keeps happening, with the correct form built into its steps so the wrong one is never typed again',
+})
 
 /** What each route means, in the reader's words; the ids are internal. */
 export const ROUTE_LABELS = Object.freeze({
@@ -313,7 +328,7 @@ export function computeSignals(rows) {
  * of it on that scale runs too. Ties fall to precedence. Below every
  * floor the result is empty, which the ask reports as "not enough yet".
  *
- * @ref LLP 0388#route-rule [implements]: largest multiple of its floor wins, near ties run together
+ * @ref LLP 0395#route-rule [implements]: largest multiple of its floor wins, near ties run together
  * @param {FirstAskSignals} s
  * @returns {FirstAskRoute[]}
  */
@@ -512,7 +527,7 @@ export function toTsv(columns, rows, pick) {
  * runs showed: unverified facts, self-serve queries, prose where a
  * mechanism was needed, and routes chosen by the model.
  *
- * @ref LLP 0388#answer-shape [implements]: recommendation first, evidence last, under 110 words before the block
+ * @ref LLP 0395#answer-shape [implements]: recommendation first, evidence last, under 110 words before the block
  * @param {FirstAskRoute[]} routes
  * @param {{ scope: string, files: string[], signals?: FirstAskSignals, windowDays?: number }} meta
  * @returns {string}
@@ -520,7 +535,7 @@ export function toTsv(columns, rows, pick) {
 export function askInstructions(routes, meta) {
   const routeLine = routes.length === 0
     ? 'What HypAware found: nothing over its floor. Every signal is below the level worth acting on.'
-    : `What HypAware found, and the kind of change to propose for each:\n${routes.map((r) => `- ${meta.signals ? describeRoute(r, meta.signals) : r}`).join('\n')}\nThe rule that chose this is printed in triage.txt.`
+    : `What HypAware found, and the skill each points to:\n${routes.map((r) => `- ${meta.signals ? describeRoute(r, meta.signals) : r} Skill: ${ROUTE_SKILLS[r]}.`).join('\n')}\nThe rule that chose this is printed in triage.txt.`
   const fileNotes = {
     'triage.txt': 'the four signals, the record size, the rule as applied, and the route. Read first.',
     'session_days_summary.txt': 'context tokens per output token for single-day sessions, first days, and later days of multi-day sessions, plus the excess on later days.',
@@ -556,11 +571,11 @@ ${files}
 - Every number you state traces to a file in this folder (or to one of your two queries). The reader never sees session ids or file names in the answer itself; those go in the Sources line at the end, where each session is its eight-character id with the date and what was typed.
 - A fact about a command, an error, or a tool must come from a file you read this session, cited path:line, or be written as a pointer. This applies to the text of the change itself, not only to the evidence for it.
 - Any command you put in the change must be run once against a real input before it appears, and the answer shows the command and its output. Do not write outside this folder to do the test.
-- The change is one of three things: a skill (a SKILL.md the person triggers by a phrase they already type), an agent definition (a worker for a request they already make), or a block in a CLAUDE.md. Never a hook, a settings entry, or anything else the person cannot read and edit as plain text.
-- If a skill, agent, or CLAUDE.md line on the subject already exists per on_disk.txt, say so and why it did not work, and change it rather than adding a second one.
-- If the mistake is a trap in something HypAware ships (a skill under ~/.claude/skills/hypaware-*, a command, an error message), say so in the Why: the lasting fix is in that skill or command, and what you propose here is a stopgap until it lands.
-- For reopened sessions, be honest that a written rule cannot stop a person from resuming a session. The change is a handoff skill (writes goal, files touched, decisions, next step to a short note at the end of a day's work) plus one CLAUDE.md line saying when the agent offers it, so that starting fresh becomes cheap enough to prefer.
-- For a request that should go to a worker, the change is an agent definition whose description opens with the recurring request as the person types it, so the lead picks it for that request. Never a hook, rule, or sentence that says to delegate more in general: when to delegate is the client's decision, and only a named worker for a request the person already makes changes it.
+- The answer is always one skill: a SKILL.md under ~/.claude/skills/<name>/ that the person can read, trigger, and edit. Never an agent definition on its own, a hook, a settings entry, or a CLAUDE.md rule. If the skill needs the agent to offer it unprompted (a handoff at the end of the day), say so in one sentence in the answer; do not propose a second file.
+- The skill's description opens with the phrase the person already types for this, so the client picks it up without being told. Its steps are the commands the record shows actually ran, not ones you imagine.
+- For reopened sessions, be honest that a skill cannot stop a person from resuming; what it does is make starting fresh cheap enough to prefer.
+- For a request that should go to a worker, the skill's body dispatches a worker for the reading and returns a summary; where the client has no subagent (Codex), the same skill reduces in the shell instead, and the answer says which client the days ran in.
+- For a recurring mistake, the skill is for the task the mistake happens in, and its steps carry the correct form; if the mistake is a trap in something HypAware ships (a skill under ~/.claude/skills/hypaware-*, a command, an error message), say so: the lasting fix is there, and this skill is a stopgap.
 - Discount session ids that carry identical typed lines on the same day as another id; that is one conversation recorded twice.
 - If nothing was over its floor: two sentences, what was recorded (sessions and days, from the record line of triage.txt) and that there is not enough yet to recommend anything. Then the Sources line and stop; no question.
 
@@ -568,15 +583,15 @@ ${files}
 
 This is the first thing a person sees after installing, and they will give it about ten seconds. Write it the way you would tell a colleague what you found: short paragraphs, plain words a non-engineer would follow, no headings, no bold labels, no em dashes, no citations, file names, or session ids in the text. Print nothing before the first sentence.
 
-Open by saying what you did and what stood out, in your own words: that you looked through the last ${meta.windowDays ?? EVIDENCE_WINDOW_DAYS} days of sessions for ${meta.scope} and the one thing worth changing. Then the recommendation itself, what to add and where, and why, in a sentence or two. Then the evidence in prose: two or three plain facts with at most one number each, and one real example with its date and what was typed, told as a story rather than a citation. If you skipped something you had to skip, say so in a clause. A short bullet list is fine if it reads better than a paragraph; a table is not.
+Open by saying what you did and what stood out, in your own words: that you looked through the last ${meta.windowDays ?? EVIDENCE_WINDOW_DAYS} days of sessions for ${meta.scope} and the one skill worth adding first. Then the recommendation itself, what the skill does and what phrase triggers it, and why, in a sentence or two. Then the evidence in prose: two or three plain facts with at most one number each, and one real example with its date and what was typed, told as a story rather than a citation. If you skipped something you had to skip, say so in a clause. A short bullet list is fine if it reads better than a paragraph; a table is not.
 
-Then, on its own line, something like "Here's what I'd add:", the file path, and the exact text in a fenced code block. A CLAUDE.md block under 12 lines, a skill under 25, an agent definition under 20.
+Then, on its own line, something like "Here's the skill I'd add:", the file path under ~/.claude/skills/, and the exact SKILL.md in a fenced code block, under 30 lines including the front matter.
 
 Then ask whether to apply it, in one short sentence.
 
 Then one line that starts with "Sources:" carrying everything you verified, compact: the file:line references, the sessions by id, and for any command the test command and its output. This line is for checking, not reading.
 
-If nothing was over its floor: say what you looked through (sessions and days, from the record line of triage.txt), that there is not enough yet to recommend a change, and when it would be worth asking again. Then "Sources:" and stop; no question.
+If nothing was over its floor: say what you looked through (sessions and days, from the record line of triage.txt), that there is not enough yet to recommend a skill, and when it would be worth asking again. Then "Sources:" and stop; no question.
 
 When the answer is yes: create or edit the file with the Write or Edit tool in that same turn and print the result. Do not ask again.
 
@@ -826,7 +841,7 @@ export async function clusterFiles(runner, from, sessionIds, phrase) {
  * the files exist so the client can read them during that session, and
  * nothing reads them afterwards, so keeping old runs would only grow.
  *
- * @ref LLP 0388#run-directory [implements]: one directory, wiped and rewritten per ask, and the client starts inside it
+ * @ref LLP 0395#run-directory [implements]: one directory, wiped and rewritten per ask, and the client starts inside it
  * @param {{
  *   runner: OverviewQueryRunner,
  *   root: string,

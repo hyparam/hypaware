@@ -300,7 +300,7 @@ test('runWizardFirstAsk: an unknown row count never withholds the offer', async 
 })
 
 test('runWizardFirstAsk: cancelling the client pick declines, and keeps the list', async () => {
-  // @ref LLP 0388#one-question [tests]: with no question menu, the client pick is the one place to say not now
+  // @ref LLP 0395#one-question [tests]: with no question menu, the client pick is the one place to say not now
   for (const chooser of [
     /** @type {any} */ (async () => { throw new PromptCancelledError() }),
   ]) {
@@ -410,7 +410,7 @@ test('runWizardFirstAsk: two launchable clients ask which one answers', async ()
 
 test('the suggested prompt is one routable question that names no machinery', async () => {
   // @ref LLP 0198#split [tests]: core owns the questions, and they name no machinery
-  // One question (LLP 0388 #one-question): the earlier rows became the
+  // One question (LLP 0395 #one-question): the earlier rows became the
   // routes it chooses between, so a second row here would be a regression.
   assert.equal(SUGGESTED_PROMPTS.length, 1)
   assert.equal(new Set(SUGGESTED_PROMPTS.map((p) => p.id)).size, SUGGESTED_PROMPTS.length, 'ids must be unique')
@@ -432,7 +432,7 @@ test('every suggested label fits a narrow terminal without wrapping', async () =
 })
 
 test('runWizardFirstAsk: the recommendation row gathers first and starts the client in the run directory', async () => {
-  // @ref LLP 0388#run-directory [tests]: the client starts inside the evidence, on the folder-relative prompt
+  // @ref LLP 0395#run-directory [tests]: the client starts inside the evidence, on the folder-relative prompt
   const stdout = makeBuf()
   const spawner = recordingSpawn()
   const chooser = selectReturning('recommend')
@@ -459,7 +459,7 @@ test('runWizardFirstAsk: the recommendation row gathers first and starts the cli
 })
 
 test('runWizardFirstAsk: a failed or absent gather refuses to launch', async () => {
-  // @ref LLP 0388#run-directory [tests]: no evidence, no launch; the cold answer is the failure this ask removes
+  // @ref LLP 0395#run-directory [tests]: no evidence, no launch; the cold answer is the failure this ask removes
   for (const prepareEvidence of [
     async () => { throw new Error('cache locked') },
     async () => undefined,

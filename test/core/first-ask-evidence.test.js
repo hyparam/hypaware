@@ -24,9 +24,9 @@ import {
   windowStart,
 } from '../../src/core/query/first_ask_evidence.js'
 
-// The recommendation ask (LLP 0388): the route rule, the files the client
+// The recommendation ask (LLP 0395): the route rule, the files the client
 // reads, and the run directory the client is started in.
-// @ref LLP 0388#route-rule [tests]:
+// @ref LLP 0395#route-rule [tests]:
 
 /** Signals with nothing over any floor. */
 function quietSignals() {
@@ -39,7 +39,7 @@ test('windowStart: thirty days back, as a UTC date', () => {
 })
 
 test('triageSql: every statement excludes the duplicate OTEL lane and is bounded', () => {
-  // @ref LLP 0388#human-turns [tests]: the duplicate lane never counts
+  // @ref LLP 0395#human-turns [tests]: the duplicate lane never counts
   const sql = triageSql('2026-08-08')
   for (const [name, stmt] of Object.entries(sql)) {
     assert.ok(stmt.includes("conversation_source <> 'claude_code'"), `${name} keeps the duplicate lane`)
@@ -83,7 +83,7 @@ test('computeSignals: reopened days are measured against the fresh ratio', () =>
 })
 
 test('chooseRoutes: below every floor is none; the largest multiple wins; a near tie runs both', () => {
-  // @ref LLP 0388#route-rule [tests]: floors, precedence, and the one-fifth band
+  // @ref LLP 0395#route-rule [tests]: floors, precedence, and the one-fifth band
   assert.deepEqual(chooseRoutes(quietSignals()), [])
 
   const s = quietSignals()
@@ -195,12 +195,14 @@ test('sinkFiles: summary slices and the per-day table agree', () => {
 })
 
 test('askInstructions: route, files, and the answer shape the reader gets', () => {
-  // @ref LLP 0388#answer-shape [tests]: recommendation first, no self-serve queries, sources last
+  // @ref LLP 0395#answer-shape [tests]: recommendation first, no self-serve queries, sources last
   const s = quietSignals()
   s.sink.share = 0.209
   s.sink.reopenedDays = 64
   const text = askInstructions(['sink'], { scope: 'this machine', files: ['triage.txt', 'session_days.tsv', 'ASK.md'], signals: s })
-  assert.ok(text.includes('- reopened sessions: 20.9% of all spend is excess on the 64 days a session was reopened.'), 'the route is a finding in words, never a bare id')
+  assert.ok(text.includes('- reopened sessions: 20.9% of all spend is excess on the 64 days a session was reopened. Skill: a handoff skill'), 'the route is a finding in words that names the skill it points to')
+  assert.ok(text.includes('The answer is always one skill'))
+  assert.ok(!text.includes('an agent definition under 20'), 'no other kind of change is offered')
   assert.ok(!text.includes('Route: sink'))
   assert.ok(text.includes('at most two `hyp query` commands'), 'a bounded fetch for a missing figure is allowed')
   assert.ok(text.includes("read the hypaware-query skill's SKILL.md"), 'the skill is read before a query, and only then')
@@ -242,7 +244,7 @@ test('frontMatterDescription: one line, unquoted, capped, empty without front ma
 })
 
 test('prepareFirstAskEvidence: rewrites the one directory with only the chosen route', async () => {
-  // @ref LLP 0388#run-directory [tests]: one directory, wiped per ask, the client starts inside it
+  // @ref LLP 0395#run-directory [tests]: one directory, wiped per ask, the client starts inside it
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-runs-'))
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
   // A leftover from a previous ask on another route must not survive.

@@ -1,4 +1,4 @@
-# LLP 0388: The recommendation ask gathers its evidence before the client starts
+# LLP 0395: The recommendation ask gathers its evidence before the client starts
 
 **Type:** Decision
 **Status:** Draft
@@ -57,8 +57,24 @@ do: reading the evidence, finding the pattern, writing and testing the
 change. This is the split LLP 0140 made for the server's report agents,
 applied to the first ask.
 
+<a id="always-a-skill"></a>**The answer is always one skill.** Whatever the
+signals find, what the person is offered is a SKILL.md they can read,
+trigger by a phrase they already type, and edit. A skill is the most
+actionable place to start: it lands on the first day, it is visible, and
+it is the person's own. Hooks and settings entries are invisible and
+fragile; an agent definition only matters once the lead picks it; an
+instruction-file rule is one more sentence the model may not weigh.
+Each signal points to a skill: reopened sessions to a handoff skill,
+something the person keeps typing to a skill for that procedure, a
+recurring request that should go to a worker to a skill whose body
+dispatches one, a recurring mistake to a skill for the task it happens
+in with the correct form built in. The answer may say in one sentence
+when the agent should offer the skill unprompted; it does not propose a
+second file.
+
 <a id="route-rule"></a>**The route is chosen by a stated rule, in code.**
-Four signals are measured over the last 30 days, one per kind of change:
+Four signals are measured over the last 30 days, one per skill the answer
+might propose:
 
 | route | signal | floor |
 |---|---|---|
@@ -153,20 +169,14 @@ runs showed:
   session, cited, or are written as pointers.
 - Any command in the change is run once against a real input, and the
   output is shown.
-- The change is a skill, an agent definition, or a CLAUDE.md block, and
-  nothing else. Not a hook or a settings entry: those are invisible to
-  the person, fragile across client updates, and not something a new
-  user reads or maintains, so they are a poor first suggestion however
-  well they would work. The on-disk listing the answer consults names the
-  installed skills and agents with what each is for, and does not list
-  hooks at all.
-- If a skill, agent, or CLAUDE.md line on the subject already exists, the
-  answer says why it did not work and changes it rather than adding a
-  second.
-- For the sink route the answer says plainly that a written rule cannot
-  stop a person from resuming a session. Its change is a handoff skill
-  plus one CLAUDE.md line on when the agent offers it, so that starting
-  fresh becomes the cheaper habit.
+- The change is one skill (#always-a-skill). The on-disk listing the
+  answer consults names the installed skills and agents with what each is
+  for, and does not list hooks at all.
+- If a skill on the subject already exists, the answer says why it did
+  not do the job and changes it rather than adding a second.
+- For the sink route the answer says plainly that a skill cannot stop a
+  person from resuming a session; the handoff skill makes starting fresh
+  the cheaper habit.
 
 <a id="one-question"></a>**`hyp ask` asks one question.** The list of
 LLP 0198 #first-ask had four rows: token spend, a repeated mistake, a
