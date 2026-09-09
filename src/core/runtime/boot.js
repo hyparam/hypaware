@@ -27,7 +27,7 @@ import { discoverInstalledPlugins } from './installed.js'
 
 /**
  * @import { ActivePlugin, HypAwareV2Config, JsonObject, PluginName } from '../../../hypaware-plugin-kernel-types.js'
- * @import { LoadedManifest } from '../../../src/core/types.js'
+ * @import { LoadedManifest, UnsatisfiedRequirement } from '../../../src/core/types.js'
  * @import { ActivationResult } from '../../../src/core/runtime/types.js'
  * @import { BootKernelOptions, BootKernelResult, BootProfile } from '../../../src/core/runtime/types.js'
  * @import { ConfigLayerDrop, LoadConfigResult, PluginMetadata } from '../../../src/core/config/types.js'
@@ -287,6 +287,7 @@ export async function bootKernel(opts = {}) {
           runId,
           skipped,
           withheldByProfile,
+          unsatisfiedRequirements: /** @type {UnsatisfiedRequirement[]} */ ([]),
           unavailablePlugins: [...new Set([...unloadable, ...wantedButWithheld])],
           clientDescriptors: catalog.clientDescriptors,
         }
@@ -340,6 +341,10 @@ export async function bootKernel(opts = {}) {
         runId,
         skipped,
         withheldByProfile,
+        // Which door `unavailablePlugins` below took, and why, for the caller
+        // that has to *say* why a plugin is missing rather than only that it
+        // is: the flat list underneath keeps names alone (issue #1580).
+        unsatisfiedRequirements: resolution.unsatisfied,
         // The one list of "this boot did not get its whole plugin set", for
         // callers that must not read a missing contribution as a withdrawn one.
         // Four doors, and only the first ever reaches an activation record: a

@@ -85,7 +85,15 @@ export interface RecentEntrypoint {
  */
 export interface FailedPluginSnapshot {
   name: string
-  /** `activate_failed`, `activate_missing`, or whatever the throw carried. */
+  /**
+   * `activate_failed`, `activate_missing`, or whatever the throw carried
+   * (bar `requires_unsatisfied`, which a throw's own label is rewritten to
+   * `activate_failed` rather than be mistaken for the door below) -
+   * and `requires_unsatisfied` when there was no throw because the dependency
+   * resolver eliminated the plugin before `activate()` ran (issue #1580). That
+   * one value is the discriminator `hyp status` branches on to pick a message
+   * and a repair; the resolver's own kind is kept in front of `message`.
+   */
   errorKind: string
   message: string
 }
@@ -203,9 +211,12 @@ export interface DaemonStatus {
   sources: SourceSnapshot[]
   sinks: SinkSnapshot[]
   /**
-   * Plugins this daemon's boot could not activate. Absent, never `[]`, when
-   * every configured plugin came up, so a boot with nothing to report writes
-   * the file shape it always wrote.
+   * Plugins this daemon's boot could not activate, by either door that names
+   * one: a plugin whose `activate()` threw, and a plugin the dependency
+   * resolver eliminated for an unsatisfied `requires` and so never called
+   * `activate()` on at all (issue #1580). Absent, never `[]`, when every
+   * configured plugin came up, so a boot with nothing to report writes the
+   * file shape it always wrote.
    */
   failedPlugins?: FailedPluginSnapshot[]
   /**
@@ -244,6 +255,7 @@ export type StatusDiagnosticKind =
   | 'installed_plugin_shadowed'
   | 'source_name_unregistered'
   | 'plugin_activate_failed'
+  | 'plugin_requires_unsatisfied'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -525,8 +537,9 @@ export interface HypAwareStatusReport {
   configRecordsAnswer: boolean
   activePlugins: string[]
   /**
-   * Plugins the running daemon could not activate, read from its live
-   * snapshot (issue #1556). Empty when no daemon is running:
+   * Plugins the running daemon could not activate, by either door: a throw from
+   * `activate()`, or elimination by the dependency resolver before it ran
+   * (issues #1556, #1580). Empty when no daemon is running:
    * a snapshot left by an exited daemon is a record of how that run went, not
    * a claim about now (LLP 0383#a-record-not-a-claim).
    */

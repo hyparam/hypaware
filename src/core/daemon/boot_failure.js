@@ -8,6 +8,7 @@
  * neither, which is why they live in a leaf module.
  *
  * @import { ActivationResult } from '../../../src/core/runtime/types.js'
+ * @import { UnsatisfiedRequirement } from '../../../src/core/types.js'
  * @import { DaemonLogger, FailedPluginSnapshot } from '../../../src/core/daemon/types.js'
  */
 
@@ -44,6 +45,30 @@ export const MAX_ACTIVATION_MESSAGE_CHARS = 200
 export const BOOT_FAILED_WARNING_PREFIX = 'boot_failed'
 
 /**
+ * The `errorKind` a snapshot entry carries when the plugin's `activate()` was
+ * never called, because the dependency resolver eliminated it for an
+ * unsatisfied `requires` (issue #1580).
+ *
+ * One value, not the resolver's own four: `hyp status` branches on it to pick
+ * a message and a repair, and a kind added to the resolver later would then
+ * arrive at that branch as a throw that never happened. The resolver's kind is
+ * kept in front of its detail in `message`, which nothing matches on.
+ *
+ * Owned by this door alone: the activation loop below rewrites a throw that
+ * labelled itself with this value, so the discriminator stays exclusive.
+ */
+export const REQUIRES_UNSATISFIED_ERROR_KIND = 'requires_unsatisfied'
+
+/**
+ * The one `DepGraphErrorKind` that eliminates nothing. `resolveDependencies`
+ * pushes it straight onto `unsatisfied` for *every* provider of a clashing
+ * capability, without the `recordReject` that adds a plugin to the eliminated
+ * set, so it is never the reason a plugin is absent - not even when the same
+ * plugin is eliminated by a later entry.
+ */
+const CAP_VERSION_CLASH = 'cap_version_clash'
+
+/**
  * Does a persisted snapshot's `warnings` carry that label? The caller decides
  * which `state` it accepts alongside; this reads the label alone, over
  * whatever the file held.
@@ -67,24 +92,79 @@ export function warningsRecordBootFailure(warnings) {
  * `recent_error_count` counts in both processes
  * (LLP 0349#read-the-records-production-keeps).
  *
+ * Both doors that name a plugin are recorded, kept apart: the operator loses
+ * the same capture through either, but a plugin the resolver eliminated never
+ * ran a line of its own code, so the reason and the repair are not a throw's
+ * (issue #1580).
+ *
+ * The other two doors into `unavailablePlugins` are deliberately not here. A
+ * manifest that would not load is named by its directory rather than by a
+ * plugin name, and what to render for it is open as issue #1576. A plugin the
+ * boot profile withheld is not a shortfall in either writer: the processing
+ * daemon boots the `config` profile, which withholds nothing the config
+ * enabled, and the gateway profile withholds every non-routing plugin by
+ * design, so persisting that door would report a hole on every healthy install.
+ *
  * @param {object} args
  * @param {ActivationResult[]} args.activations `bootKernel`'s per-plugin results.
+ * @param {UnsatisfiedRequirement[]} [args.unsatisfied] `bootKernel`'s
+ *   `unsatisfiedRequirements`: what the dependency resolver rejected.
  * @param {DaemonLogger} args.log The process's own file log.
  * @returns {FailedPluginSnapshot[]} Empty when every plugin activated.
  */
-export function recordFailedPlugins({ activations, log }) {
+export function recordFailedPlugins({ activations, unsatisfied = [], log }) {
   /** @type {FailedPluginSnapshot[]} */
   const failed = []
+  /** @type {Set<string>} */
+  const activated = new Set()
+  /** @type {Set<string>} */
+  const recorded = new Set()
   for (const result of activations) {
-    if (result.ok) continue
-    const { errorKind, message } = result
+    if (result.ok) {
+      activated.add(result.plugin.name)
+      continue
+    }
+    const { message } = result
     const name = result.plugin.name
+    recorded.add(name)
+    // A throw is an activate failure whatever it labels itself. The loader
+    // copies a plugin's own `hypErrorKind` into the result verbatim, so a
+    // plugin that threw one carrying the resolver door's value would otherwise
+    // be rendered by `hyp status` as an elimination that never happened, with
+    // the log-grep repair that holds the untruncated throw dropped for a
+    // config edit that repairs nothing.
+    const errorKind = result.errorKind === REQUIRES_UNSATISFIED_ERROR_KIND
+      ? 'activate_failed'
+      : result.errorKind
     failed.push({
       name,
       errorKind,
       message: sanitizeLabel(message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded',
     })
     log.error('daemon.plugin_activate_failed', { plugin: name, error_kind: errorKind, message })
+  }
+  for (const entry of unsatisfied) {
+    const name = entry.plugin
+    // Skipped by kind, not only by whether the plugin came up: a clash names
+    // every provider, and a provider can *also* be eliminated by a later entry,
+    // in which case taking the first leaves `hyp status` reporting the clash as
+    // the reason a plugin is missing, the require that actually eliminated it
+    // named nowhere, and the repair pointing at the wrong config line. A plugin
+    // whose only entry is a clash needs no skip of its own: it stays in
+    // `resolution.order`, so it always carries an activation record below.
+    if (entry.errorKind === CAP_VERSION_CLASH) continue
+    // One broken plugin per name, whatever the resolver's kind: a plugin can
+    // miss several requires at once, and a kind added to the resolver later
+    // must not be read as a second failure or as a throw.
+    if (activated.has(name) || recorded.has(name)) continue
+    recorded.add(name)
+    const message = entry.detail ? `${entry.errorKind}: ${entry.detail}` : entry.errorKind
+    failed.push({
+      name,
+      errorKind: REQUIRES_UNSATISFIED_ERROR_KIND,
+      message: sanitizeLabel(message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded',
+    })
+    log.error('daemon.plugin_requires_unsatisfied', { plugin: name, error_kind: entry.errorKind, message })
   }
   return failed
 }

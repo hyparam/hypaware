@@ -706,9 +706,14 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
     // belongs on it, tagged: unqualified, the line claims it is running when
     // some or all of what it contributes is not. How much is not, the reason,
     // and the repair are in the diagnostics block.
+    //
+    // "did not activate", not "failed to activate": one of the two doors into
+    // this set is a plugin the dependency resolver eliminated, which never ran
+    // a line of its own code to fail in (issue #1580). The wording is the one
+    // `hyp plugin list` already uses for the same set on the same install.
     const failed = new Set(report.failedPlugins)
     for (const name of report.activePlugins) {
-      const tag = failed.has(name) ? '  [failed to activate]' : ''
+      const tag = failed.has(name) ? '  [did not activate]' : ''
       stdout.write(`    - ${name}${provenanceTag(report.layered, isCentralPlugin(report.layered, name))}${tag}\n`)
     }
   }

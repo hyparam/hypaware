@@ -425,11 +425,19 @@ export async function runDaemon(opts = {}) {
   }
 
   status.configPath = boot.configPath ?? undefined
-  // A plugin whose `activate()` threw leaves no source, no sink and no command
+  // A plugin that did not come up leaves no source, no sink and no command
   // behind, so every other line of this snapshot reads as it would on a boot
   // nobody configured it for. Recorded on both surfaces this process owns: the
   // file log a support bundle carries, and the snapshot `hyp status` reads.
-  const failedPlugins = recordFailedPlugins({ activations: boot.activations, log: fileLog })
+  //
+  // `unsatisfied` alongside `activations` because a throw is only one of the
+  // doors: a plugin the dependency resolver eliminated never reaches
+  // `activatePlugins`, so it leaves no activation record to find (issue #1580).
+  const failedPlugins = recordFailedPlugins({
+    activations: boot.activations,
+    unsatisfied: boot.unsatisfiedRequirements,
+    log: fileLog,
+  })
   if (failedPlugins.length > 0) status.failedPlugins = failedPlugins
   status.sources = sourceSnapshots
   const anySourceFailed = sourceSnapshots.some((s) => s.state === 'failed')

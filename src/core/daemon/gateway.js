@@ -287,7 +287,7 @@ export async function runGatewayDaemon(opts = {}) {
 
   try {
     boot = await bootKernel({ hypHome, configPath: opts.configPath, env, runId, mode: 'daemon', bootProfile: 'gateway', storage })
-    gatewayFailedPlugins = recordFailedPlugins({ activations: boot.activations, log })
+    gatewayFailedPlugins = recordFailedPlugins({ activations: boot.activations, unsatisfied: boot.unsatisfiedRequirements, log })
     const source = boot.runtime.sources.get('ai-gateway')
     if (!source && boot.config?.plugins?.some(plugin => plugin.name === '@hypaware/ai-gateway' && plugin.enabled !== false)) {
       throw new Error('configured gateway failed to activate')
