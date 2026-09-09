@@ -106,11 +106,22 @@ test('OpenCode backfill recognizes the CLI empty-store response and logs the sel
 })
 
 test('OpenCode backfill rejects malformed nonempty lists and non-array JSON', async () => {
-  for (const raw of [' ', '\n', '[', 'not json', '{}', 'null']) {
+  // Assert which rejection each shape earns. Without that, a later change that
+  // made the run fail earlier would keep all six green while proving nothing
+  // about malformed nonempty stdout, which is the whole point of the guard.
+  const cases = [
+    { raw: ' ', error: SyntaxError },
+    { raw: '\n', error: SyntaxError },
+    { raw: '[', error: SyntaxError },
+    { raw: 'not json', error: SyntaxError },
+    { raw: '{}', error: /did not return an array/ },
+    { raw: 'null', error: /did not return an array/ },
+  ]
+  for (const { raw, error } of cases) {
     const provider = createOpenCodeBackfillProvider({
       async runCommand() { return raw },
     })
-    await assert.rejects(collect(provider.run(runContext())))
+    await assert.rejects(collect(provider.run(runContext())), error, JSON.stringify(raw))
   }
 })
 
