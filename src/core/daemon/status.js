@@ -63,7 +63,8 @@ import {
 } from './pid.js'
 
 /**
- * @import { HypAwareV2Config, PluginConfigInstance, SourceStatus } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { HypAwareV2Config, PluginConfigInstance, SourceContribution, SourceStatus } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
  * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceHealth, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
@@ -930,6 +931,63 @@ export function sourceHealth(reported) {
 }
 
 /**
+ * The name and plugin a source contribution is listed and driven under, and
+ * whether it is still answering with the name it registered under.
+ *
+ * `register` validated `name` and `plugin` once and stored the contribution by
+ * reference, so what it validated is not what a later read returns: both are
+ * free to be accessors. `sources.start(name, ctx)` resolves
+ * `contributions.get(name)` and starts *that* contribution, so a `name`
+ * answering with a neighbour's registered name starts the neighbour's source
+ * under this plugin's activation context, its config slice and its capability
+ * handles (issue #1535). `register` keys the Map by the string it validated, so
+ * resolving the name back to this same object is what makes that key mean
+ * anything here. It is the guard `readIdentity` already applies to a backfill
+ * provider in `src/core/daemon/backfill_sweep.js`.
+ *
+ * `plugin` is read in the same guarded pass because the boot walk hoisted it
+ * outside every try, and it picks the activation context beside the name, so it
+ * is no more a bare label than the name is. Unlike the name there is nothing to
+ * resolve it back through: the registry keys by source name and keeps no record
+ * of the plugin that registered one, so what this returns is still the
+ * contribution's own claim. A `plugin` that is no longer a string degrades to
+ * the empty string, which every caller must treat as "no plugin" rather than as
+ * a key to look up: it collapses the non-strings onto one string, and a string
+ * is the shape an activation-context lookup takes.
+ *
+ * `registered` false is the refusal, and it covers both ways the read can end
+ * badly: a name that resolves to another contribution or to none, and a read
+ * that threw, including one that got the name and threw on the plugin. A
+ * caller reporting the skip should say the identity would not read back rather
+ * than name one of the two. The `name` beside the refusal is whatever the
+ * contribution claimed before it (the empty string when it claimed nothing
+ * readable), so that caller can name it without reading the plugin's object
+ * again from inside its own handler.
+ *
+ * @param {ExtendedSourceRegistry | undefined} sources
+ * @param {SourceContribution} contribution
+ * @returns {{ name: string, plugin: string, registered: boolean }}
+ * @ref LLP 0012#contribution-surface [constrained-by]: unique source names are the registry's keys, so a consumer resolves a contribution back through them before driving it by name
+ */
+export function readSourceIdentity(sources, contribution) {
+  let name = ''
+  let plugin = ''
+  try {
+    const claimed = contribution.name
+    if (typeof claimed === 'string') name = claimed
+    const declared = contribution.plugin
+    if (typeof declared === 'string') plugin = declared
+    // `register` refuses an empty name, so the empty string a contribution that
+    // claimed nothing readable carries here resolves to nothing.
+    return { name, plugin, registered: sources?.get?.(name) === contribution }
+  } catch {
+    // Reading the identity is what just failed. Whatever was read before the
+    // throw still names the contribution better than nothing does.
+    return { name, plugin, registered: false }
+  }
+}
+
+/**
  * @param {SourceSnapshot | undefined} source
  * @returns {Record<string, unknown> | undefined}
  */
@@ -1465,12 +1523,32 @@ export async function collectHypAwareStatus(opts = {}) {
   const sinks = []
   const runtimeSources = opts.runtime?.sources?.list?.() ?? []
   if (runtimeSources.length > 0) {
+    // The `started()` probe and the row it labels have to be asking about the
+    // same source, so both come from one guarded read (issue #1535). A
+    // contribution that cannot be read back to its registered name is left off
+    // the list rather than listed under a name that is not its own.
+    let unregistered = 0
     for (const contribution of runtimeSources) {
-      const started = opts.runtime?.sources?.started?.(contribution.name)
+      const identity = readSourceIdentity(opts.runtime?.sources, contribution)
+      if (!identity.registered) {
+        unregistered += 1
+        continue
+      }
+      const started = opts.runtime?.sources?.started?.(identity.name)
       sources.push({
-        name: contribution.name,
-        plugin: contribution.plugin,
+        name: identity.name,
+        plugin: identity.plugin,
         state: started ? 'started' : 'stopped',
+      })
+    }
+    if (unregistered > 0) {
+      diagnostics.push({
+        severity: 'warning',
+        kind: 'source_name_unregistered',
+        message: unregistered === 1
+          ? 'a registered source could not be read back to the name it registered under and is left off this list'
+          : `${unregistered} registered sources could not be read back to the names they registered under and are left off this list`,
+        repair: ['hyp plugin list'],
       })
     }
   } else if (daemonStatusFile && Array.isArray(daemonStatusFile.sources) && daemonStatusFile.sources.length > 0) {

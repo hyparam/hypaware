@@ -39,7 +39,7 @@ import {
   writePidFile,
 } from './pid.js'
 import { openDaemonLog } from './logs.js'
-import { sourceHealth, statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
+import { readSourceIdentity, sourceHealth, statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
 import {
   detectSupervisor,
   readSelfPackageIdentity,
@@ -1334,6 +1334,12 @@ export async function runDaemon(opts = {}) {
         // based on a diff of loaded config is still deferred.
         for (const snap of status.sources) {
           if (snap.state !== 'started') continue
+          // The empty string is what a row carries when the boot walk could
+          // not read a plugin off the contribution, and it is no more a
+          // context key here than it is in `startConfiguredSources`: a source
+          // that would not say whose it is does not get reloaded under
+          // whatever that key holds, nor handed that key's config slice below.
+          if (snap.plugin === '') continue
           const ctx = boot.runtime.activationContexts.get(snap.plugin)
           if (!ctx) continue
           ctx.config = /** @type {JsonObject} */ (
@@ -1590,7 +1596,8 @@ function describeSourceStartError(err, source) {
  * Start every registered source that has not auto-started during
  * `activate()`. Returns one snapshot per source (including the
  * already-started ones) so the status file lists everything the
- * operator expects to see.
+ * operator expects to see. Exported so the identity guard below can be pinned
+ * by a test: what it refuses never reaches the status file.
  *
  * @param {{ runtime: KernelRuntime, log: ReturnType<typeof getLogger>, fileLog: ReturnType<typeof openDaemonLog> }} args
  * @returns {Promise<SourceSnapshot[]>}
@@ -1599,12 +1606,28 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
   /** @type {SourceSnapshot[]} */
   const snapshots = []
   for (const contribution of runtime.sources.list()) {
-    const plugin = contribution.plugin
-    const existing = runtime.sources.started(contribution.name)
+    // One guarded read of the identity for the whole iteration: every use
+    // below drives or labels a source by it, and a per-use read lets them
+    // disagree (issue #1535).
+    const identity = readSourceIdentity(runtime.sources, contribution)
+    if (!identity.registered) {
+      fileLog.warn('daemon.source_identity_unreadable', {
+        [Attr.COMPONENT]: 'daemon',
+        [Attr.OPERATION]: 'daemon.start_sources',
+        [Attr.ERROR_KIND]: 'unregistered_source_name',
+        status: 'skipped',
+        source: identity.name,
+        plugin: identity.plugin,
+        message: 'source could not be read back to the name it registered under; not started',
+      })
+      continue
+    }
+    const { name, plugin } = identity
+    const existing = runtime.sources.started(name)
     if (existing) {
-      const reported = await safeStatus(runtime, contribution.name, fileLog)
+      const reported = await safeStatus(runtime, name, fileLog)
       snapshots.push({
-        name: contribution.name,
+        name,
         plugin,
         state: 'started',
         details: reported.details,
@@ -1612,20 +1635,25 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
       })
       log.info('daemon.source_already_started', {
         [Attr.PLUGIN]: plugin,
-        hyp_source: contribution.name,
+        hyp_source: name,
       })
       continue
     }
-    const ctx = runtime.activationContexts.get(plugin)
+    // The empty string is what an unreadable `plugin` degrades to, and no
+    // manifest can carry it as a name (`validateManifest` requires a non-empty
+    // one), so it is not asked of the context map as though it were one: a
+    // contribution that would not say which plugin it belongs to must not be
+    // handed whatever that key happens to hold.
+    const ctx = plugin === '' ? undefined : runtime.activationContexts.get(plugin)
     if (!ctx) {
       const message = `no activation context recorded for plugin '${plugin}'`
       fileLog.error('daemon.source_start_failed', {
-        source: contribution.name,
+        source: name,
         plugin,
         message,
       })
       snapshots.push({
-        name: contribution.name,
+        name,
         plugin,
         state: 'failed',
         error: message,
@@ -1633,24 +1661,24 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
       continue
     }
     try {
-      await runtime.sources.start(contribution.name, ctx)
-      const reported = await safeStatus(runtime, contribution.name, fileLog)
+      await runtime.sources.start(name, ctx)
+      const reported = await safeStatus(runtime, name, fileLog)
       snapshots.push({
-        name: contribution.name,
+        name,
         plugin,
         state: 'started',
         details: reported.details,
         health: reported.health,
       })
     } catch (err) {
-      const message = describeSourceStartError(err, contribution.name)
+      const message = describeSourceStartError(err, name)
       fileLog.error('daemon.source_start_failed', {
-        source: contribution.name,
+        source: name,
         plugin,
         message,
       })
       snapshots.push({
-        name: contribution.name,
+        name,
         plugin,
         state: 'failed',
         error: message,
@@ -1848,5 +1876,6 @@ export {
   pidFilePath,
   statusFilePath,
   resolveClientActionSeam,
+  startConfiguredSources,
   withStatusTimeout,
 }
