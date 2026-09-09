@@ -101,8 +101,10 @@ local-only or ignored-folder exclusions. A confirmed all-destination sync can
 release an attended enrollment's first-sync hold early. See [privacy](PRIVACY.md)
 and [headless setup](HEADLESS.md) for enrollment-specific behavior.
 
-The generated Parquet sink instance is named `local`. Inspect cache
-maintenance with:
+The generated Parquet sink instance is named `local`.
+
+Cache maintenance is separate from export: it acts on the local query cache,
+not on that sink. Inspect it with:
 
 ```sh
 hyp cache maintain ai_gateway_messages --dry-run
