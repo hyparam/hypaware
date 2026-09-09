@@ -429,32 +429,54 @@ function createInitPresetRegistry() {
       if (!preset || typeof preset !== 'object') {
         throw new TypeError('initPresets.register: preset must be an object')
       }
-      if (typeof preset.name !== 'string' || preset.name.length === 0) {
+      // Read once, and key the map on what this line validated. The
+      // registration is stored by reference, so `preset.name` is a live
+      // plugin property: reading it again put the duplicate check and the
+      // `set` to an accessor free to answer them differently, and stored the
+      // preset under a name nothing had checked, which is also the key `list`
+      // orders by.
+      const name = preset.name
+      if (typeof name !== 'string' || name.length === 0) {
         throw new TypeError('initPresets.register: name is required')
       }
       if (typeof preset.plugin !== 'string' || preset.plugin.length === 0) {
-        throw new TypeError(`initPresets.register '${preset.name}': plugin is required`)
+        throw new TypeError(`initPresets.register '${name}': plugin is required`)
       }
       if (typeof preset.summary !== 'string') {
-        throw new TypeError(`initPresets.register '${preset.name}': summary is required`)
+        throw new TypeError(`initPresets.register '${name}': summary is required`)
       }
       if (typeof preset.run !== 'function') {
-        throw new TypeError(`initPresets.register '${preset.name}': run() is required`)
+        throw new TypeError(`initPresets.register '${name}': run() is required`)
       }
-      if (presets.has(preset.name)) {
-        throw new Error(`initPresets.register: duplicate preset '${preset.name}'`)
+      if (presets.has(name)) {
+        throw new Error(`initPresets.register: duplicate preset '${name}'`)
       }
-      presets.set(preset.name, preset)
+      presets.set(name, preset)
       log.info('init.preset.register', {
         [Attr.PLUGIN]: preset.plugin,
-        preset_name: preset.name,
+        preset_name: name,
       })
     },
     get(name) {
       return presets.get(name)
     },
+    /**
+     * Every registered preset, ordered by name.
+     *
+     * The order comes from the keys, not from `a.name`: the key is the name
+     * `register` validated, while `preset.name` is a live property of the
+     * plugin's own object, which that function stores by reference. Reading
+     * it here would run plugin code inside a comparator, where a throw
+     * escapes into every caller of `list()` - `hyp init`'s preset picker and
+     * its unknown-preset listing, and the plugin doctor's dry run - before a
+     * single preset has been handed back, and where `compareStrings` refuses
+     * a non-string, so an accessor that merely stops answering with a string
+     * is the same outage (issue #1555, after #1524 in the dataset registry).
+     */
     list() {
-      return Array.from(presets.values()).sort((a, b) => compareStrings(a.name, b.name))
+      return Array.from(presets.keys())
+        .sort(compareStrings)
+        .map((name) => /** @type {InitPresetContribution} */ (presets.get(name)))
     },
   }
 }

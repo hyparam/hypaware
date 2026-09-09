@@ -180,12 +180,13 @@ test('a command whose name drifts onto its neighbour is left out of both command
   )
   assert.deepEqual(result.registered.commands, ['aaa-honest'])
   assert.deepEqual(result.registered.commandDetails.map((c) => c.name), ['aaa-honest'])
-  // Two reads: one inside `CommandRegistry.list()`, whose comparator still
-  // reads `a.name` off the records it is ordering (issue #1542, and not this
-  // file's to fix), and one guarded read here. The snapshot took three before,
-  // because `commands` and `commandDetails` each mapped the list again, so
-  // they could disagree with the registry and with each other.
-  assert.equal(probe.nameReads, 2, 'the drifting accessor was never live: the fixture is vacuous')
+  // One read: the guarded one here. It was two while `CommandRegistry.list()`
+  // ordered on `a.name` off the records it holds; that comparator now orders
+  // on the keys the registry validated (issue #1555), so the listing asks the
+  // accessor nothing. The snapshot took three before both changes, because
+  // `commands` and `commandDetails` each mapped the list again, so they could
+  // disagree with the registry and with each other.
+  assert.equal(probe.nameReads, 1, 'the drifting accessor was never live: the fixture is vacuous')
 })
 
 test('a stateful aliases iterable cannot put a spelling in the report that does not dispatch', async () => {
@@ -305,12 +306,16 @@ test('a skill name accessor that throws costs the skill one entry, not the whole
   assert.match(stderr, new RegExp(REFUSAL))
 })
 
-test('a command name accessor that throws costs the command bucket, not the whole doctor run', async () => {
-  // A read the guard never reaches: `CommandRegistry.list()` orders with
-  // `compareStrings(a.name, b.name)` over the records it holds, so the
-  // accessor runs inside the comparator, one frame above `registeredName`,
-  // and the throw leaves `snapshotRegistry` before an entry is handed back.
-  // Two commands, because a one-element sort never calls the comparator.
+test('a command name accessor that throws costs the command, not the bucket or the run', async () => {
+  // This used to be a read the guard never reached: `CommandRegistry.list()`
+  // ordered with `compareStrings(a.name, b.name)` over the records it holds,
+  // so the accessor ran inside the comparator, one frame above
+  // `registeredName`, and the throw left `snapshotRegistry` before an entry
+  // was handed back. `listed` contained that to the bucket. The registry now
+  // orders on its own keys (issue #1555), so the accessor is only ever asked
+  // by the guard, which costs the one command it cannot vouch for. Two
+  // commands still, because a one-element sort never calls the comparator and
+  // the fixture has to survive the listing being fixed again.
   const { result, stderr } = await dryRun(
     `export async function activate(ctx) {\n` +
     `  const run = async () => 0\n` +
@@ -321,14 +326,15 @@ test('a command name accessor that throws costs the command bucket, not the whol
     `}\n`
   )
   assert.equal(result.ok, true)
-  assert.deepEqual(result.registered.commands, [])
-  assert.deepEqual(result.registered.commandDetails, [])
-  assert.match(stderr, new RegExp(UNLISTABLE))
+  assert.deepEqual(result.registered.commands, ['aaa-honest'])
+  assert.deepEqual(result.registered.commandDetails.map((c) => c.name), ['aaa-honest'])
+  assert.match(stderr, new RegExp(REFUSAL))
+  assert.equal(stderr.includes(UNLISTABLE), false, 'the listing threw again')
 })
 
-test('a command name that stops being a string costs the command bucket, not the whole doctor run', async () => {
-  // `compareStrings` refuses a non-string, so an accessor that never throws is
-  // the same outage as one that does.
+test('a command name that stops being a string costs the command, not the bucket or the run', async () => {
+  // `compareStrings` refuses a non-string, so an accessor that never throws
+  // was the same outage as one that does, and is the same finding now.
   const { result, stderr } = await dryRun(
     `export async function activate(ctx) {\n` +
     `  const run = async () => 0\n` +
@@ -338,11 +344,12 @@ test('a command name that stops being a string costs the command bucket, not the
     `}\n`
   )
   assert.equal(result.ok, true)
-  assert.deepEqual(result.registered.commands, [])
-  assert.match(stderr, new RegExp(UNLISTABLE))
+  assert.deepEqual(result.registered.commands, ['aaa-honest'])
+  assert.match(stderr, new RegExp(REFUSAL))
+  assert.equal(stderr.includes(UNLISTABLE), false, 'the listing threw again')
 })
 
-test('a group name accessor that throws costs the group bucket, not the whole doctor run', async () => {
+test('a group name accessor that throws costs the group, not the bucket or the run', async () => {
   const { result, stderr } = await dryRun(
     `export async function activate(ctx) {\n` +
     `  ctx.commands.registerGroup({ name: 'aaa', plugin: '${PLUGIN}', summary: 'a' })\n` +
@@ -353,11 +360,12 @@ test('a group name accessor that throws costs the group bucket, not the whole do
     `}\n`
   )
   assert.equal(result.ok, true)
-  assert.deepEqual(result.registered.commandGroups, [])
-  assert.match(stderr, new RegExp(UNLISTABLE))
+  assert.deepEqual(result.registered.commandGroups, [{ name: 'aaa', summary: 'a' }])
+  assert.match(stderr, new RegExp(REFUSAL))
+  assert.equal(stderr.includes(UNLISTABLE), false, 'the listing threw again')
 })
 
-test('an init preset name accessor that throws costs the preset bucket, not the whole doctor run', async () => {
+test('an init preset name accessor that throws costs the preset, not the bucket or the run', async () => {
   const { result, stderr } = await dryRun(
     `export async function activate(ctx) {\n` +
     `  const run = async () => {}\n` +
@@ -369,11 +377,12 @@ test('an init preset name accessor that throws costs the preset bucket, not the 
     `}\n`
   )
   assert.equal(result.ok, true)
-  assert.deepEqual(result.registered.init_presets, [])
-  assert.match(stderr, new RegExp(UNLISTABLE))
+  assert.deepEqual(result.registered.init_presets, ['aaa'])
+  assert.match(stderr, new RegExp(REFUSAL))
+  assert.equal(stderr.includes(UNLISTABLE), false, 'the listing threw again')
 })
 
-test('the bucket-level report is structured too, and names no contribution', async () => {
+test('the refusal for a name that could not be read at all is structured, and claims nothing', async () => {
   const { stderr } = await dryRun(
     `export async function activate(ctx) {\n` +
     `  const run = async () => 0\n` +
@@ -383,14 +392,16 @@ test('the bucket-level report is structured too, and names no contribution', asy
     `  Object.defineProperties(ctx.commands.get('bbb-hostile'), Object.getOwnPropertyDescriptors(over))\n` +
     `}\n`
   )
-  const line = stderr.split('\n').find((l) => l.includes(UNLISTABLE))
-  assert.ok(line, `no bucket refusal on stderr:\n${stderr}`)
+  const line = stderr.split('\n').find((l) => l.includes(REFUSAL))
+  assert.ok(line, `no refusal on stderr:\n${stderr}`)
   assert.match(line, /\[hypaware:plugin-doctor\] WARN/)
   assert.match(line, /"hyp_operation":"doctor\.snapshot"/)
   assert.match(line, /"status":"degraded"/)
   assert.match(line, /"contribution_kind":"command"/)
-  // No entry was ever handed back, so there is no name to claim.
-  assert.doesNotMatch(line, /"claimed_name"/)
+  // The read raised before it produced anything, so the refusal claims no
+  // name rather than inventing one.
+  assert.match(line, /"claimed_name":""/)
+  assert.match(line, /an unreadable name/)
 })
 
 test('an honest plugin registers exactly what the report says it does', async () => {
