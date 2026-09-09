@@ -20,13 +20,29 @@ import { writeLock } from '../../src/core/plugin_install/lock.js'
 //
 // @ref LLP 0394#health-rides-beside-state [tests]: a boot probe whose answer cannot be read leaves the source started, not failed
 
-const PLUGIN = '@third-party/unreadable-boot-status'
-const SOURCE = 'unreadable-boot-fixture'
+const PLUGIN = '@third-party/boot-status'
+const SOURCE = 'boot-status-fixture'
 
 /**
- * Stage a plugin whose source answers `status()` with an object that throws on
- * property access. `lastError` is the last of the four fields `sourceHealth`
- * reads, so reaching the throw also proves the other three were read.
+ * The two ways a source's own `status()` fails the boot probe without ever
+ * throwing at it: an answer the kernel cannot read (#1504), and no answer at
+ * all (#1508). Each is the body of the fixture's `status()`, spliced into the
+ * plugin source below.
+ */
+const STATUS_BODY = {
+  unreadable: `return {
+            state: 'ready',
+            details: { probes: 1 },
+            get lastError() { throw new TypeError('lastError is not readable') },
+          }`,
+  hanging: 'await new Promise(() => {})',
+}
+
+/**
+ * Stage a plugin whose source's `status()` misbehaves in one of the ways
+ * `STATUS_BODY` describes. For `unreadable`, `lastError` is the last of the
+ * four fields `sourceHealth` reads, so reaching the throw also proves the
+ * other three were read.
  *
  * `autoStart` reproduces `@hypaware/otel`, which starts its own source inside
  * `activate()`: the source is then already started when
@@ -34,9 +50,10 @@ const SOURCE = 'unreadable-boot-fixture'
  *
  * @param {string} hypHome
  * @param {boolean} autoStart
+ * @param {string} statusBody
  * @returns {Promise<string>}
  */
-async function stageUnreadableStatusPlugin(hypHome, autoStart) {
+async function stageStatusPlugin(hypHome, autoStart, statusBody) {
   const installDir = path.join(hypHome, 'hypaware', 'plugins', PLUGIN)
   await fs.mkdir(installDir, { recursive: true })
   await fs.writeFile(path.join(installDir, 'hypaware.plugin.json'), JSON.stringify({
@@ -57,11 +74,7 @@ export async function activate(ctx) {
     async start() {
       return {
         async status() {
-          return {
-            state: 'ready',
-            details: { probes: 1 },
-            get lastError() { throw new TypeError('lastError is not readable') },
-          }
+          ${statusBody}
         },
         async stop() {},
       }
@@ -105,11 +118,12 @@ async function writeInstall(hypHome, installDir) {
 /**
  * @param {string} prefix
  * @param {boolean} autoStart
+ * @param {string} [statusBody]
  */
-async function bootWith(prefix, autoStart) {
+async function bootWith(prefix, autoStart, statusBody = STATUS_BODY.unreadable) {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
   try {
-    const configPath = await writeInstall(hypHome, await stageUnreadableStatusPlugin(hypHome, autoStart))
+    const configPath = await writeInstall(hypHome, await stageStatusPlugin(hypHome, autoStart, statusBody))
     const handle = await runDaemon({
       hypHome,
       configPath,
@@ -179,5 +193,62 @@ test('a source the daemon starts itself is not mislabelled failed when its statu
     assert.equal(snapshot.error, undefined, 'and no start error was invented for it')
   } finally {
     if (booted) await closeBoot(booted)
+  }
+})
+
+// The tick path races a source's `status()` against a 5 second bound and
+// reports the timeout as an ordinary probe failure. Boot awaited the same
+// plugin promise with no race at all, and `startConfiguredSources` awaits one
+// source at a time, so a single source whose `status()` never settled stopped
+// the daemon from ever reaching `persist()`: no daemon, no status file, no
+// error, just a process that never finished starting (#1508).
+//
+// @ref LLP 0394#health-rides-beside-state [tests]: a boot probe that times out records no health, rather than failing the source
+
+/** Generous enough that only a boot with no bound at all trips it. */
+const BOOT_DEADLINE_MS = 20_000
+
+test('a source whose status() never settles does not hang daemon boot', async () => {
+  /** @type {NodeJS.Timeout | undefined} */
+  let deadline
+  const outcome = await Promise.race([
+    bootWith('hypaware-boot-status-hang-', false, STATUS_BODY.hanging),
+    new Promise((resolve) => {
+      deadline = setTimeout(() => resolve('hung'), BOOT_DEADLINE_MS)
+      deadline.unref()
+    }),
+  ])
+  clearTimeout(deadline)
+  // A boot still pending leaves no handle to stop, so the assertion is all
+  // there is to do with it.
+  assert.notEqual(outcome, 'hung', `daemon boot did not finish within ${BOOT_DEADLINE_MS}ms with a source whose status() never settles`)
+
+  const booted = /** @type {Awaited<ReturnType<typeof bootWith>>} */ (outcome)
+  // Nothing else holds this process's event loop while the daemon stops: it
+  // booted with `installSignalHandlers: false` and every timer on the stop
+  // path is unref'd, so the hung probe the shutdown refresh starts would drain
+  // the loop and exit the runner mid-stop. The boot above is deliberately not
+  // held this way: a bound that holds only while something else does is not
+  // the bound this test is checking.
+  const keepAlive = setInterval(() => {}, 500)
+  try {
+    const snapshot = /** @type {any} */ (readStatusFile(booted.stateRoot)?.sources?.[0])
+    assert.ok(snapshot, 'boot wrote no source snapshot')
+    assert.equal(snapshot.name, SOURCE)
+    assert.equal(snapshot.state, 'started', 'the source did start, and boot must say so')
+    assert.equal(snapshot.health, undefined, 'a probe that never answered records nothing')
+    assert.equal(snapshot.details, undefined, 'and invents no details either')
+
+    // Abandoned, and reported the way the tick path reports it.
+    const log = await fs.readFile(path.join(booted.stateRoot, 'logs', 'daemon.log'), 'utf8')
+    const failure = log.split(String.fromCharCode(10)).find((l) => l.includes('daemon.source_status_failed'))
+    assert.ok(failure, 'a stuck boot probe went unreported')
+    assert.match(failure, /status probe exceeded 5000ms/)
+  } finally {
+    try {
+      await closeBoot(booted)
+    } finally {
+      clearInterval(keepAlive)
+    }
   }
 })

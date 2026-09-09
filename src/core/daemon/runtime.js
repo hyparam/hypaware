@@ -68,6 +68,63 @@ const DEFAULT_TICK_INTERVAL_MS = 60_000
 const MIN_TICK_INTERVAL_MS = 25
 
 /**
+ * How long a source's `status()` may take before a probe gives up on it.
+ * `status()` is plugin code and the kernel contract puts no bound on it, so a
+ * probe that never settles hangs whichever path awaits it. On the tick path a
+ * hang is silent and total - `persist()` is downstream of the refresh, so
+ * *every* field in `status.json` freezes, not just that source's, while the
+ * daemon goes on reporting itself healthy; and the shutdown refresh would hang
+ * `hyp daemon stop` with it. At boot it is worse: `startConfiguredSources`
+ * awaits one source at a time, so one hung probe stops the daemon from ever
+ * reaching `persist()` - no daemon, no status file, no error (issue #1508).
+ * Well under the tick interval floor so a slow probe cannot overlap itself
+ * into the next tick.
+ */
+const SOURCE_STATUS_TIMEOUT_MS = 5000
+
+/**
+ * Race a source's `status()` promise against `SOURCE_STATUS_TIMEOUT_MS`. Both
+ * probes go through here, so boot and the tick give up at the same point and
+ * report the same message, and there is one bound to change rather than two.
+ *
+ * The plugin's promise cannot be cancelled, only abandoned: `Promise.race`
+ * keeps its own handler on it, so a rejection arriving after the timeout has
+ * won is still handled rather than taking the daemon down as an unhandled
+ * rejection. The timer is cleared however the race settles, so a probe that
+ * answers leaves nothing pending.
+ *
+ * `keepAlive` is the one thing the two callers do not agree on, because the
+ * daemon unrefs its own timers (the tick interval included) and stays alive on
+ * its handles instead. On the tick path the timer must not be one of those
+ * handles: a probe still outstanding when the daemon is asked to stop would
+ * hold the process open past its own shutdown. At boot there are no such
+ * handles yet - the control watcher installs at the tail of `runDaemon`, after
+ * every source has started - so an unref'd wait there empties the event loop
+ * and the process exits mid-boot, which is the same "no daemon, no status
+ * file" outcome the bound exists to prevent, only sooner.
+ *
+ * @param {Promise<unknown>} probe
+ * @param {{ keepAlive?: boolean }} [opts]
+ * @returns {Promise<unknown>}
+ */
+function withStatusTimeout(probe, { keepAlive = false } = {}) {
+  /** @type {NodeJS.Timeout | undefined} */
+  let timer
+  return Promise.race([
+    probe,
+    new Promise((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`status probe exceeded ${SOURCE_STATUS_TIMEOUT_MS}ms`)),
+        SOURCE_STATUS_TIMEOUT_MS
+      )
+      if (!keepAlive && typeof timer.unref === 'function') timer.unref()
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
+/**
  * The client-action handlers the daemon constructs its reconciler with, in the
  * order the reconciler runs them: **attach first, then backfill**. The
  * reconciler runs handlers serially and `backfillHandler.perform()` awaits a
@@ -593,19 +650,6 @@ export async function runDaemon(opts = {}) {
 
   // ----- Tick loop -----
   /**
-   * How long a source's `status()` may take before the tick gives up on it.
-   * `status()` is plugin code and the kernel contract puts no bound on it. It
-   * used to be awaited only at boot, where a probe that never settles is at
-   * least loud: the daemon does not start. On the tick path a hang is silent
-   * and total - `persist()` is downstream of the refresh, so *every* field in
-   * `status.json` freezes, not just that source's, while the daemon goes on
-   * reporting itself healthy; and the shutdown refresh would hang
-   * `hyp daemon stop` with it. Well under the tick interval floor so a slow
-   * probe cannot overlap itself into the next tick.
-   */
-  const SOURCE_STATUS_TIMEOUT_MS = 5000
-
-  /**
    * Last failure message logged per source, so a persistently broken probe
    * says so once instead of once per tick forever.
    *
@@ -647,25 +691,11 @@ export async function runDaemon(opts = {}) {
     const settle = () => sourceProbesInFlight.delete(name)
     const probe = boot.runtime.sources.status(name)
     probe.then(settle, settle)
-    /** @type {NodeJS.Timeout | undefined} */
-    let timer
     try {
-      const reported = await Promise.race([
-        probe,
-        new Promise((_resolve, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(`status probe exceeded ${SOURCE_STATUS_TIMEOUT_MS}ms`)),
-            SOURCE_STATUS_TIMEOUT_MS
-          )
-          if (typeof timer.unref === 'function') timer.unref()
-        }),
-      ])
-      const answer = /** @type {SourceStatus | null | undefined} */ (reported)
+      const answer = /** @type {SourceStatus | null | undefined} */ (await withStatusTimeout(probe))
       return { answered: true, details: answer?.details, health: sourceHealth(answer), failure: undefined }
     } catch (err) {
       return { answered: false, details: undefined, health: undefined, failure: err instanceof Error ? err.message : String(err) }
-    } finally {
-      if (timer) clearTimeout(timer)
     }
   }
 
@@ -1625,6 +1655,11 @@ async function stopAllSources({ runtime, fileLog }) {
  * reference rather than rebuilt, exactly as on the tick path, so it is still
  * the plugin's object when it reaches `JSON.stringify` (issue #1505).
  *
+ * Answering at all is no more guaranteed than answering readably, so the
+ * plugin's promise is raced against the same bound the tick uses: an unbounded
+ * wait here is a daemon that never starts (issue #1508). A probe that times
+ * out is a probe that failed, and takes the path below with it.
+ *
  * A probe that fails says nothing about liveness, so nothing here does: the
  * source is left running and its snapshot carries no details and no health,
  * rather than the `failed` that every later tick would skip for the daemon's
@@ -1639,7 +1674,7 @@ async function stopAllSources({ runtime, fileLog }) {
  */
 async function safeStatus(runtime, name, fileLog) {
   try {
-    const answer = /** @type {SourceStatus | null | undefined} */ (await runtime.sources.status(name))
+    const answer = /** @type {SourceStatus | null | undefined} */ (await withStatusTimeout(runtime.sources.status(name), { keepAlive: true }))
     return { details: answer?.details, health: sourceHealth(answer) }
   } catch (err) {
     fileLog.warn('daemon.source_status_failed', {
