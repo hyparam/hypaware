@@ -39,34 +39,57 @@ export function createSinkRegistry() {
   const log = getLogger('sinks')
   const instruments = getKernelInstruments()
 
-  /** @param {SinkContribution} contribution */
+  /**
+   * `name`, `plugin` and `supports` are each read once, before the Map is
+   * touched, and every later step uses what this registry took.
+   *
+   * The contribution is stored by reference, so a plugin's `plugin` and `name`
+   * are live properties free to answer differently each time they are asked,
+   * and the pair is the key `getContribution()` addresses a contribution by. A
+   * second read for the stored wrapper indexes the sink under one plugin name
+   * and reports another to every caller of `listContributions()`, so a caller
+   * round-tripping the listing back through `getContribution()` misses a sink
+   * this registry holds. That round trip is what the plugin doctor's dry run
+   * does (issue #1553).
+   *
+   * `supports` is joined before the `set` for the reason `SourceRegistry`
+   * reads `configSection` early: a value that raises below the write leaves
+   * this registry holding a contribution while the loader marks the plugin's
+   * whole activation failed (`src/core/runtime/loader.js`).
+   *
+   * @param {SinkContribution} contribution
+   */
   function register(contribution) {
     if (!contribution || typeof contribution !== 'object') {
       throw new TypeError('SinkRegistry.register: contribution must be an object')
     }
-    if (typeof contribution.name !== 'string' || contribution.name.length === 0) {
+    const name = contribution.name
+    if (typeof name !== 'string' || name.length === 0) {
       throw new TypeError('SinkRegistry.register: contribution.name must be a non-empty string')
     }
-    if (typeof contribution.plugin !== 'string' || contribution.plugin.length === 0) {
-      throw new TypeError(`SinkRegistry.register: '${contribution.name}' missing plugin`)
+    const plugin = contribution.plugin
+    if (typeof plugin !== 'string' || plugin.length === 0) {
+      throw new TypeError(`SinkRegistry.register: '${name}' missing plugin`)
     }
-    if (!Array.isArray(contribution.supports)) {
-      throw new TypeError(`SinkRegistry.register: '${contribution.name}' supports must be an array`)
+    const supports = contribution.supports
+    if (!Array.isArray(supports)) {
+      throw new TypeError(`SinkRegistry.register: '${name}' supports must be an array`)
     }
     if (typeof contribution.create !== 'function') {
-      throw new TypeError(`SinkRegistry.register: '${contribution.name}' missing create()`)
+      throw new TypeError(`SinkRegistry.register: '${name}' missing create()`)
     }
-    const key = contributionKey(contribution.plugin, contribution.name)
+    const supportsLabel = supports.join(',')
+    const key = contributionKey(plugin, name)
     if (contributions.has(key)) {
       throw new Error(
-        `SinkRegistry.register: duplicate sink contribution '${contribution.name}' from plugin '${contribution.plugin}'`
+        `SinkRegistry.register: duplicate sink contribution '${name}' from plugin '${plugin}'`
       )
     }
-    contributions.set(key, { plugin: contribution.plugin, contribution })
+    contributions.set(key, { plugin, contribution })
     log.info('sink.contribute', {
-      [Attr.PLUGIN]: contribution.plugin,
-      hyp_sink: contribution.name,
-      hyp_sink_supports: contribution.supports.join(','),
+      [Attr.PLUGIN]: plugin,
+      hyp_sink: name,
+      hyp_sink_supports: supportsLabel,
     })
   }
 
@@ -131,6 +154,10 @@ export function createSinkRegistry() {
     if (!contribution) {
       throw new Error(`SinkRegistry.instantiate: contribution required for '${instanceName}'`)
     }
+    // One read of the contribution's `plugin`: a second answer splits a single
+    // instantiation across the two records, the span, the counter, and the
+    // handle's own `plugin` and `destination`.
+    const contributionPlugin = contribution.plugin
     const supports = resolveSupports(contribution, args.kind === 'blob' ? args.encoder : undefined)
     // Emit `sink.resolved` ahead of the destination's `create()` so the
     // resolved writer+destination+supports tuple lands in logs even when
@@ -138,11 +165,11 @@ export function createSinkRegistry() {
     // attributes mirror the post-create `sink.register` log so consumers
     // can correlate the two by instance name.
     log.info('sink.resolved', {
-      [Attr.PLUGIN]: contribution.plugin,
+      [Attr.PLUGIN]: contributionPlugin,
       [Attr.SINK_INSTANCE]: instanceName,
       hyp_sink_kind: args.kind,
       hyp_sink_writer: args.kind === 'blob' ? args.writerPlugin : '',
-      hyp_sink_destination: contribution.plugin,
+      hyp_sink_destination: contributionPlugin,
       hyp_sink_supports: supports.join(','),
     })
 
@@ -151,7 +178,7 @@ export function createSinkRegistry() {
       {
         [Attr.COMPONENT]: 'sinks',
         [Attr.OPERATION]: 'sink.register',
-        [Attr.PLUGIN]: contribution.plugin,
+        [Attr.PLUGIN]: contributionPlugin,
         [Attr.SINK_INSTANCE]: instanceName,
         hyp_sink_kind: args.kind,
         status: 'ok',
@@ -176,25 +203,25 @@ export function createSinkRegistry() {
         const handle = {
           name: instanceName,
           instanceName,
-          plugin: contribution.plugin,
+          plugin: contributionPlugin,
           supports,
           sink,
           kind: args.kind,
           config,
-          ...(args.kind === 'blob' ? { writer: args.writerPlugin, destination: contribution.plugin, encoder: args.encoder } : {}),
+          ...(args.kind === 'blob' ? { writer: args.writerPlugin, destination: contributionPlugin, encoder: args.encoder } : {}),
         }
         handles.set(instanceName, handle)
         instruments.sinksRegistered.add(1, {
           [Attr.SINK_INSTANCE]: instanceName,
           hyp_sink_kind: args.kind,
-          [Attr.PLUGIN]: contribution.plugin,
+          [Attr.PLUGIN]: contributionPlugin,
         })
         log.info('sink.register', {
-          [Attr.PLUGIN]: contribution.plugin,
+          [Attr.PLUGIN]: contributionPlugin,
           [Attr.SINK_INSTANCE]: instanceName,
           hyp_sink_kind: args.kind,
           hyp_sink_writer: args.kind === 'blob' ? args.writerPlugin : '',
-          hyp_sink_destination: contribution.plugin,
+          hyp_sink_destination: contributionPlugin,
           hyp_sink_supports: supports.join(','),
         })
         return handle
@@ -224,6 +251,9 @@ export function createSinkRegistry() {
         `SinkRegistry.instantiate: table-format sink '${instanceName}' requires a BlobStore destination`
       )
     }
+    // One read of the provider's `format`, so the two records and the handle
+    // cannot name different table formats for one instantiation.
+    const format = tableFormat.format
     // `resolveSupports` intersects the table-format provider's tags
     // with the encoder's tags, mirroring the encoder-writer rule
     // (queryable only when both sides claim it).
@@ -235,7 +265,7 @@ export function createSinkRegistry() {
       hyp_sink_kind: 'table-format',
       hyp_sink_writer: args.writerPlugin,
       hyp_sink_destination: args.destinationPlugin,
-      hyp_sink_table_format: tableFormat.format,
+      hyp_sink_table_format: format,
       hyp_sink_supports: supports.join(','),
     })
 
@@ -263,7 +293,7 @@ export function createSinkRegistry() {
         })
         if (!sink || typeof sink.exportBatch !== 'function' || typeof sink.close !== 'function') {
           throw new Error(
-            `SinkRegistry.instantiate: table-format provider '${tableFormat.format}' did not return a Sink with exportBatch/close`
+            `SinkRegistry.instantiate: table-format provider '${format}' did not return a Sink with exportBatch/close`
           )
         }
         /** @type {ExtendedSinkHandle} */
@@ -278,7 +308,7 @@ export function createSinkRegistry() {
           writer: args.writerPlugin,
           destination: args.destinationPlugin,
           encoder,
-          tableFormat: tableFormat.format,
+          tableFormat: format,
           blobStore,
         }
         handles.set(instanceName, handle)
@@ -293,7 +323,7 @@ export function createSinkRegistry() {
           hyp_sink_kind: 'table-format',
           hyp_sink_writer: args.writerPlugin,
           hyp_sink_destination: args.destinationPlugin,
-          hyp_sink_table_format: tableFormat.format,
+          hyp_sink_table_format: format,
           hyp_sink_supports: supports.join(','),
         })
         return handle
@@ -351,8 +381,9 @@ function resolveTableFormatSupports(provider, encoder) {
   /** @type {Set<SinkSupportTag>} */
   const set = new Set()
   for (const tag of provider.supports ?? []) set.add(tag)
-  if (Array.isArray(encoder.supports)) {
-    const encoderTags = new Set(encoder.supports)
+  const encoderSupports = encoder.supports
+  if (Array.isArray(encoderSupports)) {
+    const encoderTags = new Set(encoderSupports)
     for (const tag of Array.from(set)) {
       if (!encoderTags.has(tag)) set.delete(tag)
     }
@@ -380,8 +411,12 @@ function resolveSupports(contribution, encoder) {
   // not" rule without a tag-by-tag table in the kernel. Encoders
   // without a `supports` array have no opinion and neither add nor
   // remove tags.
-  if (encoder && Array.isArray(encoder.supports)) {
-    const encoderTags = new Set(encoder.supports)
+  // One read of `supports`: an encoder answering an array for the guard and
+  // another for the intersection would set `queryable` from tags the guard
+  // never saw.
+  const encoderSupports = encoder?.supports
+  if (Array.isArray(encoderSupports)) {
+    const encoderTags = new Set(encoderSupports)
     for (const tag of Array.from(set)) {
       if (!encoderTags.has(tag)) set.delete(tag)
     }
