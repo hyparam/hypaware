@@ -5,6 +5,7 @@ import { jsonReplacer } from '../query/format.js'
 import { toJsonSchema, validateToolArguments } from '../cli/verb_codec.js'
 import { verbAuthClass, verbExposure } from '../registry/verbs.js'
 import {
+  INTERNAL_ERROR,
   INVALID_PARAMS,
   INVALID_REQUEST,
   METHOD_NOT_FOUND,
@@ -14,7 +15,7 @@ import {
 } from './jsonrpc.js'
 
 /**
- * @import { QueryRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetRegistration, QueryRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /** Protocol version advertised when the client sends none. */
@@ -22,7 +23,9 @@ const DEFAULT_PROTOCOL_VERSION = '2025-06-18'
 const SERVER_NAME = 'hypaware'
 /** Telemetry identity for the records this assembly emits. */
 const SERVER_COMPONENT = 'mcp-server'
-const LIST_OPERATION = 'mcp.tools_list'
+const LIST_TOOLS_OPERATION = 'mcp.tools_list'
+const LIST_RESOURCES_OPERATION = 'mcp.resources_list'
+const HANDLE_OPERATION = 'mcp.handle_message'
 
 /**
  * Build the **one server assembly** (verbs → MCP tools, datasets → MCP
@@ -93,7 +96,13 @@ export function createMcpServer(opts) {
       if (!toolVisible(verb)) return undefined
       const tool = verb.tool
       if (verbs.getByTool(tool) !== verb) {
-        warnNotAdvertised('tool_name_not_registered', typeof tool === 'string' ? tool : '')
+        warnNotAdvertised({
+          event: 'mcp.tool_not_advertised',
+          operation: LIST_TOOLS_OPERATION,
+          errorKind: 'tool_name_not_registered',
+          key: 'tool',
+          name: typeof tool === 'string' ? tool : '',
+        })
         return undefined
       }
       named = tool
@@ -103,28 +112,86 @@ export function createMcpServer(opts) {
         inputSchema: toJsonSchema(verb.inputSchema),
       }
     } catch (err) {
-      warnNotAdvertised('unreadable_verb', named ?? '', describeThrown(err))
+      warnNotAdvertised({
+        event: 'mcp.tool_not_advertised',
+        operation: LIST_TOOLS_OPERATION,
+        errorKind: 'unreadable_verb',
+        key: 'tool',
+        name: named ?? '',
+        error: describeThrown(err),
+      })
       return undefined
     }
   }
 
   /**
-   * A verb dropped from the advertised list says so: it stays registered and
-   * callable by name, so nothing else reports that clients can no longer see
-   * it.
+   * The `resources/list` entry for one dataset, or `undefined` when it has
+   * none that can be advertised honestly.
    *
-   * @param {string} errorKind
-   * @param {string} tool
-   * @param {string} [error]
+   * The same seam as {@link toolEntry}, one registry over: `readResource`
+   * resolves a URI back through `query.getDataset`, so the name in the URI
+   * decides which schema a read serves, while `dataset.name` is plugin code
+   * free to answer differently each time it is asked. Three reads built one
+   * entry, so a drifting accessor produced an entry whose URI addressed one
+   * dataset, whose label named a second and whose description named a third,
+   * and two entries could carry the same URI. One read, resolved back through
+   * the registry, makes the advertised entry the one a read would serve.
+   *
+   * @param {DatasetRegistration} dataset
+   * @returns {{ uri: string, name: string, description: string, mimeType: string } | undefined}
    */
-  function warnNotAdvertised(errorKind, tool, error) {
-    log.warn('mcp.tool_not_advertised', {
+  function resourceEntry(dataset) {
+    /** @type {string | undefined} */
+    let named
+    try {
+      const name = dataset.name
+      if (query.getDataset(name) !== dataset) {
+        warnNotAdvertised({
+          event: 'mcp.dataset_not_advertised',
+          operation: LIST_RESOURCES_OPERATION,
+          errorKind: 'dataset_name_not_registered',
+          key: 'dataset',
+          name: typeof name === 'string' ? name : '',
+        })
+        return undefined
+      }
+      named = name
+      return {
+        uri: datasetSchemaUri(name),
+        name: `${name} schema`,
+        description: `Column schema for the ${name} dataset`,
+        mimeType: 'application/json',
+      }
+    } catch (err) {
+      warnNotAdvertised({
+        event: 'mcp.dataset_not_advertised',
+        operation: LIST_RESOURCES_OPERATION,
+        errorKind: 'unreadable_dataset',
+        key: 'dataset',
+        name: named ?? '',
+        error: describeThrown(err),
+      })
+      return undefined
+    }
+  }
+
+  /**
+   * A verb or dataset dropped from an advertised list says so: it stays
+   * registered and reachable by its key, so nothing else reports that clients
+   * can no longer see it. `key` names the attribute the subject goes under
+   * (`tool` or `dataset`), so one record shape serves both lists; `event`
+   * stays a literal at each call site so the record names are greppable.
+   *
+   * @param {{ event: string, operation: string, errorKind: string, key: 'tool' | 'dataset', name: string, error?: string }} what
+   */
+  function warnNotAdvertised(what) {
+    log.warn(what.event, {
       [Attr.COMPONENT]: SERVER_COMPONENT,
-      [Attr.OPERATION]: LIST_OPERATION,
-      [Attr.ERROR_KIND]: errorKind,
+      [Attr.OPERATION]: what.operation,
+      [Attr.ERROR_KIND]: what.errorKind,
       [Attr.STATUS]: 'degraded',
-      tool,
-      error,
+      [what.key]: what.name,
+      error: what.error,
     })
   }
 
@@ -139,12 +206,13 @@ export function createMcpServer(opts) {
   }
 
   function listResources() {
-    return query.listDatasets().map((d) => ({
-      uri: datasetSchemaUri(d.name),
-      name: `${d.name} schema`,
-      description: `Column schema for the ${d.name} dataset`,
-      mimeType: 'application/json',
-    }))
+    /** @type {{ uri: string, name: string, description: string, mimeType: string }[]} */
+    const resources = []
+    for (const dataset of query.listDatasets()) {
+      const entry = resourceEntry(dataset)
+      if (entry !== undefined) resources.push(entry)
+    }
+    return resources
   }
 
   /**
@@ -152,6 +220,15 @@ export function createMcpServer(opts) {
    * `null` for a notification (which gets no reply). Never throws: a
    * tool that throws becomes an `isError` tool result, and an unknown
    * method a `-32601` error response, so the stream is never corrupted.
+   *
+   * The `catch` in this function is what makes that true rather than an
+   * aspiration. Every arm below reads plugin-controlled properties outside the
+   * `runTool` guard - `verb.exposure` and `verb.authClass` for the call
+   * gate, `verb.inputSchema` for argument validation, `dataset.schema` for
+   * a resource read - and an accessor that threw from any of them left
+   * `serveStdio` with a rejected promise, which it logged off-channel and
+   * answered with nothing at all: the client waited forever on an id that
+   * never got a reply. A `-32603` is a reply.
    *
    * @param {any} message
    * @returns {Promise<object | null>}
@@ -162,6 +239,28 @@ export function createMcpServer(opts) {
       return jsonRpcError(message?.id ?? null, INVALID_REQUEST, 'invalid JSON-RPC request')
     }
     const { id, method, params } = message
+    try {
+      return await dispatch(id, method, params)
+    } catch (err) {
+      log.warn('mcp.request_failed', {
+        [Attr.COMPONENT]: SERVER_COMPONENT,
+        [Attr.OPERATION]: HANDLE_OPERATION,
+        [Attr.ERROR_KIND]: 'unreadable_registration',
+        [Attr.STATUS]: 'degraded',
+        method,
+        error: describeThrown(err),
+      })
+      return jsonRpcError(id, INTERNAL_ERROR, `internal error handling '${method}'`)
+    }
+  }
+
+  /**
+   * @param {string | number | null} id
+   * @param {string} method
+   * @param {any} params
+   * @returns {Promise<object | null>}
+   */
+  async function dispatch(id, method, params) {
     switch (method) {
       case 'initialize':
         return jsonRpcResult(id, {
@@ -178,7 +277,9 @@ export function createMcpServer(opts) {
       case 'resources/list':
         return jsonRpcResult(id, { resources: listResources() })
       case 'tools/call':
-        return callTool(id, params)
+        // Awaited, not returned: an unawaited promise rejects past the caller's
+        // catch, which is the whole point of having it.
+        return await callTool(id, params)
       case 'resources/read':
         return readResource(id, params)
       default:

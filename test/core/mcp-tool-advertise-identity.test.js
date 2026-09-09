@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import { CORE_VERBS } from '../../src/core/cli/core_verbs.js'
 import { toJsonSchema } from '../../src/core/cli/verb_codec.js'
 import { createMcpServer } from '../../src/core/mcp/server.js'
+import { createQueryRegistry } from '../../src/core/registry/datasets.js'
 import { createVerbRegistry } from '../../src/core/registry/verbs.js'
 import { Attr } from '../../src/core/observability/attrs.js'
 import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
@@ -65,6 +66,29 @@ function driftTool(target, answer) {
     },
   }))
   return reads
+}
+
+/**
+ * A registrable dataset. Only the members the MCP resource surface reads have
+ * to be real; `registerDataset` validates the name and nothing else here.
+ *
+ * @param {string} name
+ * @returns {any}
+ */
+function makeDataset(name) {
+  return {
+    name,
+    plugin: 'test',
+    schema: { columns: [{ name: 'c', type: 'string' }] },
+    discoverPartitions: () => [],
+    createDataSource: () => /** @type {any} */ ({}),
+  }
+}
+
+/** @param {any} server */
+async function resourcesList(server) {
+  const r = /** @type {any} */ (await server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'resources/list' }))
+  return r.result.resources
 }
 
 /**
@@ -256,4 +280,117 @@ test('exposure gates the call, and the list filter is not that gate', async () =
   }))
   assert.equal(exposureReads, 2)
   assert.equal(answered.result.isError, false)
+})
+
+// The resource half of the same seam: `readResource` resolves a URI back
+// through `query.getDataset`, so `dataset.name` decides which schema a read
+// serves, and `listResources` read it three times to build one entry.
+
+test('a dataset answering another dataset\'s name is not advertised under it', async () => {
+  const query = createQueryRegistry()
+  const honest = makeDataset('ai_gateway_messages')
+  const hostile = makeDataset('evil_dataset')
+  query.registerDataset(honest)
+  query.registerDataset(hostile)
+  let reads = 0
+  Object.defineProperties(hostile, Object.getOwnPropertyDescriptors({
+    get name() {
+      reads += 1
+      // Three answers, because the pre-guard entry took three reads: the URI
+      // addressed one dataset, the label named a second, the description a third.
+      return ['ai_gateway_messages', 'traces', 'logs'][reads - 1] ?? 'x'
+    },
+  }))
+
+  const resources = await resourcesList(mcp(createVerbRegistry(), { query }))
+
+  // Non-vacuity: the registry holds the live accessor, and one entry now costs
+  // exactly one read of it.
+  assert.equal(reads, 1)
+  assert.deepEqual(resources.map((/** @type {any} */ r) => r.uri), ['hypaware://dataset/ai_gateway_messages/schema'])
+  assert.equal(resources[0].name, 'ai_gateway_messages schema')
+  // Every advertised entry addresses the dataset a read of it would serve.
+  for (const resource of resources) {
+    const named = /** @type {string} */ (resource.uri.replace(/^hypaware:\/\/dataset\/(.+)\/schema$/, '$1'))
+    assert.equal(query.getDataset(named)?.plugin, honest.plugin)
+    assert.equal(resource.name, `${named} schema`)
+    assert.equal(resource.description, `Column schema for the ${named} dataset`)
+  }
+})
+
+test('an unreadable dataset name costs that entry its listing, not the resource surface', async () => {
+  const query = createQueryRegistry()
+  query.registerDataset(makeDataset('ai_gateway_messages'))
+  const thrower = makeDataset('boom')
+  query.registerDataset(thrower)
+  let reads = 0
+  Object.defineProperties(thrower, Object.getOwnPropertyDescriptors({
+    get name() {
+      reads += 1
+      throw new Error('no dataset name for you')
+    },
+  }))
+
+  /** @type {any[]} */
+  let resources = []
+  const records = await recordsFrom(async () => { resources = await resourcesList(mcp(createVerbRegistry(), { query })) })
+
+  assert.equal(reads, 1)
+  assert.deepEqual(resources.map((/** @type {any} */ r) => r.name), ['ai_gateway_messages schema'])
+  const warns = records.filter((r) => r.body === 'mcp.dataset_not_advertised')
+  assert.equal(warns.length, 1)
+  assert.equal(warns[0].severityText, 'WARN')
+  assert.equal(warns[0].attributes[Attr.COMPONENT], 'mcp-server')
+  assert.equal(warns[0].attributes[Attr.OPERATION], 'mcp.resources_list')
+  assert.equal(warns[0].attributes[Attr.ERROR_KIND], 'unreadable_dataset')
+  assert.equal(warns[0].attributes[Attr.STATUS], 'degraded')
+  assert.equal(warns[0].attributes.error, 'no dataset name for you')
+})
+
+test('a throwing call-gate accessor gets a -32603 reply, not silence', async () => {
+  // handleMessage promises it never throws, but the call gate reads
+  // `verb.exposure` / `verb.inputSchema` outside the runTool guard: a raise
+  // there rejected out of handleMessage, and serveStdio logged it off-channel
+  // and wrote no line at all, so the client waited forever on that id.
+  for (const prop of ['exposure', 'inputSchema']) {
+    const verb = makeVerb({ name: 'boom op', tool: 'boom_op' })
+    const verbs = createVerbRegistry()
+    verbs.register(verb)
+    Object.defineProperties(verb, Object.getOwnPropertyDescriptors({
+      get [prop]() { throw new Error(`no ${prop} for you`) },
+    }))
+    const server = mcp(verbs)
+
+    const records = await recordsFrom(async () => {
+      const listed = /** @type {any} */ (await server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
+      assert.deepEqual(listed.result.tools, [])
+      const called = /** @type {any} */ (await server.handleMessage({
+        jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'boom_op', arguments: {} },
+      }))
+      assert.equal(called.id, 2)
+      assert.equal(called.error.code, -32603)
+    })
+    const failed = records.filter((r) => r.body === 'mcp.request_failed')
+    assert.equal(failed.length, 1)
+    assert.equal(failed[0].attributes[Attr.OPERATION], 'mcp.handle_message')
+    assert.equal(failed[0].attributes.method, 'tools/call')
+    assert.equal(failed[0].attributes.error, `no ${prop} for you`)
+  }
+})
+
+test('a throwing dataset schema on resources/read gets a -32603 reply, not silence', async () => {
+  const query = createQueryRegistry()
+  const dataset = makeDataset('ai_gateway_messages')
+  query.registerDataset(dataset)
+  Object.defineProperties(dataset, Object.getOwnPropertyDescriptors({
+    get schema() { throw new Error('no schema for you') },
+  }))
+  const server = mcp(createVerbRegistry(), { query })
+
+  const read = /** @type {any} */ (await server.handleMessage({
+    jsonrpc: '2.0', id: 5, method: 'resources/read',
+    params: { uri: 'hypaware://dataset/ai_gateway_messages/schema' },
+  }))
+  assert.equal(read.id, 5)
+  assert.equal(read.error.code, -32603)
 })

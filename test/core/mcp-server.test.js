@@ -30,9 +30,15 @@ function fakeVerbs(list) {
   }
 }
 
+// One object, handed back by both members: the real registry stores the
+// registration by reference and `listResources` resolves the name it read back
+// through `getDataset` to prove the entry it advertises is the one a read
+// would serve. A fake that minted a fresh copy per call failed that check for
+// a reason nothing in production shares.
+const logsDataset = { name: 'logs', plugin: '@x/otel', schema: { columns: [{ name: 'ts', type: 'TIMESTAMP', nullable: false }] } }
 const fakeQuery = {
-  listDatasets: () => [{ name: 'logs', plugin: '@x/otel', schema: { columns: [{ name: 'ts', type: 'TIMESTAMP', nullable: false }] } }],
-  getDataset: (/** @type {string} */ n) => n === 'logs' ? { schema: { columns: [{ name: 'ts', type: 'TIMESTAMP', nullable: false }] } } : undefined,
+  listDatasets: () => [logsDataset],
+  getDataset: (/** @type {string} */ n) => n === 'logs' ? logsDataset : undefined,
   registerDataset() {},
 }
 
