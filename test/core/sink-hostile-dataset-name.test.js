@@ -28,8 +28,9 @@ const HEALTHY_PARTITION = { dataset: 'z_healthy', partition: { source: 'test' } 
  * @param {string} stateRoot
  * @param {any[]} datasets
  * @param {{ exportBatch?: (batch: any) => any }} [sinkOverrides]
+ * @param {Record<string, unknown>} [storageOverrides]
  */
-function driverOver(stateRoot, datasets, sinkOverrides = {}) {
+function driverOver(stateRoot, datasets, sinkOverrides = {}, storageOverrides = {}) {
   /** @type {any[][]} */
   const batches = []
   const driver = createSinkDriver({
@@ -53,6 +54,7 @@ function driverOver(stateRoot, datasets, sinkOverrides = {}) {
       cacheRoot: stateRoot,
       tableExists: () => true,
       hasPendingSync: () => false,
+      ...storageOverrides,
     }),
     stateRoot,
   })
@@ -139,6 +141,52 @@ test('a sink that throws a value with no primitive conversion is recorded failed
       (await fs.readdir(path.join(stateRoot, 'sinks', 'recorder', 'outbox')).then((n) => n.length, () => 0)),
       1,
       'a batch the sink refused is a failed batch, so its partitions belong in the outbox',
+    )
+  } finally {
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('a flush that rejects with a value with no primitive conversion still lets the post-flush re-discovery run', async () => {
+  // `storage.flushTable` runs the owning dataset's `settleBatch` hook, so the
+  // value in the flush catch is plugin-owned like the other two. Rendering it
+  // with the bare idiom raised out of that handler into the per-dataset catch
+  // below it: contained, so the tick survived, but the failure was recorded as
+  // a discovery failure with no `tablePath`, and the re-discovery that
+  // publishes what the *other* flushes just committed never ran - so those
+  // partitions went unexported for as long as one sibling kept failing.
+  const stateRoot = await tmpStateRoot()
+  try {
+    const settled = { dataset: 'z_healthy', partition: { source: 'test' }, tablePath: '/t/settled' }
+    const failing = { dataset: 'z_healthy', partition: { source: 'other' }, tablePath: '/t/failing' }
+    let discoveries = 0
+    const { driver, batches } = driverOver(
+      stateRoot,
+      [{
+        name: 'z_healthy',
+        plugin: '@hypaware/otel',
+        discoverPartitions() {
+          discoveries += 1
+          return discoveries === 1 ? [settled, failing] : [settled, failing, HEALTHY_PARTITION]
+        },
+      }],
+      {},
+      {
+        hasPendingSync: () => true,
+        async flushTable(/** @type {string} */ tablePath) {
+          if (tablePath === '/t/failing') throw Object.create(null)
+        },
+      },
+    )
+
+    const report = await driver.tick({ force: true, now: new Date('2026-09-09T00:00:00.000Z') })
+
+    assert.equal(discoveries, 2, 'the flush catch threw, so the post-flush re-discovery never ran')
+    assert.deepEqual(report.sinks.map((s) => s.status), ['exported'])
+    assert.deepEqual(
+      batches[0]?.map((/** @type {any} */ p) => p.tablePath ?? p.partition.source),
+      ['/t/settled', '/t/failing', 'test'],
+      'the partition the second discovery pass added was never exported',
     )
   } finally {
     await fs.rm(stateRoot, { recursive: true, force: true })

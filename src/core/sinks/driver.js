@@ -211,11 +211,19 @@ export function createSinkDriver(opts) {
               await storage.flushTable(part.tablePath, { reason: 'sink_discover' })
               flushedAny = true
             } catch (err) {
+              // `describeThrown`, not the bare idiom: `flushTable` runs the
+              // owning dataset's `settleBatch` hook (`getSettleHook` in
+              // `src/core/cache/storage.js`), so the value here is
+              // plugin-owned too. A raise from `String()` lands in the
+              // per-dataset catch below, which reports it as a discovery
+              // failure and skips the post-flush re-discovery, so the
+              // partitions the flushes above did commit go unexported for as
+              // long as one sibling partition keeps failing.
               log.warn('sink.flush_partition_failed', {
                 [Attr.SINK_INSTANCE]: handle.instanceName,
                 [Attr.DATASET]: datasetName,
                 tablePath: part.tablePath,
-                message: err instanceof Error ? err.message : String(err),
+                message: describeThrown(err),
               })
             }
           }
