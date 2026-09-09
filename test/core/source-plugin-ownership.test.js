@@ -290,3 +290,55 @@ test('an activation context over a registry with only the contract surface still
     'the bracket must still run its callback when the registry has nothing to record with'
   )
 })
+
+test('a prototype-backed registry reaches a plugin with the whole registry, not the own half', () => {
+  // The facade forwards "the rest of the registry" to the plugin. A spread
+  // would carry own enumerable properties and nothing else, so a registry
+  // holding `get`/`list`/the lifecycle members on a prototype reached
+  // `activate()` without them, and a plugin that starts its own source there
+  // (`@hypaware/otel`) got `ctx.sources.list is not a function`. A host
+  // supplies exactly such a registry through `hypaware/integration`'s
+  // `run(argv, { kernel })`, which dispatch hands to both of its activation
+  // seams unchanged, so this is reachable without `createKernelRuntime` being
+  // exported.
+  class HostSourceRegistry {
+    /** @param {ReturnType<typeof createSourceRegistry>} inner */
+    constructor(inner) { this.inner = inner }
+    /** @param {SourceContribution} c */
+    register(c) { return this.inner.register(c) }
+    /** @param {any} p @param {() => any} fn */
+    registeringAs(p, fn) { return this.inner.registeringAs(p, fn) }
+    /** @param {string} n */
+    ownerOf(n) { return this.inner.ownerOf(n) }
+    /** @param {string} n */
+    get(n) { return this.inner.get(n) }
+    list() { return this.inner.list() }
+  }
+
+  const inner = createSourceRegistry()
+  const runtime = /** @type {any} */ ({
+    sources: new HostSourceRegistry(inner),
+    capabilities: { provide() {}, require() {}, has() { return false }, list() { return [] } },
+    activationContexts: new Map(),
+  })
+  const ctx = createActivationContext({
+    runtime,
+    plugin: /** @type {any} */ ({ name: A, version: '1.0.0', manifest: { name: A, permissions: [] }, rootDir: '/nowhere' }),
+    paths: /** @type {any} */ ({}),
+    config: {},
+    env: {},
+  })
+
+  const sources = /** @type {any} */ (ctx.sources)
+  assert.equal(typeof sources.get, 'function', 'an inherited `get` did not reach the plugin')
+  assert.equal(typeof sources.list, 'function', 'an inherited `list` did not reach the plugin')
+  assert.equal(typeof sources.ownerOf, 'function', 'an inherited `ownerOf` did not reach the plugin')
+
+  const source = fixtureSource('proto', A)
+  ctx.sources.register(source.contribution)
+  assert.deepEqual(sources.list().map((/** @type {any} */ c) => c.name), ['proto'], 'the inherited `list` did not answer')
+  assert.equal(sources.ownerOf('proto'), A, 'the registrar was not recorded through the inherited member')
+
+  // The host registry's own state is not copied onto what the plugin holds.
+  assert.deepEqual(Object.keys(sources).sort(), ['register', 'registeringAs'])
+})
