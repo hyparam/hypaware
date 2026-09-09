@@ -79,3 +79,72 @@ test('BackfillMaterializerRegistry validates the contribution shape', () => {
   assert.throws(() => reg.register(/** @type {any} */ (materializer({ plugin: '' }))), /missing plugin/)
   assert.throws(() => reg.register(/** @type {any} */ (materializer({ materialize: undefined }))), /missing materialize/)
 })
+
+// `kind` is validated once and the registry then stores the contribution by
+// reference, so every later read is a plugin accessor running again. Sorting
+// `list()` by `a.kind` put one of those reads inside a comparator, where a
+// throw escapes before a single entry has been handed back and costs every
+// materializer rather than the hostile one (#1519). Same shape as #1518, one
+// function up.
+
+test('BackfillMaterializerRegistry.list() survives a kind that stops being readable', () => {
+  const reg = createBackfillMaterializerRegistry()
+  let armed = false
+  reg.register(/** @type {any} */ ({
+    get kind() {
+      if (armed) throw new TypeError('kind is not readable')
+      return 'a_hostile.kind'
+    },
+    dataset: 'ai_gateway_messages',
+    plugin: '@third-party/hostile-kind',
+    materialize() { return [] },
+  }))
+  reg.register(materializer({ kind: 'z_readable.kind' }))
+  armed = true
+
+  const listed = reg.list()
+
+  assert.equal(listed.length, 2, 'one unreadable kind emptied the whole listing')
+  assert.equal(listed[0]?.dataset, 'ai_gateway_messages')
+  assert.equal(listed[1]?.plugin, '@hypaware/ai-gateway')
+})
+
+test('BackfillMaterializerRegistry keys a materializer by the kind it validated', () => {
+  // What the ordering rests on. A getter that answers once and then
+  // differently must not be validated under one string and stored under
+  // another: the runner looks materializers up by `BackfillItem.kind` and
+  // nothing else, so a key nobody validated is a materializer nobody reaches.
+  const reg = createBackfillMaterializerRegistry()
+  let reads = 0
+  reg.register(/** @type {any} */ ({
+    get kind() { reads += 1; return reads === 1 ? 'a_honest.kind' : 'z_mutated.kind' },
+    dataset: 'ai_gateway_messages',
+    plugin: '@third-party/mutating-kind',
+    materialize() { return [] },
+  }))
+
+  assert.equal(reads, 1, 'register read the plugin\'s `kind` more than once')
+  assert.notEqual(reg.get('a_honest.kind'), undefined, 'the validated kind no longer addresses the materializer')
+  assert.equal(reg.get('z_mutated.kind'), undefined)
+  assert.deepEqual(reg.list().map((m) => m.dataset), ['ai_gateway_messages'])
+})
+
+test('BackfillMaterializerRegistry reads dataset and plugin before it stores anything', () => {
+  // A `dataset` that raises only on its second read must not raise from the
+  // log record below the `set`: that leaves the registry holding a
+  // materializer while the loader catches the throw and fails the plugin's
+  // whole activation.
+  const reg = createBackfillMaterializerRegistry()
+  let reads = 0
+  assert.doesNotThrow(() => reg.register(/** @type {any} */ ({
+    kind: 'ai_gateway.projected_exchange',
+    get dataset() {
+      reads += 1
+      if (reads > 1) throw new TypeError('dataset is not readable')
+      return 'ai_gateway_messages'
+    },
+    plugin: '@third-party/late-dataset',
+    materialize() { return [] },
+  })))
+  assert.equal(reg.get('ai_gateway.projected_exchange')?.plugin, '@third-party/late-dataset')
+})

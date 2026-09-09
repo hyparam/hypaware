@@ -121,37 +121,54 @@ export function createBackfillMaterializerRegistry() {
   const contributions = new Map()
   const log = getLogger('backfill-materializers')
 
-  /** @param {BackfillMaterializerContribution} contribution */
+  /**
+   * `kind`, `dataset` and `plugin` are each read once, before the Map is
+   * touched, and every later step uses the string this registry took.
+   * `contribution.kind` is free to be an accessor answering differently each
+   * time it is asked, and it is both the key `get()` addresses a materializer
+   * by and the key `list()` orders by, so a second read landing in the Map
+   * would store the materializer under a kind nothing validated. `dataset` and
+   * `plugin` are not keys, but the record below runs after the `set`: a
+   * property that answers differently there logs a registration nobody
+   * performed, and one that raises there leaves this registry holding a
+   * materializer while the loader catches the throw and marks the plugin's
+   * whole activation failed (`src/core/runtime/loader.js`).
+   *
+   * @param {BackfillMaterializerContribution} contribution
+   */
   function register(contribution) {
     if (!contribution || typeof contribution !== 'object') {
       throw new TypeError('BackfillMaterializerRegistry.register: contribution must be an object')
     }
-    if (typeof contribution.kind !== 'string' || contribution.kind.length === 0) {
+    const kind = contribution.kind
+    if (typeof kind !== 'string' || kind.length === 0) {
       throw new TypeError('BackfillMaterializerRegistry.register: contribution.kind must be a non-empty string')
     }
-    if (typeof contribution.dataset !== 'string' || contribution.dataset.length === 0) {
+    const dataset = contribution.dataset
+    if (typeof dataset !== 'string' || dataset.length === 0) {
       throw new TypeError(
-        `BackfillMaterializerRegistry.register: '${contribution.kind}' missing dataset`
+        `BackfillMaterializerRegistry.register: '${kind}' missing dataset`
       )
     }
-    if (typeof contribution.plugin !== 'string' || contribution.plugin.length === 0) {
+    const plugin = contribution.plugin
+    if (typeof plugin !== 'string' || plugin.length === 0) {
       throw new TypeError(
-        `BackfillMaterializerRegistry.register: '${contribution.kind}' missing plugin`
+        `BackfillMaterializerRegistry.register: '${kind}' missing plugin`
       )
     }
     if (typeof contribution.materialize !== 'function') {
       throw new TypeError(
-        `BackfillMaterializerRegistry.register: '${contribution.kind}' missing materialize()`
+        `BackfillMaterializerRegistry.register: '${kind}' missing materialize()`
       )
     }
-    if (contributions.has(contribution.kind)) {
-      throw new Error(`BackfillMaterializerRegistry.register: duplicate kind '${contribution.kind}'`)
+    if (contributions.has(kind)) {
+      throw new Error(`BackfillMaterializerRegistry.register: duplicate kind '${kind}'`)
     }
-    contributions.set(contribution.kind, contribution)
+    contributions.set(kind, contribution)
     log.info('backfill.materializer.register', {
-      [Attr.PLUGIN]: contribution.plugin,
-      kind: contribution.kind,
-      [Attr.DATASET]: contribution.dataset,
+      [Attr.PLUGIN]: plugin,
+      kind,
+      [Attr.DATASET]: dataset,
     })
   }
 
@@ -160,8 +177,20 @@ export function createBackfillMaterializerRegistry() {
     return contributions.get(kind)
   }
 
+  /**
+   * Every registered materializer, ordered by kind.
+   *
+   * The order comes from the keys, not from `a.kind`: the key is the kind this
+   * registry validated, while `contribution.kind` is a live plugin property.
+   * Reading it here would run plugin code inside a comparator, where a throw
+   * escapes into every caller of `list()` before a single entry has been
+   * handed back, so one hostile contribution empties the whole listing instead
+   * of costing only itself (issue #1519).
+   */
   function list() {
-    return Array.from(contributions.values()).sort((a, b) => compareStrings(a.kind, b.kind))
+    return Array.from(contributions.keys())
+      .sort(compareStrings)
+      .map((kind) => /** @type {BackfillMaterializerContribution} */ (contributions.get(kind)))
   }
 
   return { register, get, list }
