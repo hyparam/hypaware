@@ -138,6 +138,31 @@ test('CommandRegistry.listGroups survives a group name that stops being a string
   assert.equal(reads, 1, 'listGroups() read the record name instead of the validated key')
 })
 
+test('registerGroup keys the group on the name it validated, not on a later read', () => {
+  // The key ordering above is only a fix while the key is a name that was
+  // checked. `registerGroup` stores the plugin's own object, so every read of
+  // `group.name` is a fresh question: reading it again for the `set` keyed the
+  // map on an answer nothing had validated, and a drift to a non-string put a
+  // non-string key in the map, which is #1555 reopened one line lower down
+  // with the comparator already fixed.
+  const reg = createCommandRegistry()
+  let reads = 0
+  const group = /** @type {any} */ ({
+    get name() {
+      reads += 1
+      return reads === 1 ? 'a_hostile' : 7
+    },
+    summary: 'first',
+  })
+  reg.registerGroup(group)
+  reg.registerGroup(/** @type {any} */ ({ name: 'z_readable', summary: 'second' }))
+
+  assert.equal(reads, 1, 'registerGroup asked for the name more than once, so its answers can disagree')
+  assert.equal(reg.getGroup('a_hostile'), group, 'the group is not keyed on the name that was validated')
+  assert.equal(reg.getGroup(/** @type {any} */ (7)), undefined, 'a non-string reached the group key')
+  assert.deepEqual(reg.listGroups().map((g) => g.summary), ['first', 'second'])
+})
+
 /** @param {Record<string, unknown>} [overrides] */
 function preset(overrides = {}) {
   return /** @type {any} */ ({
@@ -193,6 +218,32 @@ test('initPresets.list survives a preset name that stops being a string', () => 
 
   assert.deepEqual(initPresets.list().map((p) => p.summary), ['first', 'second'])
   assert.equal(reads, 1, 'list() read the record name instead of the validated key')
+})
+
+test('initPresets.register keys the preset on the name it validated, not on a later read', () => {
+  // Same as the group above, and worse before the hoist: `has()` and `set()`
+  // were two different reads, so a preset could pass the duplicate check under
+  // one name and be written under another.
+  const { initPresets } = createKernelRuntime()
+  let reads = 0
+  // Built here rather than through `preset()`: that helper spreads its
+  // overrides, and a spread reads a getter once and copies the value away.
+  const registration = /** @type {any} */ ({
+    get name() {
+      reads += 1
+      return reads === 1 ? 'a_hostile' : 7
+    },
+    plugin: '@third-party/hostile-name',
+    summary: 'first',
+    run() {},
+  })
+  initPresets.register(registration)
+  initPresets.register(preset({ name: 'z_readable', plugin: '@hypaware/otel', summary: 'second' }))
+
+  assert.equal(reads, 1, 'register asked for the name more than once, so its answers can disagree')
+  assert.equal(initPresets.get('a_hostile'), registration, 'the preset is not keyed on the name that was validated')
+  assert.equal(initPresets.get(/** @type {any} */ (7)), undefined, 'a non-string reached the preset key')
+  assert.deepEqual(initPresets.list().map((p) => p.summary), ['first', 'second'])
 })
 
 test('the three listings order honest registrations exactly as before', () => {
