@@ -19,6 +19,7 @@ import { runDaemon } from '../../src/core/daemon/runtime.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
 import { readRowsFromTable } from '../../src/core/cache/iceberg/store.js'
+import { pollJsonlFor } from '../helpers/poll_jsonl.js'
 
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
 
@@ -32,34 +33,6 @@ const COLUMNS = [
 /** @param {number} daysAgo */
 function isoDateDaysAgo(daysAgo) {
   return new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString()
-}
-
-/**
- * Poll a JSONL file for a line matching `predicate`. The span exporter
- * writes through an `fs.WriteStream` with no flush hook this daemon ever
- * calls, so the write lands async relative to the tick's own promise.
- *
- * @param {string} filePath
- * @param {(record: any) => boolean} predicate
- * @param {number} timeoutMs
- * @returns {Promise<any>}
- */
-async function pollJsonlFor(filePath, predicate, timeoutMs) {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    try {
-      const raw = await fs.readFile(filePath, 'utf8')
-      for (const line of raw.split('\n')) {
-        if (!line) continue
-        const record = JSON.parse(line)
-        if (predicate(record)) return record
-      }
-    } catch (err) {
-      if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
-    }
-    if (Date.now() > deadline) return undefined
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
 }
 
 test('the daemon maintenance path enforces the configured retention window', async () => {
