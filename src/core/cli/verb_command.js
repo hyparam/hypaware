@@ -47,25 +47,40 @@ const VERB_PROJECTION = Symbol('hypaware.verbProjection')
  * the **same** `render` turns the structured result into stdout text.
  *
  * @param {VerbRegistration} verb
+ * @param {string} [name] the name to project under, defaulting to the verb's
+ *   own. `VerbRegistry.register` passes the name it validated and keyed by, so
+ *   the command lands under the same string as the verb rather than under
+ *   another read of an accessor free to answer differently.
  * @returns {CommandRegistration}
  * @ref LLP 0034#verbs [implements]: one declaration → a CLI command and an MCP tool; the kernel owns both adapters so the flag set and the tool schema never drift
  */
-export function verbToCommand(verb) {
+export function verbToCommand(verb, name = verb.name) {
+  // One read each. The presence test and the value that lands in the command
+  // were two reads of the same plugin property, so the registration built here
+  // could carry a value nothing had tested, and a member that answered truthy
+  // for the test could land as `undefined`. Same rule `validateVerb` follows
+  // for `exposure` and `authClass`, and the reason the command registry checks
+  // its own copy rather than the registration it was handed.
+  const aliases = verb.aliases
+  const category = verb.category
+  const audience = verb.audience
+  const plugin = verb.plugin
+  const help = verb.help
   /** @type {CommandRegistration} */
   const command = {
-    name: verb.name,
-    ...(verb.aliases ? { aliases: verb.aliases } : {}),
-    ...(verb.category ? { category: verb.category } : {}),
-    ...(verb.audience ? { audience: verb.audience } : {}),
-    ...(verb.plugin ? { plugin: verb.plugin } : {}),
+    name,
+    ...(aliases ? { aliases } : {}),
+    ...(category ? { category } : {}),
+    ...(audience ? { audience } : {}),
+    ...(plugin ? { plugin } : {}),
     summary: verb.summary,
-    usage: usageForVerb(verb.name, verb.inputSchema),
+    usage: usageForVerb(name, verb.inputSchema),
     // A verb that needs more than a usage line says so here, and dispatch's
     // central `--help` interception renders it exactly as it does for a core
     // command. Without the passthrough a verb could not explain itself at
     // all, which is what kept `graph neighbors` at one line of help.
     // @ref LLP 0214#d1 [implements]: verbs carry long help through the registration dispatch already renders
-    ...(verb.help !== undefined ? { help: verb.help } : {}),
+    ...(help !== undefined ? { help } : {}),
     run: (argv, ctx) => runVerbCommand(verb, argv, ctx),
   }
   return markVerbProjection(command)
