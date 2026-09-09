@@ -1258,11 +1258,17 @@ hyp plugin list --json
 hyp plugin info <plugin>
 ```
 
-Prints manifest, source, lock, version, permissions, and update details for one
-installed plugin.
+Prints version, source, and lock details for one installed plugin, including
+its update state when a check has run. An install under a name this package
+bundles also gets a `shadowed:` line: boot selects the bundled copy, so that
+install never runs, and the line names the `hyp plugin remove` that clears it.
+Answers for a bundled plugin too: those have no install record, so it prints
+the version and root directory from the manifest instead. A name that is
+neither installed nor bundled exits 1.
 
 ```sh
 hyp plugin info @example/hypaware-plugin-widget
+hyp plugin info @hypaware/claude
 ```
 
 ### `hyp plugin outdated`

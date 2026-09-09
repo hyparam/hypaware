@@ -213,23 +213,25 @@ function parsePluginInstallArgs(argv) {
 }
 
 /**
- * Every plugin name the package ships, both buckets, mapped to the version its
- * manifest declares. An installed copy of one of these never runs: boot
- * activates the bundled copy and skips the lock entry (LLP 0380). Read from the
- * manifests rather than from what this boot activated, so the list agrees with
- * the `installed_plugin_shadowed` diagnostic `hyp status` raises from the same
- * rule under every profile, and so a bundled plugin this boot did not get can
- * still be named with its version: it never became an `ActivePlugin` and a
- * bundled plugin is not in the lock, so nothing else here knows either fact.
- * Discovery failure degrades to empty (no marks), never throws: a listing is
- * not the place to fail.
+ * Every plugin name the package ships, both buckets, mapped to its manifest. An
+ * installed copy of one of these never runs: boot activates the bundled copy
+ * and skips the lock entry (LLP 0380). Read from the manifests rather than from
+ * what this boot activated, so the plugin commands agree with the
+ * `installed_plugin_shadowed` diagnostic `hyp status` raises from the same rule
+ * under every profile, and so a bundled plugin this boot did not get can still
+ * be named with its version and root directory: it never became an
+ * `ActivePlugin` and a bundled plugin is not in the lock, so nothing else here
+ * knows either fact. Discovery failure degrades to empty (no marks, and
+ * `plugin info` reads as if the name were unknown), never throws: neither a
+ * listing nor a lookup is the place to fail. A bundled plugin whose manifest
+ * will not load is absent here too, having no name to be keyed by (issue #1576).
  *
- * @returns {Promise<Map<string, string>>}
+ * @returns {Promise<Map<string, LoadedManifest>>}
  */
-async function discoverBundledVersions() {
+async function discoverBundledManifests() {
   try {
     const bundled = await discoverBundledPlugins()
-    return new Map([...bundled.loaded, ...bundled.excluded].map((m) => [m.manifest.name, m.manifest.version]))
+    return new Map([...bundled.loaded, ...bundled.excluded].map((m) => [m.manifest.name, m]))
   } catch {
     return new Map()
   }
@@ -246,7 +248,7 @@ export async function runPluginList(argv, ctx) {
   const stateDir = pluginStateDir(ctx)
   const installed = await listInstalledPlugins(stateDir)
   const active = ctx.plugins ?? []
-  const bundledVersions = await discoverBundledVersions()
+  const bundledManifests = await discoverBundledManifests()
   const installedByName = new Map(installed.map((e) => [e.name, e]))
   const activeByName = new Map(active.map((p) => [p.name, p]))
 
@@ -261,7 +263,7 @@ export async function runPluginList(argv, ctx) {
   // of an operator with no way to settle it.
   const unavailable = new Set(
     (ctx.failedPlugins ?? []).filter((name) => (
-      !activeByName.has(name) && (bundledVersions.has(name) || installedByName.has(name))
+      !activeByName.has(name) && (bundledManifests.has(name) || installedByName.has(name))
     ))
   )
 
@@ -275,8 +277,8 @@ export async function runPluginList(argv, ctx) {
    * @returns {{ version: string, source: 'bundled' | 'installed' }}
    */
   function unavailableCopy(name) {
-    const bundled = bundledVersions.get(name)
-    if (bundled !== undefined) return { version: bundled, source: 'bundled' }
+    const bundled = bundledManifests.get(name)
+    if (bundled !== undefined) return { version: bundled.manifest.version, source: 'bundled' }
     return { version: installedByName.get(name)?.version ?? '', source: 'installed' }
   }
 
@@ -306,7 +308,7 @@ export async function runPluginList(argv, ctx) {
       // about) is inert all the same, and `hyp status` already says so.
       // @ref LLP 0380#bundled-copy-wins [implements]: the list says which copy runs, by root directory, not by lock membership
       const runsInstalled = !!act && !!inst && act.rootDir === inst.install_dir
-      const shadowed = !!inst && bundledVersions.has(name)
+      const shadowed = !!inst && bundledManifests.has(name)
       plugins.push({
         name,
         version,
@@ -348,7 +350,7 @@ export async function runPluginList(argv, ctx) {
     ctx.stdout.write('Installed plugins:\n')
     for (const entry of installed) {
       const available = entry.update?.available ? '  (update available)' : ''
-      const isBundledName = bundledVersions.has(entry.name)
+      const isBundledName = bundledManifests.has(entry.name)
       const shadowed = isBundledName
         ? `  (shadowed by the bundled copy; hyp plugin remove ${entry.name})`
         : ''
@@ -396,11 +398,45 @@ export async function runPluginInfo(argv, ctx) {
   const stateDir = pluginStateDir(ctx)
   const lock = await loadLock(stateDir)
   const entry = lock.plugins[name]
+  // The lock alone cannot answer for a bundled plugin, which is never in it, so
+  // every bundled name read as `is not installed` whatever its state (issue
+  // #1578). Same discovery as the listing, so the two cannot disagree about
+  // what the package ships.
+  const bundled = (await discoverBundledManifests()).get(name)
   if (!entry) {
-    ctx.stderr.write(`hyp plugin info: '${name}' is not installed\n`)
-    return 1
+    if (!bundled) {
+      ctx.stderr.write(
+        `hyp plugin info: no plugin named '${name}' is installed or bundled with this package\n`
+      )
+      return 1
+    }
+    // The manifest, and nothing more: `install_dir`, `content_hash`,
+    // `manifest_hash`, `installed_at` and the update block all describe an
+    // install this copy never went through, so a value in any of them would be
+    // invented. The `source` line says why they are absent. Activation is
+    // absent too: `plugin list` owns "did this boot activate it" along with the
+    // scoping that claim needs, and a second surface restating it is how two
+    // surfaces come to contradict each other.
+    ctx.stdout.write(`${bundled.manifest.name}@${bundled.manifest.version}\n`)
+    ctx.stdout.write('  source:        bundled (ships with this package, so there is no install record)\n')
+    ctx.stdout.write(`  root_dir:      ${bundled.rootDir}\n`)
+    return 0
   }
   ctx.stdout.write(`${entry.name}@${entry.version}\n`)
+  // A lock entry under a bundled name is real and removable, but it never runs:
+  // boot drops it from selection in favor of the bundled copy. The claim is
+  // selection, not execution, because that is the part the manifest set settles
+  // on its own: whether the selected copy then activated is this boot's
+  // business and `hyp plugin list`'s to report. Read off the bundled manifest
+  // set rather than off what this boot activated, exactly as the listing's
+  // `(shadowed by the bundled copy)` mark is, so the two agree under every
+  // profile.
+  // @ref LLP 0380#bundled-copy-wins [implements]: the install record says which copy boot selects
+  if (bundled) {
+    ctx.stdout.write(
+      `  shadowed:      boot selects the bundled copy ${bundled.manifest.version} at ${bundled.rootDir}; this install never runs (hyp plugin remove ${name})\n`
+    )
+  }
   ctx.stdout.write(`  source:        ${entry.source.kind} (${entry.source.raw})\n`)
   ctx.stdout.write(`  install_dir:   ${entry.install_dir}\n`)
   ctx.stdout.write(`  content_hash:  ${entry.content_hash}\n`)

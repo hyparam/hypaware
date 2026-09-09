@@ -284,7 +284,7 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'plugin info',
-      summary: 'Show details for an installed plugin',
+      summary: 'Show details for an installed or bundled plugin',
       usage: coreUsage('plugin info'),
       run: runPluginInfo,
     },
