@@ -239,6 +239,121 @@ test('the registry keys a contribution by the name it validated, not by a later 
   assert.deepEqual(backfills.list().map((c) => (c === backfills.get('a-honest') ? 'a-honest' : 'z-readable')), ['a-honest', 'z-readable'])
 })
 
+test('a name that reads as another provider does not steer that provider\'s sweep', async () => {
+  // What the registry's key buys the sweep. The honest provider sweeps daily
+  // at 03:00; the hostile one sweeps every five minutes and answers with the
+  // honest one's registered name from its second read on. At 10:05 only the
+  // hostile cron matches, so a run of `claude` here is one the hostile
+  // contribution steered: on its cadence, under its `backfill.window_days`,
+  // and holding `inFlight` on a name that is not its own, which is what would
+  // then skip the real provider's own due tick as `already_running`.
+  /** @type {string[]} */
+  const ran = []
+  let reads = 0
+  const driver = driverOver(
+    [
+      {
+        get name() { reads += 1; return reads === 1 ? 'a-hostile-identity' : 'claude' },
+        plugin: '@third-party/hostile-identity',
+        datasets: ['ai_gateway_messages'],
+        async *run() {},
+        sweep: { cron: '*/5 * * * *' },
+      },
+      {
+        name: 'claude',
+        plugin: '@hypaware/claude',
+        datasets: ['ai_gateway_messages'],
+        async *run() {},
+        sweep: { cron: '0 3 * * *' },
+      },
+    ],
+    async (args) => { ran.push(args.provider); return OK }
+  )
+
+  const report = await driver.tick({ now: new Date('2026-09-09T10:05:00.000Z') })
+  await tickOver()
+
+  assert.deepEqual(report.fired, [], 'the sweep fired a provider under a name it did not register')
+  assert.deepEqual(ran, [], 'a plugin ran @hypaware/claude on a cadence claude never asked for')
+})
+
+test('a throw the driver cannot render does not escape the guard reporting it', async () => {
+  // Each guard exists to contain a plugin throw, and the thrown value is the
+  // last thing in the catch the plugin still owns. A null-prototype object has
+  // no primitive conversion, so `String(err)` raises on it and reporting the
+  // first failure becomes a second one - this time out of `tick()`, where it
+  // is swallowed as `daemon.tick_failed` and costs every provider's sweep.
+  /** @type {string[]} */
+  const ran = []
+  let armed = false
+  const unreadableName = {
+    get name() {
+      if (armed) throw Object.create(null)
+      return 'a-unreadable-name'
+    },
+    plugin: '@third-party/unrenderable',
+    datasets: ['ai_gateway_messages'],
+    async *run() {},
+    sweep: { cron: '*/5 * * * *' },
+  }
+  const unreadableSweep = {
+    name: 'b-unreadable-sweep',
+    plugin: '@third-party/unrenderable',
+    datasets: ['ai_gateway_messages'],
+    async *run() {},
+  }
+  Object.defineProperty(unreadableSweep, 'sweep', {
+    get() { throw Object.create(null) },
+  })
+
+  const driver = driverOver(
+    [unreadableName, unreadableSweep, readableSweep()],
+    async (args) => { ran.push(args.provider); return OK }
+  )
+  armed = true
+
+  const report = await driver.tick({ now: new Date('2026-09-09T10:05:00.000Z') })
+  await tickOver()
+
+  assert.deepEqual(report.fired, ['z-readable'], 'an unrenderable throw cost the whole sweep evaluation')
+  assert.deepEqual(ran, ['z-readable'])
+})
+
+test('a run rejecting with a value the driver cannot render leaves the daemon up', () => {
+  // The same value on the settlement side, where there is no `tick()` left to
+  // swallow it: `void` discarded that promise, so a throw out of `logFailed`
+  // is an unhandled rejection and Node's default takes the process with it.
+  const script = `
+    import { createBackfillRegistry } from '${REGISTRY_URL}'
+    import { createBackfillSweepDriver } from '${DRIVER_URL}'
+    const backfills = createBackfillRegistry()
+    backfills.register({
+      name: 'a-unrenderable-throw',
+      plugin: '@third-party/unrenderable',
+      datasets: ['ai_gateway_messages'],
+      async *run() {},
+      sweep: { cron: '*/5 * * * *' },
+    })
+    const driver = createBackfillSweepDriver({
+      backfills,
+      backfillMaterializers: { register() {}, get: () => undefined, list: () => [] },
+      env: { HYP_HOME: '/nonexistent-home' },
+      storage: { cacheRoot: '/nonexistent-cache' },
+      query: { getDataset: () => undefined },
+      runBackfill: async () => { throw Object.create(null) },
+    })
+    await driver.tick({ now: new Date('2026-09-09T10:05:00.000Z') })
+    await new Promise((r) => setTimeout(r, 50))
+    process.stdout.write('DAEMON_STILL_UP')
+  `
+  const stdout = execFileSync(process.execPath, ['--input-type=module', '--eval', script], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  assert.equal(stdout, 'DAEMON_STILL_UP')
+})
+
 /** Let every already-queued microtask and immediate settle. */
 function tickOver() {
   return new Promise((resolve) => { setTimeout(resolve, 0) })

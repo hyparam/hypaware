@@ -34,6 +34,16 @@ export function createBackfillRegistry() {
    * value `Array.prototype.sort` never hands a comparator, so it sorts last in
    * silence.
    *
+   * `plugin` and `datasets` are read once for the same reason, even though
+   * neither is a key: their second read used to be in the `backfill.register`
+   * record below, which is after the `set`. A plugin property that answers
+   * differently there logs a registration nobody performed, and one that
+   * raises there leaves this registry holding a contribution while the loader
+   * catches the throw and marks the plugin's whole activation failed
+   * (`src/core/runtime/loader.js`). Every read of the plugin's object now
+   * happens before the Map is touched, so nothing between validation and the
+   * stored entry can still run plugin code.
+   *
    * @param {BackfillContribution} contribution
    */
   function register(contribution) {
@@ -44,12 +54,14 @@ export function createBackfillRegistry() {
     if (typeof name !== 'string' || name.length === 0) {
       throw new TypeError('BackfillRegistry.register: contribution.name must be a non-empty string')
     }
-    if (typeof contribution.plugin !== 'string' || contribution.plugin.length === 0) {
+    const plugin = contribution.plugin
+    if (typeof plugin !== 'string' || plugin.length === 0) {
       throw new TypeError(
         `BackfillRegistry.register: '${name}' missing plugin`
       )
     }
-    if (!Array.isArray(contribution.datasets) || contribution.datasets.length === 0) {
+    const datasets = contribution.datasets
+    if (!Array.isArray(datasets) || datasets.length === 0) {
       throw new TypeError(
         `BackfillRegistry.register: '${name}' datasets must be a non-empty array`
       )
@@ -63,11 +75,12 @@ export function createBackfillRegistry() {
     if (contributions.has(name)) {
       throw new Error(`BackfillRegistry.register: duplicate provider '${name}'`)
     }
+    const datasetList = datasets.join(',')
     contributions.set(name, contribution)
     log.info('backfill.register', {
-      [Attr.PLUGIN]: contribution.plugin,
+      [Attr.PLUGIN]: plugin,
       provider: name,
-      datasets: contribution.datasets.join(','),
+      datasets: datasetList,
     })
   }
 

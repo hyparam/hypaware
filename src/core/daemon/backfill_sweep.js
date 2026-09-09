@@ -186,9 +186,11 @@ export function createBackfillSweepDriver(opts) {
       // `pending` are handled - but that alone is not what makes this safe.
       // `void` discards the promise `.then` returns with nothing attached, so
       // anything a handler throws is an unhandled rejection, which Node's
-      // default terminates the daemon on. What keeps the handlers from
-      // throwing is that they read `identity` and `devRunId`, strings this
-      // driver built, and never the contribution (issue #1509).
+      // default terminates the daemon on. So neither handler may read anything
+      // a plugin controls: the identity they log is `identity` and `devRunId`,
+      // strings this driver built, never the contribution, and the one value
+      // still plugin-owned on the rejection side is the thrown `err` itself,
+      // which `logFailed` renders through `describeThrown` (issue #1509).
       void pending.then(
         (result) => { inFlight.delete(identity.name); logSettled(identity, devRunId, result) },
         (err) => { inFlight.delete(identity.name); logFailed(identity, devRunId, err) }
@@ -257,6 +259,17 @@ export function createBackfillSweepDriver(opts) {
    * string. A `plugin` that stopped being one degrades to the empty string,
    * because it is only ever a log attribute.
    *
+   * A `name` that reads as some other provider's is refused too, and that is
+   * the read the sweep cannot simply take at face value: it is what
+   * `runBackfill` looks the contribution up by, so an accessor answering with
+   * a neighbour's registered name makes the sweep run *that* provider under
+   * this one's schedule and this one's `backfill.window_days`, hold `inFlight`
+   * on the neighbour's name so its own due tick is skipped as
+   * `already_running`, and report a `fired` list the hostile provider is not
+   * even in. `register` keys the Map by the string it validated, so asking the
+   * registry to resolve the name back to this same object is what makes that
+   * key mean anything here.
+   *
    * @param {BackfillContribution} provider
    * @returns {BackfillSweepProviderIdentity | undefined}
    */
@@ -267,6 +280,9 @@ export function createBackfillSweepDriver(opts) {
       if (typeof name !== 'string' || name.length === 0) {
         throw new TypeError('contribution.name is not a non-empty string')
       }
+      if (backfills.get(name) !== provider) {
+        throw new TypeError(`contribution.name '${name}' is not the name it registered under`)
+      }
       return { name, plugin: typeof plugin === 'string' ? plugin : '' }
     } catch (err) {
       // No provider identity on this record: reading one is what just failed.
@@ -275,7 +291,7 @@ export function createBackfillSweepDriver(opts) {
         [Attr.OPERATION]: SWEEP_OPERATION,
         [Attr.ERROR_KIND]: 'unreadable_provider',
         status: 'failed',
-        error: err instanceof Error ? err.message : String(err),
+        error: describeThrown(err),
       })
       return undefined
     }
@@ -319,7 +335,7 @@ export function createBackfillSweepDriver(opts) {
         [Attr.PLUGIN]: identity.plugin,
         provider: identity.name,
         status: 'failed',
-        error: err instanceof Error ? err.message : String(err),
+        error: describeThrown(err),
       })
       return undefined
     }
@@ -411,7 +427,7 @@ export function createBackfillSweepDriver(opts) {
       [Attr.DEV_RUN_ID]: devRunId,
       provider: identity.name,
       status: 'failed',
-      error: err instanceof Error ? err.message : String(err),
+      error: describeThrown(err),
     })
   }
 
@@ -444,4 +460,31 @@ function sweepRetentionDays(pluginName, config) {
   const { windowDays } = readBackfillPolicy(entry)
   if (windowDays !== undefined) return windowDays
   return resolveRetentionDays({ flag: undefined, config })
+}
+
+/**
+ * The message for a throw that came from a plugin, rendered so that reporting
+ * one failure cannot become a second one.
+ *
+ * `err` is the last plugin-owned value left in these catch blocks: a thrown
+ * object carries whatever `message` getter its author wrote, and `String()`
+ * raises on its own for anything with no primitive conversion, a null-prototype
+ * object being the easy case. Every caller is a guard whose whole purpose is to
+ * contain a plugin throw - two inside `tick()`, where an escape is swallowed as
+ * `daemon.tick_failed` and costs the sweep for every provider (issue #1510),
+ * and one in a settlement handler `void` discarded, where an escape is an
+ * unhandled rejection and Node's default takes the daemon down (issue #1509) -
+ * so a raise from this expression would defeat the guard it is reporting from.
+ * The bare idiom is repo-wide, but it is only load-bearing where the catch is
+ * the last thing standing between a plugin and the process.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function describeThrown(err) {
+  try {
+    return String(err instanceof Error ? err.message : err)
+  } catch {
+    return 'unreadable error'
+  }
 }
