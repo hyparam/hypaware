@@ -702,8 +702,14 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.activePlugins.length === 0) {
     stdout.write('    (none - no config or no plugins selected)\n')
   } else {
+    // The list is the configured set, so a plugin that did not activate still
+    // belongs on it, tagged: unqualified, the line claims it is running when
+    // some or all of what it contributes is not. How much is not, the reason,
+    // and the repair are in the diagnostics block.
+    const failed = new Set(report.failedPlugins)
     for (const name of report.activePlugins) {
-      stdout.write(`    - ${name}${provenanceTag(report.layered, isCentralPlugin(report.layered, name))}\n`)
+      const tag = failed.has(name) ? '  [failed to activate]' : ''
+      stdout.write(`    - ${name}${provenanceTag(report.layered, isCentralPlugin(report.layered, name))}${tag}\n`)
     }
   }
 

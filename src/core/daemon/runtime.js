@@ -25,7 +25,7 @@ import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
-import { BOOT_FAILED_WARNING_PREFIX } from './boot_failure.js'
+import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
 import {
   clearControlRequests,
   watchControlRequests,
@@ -425,6 +425,12 @@ export async function runDaemon(opts = {}) {
   }
 
   status.configPath = boot.configPath ?? undefined
+  // A plugin whose `activate()` threw leaves no source, no sink and no command
+  // behind, so every other line of this snapshot reads as it would on a boot
+  // nobody configured it for. Recorded on both surfaces this process owns: the
+  // file log a support bundle carries, and the snapshot `hyp status` reads.
+  const failedPlugins = recordFailedPlugins({ activations: boot.activations, log: fileLog })
+  if (failedPlugins.length > 0) status.failedPlugins = failedPlugins
   status.sources = sourceSnapshots
   const anySourceFailed = sourceSnapshots.some((s) => s.state === 'failed')
   product.setAdapters(productAdapters(boot.config?.plugins ?? []))

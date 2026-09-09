@@ -75,6 +75,21 @@ export interface RecentEntrypoint {
   rows: number
 }
 
+/**
+ * One plugin whose `activate()` did not complete on this boot.
+ *
+ * The kernel catches per plugin and boots the rest, so the snapshot around
+ * this entry looks exactly like the snapshot of a boot that was never asked
+ * for the plugin at all: no source, no sink, no command, and no error. This
+ * is the entry that tells those two apart (issue #1556).
+ */
+export interface FailedPluginSnapshot {
+  name: string
+  /** `activate_failed`, `activate_missing`, or whatever the throw carried. */
+  errorKind: string
+  message: string
+}
+
 export interface SinkSnapshot {
   instance: string
   plugin: string
@@ -188,6 +203,12 @@ export interface DaemonStatus {
   sources: SourceSnapshot[]
   sinks: SinkSnapshot[]
   /**
+   * Plugins this daemon's boot could not activate. Absent, never `[]`, when
+   * every configured plugin came up, so a boot with nothing to report writes
+   * the file shape it always wrote.
+   */
+  failedPlugins?: FailedPluginSnapshot[]
+  /**
    * What the last completed cache-maintenance tick left fragmented, and why
    * (LLP 0228#status-file-is-the-surface). Absent until a tick has run.
    */
@@ -222,6 +243,7 @@ export type StatusDiagnosticKind =
   | 'cache_flush_failing'
   | 'installed_plugin_shadowed'
   | 'source_name_unregistered'
+  | 'plugin_activate_failed'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -502,6 +524,13 @@ export interface HypAwareStatusReport {
    */
   configRecordsAnswer: boolean
   activePlugins: string[]
+  /**
+   * Plugins the running daemon could not activate, read from its live
+   * snapshot (issue #1556). Empty when no daemon is running:
+   * a snapshot left by an exited daemon is a record of how that run went, not
+   * a claim about now (LLP 0383#a-record-not-a-claim).
+   */
+  failedPlugins: string[]
   /**
    * Two-layer provenance (LLP 0031). Null on a host that never joined (a
    * single local layer: the V1 surface is unchanged). When set, the

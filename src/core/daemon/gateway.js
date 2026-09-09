@@ -12,14 +12,14 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { clearPidFile, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
 import { DAEMON_HEARTBEAT_STALE_MS, daemonHeartbeatAgeMs, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
-import { BOOT_FAILED_WARNING_PREFIX } from './boot_failure.js'
+import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
 import { openDaemonLog } from './logs.js'
 
 /**
  * @import { ChildProcess } from 'node:child_process'
  * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { DaemonStatus, RunDaemonOptions, SourceSnapshot } from '../../../src/core/daemon/types.js'
+ * @import { DaemonStatus, FailedPluginSnapshot, RunDaemonOptions, SourceSnapshot } from '../../../src/core/daemon/types.js'
  */
 
 const PROCESSOR_ENTRY = fileURLToPath(new URL('./processor.js', import.meta.url))
@@ -59,6 +59,10 @@ export async function runGatewayDaemon(opts = {}) {
   let child
   /** @type {BootKernelResult | undefined} */
   let boot
+  // Routing contributors activate here as well as in the child, over a storage
+  // proxy that refuses cache access, so a plugin can fail here and nowhere else.
+  /** @type {FailedPluginSnapshot[]} */
+  let gatewayFailedPlugins = []
   /** @type {NodeJS.Timeout | undefined} */
   let restartTimer
   /** @type {NodeJS.Timeout | undefined} */
@@ -138,6 +142,16 @@ export async function runGatewayDaemon(opts = {}) {
       }
       status.sinks = matches ? processor?.sinks ?? [] : []
       status.maintenance = matches ? processor?.maintenance : undefined
+      // Both processes activate plugins and this aggregate is the one file
+      // `hyp status` reads, so it carries what either of them could not
+      // activate, deduped: a plugin that throws in both is one broken plugin.
+      // The child's list is read the way every borrowed field here is, since
+      // `readStatusFile` validates only "is an object".
+      const reported = matches && Array.isArray(processor?.failedPlugins) ? processor.failedPlugins : []
+      const failedByName = new Map([...gatewayFailedPlugins, ...reported]
+        .filter(failed => !!failed && typeof failed.name === 'string')
+        .map(failed => [failed.name, failed]))
+      status.failedPlugins = failedByName.size > 0 ? [...failedByName.values()] : undefined
       status.warnings = [...(matches ? processor?.warnings ?? [] : []), ...(!ready ? ['processing_unavailable: gateway forwarding remains available; recording and background work may be delayed or lost'] : [])]
       status.processes = { gateway: { pid: process.pid, state: gateway ? 'healthy' : 'disabled' }, processing: { pid: child?.pid, state: ready ? 'healthy' : 'degraded', restarts } }
       status.configPath = boot?.configPath ?? undefined
@@ -145,7 +159,7 @@ export async function runGatewayDaemon(opts = {}) {
       // transition stay immediately observable, but rewriting an unchanged file
       // once a second is ~86k idle disk writes a day on a daemon that runs for
       // weeks. Write on a real change, or on the heartbeat cadence.
-      const shape = JSON.stringify([status.state, status.sources, status.sinks, status.maintenance, status.warnings, status.processes, status.configPath])
+      const shape = JSON.stringify([status.state, status.sources, status.sinks, status.maintenance, status.failedPlugins, status.warnings, status.processes, status.configPath])
       const nowMs = Date.now()
       if (shape !== lastStatusShape || nowMs - lastStatusWriteMs >= STATUS_HEARTBEAT_MS) {
         lastStatusShape = shape
@@ -273,6 +287,7 @@ export async function runGatewayDaemon(opts = {}) {
 
   try {
     boot = await bootKernel({ hypHome, configPath: opts.configPath, env, runId, mode: 'daemon', bootProfile: 'gateway', storage })
+    gatewayFailedPlugins = recordFailedPlugins({ activations: boot.activations, log })
     const source = boot.runtime.sources.get('ai-gateway')
     if (!source && boot.config?.plugins?.some(plugin => plugin.name === '@hypaware/ai-gateway' && plugin.enabled !== false)) {
       throw new Error('configured gateway failed to activate')

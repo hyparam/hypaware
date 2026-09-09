@@ -43,7 +43,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
-import { warningsRecordBootFailure } from './boot_failure.js'
+import { MAX_ACTIVATION_MESSAGE_CHARS, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -1382,7 +1382,10 @@ export async function collectHypAwareStatus(opts = {}) {
   // daemon's.
   const snapshotIsThisProcess =
     typeof daemonStatusFile?.pid !== 'number' || daemonStatusFile.pid === daemon.pid
-  const heartbeatAgeMs = daemon.running && snapshotIsThisProcess
+  // Is the snapshot a live daemon's own, and so readable in the present tense
+  // at all? Every reader below that makes a claim about *now* is gated on it.
+  const snapshotIsLive = daemon.running && snapshotIsThisProcess
+  const heartbeatAgeMs = snapshotIsLive
     ? daemonHeartbeatAgeMs(daemonStatusFile, Date.now())
     : null
   if (heartbeatAgeMs !== null && heartbeatAgeMs > DAEMON_HEARTBEAT_STALE_MS) {
@@ -1587,7 +1590,6 @@ export async function collectHypAwareStatus(opts = {}) {
     // dereferences `.name`, so a `null` in the list takes the whole report out
     // at the render rather than here.
     // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
-    const snapshotIsLive = daemon.running && snapshotIsThisProcess
     sources.push(...daemonStatusFile.sources
       .filter((s) => !!s && typeof s === 'object')
       .map((s) => (
@@ -1597,6 +1599,62 @@ export async function collectHypAwareStatus(opts = {}) {
       )))
   } else {
     sources.push(...inferConfiguredSources(activePlugins))
+  }
+
+  // ----- plugins the running daemon could not activate (issue #1556) -----
+  // `activePlugins` above is the configured set: the right answer to what this
+  // machine is set up to do, the only answer available with no daemon running,
+  // and no answer at all to whether a plugin is running. The daemon is the only
+  // process that knows that, so it comes from the snapshot, whose entries are
+  // validated the way every borrowed list here is: the file is only known to
+  // hold an object (LLP 0164#status-reads-it-from-the-status-file).
+  // @ref LLP 0383#a-record-not-a-claim [constrained-by]: an `error` diagnostic is present tense, so it is raised off a live daemon's snapshot only
+  /** @type {string[]} */
+  const failedPlugins = []
+  const reportedFailures = snapshotIsLive && Array.isArray(daemonStatusFile?.failedPlugins)
+    ? daemonStatusFile.failedPlugins
+    : []
+  // Where the untruncated reason is. Both files, because either process can be
+  // the one that could not activate the plugin, and the entry does not say
+  // which. Same two paths `recent_errors` counts (LLP 0349), derived the same
+  // way, so the pointer cannot drift from the store it points at.
+  const activationLogGrep = reportedFailures.length === 0 ? ''
+    : `grep -s plugin_activate_failed ${path.join(daemonLogDir(stateRoot), 'daemon.log')} `
+      + `${path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log')}`
+  for (const entry of reportedFailures) {
+    const name = sanitizeLabel(entry?.name)
+    if (name === undefined) continue
+    failedPlugins.push(name)
+    // An error, so it degrades `overall` through the existing severity rule.
+    // The daemon is up and the rest of the install works, but a plugin the
+    // operator configured is capturing nothing, and a machine that silently
+    // stopped capturing is the outage this surface exists to name.
+    // What is left of the plugin, read off the same snapshot the failure came
+    // from rather than asserted. A routing contributor activates in *both*
+    // daemon processes, and in the gateway it gets a storage proxy that throws
+    // on every cache call, so one that reads storage in `activate()` fails
+    // there and comes up in the processing daemon: its source is `started` in
+    // this very report while the entry says it never activated. "Nothing of it
+    // is running" is a claim this collector can check, so it checks it.
+    const stillContributing = sources.some((s) => s.plugin === name && s.state === 'started')
+    diagnostics.push({
+      severity: 'error',
+      kind: 'plugin_activate_failed',
+      message: `plugin '${name}' failed to activate `
+        + `(${sanitizeLabel(entry.errorKind) ?? 'activate_failed'}): `
+        + `${sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'}`
+        + (stillContributing
+          ? ' - it came up in only one of the daemon\'s two processes, so part of what it contributes is not running'
+          : ' - none of its sources, sinks or commands are running'),
+      // Not `hyp plugin list`: it prints the plugins *this* CLI boot activated
+      // plus the install lock, so the plugin that just failed is either missing
+      // from the output entirely (a bundled adapter, the likeliest subject) or
+      // sits under "Installed plugins" with nothing marking it as broken. The
+      // reason above is clamped to a sentence and the commonest real one is a
+      // module-resolution error longer than that, so the first repair is the
+      // record that kept it whole.
+      repair: [activationLogGrep, 'hyp daemon restart'],
+    })
   }
 
   // ----- recent client surfaces (LLP 0164) -----
@@ -2371,6 +2429,7 @@ export async function collectHypAwareStatus(opts = {}) {
     configValid,
     configRecordsAnswer,
     activePlugins,
+    failedPlugins,
     layered,
     daemon,
     sources,
