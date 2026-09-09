@@ -8,8 +8,13 @@
 //
 // What makes the committed partition reachable at all is
 // `discoverReadyPartitions` flushing the pending spool and re-running discovery
-// inside the same tick. Only the two sink-export smokes drove that, and CI runs
-// no smokes (#1487).
+// inside the same tick. Before this test, deleting that re-discovery reddened
+// only `test/core/sink-hostile-dataset-name.test.js`, which drives it over a
+// stubbed storage (`hasPendingSync: () => true`, fake table paths) to prove a
+// hostile flush failure cannot skip it. Nothing in `npm test` drove it over the
+// real cache write path, where the spool label and the committed partition
+// actually differ. The two sink-export smokes did, and CI runs no smokes
+// (#1487).
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -34,8 +39,14 @@ const COLUMNS = [
 ]
 
 /**
- * A dataset that lists its spool label and every committed partition on disk,
- * the shape every cache-backed dataset in the tree uses (cf. `@hypaware/otel`).
+ * A dataset that lists its spool label and every committed partition on disk.
+ * That is the convention the cache-backed datasets follow: `@hypaware/otel`,
+ * `@hypaware/ai-gateway`, `@hypaware/gascity`, `@hypaware/claude`'s telemetry
+ * events and both graph plugins all list the label and then scan. It is a
+ * convention rather than an invariant the kernel enforces: `@hypaware/github`
+ * still returns its spool label alone and loses every row to the flush below
+ * (#1593), which is why this drives the real driver rather than asserting the
+ * shape at the dataset level.
  *
  * @param {string} cacheRoot
  * @param {string} spoolPath
