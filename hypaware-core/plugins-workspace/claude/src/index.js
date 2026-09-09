@@ -35,7 +35,7 @@ import { claudeBodySpoolDir, ensureClaudeBodySpool } from './telemetry/spool.js'
 const PLUGIN_NAME = '@hypaware/claude'
 const CLIENT_NAME = 'claude'
 const UPSTREAM_NAME = 'anthropic'
-const FALLBACK_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
+const CLI_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
 
 /**
  * The plugin's `config_sections` validator, surfaced as a side-effect-free
@@ -486,14 +486,15 @@ export async function activate(ctx) {
 /**
  * Claude runs hooks from arbitrary working directories, so the managed hook
  * must use a concrete CLI entrypoint instead of assuming `hyp` is on PATH.
+ * Daemon reconciliation runs in processor.js, so process.argv[1] is not
+ * necessarily a CLI. Resolve the entrypoint from this installed package.
  *
  * @param {NodeJS.ProcessEnv} env
  */
 function resolveHookBinPath(env) {
   const explicit = firstNonEmpty(env.HYPAWARE_BIN, env.HYP_BIN)
   if (explicit) return path.resolve(explicit)
-  if (process.argv[1]) return path.resolve(process.argv[1])
-  return FALLBACK_BIN_PATH
+  return CLI_BIN_PATH
 }
 
 /**
