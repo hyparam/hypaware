@@ -187,7 +187,13 @@ function isMissingBinary(err) {
   return err instanceof Error && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT'
 }
 
-/** @param {string[]} args */
+/**
+ * Stdout is returned verbatim. The empty-list check above reads exact
+ * emptiness, so trimming here would silently turn a truncated whitespace-only
+ * response into a successful "no sessions" import instead of the failure it is.
+ *
+ * @param {string[]} args
+ */
 async function runOpenCode(args) {
   const result = await execFileAsync('opencode', args, {
     encoding: 'utf8',
