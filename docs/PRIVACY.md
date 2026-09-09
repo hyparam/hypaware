@@ -1,5 +1,7 @@
 # What HypAware records, and how to control it
 
+[Documentation](README.md)
+
 HypAware records AI activity on your machine. This page is the honest
 inventory: what is captured, where it goes, and every control you have over
 it. If your team is rolling HypAware out, this is the page to read before
@@ -223,10 +225,16 @@ next batch write back rows you just deleted.
 
 ## Enrolling with a team: the first-sync review
 
-Enrollment never ships history silently. When `hyp remote login` (or
-`hyp join`) enrolls a machine, the first sync, which includes backfilled
-history, is held until at least 11:59pm local time that day, and the exact
-deadline is printed. Before it passes:
+An attended `hyp remote login` enrollment creates a first-sync review hold,
+including backfilled history. Login prints the deadline: the next local
+11:59pm, or the following day's 11:59pm if fewer than four hours remain.
+`hyp status` reports the hold. A confirmed all-destination `hyp sync` can
+release it early; otherwise it expires automatically.
+
+Token-based `hyp join` and re-logins do not create this hold. Apply privacy
+markings before unattended enrollment; see [headless setup](HEADLESS.md).
+
+Before an attended review deadline passes:
 
 open Claude Code or Codex and run the **`hypaware-privacy`** skill. It walks
 the captured directories with you, samples them for credentials, personal

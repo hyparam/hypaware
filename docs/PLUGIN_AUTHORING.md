@@ -1,5 +1,7 @@
 # Authoring a HypAware plugin
 
+[Documentation](README.md)
+
 This guide takes you from nothing to a working, validated plugin. The
 fast path is two commands:
 
