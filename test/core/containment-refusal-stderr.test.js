@@ -20,7 +20,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs/promises'
-import { closeSync } from 'node:fs'
+import { closeSync, openSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -1203,18 +1203,44 @@ test('a provider that rejects is diagnosed even if another is installed before t
   assert.match(stderr, /the provider that emitted this rejected/, 'and so is the one whose rejection landed after it was replaced')
 })
 
+/**
+ * Break a live writer's stream the way the operating system breaks it, by
+ * leaving it a descriptor it cannot write to: every write from here on fails
+ * EBADF in the kernel, which is what the three tests below pin.
+ *
+ * A read-only descriptor rather than `closeSync(stream.fd)`, because closing
+ * it hands its *number* back to the process while the stream still intends to
+ * close that number when it destroys: an `fs.open` landing in that window
+ * draws the recycled number and then loses it to the stream's close, which is
+ * an EBADF on a line that never touched a descriptor (hyparam/hypaware#1521).
+ * No number here is ever free while a close is still owed on it. The stream
+ * closes the read-only one exactly once, and the writable one it replaced
+ * stays open, still holding its number against anything that refers to it, the
+ * buffered write included, until the returned release closes it.
+ *
+ * @param {any} writer a JsonlWriter whose stream is open
+ * @returns {() => void} closes the descriptor the stream no longer holds
+ */
+function refuseWritesToStream(writer) {
+  const writable = writer.stream.fd
+  writer.stream.fd = openSync(writer.filePath, 'r')
+  return () => closeSync(writable)
+}
+
 // The in-tree half of the close-failure gap. LLP 0335#close-failures could
 // name the report but not demonstrate it on anything this repo ships:
 // `JsonlWriter.close` resolved from `stream.end`'s callback without reading
 // the error that callback is handed, so a disk that took none of the buffered
 // records produced a clean shutdown and no line anywhere
 // (hyparam/hypaware#1130 item 2, hyparam/hypaware#1137 item 3). The stream is
-// broken the way the operating system breaks it, by taking the descriptor
-// away, rather than by a fake that agrees with the assertion.
+// broken the way the operating system breaks it, by leaving it a descriptor it
+// cannot write to, rather than by a fake that agrees with the assertion.
 //
 // @ref LLP 0337#close-rejects [tests]: a JSONL close that lost its records is diagnosed once on stderr.
 test('a JSONL exporter whose stream fails at close says so instead of reporting a clean shutdown', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-close-'))
+  /** @type {(() => void)|undefined} */
+  let release
   try {
     const exporter = new JsonlSpanExporter({ dir, pid: 4242 })
     const writer = /** @type {any} */ (exporter).writer
@@ -1222,7 +1248,7 @@ test('a JSONL exporter whose stream fails at close says so instead of reporting 
     await new Promise((resolve) => { writer.stream.once('open', resolve) })
     // Everything after this write has nowhere to land. The stream reports it
     // asynchronously, which is the failure mode the old close could not see.
-    closeSync(writer.stream.fd)
+    release = refuseWritesToStream(writer)
     writer.writeBatch([{ note: 'nor this one' }])
 
     const provider = new TracerProvider({
@@ -1239,6 +1265,7 @@ test('a JSONL exporter whose stream fails at close says so instead of reporting 
     const reports = stderr.split('\n').filter((line) => line.includes('telemetry_shutdown_threw'))
     assert.equal(reports.length, 1, 'one line for the failed close')
   } finally {
+    release?.()
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
@@ -1287,6 +1314,9 @@ test('a JSONL write that fails after the write call returned does not end the pr
       "const writer = exporter.writer",
       "writer.writeBatch([{ note: 'the first record' }])",
       "await new Promise((resolve) => { writer.stream.once('open', resolve) })",
+      // A raw close rather than `refuseWritesToStream`: this is a fresh process
+      // that opens nothing after it, so the freed descriptor number cannot be
+      // drawn by anything.
       "fs.closeSync(writer.stream.fd)",
       "writer.writeBatch([{ note: 'the record the closed descriptor cannot take' }])",
       "await new Promise((resolve) => { setTimeout(resolve, 300) })",
@@ -1380,12 +1410,14 @@ test('a shutdown whose providers all close inside the budget stays byte-silent',
 // @ref LLP 0337#close-rejects [tests]: a close inside the async-destroy window is still diagnosed.
 test('a JSONL close that lands after destroy but before the error event is still diagnosed', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-destroy-window-'))
+  /** @type {(() => void)|undefined} */
+  let release
   try {
     const exporter = new JsonlSpanExporter({ dir, pid: 4245 })
     const writer = /** @type {any} */ (exporter).writer
     writer.writeBatch([{ note: 'a record the disk keeps' }])
     await new Promise((resolve) => { writer.stream.once('open', resolve) })
-    closeSync(writer.stream.fd)
+    release = refuseWritesToStream(writer)
     writer.writeBatch([{ note: 'the record that goes nowhere' }])
     // Wait for the destroy, not for the event: this is the window.
     let spins = 0
@@ -1408,6 +1440,7 @@ test('a JSONL close that lands after destroy but before the error event is still
     const written = await fs.readFile(path.join(dir, 'traces-4245.jsonl'), 'utf8')
     assert.doesNotMatch(written, /goes nowhere/, 'and the record really was lost')
   } finally {
+    release?.()
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
@@ -1449,12 +1482,14 @@ test('a JSONL exporter that cannot open its file at all is diagnosed at close', 
 // @ref LLP 0337#close-rejects [tests]: a reported failure is not reported again against the next descriptor.
 test('a JSONL writer reopened after a failed close does not re-report the old failure', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-jsonl-reopen-'))
+  /** @type {(() => void)|undefined} */
+  let release
   try {
     const exporter = new JsonlSpanExporter({ dir, pid: 4247 })
     const writer = /** @type {any} */ (exporter).writer
     writer.writeBatch([{ note: 'one' }])
     await new Promise((resolve) => { writer.stream.once('open', resolve) })
-    closeSync(writer.stream.fd)
+    release = refuseWritesToStream(writer)
     writer.writeBatch([{ note: 'two' }])
     await assert.rejects(() => exporter.shutdown(), /EBADF/, 'the failed close rejects once')
     await exporter.shutdown()
@@ -1470,6 +1505,7 @@ test('a JSONL writer reopened after a failed close does not re-report the old fa
     const written = await fs.readFile(path.join(dir, 'traces-4247.jsonl'), 'utf8')
     assert.match(written, /three/, 'with the records the new descriptor took')
   } finally {
+    release?.()
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
