@@ -36,9 +36,17 @@ function moduleUrl(rel) {
   return pathToFileURL(path.join(REPO_ROOT, rel)).href
 }
 
+// Longer than `sanitizeLabel`'s 120-character default, and shaped like the
+// commonest real one: a module-resolution error whose operative half is the
+// second path. A diagnostic that quotes it at the default width loses exactly
+// the part that says which file did the failing import.
+const THROWN_MESSAGE =
+  "acme thrower: cannot find module '/opt/hypaware/plugins/@acme/thrower/lib/missing-helper.js'"
+  + " imported from '/opt/hypaware/plugins/@acme/thrower/index.js'"
+
 const THROWING_ENTRYPOINT = [
   'export async function activate() {',
-  "  throw new Error('acme thrower: activate always fails')",
+  `  throw new Error(${JSON.stringify(THROWN_MESSAGE)})`,
   '}',
   '',
 ].join('\n')
@@ -262,7 +270,7 @@ test('a plugin whose activate() throws is reported on the surfaces a shipped ins
     assert.ok(logged, `the activation failure went unrecorded in daemon.log: ${JSON.stringify(records.map((r) => /** @type {any} */ (r).event))}`)
     assert.equal(/** @type {any} */ (logged).level, 'error')
     assert.equal(/** @type {any} */ (logged).plugin, '@acme/thrower')
-    assert.match(/** @type {any} */ (logged).message, /activate always fails/)
+    assert.equal(/** @type {any} */ (logged).message, THROWN_MESSAGE)
 
     // Surface two: what `hyp status` tells the operator while the daemon runs.
     const report = run.report
@@ -270,7 +278,12 @@ test('a plugin whose activate() throws is reported on the surfaces a shipped ins
     assert.ok(diag, `hyp status raised nothing: ${JSON.stringify(report.diagnostics.map((/** @type {any} */ d) => d.kind))}`)
     assert.equal(diag.severity, 'error')
     assert.match(diag.message, /@acme\/thrower/)
-    assert.match(diag.message, /activate always fails/)
+    // Quoted whole: the reason is the only thing this diagnostic is for, and
+    // the repair must name a command that answers for a bundled plugin too
+    // (`hyp plugin info` reads the install lock, so it reports every bundled
+    // name as "not installed").
+    assert.ok(diag.message.includes(THROWN_MESSAGE), `the reason was truncated: ${diag.message}`)
+    assert.deepEqual(diag.repair, ['hyp plugin list', 'hyp daemon restart'])
     assert.equal(report.overall, 'degraded', 'a configured plugin that is not running is not a healthy install')
 
     // And the plugin list stops claiming the plugin is running.

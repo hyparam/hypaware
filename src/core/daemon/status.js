@@ -896,6 +896,15 @@ function liveStatusSources(stateRoot) {
  */
 const MAX_SOURCE_HEALTH_CHARS = 200
 
+/**
+ * How much of a failed `activate()`'s message the diagnostic quotes. Wider
+ * than `sanitizeLabel`'s default for the reason above: this is a sentence,
+ * not a name, and the commonest one by far is a module-resolution error whose
+ * operative half is the second path it names ("... imported from <file>"),
+ * which the 120-character default cuts off.
+ */
+const MAX_ACTIVATION_MESSAGE_CHARS = 200
+
 /** The health words `SourceStatus.state` is allowed to carry. */
 const SOURCE_HEALTH_STATES = new Set(['starting', 'ready', 'degraded', 'stopped', 'error'])
 
@@ -1627,9 +1636,9 @@ export async function collectHypAwareStatus(opts = {}) {
       kind: 'plugin_activate_failed',
       message: `plugin '${name}' failed to activate `
         + `(${sanitizeLabel(entry.errorKind) ?? 'activate_failed'}): `
-        + `${sanitizeLabel(entry.message) ?? 'no message recorded'}`
+        + `${sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'}`
         + ' - none of its sources, sinks or commands are running',
-      repair: [`hyp plugin info ${name}`, 'hyp daemon restart'],
+      repair: ['hyp plugin list', 'hyp daemon restart'],
     })
   }
 
