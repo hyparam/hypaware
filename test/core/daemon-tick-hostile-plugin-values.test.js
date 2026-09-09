@@ -156,13 +156,20 @@ test('a tick that cannot read a plugin value still sweeps and still advances the
     assert.equal(status.sinks[0].instance, SINK_INSTANCE)
     assert.ok(ticked, `sink ${SINK_INSTANCE} never recorded a tick, while hyp status reported the daemon healthy`)
   } finally {
-    if (handle) {
-      await handle.stop()
-      await handle.done
+    // The removal is nested inside the shutdown's own finally so a stop that
+    // rejects still surfaces and still leaves no temp HYP_HOME behind. This
+    // test writes a plugin tree and a whole daemon state root, and the run
+    // that would leak one is the failing run nobody is watching.
+    try {
+      if (handle) {
+        await handle.stop()
+        await handle.done
+      }
+    } finally {
+      // Sweeps are fired unblocked, so shutdown does not drain them: a run
+      // started by the last tick can still be touching the state tree here.
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      await fs.rm(hypHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     }
-    // Sweeps are fired unblocked, so shutdown does not drain them: a run
-    // started by the last tick can still be touching the state tree here.
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    await fs.rm(hypHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })

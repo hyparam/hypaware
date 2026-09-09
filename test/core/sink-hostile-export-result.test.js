@@ -165,3 +165,39 @@ test('a partial answer whose retryPartitions cannot be read is still spooled to 
     await fs.rm(stateRoot, { recursive: true, force: true })
   }
 })
+
+// The one place this hardening changes behaviour rather than only containing
+// it: `error` is typed `string` in the kernel contract, so a sink that answers
+// with anything else no longer has that value carried into the outbox JSON and
+// the failure log. An `Error` was the likeliest off-contract answer and the
+// worst outcome: `JSON.stringify` renders it `{}`, so the outbox recorded an
+// empty object where an operator was looking for a reason.
+test('a non-string error is replaced by the kernel sentence, not carried into the outbox', async () => {
+  const stateRoot = await tmpStateRoot()
+  try {
+    const driver = driverOver(stateRoot, [
+      handleReturning('objecterror', () => ({
+        status: 'failed',
+        partitionsExported: 0,
+        error: new Error('disk full'),
+      })),
+    ])
+
+    const report = await driver.tick({ force: true, now: new Date('2026-09-09T00:00:00.000Z') })
+
+    assert.equal(report.sinks[0].status, 'failed')
+    assert.equal(report.sinks[0].error, undefined, 'the summary carries only a string the kernel checked')
+    const names = await outboxEntries(stateRoot, 'objecterror')
+    assert.equal(names.length, 1)
+    const payload = JSON.parse(
+      await fs.readFile(path.join(stateRoot, 'sinks', 'objecterror', 'outbox', names[0]), 'utf8')
+    )
+    assert.equal(
+      payload.error,
+      'sink reported non-ok status',
+      'the outbox records a readable sentence rather than the {} an Error serializes to',
+    )
+  } finally {
+    await fs.rm(stateRoot, { recursive: true, force: true })
+  }
+})
