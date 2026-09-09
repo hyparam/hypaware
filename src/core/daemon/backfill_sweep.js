@@ -43,6 +43,7 @@ const SWEEP_RUN_TIMEOUT_MS = 30 * 60 * 1000
  * @import {
  *   BackfillSweepDriver,
  *   BackfillSweepDriverOptions,
+ *   BackfillSweepProviderIdentity,
  *   BackfillSweepTickOptions,
  *   BackfillSweepTickReport,
  * } from '../../../src/core/daemon/types.js'
@@ -124,33 +125,35 @@ export function createBackfillSweepDriver(opts) {
     /** @type {string[]} */
     const fired = []
     for (const provider of backfills.list()) {
-      const schedule = readSweepSchedule(provider)
+      const identity = readIdentity(provider)
+      if (identity === undefined) continue
+      const schedule = readSweepSchedule(provider, identity)
       if (schedule === undefined) continue
-      if (!isDue(provider, schedule, now, tickOpts.force === true)) continue
+      if (!isDue(identity, schedule, now, tickOpts.force === true)) continue
       // A due provider whose previous run is still going is skipped, not
       // queued: the sweep is level-triggered, so the next tick that finds it
       // due and idle picks up whatever this one would have.
-      if (inFlight.has(provider.name)) {
+      if (inFlight.has(identity.name)) {
         log.warn('backfill.sweep_skipped', {
           [Attr.COMPONENT]: SWEEP_COMPONENT,
           [Attr.OPERATION]: SWEEP_OPERATION,
           [Attr.ERROR_KIND]: 'already_running',
-          [Attr.PLUGIN]: provider.plugin,
-          provider: provider.name,
+          [Attr.PLUGIN]: identity.plugin,
+          provider: identity.name,
           hyp_sweep_schedule: schedule,
           status: 'ok',
         })
         continue
       }
-      const devRunId = `sweep-${provider.name}-${now.getTime()}`
-      fired.push(provider.name)
-      inFlight.add(provider.name)
+      const devRunId = `sweep-${identity.name}-${now.getTime()}`
+      fired.push(identity.name)
+      inFlight.add(identity.name)
       log.info('backfill.sweep_due', {
         [Attr.COMPONENT]: SWEEP_COMPONENT,
         [Attr.OPERATION]: SWEEP_OPERATION,
-        [Attr.PLUGIN]: provider.plugin,
+        [Attr.PLUGIN]: identity.plugin,
         [Attr.DEV_RUN_ID]: devRunId,
-        provider: provider.name,
+        provider: identity.name,
         hyp_sweep_schedule: schedule,
         status: 'ok',
       })
@@ -158,10 +161,10 @@ export function createBackfillSweepDriver(opts) {
       const head = queue
       const pending = head.then(() => runBackfill({
         ctx: { env, config: effectiveConfig, storage, query, backfills, backfillMaterializers },
-        provider: provider.name,
+        provider: identity.name,
         dryRun: false,
         devRunId,
-        retentionDays: sweepRetentionDays(provider, effectiveConfig),
+        retentionDays: sweepRetentionDays(identity.plugin, effectiveConfig),
         sweep: true,
       }))
       // Keep the queue live after either settlement, and after a run that
@@ -177,13 +180,18 @@ export function createBackfillSweepDriver(opts) {
       // log `sweep_failed` without being tried: the same permanent wedge, from
       // the handoff that exists to prevent it.
       queue = head
-        .then(() => awaitQueued(provider, devRunId, pending))
+        .then(() => awaitQueued(identity, devRunId, pending))
         .then(() => undefined, () => undefined)
-      // Fire-and-forget, with both settlements handled: `void` here means "not
-      // awaited", never "not observed".
+      // Fire-and-forget. `void` means "not awaited", and both settlements of
+      // `pending` are handled - but that alone is not what makes this safe.
+      // `void` discards the promise `.then` returns with nothing attached, so
+      // anything a handler throws is an unhandled rejection, which Node's
+      // default terminates the daemon on. What keeps the handlers from
+      // throwing is that they read `identity` and `devRunId`, strings this
+      // driver built, and never the contribution (issue #1509).
       void pending.then(
-        (result) => { inFlight.delete(provider.name); logSettled(provider, devRunId, result) },
-        (err) => { inFlight.delete(provider.name); logFailed(provider, devRunId, err) }
+        (result) => { inFlight.delete(identity.name); logSettled(identity, devRunId, result) },
+        (err) => { inFlight.delete(identity.name); logFailed(identity, devRunId, err) }
       )
     }
     return { fired }
@@ -201,12 +209,12 @@ export function createBackfillSweepDriver(opts) {
    *
    * @ref LLP 0372#bounded-handoff [implements]: one hung provider costs the
    *   sweep that provider, not every provider behind it
-   * @param {BackfillContribution} provider
+   * @param {BackfillSweepProviderIdentity} identity
    * @param {string} devRunId
    * @param {Promise<unknown>} pending
    * @returns {Promise<void>}
    */
-  async function awaitQueued(provider, devRunId, pending) {
+  async function awaitQueued(identity, devRunId, pending) {
     /** @type {NodeJS.Timeout | undefined} */
     let timer
     const abandoned = new Promise((resolve) => {
@@ -226,7 +234,51 @@ export function createBackfillSweepDriver(opts) {
     // queue's: both hand the queue on the same way.
     const timedOut = await Promise.race([pending.then(() => false, () => false), abandoned])
     clearTimeout(timer)
-    if (timedOut) logAbandoned(provider, devRunId)
+    if (timedOut) logAbandoned(identity, devRunId)
+  }
+
+  /**
+   * Rebuild one contribution's identity as two strings this driver owns, or
+   * `undefined` when the plugin's object will not give them up.
+   *
+   * `register` validated `name` and `plugin` once and stored the contribution
+   * by reference, so what it validated is not what a later read returns: both
+   * are free to be accessors. The sweep reads them from the re-entrancy skip,
+   * the dev run id and every log record inside `tick()`, where a throw is
+   * swallowed as `daemon.tick_failed` and costs the sweep for every provider
+   * (issue #1510), and from the settlement handlers that run after `tick()`
+   * returned, on a promise `void` discarded, where a throw is an unhandled
+   * rejection and Node's default takes the daemon down (issue #1509). Reading
+   * once, here, is the same rebuild `readExportResult` does for a sink's
+   * answer in `src/core/sinks/driver.js`.
+   *
+   * A `name` that is no longer a non-empty string is refused like a throw:
+   * `compareStrings`, the `inFlight` set and the dev run id all want a real
+   * string. A `plugin` that stopped being one degrades to the empty string,
+   * because it is only ever a log attribute.
+   *
+   * @param {BackfillContribution} provider
+   * @returns {BackfillSweepProviderIdentity | undefined}
+   */
+  function readIdentity(provider) {
+    try {
+      const name = provider.name
+      const plugin = provider.plugin
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new TypeError('contribution.name is not a non-empty string')
+      }
+      return { name, plugin: typeof plugin === 'string' ? plugin : '' }
+    } catch (err) {
+      // No provider identity on this record: reading one is what just failed.
+      log.warn('backfill.sweep_provider_unreadable', {
+        [Attr.COMPONENT]: SWEEP_COMPONENT,
+        [Attr.OPERATION]: SWEEP_OPERATION,
+        [Attr.ERROR_KIND]: 'unreadable_provider',
+        status: 'failed',
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return undefined
+    }
   }
 
   /**
@@ -246,10 +298,15 @@ export function createBackfillSweepDriver(opts) {
    * An opted-in contribution with no usable `cron` resolves to the empty
    * string, which `cronMatches` reads as "every tick".
    *
+   * The warning names the provider from `identity`, not from the
+   * contribution: a plugin whose `name` throws would otherwise throw again
+   * from the handler that exists to report the first failure (issue #1509).
+   *
    * @param {BackfillContribution} provider
+   * @param {BackfillSweepProviderIdentity} identity
    * @returns {string | undefined}
    */
-  function readSweepSchedule(provider) {
+  function readSweepSchedule(provider, identity) {
     try {
       const sweep = provider.sweep
       if (!sweep) return undefined
@@ -259,8 +316,8 @@ export function createBackfillSweepDriver(opts) {
         [Attr.COMPONENT]: SWEEP_COMPONENT,
         [Attr.OPERATION]: SWEEP_OPERATION,
         [Attr.ERROR_KIND]: 'unreadable_sweep',
-        [Attr.PLUGIN]: provider.plugin,
-        provider: provider.name,
+        [Attr.PLUGIN]: identity.plugin,
+        provider: identity.name,
         status: 'failed',
         error: err instanceof Error ? err.message : String(err),
       })
@@ -275,13 +332,13 @@ export function createBackfillSweepDriver(opts) {
    * provider in the list or to fail the daemon tick this runs inside, so it
    * is logged and treated as not due.
    *
-   * @param {BackfillContribution} provider
+   * @param {BackfillSweepProviderIdentity} identity
    * @param {string} schedule
    * @param {Date} now
    * @param {boolean} force
    * @returns {boolean}
    */
-  function isDue(provider, schedule, now, force) {
+  function isDue(identity, schedule, now, force) {
     if (force) return true
     try {
       return cronMatches(schedule, now)
@@ -290,8 +347,8 @@ export function createBackfillSweepDriver(opts) {
         [Attr.COMPONENT]: SWEEP_COMPONENT,
         [Attr.OPERATION]: SWEEP_OPERATION,
         [Attr.ERROR_KIND]: 'invalid_cron',
-        [Attr.PLUGIN]: provider.plugin,
-        provider: provider.name,
+        [Attr.PLUGIN]: identity.plugin,
+        provider: identity.name,
         hyp_sweep_schedule: schedule,
         status: 'failed',
       })
@@ -300,17 +357,17 @@ export function createBackfillSweepDriver(opts) {
   }
 
   /**
-   * @param {BackfillContribution} provider
+   * @param {BackfillSweepProviderIdentity} identity
    * @param {string} devRunId
    * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }} result
    */
-  function logSettled(provider, devRunId, result) {
+  function logSettled(identity, devRunId, result) {
     log.info('backfill.sweep_finished', {
       [Attr.COMPONENT]: SWEEP_COMPONENT,
       [Attr.OPERATION]: SWEEP_OPERATION,
-      [Attr.PLUGIN]: provider.plugin,
+      [Attr.PLUGIN]: identity.plugin,
       [Attr.DEV_RUN_ID]: devRunId,
-      provider: provider.name,
+      provider: identity.name,
       status: result.ok ? 'ok' : 'failed',
       ...(result.ok ? {} : { [Attr.ERROR_KIND]: 'provider_run_failed' }),
       items_seen: result.scanned,
@@ -324,35 +381,35 @@ export function createBackfillSweepDriver(opts) {
    * `sweep_run_rejected`: nothing failed, nothing finished, and the run is
    * still out there holding its `inFlight` entry.
    *
-   * @param {BackfillContribution} provider
+   * @param {BackfillSweepProviderIdentity} identity
    * @param {string} devRunId
    */
-  function logAbandoned(provider, devRunId) {
+  function logAbandoned(identity, devRunId) {
     log.warn('backfill.sweep_queue_abandoned', {
       [Attr.COMPONENT]: SWEEP_COMPONENT,
       [Attr.OPERATION]: SWEEP_OPERATION,
       [Attr.ERROR_KIND]: 'run_timed_out',
-      [Attr.PLUGIN]: provider.plugin,
+      [Attr.PLUGIN]: identity.plugin,
       [Attr.DEV_RUN_ID]: devRunId,
-      provider: provider.name,
+      provider: identity.name,
       status: 'failed',
       after_ms: runTimeoutMs,
     })
   }
 
   /**
-   * @param {BackfillContribution} provider
+   * @param {BackfillSweepProviderIdentity} identity
    * @param {string} devRunId
    * @param {unknown} err
    */
-  function logFailed(provider, devRunId, err) {
+  function logFailed(identity, devRunId, err) {
     log.error('backfill.sweep_failed', {
       [Attr.COMPONENT]: SWEEP_COMPONENT,
       [Attr.OPERATION]: SWEEP_OPERATION,
       [Attr.ERROR_KIND]: 'sweep_run_rejected',
-      [Attr.PLUGIN]: provider.plugin,
+      [Attr.PLUGIN]: identity.plugin,
       [Attr.DEV_RUN_ID]: devRunId,
-      provider: provider.name,
+      provider: identity.name,
       status: 'failed',
       error: err instanceof Error ? err.message : String(err),
     })
@@ -368,14 +425,18 @@ export function createBackfillSweepDriver(opts) {
  * it, so the schedule cannot disagree with the join-time reconciler about what
  * a given `window_days` means.
  *
+ * Takes the plugin name the sweep already read, not the contribution: this
+ * runs in `tick()`'s loop body, where a throwing accessor is the whole
+ * sweep's problem rather than one provider's.
+ *
  * @ref LLP 0359#sweep-context [implements]: a positive `backfill.window_days` narrows that provider's sweep, else cache retention applies
- * @param {BackfillContribution} provider
+ * @param {string} pluginName
  * @param {HypAwareV2Config} config
  * @returns {number}
  */
-function sweepRetentionDays(provider, config) {
+function sweepRetentionDays(pluginName, config) {
   const entry = config?.plugins?.find((plugin) =>
-    plugin?.name === provider.plugin && plugin.enabled !== false
+    plugin?.name === pluginName && plugin.enabled !== false
   )
   const { windowDays } = readBackfillPolicy(entry)
   if (windowDays !== undefined) return windowDays

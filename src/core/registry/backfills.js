@@ -62,8 +62,20 @@ export function createBackfillRegistry() {
     return contributions.get(name)
   }
 
+  /**
+   * Every registered contribution, ordered by name.
+   *
+   * The order comes from the keys, not from `a.name`: the key is the name
+   * this registry validated at registration, while `contribution.name` is a
+   * live plugin property free to be an accessor. Reading it here would run
+   * plugin code inside a comparator, where a throw escapes into every caller
+   * of `list()` - the daemon's backfill sweep among them, which loses the
+   * sweep for every provider rather than for one contribution (issue #1509).
+   */
   function list() {
-    return Array.from(contributions.values()).sort((a, b) => compareStrings(a.name, b.name))
+    return Array.from(contributions.keys())
+      .sort(compareStrings)
+      .map((name) => /** @type {BackfillContribution} */ (contributions.get(name)))
   }
 
   return { register, get, list }

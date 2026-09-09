@@ -948,6 +948,18 @@ export interface BackfillSweepRunner {
   }): Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>
 }
 
+/**
+ * One backfill contribution's identity, read once out of the plugin's object and
+ * rebuilt as strings the kernel owns. Everything the sweep does after that
+ * read - the re-entrancy set, the dev run id, the log records, and the
+ * settlement handlers that run long after `tick()` returned - uses this
+ * instead of the contribution, so no later step can run a plugin accessor.
+ */
+export interface BackfillSweepProviderIdentity {
+  name: string
+  plugin: string
+}
+
 export interface BackfillSweepDriverOptions {
   backfills: BackfillRegistry
   backfillMaterializers: BackfillMaterializerRegistry
