@@ -1,6 +1,7 @@
 // @ts-check
 
 import { spawn } from 'node:child_process'
+import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -95,6 +96,75 @@ export function isNpxBinPath(binPath, env = process.env) {
   const cache = env.npm_config_cache ? path.resolve(env.npm_config_cache) : undefined
   if (cache && isInside(normalized, path.join(cache, '_npx'))) return true
   return normalized.split(path.sep).includes('_npx')
+}
+
+/**
+ * The absolute path of an already-installed HypAware CLI, or `undefined`.
+ *
+ * The read-only counterpart to `ensureDurableBinForNpx`, for a caller that must
+ * record a CLI path on disk but cannot spend an `npm install -g` to get one: it
+ * finds only what is already there, so it stays synchronous and total.
+ *
+ * `$PATH` is the search, not the answer - what comes back is absolute, so a
+ * consumer that cannot depend on `PATH` at run time spends the lookup once,
+ * here. What it will not answer with is any `node_modules` tree, npx's own
+ * shim directory among them: those sit in front of `$PATH` for exactly as long
+ * as one command runs and the next `npm ci` deletes them, so recording one
+ * only trades npm's prune schedule for npm's install schedule.
+ *
+ * It answers "where is an installed `hypaware`", not "where is *this*
+ * `hypaware`": the first executable of that name wins and no version is
+ * compared, which is the one place it parts company with
+ * `ensureDurableBinForNpx` and its deliberate `name@version` pin. Telling the
+ * difference means resolving the candidate's own `package.json` across every
+ * install layout (npm, pnpm, yarn, and volta/nvm/asdf shims) or spawning it
+ * for `--version`, and each buys the check by giving up either correctness on
+ * a layout nobody enumerated or the synchronous, total contract above. So skew
+ * is accepted here rather than detected, and not every skew is loud: a CLI too
+ * old for the subcommand answers `unknown command` in front of whoever ran it,
+ * but one old enough only to predate a later contract on a subcommand it still
+ * has can go on exiting 0. What the walk buys against that is a path that will
+ * still be there, which is the one thing the `_npx` path it displaces cannot
+ * promise. The `node_modules` rule carries most of the weight: a project-local
+ * `hypaware` is both the likeliest wrong version to find and the likeliest to
+ * be deleted, and it is refused on the second ground without needing the first.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {NodeJS.Platform} [platform]
+ * @returns {string | undefined}
+ */
+export function findInstalledHypawareBin(env = process.env, platform = process.platform) {
+  const exts = platform === 'win32'
+    ? (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+    : ['']
+  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+    // A relative entry (or the empty string, which `$PATH` uses to mean the
+    // cwd) would resolve against whatever directory the caller happened to run
+    // in, which is the same kind of path that does not survive being written
+    // down. Only an absolute entry can answer the question being asked.
+    if (!path.isAbsolute(dir)) continue
+    // Every `node_modules/.bin` is temporary, and `npx` and `npm run` both put
+    // one at the FRONT of `$PATH`. The npx cache is one instance of that and
+    // has its own test because its layout is recognizable on its own; a plain
+    // project-local install is the same hazard without the tell, and the next
+    // `npm ci` removes it just as npm's prune removes the cache. Recording
+    // either writes down a path that outlives nothing.
+    if (isNpxBinPath(dir, env) || dir.split(path.sep).includes('node_modules')) continue
+    for (const ext of exts) {
+      const candidate = path.resolve(dir, 'hypaware' + ext)
+      try {
+        // `X_OK` alone is true for a directory, because directories are
+        // searchable. A caller that records the answer would pin itself to
+        // something that can never execute, with nothing to say so.
+        if (!statSync(candidate).isFile()) continue
+        accessSync(candidate, fsConstants.X_OK)
+        return candidate
+      } catch {
+        // not here, not a file, or not executable: keep walking
+      }
+    }
+  }
+  return undefined
 }
 
 /**
