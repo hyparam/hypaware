@@ -221,6 +221,7 @@ export type StatusDiagnosticKind =
   | 'capture_gap'
   | 'cache_flush_failing'
   | 'installed_plugin_shadowed'
+  | 'source_name_unregistered'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
