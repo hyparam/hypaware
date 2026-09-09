@@ -131,6 +131,35 @@ export function createCommandRegistry() {
     /** @type {string[]} */
     const aliases = []
     for (const alias of record.aliases ?? []) aliases.push(alias)
+    // Shape, checked after the drain and not before it: every non-iterable
+    // fails this check too, and answering `aliases: 7` here would replace the
+    // boundary error the loop above raises, which names the value passed,
+    // with one about a list the author never wrote.
+    //
+    // A string is refused by name because no member rule can catch it:
+    // `aliases: 'st'`, the ordinary typo for this field, drains into 's' and
+    // 't', which are perfectly good aliases. Unrefused it claims two single
+    // letters globally, so the next plugin to register 's' for real is
+    // refused with a collision naming a command that never meant to claim it,
+    // one activation removed from the typo.
+    if (typeof record.aliases === 'string') {
+      throw new TypeError(
+        `CommandRegistry.register: '${record.name}' has invalid aliases '${record.aliases}' - ` +
+          'aliases must be a list of strings, and a bare string is read one character at a time'
+      )
+    }
+    // Named by index and type, never by rendering the member: a boundary
+    // error is the plugin author's only feedback, and converting a value they
+    // control is the one step here their own code could make throw.
+    for (let i = 0; i < aliases.length; i += 1) {
+      const alias = aliases[i]
+      if (typeof alias !== 'string' || alias.length === 0) {
+        throw new TypeError(
+          `CommandRegistry.register: '${record.name}' has invalid alias at index ${i} - every alias must ` +
+            `be a non-empty string, and this one is ${typeof alias === 'string' ? 'empty' : `of type ${typeof alias}`}`
+        )
+      }
+    }
     for (const alias of aliases) {
       if (byName.has(alias) || aliasIndex.has(alias)) {
         throw new Error(
