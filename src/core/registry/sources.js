@@ -4,7 +4,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { PluginActivationContext, SourceContribution, SourceStatus, StartedSource } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginActivationContext, PluginName, SourceContribution, SourceStatus, StartedSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  */
 
@@ -15,7 +15,10 @@ import { compareStrings } from '../util/compare_strings.js'
  * additionally drives lifecycle via `start`/`stop`/`reload`/`status`,
  * which wrap the source's `StartedSource` handle in `source.*` spans
  * and tick `hyp_sources_started` so a `hyp status` view can report the
- * active set without reaching into plugin internals.
+ * active set without reaching into plugin internals, and binds each
+ * source to its registering plugin via `registeringAs`/`ownerOf`.
+ * Those two are kernel-side like the lifecycle members: they live on
+ * `ExtendedSourceRegistry`, not on the plugin-facing contract.
  *
  * @returns {ExtendedSourceRegistry}
  */
@@ -23,10 +26,86 @@ import { compareStrings } from '../util/compare_strings.js'
 export function createSourceRegistry() {
   /** @type {Map<string, SourceContribution>} */
   const contributions = new Map()
+  /**
+   * The plugin the kernel saw register each source, by the key `register`
+   * validated. Only `registeringAs` writes it, so it is the kernel's own
+   * record rather than the contribution's claim about itself.
+   *
+   * @type {Map<string, PluginName>}
+   */
+  const owners = new Map()
   /** @type {Map<string, StartedSource>} */
   const started = new Map()
   const log = getLogger('sources')
   const instruments = getKernelInstruments()
+  /**
+   * The plugin currently registering, or `''` outside an activation. Set only
+   * by `registeringAs`, which brackets a synchronous `register` call, so no
+   * two activations can hold it at once however they interleave.
+   */
+  let registrar = ''
+
+  /**
+   * Run `fn` with `plugin` recorded as the plugin doing the registering. The
+   * activation context brackets its own `register` call with this, which is
+   * how the registry learns who is calling: `contribution.plugin` is written
+   * by the plugin and cannot be that answer (issue #1541).
+   *
+   * A bracket rather than a `register(plugin, contribution)` overload because
+   * the plugin doctor substitutes a registry that wraps `register` and
+   * delegates to the real one (`src/core/plugin_doctor/dry_run.js`). A second
+   * entry point would route around that wrapper and run the `start()` it
+   * exists to keep inert.
+   *
+   * Restoring the previous value rather than clearing it keeps the outer
+   * call's registrar intact when a property read re-enters `register`.
+   *
+   * @template T
+   * @param {PluginName} plugin
+   * @param {() => T} fn
+   * @returns {T}
+   */
+  function registeringAs(plugin, fn) {
+    const previous = registrar
+    registrar = typeof plugin === 'string' ? plugin : ''
+    try {
+      return fn()
+    } finally {
+      registrar = previous
+    }
+  }
+
+  /**
+   * The plugin the kernel recorded as registering `name`, or `undefined` when
+   * the source was registered outside an activation (the kernel's own tests
+   * and any host driving the registry directly).
+   *
+   * @param {string} name
+   * @returns {PluginName | undefined}
+   */
+  function ownerOf(name) {
+    return owners.get(name)
+  }
+
+  /**
+   * The plugin a lifecycle emission is labelled with: the kernel's record when
+   * it has one, and the contribution's own claim otherwise, which is what a
+   * source registered outside an activation has always been labelled with.
+   *
+   * The record because the `hyp_sources_started` gauge is ticked up by a start
+   * and down by its later stop, so a `plugin` property answering differently
+   * between the two leaves the gauge holding a label pair nothing decrements.
+   *
+   * @param {string} name
+   * @param {SourceContribution} [contribution]
+   * @returns {string}
+   */
+  function labelPluginOf(name, contribution) {
+    const recorded = owners.get(name)
+    if (recorded !== undefined) return recorded
+    const declared = contribution?.plugin
+    return typeof declared === 'string' && declared.length > 0 ? declared : 'unknown'
+  }
 
   // @ref LLP 0012#contribution-surface [implements]: name/plugin/start required, unique source names
   /**
@@ -46,9 +125,21 @@ export function createSourceRegistry() {
    * record below leaves this registry holding a contribution while the loader
    * marks the plugin's whole activation failed (`src/core/runtime/loader.js`).
    *
+   * `plugin` is checked against the registrar rather than taken on trust: the
+   * daemon picks the activation context a source starts under from it, so a
+   * contribution naming a neighbour was handed that neighbour's config slice,
+   * paths, logger, capability handles and permission context, and nothing said
+   * so (issue #1541). Refusing at registration, where the two are known to
+   * disagree, leaves no half-registered source for the boot walk, the status
+   * walk and the doctor's report each to refuse again; it lands as an
+   * activation failure like the missing `start()` and the duplicate name
+   * below, and reaches a plugin author through `hyp plugin doctor`.
+   *
    * @param {SourceContribution} contribution
    */
   function register(contribution) {
+    // Read once, before any plugin property can run and re-enter.
+    const registeredBy = registrar
     if (!contribution || typeof contribution !== 'object') {
       throw new TypeError('SourceRegistry.register: contribution must be an object')
     }
@@ -60,6 +151,20 @@ export function createSourceRegistry() {
     if (typeof plugin !== 'string' || plugin.length === 0) {
       throw new TypeError(`SourceRegistry.register: '${name}' missing plugin`)
     }
+    if (registeredBy !== '' && plugin !== registeredBy) {
+      log.warn('source.register_plugin_mismatch', {
+        [Attr.COMPONENT]: 'sources',
+        [Attr.OPERATION]: 'source.register',
+        [Attr.ERROR_KIND]: 'source_plugin_mismatch',
+        [Attr.PLUGIN]: registeredBy,
+        hyp_declared_plugin: plugin,
+        hyp_source: name,
+        status: 'failed',
+      })
+      throw new Error(
+        `SourceRegistry.register: '${name}' declares plugin '${plugin}' but was registered by '${registeredBy}'`
+      )
+    }
     if (typeof contribution.start !== 'function') {
       throw new TypeError(`SourceRegistry.register: '${name}' missing start()`)
     }
@@ -68,6 +173,7 @@ export function createSourceRegistry() {
     }
     const configSection = contribution.configSection ?? ''
     contributions.set(name, contribution)
+    if (registeredBy !== '') owners.set(name, registeredBy)
     log.info('source.register', {
       [Attr.PLUGIN]: plugin,
       hyp_source: name,
@@ -113,7 +219,7 @@ export function createSourceRegistry() {
     }
     // One read for the span and the counter both, so a single start cannot be
     // spanned under one plugin and counted under another.
-    const plugin = contribution.plugin
+    const plugin = labelPluginOf(name, contribution)
     return withSpan(
       'source.start',
       {
@@ -141,7 +247,7 @@ export function createSourceRegistry() {
     const handle = started.get(name)
     if (!handle) return
     const contribution = contributions.get(name)
-    const plugin = contribution?.plugin ?? 'unknown'
+    const plugin = labelPluginOf(name, contribution)
     await withSpan(
       'source.stop',
       {
@@ -182,7 +288,7 @@ export function createSourceRegistry() {
         {
           [Attr.COMPONENT]: 'sources',
           [Attr.OPERATION]: 'source.reload',
-          [Attr.PLUGIN]: contribution?.plugin ?? 'unknown',
+          [Attr.PLUGIN]: labelPluginOf(name, contribution),
           hyp_source: name,
           status: 'skipped',
         },
@@ -197,7 +303,7 @@ export function createSourceRegistry() {
       {
         [Attr.COMPONENT]: 'sources',
         [Attr.OPERATION]: 'source.reload',
-        [Attr.PLUGIN]: contribution?.plugin ?? 'unknown',
+        [Attr.PLUGIN]: labelPluginOf(name, contribution),
         hyp_source: name,
         status: 'ok',
       },
@@ -218,7 +324,7 @@ export function createSourceRegistry() {
       {
         [Attr.COMPONENT]: 'sources',
         [Attr.OPERATION]: 'source.status',
-        [Attr.PLUGIN]: contribution?.plugin ?? 'unknown',
+        [Attr.PLUGIN]: labelPluginOf(name, contribution),
         hyp_source: name,
         status: 'ok',
       },
@@ -256,6 +362,8 @@ export function createSourceRegistry() {
 
   return {
     register,
+    registeringAs,
+    ownerOf,
     get,
     list,
     start,

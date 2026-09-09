@@ -21,8 +21,9 @@ import { isSafeContributionName } from './contribution_names.js'
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SkillContribution, SkillRegistry, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SkillContribution, SkillRegistry, SourceContribution, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
+ * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  */
 
@@ -144,7 +145,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     capabilities,
     commands: runtime.commands,
     configRegistry: runtime.configRegistry,
-    sources: runtime.sources,
+    sources: createSourcesFacade(pluginName, runtime.sources),
     sinks: runtime.sinks,
     query: runtime.query,
     verbs: runtime.verbs,
@@ -178,6 +179,57 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
   }
   runtime.activationContexts.set(pluginName, ctx)
   return ctx
+}
+
+/**
+ * Per-plugin facade over the global source registry. `register` tells the
+ * registry which plugin is calling, so a source is bound to its registrar
+ * rather than to the `plugin` its own contribution declares: the daemon picks
+ * the activation context a source starts under from that binding, and the
+ * declared field is plugin-written (issue #1541).
+ *
+ * The rest of the registry is forwarded unchanged. `ctx.sources` has always
+ * carried the kernel-side lifecycle members too, and `@hypaware/otel` starts
+ * its own listener through them from `activate()`.
+ *
+ * A registry without `registeringAs` is called exactly as before, for a host
+ * substituting a registry of its own. The plugin doctor's stand-in spreads the
+ * real registry, so it has it.
+ *
+ * @param {PluginName} pluginName
+ * @param {ExtendedSourceRegistry} registry
+ * @returns {ExtendedSourceRegistry}
+ * @ref LLP 0004#the-activation-context [implements]: `sources` is one of the per-plugin registry facades
+ */
+function createSourcesFacade(pluginName, registry) {
+  return {
+    ...registry,
+    /** @param {SourceContribution} contribution */
+    register(contribution) {
+      if (typeof registry.registeringAs !== 'function') {
+        registry.register(contribution)
+        return
+      }
+      // Through `register`, not around it: the doctor wraps that member to
+      // neuter `start()` before the real registry stores it.
+      registry.registeringAs(pluginName, () => { registry.register(contribution) })
+    },
+    /**
+     * Always the activating plugin's name, whatever is passed, like
+     * `provide` on the capabilities facade below. The spread would
+     * otherwise hand a plugin the kernel's own lever for saying who is
+     * registering.
+     *
+     * @template T
+     * @param {PluginName} _plugin
+     * @param {() => T} fn
+     * @returns {T}
+     */
+    registeringAs(_plugin, fn) {
+      if (typeof registry.registeringAs !== 'function') return fn()
+      return registry.registeringAs(pluginName, fn)
+    },
+  }
 }
 
 /**

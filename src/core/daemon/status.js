@@ -947,13 +947,19 @@ export function sourceHealth(reported) {
  *
  * `plugin` is read in the same guarded pass because the boot walk hoisted it
  * outside every try, and it picks the activation context beside the name, so it
- * is no more a bare label than the name is. Unlike the name there is nothing to
- * resolve it back through: the registry keys by source name and keeps no record
- * of the plugin that registered one, so what this returns is still the
- * contribution's own claim. A `plugin` that is no longer a string degrades to
- * the empty string, which every caller must treat as "no plugin" rather than as
- * a key to look up: it collapses the non-strings onto one string, and a string
- * is the shape an activation-context lookup takes.
+ * is no more a bare label than the name is. It resolves back through
+ * `ownerOf`, the plugin the kernel saw call `register`, rather than standing
+ * as the contribution's own claim: a source started under a neighbour's
+ * context gets that neighbour's config slice, paths, logger, capability
+ * handles and permission context (issue #1541). The registry records an owner
+ * only for a source registered through an activation context, so one
+ * registered straight on the registry still resolves to what it declares, and
+ * the resolution is gated on `registered` for the same reason the name is: an
+ * `ownerOf` keyed by a name answering with a neighbour's would label this
+ * contribution with the neighbour's plugin. A `plugin` that is no longer a
+ * string degrades to the empty string, which every caller must treat as "no
+ * plugin" rather than as a key to look up: it collapses the non-strings onto
+ * one string, and a string is the shape an activation-context lookup takes.
  *
  * `registered` false is the refusal, and it covers both ways the read can end
  * badly: a name that resolves to another contribution or to none, and a read
@@ -979,7 +985,10 @@ export function readSourceIdentity(sources, contribution) {
     if (typeof declared === 'string') plugin = declared
     // `register` refuses an empty name, so the empty string a contribution that
     // claimed nothing readable carries here resolves to nothing.
-    return { name, plugin, registered: sources?.get?.(name) === contribution }
+    const registered = sources?.get?.(name) === contribution
+    const recorded = registered ? sources?.ownerOf?.(name) : undefined
+    if (typeof recorded === 'string' && recorded.length > 0) plugin = recorded
+    return { name, plugin, registered }
   } catch {
     // Reading the identity is what just failed. Whatever was read before the
     // throw still names the contribution better than nothing does.

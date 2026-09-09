@@ -4,6 +4,7 @@ import type {
   CapabilityRegistry,
   PluginActivationContext,
   PluginLogger,
+  PluginName,
   PluginPaths,
   QueryRegistry,
   QueryStorageService,
@@ -113,6 +114,18 @@ export type ExtendedSinkRegistry = SinkRegistry & {
 }
 
 export type ExtendedSourceRegistry = SourceRegistry & {
+  /**
+   * Run `fn` with `plugin` recorded as the plugin doing the registering,
+   * and return what it returns. The kernel brackets each plugin's own
+   * `register` call with this, so the registry learns who is calling from
+   * the kernel rather than from `contribution.plugin` (issue #1541).
+   */
+  registeringAs<T>(plugin: PluginName, fn: () => T): T
+  /**
+   * The plugin the kernel recorded as registering `name`, or `undefined`
+   * for a source registered outside any activation.
+   */
+  ownerOf(name: string): PluginName | undefined
   start(name: string, ctx: PluginActivationContext): Promise<StartedSource>
   stop(name: string): Promise<void>
   reload(name: string, ctx: PluginActivationContext): Promise<void>
