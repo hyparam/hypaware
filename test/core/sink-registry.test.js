@@ -464,6 +464,31 @@ test('mutating the registered supports array in place decides nothing', async ()
   await reg.closeAll()
 })
 
+test('the tags the listing hands out are a copy of the ones the registry resolves', async () => {
+  // `ctx.sinks` is this registry itself (`src/core/runtime/activation.js`), so
+  // the listing is a plugin's route to the wrapper. Handing out the validated
+  // array by reference would let it be edited after the check, which is #1568's
+  // drift arriving by the other door.
+  const reg = createSinkRegistry()
+  const contribution = sinkOf({ name: 'listed', plugin: '@third-party/drifting-supports', supports: [] })
+  reg.register(contribution)
+
+  const entry = reg.listContributions()[0]
+  entry.supports.push('queryable')
+  const pushed = await reg.instantiate(requestArgs('listed-push', contribution))
+  assert.deepEqual(pushed.supports, [], 'pushing onto the listed array decided supports')
+
+  entry.supports = ['queryable']
+  const reassigned = await reg.instantiate(requestArgs('listed-set', contribution))
+  assert.deepEqual(reassigned.supports, [], 'reassigning the listed field decided supports')
+
+  // Non-vacuity: the listing is still reporting the registration, and the
+  // contribution reached instantiate by the identity the registry resolves on.
+  assert.deepEqual(reg.listContributions().map((e) => e.supports), [[]])
+  assert.equal(reg.listContributions()[0].contribution, contribution)
+  await reg.closeAll()
+})
+
 test('the sink.contribute, sink.resolved and sink.register records agree on supports', async () => {
   const reg = createSinkRegistry()
   let reads = 0

@@ -121,8 +121,16 @@ export function createSinkRegistry() {
     return contributions.get(contributionKey(plugin, sinkName))?.contribution
   }
 
+  /**
+   * Fresh wrappers carrying a copy of the validated tags. The copy at
+   * `register` guards the plugin's array; this one guards the registry's own,
+   * which the listing is the only route to: `ctx.sinks` is this registry
+   * (`src/core/runtime/activation.js`), so a plugin that could edit the array
+   * it is handed here would decide `supports` after the check, which is the
+   * drift #1568 closed arriving by the other door.
+   */
   function listContributions() {
-    return Array.from(contributions.values())
+    return Array.from(contributions.values(), (entry) => ({ ...entry, supports: entry.supports.slice() }))
   }
 
   /**
