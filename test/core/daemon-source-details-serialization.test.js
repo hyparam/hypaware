@@ -33,6 +33,17 @@ const SOURCE = 'details-fixture'
 /** The fixture's getter throws while this global is set, and not before. */
 const ARMED = '__hypawareDetailsGetterArmed'
 
+/**
+ * The fixture reports a `details` that serializes to nothing (rather than to a
+ * failure) while this global is set. Not the same fault: a `toJSON` returning
+ * `undefined` is a source with no readable detail to give, not a source the
+ * kernel could not read.
+ */
+const UNSERIALIZABLE = '__hypawareDetailsUnserializable'
+
+/** What the fixture reports about itself while `UNSERIALIZABLE` is set. */
+const UNSERIALIZABLE_HEALTH = { state: 'ready', message: 'health survives an unwritable detail' }
+
 /** What the fixture reports while its getter is disarmed. */
 const READABLE_DETAILS = { probes: 1, nested: { lazy: 'readable' } }
 
@@ -66,6 +77,9 @@ export async function activate(ctx) {
     async start() {
       return {
         async status() {
+          if (globalThis['${UNSERIALIZABLE}']) {
+            return { ...${JSON.stringify(UNSERIALIZABLE_HEALTH)}, details: { toJSON() { return undefined } } }
+          }
           return {
             state: 'ready',
             details: {
@@ -213,5 +227,29 @@ test('the tick keeps writing the status file when a source stops being able to r
     // Stopped with the getter still armed: the shutdown refresh and the
     // `stopping` persist run the same path the tick does.
     await closeBoot(booted)
+  }
+})
+
+test('a details that serializes to nothing is an answer without details, not a failed probe', async (t) => {
+  // Distinct from the two above: `JSON.stringify` drops this value rather than
+  // throwing on it, so nothing about the probe went wrong. Round-tripping it
+  // through `JSON.parse` regardless would throw a `SyntaxError` on the string
+  // 'undefined' and erase the health the source did report - a field the
+  // details had nothing to do with (LLP 0394).
+  globalThis[UNSERIALIZABLE] = true
+  t.after(() => { delete globalThis[UNSERIALIZABLE] })
+  let booted
+  try {
+    booted = await bootWith('hypaware-details-empty-', 0)
+
+    const snapshot = /** @type {any} */ (readStatusFile(booted.stateRoot))?.sources?.[0]
+    assert.ok(snapshot, 'boot wrote no source snapshot')
+    assert.equal(snapshot.details, undefined, 'a detail that writes to nothing is recorded as nothing')
+    assert.deepEqual(snapshot.health, UNSERIALIZABLE_HEALTH, 'the health beside the detail must survive it')
+
+    const log = await fs.readFile(path.join(booted.stateRoot, 'logs', 'daemon.log'), 'utf8')
+    assert.doesNotMatch(log, /daemon\.source_status_failed/, 'nothing failed, so nothing may be reported as failing')
+  } finally {
+    if (booted) await closeBoot(booted)
   }
 })

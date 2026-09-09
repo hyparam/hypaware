@@ -143,6 +143,14 @@ function withStatusTimeout(probe, { keepAlive = false } = {}) {
  * written while the daemon runs on, so `hyp status` reports boot-time data
  * with nothing anywhere saying why (issue #1505).
  *
+ * Serializing to nothing is not the same as failing to serialize. A value
+ * `JSON.stringify` drops rather than throws on (a function, a `toJSON` that
+ * returns `undefined`) is a source that reported no readable detail, not a
+ * probe that broke: it is the answer-that-omits-`details` the refresh already
+ * has a rule for, and the health beside it is still worth recording. Parsing
+ * that `undefined` back would instead throw a `SyntaxError` on the string
+ * `'undefined'` and take the whole answer down with it.
+ *
  * @param {SourceStatus | null | undefined} reported
  * @returns {JsonObject | undefined}
  * @ref LLP 0394#health-rides-beside-state [implements]: a details the kernel cannot read is recorded no more than a health it cannot read
@@ -150,7 +158,9 @@ function withStatusTimeout(probe, { keepAlive = false } = {}) {
 function reportedDetails(reported) {
   const details = reported?.details
   if (details === undefined) return undefined
-  return /** @type {JsonObject} */ (JSON.parse(JSON.stringify(details)))
+  const text = JSON.stringify(details)
+  if (text === undefined) return undefined
+  return /** @type {JsonObject} */ (JSON.parse(text))
 }
 
 /**
