@@ -1063,13 +1063,18 @@ export interface CommandRunContext {
   config: HypAwareV2Config
   plugins: ActivePlugin[]
   /**
-   * Plugins this boot selected but whose `activate()` threw (kernel-owned,
-   * populated by the dispatcher). `plugins` alone cannot express a partial
-   * boot: `activatePlugins` catches per plugin and continues, so a command
-   * body that acts on "what the plugin set contributes now" sees a plan with
-   * a hole in it and no way to know. Empty on a clean boot, and on a caller
-   * that pre-built the kernel. Read by the client-asset materializer, which
-   * must not read a failed plugin's missing contribution as a retirement
+   * Plugins this boot came up short of (kernel-owned, populated by the
+   * dispatcher from `bootKernel`'s `unavailablePlugins`). Four routes, and
+   * only the first ever reaches an activation record: a throwing
+   * `activate()`, a dep-graph elimination for an unsatisfied `requires`, a
+   * manifest that would not load (named by its directory, since it has no
+   * plugin name), and a config-enabled plugin the boot profile withheld.
+   * `plugins` alone cannot express a partial boot: `activatePlugins` catches
+   * per plugin and continues, so a command body that acts on "what the plugin
+   * set contributes now" sees a plan with a hole in it and no way to know.
+   * Empty on a clean boot, and on a caller that pre-built the kernel. Read by
+   * the client-asset materializer, which must not read a failed plugin's
+   * missing contribution as a retirement
    * (LLP 0219 #incomplete-activation-prunes-nothing).
    */
   failedPlugins?: string[]
