@@ -265,7 +265,10 @@ export const STRICT_SHORT_FLAGS = { strictShortFlags: true }
  */
 export function parseCommandArgv(argv, inputSchema, opts = {}) {
   const aliases = opts.aliases ?? {}
-  const expanded = argv.map((token) => aliases[token] ?? token)
+  // `Object.hasOwn`, not a bare lookup: tokens come off the command line, so an
+  // `Object.prototype` name ('constructor', 'toString') would otherwise expand
+  // to the inherited function and the parse dies on it (issue #1601).
+  const expanded = argv.map((token) => (Object.hasOwn(aliases, token) ? aliases[token] : token))
   if (expanded.includes('--help') || expanded.includes('-h')) return { help: true }
   return argvToParams(inputSchema, expanded, { strictShortFlags: opts.strictShortFlags === true })
 }
@@ -373,8 +376,11 @@ export function usageForVerb(name, inputSchema) {
  */
 function resolveFlag(props, flag) {
   const snake = flag.replace(/-/g, '_')
-  if (props[snake]) return snake
-  if (props[flag]) return flag
+  // `Object.hasOwn`, not truthiness: `flag` comes off the command line, so
+  // `--constructor` would otherwise bind Object.prototype's function as a
+  // declared property instead of refusing as an unknown flag.
+  if (Object.hasOwn(props, snake)) return snake
+  if (Object.hasOwn(props, flag)) return flag
   return undefined
 }
 

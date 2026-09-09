@@ -96,7 +96,7 @@ export function upsertEntry(lock, entry) {
  * @returns {PluginLockFile}
  */
 export function removeEntry(lock, name) {
-  if (!(name in lock.plugins)) return lock
+  if (!Object.hasOwn(lock.plugins, name)) return lock
   const next = { ...lock.plugins }
   delete next[name]
   return { schema_version: SCHEMA_VERSION, plugins: next }
@@ -110,7 +110,11 @@ export function removeEntry(lock, name) {
  * @returns {PluginLockEntry | undefined}
  */
 export function getEntry(lock, name) {
-  return lock.plugins[name]
+  // `Object.hasOwn`, not a bare lookup: `plugins` is a plain object parsed
+  // from `plugin-lock.json`, so an operator-typed name that is an
+  // `Object.prototype` member would otherwise come back as the inherited
+  // function and read as an install record (issue #1601).
+  return Object.hasOwn(lock.plugins, name) ? lock.plugins[name] : undefined
 }
 
 /** @param {PluginLockFile} lock */
