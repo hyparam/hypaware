@@ -1515,13 +1515,13 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
     const plugin = contribution.plugin
     const existing = runtime.sources.started(contribution.name)
     if (existing) {
-      const reported = await safeStatus(runtime, contribution.name)
+      const reported = await safeStatus(runtime, contribution.name, fileLog)
       snapshots.push({
         name: contribution.name,
         plugin,
         state: 'started',
-        details: reported?.details,
-        health: sourceHealth(reported),
+        details: reported.details,
+        health: reported.health,
       })
       log.info('daemon.source_already_started', {
         [Attr.PLUGIN]: plugin,
@@ -1547,13 +1547,13 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
     }
     try {
       await runtime.sources.start(contribution.name, ctx)
-      const reported = await safeStatus(runtime, contribution.name)
+      const reported = await safeStatus(runtime, contribution.name, fileLog)
       snapshots.push({
         name: contribution.name,
         plugin,
         state: 'started',
-        details: reported?.details,
-        health: sourceHealth(reported),
+        details: reported.details,
+        health: reported.health,
       })
     } catch (err) {
       const message = describeSourceStartError(err, contribution.name)
@@ -1613,18 +1613,41 @@ async function stopAllSources({ runtime, fileLog }) {
 }
 
 /**
- * Best-effort source `.status()` invocation (failures should not
- * abort the daemon's snapshot capture).
+ * Read a started source's own report for the boot snapshot.
+ *
+ * `status()` is plugin code, and resolving an answer is not the same as being
+ * able to read one: a plugin is free to compute any field in a getter. The
+ * answer is therefore taken apart *here*, inside the same try that already
+ * contains the plugin's promise, and every field the caller reads off the
+ * result is one the kernel built - the shape `probeSourceStatus` uses on the
+ * tick path, so a reader does not have to remember which of the two is the
+ * safe one (issue #1504). `details` is the one value passed through by
+ * reference rather than rebuilt, exactly as on the tick path, so it is still
+ * the plugin's object when it reaches `JSON.stringify` (issue #1505).
+ *
+ * A probe that fails says nothing about liveness, so nothing here does: the
+ * source is left running and its snapshot carries no details and no health,
+ * rather than the `failed` that every later tick would skip for the daemon's
+ * life. The failure is logged under the tick's event, once, boot being a
+ * single probe per source.
  *
  * @param {KernelRuntime} runtime
  * @param {string} name
- * @returns {Promise<SourceStatus | null | undefined>}
+ * @param {ReturnType<typeof openDaemonLog>} fileLog
+ * @returns {Promise<{ details: object | undefined, health: SourceHealth | undefined }>}
+ * @ref LLP 0394#health-rides-beside-state [implements]: a boot probe that cannot be read records no health, rather than failing the source
  */
-async function safeStatus(runtime, name) {
+async function safeStatus(runtime, name, fileLog) {
   try {
-    return await runtime.sources.status(name)
-  } catch {
-    return undefined
+    const answer = /** @type {SourceStatus | null | undefined} */ (await runtime.sources.status(name))
+    return { details: answer?.details, health: sourceHealth(answer) }
+  } catch (err) {
+    fileLog.warn('daemon.source_status_failed', {
+      hyp_source: name,
+      message: err instanceof Error ? err.message : String(err),
+      error_kind: 'source_status_probe',
+    })
+    return { details: undefined, health: undefined }
   }
 }
 
