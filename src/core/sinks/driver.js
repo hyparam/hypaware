@@ -8,7 +8,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 
 /**
- * @import { ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetRegistration, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
  * @import { Span } from '../observability/runtime.js'
  * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
  * @import { DriverOptions, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
@@ -122,7 +122,7 @@ export function createSinkDriver(opts) {
           )
           result = readExportResult(reported, partitions)
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
+          const message = describeThrown(err)
           /** @type {ExportResult} */
           const failed = { status: 'failed', partitionsExported: 0, retryPartitions: partitions, error: message }
           await persistOutbox(handle, batchId, partitions, message)
@@ -184,6 +184,7 @@ export function createSinkDriver(opts) {
       all.push(part)
     }
     for (const dataset of datasets) {
+      const datasetName = readDatasetName(dataset)
       try {
         const discover = () => dataset.discoverPartitions({
           config: config ?? { version: 2 },
@@ -212,7 +213,7 @@ export function createSinkDriver(opts) {
             } catch (err) {
               log.warn('sink.flush_partition_failed', {
                 [Attr.SINK_INSTANCE]: handle.instanceName,
-                [Attr.DATASET]: dataset.name,
+                [Attr.DATASET]: datasetName,
                 tablePath: part.tablePath,
                 message: err instanceof Error ? err.message : String(err),
               })
@@ -223,11 +224,10 @@ export function createSinkDriver(opts) {
           for (const part of (await discover()) ?? []) keep(part)
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
         log.warn('sink.discover_partitions_failed', {
           [Attr.SINK_INSTANCE]: handle.instanceName,
-          [Attr.DATASET]: dataset.name,
-          message,
+          [Attr.DATASET]: datasetName,
+          message: describeThrown(err),
         })
       }
     }
@@ -336,6 +336,59 @@ function readExportResult(reported, partitions) {
     bytesWritten: typeof reported?.bytesWritten === 'number' ? reported.bytesWritten : 0,
     retryPartitions: Array.isArray(reported?.retryPartitions) ? reported.retryPartitions.slice() : partitions,
     error: typeof reported?.error === 'string' ? reported.error : undefined,
+  }
+}
+
+/**
+ * One dataset's name as a string this driver owns, or a placeholder when the
+ * plugin's object will not give one up.
+ *
+ * `registerDataset` validated `name` once and stored the registration by
+ * reference, so this is a fresh call into plugin code. The driver wants it only
+ * for two log records, and one of them is the catch that exists to report a
+ * failed `discoverPartitions`: reading the live property there throws a second
+ * time from the handler containing the first throw, out of the daemon tick,
+ * which swallows it as `daemon.tick_failed` and stops every sink's export for
+ * the daemon's life while `hyp status` still reads healthy (issue #1524, the
+ * shape #1509 closed for the backfill sweep). Read once, here, so a name that
+ * cannot be read costs the two records their precision and nothing else.
+ *
+ * @param {DatasetRegistration} dataset
+ * @returns {string}
+ */
+function readDatasetName(dataset) {
+  try {
+    const name = dataset.name
+    return typeof name === 'string' ? name : '<unreadable>'
+  } catch {
+    return '<unreadable>'
+  }
+}
+
+/**
+ * The message for a throw that came from a plugin, rendered so that reporting
+ * one failure cannot become a second one.
+ *
+ * `err` is the last plugin-owned value left in these two catches - one holds a
+ * sink's `exportBatch`, the other a dataset's `discoverPartitions` - and a
+ * thrown object carries whatever `message` getter its author wrote, while
+ * `String()` raises on its own for anything with no primitive conversion, a
+ * null-prototype object being the easy case. Both catches sit on the daemon's
+ * tick path, where an escape is swallowed as `daemon.tick_failed` and costs
+ * every sink its export, so a raise from here would defeat the guard it is
+ * reporting from. The bare idiom stays as it is elsewhere in the tree; it is
+ * load-bearing only where the catch is the last thing between a plugin and the
+ * process, so this stays file-local like its twin in
+ * `src/core/daemon/backfill_sweep.js`.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function describeThrown(err) {
+  try {
+    return String(err instanceof Error ? err.message : err)
+  } catch {
+    return 'unreadable error'
   }
 }
 

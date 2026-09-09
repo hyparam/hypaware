@@ -80,23 +80,55 @@ export function createQueryRegistry() {
   const datasets = new Map()
 
   return {
+    /**
+     * `name` and `cachePartitioning` are each read once, and every later step
+     * uses what this registry took.
+     *
+     * The registration is stored by reference, so a plugin's `name` is free to
+     * be an accessor answering differently each time it is asked, and it is
+     * both the key `getDataset` addresses a dataset by and the key
+     * `listDatasets` orders by. Reading it again for the `set` stored the
+     * dataset under a name nothing had validated: `getDataset` stopped
+     * reaching it, the order came from a string nobody checked, and a second
+     * answer naming an already-registered dataset displaced that dataset
+     * instead of being refused as a duplicate.
+     */
     registerDataset(dataset) {
-      if (!dataset || typeof dataset.name !== 'string' || dataset.name.length === 0) {
+      const name = dataset?.name
+      if (typeof name !== 'string' || name.length === 0) {
         throw new Error('registerDataset: dataset.name is required')
       }
-      if (datasets.has(dataset.name)) {
-        throw new Error(`registerDataset: dataset '${dataset.name}' already registered`)
+      if (datasets.has(name)) {
+        throw new Error(`registerDataset: dataset '${name}' already registered`)
       }
-      if (dataset.cachePartitioning) {
-        validateCachePartitioning(dataset.cachePartitioning, dataset.schema, dataset.name)
+      const cachePartitioning = dataset.cachePartitioning
+      if (cachePartitioning) {
+        validateCachePartitioning(cachePartitioning, dataset.schema, name)
       }
-      datasets.set(dataset.name, dataset)
+      datasets.set(name, dataset)
     },
     getDataset(name) {
       return datasets.get(name)
     },
+    /**
+     * Every registered dataset, ordered by name.
+     *
+     * The order comes from the keys, not from `a.name`: the key is the name
+     * this registry validated, while `dataset.name` is a live plugin property.
+     * Reading it here would run plugin code inside a comparator, where a throw
+     * escapes into every caller of `listDatasets()` before a single entry has
+     * been handed back - `hyp query`, `hyp status`, the sync preview, and the
+     * sink driver's partition discovery, which runs on the daemon's own tick
+     * where the throw is swallowed as `daemon.tick_failed` and costs every
+     * sink its export while `hyp status` still reads healthy (issue #1524).
+     * `compareStrings` refuses a non-string as well, so an accessor that
+     * merely stopped answering with a string was the same outage as one that
+     * raised.
+     */
     listDatasets() {
-      return Array.from(datasets.values()).sort((a, b) => compareStrings(a.name, b.name))
+      return Array.from(datasets.keys())
+        .sort(compareStrings)
+        .map((name) => /** @type {DatasetRegistration} */ (datasets.get(name)))
     },
   }
 }
