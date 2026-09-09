@@ -16,10 +16,21 @@
  *
  * Every hostile fixture here installs its accessor with
  * `Object.defineProperties(base, Object.getOwnPropertyDescriptors(over))`
- * AFTER the registration, so the live getter reaches the stored record. A
- * fixture built with a spread would invoke each getter once and store the
- * copied value, which passes against the buggy code as happily as against the
- * fix; the read counters below fail loudly if that ever happens here.
+ * AFTER the registration, so the live getter reaches the stored record. The
+ * read counters below say the accessor was reached at all: a fixture that set
+ * a plain property, or one whose getter the snapshot never asks, leaves the
+ * count at zero and fails.
+ *
+ * They do not say more than that, and the comment here used to. Rebuilding a
+ * fixture with a spread instead (`Object.assign(record, { ...over })`) freezes
+ * the drifted answer into a plain property, and the counters for the source,
+ * sink and dataset cases still read exactly 1, because the spread itself is
+ * the one read. Those three stay honest anyway: a record permanently claiming
+ * its neighbour's name is a misregistration the same guard refuses, and the
+ * variant was run against the pre-fix code and still failed there. Only the
+ * command and alias fixtures, where the drift has to arrive after
+ * `CommandRegistry` has read the record for itself, are actually held up by
+ * their counters.
  *
  * @ref LLP 0267#consequences [tests]: the snapshot is what the doctor's checks read, so a name in it that is not the registry's key is a finding made against the wrong contribution
  */
@@ -232,6 +243,62 @@ test('a name accessor that throws costs the plugin one entry, not the whole doct
   )
   assert.equal(result.ok, true)
   assert.deepEqual(result.registered.sources, ['aaa-honest'])
+  assert.match(stderr, new RegExp(REFUSAL))
+})
+
+test('a summary accessor that throws costs the command one entry, not the whole doctor run', async () => {
+  // `snapshotRegistry` runs outside the dry run's own catch, so anything it
+  // reads unguarded escapes `dryRunActivate` and takes `hyp plugin doctor`
+  // down over one plugin. `summary` and `hidden` are read beside the guarded
+  // name and are as plugin-controlled as it is.
+  const { result, stderr } = await dryRun(
+    `export async function activate(ctx) {\n` +
+    `  const run = async () => 0\n` +
+    `  ctx.commands.register({ name: 'aaa-honest', plugin: '${PLUGIN}', summary: 'a', usage: 'u', run })\n` +
+    `  ctx.commands.register({ name: 'bbb-hostile', plugin: '${PLUGIN}', summary: 'b', usage: 'u', run })\n` +
+    `  const over = { get summary() { throw new Error('no summary for you') } }\n` +
+    `  Object.defineProperties(ctx.commands.get('bbb-hostile'), Object.getOwnPropertyDescriptors(over))\n` +
+    `}\n`
+  )
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.registered.commands, ['aaa-honest'])
+  assert.deepEqual(result.registered.commandDetails.map((c) => c.name), ['aaa-honest'])
+  assert.match(stderr, new RegExp(REFUSAL))
+  // The name read back fine. Saying it is not registered under it would be
+  // false about this record.
+  assert.match(stderr, /did not answer for its summary/)
+})
+
+test('a group summary accessor that throws costs the group one row, not the whole doctor run', async () => {
+  const { result, stderr } = await dryRun(
+    `export async function activate(ctx) {\n` +
+    `  ctx.commands.registerGroup({ name: 'aaa', plugin: '${PLUGIN}', summary: 'honest' })\n` +
+    `  const hostile = { name: 'bbb', plugin: '${PLUGIN}', summary: 'b' }\n` +
+    `  ctx.commands.registerGroup(hostile)\n` +
+    `  const over = { get summary() { throw new Error('no summary for you') } }\n` +
+    `  Object.defineProperties(hostile, Object.getOwnPropertyDescriptors(over))\n` +
+    `}\n`
+  )
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.registered.commandGroups, [{ name: 'aaa', summary: 'honest' }])
+  assert.match(stderr, new RegExp(REFUSAL))
+})
+
+test('a skill name accessor that throws costs the skill one entry, not the whole doctor run', async () => {
+  // `SkillRegistry.list()` hands back the elements of its own array, so a
+  // plugin calling it inside `activate()` reaches the record the registry
+  // holds. Neither registry is keyed, so the name cannot be checked, only
+  // contained (hyparam/hypaware#1552).
+  const { result, stderr } = await dryRun(
+    `export async function activate(ctx) {\n` +
+    `  ctx.skills.register({ name: 'aaa-honest', plugin: '${PLUGIN}', clients: ['claude'], sourceDir: '.' })\n` +
+    `  ctx.skills.register({ name: 'bbb-hostile', plugin: '${PLUGIN}', clients: ['claude'], sourceDir: '.' })\n` +
+    `  const over = { get name() { throw new Error('no name for you') } }\n` +
+    `  Object.defineProperties(ctx.skills.list()[1], Object.getOwnPropertyDescriptors(over))\n` +
+    `}\n`
+  )
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.registered.skills, ['aaa-honest'])
   assert.match(stderr, new RegExp(REFUSAL))
 })
 

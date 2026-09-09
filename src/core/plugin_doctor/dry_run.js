@@ -167,13 +167,21 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * divergence has no symptom: the report renders as a well-formed list, of a
  * registry holding something else.
  *
- * `skills`, `agents` and `capabilities` are read plainly, because those three
- * registries do not store the caller's object at all: `skills.register` and
- * `agents.register` build a registry-owned record out of the fields they
- * validated (`src/core/runtime/activation.js`), and `capabilities.list()`
- * returns fresh `{ name, version, provider }` objects built from the
- * arguments `provide` was called with. There is no second read of anything
- * plugin-controlled to guard.
+ * `capabilities` is read plainly: `capabilities.list()` returns fresh
+ * `{ name, version, provider }` objects built from the string arguments
+ * `provide` was called with, so there is nothing plugin-controlled left to
+ * read.
+ *
+ * `skills` and `agents` are contained but not verified. `skills.register` and
+ * `agents.register` do build a registry-owned record out of the fields they
+ * validated, but `list()` hands the elements of that array straight back
+ * (`items.slice()` copies the array, not its entries) and `ctx.skills` and
+ * `ctx.agents` are on the activation context, so a plugin that calls `list()`
+ * inside its own `activate()` can install an accessor on the very record the
+ * registry holds. Neither registry is keyed, so there is no key to resolve a
+ * name back to and no divergence to detect here; the guard below can only stop
+ * a throwing accessor costing the whole run, and closing the rest belongs in
+ * those two registries (hyparam/hypaware#1552).
  *
  * @param {ReturnType<typeof createKernelRuntime>} runtime
  * @param {ReturnType<typeof createCommandRegistry>} commandRegistry
@@ -193,9 +201,13 @@ function snapshotRegistry(runtime, commandRegistry) {
     sinks: registeredNames(
       sinks.listContributions(),
       'sink',
-      // Keyed by plugin and name together. `plugin` comes off the registry's
-      // own wrapper, which holds what `register` read, so the name is the only
-      // plugin-controlled read in the pair.
+      // Keyed by plugin and name together, so both halves have to be right.
+      // `plugin` is taken off the registry's own wrapper rather than re-read
+      // off the contribution, which is the best this side can do: `register`
+      // builds the key from one read of `contribution.plugin` and the wrapper
+      // from the next one, so the two can differ under a drifting accessor
+      // (hyparam/hypaware#1553). A pair that misses is refused, which
+      // under-reports a real sink rather than reporting a false name.
       (entry, name) => sinks.getContribution(entry.plugin, name),
       (entry) => entry.contribution
     ),
@@ -203,8 +215,10 @@ function snapshotRegistry(runtime, commandRegistry) {
     commands: commandDetails.map((c) => c.name),
     commandDetails,
     commandGroups: readCommandGroups(commandRegistry),
-    skills: runtime.skills.list().map((s) => s.name),
-    agents: runtime.agents.list().map((a) => a.name),
+    // No registry accessor to resolve through, so `itself` makes the resolve
+    // trivially true: what this buys is the containment, not the check.
+    skills: registeredNames(runtime.skills.list(), 'skill', itself),
+    agents: registeredNames(runtime.agents.list(), 'agent', itself),
     init_presets: registeredNames(runtime.initPresets.list(), 'init preset', (_, name) => runtime.initPresets.get(name)),
     capabilities: runtime.capabilities
       .list()
@@ -216,6 +230,10 @@ function snapshotRegistry(runtime, commandRegistry) {
 /**
  * The default `stored`: every registry but the sink one lists the object it
  * holds.
+ *
+ * Doubles as the `resolve` for the two registries that are not keyed at all
+ * (`skills`, `agents`), where it makes the check trivially true and leaves
+ * only the containment `registeredName` wraps the read in.
  *
  * @param {any} record
  * @returns {object}
@@ -303,12 +321,26 @@ function readCommands(commandRegistry) {
   for (const record of commandRegistry.list()) {
     const name = registeredName(record, 'command', (_, claimed) => commandRegistry.get(claimed))
     if (name === undefined) continue
-    details.push({
-      name,
-      summary: record.summary,
-      aliases: registeredAliases(commandRegistry, record),
-      hidden: record.hidden === true,
-    })
+    // `summary` and `hidden` are plugin-controlled too, and are read here
+    // beside the guarded name. Neither is a key, so neither can misattribute a
+    // finding, but an accessor that throws would escape `snapshotRegistry`,
+    // which runs outside the dry run's own catch, and cost `hyp plugin doctor`
+    // the whole run over one plugin. Contained to the same one entry a
+    // refused name costs.
+    /** @type {RegisteredCommand} */
+    let detail
+    try {
+      detail = {
+        name,
+        summary: record.summary,
+        aliases: registeredAliases(commandRegistry, record),
+        hidden: record.hidden === true,
+      }
+    } catch {
+      reportUnreadable('command', name, 'did not answer for its summary or hidden flag')
+      continue
+    }
+    details.push(detail)
   }
   return details
 }
@@ -373,7 +405,15 @@ function readCommandGroups(commandRegistry) {
   for (const record of commandRegistry.listGroups()) {
     const name = registeredName(record, 'command group', (_, claimed) => commandRegistry.getGroup(claimed))
     if (name === undefined) continue
-    const summary = record.summary
+    // Contained for the same reason the command detail above is: a throwing
+    // `summary` accessor must cost this group its row, not the doctor its run.
+    let summary
+    try {
+      summary = record.summary
+    } catch {
+      reportUnreadable('command group', name, 'did not answer for its summary')
+      continue
+    }
     groups.push({ name, ...(summary !== undefined ? { summary } : {}) })
   }
   return groups
@@ -391,12 +431,15 @@ function readCommandGroups(commandRegistry) {
  * @param {string} kind
  * @param {string} claimed The name it claimed, or the empty string when it
  *   claimed nothing readable.
+ * @param {string} [why] What was wrong with it, when it was not the name. The
+ *   default clause is false about a record whose name read back fine and whose
+ *   `summary` was the accessor that threw.
  */
-function reportUnreadable(kind, claimed) {
+function reportUnreadable(kind, claimed, why = 'is not registered under it') {
   const named = claimed.length > 0 ? `'${claimed}'` : 'an unreadable name'
   try {
     getLogger('plugin-doctor', { mirrorStderr: true }).warn(
-      `hyp plugin doctor: a registered ${kind} claiming ${named} is not registered under it; left out of the report`,
+      `hyp plugin doctor: a registered ${kind} claiming ${named} ${why}; left out of the report`,
       {
         [Attr.OPERATION]: 'doctor.snapshot',
         [Attr.STATUS]: 'degraded',
