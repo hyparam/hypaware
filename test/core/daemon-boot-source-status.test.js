@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import { rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -119,9 +120,12 @@ async function writeInstall(hypHome, installDir) {
  * @param {string} prefix
  * @param {boolean} autoStart
  * @param {string} [statusBody]
+ * @param {string} [home] A temp home the caller already made, for the one
+ *   caller that has to be able to remove it even when this boot never settles
+ *   and so never hands a handle back.
  */
-async function bootWith(prefix, autoStart, statusBody = STATUS_BODY.unreadable) {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
+async function bootWith(prefix, autoStart, statusBody = STATUS_BODY.unreadable, home) {
+  const hypHome = home ?? await fs.mkdtemp(path.join(os.tmpdir(), prefix))
   try {
     const configPath = await writeInstall(hypHome, await stageStatusPlugin(hypHome, autoStart, statusBody))
     const handle = await runDaemon({
@@ -209,19 +213,35 @@ test('a source the daemon starts itself is not mislabelled failed when its statu
 const BOOT_DEADLINE_MS = 20_000
 
 test('a source whose status() never settles does not hang daemon boot', async () => {
+  // Made here rather than inside `bootWith` so the regression run has
+  // something to clean up with: a boot still pending hands back no handle.
+  // The removal is an exit hook because the run this test exists to report
+  // is one where nothing else gets a turn: an unbounded boot probe drains
+  // the loop and Node tears the runner down without unwinding this test, so
+  // neither a `finally` here nor `closeBoot` below would ever run. `force`
+  // makes it a no-op on the passing run, where `closeBoot` got there first.
+  const prefix = 'hypaware-boot-status-hang-'
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
+  process.on('exit', () => { rmSync(hypHome, { recursive: true, force: true }) })
   /** @type {NodeJS.Timeout | undefined} */
   let deadline
-  const outcome = await Promise.race([
-    bootWith('hypaware-boot-status-hang-', false, STATUS_BODY.hanging),
-    new Promise((resolve) => {
-      deadline = setTimeout(() => resolve('hung'), BOOT_DEADLINE_MS)
-      deadline.unref()
-    }),
-  ])
-  clearTimeout(deadline)
-  // A boot still pending leaves no handle to stop, so the assertion is all
-  // there is to do with it.
-  assert.notEqual(outcome, 'hung', `daemon boot did not finish within ${BOOT_DEADLINE_MS}ms with a source whose status() never settles`)
+  let outcome
+  try {
+    outcome = await Promise.race([
+      bootWith(prefix, false, STATUS_BODY.hanging, hypHome),
+      new Promise((resolve) => {
+        deadline = setTimeout(() => resolve('hung'), BOOT_DEADLINE_MS)
+        deadline.unref()
+      }),
+    ])
+  } finally {
+    // Cleared on the rejecting path too, where `bootWith` has already removed
+    // the home itself but the deadline would otherwise sit out its 20 seconds.
+    clearTimeout(deadline)
+  }
+  if (outcome === 'hung') {
+    assert.fail(`daemon boot did not finish within ${BOOT_DEADLINE_MS}ms with a source whose status() never settles`)
+  }
 
   const booted = /** @type {Awaited<ReturnType<typeof bootWith>>} */ (outcome)
   // Nothing else holds this process's event loop while the daemon stops: it
