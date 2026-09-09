@@ -585,13 +585,21 @@ test('a non-array iterable aliases is still accepted', () => {
 // that check before the drain would answer `aliases: 7` in the registry's
 // words instead of the engine's. The author must still get V8's error, which
 // names the value they passed.
+//
+// Asserted as properties, never as V8's sentence: the engine's exact wording
+// is a version detail, which is why the sibling test above pins the negative
+// too. What has to hold is that the error is the engine's (no
+// `CommandRegistry.register` prefix), that it names the value passed (7) and
+// not the expression that read it (`record.aliases`), and that it is the
+// 'not iterable' diagnosis rather than some later failure.
 test('a non-iterable aliases keeps the boundary error the drain raises', () => {
   const commands = createCommandRegistry()
   assert.throws(
     () => commands.register(makeCommand({ name: 'bad', aliases: 7 })),
     (err) =>
       err instanceof TypeError &&
-      err.message.startsWith('number 7 is not iterable') &&
+      /\bnot iterable\b/.test(err.message) &&
+      /\b7\b/.test(err.message) &&
       !/CommandRegistry\.register/.test(err.message) &&
       !/record\.aliases/.test(err.message)
   )
