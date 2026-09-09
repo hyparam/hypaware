@@ -1,16 +1,16 @@
 // @ts-check
 
 /**
- * The label `runDaemon` stamps on the warning it persists when boot throws.
- * In a `degraded` snapshot it is the only thing separating a boot that never
- * reached service from a daemon that served with a failed source.
+ * The label a daemon process stamps on the warning it persists when its boot
+ * throws. In a `degraded` snapshot it is the only thing separating a boot that
+ * never reached service from a daemon that served with a failed source.
  *
- * It lives in a leaf module because it is a contract between one writer
- * (`daemon/runtime.js`) and two readers that can import neither it nor each
- * other: `hyp status`'s abnormal-exit message (`daemon/status.js`, which
- * `runtime.js` imports) and the self-updater's stuck-boot re-probe
- * (`update/self_update.js`, which stays import-light so a crash-looping
- * release can still jump forward).
+ * It lives in a leaf module because it is a contract between two writers
+ * (`daemon/runtime.js` and `daemon/gateway.js`) and two readers that can
+ * import neither them nor each other: `hyp status`'s abnormal-exit message
+ * (`daemon/status.js`, which both writers import) and the self-updater's
+ * stuck-boot re-probe (`update/self_update.js`, which stays import-light so a
+ * crash-looping release can still jump forward).
  */
 export const BOOT_FAILED_WARNING_PREFIX = 'boot_failed'
 
