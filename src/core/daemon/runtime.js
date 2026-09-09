@@ -129,6 +129,31 @@ function withStatusTimeout(probe, { keepAlive = false } = {}) {
 }
 
 /**
+ * The `details` a source reported, as a value the kernel owns.
+ *
+ * `details` is free-form by contract (`JsonObject`), so unlike the health
+ * fields beside it there is nothing to validate it against: all the status
+ * file asks of it is that it can be written. The round trip is that check and
+ * the copy at once. Every getter and every `toJSON` the plugin hung anywhere
+ * in the tree fires here, inside the try that already holds the plugin's
+ * promise, so a `details` the kernel cannot serialize is a probe that failed
+ * and takes the same path as one that threw or timed out. Passing the plugin's
+ * object on unread instead only moves that code to the `JSON.stringify` inside
+ * `persist()`, which sits on no guard at all: the status file stops being
+ * written while the daemon runs on, so `hyp status` reports boot-time data
+ * with nothing anywhere saying why (issue #1505).
+ *
+ * @param {SourceStatus | null | undefined} reported
+ * @returns {JsonObject | undefined}
+ * @ref LLP 0394#health-rides-beside-state [implements]: a details the kernel cannot read is recorded no more than a health it cannot read
+ */
+function reportedDetails(reported) {
+  const details = reported?.details
+  if (details === undefined) return undefined
+  return /** @type {JsonObject} */ (JSON.parse(JSON.stringify(details)))
+}
+
+/**
  * The client-action handlers the daemon constructs its reconciler with, in the
  * order the reconciler runs them: **attach first, then backfill**. The
  * reconciler runs handlers serially and `backfillHandler.perform()` awaits a
@@ -685,10 +710,12 @@ export async function runDaemon(opts = {}) {
    * `SourceStatus`: `null` is as easy to return as an object. The answer is
    * therefore taken apart *here*, inside the same try that already contains
    * the plugin's promise, and what leaves this function is only values the
-   * kernel built. A dereference of the plugin's object on the caller's side
-   * would be a throw on the tick's critical path, which is an unhandled
-   * rejection that never reaches `persist()`, freezing the whole status file
-   * and, on the shutdown path, the stop (issue #1490 round 1).
+   * kernel built, the JSON copy of `details` included. A dereference of the
+   * plugin's object on the caller's side would be a throw on the tick's
+   * critical path, which is an unhandled rejection that never reaches
+   * `persist()`, freezing the whole status file and, on the shutdown path,
+   * the stop (issue #1490 round 1). Handing the object on unread only defers
+   * that throw to the `JSON.stringify` inside `persist()` (issue #1505).
    *
    * `answered` is what separates "the source said nothing" from "the probe
    * never got an answer": both arrive with nothing to record, and only the
@@ -707,7 +734,7 @@ export async function runDaemon(opts = {}) {
     probe.then(settle, settle)
     try {
       const answer = /** @type {SourceStatus | null | undefined} */ (await withStatusTimeout(probe))
-      return { answered: true, details: answer?.details, health: sourceHealth(answer), failure: undefined }
+      return { answered: true, details: reportedDetails(answer), health: sourceHealth(answer), failure: undefined }
     } catch (err) {
       return { answered: false, details: undefined, health: undefined, failure: err instanceof Error ? err.message : String(err) }
     }
@@ -1668,9 +1695,8 @@ async function stopAllSources({ runtime, fileLog }) {
  * contains the plugin's promise, and every field the caller reads off the
  * result is one the kernel built - the shape `probeSourceStatus` uses on the
  * tick path, so a reader does not have to remember which of the two is the
- * safe one (issue #1504). `details` is the one value passed through by
- * reference rather than rebuilt, exactly as on the tick path, so it is still
- * the plugin's object when it reaches `JSON.stringify` (issue #1505).
+ * safe one (issue #1504), `details` copied out of the plugin's object here
+ * rather than serialized out of it later (issue #1505).
  *
  * Answering at all is no more guaranteed than answering readably, so the
  * plugin's promise is raced against the same bound the tick uses: an unbounded
@@ -1692,7 +1718,7 @@ async function stopAllSources({ runtime, fileLog }) {
 async function safeStatus(runtime, name, fileLog) {
   try {
     const answer = /** @type {SourceStatus | null | undefined} */ (await withStatusTimeout(runtime.sources.status(name), { keepAlive: true }))
-    return { details: answer?.details, health: sourceHealth(answer) }
+    return { details: reportedDetails(answer), health: sourceHealth(answer) }
   } catch (err) {
     fileLog.warn('daemon.source_status_failed', {
       hyp_source: name,
