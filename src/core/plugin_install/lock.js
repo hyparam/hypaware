@@ -124,10 +124,17 @@ export function listEntries(lock) {
 
 /** @param {PluginLockFile} lock */
 function normalizeLock(lock) {
+  // `Object.fromEntries`, not `sorted[name] = ...` into a `{}`: a bracket
+  // assignment of '__proto__' runs Object.prototype's setter instead of adding
+  // an own key, so a plugin by that name vanished from the file it had just
+  // been installed into, leaving its directory on disk and no row for `list`,
+  // `info` or `remove` to reach. Nothing rejects the name on the way in:
+  // the manifest asks only for a non-empty string, and a local-dir source
+  // carries none to cross-check it against. `fromEntries` defines own
+  // properties, so the write side answers as the reads above now do (#1601).
   /** @type {Record<string, PluginLockEntry>} */
-  const sorted = {}
-  for (const name of Object.keys(lock.plugins).sort()) {
-    sorted[name] = lock.plugins[name]
-  }
+  const sorted = Object.fromEntries(
+    Object.keys(lock.plugins).sort().map((name) => [name, lock.plugins[name]])
+  )
   return { schema_version: SCHEMA_VERSION, plugins: sorted }
 }

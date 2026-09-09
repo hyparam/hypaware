@@ -17,7 +17,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { writeLock } from '../../src/core/plugin_install/lock.js'
+import { getEntry, readLock, upsertEntry, writeLock } from '../../src/core/plugin_install/lock.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const BIN = path.join(REPO_ROOT, 'bin', 'hypaware.js')
@@ -138,5 +138,37 @@ test('a real install record still answers plugin info', async () => {
     assert.match(out.stdout, /^@third-party\/echo@0\.2\.0$/m)
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+// The write side of the same lookups. A lock is normalized into a fresh {} on
+// its way to disk, where 'sorted["__proto__"] = entry' runs Object.prototype's
+// setter rather than adding an own key, so the entry never reached the file:
+// install reported success, the directory stayed on disk, and no read could
+// find it again. Nothing upstream rejects the name (a manifest's is any
+// non-empty string, and a local-dir source has none to check it against), so
+// the guard has to be here. No spawn: the defect is entirely in the round trip.
+test('a lock round trip keeps an entry named for a prototype member', async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-lock-proto-'))
+  try {
+    let lock = { schema_version: /** @type {1} */ (1), plugins: {} }
+    for (const name of PROTOTYPE_NAMES) {
+      lock = upsertEntry(lock, {
+        name,
+        version: '1.0.0',
+        source: { kind: 'local-dir', raw: `/fixtures/${name}`, path: `/fixtures/${name}` },
+        install_dir: `/fixtures/${name}`,
+        content_hash: 'c'.repeat(64),
+        manifest_hash: 'd'.repeat(64),
+        installed_at: '2026-09-01T00:00:00.000Z',
+      })
+    }
+    await writeLock(stateDir, lock)
+    const back = await readLock(stateDir)
+    for (const name of PROTOTYPE_NAMES) {
+      assert.equal(getEntry(back, name)?.install_dir, `/fixtures/${name}`, `${name}: lost on write`)
+    }
+  } finally {
+    await fs.rm(stateDir, { recursive: true, force: true })
   }
 })
