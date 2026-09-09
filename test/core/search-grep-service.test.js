@@ -18,10 +18,27 @@ import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-worksp
 
 /**
  * @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js'
+ * @import { CachePartitioningDeclaration } from '../../src/core/iceberg/types.js'
  * @import { UsagePolicyResolver } from '../../src/core/usage-policy/types.js'
  */
 
 const DATASET = 'ai_gateway_messages'
+
+/** The cache layout shipped before `session_id` became the required identity. */
+/** @type {CachePartitioningDeclaration} */
+const PRE_SESSION_ID_DECLARATION = {
+  source: {
+    columns: ['client_name', 'conversation_source', 'provider'],
+    fallback: 'unknown',
+  },
+  iceberg: {
+    fields: [
+      { column: 'conversation_id', transform: 'identity', required: true },
+      { column: 'cwd', transform: 'identity' },
+      { column: 'date', transform: 'identity', required: true },
+    ],
+  },
+}
 
 /** @type {ColumnSpec[]} */
 const COLUMNS = [
@@ -80,12 +97,12 @@ function mkRow(over = {}) {
  *
  * @param {Record<string, unknown>[][]} batches
  */
-async function makeCache(batches) {
+async function makeCache(batches, writeDeclaration = aiGatewayDatasetRegistration().cachePartitioning) {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-grep-service-'))
-  const declaration = aiGatewayDatasetRegistration().cachePartitioning
   for (const batch of batches) {
-    await appendRowsToSourceTable(cacheRoot, DATASET, ['source=test'], COLUMNS, batch, { declaration })
+    await appendRowsToSourceTable(cacheRoot, DATASET, ['source=test'], COLUMNS, batch, { declaration: writeDeclaration })
   }
+  const declaration = aiGatewayDatasetRegistration().cachePartitioning
   const storage = createQueryStorageService({
     cacheRoot,
     getDeclaration: (dataset) => (dataset === DATASET ? declaration : undefined),
@@ -160,6 +177,30 @@ test('scan tier: hits carry locators and snippets, newest day first', async () =
   assert.equal(first.matches[0].column, 'content_text')
   assert.match(first.matches[0].snippet, /needle/)
   assert.equal(second.date, '2026-08-10')
+})
+
+test('grep flushes pending rows into a pre-session-id cache table', async () => {
+  const committed = mkRow({
+    session_id: 'legacy-session',
+    conversation_id: 'legacy-conversation',
+    content_text: 'committed legacy needle',
+  })
+  const { storage } = await makeCache([[committed]], PRE_SESSION_ID_DECLARATION)
+  const pending = mkRow({
+    session_id: 'pending-session',
+    conversation_id: 'pending-conversation',
+    content_text: 'pending legacy needle',
+  })
+  const labelTable = storage.cacheTablePath(DATASET, ['proxy_messages_v5'])
+  await storage.appendRows(labelTable, COLUMNS, [pending])
+
+  const res = await grep(storage, { refresh: 'always' })
+
+  assert.deepEqual(
+    new Set(res.hits.map((hit) => hit.sessionId)),
+    new Set(['legacy-session', 'pending-session'])
+  )
+  assert.equal((await storage.pendingInfo(labelTable)).pending, false)
 })
 
 test('scan tier: the limit truncates to the newest matches', async () => {
