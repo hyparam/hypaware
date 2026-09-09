@@ -368,12 +368,19 @@ export async function runPluginList(argv, ctx) {
     // named) nor why, since four different shortfalls land in this one list. The
     // closing line says which boot is missing from the answer: this CLI process
     // is not the daemon, and a plugin can fail in either one alone.
+    // It names the one thing `hyp status` actually reports, and not "plugin
+    // failures" at large: the daemon's `failedPlugins` is built from its
+    // `activations` (`recordFailedPlugins`), which only the throwing-`activate()`
+    // route ever reaches. A plugin the dep graph eliminated for an unsatisfied
+    // `requires` lands in this section and is reported by `hyp status` as active
+    // under `overall: healthy`, so a wider pointer would send an operator to a
+    // surface that contradicts this one (issue #1580).
     ctx.stdout.write('Plugins this boot did not activate:\n')
     for (const name of [...unavailable].sort()) {
       const { version, source } = unavailableCopy(name)
       ctx.stdout.write(`  ${name}@${version}  (${source})\n`)
     }
-    ctx.stdout.write('  The daemon boots separately; hyp status reports the running daemon\'s own plugin failures.\n')
+    ctx.stdout.write('  The daemon boots separately; hyp status names a plugin whose activate() threw in a running one.\n')
   }
   return 0
 }
