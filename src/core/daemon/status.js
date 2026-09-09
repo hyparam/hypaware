@@ -43,7 +43,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
-import { MAX_ACTIVATION_MESSAGE_CHARS, warningsRecordBootFailure } from './boot_failure.js'
+import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -1601,7 +1601,7 @@ export async function collectHypAwareStatus(opts = {}) {
     sources.push(...inferConfiguredSources(activePlugins))
   }
 
-  // ----- plugins the running daemon could not activate (issue #1556) -----
+  // ----- plugins the running daemon could not activate (issues #1556, #1580) -----
   // `activePlugins` above is the configured set: the right answer to what this
   // machine is set up to do, the only answer available with no daemon running,
   // and no answer at all to whether a plugin is running. The daemon is the only
@@ -1658,15 +1658,42 @@ export async function collectHypAwareStatus(opts = {}) {
     // breath as calling it stopped.
     const stillContributing = sources.some((s) => s.plugin === name && s.state === 'started')
       || liveSinks.some((s) => s.plugin === name)
+    // What is left of the plugin, never why it is gone, so both doors below
+    // share it verbatim.
+    const runningTail = stillContributing
+      ? ' - it came up in only one of the daemon\'s two processes, so part of what it contributes is not running'
+      : ' - none of its sources or sinks are running'
+    const reason = sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'
+    if (entry.errorKind === REQUIRES_UNSATISFIED_ERROR_KIND) {
+      // A throw's severity, for the operator's reason rather than the author's:
+      // the plugin they configured is capturing nothing either way, and `error`
+      // is the only severity that moves `overall` off `healthy` - reporting
+      // this install healthy being the whole defect (issue #1580). A kind of its
+      // own because nothing else carries over: this plugin never ran a line of
+      // its own code, so "failed to activate" would be a false sentence and
+      // `hyp daemon restart` a repair that changes nothing while the config
+      // still asks for a set the resolver cannot satisfy.
+      diagnostics.push({
+        severity: 'error',
+        kind: 'plugin_requires_unsatisfied',
+        message: `plugin '${name}' did not activate - the dependency resolver eliminated it (${reason})` + runningTail,
+        // The reason is the resolver's own and names what is missing, so the
+        // repair is the config edit that supplies it or withdraws the request.
+        // Only a restart re-resolves: the daemon reads `requires` at boot.
+        repair: [
+          `enable what the reason names, or remove '${name}', in ${configPath}`,
+          'hyp daemon restart  # requires are resolved at boot',
+        ],
+      })
+      continue
+    }
     diagnostics.push({
       severity: 'error',
       kind: 'plugin_activate_failed',
       message: `plugin '${name}' failed to activate `
         + `(${sanitizeLabel(entry.errorKind) ?? 'activate_failed'}): `
-        + `${sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'}`
-        + (stillContributing
-          ? ' - it came up in only one of the daemon\'s two processes, so part of what it contributes is not running'
-          : ' - none of its sources or sinks are running'),
+        + reason
+        + runningTail,
       // Not `hyp plugin list`: it prints the plugins *this* CLI boot activated
       // plus the install lock, so the plugin that just failed is either missing
       // from the output entirely (a bundled adapter, the likeliest subject) or

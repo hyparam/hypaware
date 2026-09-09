@@ -21,7 +21,7 @@ import type {
 import type { createCommandRegistry } from '../registry/commands.js'
 import type { ConfigLayerDrop } from '../config/types.d.ts'
 import type { ExtendedQueryStorageService } from '../cache/types.d.ts'
-import type { ClientDescriptor, LoadedManifest, FailedManifest } from '../types.d.ts'
+import type { ClientDescriptor, LoadedManifest, FailedManifest, UnsatisfiedRequirement } from '../types.d.ts'
 import type {
   CapabilityRegistryHandle,
   ExtendedSinkRegistry,
@@ -103,6 +103,20 @@ export interface BootKernelResult {
    * `all-bundled`/`all-available` drop even when the config names them.
    */
   withheldByProfile: PluginName[]
+  /**
+   * What the dependency resolver rejected, with the reason it rejected it and
+   * the plugin it names. `unavailablePlugins` below folds these into a flat
+   * list of names, which is all the prune needs and all a caller can get back
+   * out of it; a caller that must *say* why a configured plugin is not running
+   * needs the reason too, and the daemon's status snapshot is one
+   * (issue #1580).
+   *
+   * Not every entry is a plugin that failed to activate: a
+   * `cap_version_clash` is recorded against every provider of the clashing
+   * capability and eliminates none of them, so a reader making a claim about a
+   * plugin must check `activations` before making it.
+   */
+  unsatisfiedRequirements: UnsatisfiedRequirement[]
   /**
    * Everything this boot did not get, in one list: plugins whose `activate()`
    * threw, plugins the dep graph eliminated for an unsatisfied `requires`,
