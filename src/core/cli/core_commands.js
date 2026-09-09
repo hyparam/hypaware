@@ -52,6 +52,7 @@ import {
   runUnignore,
 } from '../commands/clients.js'
 import { runPolicyClient, runPolicyFolders, runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
+import { runTelemetry } from '../product_telemetry/commands.js'
 
 /**
  * @import { CommandGroupRegistration, CommandRegistration } from '../../../hypaware-plugin-kernel-types.js'
@@ -132,6 +133,16 @@ const CORE_COMMAND_GROUPS = [
  */
 function buildCoreCommands(registry) {
   return [
+    {
+      name: 'telemetry',
+      category: 'privacy',
+      audience: 'everyday',
+      bootProfile: 'none',
+      summary: 'Inspect and control optional product telemetry',
+      usage: coreUsage('telemetry'),
+      help: 'Off by default. Local mode retains a bounded preview queue. Organization mode uses the existing enrolled gateway. Vendor sharing and standalone registration are unavailable. Preview prints the exact next queued payload. Off removes pending copies, not records already accepted remotely.',
+      run: runTelemetry,
+    },
     {
       name: 'status',
       category: 'getting-started',

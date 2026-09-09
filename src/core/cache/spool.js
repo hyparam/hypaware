@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
+import { noteProductPending, noteProductPipeline } from '../product_telemetry/client.js'
 
 import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
@@ -112,6 +113,7 @@ export function createCacheSpool(args) {
 
       for await (const batch of streamFlushFile({ filePath, batchId, startOffset, batchRowLimit: args.batchRowLimit, batchByteLimit: args.batchByteLimit, nextSeq: seqAllocator.next })) {
         const written = await args.appendChunk(tablePath, batch.chunk.columns, batch.chunk.rows)
+        noteProductPipeline('write', { rows: batch.chunk.rows.length - (written.droppedCount ?? 0), bytes: written.bytesWritten })
         totals.rowCount += batch.chunk.rows.length
         totals.chunkCount += 1
         totals.bytesWritten += written.bytesWritten
@@ -253,6 +255,8 @@ export function createCacheSpool(args) {
         }
         return { bytesWritten, pendingBytes: pendingBytesSync(tablePath) }
       })
+      noteProductPipeline('capture', { rows: rows.length, bytes: result.bytesWritten })
+      noteProductPending(tablePath, result.pendingBytes)
       return result
     },
 
@@ -265,6 +269,7 @@ export function createCacheSpool(args) {
           // and this one did not.
           // @ref LLP 0322#clearing [implements]: a flush that completed is the evidence that clears the stamp
           await clearFlushFailure(tablePath)
+          noteProductPending(tablePath, result.pendingBytes)
           return result
         } catch (err) {
           // Written before the rethrow so the error the caller sees is
@@ -272,6 +277,7 @@ export function createCacheSpool(args) {
           // failure this process is about to forget.
           // @ref LLP 0322#stamp-the-failure [implements]: the failed flush leaves the pacing record the query gate reads
           await writeFlushFailure(tablePath, err)
+          noteProductPipeline('write', { failures: 1 })
           throw err
         }
       })

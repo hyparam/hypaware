@@ -7,6 +7,7 @@ import { sanitizeLabel } from '../util/json_util.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
+import { productStatus } from '../product_telemetry/commands.js'
 
 /**
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
@@ -97,7 +98,7 @@ export async function runStatus(argv, ctx) {
           datasets,
           cacheRoot: ctx.storage.cacheRoot,
         })
-        ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
+        ctx.stdout.write(JSON.stringify({ ...payload, product_telemetry: productStatus(ctx.env) }, null, 2) + '\n')
         return 0
       }
       renderStatusText({
@@ -107,6 +108,7 @@ export async function runStatus(argv, ctx) {
         cacheRoot: ctx.storage.cacheRoot,
         stdout: ctx.stdout,
       })
+      ctx.stdout.write(`product telemetry: ${productStatus(ctx.env).collection} (hyp telemetry status; hyp telemetry preview)\n`)
       return 0
     },
     { component: 'status' }

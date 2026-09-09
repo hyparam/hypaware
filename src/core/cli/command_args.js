@@ -26,6 +26,10 @@ import { parseCommandArgv } from './verb_codec.js'
  * @ref LLP 0293#usage-agreement [implements]: usage line and parser schema are one declaration, so neither can advertise a flag the other rejects
  */
 export const CORE_COMMAND_ARGS = {
+  'telemetry': {
+    usage: 'hyp telemetry [status|preview|off|enable local|enable organization]',
+    schema: { type: 'object', properties: { action: { type: 'string', enum: ['status', 'preview', 'off', 'enable'] }, destination: { type: 'string', enum: ['local', 'organization'] } }, positional: ['action', 'destination'] },
+  },
   'version': {
     usage: 'hyp version',
     schema: { type: 'object', properties: {} },

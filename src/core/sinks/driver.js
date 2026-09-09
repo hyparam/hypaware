@@ -2,6 +2,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { noteProductPipeline } from '../product_telemetry/client.js'
 
 import { Attr, getKernelInstruments, getLogger, withSpan } from '../observability/index.js'
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
@@ -126,6 +127,7 @@ export function createSinkDriver(opts) {
         span.setAttribute('partitions_exported', exported)
         span.setAttribute('bytes_written', bytesWritten)
         if (status === 'exported') {
+          noteProductPipeline('export', { bytes: bytesWritten })
           instruments.sinkExportsTotal.add(1, {
             [Attr.SINK_INSTANCE]: instance,
             [Attr.STATUS]: 'ok',
@@ -268,6 +270,7 @@ export function createSinkDriver(opts) {
    * @param {Span} span
    */
   function recordFailure(handle, batchId, partitionsCount, message, span) {
+    noteProductPipeline('export', { failures: 1 })
     instruments.sinkExportFailuresTotal.add(1, {
       [Attr.SINK_INSTANCE]: handle.instanceName,
       [Attr.PLUGIN]: handle.plugin,

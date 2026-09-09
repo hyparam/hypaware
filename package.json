@@ -21,6 +21,10 @@
       "types": "./types/core/observability/index.d.ts",
       "import": "./src/core/observability/index.js"
     },
+    "./core/product-telemetry": {
+      "types": "./types/core/product_telemetry/index.d.ts",
+      "import": "./src/core/product_telemetry/index.js"
+    },
     "./core/sinks": {
       "types": "./types/core/sinks/index.d.ts",
       "import": "./src/core/sinks/index.js"
