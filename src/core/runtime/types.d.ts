@@ -299,6 +299,24 @@ export interface ClientAssetMaterialization {
   withheld: ClientAssetRemoval[]
 }
 
+/**
+ * What one boot-time refresh did: the installed copies it rewrote because
+ * their source changed, the ones it left alone and why, and how many it read
+ * and found current.
+ */
+export interface ClientAssetRefresh {
+  refreshed: Omit<ClientAssetRemoval, 'dryRun'>[]
+  skipped: (Omit<ClientAssetRemoval, 'dryRun'> & {
+    /**
+     * `edited`: bytes no longer match any recorded digest. `unreadable`: the
+     * copy could not be read. `missing`: the copy is gone. `copy_failed`: the
+     * rewrite itself failed.
+     */
+    reason: 'edited' | 'unreadable' | 'missing' | 'copy_failed'
+  })[]
+  unchanged: number
+}
+
 export interface MaterializeClientAssetsOptions {
   /**
    * Client names to install for; contributions targeting others are skipped.
