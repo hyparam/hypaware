@@ -11,7 +11,7 @@ import {
   renderManagedPreferencesPlist,
 } from './profile.js'
 import { runInstall } from './install.js'
-import { runVerify } from './verify.js'
+import { checkHelperScript, renderHelperLine, runVerify } from './verify.js'
 
 /**
  * @import { PluginActivationContext, CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -335,14 +335,17 @@ async function runProfile(argv, cmdCtx, sectionConfig, credential, stateDir) {
 async function runStatus(cmdCtx, sectionConfig, credential, stateDir) {
   try {
     const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
-    const helperExists = fs.existsSync(inputs.helperPath)
+    // `fs.existsSync` alone reported "installed" for a wrapper whose baked
+    // interpreter or CLI path had rotted away under it, which is the one
+    // machine that needs the re-run being told nothing is wrong (#1616).
+    const helper = checkHelperScript(inputs.helperPath, cmdCtx.env)
     cmdCtx.stdout.write(`endpoint: ${inputs.baseUrl}\n`)
     cmdCtx.stdout.write(`credential mode: ${credential.mode} (scheme ${inputs.authScheme})\n`)
-    cmdCtx.stdout.write(`helper: ${inputs.helperPath} (${helperExists ? 'installed' : 'NOT installed'})\n`)
+    cmdCtx.stdout.write(`helper: ${renderHelperLine(helper, inputs.helperPath)}\n`)
     cmdCtx.stdout.write(`models: ${inputs.models.join(', ')}\n`)
     cmdCtx.stdout.write(`bundle id: ${inputs.bundleId}\n`)
     cmdCtx.stdout.write("credential state: see 'hyp client claude-account status'\n")
-    return helperExists ? 0 : 1
+    return helper.present && !helper.stale ? 0 : 1
   } catch (err) {
     cmdCtx.stderr.write(`claude-desktop status: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1

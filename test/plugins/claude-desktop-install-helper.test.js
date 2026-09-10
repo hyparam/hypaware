@@ -126,6 +126,28 @@ test('status reports the helper as not installed until install-helper runs', asy
   const after = await invoke(status.run, [])
   assert.equal(after.code, 0)
   assert.ok(/installed/.test(after.out))
+  // A wrapper this run just generated is live, so status must not nag (#1616).
+  assert.ok(!/STALE/.test(after.out), after.out)
+})
+
+// @ref LLP 0116#helper-contract [tests]: Desktop is the only observer of a rotted wrapper, so status has to read the file rather than stat it
+test('status reports a wrapper whose baked interpreter rotted away, rather than "installed"', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-'))
+  const { ctx, commands } = fakeCtx({ stateDir, mode: 'org_key' })
+  await activate(ctx)
+
+  await invoke(commands.get('client claude-desktop install-helper').run, [])
+  const helperPath = path.join(stateDir, HELPER_BASENAME)
+  // Stand in for an nvm/volta/asdf/brew node switch: same wrapper, same
+  // path in the plist, an interpreter that is no longer there.
+  const rotted = fs.readFileSync(helperPath, 'utf8')
+    .replace(/^exec \S+/m, `exec ${path.join(stateDir, 'nvm', 'v20.0.0', 'bin', 'node')}`)
+  fs.writeFileSync(helperPath, rotted)
+
+  const after = await invoke(commands.get('client claude-desktop status').run, [])
+
+  assert.equal(after.code, 1, after.out)
+  assert.ok(/STALE: baked interpreter path no longer exists/.test(after.out), after.out)
 })
 
 // @ref LLP 0358#onboarding [tests]: missing credentials disable only the

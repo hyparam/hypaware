@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { computeDesiredPlistContent, residueDirPath } from '../../hypaware-core/plugins-workspace/claude-desktop/src/install.js'
 import { resolveInputs } from '../../hypaware-core/plugins-workspace/claude-desktop/src/inputs.js'
+import { renderCredentialHelperScript } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
 import { checkInstallState, runVerify } from '../../hypaware-core/plugins-workspace/claude-desktop/src/verify.js'
 
 /**
@@ -36,6 +37,29 @@ function fixture(opts) {
   return { cmdCtx, bufs, credential, sectionConfig: {}, stateDir: opts.stateDir }
 }
 
+/**
+ * Write a credential wrapper the way `install-helper` does, with the two
+ * baked paths under the test's control. Defaults to a wrapper that works:
+ * this interpreter and a CLI entry script that is really on disk.
+ *
+ * @param {{ stateDir: string, nodeBin?: string, hypBin?: string }} opts
+ * @returns {string} the wrapper's path
+ */
+function writeHelper(opts) {
+  let hypBin = opts.hypBin
+  if (hypBin === undefined) {
+    hypBin = path.join(opts.stateDir, 'hypaware.js')
+    fs.writeFileSync(hypBin, '// stand-in CLI entry\n')
+  }
+  const helperPath = path.join(opts.stateDir, 'credential-helper.sh')
+  fs.writeFileSync(helperPath, renderCredentialHelperScript({
+    nodeBin: opts.nodeBin ?? process.execPath,
+    hypBin,
+    args: ['claude-account', 'credential'],
+  }), { mode: 0o755 })
+  return helperPath
+}
+
 test('verify: missing plist and clean residue is incomplete but not thrown', async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
@@ -51,7 +75,77 @@ test('verify: missing plist and clean residue is incomplete but not thrown', asy
   assert.match(bufs.stdout.text(), /claude-desktop-3p/)
 })
 
-test('verify: up-to-date plist and clean residue is a green exit code', async () => {
+test('verify: up-to-date plist, live wrapper and clean residue is a green exit code', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  writeHelper({ stateDir })
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.match(bufs.stdout.text(), /present, up to date/)
+  // The point of the whole check: a working machine must not be told to
+  // re-run install, or operators learn to ignore the line that matters.
+  assert.match(bufs.stdout.text(), /credential wrapper: .*\(installed\)/)
+  assert.doesNotMatch(bufs.stdout.text(), /STALE/)
+})
+
+// @ref LLP 0116#helper-contract [tests]: the plist names only the wrapper's path, so a rotted bake renders an identical plist and only reading the wrapper can see it
+test('verify: a wrapper whose baked CLI path is gone is STALE despite an up-to-date plist', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  writeHelper({ stateDir, hypBin: path.join(stateDir, 'pruned', 'hypaware.js') })
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
+  assert.equal(code, 1, bufs.stdout.text())
+  assert.match(bufs.stdout.text(), /present, up to date/)
+  assert.match(bufs.stdout.text(), /credential wrapper: .*installed but STALE: baked CLI path no longer exists/)
+  assert.match(bufs.stdout.text(), /re-run 'hyp client claude-desktop install'/)
+})
+
+test('verify: a wrapper whose baked interpreter is gone is STALE (the node-version-switch case)', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  writeHelper({ stateDir, nodeBin: path.join(stateDir, 'nvm', 'v20.0.0', 'bin', 'node') })
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
+  assert.equal(code, 1, bufs.stdout.text())
+  assert.match(bufs.stdout.text(), /installed but STALE: baked interpreter path no longer exists/)
+})
+
+// The one case that is stale while still on disk today: npm owns the cache
+// and prunes it on its own schedule, the same reasoning core applies to the
+// sibling Claude hook in `markerRecordsEphemeralHookBin`.
+test('verify: a baked _npx CLI path is STALE even while it still resolves', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  const npxBin = path.join(stateDir, '_npx', 'ab12', 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+  fs.mkdirSync(path.dirname(npxBin), { recursive: true })
+  fs.writeFileSync(npxBin, '// still cached, for now\n')
+  writeHelper({ stateDir, hypBin: npxBin })
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
+  assert.ok(fs.existsSync(npxBin), 'the cached CLI is still on disk')
+  assert.equal(code, 1, bufs.stdout.text())
+  assert.match(bufs.stdout.text(), /installed but STALE: baked CLI path is in npm's _npx cache/)
+})
+
+test('verify: a missing wrapper is reported, not passed over', async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
   const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
@@ -60,8 +154,48 @@ test('verify: up-to-date plist and clean residue is a green exit code', async ()
 
   const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
 
+  assert.equal(code, 1)
+  assert.match(bufs.stdout.text(), /credential wrapper: .*\(NOT installed/)
+})
+
+test('verify: a wrapper this plugin did not generate is left alone, not judged stale', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  // A `claude_desktop.helper_path` may name the operator's own script, whose
+  // paths are none of this check's business even when they do not resolve.
+  fs.writeFileSync(
+    path.join(stateDir, 'credential-helper.sh'),
+    `#!/bin/sh\nexec ${path.join(stateDir, 'gone', 'my-node')} ${path.join(stateDir, 'gone', 'my-cli')}\n`,
+    { mode: 0o755 },
+  )
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
   assert.equal(code, 0, bufs.stdout.text())
-  assert.match(bufs.stdout.text(), /present, up to date/)
+  assert.doesNotMatch(bufs.stdout.text(), /STALE/)
+})
+
+test('verify: a wrapper whose baked paths hold quotes and spaces is read back correctly', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-desktop-verify-o'dd "))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  const hypBin = path.join(stateDir, "hyp aware's.js")
+  fs.writeFileSync(hypBin, '// stand-in CLI entry\n')
+  writeHelper({ stateDir, hypBin })
+
+  const okCode = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+  assert.equal(okCode, 0, bufs.stdout.text())
+
+  fs.rmSync(hypBin)
+  const { cmdCtx: ctx2, bufs: bufs2 } = fixture({ stateDir })
+  const staleCode = await runVerify([], ctx2, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+  assert.equal(staleCode, 1, bufs2.stdout.text())
+  assert.match(bufs2.stdout.text(), /baked CLI path no longer exists/)
 })
 
 test('verify: a present but stale plist is reported STALE and fails', async () => {
