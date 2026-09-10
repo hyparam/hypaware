@@ -162,7 +162,13 @@ export function renderCredentialHelperScript(opts) {
  */
 export function parseCredentialHelperScript(script) {
   if (!script.includes(HELPER_GENERATED_MARKER)) return undefined
-  for (const line of script.split('\n')) {
+  // The last `exec` line, not the first. `shellQuote` renders a newline in
+  // `HYP_HOME` / `HYP_CONFIG` as a quoted value spanning lines, so a line
+  // inside one of the exports can read as `exec ...` while `/bin/sh` sees
+  // only more of the value; the renderer writes the real one last.
+  const lines = script.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
     if (!line.startsWith('exec ')) continue
     const tokens = shellSplitPrefix(line.slice('exec '.length), 2)
     if (tokens === undefined) return undefined

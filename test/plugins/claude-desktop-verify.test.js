@@ -144,6 +144,9 @@ test('verify: a baked _npx CLI path is STALE even while it still resolves', asyn
   assert.ok(fs.existsSync(npxBin), 'the cached CLI is still on disk')
   assert.equal(code, 1, bufs.stdout.text())
   assert.match(bufs.stdout.text(), /installed but STALE: baked CLI path is in npm's _npx cache/)
+  // The generic re-run cannot clear this one: under the same npx it bakes the
+  // same cache path back in, so the line has to name the durable install.
+  assert.match(bufs.stdout.text(), /install a durable CLI first with 'npm install -g hypaware'/)
 })
 
 test('verify: a missing wrapper is reported, not passed over', async () => {
@@ -197,6 +200,23 @@ test('verify: a wrapper whose baked paths hold quotes and spaces is read back co
   const staleCode = await runVerify([], ctx2, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
   assert.equal(staleCode, 1, bufs2.stdout.text())
   assert.match(bufs2.stdout.text(), /baked CLI path no longer exists/)
+})
+
+test('verify: an exec line inside a quoted env value is not mistaken for the baked command', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  // `shellQuote` renders a newline in HYP_HOME as a quoted value spanning
+  // lines, so a line the shell only ever reads as more of the value can look
+  // like the baked command. Judging it would report a live wrapper broken.
+  writeHelper({ stateDir, env: { HYP_HOME: `${stateDir}\nexec /nope/node /nope/hypaware.js` } })
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.doesNotMatch(bufs.stdout.text(), /STALE/)
 })
 
 test('verify: a wrapper longer than the bounded read is left alone, not cut into a false STALE', async () => {

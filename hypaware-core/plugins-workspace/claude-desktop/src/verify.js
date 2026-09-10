@@ -62,7 +62,11 @@ export function checkHelperScript(helperPath, env) {
     return {
       present: true,
       stale: true,
-      detail: `baked CLI path is in npm's _npx cache, which npm prunes on its own schedule (${baked.hypBin})`,
+      // The generic re-run alone is not the repair here: re-running under the
+      // same `npx` bakes the same cache path back in. Name the durable
+      // install first, so the verdict is one an operator can clear.
+      detail: `baked CLI path is in npm's _npx cache, which npm prunes on its own schedule (${baked.hypBin})`
+        + "; install a durable CLI first with 'npm install -g hypaware'",
     }
   }
   const gone = missingBin('interpreter', baked.nodeBin) ?? missingBin('CLI', baked.hypBin)
@@ -79,6 +83,10 @@ export function checkHelperScript(helperPath, env) {
 function readBakedPaths(helperPath) {
   let fd
   try {
+    // Kind first, because `helper_path` is operator-supplied and `openSync`
+    // on a fifo blocks until a writer shows up: `verify` and `status` have to
+    // stay total, and a wrapper Desktop can exec is a regular file.
+    if (!fs.statSync(helperPath).isFile()) return undefined
     fd = fs.openSync(helperPath, 'r')
     const buf = Buffer.allocUnsafe(HELPER_READ_LIMIT_BYTES)
     const read = fs.readSync(fd, buf, 0, HELPER_READ_LIMIT_BYTES, 0)

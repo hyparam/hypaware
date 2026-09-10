@@ -156,12 +156,13 @@ export async function activate(ctx) {
     summary: 'Show the resolved Desktop profile inputs (endpoint, mode, helper)',
     usage: 'hyp client claude-desktop status',
     help: 'Prints what the profile WOULD be built from: the gateway endpoint, the credential mode '
-      + 'and auth scheme, the wrapper path and whether it exists on disk, the advertised models, and '
+      + 'and auth scheme, the wrapper path and whether it is there and still runnable, the advertised models, and '
       + 'the target bundle id. It reads config and disk only, changes nothing, and works on a non-Mac '
       + "admin box. It carries no secret: for sign-in state run 'hyp client claude-account status', "
       + "and for whether the install actually took, run 'hyp client claude-desktop verify' - this command answers "
       + 'what the inputs resolve to, not whether Desktop is configured. Exits nonzero when the '
-      + 'credential wrapper is missing, and when the inputs do not resolve at all - an ephemeral '
+      + 'credential wrapper is missing or stale (a wrapper this plugin generated whose baked '
+      + 'interpreter or CLI path has rotted away), and when the inputs do not resolve at all - an ephemeral '
       + "gateway listen (':0') has no stable port for a profile to point at.",
     run: async (_argv, cmdCtx) => {
       const credential = resolveCredential()
@@ -211,7 +212,8 @@ export async function activate(ctx) {
     audience: 'everyday',
     summary: 'Verify the Desktop plist install and print the in-app capture-check hint',
     usage: 'hyp client claude-desktop verify',
-    help: 'Checks the automatic half (managed plist present and up to date, dialog residue cleared) '
+    help: 'Checks the automatic half (managed plist present and up to date, the credential wrapper it '
+      + 'names present and still runnable, dialog residue cleared) '
       + 'and sets the exit code from it. Also prints the in-app half as a hint only (send a message in '
       + 'Claude Desktop, confirm it was captured); that half is never checked automatically and never '
       + 'blocks (LLP 0131#verify-is-a-hint).',
