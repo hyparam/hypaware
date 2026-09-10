@@ -59,13 +59,46 @@ export function resolveHypBin(env = process.env, entry = process.argv[1]) {
 
   const running = resolveEntryPath(entry)
   if (!isNpxBinPath(running, env)) return { binPath: running, ephemeral: false }
-  // Taken as `$PATH` spells it, never through `realpathSync`: what a global
-  // install puts on `$PATH` is usually a symlink into the package tree, and
-  // the durable name is that link, not the versioned directory it currently
-  // points at.
+  // Recorded as `$PATH` spells it, never as `realpathSync` resolves it: what a
+  // global install puts on `$PATH` is usually a symlink into the package tree,
+  // and the durable name is that link, not the versioned directory it
+  // currently points at. The link is still followed to decide whether to
+  // record it at all (`runsUnderNode`); only the answer is left unresolved.
   const installed = findInstalledHypawareBin(env)
-  if (installed !== undefined) return { binPath: installed, ephemeral: false }
+  if (installed !== undefined && runsUnderNode(installed)) {
+    return { binPath: installed, ephemeral: false }
+  }
   return { binPath: running, ephemeral: true }
+}
+
+/**
+ * Whether `node <candidate>` can run what `$PATH` calls `hypaware`.
+ *
+ * The wrapper is `exec <nodeBin> <hypBin> ...`, so this call site needs a
+ * script Node can parse, not merely an executable. `findInstalledHypawareBin`
+ * answers the weaker question its other caller asks: `@hypaware/claude` puts
+ * the path at the head of a command line and runs it directly, where pnpm's
+ * shell script or a volta/asdf shim is a perfectly good answer. Here the same
+ * answer is a `SyntaxError` on the wrapper's first run, which Claude Desktop
+ * reports as a failed credential helper and nothing on this machine reports at
+ * all - so it would be worse than the `_npx` path it replaced, which at least
+ * works until npm prunes the cache.
+ *
+ * `npm install -g` links `<prefix>/bin/hypaware` onto the package's own
+ * `bin/hypaware.js`, so following the link and asking for `.js` accepts the
+ * layout the walk exists to find and declines the shims. Declining falls back
+ * to the npx path and its warning, which is what the machine had before the
+ * walk: never worse than not looking.
+ *
+ * @param {string} candidate
+ * @returns {boolean}
+ */
+function runsUnderNode(candidate) {
+  try {
+    return path.extname(fs.realpathSync(candidate)) === '.js'
+  } catch {
+    return false
+  }
 }
 
 /**

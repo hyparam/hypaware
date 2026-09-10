@@ -173,7 +173,12 @@ function writeExecutable(file) {
  * A temp root standing in for a machine running `npx hypaware`, plus the state
  * dir the wrapper is written into.
  *
- * @param {{ installedBin?: boolean }} [opts]
+ * `installedBin` picks what sits at the global bin name: `npm install -g`
+ * links it onto the package's own `bin/hypaware.js`, which is what makes the
+ * wrapper's `exec <node> <hypBin>` work at all, while pnpm, volta and asdf put
+ * a shell script or a compiled shim there under the same name.
+ *
+ * @param {{ installedBin?: boolean | 'shim' }} [opts]
  */
 function npxRig(opts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-bin-'))
@@ -186,7 +191,13 @@ function npxRig(opts = {}) {
   const globalBinDir = path.join(root, 'npm-global', 'bin')
   const globalBin = path.join(globalBinDir, 'hypaware')
   if (opts.installedBin === false) fs.mkdirSync(globalBinDir, { recursive: true })
-  else writeExecutable(globalBin)
+  else if (opts.installedBin === 'shim') writeExecutable(globalBin)
+  else {
+    const linkTarget = path.join(root, 'npm-global', 'lib', 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+    writeExecutable(linkTarget)
+    fs.mkdirSync(globalBinDir, { recursive: true })
+    fs.symlinkSync(linkTarget, globalBin)
+  }
 
   return {
     stateDir: root,
@@ -253,6 +264,22 @@ test('with no CLI installed the wrapper still works, and says what will break it
   assert.ok(body.includes(fs.realpathSync(rig.npxCliPath)))
   assert.match(err, /npx cache/)
   assert.match(err, /npm install -g hypaware/)
+})
+
+test('a $PATH entry node cannot run is declined, not recorded as durable', async (t) => {
+  // pnpm, volta and asdf all put a shell script or a compiled shim at the
+  // global bin name. The wrapper runs `exec <node> <hypBin>`, so recording one
+  // writes a wrapper that fails on its very first run - strictly worse than
+  // the npx path it would displace, which works until npm prunes the cache.
+  // So the walk declines it and the machine keeps the path plus the warning.
+  const rig = npxRig({ installedBin: 'shim' })
+
+  const { code, err, body } = await runInstallHelperWithEntry(t, rig, rig.npxCliPath)
+
+  assert.equal(code, 0)
+  assert.ok(!body.includes(rig.globalBin), `wrapper records a shim node cannot run: ${body}`)
+  assert.ok(body.includes(fs.realpathSync(rig.npxCliPath)))
+  assert.match(err, /npx cache/)
 })
 
 test('an ordinary durable install is recorded as it stands', async (t) => {
