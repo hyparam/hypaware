@@ -3047,7 +3047,13 @@ function markerRecordsEphemeralHookBin(markerObj, env) {
   for (const entry of entries) {
     if (!isPlainObject(entry)) continue
     const bin = hookCommandBin(entry.command)
-    if (bin !== undefined && isNpxBinPath(bin, env)) return true
+    // Absolute, or no claim. `isNpxBinPath` resolves whatever it is handed, so
+    // a relative token - a hand-edited `node hypaware.js ...`, an empty quoted
+    // command - would be judged against the directory `hyp` happened to run
+    // in, and one marker would read stale from inside a cache and current from
+    // anywhere else. Every command attach writes is absolute, so the guard
+    // costs nothing and makes the verdict a property of the marker alone.
+    if (bin !== undefined && path.isAbsolute(bin) && isNpxBinPath(bin, env)) return true
   }
   return false
 }
