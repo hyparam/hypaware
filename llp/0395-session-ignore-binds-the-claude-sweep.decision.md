@@ -95,9 +95,10 @@ deliberate re-import remains the user's call.
 - **Claude Desktop.** Its only capture lane is this sweep (LLP 0358
   #transcript-primary), so a Desktop session id supplied explicitly is now
   honored by it. But `hyp session ignore` still cannot resolve a Desktop
-  session id (`resolveClaudeSessionId` reads Claude Code conventions), so in
-  practice Desktop remains uncovered. Making the verb resolve or refuse a
-  Desktop session is a separate decision, not a consequence of this one.
+  session id (`resolveSessionIdForCli` reads `CLAUDE_CODE_SESSION_ID`, which
+  only the Claude Code CLI states), so in practice Desktop remains uncovered.
+  Making the verb resolve or refuse a Desktop session is a separate decision,
+  not a consequence of this one.
 - **OpenClaw and Hermes** honor the session opt-out in no lane, live included.
   Separate gap, separate decision.
 - **An already-written row** is untouched. This decision withholds a future
