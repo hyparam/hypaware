@@ -265,7 +265,10 @@ export const STRICT_SHORT_FLAGS = { strictShortFlags: true }
  */
 export function parseCommandArgv(argv, inputSchema, opts = {}) {
   const aliases = opts.aliases ?? {}
-  const expanded = argv.map((token) => aliases[token] ?? token)
+  // `Object.hasOwn`, not a bare lookup: tokens come off the command line, so an
+  // `Object.prototype` name ('constructor', 'toString') would otherwise expand
+  // to the inherited function and the parse dies on it (issue #1601).
+  const expanded = argv.map((token) => (Object.hasOwn(aliases, token) ? aliases[token] : token))
   if (expanded.includes('--help') || expanded.includes('-h')) return { help: true }
   return argvToParams(inputSchema, expanded, { strictShortFlags: opts.strictShortFlags === true })
 }
@@ -285,7 +288,12 @@ export function validateToolArguments(inputSchema, args) {
   /** @type {Record<string, unknown>} */
   const params = {}
   for (const [key, raw] of Object.entries(args ?? {})) {
-    const prop = props[key]
+    // `Object.hasOwn`, not truthiness: `key` comes off the MCP wire, so an
+    // `Object.prototype` name ('constructor', '__proto__') would otherwise
+    // resolve to the inherited member and pass as a declared property. The CLI
+    // half refuses it (see `resolveFlag`); the two projections of one schema
+    // must not disagree about what an unknown argument is (issue #1601).
+    const prop = Object.hasOwn(props, key) ? props[key] : undefined
     if (!prop) return { ok: false, error: `unknown argument '${key}'` }
     if (raw === undefined || raw === null) continue
     if (prop.type === 'array') {
@@ -373,8 +381,11 @@ export function usageForVerb(name, inputSchema) {
  */
 function resolveFlag(props, flag) {
   const snake = flag.replace(/-/g, '_')
-  if (props[snake]) return snake
-  if (props[flag]) return flag
+  // `Object.hasOwn`, not truthiness: `flag` comes off the command line, so
+  // `--constructor` would otherwise bind Object.prototype's function as a
+  // declared property instead of refusing as an unknown flag.
+  if (Object.hasOwn(props, snake)) return snake
+  if (Object.hasOwn(props, flag)) return flag
   return undefined
 }
 

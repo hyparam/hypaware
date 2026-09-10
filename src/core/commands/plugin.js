@@ -17,6 +17,7 @@ import {
   removePlugin,
   updatePlugin,
 } from '../plugin_install/install.js'
+import { getEntry } from '../plugin_install/lock.js'
 import {
   buildTtyPrompt,
   buildWarnings,
@@ -397,7 +398,7 @@ export async function runPluginInfo(argv, ctx) {
   const name = String(parsed.params.plugin)
   const stateDir = pluginStateDir(ctx)
   const lock = await loadLock(stateDir)
-  const entry = lock.plugins[name]
+  const entry = getEntry(lock, name)
   // The lock alone cannot answer for a bundled plugin, which is never in it, so
   // every bundled name read as `is not installed` whatever its state (issue
   // #1578). Same discovery as the listing, so the two cannot disagree about
