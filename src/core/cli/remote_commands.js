@@ -381,8 +381,11 @@ export async function runRemoteAdd(argv, ctx) {
   try {
     await mutateLocalConfig(configPath, (config) => {
       const query = (config.query = isPlainObject(config.query) ? config.query : {})
-      const remotes = (query.remotes = isPlainObject(query.remotes) ? query.remotes : {})
-      remotes[name] = { url }
+      const remotes = isPlainObject(query.remotes) ? query.remotes : {}
+      // `remotes[name] = ...` would run the inherited setter for a target
+      // named `__proto__` and rewrite the config without it, while this
+      // command still reported success. fromEntries defines an own property.
+      query.remotes = Object.fromEntries([...Object.entries(remotes), [name, { url }]])
     })
   } catch (err) {
     ctx.stderr.write(`hyp remote add: ${err instanceof Error ? err.message : String(err)}\n`)
@@ -626,7 +629,7 @@ async function persistStaticToken(name, token, ctx) {
   // A friendly nudge if the target isn't configured: the token still
   // stores (an env override may use it), but a typo here is common.
   const remotes = await readConfiguredRemotes(ctx)
-  if (!remotes[name]) {
+  if (!Object.hasOwn(remotes, name)) {
     ctx.stderr.write(`note: '${name}' is not a configured target - add it with 'hyp remote add ${name} <url>'\n`)
   }
   return { exitCode: 0, reason: 'ok' }
@@ -649,7 +652,7 @@ async function persistStaticToken(name, token, ctx) {
  */
 async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, compact = false }, ctx, { login, seed, enroll, waitForAttach }) {
   const remotes = await readConfiguredRemotes(ctx)
-  const entry = remotes[name]
+  const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) {
     ctx.stderr.write(`hyp remote login: '${name}' is not a configured target - add it first with 'hyp remote add ${name} <url>'\n`)
     ctx.stderr.write("  (or pass a static token with --token-file <path>)\n")
@@ -1057,7 +1060,7 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   // Bounded and defaulted by the schema (LLP 0293), so no second check here.
   const expiresDays = /** @type {number} */ (gate.params['expires-days'])
   const remotes = await readConfiguredRemotes(ctx)
-  const entry = remotes[name]
+  const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) {
     ctx.stderr.write(`hyp remote mint: unknown remote target '${name}' - add it with 'hyp remote add ${name} <url>'\n`)
     return 2
@@ -1248,7 +1251,7 @@ export async function runRemoteList(argv, ctx) {
   /** @param {string} name */
   const tokenStatus = (name) => {
     if (typeof ctx.env[remoteTokenEnvVar(name)] === 'string' && ctx.env[remoteTokenEnvVar(name)]) return 'env'
-    return stored[name] ? 'stored' : 'missing'
+    return Object.hasOwn(stored, name) && stored[name] ? 'stored' : 'missing'
   }
 
   if (json) {
@@ -1283,7 +1286,7 @@ export async function runRemoteRemove(argv, ctx) {
   const configPath = localConfigPath(ctx)
   try {
     await mutateLocalConfig(configPath, (config) => {
-      if (isPlainObject(config.query) && isPlainObject(config.query.remotes) && config.query.remotes[name] !== undefined) {
+      if (isPlainObject(config.query) && isPlainObject(config.query.remotes) && Object.hasOwn(config.query.remotes, name)) {
         delete config.query.remotes[name]
         removedConfig = true
         if (config.query.default_remote === name) delete config.query.default_remote
@@ -1337,15 +1340,21 @@ async function readConfiguredRemotes(ctx) {
   // Ship the built-in targets under any user-defined ones, so `remote login`
   // and `remote list` see the central server even before a `remote add`; a
   // user entry of the same name overrides it.
-  /** @type {Record<string, { url: string }>} */
-  const out = { ...BUILTIN_REMOTES }
+  // Built-ins first, user entries appended, and a later pair for the same
+  // name wins. `Object.fromEntries` rather than an `out[name] = ...` loop
+  // because a target named `__proto__` would otherwise set this map's
+  // prototype: the entry vanishes, and the prototype's keys then answer
+  // lookups for names nobody configured. Callers still read through
+  // `Object.hasOwn`, since the names they look up are operator-supplied too.
+  /** @type {[string, { url: string }][]} */
+  const pairs = Object.entries(BUILTIN_REMOTES)
   const config = await readLocalConfigRaw(localConfigPath(ctx))
   if (isPlainObject(config.query) && isPlainObject(config.query.remotes)) {
     for (const [name, entry] of Object.entries(config.query.remotes)) {
-      if (isPlainObject(entry) && typeof entry.url === 'string') out[name] = { url: entry.url }
+      if (isPlainObject(entry) && typeof entry.url === 'string') pairs.push([name, { url: entry.url }])
     }
   }
-  return out
+  return Object.fromEntries(pairs)
 }
 
 /**
