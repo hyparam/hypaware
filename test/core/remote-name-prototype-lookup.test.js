@@ -8,10 +8,11 @@
 // stored, and let `remote add` report success while recording nothing.
 //
 // The target name reaches the runners here as `--name=<value>`, the flag
-// form the shared `remote` schemas already declare. That is deliberate: the
-// argv tokenizer has the same hazard in its alias table (#1601), so a bare
-// positional `constructor` dies before any of these runners is entered and
-// could not exercise them.
+// form the shared `remote` schemas already declare, and these cases call the
+// runners directly. #1608 reported the bare positional form
+// (`hyp remote mint constructor`); it lands on these same lookups once the
+// argv tokenizer stops resolving a positional name off `Object.prototype`,
+// which is #1601's own defect and whose guard landed separately in #1605.
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
