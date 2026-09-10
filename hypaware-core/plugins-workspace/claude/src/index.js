@@ -297,7 +297,7 @@ export async function activate(ctx) {
             const warnings = spoolWarning === undefined
               ? [...malformedWarnings]
               : [...malformedWarnings, spoolWarning]
-            // Nothing else will ever mention an npx-cache hook path: the hook
+            // Nothing else will ever mention an ephemeral hook path: the hook
             // exits 0 and says nothing once its command is gone, so the first
             // symptom is columns that stopped arriving. Pushed onto a copy, so
             // `malformed_blocks_repaired` keeps counting only repairs.
@@ -305,9 +305,11 @@ export async function activate(ctx) {
             // The repair is a plain re-attach. The already-attached exit used
             // to compare the marker's mode, format and port and never the
             // recorded hook command, so the repair had to name a detach first;
-            // the probe now reads an `_npx` hook command as marker drift
-            // (issue #1607), so the re-run reaches this adapter and rewrites
-            // the command.
+            // the probe now reads a hook command this predicate calls ephemeral
+            // - the `_npx` cache or a project's `node_modules` alike - as marker
+            // drift (issue #1607), so the re-run reaches this adapter and
+            // rewrites the command. Narrowing either side reopens #1607 for
+            // whichever tree the two stop agreeing on.
             if (hookBin.ephemeral) {
               // Named for the tree it is actually in: npm's prune runs on
               // npm's schedule, an `npm ci` on the operator's, so an operator
