@@ -3,6 +3,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { Attr, getLogger } from '../../../../src/core/observability/index.js'
+
 import { CLAUDE_DESKTOP_CONFIG_SECTION, validateClaudeDesktopConfig } from './config.js'
 import { resolveHelperPath, resolveHypBin, resolveInputs } from './inputs.js'
 import {
@@ -268,9 +270,10 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
     ? /** @type {string} */ (argv[pathIndex + 1])
     : resolveHelperPath(sectionConfig, stateDir)
   try {
+    const hypBin = resolveHypBin(cmdCtx.env)
     const script = renderCredentialHelperScript({
       nodeBin: process.execPath,
-      hypBin: resolveHypBin(),
+      hypBin: hypBin.binPath,
       args: [...credential.helperCommandArgs],
       env: cmdCtx.env,
     })
@@ -279,6 +282,27 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
     fs.chmodSync(helperPath, 0o755)
     cmdCtx.stdout.write(`wrote credential wrapper to ${helperPath}\n`)
     cmdCtx.stdout.write("point the Desktop profile's inferenceCredentialHelper at this path\n")
+    // After the write, not instead of it: the wrapper works today, and what
+    // needs saying is what will stop working. Desktop runs it outside any shell
+    // profile with no HypAware surface in the loop, so an npm prune of the
+    // cache otherwise shows up only as the app losing its credentials.
+    if (hypBin.ephemeral) {
+      cmdCtx.stderr.write(
+        `claude-desktop install-helper: warning: the wrapper runs ${hypBin.binPath}, `
+        + "inside npm's npx cache; Claude Desktop's credential helper fails without "
+        + "warning once npm prunes it. Run 'npm install -g hypaware', then "
+        + "'hyp client claude-desktop install-helper', to record a durable path\n",
+      )
+      // The stderr line is read once, by whoever is at the terminal now; the
+      // wrapper it describes outlives that session and fails silently later.
+      // Recording the decision is what lets the machine be asked afterwards
+      // which path it baked in, the same signal `@hypaware/claude` emits for
+      // the identical choice on its managed hook.
+      getLogger('plugin.claude-desktop').warn('client.install_helper.ephemeral_hyp_bin', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        bin_path: hypBin.binPath,
+      })
+    }
     return 0
   } catch (err) {
     cmdCtx.stderr.write(`claude-desktop install-helper: ${err instanceof Error ? err.message : String(err)}\n`)
