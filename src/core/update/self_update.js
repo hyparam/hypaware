@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { isEphemeralBinPath } from '../cli/global_install.js'
 import { warningsRecordBootFailure } from '../daemon/boot_failure.js'
 import { daemonRunDir, processIsAlive, readPidFile } from '../daemon/pid.js'
 import { LAUNCH_LABEL } from '../daemon/platform.js'
@@ -416,6 +417,22 @@ function registryOrigin(raw) {
  * checkout would create a second, skewed install beside the one
  * actually running.
  *
+ * A copy inside some project's `node_modules` is that second install one tree
+ * over: `npm install -g` lands beside it and never replaces it. Telling it from
+ * a global root takes more than "is there a `node_modules` segment", which both
+ * have; what separates them is the manifest beside the outermost one, which a
+ * project carries and `<prefix>/lib` does not. That is exactly the question
+ * `isEphemeralBinPath` asks, so it is reused rather than restated, and the
+ * module it lives in imports no kernel code, so the pre-boot lane stays as
+ * import-light as it was.
+ *
+ * `applySelfUpdate` refuses this root anyway (it compares against npm's prefix),
+ * so what the verdict buys is everything around that refusal: no daily registry
+ * probe, no `npm config get prefix` spawned to ask what the path already
+ * answers, and no sticky `apply_failed` error putting a permanent
+ * "self-update: degraded" line on `hyp status` for a machine with nothing wrong
+ * with it (issue #1622).
+ *
  * @ref LLP 0309#global-install-only [implements]: provenance guard on the running package root
  * @param {{ packageRoot?: string, env?: NodeJS.ProcessEnv }} [opts]
  * @returns {SelfInstallProvenance}
@@ -429,6 +446,7 @@ export function classifySelfProvenance(opts = {}) {
   if (cache && root.startsWith(path.join(cache, '_npx') + path.sep)) return 'npx'
   if (fs.existsSync(path.join(root, '.git'))) return 'checkout'
   if (!segments.includes('node_modules')) return 'checkout'
+  if (isEphemeralBinPath(root, env)) return 'project-local'
   return 'global-candidate'
 }
 

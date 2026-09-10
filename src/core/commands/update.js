@@ -146,8 +146,12 @@ export async function runUpdate(argv, ctx) {
     )
     return 1
   }
-  if (result.reason === 'checkout' || result.reason === 'npx') {
-    const how = result.reason === 'checkout' ? 'a source checkout' : 'an npx cache'
+  // None of the three is the global root `npm install -g` replaces, so each is
+  // told which copy it is running rather than that an install failed.
+  if (result.reason === 'checkout' || result.reason === 'npx' || result.reason === 'project-local') {
+    const how = result.reason === 'checkout'
+      ? 'a source checkout'
+      : result.reason === 'npx' ? 'an npx cache' : "a project's node_modules"
     ctx.stderr.write(
       `hyp update: ${result.latest} is available but this install runs from ${how}, ` +
       `which never self-updates. Install with 'npm install -g ${identity.name}' instead.\n`
