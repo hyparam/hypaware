@@ -1,0 +1,613 @@
+{
+  "client_version": "3.19.19",
+  "conversation_id": "a04677b4-01ac-478d-a4ef-37ab5ddd0d9a",
+  "source_bundle_sha256": "b58c85c5304741e433b21dbfb2714d39f8c7ced47ceb1112a001ee8c3edb8846",
+  "root_message_count": 29,
+  "tool_result_counts": {
+    "Glob": 3,
+    "Read": 4,
+    "Grep": 1,
+    "Shell": 2,
+    "GetDynamicTools": 2
+  },
+  "excluded_counts": {
+    "non_assistant_or_tool_message": 7,
+    "reasoning": 10,
+    "thinking_step": 10
+  },
+  "hook_counts": {
+    "sessionStart": 1,
+    "beforeSubmitPrompt": 5,
+    "afterAgentResponse": 5,
+    "stop": 5,
+    "preToolUse": 10,
+    "postToolUse": 10,
+    "beforeReadFile": 3,
+    "afterShellExecution": 2
+  },
+  "native_result_ids_matching_hooks_exactly": 8,
+  "native_result_ids_matching_hooks_after_literal_newline_conversion": 8,
+  "turns": [
+    {
+      "user": {
+        "text": "Hi how are you",
+        "message_id": "8d94b732-ea44-49c9-9e8c-fa7c56a2ac3f"
+      },
+      "request_id": "a07c639b-d9a1-46ce-8639-5c42ba91f842",
+      "steps": [
+        {
+          "kind": "assistant",
+          "text": "Doing well, thanks. How can I help you today?",
+          "started_at_ms": 1789077077166,
+          "completed_at_ms": null
+        }
+      ]
+    },
+    {
+      "user": {
+        "text": "can youtell me what's in the notes file here",
+        "message_id": "00310b76-efd7-4fd0-8787-ee0b080016be"
+      },
+      "request_id": "fa02e1a3-ef6f-44b9-9e1e-8046123d1074",
+      "steps": [
+        {
+          "kind": "assistant",
+          "text": "I'll look up the notes file in this workspace and summarize what\u2019s in it.",
+          "started_at_ms": 1789077093392,
+          "completed_at_ms": 1789077093396
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-62daabda-a965-41fb-b5d8-e7158c01e16d-1\nfc_ozmck4N-3LYxF7-4a913528-aws_ue1_1",
+          "started_at_ms": 1789077093400,
+          "completed_at_ms": 1789077093902,
+          "sentinel_bytes_present": false
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-62daabda-a965-41fb-b5d8-e7158c01e16d-0\nfc_ozmck4N-3LYxF7-4a913528-aws_ue1_0",
+          "started_at_ms": 1789077093394,
+          "completed_at_ms": 1789077093905,
+          "sentinel_bytes_present": false
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-1c9eff41-3ea2-4e6d-b15b-1416f9295309-2\nfc_ozmckZK-3LYxF7-3cae1704-aws_ue1_0",
+          "started_at_ms": 1789077095615,
+          "completed_at_ms": 1789077095857,
+          "sentinel_bytes_present": true
+        },
+        {
+          "kind": "assistant",
+          "text": "`notes.txt` has one line:\n\n**The probe value is MARIGOLD-42.**",
+          "started_at_ms": 1789077096813,
+          "completed_at_ms": null
+        }
+      ]
+    },
+    {
+      "user": {
+        "text": "well done",
+        "message_id": "1f8277db-d60c-4d90-a05e-c2bfa0acb1b1"
+      },
+      "request_id": "8784c510-eb26-4a1e-b106-5f705f612fbc",
+      "steps": [
+        {
+          "kind": "assistant",
+          "text": "Glad that helped. If you want to dig into anything else in this workspace, just say.",
+          "started_at_ms": 1789077109210,
+          "completed_at_ms": null
+        }
+      ]
+    },
+    {
+      "user": {
+        "text": "can you read the notes.txt again, it's a test",
+        "message_id": "c35b11ad-51d3-43bc-9796-5761f6bc9f7d"
+      },
+      "request_id": "f2284f94-aa40-4b97-96ca-01ba5e518677",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool_call_id": "call-c1013c51-8c3b-430d-a8fb-82b19d90c535-3\nfc_ozmfg7u-3LYxF7-5adeb851-aws_ue1_0",
+          "started_at_ms": 1789077666446,
+          "completed_at_ms": 1789077667262,
+          "sentinel_bytes_present": true
+        },
+        {
+          "kind": "assistant",
+          "text": "`notes.txt` still says:\n\n**The probe value is MARIGOLD-42.**",
+          "started_at_ms": 1789077670133,
+          "completed_at_ms": null
+        }
+      ]
+    },
+    {
+      "user": {
+        "text": "testing the cursor tool hook out, can you use a bunch of tools",
+        "message_id": "dbbd5164-c628-4b15-8164-7197dbbfb8fd"
+      },
+      "request_id": "37013e55-e103-4b73-ae59-840cae5fa044",
+      "steps": [
+        {
+          "kind": "assistant",
+          "text": "I'll exercise several tools at once on this workspace so we can see the hook fire across reads, searches, and shell.",
+          "started_at_ms": 1789077895991,
+          "completed_at_ms": 1789077896108
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-4\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_0",
+          "started_at_ms": 1789077896107,
+          "completed_at_ms": 1789077896423,
+          "sentinel_bytes_present": true
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-5\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_1",
+          "started_at_ms": 1789077896110,
+          "completed_at_ms": 1789077896572,
+          "sentinel_bytes_present": false
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-6\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_2",
+          "started_at_ms": 1789077896347,
+          "completed_at_ms": 1789077898314,
+          "sentinel_bytes_present": true
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-8\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_4",
+          "started_at_ms": 1789077898271,
+          "completed_at_ms": 1789077898402,
+          "sentinel_bytes_present": false
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-7\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_3",
+          "started_at_ms": 1789077898270,
+          "completed_at_ms": 1789077901082,
+          "sentinel_bytes_present": true
+        },
+        {
+          "kind": "assistant",
+          "text": "Firing a second wave so the hook sees a few more tool types.",
+          "started_at_ms": 1789077903816,
+          "completed_at_ms": 1789077904143
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-10\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_1",
+          "started_at_ms": 1789077904340,
+          "completed_at_ms": 1789077904437,
+          "sentinel_bytes_present": false
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-9\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_0",
+          "started_at_ms": 1789077904142,
+          "completed_at_ms": 1789077904654,
+          "sentinel_bytes_present": false
+        },
+        {
+          "kind": "tool",
+          "tool_call_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-11\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_2",
+          "started_at_ms": 1789077904522,
+          "completed_at_ms": 1789077905092,
+          "sentinel_bytes_present": false
+        },
+        {
+          "kind": "assistant",
+          "text": "Hook test ran. I fired two batches across these tools:\n\n- **Read** \u2014 `notes.txt` and `.cursor/hooks.json`\n- **Glob** \u2014 workspace file listing\n- **Grep** \u2014 full-text scan\n- **Shell** \u2014 `ls`, `pwd`, `wc`, `file`\n- **GetDynamicTools** \u2014 catalog search, then `cursor_dialog` schema\n\nWorkspace is tiny: `notes.txt` (`The probe value is MARIGOLD-42.`) and `.cursor/hooks.json`, which wires `capture.mjs` into `preToolUse`, `postToolUse`, `beforeReadFile`, `afterShellExecution`, and the other session hooks.\n\nThat should have given the hook a mix of read, search, shell, and MCP discovery events.",
+          "started_at_ms": 1789077906521,
+          "completed_at_ms": null
+        }
+      ]
+    }
+  ],
+  "projected_messages": [
+    {
+      "position": 3,
+      "message_id": "msg_ozmceiQ-3LYxF7-469b5fb1-aws_ue1_0",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Doing well, thanks. How can I help you today?"
+        }
+      ]
+    },
+    {
+      "position": 5,
+      "message_id": "msg_ozmck4N-3LYxF7-4a913528-aws_ue1_0",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "I'll look up the notes file in this workspace and summarize what\u2019s in it."
+        },
+        {
+          "type": "tool-call",
+          "tool_name": "Glob",
+          "tool_call_id": "call-62daabda-a965-41fb-b5d8-e7158c01e16d-0\nfc_ozmck4N-3LYxF7-4a913528-aws_ue1_0",
+          "args": {
+            "glob_pattern": "**/*notes*"
+          }
+        },
+        {
+          "type": "tool-call",
+          "tool_name": "Glob",
+          "tool_call_id": "call-62daabda-a965-41fb-b5d8-e7158c01e16d-1\nfc_ozmck4N-3LYxF7-4a913528-aws_ue1_1",
+          "args": {
+            "glob_pattern": "**/*.{md,txt}"
+          }
+        }
+      ]
+    },
+    {
+      "position": 6,
+      "message_id": "call-62daabda-a965-41fb-b5d8-e7158c01e16d-0\nfc_ozmck4N-3LYxF7-4a913528-aws_ue1_0",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "Glob",
+          "tool_call_id": "call-62daabda-a965-41fb-b5d8-e7158c01e16d-0\nfc_ozmck4N-3LYxF7-4a913528-aws_ue1_0",
+          "result_type": "text",
+          "result_chars": 53,
+          "result_sha256": "f94d7bf17fc2f8bbd8e6be09e15d9379d383a9212f8210fc0207f1a6e5f2809f",
+          "notes_path_present": true
+        }
+      ]
+    },
+    {
+      "position": 7,
+      "message_id": "call-62daabda-a965-41fb-b5d8-e7158c01e16d-1\nfc_ozmck4N-3LYxF7-4a913528-aws_ue1_1",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "Glob",
+          "tool_call_id": "call-62daabda-a965-41fb-b5d8-e7158c01e16d-1\nfc_ozmck4N-3LYxF7-4a913528-aws_ue1_1",
+          "result_type": "text",
+          "result_chars": 53,
+          "result_sha256": "f94d7bf17fc2f8bbd8e6be09e15d9379d383a9212f8210fc0207f1a6e5f2809f",
+          "notes_path_present": true
+        }
+      ]
+    },
+    {
+      "position": 8,
+      "message_id": "1",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "tool-call",
+          "tool_name": "Read",
+          "tool_call_id": "call-1c9eff41-3ea2-4e6d-b15b-1416f9295309-2\nfc_ozmckZK-3LYxF7-3cae1704-aws_ue1_0",
+          "args": {
+            "path": "/tmp/hypaware-cursor-live-probe/workspace/notes.txt"
+          }
+        }
+      ]
+    },
+    {
+      "position": 9,
+      "message_id": "call-1c9eff41-3ea2-4e6d-b15b-1416f9295309-2\nfc_ozmckZK-3LYxF7-3cae1704-aws_ue1_0",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "Read",
+          "tool_call_id": "call-1c9eff41-3ea2-4e6d-b15b-1416f9295309-2\nfc_ozmckZK-3LYxF7-3cae1704-aws_ue1_0",
+          "result_type": "text",
+          "result_chars": 32,
+          "result_sha256": "8df7676c005c029e1c7075b281908fcda01aae5fbc7051a18b3373a1986a5107",
+          "result": "The probe value is MARIGOLD-42.\n"
+        }
+      ]
+    },
+    {
+      "position": 10,
+      "message_id": "msg_ozmcm8t-3LYxF7-e103a289-aws_ue1_0",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "`notes.txt` has one line:\n\n**The probe value is MARIGOLD-42.**"
+        }
+      ]
+    },
+    {
+      "position": 12,
+      "message_id": "msg_ozmcpiH-3LYxF7-fadd624a-aws_ue1_0",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Glad that helped. If you want to dig into anything else in this workspace, just say."
+        }
+      ]
+    },
+    {
+      "position": 14,
+      "message_id": "1",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "tool-call",
+          "tool_name": "Read",
+          "tool_call_id": "call-c1013c51-8c3b-430d-a8fb-82b19d90c535-3\nfc_ozmfg7u-3LYxF7-5adeb851-aws_ue1_0",
+          "args": {
+            "path": "/tmp/hypaware-cursor-live-probe/workspace/notes.txt"
+          }
+        }
+      ]
+    },
+    {
+      "position": 15,
+      "message_id": "call-c1013c51-8c3b-430d-a8fb-82b19d90c535-3\nfc_ozmfg7u-3LYxF7-5adeb851-aws_ue1_0",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "Read",
+          "tool_call_id": "call-c1013c51-8c3b-430d-a8fb-82b19d90c535-3\nfc_ozmfg7u-3LYxF7-5adeb851-aws_ue1_0",
+          "result_type": "text",
+          "result_chars": 32,
+          "result_sha256": "8df7676c005c029e1c7075b281908fcda01aae5fbc7051a18b3373a1986a5107",
+          "result": "The probe value is MARIGOLD-42.\n"
+        }
+      ]
+    },
+    {
+      "position": 16,
+      "message_id": "msg_ozmfh18-3LYxF7-0a78b14f-aws_ue1_0",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "`notes.txt` still says:\n\n**The probe value is MARIGOLD-42.**"
+        }
+      ]
+    },
+    {
+      "position": 18,
+      "message_id": "msg_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_0",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "I'll exercise several tools at once on this workspace so we can see the hook fire across reads, searches, and shell."
+        },
+        {
+          "type": "tool-call",
+          "tool_name": "Read",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-4\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_0",
+          "args": {
+            "path": "/tmp/hypaware-cursor-live-probe/workspace/notes.txt"
+          }
+        },
+        {
+          "type": "tool-call",
+          "tool_name": "Glob",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-5\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_1",
+          "args": {
+            "glob_pattern": "**/*",
+            "target_directory": "/tmp/hypaware-cursor-live-probe/workspace"
+          }
+        },
+        {
+          "type": "tool-call",
+          "tool_name": "Grep",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-6\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_2",
+          "args": {
+            "path": "/tmp/hypaware-cursor-live-probe/workspace",
+            "pattern": "."
+          }
+        },
+        {
+          "type": "tool-call",
+          "tool_name": "Shell",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-7\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_3",
+          "args": {
+            "command": "ls -la && pwd && echo \"---\" && head -n 20 notes.txt",
+            "description": "List workspace and preview notes"
+          }
+        },
+        {
+          "type": "tool-call",
+          "tool_name": "GetDynamicTools",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-8\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_4",
+          "args": {
+            "pattern": "cursor|browser|dialog"
+          }
+        }
+      ]
+    },
+    {
+      "position": 19,
+      "message_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-4\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_0",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "Read",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-4\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_0",
+          "result_type": "text",
+          "result_chars": 32,
+          "result_sha256": "8df7676c005c029e1c7075b281908fcda01aae5fbc7051a18b3373a1986a5107",
+          "result": "The probe value is MARIGOLD-42.\n"
+        }
+      ]
+    },
+    {
+      "position": 20,
+      "message_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-5\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_1",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "Glob",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-5\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_1",
+          "result_type": "text",
+          "result_chars": 114,
+          "result_sha256": "1144245dec16b7b93b0598846177404c2d0bfa8da1b21d366c71d0e64ac72dd5",
+          "notes_path_present": true
+        }
+      ]
+    },
+    {
+      "position": 21,
+      "message_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-6\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_2",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "Grep",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-6\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_2",
+          "result_type": "text",
+          "result_chars": 3740,
+          "result_sha256": "c22de66a1a7d25d25647577f12bd57f4f1bcb9035b859302ef8c3cf7be077cb8",
+          "sentinel_match_present": true
+        }
+      ]
+    },
+    {
+      "position": 22,
+      "message_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-7\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_3",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "Shell",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-7\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_3",
+          "result_type": "text",
+          "result_chars": 773,
+          "result_sha256": "3b59f0859107d678d8971e711bed80aacac3be6e9233c3e7089dba3ebe3ad28b"
+        }
+      ]
+    },
+    {
+      "position": 23,
+      "message_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-8\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_4",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "GetDynamicTools",
+          "tool_call_id": "call-e3115cbb-39f9-4b9d-91c1-322af5c0bb99-8\nfc_ozmgrR3-3LYxF7-0e278fb1-aws_ue1_4",
+          "result_type": "object",
+          "result_chars": 6268,
+          "result_sha256": "858e29cbf2c86f02b87cd8ae68727943d9abc0d5a55b85d0feb4fa6fd76ca42d",
+          "result_keys": [
+            "matches",
+            "mode",
+            "pattern"
+          ],
+          "describes_cursor_dialog": false
+        }
+      ]
+    },
+    {
+      "position": 24,
+      "message_id": "msg_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_0",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Firing a second wave so the hook sees a few more tool types."
+        },
+        {
+          "type": "tool-call",
+          "tool_name": "Read",
+          "tool_call_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-9\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_0",
+          "args": {
+            "path": "/tmp/hypaware-cursor-live-probe/workspace/.cursor/hooks.json"
+          }
+        },
+        {
+          "type": "tool-call",
+          "tool_name": "GetDynamicTools",
+          "tool_call_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-10\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_1",
+          "args": {
+            "namespace": "cursor-app-control",
+            "toolName": "cursor_dialog"
+          }
+        },
+        {
+          "type": "tool-call",
+          "tool_name": "Shell",
+          "tool_call_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-11\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_2",
+          "args": {
+            "command": "wc -l notes.txt .cursor/hooks.json && file notes.txt .cursor/hooks.json",
+            "description": "Count lines and identify file types"
+          }
+        }
+      ]
+    },
+    {
+      "position": 25,
+      "message_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-9\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_0",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "Read",
+          "tool_call_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-9\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_0",
+          "result_type": "text",
+          "result_chars": 3145,
+          "result_sha256": "9d72158cd0994b07a6576a7938034ac71de0565025fd9d8203fe5a358032eabe"
+        }
+      ]
+    },
+    {
+      "position": 26,
+      "message_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-10\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_1",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "GetDynamicTools",
+          "tool_call_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-10\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_1",
+          "result_type": "object",
+          "result_chars": 2919,
+          "result_sha256": "473eadfb268777ccac02be194ba5047096f3f4e2e5512c910f5346afa54a9906",
+          "result_keys": [
+            "description",
+            "inputSchema",
+            "tool"
+          ],
+          "describes_cursor_dialog": true
+        }
+      ]
+    },
+    {
+      "position": 27,
+      "message_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-11\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_2",
+      "role": "tool",
+      "blocks": [
+        {
+          "type": "tool-result",
+          "tool_name": "Shell",
+          "tool_call_id": "call-1ee6f64c-84d5-477a-8c34-3160156d6b0b-11\nfc_ozmgtWS-3LYxF7-ce23eacc-aws_ue1_2",
+          "result_type": "text",
+          "result_chars": 725,
+          "result_sha256": "56a073e3cc298917dceeeaafd761503e2502855856d50ba13ea09d3a9d93cf77"
+        }
+      ]
+    },
+    {
+      "position": 28,
+      "message_id": "msg_ozmguhT-3LYxF7-51362667-aws_ue1_0",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Hook test ran. I fired two batches across these tools:\n\n- **Read** \u2014 `notes.txt` and `.cursor/hooks.json`\n- **Glob** \u2014 workspace file listing\n- **Grep** \u2014 full-text scan\n- **Shell** \u2014 `ls`, `pwd`, `wc`, `file`\n- **GetDynamicTools** \u2014 catalog search, then `cursor_dialog` schema\n\nWorkspace is tiny: `notes.txt` (`The probe value is MARIGOLD-42.`) and `.cursor/hooks.json`, which wires `capture.mjs` into `preToolUse`, `postToolUse`, `beforeReadFile`, `afterShellExecution`, and the other session hooks.\n\nThat should have given the hook a mix of read, search, shell, and MCP discovery events."
+        }
+      ]
+    }
+  ]
+}

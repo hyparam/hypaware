@@ -59,6 +59,9 @@ const PLUGIN_NAME = '@hypaware/claude'
  *   subprocess helpers and the real sweep.
  */
 export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
+  // @ref LLP 0399#coexistence: inherited hooks are not Claude activity and
+  // must not write Claude context or run its body-spool maintenance.
+  if (ctx.env.CURSOR_VERSION) return 0
   if (argv.includes('--help') || argv.includes('-h')) {
     ctx.stdout.write('usage: hyp claude-hook session-context --state-file <absolute-path>\n')
     return 0
@@ -113,6 +116,7 @@ async function recordSessionContext(argv, ctx, deps) {
     return
   }
 
+  if (typeof event.cursor_version === 'string') return
   const sessionId = str(event.session_id)
   const cwd = str(event.new_cwd) ?? str(event.cwd)
   if (!sessionId || !cwd) return
