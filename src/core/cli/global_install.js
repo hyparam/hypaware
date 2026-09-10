@@ -125,7 +125,17 @@ export function isNpxBinPath(binPath, env = process.env) {
  *
  * A manifest that cannot be read answers "durable", so the fail direction is a
  * missed ephemeral path - today's behaviour - and never a warning on a machine
- * with nothing wrong with it. A global root some other package manager does
+ * with nothing wrong with it. For the entrypoint callers that is the whole
+ * story, since nothing can be running out of a tree that is not there. It is
+ * weaker for `markerRecordsEphemeralHookBin`, which asks about a path recorded
+ * some time ago: delete the whole project and the manifest goes with it, so the
+ * recorded command reads durable again and the re-attach that would rewrite it
+ * fast-paths at "already attached". `_npx` keeps answering off the path shape
+ * alone and survives its own prune; this one does not survive an `rm -rf` of
+ * the project root. Closing that would mean calling a recorded path stale for
+ * merely not resolving, which is the case that function deliberately leaves
+ * alone (a CLI moves for ordinary reasons), so it is a known edge and not an
+ * oversight. A global root some other package manager does
  * write a manifest beside (pnpm's `global/<n>` and yarn's `config/yarn/global`
  * are the two) reads as ephemeral. What that costs is the `$PATH` walk each
  * caller already runs: coming back empty it records what it was handed,

@@ -3051,6 +3051,13 @@ function markerRecordsEphemeralHookBin(markerObj, env) {
   if (!isPlainObject(managed)) return false
   const entries = managed.hook_entries
   if (!Array.isArray(entries)) return false
+  // One answer per distinct path, not per entry. Attach writes six managed
+  // entries (`MANAGED_HOOK_SPECS` in the adapter) and every one of them names
+  // the same bin, so asking per entry is five repeats of a walk plus a
+  // `statSync` - work `isNpxBinPath` never did, on a function `hyp status` and
+  // the login attach-wait's one-second poll both call.
+  /** @type {Set<string> | undefined} */
+  let asked
   for (const entry of entries) {
     if (!isPlainObject(entry)) continue
     const bin = hookCommandBin(entry.command)
@@ -3061,7 +3068,11 @@ function markerRecordsEphemeralHookBin(markerObj, env) {
     // project and current from anywhere else. Every command attach writes is
     // absolute, so the guard costs nothing and makes the verdict a property of
     // the marker alone.
-    if (bin !== undefined && path.isAbsolute(bin) && isEphemeralBinPath(bin, env)) return true
+    if (bin === undefined || !path.isAbsolute(bin)) continue
+    asked ??= new Set()
+    if (asked.has(bin)) continue
+    asked.add(bin)
+    if (isEphemeralBinPath(bin, env)) return true
   }
   return false
 }
