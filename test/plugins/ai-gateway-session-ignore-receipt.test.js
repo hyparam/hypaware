@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { DEFAULT_GATEWAY_ENDPOINT } from '../../src/core/config/gateway_endpoint.js'
+import { CLAUDE_TELEMETRY_SOURCE } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../hypaware-core/plugins-workspace/ai-gateway/src/session_command.js'
@@ -164,6 +165,22 @@ function skillText(rel) {
   )
 }
 
+/**
+ * Just the "Protect this session first" section. Every assertion about the
+ * opt-out recipe is scoped to it, so a later step mentioning the verb in
+ * passing can neither satisfy nor break one.
+ *
+ * @param {string} rel
+ * @returns {string}
+ */
+function privacyStep1(rel) {
+  const text = skillText(rel)
+  const start = text.indexOf('## Step 1')
+  const end = text.indexOf('## Step 2')
+  assert.ok(start >= 0 && end > start, 'Step 1 must still be a section of its own')
+  return text.slice(start, end)
+}
+
 for (const rel of SKILLS) {
   test(`${rel} checks the control reply is about the session it posted`, () => {
     // R14's second half. The JS resolver refuses a reply naming a different
@@ -223,11 +240,7 @@ for (const rel of SKILLS) {
  */
 for (const rel of SKILLS) {
   test(`${rel} reaches for the CLI verb before any shell POST`, () => {
-    const text = skillText(rel)
-    const start = text.indexOf('## Step 1')
-    const end = text.indexOf('## Step 2')
-    assert.ok(start >= 0 && end > start, 'Step 1 must still be a section of its own')
-    const step1 = text.slice(start, end)
+    const step1 = privacyStep1(rel)
 
     const verbAt = step1.indexOf('hyp session ignore')
     const postAt = step1.indexOf('/_hypaware/ignore/session')
@@ -261,6 +274,46 @@ test('the claude privacy skill fallback names the real default gateway endpoint'
   assert.ok(
     text.includes(`ANTHROPIC_BASE_URL:-${DEFAULT_GATEWAY_ENDPOINT}`),
     `the fallback default must be DEFAULT_GATEWAY_ENDPOINT (${DEFAULT_GATEWAY_ENDPOINT})`
+  )
+  // Naming the right port somewhere is weaker than not naming the wrong one:
+  // the stale literal reintroduced in any other arm of the chain would leave
+  // the assertion above satisfied and the fallback still pointing nowhere.
+  assert.doesNotMatch(text, /127\.0\.0\.1:8787/, 'and the stale 8787 default must be gone from the file')
+})
+
+/**
+ * The receipt tells the agent to stop unless the recorder that captures THIS
+ * session appears in `recorders`, which only works if the skill names the id
+ * that recorder actually reports. `runMutation` fills `recorders[].recorder`
+ * from the live snapshot's `source.name`, which for the telemetry listener is
+ * `CLAUDE_TELEMETRY_SOURCE` - so the skill and the source must not drift.
+ *
+ * Checked because the failure is silent in the direction that matters: a skill
+ * naming a recorder id nothing reports would find it missing from every
+ * receipt and stop on a session that was in fact covered, and the obvious
+ * "fix" for that noise is to delete the check that makes the opt-out real.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: the listener is a recorder in its
+ * own right, so the skill's coverage check has to be able to find it.
+ */
+test('the claude privacy skill names the recorder id the listener reports', () => {
+  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+  assert.ok(
+    step1.includes(CLAUDE_TELEMETRY_SOURCE),
+    `Step 1 must name the listener's own recorder id (${CLAUDE_TELEMETRY_SOURCE}) for its coverage check to be actionable`
+  )
+  // And the check has to be a stop condition, not an observation: the whole
+  // bug this skill's Step 1 was rewritten for is an `ok` over a recorder that
+  // was never addressed (issue #1615).
+  assert.match(
+    step1,
+    /\*\*Stop on any of these\*\*/,
+    'the receipt readings must be framed as stop conditions, not as commentary'
+  )
+  assert.match(
+    step1,
+    /a `"session_id_source"` other than `claude_env`/,
+    'an id resolved off disk for another session must be one of them'
   )
 })
 

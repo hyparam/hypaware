@@ -28,20 +28,25 @@ The review conversation will discuss the most sensitive content on the machine, 
 
 Prefer `hyp session ignore --json`, which resolves the id and verifies the opt-out in one tested implementation and refuses rather than guessing. It resolves this session's id from `CLAUDE_CODE_SESSION_ID`, addresses **every** recorder advertising the control route, validates each reply the same three ways, and fails closed: it exits nonzero and prints no success when it cannot establish the right id, which is the answer this step needs. Only where it is unavailable, or cannot resolve the session, does the script below apply.
 
+Reading the receipt is not optional. The verb fails closed on the questions it can answer, but two of its **successes** are narrower than they look, and both are checked below.
+
 ```bash
 hyp session ignore --json
 ```
 
-<!-- @ref LLP 0256#cli-posts-to-both [constrained-by]: two recorders host the same route, so an opt-out that reaches one is not an opt-out -->
+<!-- @ref LLP 0256#cli-posts-to-both [constrained-by]: more than one recorder hosts this route, so an opt-out that reaches one of them is not an opt-out -->
 
-**Why the verb and not a `curl`.** Claude Code attaches over OTEL, so this session is recorded by the `@hypaware/claude` telemetry listener, whose ignored-session set is a **different object on a different port** from the gateway's (LLP 0256 #cli-posts-to-both). The verb reads `control_routes` out of live daemon status and writes to each recorder it finds; one `curl` reaches one of them, so on the default OTEL attach it can report a confident success over a listener that keeps recording. Read the receipt rather than only the exit code:
+**Why the verb and not a `curl`.** Claude Code attaches over OTEL, so this session is recorded by the `@hypaware/claude` telemetry listener, whose ignored-session set is a **different object on a different port** from the gateway's (LLP 0256 #cli-posts-to-both). The verb addresses each recorder that advertises `control_routes` in live daemon status, plus the gateway by its own resolution; one `curl` reaches one of them, so on the default OTEL attach it can report a confident success over a listener that keeps recording. `"status": "ok"` means every recorder it *addressed* took the write, which is not the same claim as "you are covered". So read the receipt rather than only the exit code:
 
 - exit `0` with `"status": "ok"`. `"status": "partial"` (exit 3) means an addressed recorder **refused and is still recording**.
-- `"session_id"` is the id this session carries (`CLAUDE_CODE_SESSION_ID`), and `"session_id_source"` is `claude_env`.
-- every entry in `"recorders"` reports `"status": "ok"` with `"ignored": true`. That list is the set of live recorders, so name them to the user rather than saying "the machine".
+- `"session_id_source"` is `claude_env`, so `"session_id"` is this conversation's own `CLAUDE_CODE_SESSION_ID`. Any other source means the verb could not read that variable and resolved **a different session** off disk instead (`codex_rollout` / `codex_env_rollout` find a Codex session sharing this directory). It then confirms a real opt-out, `"status": "ok"` and all, for a session you are not in, while this one keeps being recorded.
+- `"recorders"` contains an entry for `claude-telemetry`, the listener that captures this session. A list holding only `gateway` means the listener was never addressed, because a recorder absent from the live daemon snapshot is not addressed at all - and an `ok` over the recorder that was skipped is the exact failure this step exists to prevent. A `gateway not addressed:` line on **stderr** narrows the answer the same way from the other side.
+- every entry in `"recorders"` reports `"status": "ok"` with `"ignored": true`. Name them to the user rather than saying "the machine".
 - `"guarantee": "set_membership"` is the bound on all of it, spelled out below.
 
-If the verb exits nonzero, reports `partial`, or cannot resolve the session id, **stop and tell the user the review session is still being recorded**. Only proceed if they explicitly accept that risk.
+**Stop on any of these** and tell the user the review session is still being recorded: `"status": "partial"`, a `"session_id_source"` other than `claude_env`, no `claude-telemetry` entry in `"recorders"`, or a nonzero exit the fallback does not cover. Only proceed if they explicitly accept that risk.
+
+Two nonzero exits, and only those two, send you to the fallback: `hyp` **not installed** (`command not found`), and the verb refusing to resolve the session because more than one client states an id for this shell. A `hyp` that ran and failed any other way is a stop, not a reason to fall back: the verb already tried the gateway the script is about to try.
 
 **Fallback, only where `hyp` is unavailable.** The script below posts to the gateway control route directly. It reaches the **gateway alone**: if a telemetry listener is live, this does not cover it, so report an opt-out of the gateway rather than of the machine.
 
