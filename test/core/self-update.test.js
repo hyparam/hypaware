@@ -2187,6 +2187,20 @@ test('classifySelfProvenance separates a project dependency from the global inst
     const npxRoot = path.join(dir, 'cache', '_npx', 'abc', 'node_modules', 'hypaware')
     await fsp.mkdir(npxRoot, { recursive: true })
     assert.equal(classifySelfProvenance({ packageRoot: npxRoot, env: {} }), 'npx')
+
+    // Pinned, not overlooked: pnpm and yarn write a manifest beside their
+    // GLOBAL root (issue #1625), so this predicate reads one as project-local.
+    // `applySelfUpdate` compares against npm's prefix and refused those roots
+    // before this verdict existed, so the answer costs them no apply, and
+    // separating them needs a heuristic #1625 put out of scope. Asserted so a
+    // later change to that verdict is a decision someone made on purpose.
+    const pnpmGlobal = path.join(dir, 'pnpm', 'global', '5')
+    await fsp.mkdir(path.join(pnpmGlobal, 'node_modules', 'hypaware'), { recursive: true })
+    await fsp.writeFile(path.join(pnpmGlobal, 'package.json'), JSON.stringify({ name: 'global', version: '0.0.1' }))
+    assert.equal(
+      classifySelfProvenance({ packageRoot: path.join(pnpmGlobal, 'node_modules', 'hypaware'), env: {} }),
+      'project-local'
+    )
   } finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }

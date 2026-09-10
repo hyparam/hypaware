@@ -148,10 +148,17 @@ export async function runUpdate(argv, ctx) {
   }
   // None of the three is the global root `npm install -g` replaces, so each is
   // told which copy it is running rather than that an install failed.
+  //
+  // The third arm names the tree and stops there, for the reason
+  // `describeEphemeralBinPath` does (issue #1625): `project-local` is decided
+  // by a manifest beside the outermost `node_modules`, and pnpm's `global/<n>`
+  // and yarn's `config/yarn/global` carry one too, so asserting a project here
+  // would send those users looking for a checkout they do not have. The repair
+  // named below is right for all of them.
   if (result.reason === 'checkout' || result.reason === 'npx' || result.reason === 'project-local') {
     const how = result.reason === 'checkout'
       ? 'a source checkout'
-      : result.reason === 'npx' ? 'an npx cache' : "a project's node_modules"
+      : result.reason === 'npx' ? 'an npx cache' : 'a node_modules tree'
     ctx.stderr.write(
       `hyp update: ${result.latest} is available but this install runs from ${how}, ` +
       `which never self-updates. Install with 'npm install -g ${identity.name}' instead.\n`

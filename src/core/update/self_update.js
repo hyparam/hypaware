@@ -426,6 +426,19 @@ function registryOrigin(raw) {
  * module it lives in imports no kernel code, so the pre-boot lane stays as
  * import-light as it was.
  *
+ * A pnpm or yarn GLOBAL root answers the same way, because those two managers
+ * do write a manifest beside theirs (issue #1625), so `project-local` is the
+ * verdict for a whole install and not only for a dependency. That takes nothing
+ * an apply would have given them: `applySelfUpdate` compares the root against
+ * npm's own prefix, so it refused those roots before this change too. What it
+ * does take is the degraded line that refusal used to leave on `hyp status`,
+ * which named the repair (`npm install -g`) while it was there. `hyp update`
+ * still probes from anywhere and still names it, which is the surface
+ * #cli-surface reserves for the manual lane, and it is the same silence a
+ * checkout and an npx cache have had from the text line all along. Separating
+ * those roots from a project's tree needs a heuristic neither predicate has,
+ * and #1625 settled that as out of scope for this one.
+ *
  * `applySelfUpdate` refuses this root anyway (it compares against npm's prefix),
  * so what the verdict buys is everything around that refusal: no daily registry
  * probe, no `npm config get prefix` spawned to ask what the path already
