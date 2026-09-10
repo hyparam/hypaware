@@ -693,8 +693,10 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
  * carrying the ` · detected` suffix only when detection put it there;
  * otherwise the bare descriptor label. The retired `· stays on this
  * machine` suffix is deliberately absent: under LLP 0188 an addition on a
- * managed machine syncs by default, and the sync-scope step after this
- * prompt is where local-only is offered.
+ * managed machine syncs by default, and on an enrolled run this menu is
+ * itself the sharing choice (LLP 0396 #combined-selection) - a checked row
+ * is collected and synced. `hyp privacy client <name> local-only` is the
+ * standing control afterwards.
  *
  * @param {PickerDescriptor} d
  * @param {ReadonlySet<string>} seed

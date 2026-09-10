@@ -520,14 +520,14 @@ async function runGuardedInitWizard(opts, guard) {
         // pick lane's own default rows, computed once here, so
         // "everything" names exactly what the lane would record.
         // Resolution failure degrades to no gate.
-        const { labels: rows, optOutIds } = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
+        const rows = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
         // Nothing detected and nothing locked is nothing to accept, so
         // there is no gate to show; the pick lane opens its menu as it
         // always would (LLP 0201 #no-default-no-accept).
         if (rows.length > 0) {
           // Only an enrolled run makes a sync claim at all, so only an
           // enrolled run pays for the store read.
-          const syncWithheld = enrolled() && (await syncWithheldSafe({ opts, ids: optOutIds }))
+          const syncWithheld = enrolled() && (await syncWithheldSafe({ opts }))
           const expressFn = opts.express ?? runWizardExpressGate
           const choice = await expressFn({
             stdout: opts.stdout,
@@ -1242,10 +1242,6 @@ async function narrateEnrolledAbort(opts) {
  * is the right failure; guessing at a list the user is about to accept is
  * not.
  *
- * `optOutIds` rides along for the accept row's sync claim: the same rows
- * by id, minus the locked ones, which always sync (LLP 0188 #locked) and
- * so can never be what makes the claim false.
- *
  * @ref LLP 0201#gate [implements]: the gate names the pick lane's rows, from one computation, or is not shown
  * @param {{
  *   opts: RunInitWizardOptions,
@@ -1254,7 +1250,7 @@ async function narrateEnrolledAbort(opts) {
  *   pickSeed: PickerSource[] | undefined,
  *   detect: (args: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>,
  * }} args
- * @returns {Promise<{ labels: string[], optOutIds: string[] }>}
+ * @returns {Promise<string[]>}
  */
 async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
   try {
@@ -1266,22 +1262,27 @@ async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
       ...(pickSeed ? { initialSelection: pickSeed } : {}),
       detect,
     }))
-    return {
-      labels: seeding.defaultRows.map((d) => d.label),
-      optOutIds: seeding.defaultRows.filter((d) => !seeding.lockedSet.has(d.id)).map((d) => d.id),
-    }
+    return seeding.defaultRows.map((d) => d.label)
   } catch {
-    return { labels: [], optOutIds: [] }
+    return []
   }
 }
 
 /**
- * A corrupt store cannot fulfill the combined selection's sync promise.
- * @param {{ opts: RunInitWizardOptions, ids: string[] }} args
+ * A corrupt store cannot fulfill the combined selection's sync promise: the
+ * confirm cannot clear an opt-out it cannot read (`sync_scope.js` warns and
+ * writes nothing), and the export seam then withholds every row until the
+ * file is repaired, org-managed rows included (`source_withhold.js` throws
+ * before it filters the central ids out). So the probe reads the store on
+ * every enrolled gate rather than only on the runs that have a non-locked
+ * row to name: a fully fleet-managed machine has no such row and is exactly
+ * the machine whose entire export the corrupt file stops.
+ *
+ * @ref LLP 0396#combined-selection [constrained-by]: the accept row claims sync only where the confirm can enable it
+ * @param {{ opts: RunInitWizardOptions }} args
  * @returns {Promise<boolean>}
  */
-async function syncWithheldSafe({ opts, ids }) {
-  if (ids.length === 0) return false
+async function syncWithheldSafe({ opts }) {
   try {
     const stateDir = readObservabilityEnv(opts.env).stateDir
     await readClientSyncEntries({ stateDir })

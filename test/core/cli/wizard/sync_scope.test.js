@@ -8,6 +8,7 @@ import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
+import { LOCKED_LABEL_SUFFIX } from '../../../../src/core/cli/wizard/pick.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import {
   clientSyncListPath,
@@ -638,9 +639,11 @@ for (const autoAccept of [false, true]) {
       { source: 'codex', class: 'local-only' },
       { source: 'raw-anthropic', class: 'local-only' },
     ] })
+    const stdout = makeBuf()
     const result = await runWizardSyncScope({
-      stdout: makeBuf(), stderr: makeBuf(), env,
+      stdout, stderr: makeBuf(), env,
       candidates: [descriptor('claude')],
+      locked: [descriptor('gateway')],
       candidatesHiddenIds: ['raw-anthropic'],
       collectAndSync: true, autoAccept,
       prompt: async () => { throw new Error('combined setup must not ask a second question') },
@@ -648,6 +651,14 @@ for (const autoAccept of [false, true]) {
     assert.deepEqual(result, { noQuestion: true, optedOut: [] })
     assert.deepEqual((await readClientSyncEntries({ stateDir }))?.map((entry) => entry.source).sort(),
       ['codex', 'raw-anthropic'])
+    // The statement is the whole sync picture, and the org's row is
+    // labelled as the fleet's on it: without the suffix the list reads as
+    // though every row on it were the user's to change (LLP 0188 #locked).
+    assert.deepEqual(stdout.text().split('\n').filter((l) => l !== ''), [
+      'These will sync to your server:',
+      `  capture gateway${LOCKED_LABEL_SUFFIX}`,
+      '  capture claude',
+    ], stdout.text())
   })
 }
 

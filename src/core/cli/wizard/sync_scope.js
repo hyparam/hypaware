@@ -24,10 +24,11 @@ const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this
 
 /**
  * Combined setup applies its confirmed collection choice without a prompt
- * (LLP 0396). The standalone editor below retains its existing semantics.
+ * (LLP 0396 #combined-selection), so `runInitWizard` no longer reaches the
+ * menu below; it stands unchanged for direct callers and its own tests.
  *
- * The legacy sync-scope step (LLP 0188 #never-silent, LLP 0190
- * #sync-gate): after the picker on every enrolled run, a multiselect
+ * The menu, as it was before the combined picker (LLP 0188 #never-silent,
+ * LLP 0190 #sync-gate): after the picker on every enrolled run, a multiselect
  * over the picked, non-locked sources. Checked means "syncs"; everything
  * is checked by default on a fresh join (default-sync is the point), and
  * a re-entry renders the sources already opted out unchecked so
@@ -191,9 +192,16 @@ export async function runWizardSyncScope(opts) {
     narrateAcceptedGate({
       stdout: opts.stdout,
       title: 'These will sync to your server:',
-      items: [...(opts.locked ?? []), ...opts.candidates].map((d) => `  ${d.label}`),
+      // The org's rows keep the suffix the picker and the menu both give
+      // them: the list is the whole sync picture (LLP 0188 #locked), and
+      // unlabelled it reads as though every row on it were the user's to
+      // change here.
+      items: [
+        ...(opts.locked ?? []).map((d) => `  ${d.label}${LOCKED_LABEL_SUFFIX}`),
+        ...opts.candidates.map((d) => `  ${d.label}`),
+      ],
     })
-    return await finishSpan({ noQuestion: true, optedOut: [] }, opts)
+    return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
   }
 
   const ask = opts.prompt ?? defaultPromptFactory(opts)

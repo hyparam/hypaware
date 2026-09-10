@@ -40,7 +40,7 @@ doing at each one:
    everything** takes the default answer to every remaining question: the
    setup names the tools it is about to configure, then states what it will
    record, what will sync to your team, and how new folders are handled,
-   and continues without stopping again. **Customize** asks you those three
+   and continues without stopping again. **Customize** asks you those two
    questions instead, one screen at a time (see below).
 3. **Complete any additional setup.** A tool whose adapter needs one more
    step asks for it here, and you may defer any of them; the remaining setup
@@ -51,18 +51,18 @@ doing at each one:
 
 ### If you choose Customize
 
-Three screens, in order, each with the same answer already selected that
+Two screens, in order, each with the same answer already selected that
 **Record and sync everything** would have taken. A bare enter accepts what
 is on the screen, so inspecting everything and changing nothing is one
 keypress per screen.
 
-1. **Choose what to collect.** A checklist of AI tools. Tools your team
-   manages are already selected and locked; tools detected on your machine
-   are pre-selected as well.
-2. **Choose what syncs.** Which of your own additions sync to the server
-   and which stay on this machine. Team-managed tools always sync and are
-   shown read-only.
-3. **Choose how new folders are handled.** Whether recording in a project
+1. **Choose what to collect and sync.** A checklist of AI tools. Tools your
+   team manages are already selected and locked; tools detected on your
+   machine are pre-selected as well. A checked tool is recorded here *and*
+   shared with the server, so confirming this screen also clears any
+   standing `hyp privacy client <name> local-only` for the tools on it;
+   `hyp privacy client` changes that back afterwards.
+2. **Choose how new folders are handled.** Whether recording in a project
    you have not worked in before syncs without asking, or asks you the
    first time. This is a standing preference; `hyp privacy folders`
    changes it later.

@@ -626,7 +626,7 @@ test('runInitWizard: a join that locked nothing still counts as enrolled when ba
   assert.equal(
     calls.filter((c) => c === 'syncScope').length,
     1,
-    'the enrolled machine is still asked what syncs'
+    'the enrolled machine still applies a sharing scope'
   )
   assert.equal(
     pickOpts[1].retentionDefault,

@@ -135,16 +135,14 @@ test('wizardStepProgress: a managed machine on the local pathway gains both enro
   assert.equal(wizardStepProgress('local', 'finale', { managed: true }), 'Step 3 of 3 · Finish setup')
 })
 
-// A question lane keeps its place in the total and states its position on
-// the machine where it turns out to have nothing to ask (LLP 0338
-// #counts-anyway). The sync lane on a fully fleet-managed machine is the
-// shipped instance: everything picked is the fleet's, so it states that
-// and asks nothing. Pinned by rendering the real lane, because the
-// alternatives this decision rejected - dropping the lane from the total,
-// or blanking its position line - are both invisible in `steps.js` and
-// only show up on the screen.
-// @ref LLP 0338#counts-anyway [tests]: a lane with no question still prints its position above the statement it makes instead
-test('the sync lane states its position even when it has nothing to ask', async () => {
+// The fully fleet-managed machine: everything picked is the fleet's, so
+// the lane states that and asks nothing. It carries no position line any
+// more - the combined picker took the lane's place in the itinerary
+// (LLP 0396 #combined-selection), and `wizardStepProgress(_, 'sync')` is
+// `undefined` on every pathway (asserted below) - so handing it one here
+// would pin a frame the wizard can no longer render.
+// @ref LLP 0396#combined-selection [tests]: the retired lane states its outcome with no position above it
+test('the sync lane states its outcome, with no position line, when it has nothing to ask', async () => {
   const stdout = makeBuf()
   const result = await runWizardSyncScope(/** @type {any} */ ({
     stdout,
@@ -154,7 +152,6 @@ test('the sync lane states its position even when it has nothing to ask', async 
     locked: [{ id: 'claude', label: 'Claude Code' }],
     lockedHidden: 0,
     candidatesHiddenIds: [],
-    progress: 'Step 3 of 5 · Choose what syncs',
     // The lane's prompt seam is `prompt`, not `confirm`: a guard on the
     // wrong field is inert, and a regression in the no-candidates arm
     // would reach the real stdin instead of failing here.
@@ -163,10 +160,9 @@ test('the sync lane states its position even when it has nothing to ask', async 
 
   assert.equal(result.noQuestion, true, 'the lane asked nothing')
   const lines = stdout.text().split('\n').filter((l) => l !== '')
-  // The position line, and then the statement that corrects what the
-  // label promised, in the same frame at the first moment it is knowable.
+  // The statement alone: no `Step n of m` above it, because the lane is
+  // not a counted screen any more.
   assert.deepEqual(lines, [
-    'Step 3 of 5 · Choose what syncs',
     'Everything you picked is managed by your fleet and always syncs.',
     '  Claude Code',
   ], stdout.text())
