@@ -26,22 +26,20 @@ import {
 /**
  * `hyp ask [question]`
  *
- * The verb that makes setup's closing questions runnable. Setup prints
- * them and stops there, deliberately: it may have been invoked from an
- * installer or a directory the user does not want an agent session rooted
- * in, so the launch waits for a command run from a directory they chose.
+ * The verb that makes setup's closing question runnable. Setup prints it
+ * and stops there, deliberately: it may have been invoked from an
+ * installer, so the launch waits for a command the user runs themselves.
  *
- * With no argument it renders the same four questions and starts the
- * chosen client on the pick. With a question it skips the menu entirely,
- * which is the shape a user reaches for once they know what they want:
- * `hyp ask "which sessions touched the auth module"`.
+ * With no argument it asks the one question worth asking first (which
+ * skill to add): HypAware gathers the evidence into a folder under the
+ * system temp directory and starts an attached client inside it, asking
+ * which client only when more than one could be started. With a question
+ * it skips the gather and starts a client on that question in the
+ * current directory, which is the shape a user reaches for once they know
+ * what they want: `hyp ask "which sessions touched the auth module"`.
  *
- * The working directory is `process.cwd()` by construction: nothing here
- * overrides it, because where the client starts is the whole reason this
- * is a separate command.
- *
- * @ref LLP 0198#re-runnable [implements]: the questions need a verb, or they are four sentences to retype
- * @ref LLP 0198#onboarding-list [constrained-by]: the launch boundary is where the user chose the directory
+ * @ref LLP 0198#re-runnable [implements]: the question needs a verb, or it is a sentence to retype
+ * @ref LLP 0398#run-directory [implements]: the recommendation starts in the evidence folder, a free-form question where it was typed
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -54,15 +52,15 @@ export async function runAsk(argv, ctx) {
 
   if (parsed.params.list === true) {
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
-    writeSuggestedPrompts({ stdout: ctx.stdout, footer: launchers.length > 0 ? 'ask' : 'paste' })
+    writeSuggestedPrompts({ stdout: ctx.stdout, footer: launchers.length > 0 ? 'ask' : 'no-launch' })
     return 0
   }
   const question = String(parsed.params.question ?? '').trim()
 
   if (question.length > 0) {
-    // A named question wants a launch, not a menu: resolve directly and
-    // say plainly when nothing can answer it, rather than falling back to
-    // a list of four questions the user did not ask for.
+    // A named question wants a launch, not the gather: resolve directly
+    // and say plainly when nothing can answer it, rather than falling back
+    // to the one question the user did not ask.
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
     if (launchers.length === 0) {
       ctx.stderr.write('hyp ask: no attached client can be started here.\n')
@@ -91,15 +89,15 @@ export async function runAsk(argv, ctx) {
     prepareEvidence: () => prepareEvidenceFromCtx(ctx),
   })
   // `no-launcher` and `no-evidence` are the outcomes that are a failed
-  // invocation rather than a choice: the user asked for the menu and there is nothing to
-  // put in it. Declining, a piped run that printed the list, and an empty
+  // invocation rather than a choice: the user asked for the recommendation and
+  // nothing could produce it. Declining, a piped run that printed the question, and an empty
   // cache are all 0 - in the last case nothing is broken, there is just
   // no history yet.
   return outcome.launched === false && (outcome.reason === 'no-launcher' || outcome.reason === 'no-evidence') ? 1 : 0
 }
 
 /**
- * The recommendation ask's gather (LLP 0395), run in-process against the
+ * The recommendation ask's gather (LLP 0398), run in-process against the
  * same runner the overview uses. The evidence lives in one folder under
  * the system temp directory, `<tmpdir>/hypaware/ask/`, rewritten on every
  * ask: the client is started inside it, so its transcript label, cwd,
@@ -108,7 +106,7 @@ export async function runAsk(argv, ctx) {
  * rather than random because Claude Code asks once whether to trust a
  * new folder; a fresh random path would ask on every run.
  *
- * @ref LLP 0395#run-directory [implements]: a fixed temp folder owns the ask, not the caller's cwd and not the home directory
+ * @ref LLP 0398#run-directory [implements]: a fixed temp folder owns the ask, not the caller's cwd and not the home directory
  * @param {CommandRunContext} ctx
  * @returns {Promise<FirstAskEvidence | undefined>}
  */

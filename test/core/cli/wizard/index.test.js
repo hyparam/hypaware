@@ -12,7 +12,6 @@ import { writeClientSyncEntries } from '../../../../src/core/usage-policy/client
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
-import { SUGGESTED_PROMPTS } from '../../../../src/core/cli/wizard/first_ask.js'
 
 // The wizard orchestrator (LLP 0135 #orchestration): gate short-circuits,
 // the fork/join loop, phase threading (locked/managed), the
@@ -1298,8 +1297,8 @@ function firstLookWithRows() {
   ).runner
 }
 
-test('runInitWizard: the suggested questions come last, after the privacy narration', async () => {
-  // @ref LLP 0198#onboarding-list [tests]: onboarding closes with text and never starts a client
+test('runInitWizard: the skill offer comes last, after the privacy narration, and a run that cannot prompt names the verb', async () => {
+  // @ref LLP 0398#run-directory [tests]: setup closes on the offer; where it cannot ask, it names `hyp ask` and starts nothing
   const home = await tmpHome()
   await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
   const { opts, stdout } = wizardOpts(home, {
@@ -1308,16 +1307,55 @@ test('runInitWizard: the suggested questions come last, after the privacy narrat
   })
   await runInitWizard(opts)
   const text = stdout.text()
-  for (const prompt of SUGGESTED_PROMPTS) assert.match(text, new RegExp(prompt.prompt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.doesNotMatch(text, /Worth asking your AI client/)
   assert.doesNotMatch(text, /Starting Claude Code|Starting Codex/)
-  // Order: rows, then what leaves this machine, then the question.
+  // Order: rows, then what leaves this machine, then the offer's verb.
   assert.ok(text.indexOf('First look') < text.indexOf('Nothing has been uploaded yet'))
-  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Worth asking your AI client'))
-  assert.match(text, /To ask it, run `hyp ask`: HypAware gathers the evidence first and starts an attached AI client on it/)
+  assert.ok(text.indexOf('Nothing has been uploaded yet') < text.indexOf('Run `hyp ask` any time'))
+  assert.match(text, /Run `hyp ask` any time: HypAware suggests the one skill worth adding first/)
 })
 
-// @ref LLP 0203#offer [tests]: the sync offer sits between the first look it follows and the closing question list
-test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync question, before the suggested questions', async () => {
+test('runInitWizard: a yes to the skill offer runs `hyp ask` on this terminal', async () => {
+  // @ref LLP 0398#run-directory [tests]: the offer taken is the ask itself, as a child that inherits the terminal
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookWithRows(),
+    suggestSkill: {
+      confirm: async (/** @type {any} */ q) => { opts._suggestQuestion = q; return 'yes' },
+      spawnFn: /** @type {any} */ ((/** @type {string} */ cmd, /** @type {string[]} */ args, /** @type {any} */ o) => {
+        opts._askSpawn = { cmd, args, o }
+        /** @type {Record<string, (arg: any) => void>} */
+        const handlers = {}
+        queueMicrotask(() => handlers.close?.(0))
+        return { on: (/** @type {string} */ event, /** @type {any} */ fn) => { handlers[event] = fn } }
+      }),
+    },
+  })
+  await runInitWizard(opts)
+  assert.match(opts._suggestQuestion.title, /suggest a skill\?/)
+  assert.equal(opts._suggestQuestion.eofValue, 'no')
+  assert.equal(opts._askSpawn.cmd, process.execPath)
+  assert.equal(opts._askSpawn.args.at(-1), 'ask')
+  assert.equal(opts._askSpawn.o.stdio, 'inherit')
+  // The child owns the closing screen; setup adds nothing after it.
+  assert.doesNotMatch(stdout.text(), /Run `hyp ask` any time/)
+})
+
+test('runInitWizard: a no to the skill offer names the verb and starts nothing', async () => {
+  let spawned = 0
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    firstLook: firstLookWithRows(),
+    suggestSkill: {
+      confirm: async () => 'no',
+      spawnFn: /** @type {any} */ (() => { spawned += 1; return { on() {} } }),
+    },
+  })
+  await runInitWizard(opts)
+  assert.equal(spawned, 0)
+  assert.match(stdout.text(), /Run `hyp ask` any time: HypAware suggests the one skill worth adding first/)
+})
+
+// @ref LLP 0203#offer [tests]: the sync offer sits between the first look it follows and the closing skill offer
+test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync question, before the skill offer', async () => {
   const home = await tmpHome()
   await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
   let spawned = 0
@@ -1346,7 +1384,7 @@ test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync quest
   assert.doesNotMatch(text, /Nothing has been uploaded yet/)
   assert.doesNotMatch(text, /Send your recorded history/)
   assert.ok(text.indexOf('First look') < text.indexOf('`hyp sync` shows what would leave'))
-  assert.ok(text.indexOf('`hyp sync` shows what would leave') < text.indexOf('Worth asking your AI client'))
+  assert.ok(text.indexOf('`hyp sync` shows what would leave') < text.indexOf('Run `hyp ask` any time'))
   // A run that ends on the wait still leaves the deadline and the release
   // verb on screen.
   assert.match(text, /Nothing was sent\. Your history stays on this machine until /)
@@ -1362,25 +1400,25 @@ test('runInitWizard: a local install with no hold is never offered a sync', asyn
   assert.doesNotMatch(stdout.text(), /hyp sync/)
 })
 
-test('runInitWizard: a first look with no rows still prints the questions with an empty-history note', async () => {
+test('runInitWizard: a first look with no rows replaces the skill offer with an empty-history note', async () => {
   // @ref LLP 0198#empty-cache [tests]: a fresh install with nothing backfilled
-  // gets future-facing questions, never a launch
+  // gets the offer framed as something to come back to, never a launch
   const { opts, stdout } = wizardOpts(await tmpHome(), {
     // Every section comes back empty: the dataset exists and holds nothing.
     firstLook: firstLookStub([], []).runner,
   })
   await runInitWizard(opts)
   assert.match(stdout.text(), /Nothing recorded yet/)
-  assert.match(stdout.text(), new RegExp(SUGGESTED_PROMPTS[0].prompt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(stdout.text(), /Once you have some history, run `hyp ask`: HypAware suggests the one skill worth adding first/)
 })
 
-test('runInitWizard: no detected client or gateway dataset still prints the question list', async () => {
+test('runInitWizard: no detected client or gateway dataset still prints the empty-history note', async () => {
   const { opts, stdout } = wizardOpts(await tmpHome(), {
     firstLook: { hasDataset: () => false, async run() { return { columns: [], rows: [] } } },
   })
   await runInitWizard(opts)
   assert.match(stdout.text(), /Nothing recorded yet/)
-  assert.match(stdout.text(), new RegExp(SUGGESTED_PROMPTS[0].prompt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(stdout.text(), /Once you have some history, run `hyp ask`: HypAware suggests the one skill worth adding first/)
   assert.doesNotMatch(stdout.text(), /Starting Claude Code|Starting Codex/)
 })
 
@@ -1402,17 +1440,18 @@ test('firstLookHadRows: an absent or errored first look reports hasRows undefine
   assert.equal(firstLookHadRows({ shown: false, reason: 'error' }), undefined)
 })
 
-test('runInitWizard: a non-interactive or dry run does not print the question list', async () => {
+test('runInitWizard: a non-interactive or dry run makes no skill offer', async () => {
   const { opts, stdout } = wizardOpts(await tmpHome(), {
     picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
   })
   await runInitWizard(opts)
-  assert.ok(!stdout.text().includes('Worth asking your AI client'))
+  assert.ok(!stdout.text().includes('hyp ask'))
 
-  const { opts: dryOpts } = wizardOpts(await tmpHome(), {
+  const { opts: dryOpts, stdout: dryStdout } = wizardOpts(await tmpHome(), {
     finale: { dryRun: true },
   })
   await runInitWizard(dryOpts)
+  assert.ok(!dryStdout.text().includes('hyp ask'))
 })
 
 test('runInitWizard: team pathway with a live first-sync hold narrates the deadline', async () => {

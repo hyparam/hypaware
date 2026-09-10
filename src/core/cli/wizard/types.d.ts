@@ -667,6 +667,37 @@ export interface RunWizardSyncNowOptions {
   readDeadline?: () => Promise<number | null>
 }
 
+/**
+ * What the closing skill offer did. `launched` means `hyp ask` ran to a
+ * clean exit; the child's own output says what it started. Every other
+ * arm ended on the line that names the verb.
+ */
+export type WizardSuggestSkillResult =
+  | { asked: true; launched: true }
+  | { asked: true; launched: false; reason: 'declined' | 'spawn-failed' | 'child-failed' }
+  | { asked: false; reason: 'no-rows' | 'not-interactive' | 'error' }
+
+/** Options for `runWizardSuggestSkill`. */
+export interface RunWizardSuggestSkillOptions {
+  stdout: { write(chunk: string): unknown }
+  stderr?: { write(chunk: string): unknown }
+  env: NodeJS.ProcessEnv
+  /** False on a piped or scripted run: never prompt, never launch. */
+  interactive?: boolean
+  /**
+   * Whether the first look found rows. `false` replaces the offer with the
+   * empty-history note (LLP 0198#empty-cache); `undefined` means the caller
+   * could not tell, which never withholds the offer.
+   */
+  hasRows?: boolean
+  stdin?: NodeJS.ReadableStream
+  /** Real stream for the TUI, when `stdout` above is a buffer. */
+  stdoutStream?: NodeJS.WritableStream
+  /** Test seams; production callers pass none of these. */
+  confirm?: AsyncConfirmSelectPrompt
+  spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess
+}
+
 /** Options for `runWizardFirstAsk`. */
 export interface RunWizardFirstAskOptions {
   /** Attached client names eligible for an explicit `hyp ask` launch. */
@@ -678,7 +709,7 @@ export interface RunWizardFirstAskOptions {
   /** False on a piped run: print the list, never prompt. */
   interactive?: boolean
   /**
-   * Whether the cache holds anything the suggested questions could be
+   * Whether the cache holds anything the question could be
    * answered from. `false` suppresses the launch entirely
    * (LLP 0198#empty-cache); `undefined` means the caller could not tell,
    * which never withholds the offer.
@@ -687,7 +718,7 @@ export interface RunWizardFirstAskOptions {
   stdin?: NodeJS.ReadableStream
   /**
    * Gathers the recommendation ask's evidence into a run directory and
-   * returns it (LLP 0395). Absent or failing, the question launches as a
+   * returns it (LLP 0398). Absent or failing, the question launches as a
    * plain prompt in the caller's directory, like every other row.
    */
   prepareEvidence?: () => Promise<FirstAskEvidence | undefined>
@@ -803,6 +834,11 @@ export interface RunInitWizardOptions {
    * step runs only on an enrolled run with a live hold.
    */
   syncNow?: Partial<RunWizardSyncNowOptions>
+  /**
+   * Overrides for the closing skill offer (tests): the confirm seam and
+   * the spawn seam. Production callers pass none.
+   */
+  suggestSkill?: Partial<RunWizardSuggestSkillOptions>
   /** Phase overrides (tests). */
   gate?: (opts: EvaluateReturningGateOptions) => Promise<ReturningGateResult>
   fork?: (opts: RunWizardForkOptions) => Promise<WizardForkChoice>

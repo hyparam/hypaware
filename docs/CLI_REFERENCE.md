@@ -80,10 +80,16 @@ hyp status --json
 hyp ask ["question"] [--list]
 ```
 
-Lists suggested questions or starts the first attached executable AI client on
-a selected question. The client takes over the terminal. `--list` launches
-nothing. An empty cache, a declined selection, or list-only use succeeds. No
-launchable client or a process-start failure returns `1`.
+With no argument, asks the one question worth asking first: which skill would
+be the most useful to add. HypAware measures the last 30 days of recorded
+history itself, writes the evidence into one folder under the system temp
+directory (rewritten each time), and starts an attached AI client in that
+folder to answer with one skill. If more than one attached client could be
+started, it asks which. With a question, skips the gather and starts the
+client on that question in the current directory. The client takes over the
+terminal. `--list` prints the question and launches nothing. An empty cache, a
+declined selection, or list-only use succeeds. No launchable client, no
+gatherable evidence, or a process-start failure returns `1`.
 
 ```sh
 hyp ask "which sessions changed the authentication module"

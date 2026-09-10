@@ -135,11 +135,11 @@ test('runAsk "<question>": the no-launcher hint names real clients, not a placeh
 // machine with nothing on `$PATH` printed "Run `hyp ask` to pick one of
 // these and start your client on it" for a command that would exit 1.
 // @ref LLP 0198#path-probe [tests]: --list's launchability claim matches whether anything can actually be started
-test('runAsk: --list on a host with nothing launchable prints the manual fallback, not a launch promise', async () => {
+test('runAsk: --list on a host with nothing launchable names the condition for a launch, not a launch promise', async () => {
   const hypHome = await freshHome()
   const { ctx, stdout } = makeCtx({ env: { HYP_HOME: hypHome, HYP_CONFIG: '', PATH: '' } })
   await runAsk(['--list'], ctx)
   const text = stdout.text()
-  assert.match(text, /Paste one into an AI client session/)
+  assert.match(text, /Once an attached client can be started here \(see `hyp status`\), run `hyp ask` again/)
   assert.doesNotMatch(text, /Run `hyp ask` to start your client on it/)
 })
