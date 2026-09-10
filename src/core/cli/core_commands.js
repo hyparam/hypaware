@@ -363,9 +363,9 @@ function buildCoreCommands(registry) {
       usage: coreUsage('ask'),
       help: [
         'With no argument, asks the one question worth asking first: which skill',
-        'would be the most useful to add. HypAware measures the last 30 days itself',
-        '(reopened sessions, something you keep typing, a request that should go',
-        'to a worker, a mistake that keeps recurring), writes the evidence into one',
+        'would be the most useful to add. HypAware looks through the last 30 days',
+        'itself for what you type again and again and what your agent then ran,',
+        'writes that evidence into one',
         'folder under the system temp directory, rewritten each time, and starts',
         'an attached client in that folder so the session stays out of your home',
         'directory and out of whatever repo you ran it from. The client answers',

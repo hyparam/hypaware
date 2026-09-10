@@ -1,15 +1,13 @@
 // @ts-check
 
 /**
- * Suggested questions shared by onboarding and `hyp ask`, plus the
- * explicit command's client launcher.
+ * The one question `hyp ask` puts, and the command's client launcher.
  *
- * The first look (`first_look.js`) proves there are rows. Onboarding then
- * prints what the user can ask, while an explicit `hyp ask` can spend those
- * rows by starting a client later.
+ * The first look (`first_look.js`) proves there are rows; setup then
+ * offers to run this (`suggest_skill.js`), and an explicit `hyp ask`
+ * spends those rows: it gathers the evidence and starts a client on it.
  *
- * @ref LLP 0198#onboarding-list [implements]: setup prints the shared questions without launching
- * @ref LLP 0198#first-ask [implements]: the explicit command keeps the live question menu
+ * @ref LLP 0198#first-ask [implements]: the explicit command owns the launch; the only pick left is the client
  *
  * @import { ChildProcess, SpawnOptions } from 'node:child_process'
  * @import { ClientDescriptor } from '../../../../src/core/types.js'
@@ -36,30 +34,33 @@ import { RECOMMEND_LAUNCH_PROMPT, RECOMMEND_PROMPT_ID } from '../../query/first_
  * one whose answer is a change teaches them it is a feedback loop, which
  * is the thing worth learning in the first minute. The four earlier
  * questions (token spend, repeated mistakes, a missing skill, a subagent
- * worth adding) are not gone: they are the routes the gather chooses
- * between from the record, with evidence, instead of a cold client
- * guessing at SQL (LLP 0395 #one-question).
+ * worth adding) are answered by the one that gathers first: what the
+ * person types again and again, and what ran after it, instead of a
+ * cold client guessing at SQL (LLP 0398 #one-question).
  *
  * Phrased as a user would phrase it, never as a skill invocation
  * (`@ref LLP 0011#no-architectural-names`), and opening with "From my
  * HypAware history" because `hyp ask` opens a session with no context.
  *
- * `label` is what the menu shows; `prompt` is what the client is started
- * with.
+ * `label` is the question as printed; `prompt` is what the client is
+ * started with. They differ because the prompt names the evidence folder
+ * the client is started in, which does not exist for a reader who is
+ * only shown the list, so the prompt is never printed as something to
+ * type.
  *
  * @ref LLP 0198#split [implements]: the question is core's, because it is about core's datasets
- * @ref LLP 0395#one-question [implements]: one question, routed from evidence, replaces the list
+ * @ref LLP 0398#one-question [implements]: one question, answered from gathered evidence, replaces the list
  * @type {ReadonlyArray<{ id: string, label: string, prompt: string }>}
  */
 export const SUGGESTED_PROMPTS = Object.freeze([
   {
-    // The one question (LLP 0395 #one-question). Its launch is preceded by
+    // The one question (LLP 0398 #one-question). Its launch is preceded by
     // a gather, and the prompt names the folder because the client is
     // started inside it. The earlier four rows asked the same things a
     // cold client could not answer well from SQL it wrote itself; they are
-    // now the routes this one question chooses between.
+    // answered from what the gather finds the person typing again and again.
     id: RECOMMEND_PROMPT_ID,
-    label: 'The skill worth adding first',
+    label: 'Which one skill would be the most useful to add first?',
     prompt: RECOMMEND_LAUNCH_PROMPT,
   },
 ])
@@ -151,43 +152,40 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
 }
 
 /**
- * The question list, in every framing that prints it.
+ * The question, in every framing that prints it.
  *
- * One renderer rather than one per caller: the questions, the
+ * One renderer rather than one per caller: the question, the
  * empty-history preamble, and the footers are a single surface, and a
  * second copy of them is how the "nothing recorded yet" sentence drifts
  * out of agreement with itself. Same one-place grounds as the frame
  * helper ([LLP 0189 #palette](../../../../llp/0189-cli-severity-colour.decision.md#palette)).
  *
- * `hasRows === false` swaps the preamble: every suggested question is
- * about recorded history, so a cache with nothing in it gets the list
- * framed as something to come back to, prefaced by the one fact that
- * makes the emptiness make sense - capture starts now, not
- * retroactively. `undefined` means the caller could not tell, which
- * never withholds the ordinary framing.
+ * What prints is the `label`, never the `prompt`: the prompt tells the
+ * client to read a folder that only `hyp ask` creates, so typed into a
+ * cold session it fails in exactly the way the gather exists to prevent.
+ *
+ * `hasRows === false` swaps the preamble: the question is about recorded
+ * history, so a cache with nothing in it gets it framed as something to
+ * come back to, prefaced by the one fact that makes the emptiness make
+ * sense - capture starts now, not retroactively. `undefined` means the
+ * caller could not tell, which never withholds the ordinary framing.
  *
  * `footer` says who is reading:
  *
  * - `ask`: a launch is possible, and this run is not doing one (declined,
  *   piped, or `--list`). Names the verb that would.
- * - `paste`: nothing here can be launched, so the questions still work
- *   typed into a session the user opens themselves.
- * - `onboarding`: setup, which never launches. Names what the verb is
- *   *for* (putting one of these to a client) before naming the directory
- *   it must be run from, because a footer that only states the
- *   constraint leaves the reader to infer what they would be running it
- *   to do. It names the attached client generically because launchability
- *   is manifest-contributed; adding a client must not require a second
- *   hardcoded list in this copy. Generically and *indefinitely*: this list
- *   prints whether or not anything is attached, so "your attached AI
- *   client" would be a claim about the reader's install that a
- *   `--source otel` run makes false.
+ * - `no-launch`: this run could not start a client (none attached and on
+ *   PATH, a spawn failure, an unforeseen error). There is no manual
+ *   route, because the answer needs the evidence only the verb gathers,
+ *   so it names what has to be true before the verb is worth running again.
+ *
+ * Setup no longer prints this: it offers to run the ask instead
+ * (`suggest_skill.js`), and carries its own empty-history note.
  *
  * @ref LLP 0198#empty-cache [implements]: no rows reframes the list, and the reason is stated
- * @ref LLP 0198#onboarding-list [implements]: setup's footer names `hyp ask` and the directory to run it from
  * @param {{
  *   stdout: { write(chunk: string): unknown },
- *   footer: 'ask' | 'paste' | 'onboarding',
+ *   footer: 'ask' | 'no-launch',
  *   hasRows?: boolean,
  * }} args
  */
@@ -199,7 +197,7 @@ export function writeSuggestedPrompts({ stdout, footer, hasRows }) {
     stdout.write('\nWorth asking your AI client about this data:\n')
   }
   for (const p of SUGGESTED_PROMPTS) {
-    stdout.write(`  ${p.prompt}\n`)
+    stdout.write(`  ${p.label}\n`)
   }
   stdout.write(`\n${promptListFooter(footer, hasRows)}\n`)
 }
@@ -212,19 +210,18 @@ export function writeSuggestedPrompts({ stdout, footer, hasRows }) {
  * wrong advice until there is something to run it against, so the
  * sentence becomes "run it *then*".
  *
- * @param {'ask' | 'paste' | 'onboarding'} footer
+ * @param {'ask' | 'no-launch'} footer
  * @param {boolean | undefined} hasRows
  * @returns {string}
  */
 function promptListFooter(footer, hasRows) {
   switch (footer) {
-    case 'paste':
-      // Must not name `hyp ask`: the reader either just ran it, or is
-      // being told nothing here can be started. Either way it would
-      // point at the screen they are already looking at.
-      return 'Paste one into an AI client session to get started.'
-    case 'onboarding':
-      return 'To ask it, run `hyp ask`: HypAware gathers the evidence first and starts an attached AI client on it.'
+    case 'no-launch':
+      // The reader just ran `hyp ask` and nothing started, so a bare "run
+      // `hyp ask`" would point at the screen they are looking at. The
+      // sentence names the condition instead, and the verb only as what
+      // to run once it holds.
+      return 'Nothing was started. Once an attached client can be started here (see `hyp status`), run `hyp ask` again: it gathers the evidence first.'
     default:
       return hasRows === false
         ? 'Run `hyp ask` then, to start your client on it.'
@@ -282,7 +279,7 @@ export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn }) {
  * failure, a cancelled prompt, or an unforeseen error all degrade to the
  * printed list.
  *
- * @ref LLP 0198#first-ask [implements]: the explicit command owns the live menu and launch
+ * @ref LLP 0198#first-ask [implements]: the explicit command owns the gather and the launch
  * @param {RunWizardFirstAskOptions} opts
  * @returns {Promise<FirstAskResult>}
  */
@@ -302,7 +299,7 @@ export async function runWizardFirstAsk(opts) {
         // been started, and "nothing recorded yet" is the more useful
         // half of it. `undefined` means the caller could not tell, which
         // is never a reason to withhold the offer.
-        // @ref LLP 0198#empty-cache [implements]: an empty cache suppresses the launch, not just the menu
+        // @ref LLP 0198#empty-cache [implements]: an empty cache suppresses the launch, not just the printed question
         if (opts.hasRows === false) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-rows')
@@ -322,7 +319,7 @@ export async function runWizardFirstAsk(opts) {
         if (launchers.length === 0) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-launcher')
-          writeSuggestedPrompts({ stdout, footer: 'paste' })
+          writeSuggestedPrompts({ stdout, footer: 'no-launch' })
           return { launched: false, reason: /** @type {const} */ ('no-launcher') }
         }
         // `HYP_NO_TUI` is the same veto the prompt runtime honours. Reading
@@ -357,7 +354,7 @@ export async function runWizardFirstAsk(opts) {
         // client is spawned. No evidence means no launch: a client started
         // on the bare question would answer it the cold way, which is the
         // failure this ask exists to remove, so the run reports and stops.
-        // @ref LLP 0395#run-directory [implements]: the client starts inside the evidence, never before it and never without it
+        // @ref LLP 0398#run-directory [implements]: the client starts inside the evidence, never before it and never without it
         /** @type {string | undefined} */
         let cwd
         if (chosen.prompt.id === RECOMMEND_PROMPT_ID) {
@@ -365,7 +362,7 @@ export async function runWizardFirstAsk(opts) {
             const evidence = opts.prepareEvidence ? await opts.prepareEvidence() : undefined
             if (evidence) {
               cwd = evidence.dir
-              span.setAttribute('evidence_routes', evidence.routes.join('+') || 'none')
+              span.setAttribute('evidence_enough', evidence.enough !== false)
             }
           } catch (err) {
             span.setAttribute('evidence_error', err instanceof Error ? err.name : 'unknown')
@@ -394,7 +391,7 @@ export async function runWizardFirstAsk(opts) {
           span.setAttribute(Attr.ERROR_KIND, 'spawn_failed')
           span.setAttribute('launched', false)
           opts.stderr?.write(`Could not start ${chosen.launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
-          writeSuggestedPrompts({ stdout, footer: 'paste' })
+          writeSuggestedPrompts({ stdout, footer: 'no-launch' })
           return { launched: false, reason: /** @type {const} */ ('spawn-failed') }
         }
         span.setAttribute('launched', true)
@@ -408,7 +405,7 @@ export async function runWizardFirstAsk(opts) {
         span.setAttribute('status', 'error')
         span.setAttribute(Attr.ERROR_KIND, err instanceof Error ? err.name : 'unknown')
         try {
-          writeSuggestedPrompts({ stdout, footer: 'paste' })
+          writeSuggestedPrompts({ stdout, footer: 'no-launch' })
         } catch {
           // the stream itself is failing; the step is a courtesy, not a gate
         }
@@ -421,12 +418,12 @@ export async function runWizardFirstAsk(opts) {
 
 /**
  * Which client answers, when that is genuinely ambiguous. There is one
- * question (LLP 0395 #one-question), so there is nothing to pick among
+ * question (LLP 0398 #one-question), so there is nothing to pick among
  * and no screen for it: `hyp ask` goes straight from the gather to the
  * launch. A machine with two launchable clients still gets asked which,
  * framed as its own screen; cancelling that is "not now".
  *
- * @ref LLP 0395#one-question [implements]: no question menu; the only prompt left is the client pick
+ * @ref LLP 0398#one-question [implements]: no question menu; the only prompt left is the client pick
  * @param {RunWizardFirstAskOptions} opts
  * @param {FirstAskLauncher[]} launchers
  * @returns {Promise<{ prompt: (typeof SUGGESTED_PROMPTS)[number], launcher: FirstAskLauncher } | undefined>}
@@ -444,9 +441,10 @@ async function chooseQuestion(opts, launchers) {
   let client
   try {
     client = await ask({
-      // The follow-up half of the same screen, so it keeps the same frame.
+      // The only screen: there is no question menu ahead of it, so the
+      // title names the job rather than pointing back at one.
       box: true,
-      title: 'Which client should answer it?',
+      title: 'Which client should recommend a skill?',
       options: launchers.map((l) => ({ value: l.client, label: l.label })),
       ...io,
     })

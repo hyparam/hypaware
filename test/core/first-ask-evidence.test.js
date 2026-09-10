@@ -7,178 +7,40 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
-  ROUTE_FLOORS,
+  RECORD_FLOOR,
   askInstructions,
-  chooseRoutes,
+  buildCandidates,
   commandHeads,
-  computeSignals,
-  describeRoute,
-  draftSkill,
-  firstPerDay,
+  enoughRecorded,
+  evidenceSql,
   frontMatterDescription,
   onDiskListing,
   prepareFirstAskEvidence,
-  renderTriage,
-  sinkFiles,
-  toTsv,
-  triageSql,
+  renderCandidates,
   windowStart,
 } from '../../src/core/query/first_ask_evidence.js'
 
-// The recommendation ask (LLP 0395): the route rule, the files the client
-// reads, and the run directory the client is started in.
-// @ref LLP 0395#route-rule [tests]:
-
-/** Signals with nothing over any floor. */
-function quietSignals() {
-  return computeSignals({ sink: [], cont: [], skill: [], rule: [], subagent: [] })
-}
+// The recommendation ask (LLP 0398): the one signal, the files the client
+// reads, and the folder the client is started in.
+// @ref LLP 0398#one-signal [tests]:
 
 test('windowStart: thirty days back, as a UTC date', () => {
   assert.equal(windowStart(new Date('2026-09-07T05:00:00Z')), '2026-08-08')
   assert.equal(windowStart(new Date('2026-09-07T05:00:00Z'), 1), '2026-09-06')
 })
 
-test('triageSql: every statement excludes the duplicate OTEL lane and is bounded', () => {
-  // @ref LLP 0395#human-turns [tests]: the duplicate lane never counts
-  const sql = triageSql('2026-08-08')
-  for (const [name, stmt] of Object.entries(sql)) {
-    assert.ok(stmt.includes("conversation_source <> 'claude_code'"), `${name} keeps the duplicate lane`)
-    assert.ok(/group by|count\(\*\)/.test(stmt), `${name} is not an aggregate`)
+test('evidenceSql: every statement excludes the duplicate OTEL lane; user text is human turns only', () => {
+  // @ref LLP 0398#human-turns [tests]: the duplicate lane never counts, and injected user text is not a person
+  const sql = evidenceSql('2026-08-08')
+  const stmts = [sql.record, sql.lines, sql.triggers(['x']), sql.calls(['a']), sql.replies(['a'])]
+  for (const stmt of stmts) assert.ok(stmt.includes("conversation_source <> 'claude_code'"))
+  for (const stmt of [sql.lines, sql.triggers(['x'])]) {
+    assert.ok(stmt.includes("user_type in ('external', 'user')"), 'Codex human turns count, guardian reviews do not')
+    assert.ok(stmt.includes("not like 'Message Type:%'"), 'a pasted relay header is not a typed request')
+    assert.ok(stmt.includes("not like '# AGENTS.md instructions%'"))
   }
-  assert.ok(sql.skill.includes("user_type in ('external', 'user')"), 'the typed-line signal keeps Codex human turns and drops guardian reviews')
-  assert.ok(sql.skill.includes('limit 8'))
-  assert.ok(sql.skill.includes("not like 'Message Type:%'"), 'a pasted relay header is not a typed request')
-  assert.ok(sql.rule.includes("not like 'This Bash command contains multiple operations%'"), 'permission prompts are not agent mistakes')
-})
-
-test('computeSignals: reopened days are measured against the fresh ratio', () => {
-  const s = computeSignals({
-    sink: [
-      { session_id: 'a', date: '2026-08-10', ctx: 1000, outp: 10 },
-      { session_id: 'b', date: '2026-08-10', ctx: 1000, outp: 10 },
-      // session c: day one at the fresh ratio, day two at four times it
-      { session_id: 'c', date: '2026-08-11', ctx: 1000, outp: 10 },
-      { session_id: 'c', date: '2026-08-12', ctx: 4000, outp: 10 },
-    ],
-    cont: [{ typed: 3, sessions: 2 }],
-    skill: [],
-    rule: [],
-    subagent: [],
-  })
-  assert.equal(s.record.sessions, 3)
-  assert.equal(s.record.sessionDays, 4)
-  assert.equal(s.sink.fresh, 100)
-  assert.equal(s.sink.reopenedDays, 1)
-  assert.equal(s.sink.excess, 3000)
-  assert.equal(s.sink.total, 7000)
-  // Cost-weighted: every row prices its context as cache reads (0.1) and its
-  // output at 5, so fresh days cost 15 per output token and day two of c
-  // costs 45, an excess of 300 of 900 units.
-  assert.equal(s.sink.excessCost, 300)
-  assert.equal(s.sink.totalCost, 900)
-  assert.ok(Math.abs(s.sink.share - 1 / 3) < 1e-9)
-  assert.ok(Math.abs(s.sink.rawShare - 3000 / 7000) < 1e-9)
-  assert.equal(s.sink.continueTyped, 3)
-  assert.equal(s.skill, undefined)
-})
-
-test('chooseRoutes: below every floor is none; the largest multiple wins; a near tie runs both', () => {
-  // @ref LLP 0395#route-rule [tests]: floors, precedence, and the one-fifth band
-  assert.deepEqual(chooseRoutes(quietSignals()), [])
-
-  const s = quietSignals()
-  s.sink.share = 0.157
-  s.subagent.costShare = 0.40
-  s.subagent.noDispatchDays = 136
-  // Inline reading at four times the sink's share, but no recurring task:
-  // nothing a person can add would change it, so the sink wins alone.
-  assert.deepEqual(chooseRoutes(s), ['sink'])
-  s.subagent.recurring = { kind: 'line', text: 'review the pr for memory or cpu pain points', sessions: 4 }
-  // With a request that recurs, the same cost is 4x its floor against the sink's 1.57x.
-  assert.deepEqual(chooseRoutes(s), ['subagent'])
-
-  const t = quietSignals()
-  t.subagent.costShare = 0.22   // 2.2x
-  t.subagent.recurring = { kind: 'brief', text: 'Audit one collection path', sessions: 3 }
-  t.rule = { head: 'x', tool: 'Bash', sessions: 9, days: 6, n: 20, others: [] }   // min(1.8x, 2x) = 1.8x, within a fifth of 2.2x
-  assert.deepEqual(chooseRoutes(t), ['subagent', 'rule'])
-
-  const u = quietSignals()
-  u.sink.share = 0.099   // one tenth of a point under the floor stays out
-  u.skill = { line: 'commit on appropriate branch', sessions: 15, days: 10, typed: 17, others: [] }
-  assert.deepEqual(chooseRoutes(u), ['skill'])
-  assert.equal(ROUTE_FLOORS.sink, 0.10)
-  assert.equal(ROUTE_FLOORS.subagent, ROUTE_FLOORS.sink, 'the two token routes share a floor so they compare')
-
-  const burst = quietSignals()
-  burst.sink.share = 0.216   // 2.16x
-  burst.rule = { head: 'Column "type" not found', tool: 'Bash', sessions: 47, days: 5, n: 48, others: [] }
-  // 47 sessions is 9.4x, but 5 days is 1.67x; the smaller wins, so a one-day
-  // burst from an eval harness does not outrank a month of reopened sessions.
-  assert.deepEqual(chooseRoutes(burst), ['sink'])
-  burst.rule.days = 2
-  assert.deepEqual(chooseRoutes(burst), ['sink'], 'under the day floor the rule route is out entirely')
-})
-
-test('computeSignals: inline reading is costed in tokens and needs a recurring task to count', () => {
-  const s = computeSignals({
-    sink: [{ session_id: 'a', date: '2026-08-10', ctx: 1_000_000, outp: 1000 }],
-    cont: [],
-    skill: [],
-    rule: [],
-    // 400 KB of results over 20 turns: 100k tokens re-sent for ~10 turns
-    subagent: [{ session_id: 'a', date: '2026-08-10', reads: 60, dispatches: 0, calls: 80, turns: 20, result_bytes: 400_000 }],
-    briefs: [{ brief: 'Audit one collection path', sessions: 3 }],
-    recurring: [],
-  })
-  // 100k tokens re-sent for ~10 turns, priced as cache reads at 0.1: 100k cost units,
-  // against a total spend of 100k (context as cache reads) + 5k (output at 5).
-  assert.equal(s.subagent.inlineCost, 100_000)
-  assert.ok(Math.abs(s.subagent.costShare - 100_000 / 105_000) < 1e-9)
-  assert.deepEqual(s.subagent.recurring, { kind: 'brief', text: 'Audit one collection path', sessions: 3 })
-  const typed = computeSignals({ sink: [], cont: [], skill: [], rule: [], subagent: [], briefs: [{ brief: 'x', sessions: 3 }], recurring: [{ line: 'check this pr for cpu pain points', sessions: 4 }] })
-  assert.equal(typed.subagent.recurring?.kind, 'line', 'a typed request outranks a brief as the recurring task')
-})
-
-test('renderTriage: the record line comes first and the applied rule names the route', () => {
-  const s = quietSignals()
-  s.record = { sessions: 3, sessionDays: 3 }
-  const text = renderTriage(s, [], { from: '2026-08-08', scope: 'this machine' })
-  const lines = text.split('\n')
-  assert.match(lines[2], /^record\s+3 sessions over 3 session-days/)
-  assert.ok(text.includes('threshold 3 sessions on 3 days'), 'a missing signal names its threshold, not a count')
-  assert.ok(text.includes('Route chosen by HypAware: none'))
-  s.rule = { head: 'Column "type" not found', tool: 'Bash', sessions: 11, days: 5, n: 11, others: [] }
-  const routed = renderTriage(s, ['sink', 'rule'], { from: '2026-08-08', scope: 'this machine' })
-  assert.ok(routed.includes('Route chosen by HypAware: sink (reopened sessions:'))
-  assert.ok(routed.includes('Route chosen by HypAware: rule (a mistake that keeps recurring: "Column "type" not found" failed in 11 sessions on 5 days (11 times).)'))
-  assert.equal(describeRoute('skill', s), 'something you keep typing.')
-})
-
-test('draftSkill: the draft for a repeated line carries its phrase and the recorded steps', () => {
-  // @ref LLP 0395#always-a-skill [tests]: HypAware drafts, the client tailors
-  const s = quietSignals()
-  s.skill = { line: 'commit on appropriate branch and make a pr', sessions: 11, days: 8, typed: 12, others: [] }
-  const d = draftSkill('skill', s, { steps: [
-    { head: 'Bash: grep -n', n: 43, sessions: 4 },
-    { head: 'Bash: git checkout -b', n: 11, sessions: 10 },
-    { head: 'Bash: gh pr create', n: 12, sessions: 9 },
-    { head: 'Read: types.d.ts', n: 3, sessions: 1 },
-  ] })
-  assert.ok(d.startsWith('---\nname: commit-on-appropriate-branch-and-make-a-pr\n'))
-  assert.ok(d.includes('description: "commit on appropriate branch and make a pr".'))
-  assert.ok(d.includes('1. `git checkout -b` (ran in 10 of the sessions)'))
-  assert.ok(d.includes('2. `gh pr create` (ran in 9 of the sessions)'))
-  assert.ok(!d.includes('grep -n'), 'reading commands are not steps of the procedure')
-  assert.ok(draftSkill('sink', s).includes('name: handoff'))
-  assert.ok(draftSkill('rule', s).includes('(the task this mistake happens in)'))
-  assert.equal(draftSkill(/** @type {any} */ ('other'), s), '')
-})
-
-test('toTsv: cells lose their newlines and tabs', () => {
-  const tsv = toTsv(['a', 'b'], [{ a: 'x\ny', b: 'p\tq' }])
-  assert.equal(tsv, 'a\tb\nx y\tp q\n')
+  assert.ok(sql.lines.includes('having count(distinct session_id) >= 3 and count(distinct date) >= 3'))
+  assert.ok(sql.triggers(["it's done"]).includes("'it''s done'"), 'a quote in a line is escaped')
 })
 
 test('commandHeads: a cd prefix is dropped and the head is the verb plus its subcommand', () => {
@@ -191,53 +53,75 @@ test('commandHeads: a cd prefix is dropped and the head is the verb plus its sub
   assert.equal(heads[0].sessions, 1)
 })
 
-test('sinkFiles: summary slices and the per-day table agree', () => {
-  const files = sinkFiles(
-    [
-      { s: 'aaaa1111', date: '2026-08-10', ctx: 1000, outp: 10, calls: 3 },
-      { s: 'bbbb2222', date: '2026-08-11', ctx: 1000, outp: 10, calls: 3 },
-      { s: 'bbbb2222', date: '2026-08-12', ctx: 5000, outp: 10, calls: 1 },
+/** Two sessions that typed the commit line and then ran the procedure. */
+function commitRows() {
+  return {
+    lines: [{ line: 'commit on appropriate branch and make a pr', sessions: 2, days: 2, typed: 2 }],
+    triggers: [
+      { session_id: 'sA', line: 'commit on appropriate branch and make a pr', at: '2026-08-12T10:00:00Z', date: '2026-08-12', example: 'commit on appropriate branch and make a PR' },
+      { session_id: 'sB', line: 'commit on appropriate branch and make a pr', at: '2026-08-14T10:00:00Z', date: '2026-08-14', example: 'Commit on appropriate branch and make a PR' },
     ],
-    [
-      { s: 'bbbb2222', date: '2026-08-11', i: 0, cwd: '/Users/someone/work', line: 'add a grep command' },
-      { s: 'bbbb2222', date: '2026-08-11', i: 3, cwd: '/Users/someone/work', line: 'now the tests' },
-      { s: 'bbbb2222', date: '2026-08-11', i: 9, cwd: '/Users/someone/work', line: 'third line, dropped' },
-      // positions continue across the reopen, so day two starts at 40
-      { s: 'bbbb2222', date: '2026-08-12', i: 40, cwd: '/Users/someone/work', line: 'continue' },
+    calls: [
+      // before the trigger: not part of the procedure
+      { session_id: 'sA', at: '2026-08-12T09:00:00Z', tool_name: 'Bash', args: '{"command":"git log --oneline -3"}' },
+      { session_id: 'sA', at: '2026-08-12T10:01:00Z', tool_name: 'Bash', args: '{"command":"git status --short"}' },
+      { session_id: 'sA', at: '2026-08-12T10:02:00Z', tool_name: 'Bash', args: '{"command":"npm test 2>&1 | tail -3"}' },
+      { session_id: 'sA', at: '2026-08-12T10:03:00Z', tool_name: 'Bash', args: '{"command":"git checkout -b topic"}' },
+      { session_id: 'sA', at: '2026-08-12T10:04:00Z', tool_name: 'Bash', args: '{"command":"gh pr create --title x"}' },
+      { session_id: 'sA', at: '2026-08-12T10:03:30Z', tool_name: 'Read', args: '{"file_path":"/repo/README.md"}' },
+      { session_id: 'sB', at: '2026-08-14T10:01:00Z', tool_name: 'Bash', args: '{"command":"git checkout -b other"}' },
+      { session_id: 'sB', at: '2026-08-14T10:02:00Z', tool_name: 'Bash', args: '{"command":"gh pr create --title y"}' },
     ],
-  )
-  const byName = Object.fromEntries(files.map((f) => [f.name, f.content]))
-  assert.match(byName['session_days_summary.txt'], /multi_later\t1\t5000\t10\t500/)
-  assert.match(byName['session_days_summary.txt'], /excess context on later days, relative to the single-day ratio: 4000 tokens/)
-  assert.match(byName['session_days.tsv'], /bbbb2222\t2026-08-12\t2\t2\t5000\t10\t500\t1/)
-  assert.match(byName['worst_days.tsv'], /bbbb2222\t2026-08-12\t2\t2\t5000\t10\t500\t4000\tcontinue/, 'the worst reopened day carries its excess and what it was opened for')
-  assert.match(byName['day_openers.tsv'], /bbbb2222\t2026-08-12\t40\t~\/work\tcontinue/, 'a reopened day keeps its first line even at a high position')
-  assert.ok(!byName['day_openers.tsv'].includes('third line, dropped'))
-  assert.equal(firstPerDay([{ s: 'a', date: 'd', i: 1 }, { s: 'a', date: 'd', i: 2 }, { s: 'a', date: 'e', i: 3 }], 1).length, 2)
+    replies: [
+      { session_id: 'sA', at: '2026-08-12T09:30:00Z', text: 'Here is the plan for the change, in three parts, before I commit anything at all.' },
+      { session_id: 'sA', at: '2026-08-12T10:05:00Z', text: 'Committed on topic and opened PR #720: https://example/pull/720. Tests: 3894 passing, 4 failing, none from this change.' },
+    ],
+  }
+}
+
+test('buildCandidates: steps are the procedure commands after the line, ranked by sessions, with how one session ended', () => {
+  // @ref LLP 0398#one-signal [tests]: the skill's steps are what the record shows ran
+  const [c] = buildCandidates(commitRows())
+  assert.equal(c.line, 'commit on appropriate branch and make a pr')
+  assert.equal(c.sessionsWithCalls, 2)
+  assert.deepEqual(c.example, { date: '2026-08-12', text: 'commit on appropriate branch and make a PR' })
+  assert.deepEqual(c.steps.map((s) => [s.command, s.sessions]), [['git checkout -b', 2], ['gh pr create', 2], ['git status --short', 1], ['npm test 2>&1', 1]])
+  assert.ok(!c.steps.some((s) => s.command.startsWith('git log')), 'a command before the trigger is not part of the procedure')
+  assert.deepEqual(c.other.map((o) => o.head), ['Read: README.md'])
+  assert.equal(c.ending?.date, '2026-08-12')
+  assert.match(c.ending?.text ?? '', /^Committed on topic and opened PR #720/, 'the ending is the first substantial reply after the procedure, not before it')
 })
 
-test('askInstructions: route, files, and the answer shape the reader gets', () => {
-  // @ref LLP 0395#answer-shape [tests]: recommendation first, no self-serve queries, sources last
-  const s = quietSignals()
-  s.sink.share = 0.209
-  s.sink.reopenedDays = 64
-  const text = askInstructions(['sink'], { scope: 'this machine', files: ['triage.txt', 'session_days.tsv', 'ASK.md'], signals: s })
-  assert.ok(text.includes('- reopened sessions: 20.9% of all spend is excess on the 64 days a session was reopened. Skill: a handoff skill'), 'the route is a finding in words that names the skill it points to')
-  assert.ok(text.includes('The answer is always one skill'))
-  assert.ok(!text.includes('an agent definition under 20'), 'no other kind of change is offered')
-  assert.ok(!text.includes('Route: sink'))
-  assert.ok(text.includes('at most two `hyp query` commands'), 'a bounded fetch for a missing figure is allowed')
-  assert.ok(text.includes("read the hypaware-query skill's SKILL.md"), 'the skill is read before a query, and only then')
-  assert.ok(text.includes('`session_days.tsv`'))
-  assert.ok(text.includes('the way you would tell a colleague what you found'), 'a conversational reply, not a report')
-  assert.ok(!text.includes('**Why**'), 'no report headings')
-  assert.ok(text.startsWith('# What to do with this folder\n\nHypAware keeps your AI agents'), 'a cold session is told what HypAware is, in the product\'s own words, before anything else')
-  assert.ok(text.includes('over the last 30 days of that history for this machine,'))
-  assert.ok(askInstructions([], { scope: 'org acme on the central server', files: [], windowDays: 14 }).includes('over the last 14 days of that history for org acme on the central server,'))
-  assert.ok(text.includes('Under 120 words before the code block'))
-  assert.ok(!text.includes('\u2014'), 'no em dashes')
-  const none = askInstructions([], { scope: 'this machine', files: ['triage.txt'] })
-  assert.ok(none.includes('nothing over its floor'))
+test('enoughRecorded: the record floor and the line floor both have to clear', () => {
+  const [c] = buildCandidates(commitRows())
+  assert.equal(enoughRecorded({ sessions: 3 }, [c]), false, 'three sessions is not a record')
+  assert.equal(enoughRecorded({ sessions: 100 }, [c]), false, 'a line typed in two sessions is not a habit')
+  assert.equal(enoughRecorded({ sessions: 100 }, [{ ...c, sessions: RECORD_FLOOR.lineSessions, days: RECORD_FLOOR.lineDays }]), true)
+  assert.equal(enoughRecorded({ sessions: 100 }, []), false)
+})
+
+test('renderCandidates: a reader-ready page, or the not-enough sentence', () => {
+  const cands = buildCandidates(commitRows())
+  const page = renderCandidates({ sessions: 100, sessionDays: 120 }, cands, true)
+  assert.ok(page.includes('Recorded: 100 sessions over 120 session-days.'))
+  assert.ok(page.includes('## 1. "commit on appropriate branch and make a pr"'))
+  assert.ok(page.includes('- `git checkout -b` (2)'))
+  assert.ok(page.includes('How one ended (2026-08-12): "Committed on topic'))
+  const thin = renderCandidates({ sessions: 3, sessionDays: 3 }, cands, false)
+  assert.ok(thin.includes('Nothing is typed often enough yet to recommend a skill.'))
+  assert.ok(!thin.includes('## 1.'))
+})
+
+test('askInstructions: one skill, from the record, in a colleague\'s voice, no queries', () => {
+  // @ref LLP 0398#answer-shape [tests]: the answer is a skill the person can read and edit, told plainly
+  const text = askInstructions({ scope: 'this machine' })
+  assert.ok(text.startsWith('# What to do with this folder\n\nHypAware keeps your AI agents'), 'a cold session is told what HypAware is first')
+  assert.ok(text.includes('over the last 30 days for this machine'))
+  assert.ok(text.includes('Run no queries and no commands.'))
+  assert.ok(text.includes('~/.claude/skills/<name>/SKILL.md, under 25 lines'))
+  assert.ok(text.includes('no headings, no bold, no em dashes'))
+  assert.ok(!text.includes('\u2014'), 'no em dash in the instructions')
+  assert.ok(askInstructions({ scope: 'org acme on the central server', windowDays: 14 }).includes('over the last 14 days for org acme on the central server'))
 })
 
 test('onDiskListing: skills and agents carry their descriptions; hooks are not listed', async () => {
@@ -255,7 +139,7 @@ test('onDiskListing: skills and agents carry their descriptions; hooks are not l
   assert.ok(again.includes("hypaware-query: Query this machine's recorded AI session history."))
   assert.ok(again.includes('hypaware-analyst: Worker for fan-out analysis.'))
   assert.ok(!again.includes('.DS_Store'))
-  assert.ok(!again.includes('hook'), 'hooks are not a change the ask proposes, so they are not evidence')
+  assert.ok(!again.includes('hook'))
 })
 
 test('frontMatterDescription: one line, unquoted, capped, empty without front matter', () => {
@@ -265,49 +149,46 @@ test('frontMatterDescription: one line, unquoted, capped, empty without front ma
   assert.equal(frontMatterDescription('---\ndescription: ' + 'x'.repeat(300) + '\n---\n').length, 200)
 })
 
-test('prepareFirstAskEvidence: rewrites the one directory with only the chosen route', async () => {
-  // @ref LLP 0395#run-directory [tests]: one directory, wiped per ask, the client starts inside it
+test('prepareFirstAskEvidence: five queries, three files, one user-only folder rewritten each time', async () => {
+  // @ref LLP 0398#run-directory [tests]: one directory, wiped per ask, the client starts inside it
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-runs-'))
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
-  // A leftover from a previous ask on another route must not survive.
-  await fsp.writeFile(path.join(root, 'session_days.tsv'), 'stale\n')
+  await fsp.writeFile(path.join(root, 'stale.tsv'), 'from a previous ask\n')
+  const rows = commitRows()
   /** @type {string[]} */
   const seen = []
   const runner = {
     hasDataset: () => true,
     async run(sql) {
       seen.push(sql)
-      // The route's heavy-day table carries the client column; the triage
-      // probe carries turns. Both carry result bytes.
-      if (sql.includes('max(client_name) as client')) return { columns: [], rows: [{ s: 'a0000001', date: '2026-08-20', client: 'claude', calls: 60, read_calls: 50, shell_calls: 5, edit_calls: 0, dispatches: 0, result_bytes: 204800 }] }
-      // Triage: inline reading worth all of the context, on days that share one typed request.
-      if (sql.includes('as turns')) {
-        return { columns: [], rows: Array.from({ length: 25 }, (_, i) => ({ session_id: `a000000${i % 4}`, date: `2026-08-${10 + i}`, reads: 50, dispatches: 0, calls: 60, turns: 20, result_bytes: 400_000 })) }
-      }
-      if (sql.includes('as ctx')) return { columns: [], rows: [{ session_id: 'a0000001', date: '2026-08-10', ctx: 1_000_000, outp: 1000 }] }
-      if (sql.includes('having count(distinct session_id) >= 3 order by sessions desc limit 3') && sql.includes('as line')) {
-        return { columns: [], rows: [{ line: 'check this pr for cpu pain points', sessions: 4 }] }
-      }
-      if (sql.includes('as brief')) return { columns: [], rows: [] }
-      if (sql.includes("in ('a0000001')")) return { columns: [], rows: [{ s: 'a0000001', date: '2026-08-20', i: 0, line: 'find every place we parse dates' }] }
+      if (sql.includes('as session_days')) return { columns: [], rows: [{ session_days: 130, sessions: 100 }] }
+      if (sql.includes('as typed')) return { columns: [], rows: [{ ...rows.lines[0], sessions: 10, days: 7, typed: 12 }] }
+      if (sql.includes('as example')) return { columns: [], rows: rows.triggers }
+      if (sql.includes("part_type = 'tool_call'")) return { columns: [], rows: rows.calls }
+      if (sql.includes("role = 'assistant' and part_type = 'text'")) return { columns: [], rows: rows.replies }
       return { columns: [], rows: [] }
     },
   }
-  const evidence = await prepareFirstAskEvidence({
-    runner,
-    root,
-    homeDir: home,
-    now: new Date('2026-09-07T05:00:00Z'),
-  })
-  assert.deepEqual(evidence.routes, ['subagent'])
+  const evidence = await prepareFirstAskEvidence({ runner, root, homeDir: home, now: new Date('2026-09-07T05:00:00Z') })
+  assert.equal(seen.length, 5)
   assert.equal(evidence.dir, root)
-  assert.equal((await fsp.stat(root)).mode & 0o777, 0o700, 'the folder quotes the person\'s typed lines, so it is user-only')
-  const names = (await fsp.readdir(evidence.dir)).sort()
-  assert.deepEqual(names, ['ASK.md', 'SKILL.draft.md', 'agent_briefs.tsv', 'heavy_typed.tsv', 'on_disk.txt', 'read_heavy_sessions.tsv', 'triage.txt'])
-  assert.ok(!names.includes('session_days.tsv'), 'the sink route was not gathered and the stale file is gone')
-  const typed = await fsp.readFile(path.join(evidence.dir, 'heavy_typed.tsv'), 'utf8')
-  assert.match(typed, /a0000001\t2026-08-20\t0\tfind every place we parse dates/)
-  // The triage probe ran once and the route's own gather once.
-  assert.equal(seen.filter((q) => q.includes('as turns')).length, 1)
-  assert.equal(seen.filter((q) => q.includes('max(client_name) as client')).length, 1)
+  assert.equal(evidence.enough, true)
+  assert.equal(evidence.candidates?.[0].steps[0].command, 'git checkout -b')
+  assert.deepEqual((await fsp.readdir(root)).sort(), ['ASK.md', 'candidates.md', 'on_disk.txt'], 'the stale file is gone')
+  assert.equal((await fsp.stat(root)).mode & 0o777, 0o700)
+  const page = await fsp.readFile(path.join(root, 'candidates.md'), 'utf8')
+  assert.ok(page.includes('Typed 12 times in 10 sessions on 7 days.'))
+})
+
+test('prepareFirstAskEvidence: an empty record writes the not-enough page and runs no session queries', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-runs-'))
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  let queries = 0
+  const runner = { hasDataset: () => true, async run() { queries += 1; return { columns: [], rows: [] } } }
+  const evidence = await prepareFirstAskEvidence({ runner, root, homeDir: home })
+  assert.equal(queries, 2, 'the record probe and the lines probe only')
+  assert.equal(evidence.enough, false)
+  const page = await fsp.readFile(path.join(root, 'candidates.md'), 'utf8')
+  assert.ok(page.includes('Recorded: 0 sessions over 0 session-days.'))
+  assert.ok(page.includes('Nothing is typed often enough yet'))
 })

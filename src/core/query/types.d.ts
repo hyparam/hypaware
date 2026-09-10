@@ -224,70 +224,39 @@ export interface TimestampScope {
   outer?: TimestampScope
 }
 
-/** One of the four kinds of change the recommendation ask can propose (LLP 0395). */
-export type FirstAskRoute = 'sink' | 'skill' | 'subagent' | 'rule'
-
-/** The triage signals, one per route, plus the record size. */
-export interface FirstAskSignals {
-  record: { sessions: number; sessionDays: number }
-  sink: {
-    /** Share of all spend, cost-weighted by PRICE_RATIO, that is excess on reopened days. */
-    share: number
-    /** The same by raw token count, printed beside it so the weighting is visible. */
-    rawShare: number
-    excess: number
-    excessCost: number
-    total: number
-    totalCost: number
-    reopenedDays: number
-    /** Context tokens per output token on single-day sessions. */
-    fresh: number
-    /** The same on later days of multi-day sessions. */
-    reopened: number
-    continueTyped: number
-    continueSessions: number
-  }
-  skill?: {
-    line: string
-    sessions: number
-    days: number
-    typed: number
-    others: { line: string; sessions: number; days: number }[]
-  }
-  rule?: {
-    head: string
-    tool: string
-    sessions: number
-    days: number
-    n: number
-    others: { head: string; sessions: number }[]
-  }
-  subagent: {
-    heavyDays: number
-    noDispatchDays: number
-    inlineReads: number
-    dispatches: number
-    /** Estimated tokens re-sent because reads happened inline on no-dispatch heavy days. */
-    inlineCost: number
-    /** That cost as a share of all spend, cost-weighted, the sink's currency. */
-    costShare: number
-    /** The task that recurs across those sessions, without which the route cannot be chosen. */
-    recurring?: { kind: 'brief' | 'line'; text: string; sessions: number }
-  }
-}
-
-/** A file written into the run directory. */
-export interface FirstAskEvidenceFile {
-  name: string
-  content: string
+/**
+ * One line the person types again and again, with what the agent did
+ * after it (LLP 0398 #one-signal).
+ */
+export interface FirstAskCandidate {
+  /** The line, lower-cased, first 42 characters. */
+  line: string
+  sessions: number
+  days: number
+  typed: number
+  /** The earliest occurrence, as typed. */
+  example?: { date: string; text: string }
+  /** Sessions whose tool calls after the line were read. */
+  sessionsWithCalls: number
+  /** Procedure commands that ran after it, most sessions first. */
+  steps: { command: string; sessions: number }[]
+  /** Other tool activity after it, for context. */
+  other: { head: string; sessions: number }[]
+  /** How one such session ended: the first substantial reply after the procedure. */
+  ending?: { date: string; text: string }
 }
 
 /** What `prepareFirstAskEvidence` produced. */
 export interface FirstAskEvidence {
-  /** The run directory the client is started in. */
+  /** The folder the client is started in. */
   dir: string
   from: string
-  routes: FirstAskRoute[]
-  signals: FirstAskSignals
   files: string[]
+  record?: { sessions: number; sessionDays: number }
+  /** Whether the record cleared RECORD_FLOOR; false means the answer stops at "not enough yet". */
+  enough?: boolean
+  candidates?: FirstAskCandidate[]
+  /** Kept for callers written against the routed version; the one-signal gather leaves it unset. */
+  routes?: string[]
+  signals?: unknown
 }

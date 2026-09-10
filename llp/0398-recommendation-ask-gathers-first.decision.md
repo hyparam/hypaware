@@ -1,11 +1,11 @@
-# LLP 0395: The recommendation ask gathers its evidence before the client starts
+# LLP 0398: The recommendation ask gathers its evidence before the client starts
 
 **Type:** Decision
 **Status:** Draft
 **Systems:** Onboarding, CLI, Query
 **Author:** Brendan / Claude
 **Date:** 2026-09-07
-**Extends:** LLP 0198 (#first-ask: one suggested question is answered from evidence HypAware gathers; #onboarding-list: that one question starts the client in a HypAware-owned directory rather than the caller's)
+**Extends:** LLP 0198 (#first-ask: one suggested question is answered from evidence HypAware gathers; #onboarding-list: that one question starts the client in a HypAware-owned directory rather than the caller's, so setup offers to run it instead of printing it)
 **Related:** LLP 0198 (#no-preauth: the launched session is still not pre-authorized), LLP 0140 (the server's report transcript, the same "recorded runs are evidence" stance), LLP 0359 (bounded scheduled work; the gather is bounded the same way)
 
 > Extends [LLP 0198](./0198-setup-ends-on-a-question.decision.md). The
@@ -57,57 +57,52 @@ do: reading the evidence, finding the pattern, writing and testing the
 change. This is the split LLP 0140 made for the server's report agents,
 applied to the first ask.
 
-<a id="always-a-skill"></a>**The answer is always one skill.** Whatever the
-signals find, what the person is offered is a SKILL.md they can read,
-trigger by a phrase they already type, and edit. A skill is the most
-actionable place to start: it lands on the first day, it is visible, and
-it is the person's own. Hooks and settings entries are invisible and
-fragile; an agent definition only matters once the lead picks it; an
-instruction-file rule is one more sentence the model may not weigh.
-Each signal points to a skill: reopened sessions to a handoff skill,
-something the person keeps typing to a skill for that procedure, a
-recurring request that should go to a worker to a skill whose body
-dispatches one, a recurring mistake to a skill for the task it happens
-in with the correct form built in. The answer may say in one sentence
-when the agent should offer the skill unprompted; it does not propose a
-second file.
+<a id="always-a-skill"></a>**The answer is always one skill.** What the
+person is offered is a SKILL.md they can read, trigger by a phrase they
+already type, and edit. A skill is the most actionable place to start:
+it lands on the first day, it is visible, and it is the person's own.
+Hooks and settings entries are invisible and fragile; an agent
+definition only matters once the lead picks it; an instruction-file
+rule is one more sentence the model may not weigh.
 
-<a id="route-rule"></a>**The route is chosen by a stated rule, in code.**
-Four signals are measured over the last 30 days, one per skill the answer
-might propose:
+<a id="one-signal"></a>**One signal: what the person types again and
+again.** HypAware finds the human lines typed in the most sessions on
+the most days, and for each pulls the tool calls that followed it and
+the first substantial reply after those calls. That is the whole
+evidence: the request as the person makes it, the procedure the agent
+reconstructed each time, and what a finished run reported. The skill's
+trigger is the line, its steps are the commands, and its report is the
+ending.
 
-| route | signal | floor |
-|---|---|---|
-| sink | share of all spend, cost-weighted, that is excess on reopened days | 10% |
-| skill | most-typed human line, sessions on distinct days | 10 sessions on 5 days |
-| subagent | estimated re-sent cost of inline reading on heavy days with no dispatch, priced as cache reads, as a share of all spend, and only when a request or brief recurs in 3+ of those sessions | 10% |
-| rule | error head recurring across sessions and days, scored on the smaller multiple | 5 sessions on 3 days |
+A first version measured four signals (reopened sessions, a repeated
+line, a request that should go to a worker, a recurring mistake) and
+chose among them by a rule with floors. It was replaced for three
+reasons, each measured on this machine's own record:
 
-Both token signals are measured in cost units, fresh input at 1, a cache
-read at 0.1, a cache write at 1.25, an output token at 5 (`PRICE_RATIO`),
-because a raw count treats a cache read like a fresh token and that is how
-an earlier generation of reports fixated on cached tokens. On this
-machine the reopened-session excess is 24 percent of tokens and 21
-percent of spend, so the finding survives the weighting, but the raw
-share is printed beside the cost share in `triage.txt` so a reader can see
-when they diverge. The sink and subagent signals share a currency and a floor, so they
-compare directly: a count of heavy days does not, and a first version
-that scored days against tokens chose delegation on a machine whose
-measured loss was the reopened sessions. The subagent route also needs
-a recurring task, because when to delegate is the client's decision;
-the one lever a person holds is a named worker whose description matches
-a request they already make. Each qualifying signal is scored as a multiple of its floor; the largest
-wins; any other qualifying route within a fifth of it on that scale runs
-too; ties fall to the order above. Below every floor the route is none,
-and the answer says what was recorded and that it is not enough yet.
+- The rule needed five corrections in a week, every one for a false
+  signal found by accident: raw token counts, days scored against
+  tokens, an eval harness's afternoon outranking a month, permission
+  prompts counted as mistakes, a relay header counted as a request. The
+  next machine has its own.
+- The skill it chose most often, a handoff note for reopened sessions,
+  saves the most spend and asks the person to change a habit. The
+  repeated line's skill asks nothing: it automates what they already do,
+  and it was the one answer the person acted on.
+- Handed all four signals with no rule, the model picked one of the two
+  real ones both times; forced onto a weak signal alone, it wrote a
+  confident skill anyway. So the model can choose among real signals and
+  cannot be trusted to say "none". A record floor does that, and needs
+  no per-signal tuning.
 
-The rule is in `first_ask_evidence.js` and nowhere else, and `triage.txt`
-prints it as applied. Two reasons it is not the model's call. The model
-picked the wrong route once when told the rule in prose, and could not be
-asked why. And the floors are the only tunable in the design: on the
-first fleet run two orgs sat at 9.7 and 9.8 percent, which is exactly the
-margin a floor exists to draw, and an operator who wants to move it
-should find one number.
+Timed on the same cache, the one-signal gather answered in 43 and 77
+seconds against 80 and 116 for the routed one, with three files read
+instead of eight, from 400 lines of code instead of 1,050. The other
+signals are not wrong. They are later questions.
+
+<a id="record-floor"></a>**Below the floor the answer says so and stops.**
+Fewer than 20 sessions recorded, or no line typed in 5 sessions on 3
+days, and the client is told to say how much was recorded and that there
+is not enough yet. A skill proposed from three sessions is a guess.
 
 <a id="human-turns"></a>**User text means human turns, deduplicated.**
 Every query excludes `conversation_source = 'claude_code'`, the OTEL lane
@@ -174,22 +169,34 @@ runs showed:
   for, and does not list hooks at all.
 - If a skill on the subject already exists, the answer says why it did
   not do the job and changes it rather than adding a second.
-- For the sink route the answer says plainly that a skill cannot stop a
-  person from resuming a session; the handoff skill makes starting fresh
-  the cheaper habit.
 
 <a id="one-question"></a>**`hyp ask` asks one question.** The list of
 LLP 0198 #first-ask had four rows: token spend, a repeated mistake, a
 missing skill, a subagent worth adding. Each sent a cold client at the
 cache with a sentence and a skill, and the recorded runs of those rows
 are the evidence in the Context above that this does not produce a
-change anyone acts on. The four are now the routes the gather chooses
-between, with evidence, so there is no question menu at all: `hyp ask`
+change anyone acts on. What they asked about is now answered from the
+one signal, with evidence, so there is no question menu at all: `hyp ask`
 goes straight from the gather to the launch. The one screen left is the
 client pick when two clients could answer, still framed, and cancelling
-it is "not now". The printed list in setup and `hyp ask --list` name the
-one question. `hyp ask "<question>"` still
+it is "not now". `hyp ask --list` names the one question in plain words,
+never the launch prompt, which tells the client to read a folder only the
+gather creates. `hyp ask "<question>"` still
 skips everything and starts straight on what was typed.
+
+<a id="setup-offer"></a>**Setup offers to run it.** LLP 0198
+#onboarding-list ended setup on a printed list because the launch would
+have rooted a session in whatever directory `hyp init` was run from. With
+#run-directory that reason is gone: the client starts in the run
+directory wherever the ask was typed. So setup's last screen is now a
+question, "Would you like HypAware to suggest a skill?", and a yes runs
+`hyp ask` as a child on the same terminal, the way LLP 0203 runs `hyp
+sync`. A no, a cancelled prompt, or a run that cannot prompt ends on one
+line naming the verb; an empty cache ends on the note that capture starts
+now. The list of questions to type later is gone from setup: a sentence to
+act on later is the shape the Context above shows nobody acts on, and the
+offer is made at the moment the first look has just shown the person their
+own rows.
 
 <a id="not-preauthorized"></a>**The launch is still not pre-authorized.**
 LLP 0198 #no-preauth stands. The client will ask before its first Bash
@@ -201,26 +208,30 @@ to permission denials.
 
 ## Consequences {#consequences}
 
-The gather costs seconds on a warm cache and under two minutes on a cold
-one, all before the client starts, and the user sees one line per step.
-The answer then takes two to four minutes in a cold client, most of it
-the hook test. The earlier shape took the same time and was not read.
+The gather is five bounded queries, seconds on a warm cache, before the
+client starts. The answer then takes one to two minutes in a cold client:
+three file reads and the writing.
 
-The route rule can be wrong for a machine. It is one exported object,
-and the applied rule is printed in `triage.txt`, so a user who disagrees
-with the route can see exactly which floor decided it.
+The floor can be wrong for a machine. It is one exported object,
+`RECORD_FLOOR`, and `candidates.md` prints the record size it was judged
+against.
 
 The server-side, per-org version of this ask exists as operator tooling
-outside the product and is not part of this decision. Its findings are
-what set the floors.
+outside the product and is not part of this decision.
 
-`SUGGESTED_PROMPTS` holds the one question. Setup's printed list and
-`hyp ask --list` show it; only the interactive pick triggers the gather.
+`SUGGESTED_PROMPTS` holds the one question. `hyp ask --list` prints it;
+setup offers to run it (#setup-offer); only a launch triggers the gather.
 
 ## Telemetry
 
-`wizard.first_ask` gains `evidence_routes` (`sink`, `skill+rule`, `none`)
-on a recommendation launch, and `evidence_error` when the gather failed
-and the launch degraded to the plain prompt. The distribution of routes
-across installs is the first fleet-level statement of where wasted effort
-goes, and the rate of `none` is how many machines are asked too early.
+`wizard.suggest_skill` records what setup's offer did: `launched`,
+`declined`, `spawn-failed`, `child-failed`, or the skip reason
+(`no-rows`, `not-interactive`, `error`), and `wizard.finish` carries the
+same value as `suggest_skill` in place of `first_ask`. `launched` against
+`declined` is whether the offer is one people take; `no-rows` is the rate
+of installs finishing with an empty cache.
+
+`wizard.first_ask` gains `evidence_enough` on a recommendation launch
+(false when the record was under the floor) and `evidence_error` when
+the gather failed and nothing was started. The rate of `false` is how
+many machines are asked too early.

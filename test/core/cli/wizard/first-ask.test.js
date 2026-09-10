@@ -210,26 +210,21 @@ test('runWizardFirstAsk: no launchable client prints the list and launches nothi
   assert.equal(spawner.calls.length, 0)
   const text = stdout.text()
   assert.match(text, /Worth asking your AI client/)
-  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
-  // Nothing to start here, so the fallback names the manual route.
-  assert.match(text, /Paste one into an AI client session/)
+  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.label), `missing question ${p.id}`)
+  // The prompt names the evidence folder, which a reader with no launch
+  // does not have, so it is never offered as something to paste.
+  for (const p of SUGGESTED_PROMPTS) assert.ok(!text.includes(p.prompt), `prompt ${p.id} offered for pasting`)
+  // Nothing to start here, so the footer names the condition and the verb to run once it holds.
+  assert.match(text, /Once an attached client can be started here \(see `hyp status`\), run `hyp ask` again/)
 })
 
-test('onboarding only prints the questions and tells the user to choose the launch directory later', () => {
-  // @ref LLP 0198#onboarding-list [tests]: setup never launches or depends on client detection
+test('an empty cache frames the question as something to come back to', () => {
+  // @ref LLP 0198#empty-cache [tests]: no rows reframes the list, and the reason is stated
   const stdout = makeBuf()
-  writeSuggestedPrompts({ stdout, footer: 'onboarding', hasRows: true })
-  const text = stdout.text()
-  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
-  assert.match(text, /To ask it, run `hyp ask`: HypAware gathers the evidence first and starts an attached AI client on it/)
-  assert.doesNotMatch(text, /Starting Claude Code|Starting Codex/)
-})
-
-test('onboarding with no detected dataset still prints the questions', () => {
-  const stdout = makeBuf()
-  writeSuggestedPrompts({ stdout, footer: 'onboarding', hasRows: false })
+  writeSuggestedPrompts({ stdout, footer: 'ask', hasRows: false })
   assert.match(stdout.text(), /Nothing recorded yet/)
-  for (const p of SUGGESTED_PROMPTS) assert.ok(stdout.text().includes(p.prompt), `missing prompt ${p.id}`)
+  for (const p of SUGGESTED_PROMPTS) assert.ok(stdout.text().includes(p.label), `missing question ${p.id}`)
+  assert.match(stdout.text(), /Run `hyp ask` then, to start your client on it/)
 })
 
 test('runWizardFirstAsk: the ask is framed, so it reads as a screen and not as more output', async () => {
@@ -276,7 +271,7 @@ test('runWizardFirstAsk: an empty cache suppresses the launch and says why', asy
   // retroactive beyond what backfill imported.
   assert.match(text, /captures from your next session onward/)
   // The questions still print, as something to come back to.
-  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
+  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.label), `missing question ${p.id}`)
   assert.match(text, /Run `hyp ask` then/)
 })
 
@@ -300,7 +295,7 @@ test('runWizardFirstAsk: an unknown row count never withholds the offer', async 
 })
 
 test('runWizardFirstAsk: cancelling the client pick declines, and keeps the list', async () => {
-  // @ref LLP 0395#one-question [tests]: with no question menu, the client pick is the one place to say not now
+  // @ref LLP 0398#one-question [tests]: with no question menu, the client pick is the one place to say not now
   for (const chooser of [
     /** @type {any} */ (async () => { throw new PromptCancelledError() }),
   ]) {
@@ -410,7 +405,7 @@ test('runWizardFirstAsk: two launchable clients ask which one answers', async ()
 
 test('the suggested prompt is one routable question that names no machinery', async () => {
   // @ref LLP 0198#split [tests]: core owns the questions, and they name no machinery
-  // One question (LLP 0395 #one-question): the earlier rows became the
+  // One question (LLP 0398 #one-question): the earlier rows became the
   // routes it chooses between, so a second row here would be a regression.
   assert.equal(SUGGESTED_PROMPTS.length, 1)
   assert.equal(new Set(SUGGESTED_PROMPTS.map((p) => p.id)).size, SUGGESTED_PROMPTS.length, 'ids must be unique')
@@ -425,14 +420,15 @@ test('the suggested prompt is one routable question that names no machinery', as
 })
 
 test('every suggested label fits a narrow terminal without wrapping', async () => {
-  // A wrapped menu row costs two lines and reads as two options. 72 columns
-  // leaves room for the "> " cursor gutter inside an 80-column terminal.
+  // The label is the printed question. A wrapped one reads as two
+  // questions. 72 columns leaves room for the two-space indent inside an
+  // 80-column terminal.
   const tooLong = SUGGESTED_PROMPTS.filter((p) => p.label.length > 72)
   assert.deepEqual(tooLong.map((p) => `${p.id} (${p.label.length} cols)`), [])
 })
 
 test('runWizardFirstAsk: the recommendation row gathers first and starts the client in the run directory', async () => {
-  // @ref LLP 0395#run-directory [tests]: the client starts inside the evidence, on the folder-relative prompt
+  // @ref LLP 0398#run-directory [tests]: the client starts inside the evidence, on the folder-relative prompt
   const stdout = makeBuf()
   const spawner = recordingSpawn()
   const chooser = selectReturning('recommend')
@@ -459,7 +455,7 @@ test('runWizardFirstAsk: the recommendation row gathers first and starts the cli
 })
 
 test('runWizardFirstAsk: a failed or absent gather refuses to launch', async () => {
-  // @ref LLP 0395#run-directory [tests]: no evidence, no launch; the cold answer is the failure this ask removes
+  // @ref LLP 0398#run-directory [tests]: no evidence, no launch; the cold answer is the failure this ask removes
   for (const prepareEvidence of [
     async () => { throw new Error('cache locked') },
     async () => undefined,
