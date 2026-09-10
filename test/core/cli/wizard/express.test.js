@@ -116,7 +116,7 @@ test('the gate claims a server only when told it has one', async () => {
   assert.equal(state.question.options[1].summary, 'Choose what to record.')
 })
 
-test('the sync claim drops when the store already withholds one of the named rows', async () => {
+test('the sync claim drops when the confirm behind it cannot enable sharing', async () => {
   const { env } = await makeHome()
   const { confirm, state } = capturingConfirm('defaults')
 
@@ -124,12 +124,14 @@ test('the sync claim drops when the store already withholds one of the named row
     stdout: makeBuf(), stderr: makeBuf(), env, enrolled: true, syncWithheld: true, rows: ROWS, confirm,
   }))
 
-  // An express accept preserves standing opt-outs verbatim rather than
-  // clearing them, so on that reconfigure "and sync everything" is a
-  // promise the accept does not keep. The retired sync gate carried this
-  // distinction itself ("Sync all" against "Keep this"); with that gate
-  // gone this row is the only screen the user decides on.
-  // @ref LLP 0201#gate [tests]: the accept row claims sync only when accepting would in fact sync everything it names
+  // An accept clears the standing opt-outs for the rows it names
+  // (LLP 0396 #combined-selection), so the promise holds wherever the
+  // clearing can happen. `syncWithheld` is the one machine where it
+  // cannot: an unreadable policy store, which the confirm may not
+  // overwrite and which makes the export seam withhold every row. This
+  // row is the only screen an express run decides on, so it is where the
+  // promise has to narrow.
+  // @ref LLP 0396#combined-selection [tests]: the accept row claims sync only when confirming it would in fact enable sync for everything it names
   assert.equal(state.question.options[0].label, 'Record everything')
   // Only the claim narrows. The disclosure is unconditional, and the
   // decline row still opens both menus.

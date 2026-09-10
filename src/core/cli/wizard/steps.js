@@ -86,7 +86,7 @@ export function wizardItinerary(pathway, opts = {}) {
  * rather than contradicting a total already on screen.
  *
  * @ref LLP 0135#progress [implements]: the denominator is resolved after the fork, counts prompt lanes rather than phases, and is absent when no pathway is committed
- * @ref LLP 0338#counts-anyway [implements]: the itinerary is a property of the pathway, so a lane with nothing to ask on this machine keeps both its place in the total and its position line
+ * @ref LLP 0338#counts-anyway [implements]: the position comes from the pathway alone, so a counted lane that turns out to have nothing to ask still states one; LLP 0396 retired the sync lane that was the shipped instance
  *
  * @param {WizardPathway | undefined} pathway
  * @param {WizardStepName} step

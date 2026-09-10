@@ -510,12 +510,25 @@ async function runGuardedInitWizard(opts, guard) {
       // the pick lane's back edge then reaches the fork directly, exactly
       // as it did before the gate existed.
       let expressShown = false
+      // The one probe both of this pass's sharing claims rest on: the
+      // express accept row ("Record and sync everything") and the combined
+      // picker's own title and accept narration. A store the confirm
+      // cannot read is a store it cannot clear (`sync_scope.js` warns and
+      // writes nothing), and the export seam then withholds every row, so
+      // no screen on that machine may say "and sync" - not the gate the
+      // user decides on, and not the menu behind a decline, which is the
+      // only screen a Customize run sees. Read once per pass, and only
+      // where the answer can change a claim: an unenrolled run makes no
+      // sharing claim anywhere, so it never pays for the read.
+      // @ref LLP 0396#combined-selection [constrained-by]: a screen claims sharing only where confirming it can enable sharing
+      let syncWithheld = false
       // Every attended pass with default rows gets the gate, both
       // pathways: it is the wizard's only accept-or-customize screen, and
       // the lanes behind it are menus that never re-ask "defaults or
       // customize" (LLP 0201 #decline).
       // @ref LLP 0201#gate [implements]: the gate is asked on every attended pass whose seeding yields default rows
       if (interactive) {
+        syncWithheld = enrolled() && (await syncWithheldSafe({ opts }))
         // The tool names the accept row's summary sentence claims: the
         // pick lane's own default rows, computed once here, so
         // "everything" names exactly what the lane would record.
@@ -525,9 +538,6 @@ async function runGuardedInitWizard(opts, guard) {
         // there is no gate to show; the pick lane opens its menu as it
         // always would (LLP 0201 #no-default-no-accept).
         if (rows.length > 0) {
-          // Only an enrolled run makes a sync claim at all, so only an
-          // enrolled run pays for the store read.
-          const syncWithheld = enrolled() && (await syncWithheldSafe({ opts }))
           const expressFn = opts.express ?? runWizardExpressGate
           const choice = await expressFn({
             stdout: opts.stdout,
@@ -583,7 +593,11 @@ async function runGuardedInitWizard(opts, guard) {
           ...(opts.stdin ? { stdin: opts.stdin } : {}),
           env: opts.env,
           ...(pickProgress ? { progress: pickProgress } : {}),
-          ...(interactive && enrolled() ? { collectAndSync: true } : {}),
+          // The menu is the sharing choice on an enrolled run (LLP 0396),
+          // so it says so - except where the confirm behind it cannot
+          // clear an opt-out, which is the same condition that narrows
+          // the gate's accept row above.
+          ...(interactive && enrolled() && !syncWithheld ? { collectAndSync: true } : {}),
           ...(catalog ? { catalog } : {}),
           ...(opts.platform ? { platform: opts.platform } : {}),
           ...(locked ? { locked } : {}),
@@ -1274,9 +1288,15 @@ async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
  * writes nothing), and the export seam then withholds every row until the
  * file is repaired, org-managed rows included (`source_withhold.js` throws
  * before it filters the central ids out). So the probe reads the store on
- * every enrolled gate rather than only on the runs that have a non-locked
- * row to name: a fully fleet-managed machine has no such row and is exactly
- * the machine whose entire export the corrupt file stops.
+ * every enrolled attended pass rather than only on the runs that have a
+ * non-locked row to name: a fully fleet-managed machine has no such row and
+ * is exactly the machine whose entire export the corrupt file stops. Nor
+ * only on the passes that show a gate, because the pick lane makes the same
+ * claim in its title on the passes that do not.
+ *
+ * The entries are read and discarded: the question is whether the file
+ * parses, not what is in it, and `readClientSyncEntries` is the one reader
+ * that answers it the way the export seam and `hyp status` do.
  *
  * @ref LLP 0396#combined-selection [constrained-by]: the accept row claims sync only where the confirm can enable it
  * @param {{ opts: RunInitWizardOptions }} args
