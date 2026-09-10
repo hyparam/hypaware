@@ -660,7 +660,7 @@ ${files}
 
 - Every number you state traces to a file in this folder (or to one of your two queries). The reader never sees session ids or file names in the answer itself; those go in the Sources line at the end, where each session is its eight-character id with the date and what was typed.
 - A fact about a command, an error, or a tool must come from a file you read this session, cited path:line, or be written as a pointer. This applies to the text of the change itself, not only to the evidence for it.
-- Any command you put in the change must be run once against a real input before it appears, and the answer shows the command and its output. Do not write outside this folder to do the test.
+- Standard commands (git, gh, npm, node, hyp) need no proof; the model knows them and the record shows they ran. A command specific to this repo or tool (a script under scripts/, a flag you have not seen in the record) is run once before it appears, and the answer shows the command and its output. Do not write outside this folder to do that. Never build a scratch repo or run git in the person's repo to test a step.
 - The answer is always one skill: a SKILL.md under ~/.claude/skills/<name>/ that the person can read, trigger, and edit. Never an agent definition on its own, a hook, a settings entry, or a CLAUDE.md rule. If the skill needs the agent to offer it unprompted (a handoff at the end of the day), say so in one sentence in the answer; do not propose a second file.
 - The skill's description opens with the phrase the person already types for this, so the client picks it up without being told. Its steps are the commands the record shows actually ran, not ones you imagine.
 - For reopened sessions, be honest that a skill cannot stop a person from resuming; what it does is make starting fresh cheap enough to prefer.
@@ -685,7 +685,7 @@ If nothing was over its floor: say what you looked through (sessions and days, f
 
 When the answer is yes: create or edit the file with the Write or Edit tool in that same turn and print the result. Do not ask again.
 
-Under 120 words before the code block. Read each file once; do not re-derive with grep what a file already lists. Aim to answer in under two minutes: the draft is written, the finding is stated, and your job is to fit them together and say why.
+Under 120 words before the code block. Read each file once, in one pass; do not page through it in pieces, and do not re-derive with grep what a file already lists. Aim to answer in under two minutes: the draft is written, the finding is stated, and your job is to fit them together and say why.
 `
 }
 
