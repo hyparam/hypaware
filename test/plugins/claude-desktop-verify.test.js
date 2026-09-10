@@ -243,6 +243,47 @@ test('verify: a wrapper longer than the bounded read is left alone, not cut into
   assert.doesNotMatch(bufs.stdout.text(), /STALE/)
 })
 
+test('verify: an overrun read does not fall back to an exec line the shell never runs', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  // The two bounded-read hazards at once: a multi-line quoted HYP_HOME whose
+  // value carries its own `exec` line, padded so the real one falls past the
+  // cap. Keeping whole lines is not enough here - the surviving whole lines
+  // end inside the value, so the last `exec` in hand is the one the shell
+  // only ever reads as more of HYP_HOME. Judging it reports a live wrapper
+  // broken, which is the false positive the whole check exists to avoid.
+  writeHelper({
+    stateDir,
+    env: { HYP_HOME: `${stateDir}\nexec /gone/node /gone/hypaware.js\n${'d'.repeat(4096)}` },
+  })
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.doesNotMatch(bufs.stdout.text(), /STALE/)
+})
+
+// @ref LLP 0116#helper-contract [tests]: Desktop runs the wrapper as a bare executable, so a lost execute bit fails exactly as silently as a rotted path
+test('verify: a wrapper that lost its execute bit is STALE, not "installed"', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  const helperPath = writeHelper({ stateDir })
+  // Both baked paths are still on disk; only the mode a restore or a sync
+  // tool drops is gone.
+  fs.chmodSync(helperPath, 0o644)
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
+  assert.equal(code, 1, bufs.stdout.text())
+  assert.match(bufs.stdout.text(), /installed but STALE: the wrapper is no longer executable/)
+})
+
 test('verify: a present but stale plist is reported STALE and fails', async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
   const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })

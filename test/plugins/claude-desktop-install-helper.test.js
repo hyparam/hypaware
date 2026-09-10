@@ -11,6 +11,7 @@ import {
   HELPER_BASENAME,
   activate,
 } from '../../hypaware-core/plugins-workspace/claude-desktop/src/index.js'
+import { shellQuote } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
 
 /**
  * Minimal activation context: capture registered commands and provide
@@ -139,9 +140,15 @@ test('status reports a wrapper whose baked interpreter rotted away, rather than 
   await invoke(commands.get('client claude-desktop install-helper').run, [])
   const helperPath = path.join(stateDir, HELPER_BASENAME)
   // Stand in for an nvm/volta/asdf/brew node switch: same wrapper, same
-  // path in the plist, an interpreter that is no longer there.
-  const rotted = fs.readFileSync(helperPath, 'utf8')
-    .replace(/^exec \S+/m, `exec ${path.join(stateDir, 'nvm', 'v20.0.0', 'bin', 'node')}`)
+  // path in the plist, an interpreter that is no longer there. Swapped by the
+  // exact token the renderer wrote, not by a `\S+` match on it: an interpreter
+  // under a path with a space is quoted, so the pattern would cut the token in
+  // half and leave the rest of it as a third argument - a wrapper still judged
+  // STALE, but for a shape `install-helper` never writes.
+  const rotted = fs.readFileSync(helperPath, 'utf8').replace(
+    `exec ${shellQuote(process.execPath)} `,
+    `exec ${shellQuote(path.join(stateDir, 'nvm', 'v20.0.0', 'bin', 'node'))} `,
+  )
   fs.writeFileSync(helperPath, rotted)
 
   const after = await invoke(commands.get('client claude-desktop status').run, [])

@@ -18,9 +18,9 @@ import { parseCredentialHelperScript } from './profile.js'
 /**
  * Bound on the wrapper read. What this plugin generates is five short lines,
  * but `claude_desktop.helper_path` can point the check at any file at all, so
- * the read is capped rather than trusted. A file that overruns the cap keeps
- * only its whole lines (`readBakedPaths`), so the cap can cost a verdict but
- * never invent one.
+ * the read is capped rather than trusted. A file that overruns the cap is not
+ * judged at all (`readBakedPaths`), so the cap can cost a verdict but never
+ * invent one.
  */
 const HELPER_READ_LIMIT_BYTES = 4096
 
@@ -69,7 +69,9 @@ export function checkHelperScript(helperPath, env) {
         + "; install a durable CLI first with 'npm install -g hypaware'",
     }
   }
-  const gone = missingBin('interpreter', baked.nodeBin) ?? missingBin('CLI', baked.hypBin)
+  const gone = missingBin('interpreter', baked.nodeBin)
+    ?? missingBin('CLI', baked.hypBin)
+    ?? lostExecuteBit(helperPath)
   return gone === undefined ? { present: true, stale: false } : { present: true, stale: true, detail: gone }
 }
 
@@ -90,15 +92,15 @@ function readBakedPaths(helperPath) {
     fd = fs.openSync(helperPath, 'r')
     const buf = Buffer.allocUnsafe(HELPER_READ_LIMIT_BYTES)
     const read = fs.readSync(fd, buf, 0, HELPER_READ_LIMIT_BYTES, 0)
-    const text = buf.toString('utf8', 0, read)
-    // A read that filled the cap may have cut the last line mid-token, and
-    // half a path is still absolute and still absent: the parse would hand
-    // back a truncated `hypBin` and the check would call a live wrapper
-    // STALE. Only whole lines are parsed, so the cap can cost a verdict but
-    // never invent one.
-    return parseCredentialHelperScript(
-      read < HELPER_READ_LIMIT_BYTES ? text : text.slice(0, text.lastIndexOf('\n') + 1),
-    )
+    // A read that filled the cap did not reach the end of the file, and the
+    // renderer writes `exec` last: whatever the cap did reach is therefore not
+    // the baked command, whether it cut a path in half or stopped inside a
+    // quoted `HYP_HOME` whose value carries an `exec` line of its own. Either
+    // way the parse would judge a line the shell never runs and report a live
+    // wrapper STALE, so an overrun is no claim at all. It costs nothing real:
+    // what this plugin generates is five short lines.
+    if (read >= HELPER_READ_LIMIT_BYTES) return undefined
+    return parseCredentialHelperScript(buf.toString('utf8', 0, read))
   } catch {
     return undefined
   } finally {
@@ -114,6 +116,26 @@ function readBakedPaths(helperPath) {
 function missingBin(role, bin) {
   if (!path.isAbsolute(bin) || fs.existsSync(bin)) return undefined
   return `baked ${role} path no longer exists (${bin})`
+}
+
+/**
+ * Desktop runs `inferenceCredentialHelper` as a bare executable
+ * (LLP 0116#helper-contract), so a wrapper that lost its execute bit fails the
+ * same silent way a rotted path does: `install-helper` chmods 0755, and a
+ * restore, a copy across filesystems, or a sync tool that drops the mode does
+ * not. Asked only of a wrapper this plugin generated, because that is the one
+ * whose repair really is the re-run the verdict names.
+ *
+ * @param {string} helperPath
+ * @returns {string | undefined}
+ */
+function lostExecuteBit(helperPath) {
+  try {
+    fs.accessSync(helperPath, fs.constants.X_OK)
+    return undefined
+  } catch {
+    return 'the wrapper is no longer executable, and Desktop runs it as a bare executable'
+  }
 }
 
 /**
@@ -166,7 +188,7 @@ export function renderHelperLine(helper, helperPath) {
 /**
  * `hyp claude-desktop verify`: the two-tier verify.
  *
- * @ref LLP 0131#verify-is-a-hint [implements]: the automatic half (plist present and up to date, dialog residue cleared) drives the exit code; the in-app half (send a message, confirm capture) needs a human inside the app, so it is printed as a hint and never checked or blocked on here
+ * @ref LLP 0131#verify-is-a-hint [implements]: the automatic half (plist present and up to date, credential wrapper live, dialog residue cleared) drives the exit code; the in-app half (send a message, confirm capture) needs a human inside the app, so it is printed as a hint and never checked or blocked on here
  *
  * @param {string[]} argv
  * @param {CommandRunContext} cmdCtx
