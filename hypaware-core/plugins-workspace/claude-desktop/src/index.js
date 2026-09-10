@@ -3,6 +3,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { Attr, getLogger } from '../../../../src/core/observability/index.js'
+
 import { CLAUDE_DESKTOP_CONFIG_SECTION, validateClaudeDesktopConfig } from './config.js'
 import { resolveHelperPath, resolveHypBin, resolveInputs } from './inputs.js'
 import {
@@ -289,6 +291,15 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
         + "warning once npm prunes it. Run 'npm install -g hypaware', then "
         + "'hyp client claude-desktop install-helper', to record a durable path\n",
       )
+      // The stderr line is read once, by whoever is at the terminal now; the
+      // wrapper it describes outlives that session and fails silently later.
+      // Recording the decision is what lets the machine be asked afterwards
+      // which path it baked in, the same signal `@hypaware/claude` emits for
+      // the identical choice on its managed hook.
+      getLogger('plugin.claude-desktop').warn('client.install_helper.ephemeral_hyp_bin', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        bin_path: hypBin.binPath,
+      })
     }
     return 0
   } catch (err) {

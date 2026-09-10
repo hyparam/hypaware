@@ -94,6 +94,46 @@ test('findInstalledHypawareBin only accepts a durable, runnable entry', async (t
   assert.equal(findInstalledHypawareBin({}), undefined)
 })
 
+// `accept` narrows what counts as an answer, and the narrowing has to happen
+// inside the walk. A caller that filters the single returned path instead gets
+// nothing whenever a rejected candidate happens to sit first on `$PATH`, which
+// is exactly where the managers that ship shims put themselves.
+test('findInstalledHypawareBin resumes the walk past a candidate accept rejects', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-find-bin-accept-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+
+  /** @param {string} file */
+  async function writeExecutable(file) {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, '#!/bin/sh\nexit 0\n')
+    await fs.chmod(file, 0o755)
+  }
+
+  const shimDir = path.join(root, 'shim', 'bin')
+  const wantedDir = path.join(root, 'wanted', 'bin')
+  await writeExecutable(path.join(shimDir, 'hypaware'))
+  await writeExecutable(path.join(wantedDir, 'hypaware'))
+  const env = { PATH: [shimDir, wantedDir].join(path.delimiter) }
+
+  // Without a filter the first entry still wins, unchanged.
+  assert.equal(findInstalledHypawareBin(env), path.join(shimDir, 'hypaware'))
+
+  /** @type {string[]} */
+  const seen = []
+  const accept = (/** @type {string} */ candidate) => {
+    seen.push(candidate)
+    return candidate.startsWith(wantedDir)
+  }
+  assert.equal(
+    findInstalledHypawareBin(env, process.platform, accept),
+    path.join(wantedDir, 'hypaware')
+  )
+  assert.deepEqual(seen, [path.join(shimDir, 'hypaware'), path.join(wantedDir, 'hypaware')])
+
+  // A filter nothing satisfies is `undefined`, not the last thing it walked.
+  assert.equal(findInstalledHypawareBin(env, process.platform, () => false), undefined)
+})
+
 test('ensureDurableBinForNpx installs the current package globally and returns the global bin', async () => {
   /** @type {{ cmd: string, args: string[] }[]} */
   const calls = []

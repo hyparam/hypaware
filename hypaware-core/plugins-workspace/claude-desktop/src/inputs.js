@@ -22,6 +22,9 @@ import { DEFAULT_BUNDLE_ID, DEFAULT_MODELS, resolveGatewayBaseUrl } from './prof
 /** Basename of the generated credential-helper wrapper under the state dir. */
 export const HELPER_BASENAME = 'credential-helper.sh'
 
+/** Entry-script extensions `node <path>` will load. */
+const NODE_MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
+
 /**
  * Absolute path of the `hyp` executable to embed in the wrapper.
  * Desktop runs the wrapper outside any shell profile, so a bare `hyp`
@@ -55,19 +58,22 @@ export const HELPER_BASENAME = 'credential-helper.sh'
 export function resolveHypBin(env = process.env, entry = process.argv[1]) {
   const explicit = [env.HYPAWARE_BIN, env.HYP_BIN]
     .find((value) => typeof value === 'string' && value.trim() !== '')
-  if (explicit !== undefined) return { binPath: path.resolve(explicit), ephemeral: false }
+  // Trimmed, because the emptiness test above is already the decision that
+  // surrounding whitespace is not part of the value. Untrimmed, ` /opt/hyp`
+  // is not absolute, so `path.resolve` would anchor it to whatever directory
+  // this command ran in and bake that into the wrapper.
+  if (explicit !== undefined) return { binPath: path.resolve(explicit.trim()), ephemeral: false }
 
   const running = resolveEntryPath(entry)
   if (!isNpxBinPath(running, env)) return { binPath: running, ephemeral: false }
   // Recorded as `$PATH` spells it, never as `realpathSync` resolves it: what a
   // global install puts on `$PATH` is usually a symlink into the package tree,
   // and the durable name is that link, not the versioned directory it
-  // currently points at. The link is still followed to decide whether to
-  // record it at all (`runsUnderNode`); only the answer is left unresolved.
-  const installed = findInstalledHypawareBin(env)
-  if (installed !== undefined && runsUnderNode(installed)) {
-    return { binPath: installed, ephemeral: false }
-  }
+  // currently points at. Each candidate's link is still followed inside the
+  // walk, to decide whether to take it (`runsUnderNode`) or carry on past it;
+  // only the name that comes back is left unresolved.
+  const installed = findInstalledHypawareBin(env, process.platform, runsUnderNode)
+  if (installed !== undefined) return { binPath: installed, ephemeral: false }
   return { binPath: running, ephemeral: true }
 }
 
@@ -85,9 +91,18 @@ export function resolveHypBin(env = process.env, entry = process.argv[1]) {
  * works until npm prunes the cache.
  *
  * `npm install -g` links `<prefix>/bin/hypaware` onto the package's own
- * `bin/hypaware.js`, so following the link and asking for `.js` accepts the
- * layout the walk exists to find and declines the shims. Declining falls back
- * to the npx path and its warning, which is what the machine had before the
+ * `bin/hypaware.js`, so following the link and asking for a module extension
+ * accepts the layout the walk exists to find and declines the shims. All three
+ * of `.js`/`.mjs`/`.cjs` are listed because the question is what Node can run,
+ * not what this package happens to name its entry today: pinning the check to
+ * the current `bin` filename would turn a later rename into a silent return to
+ * ephemeral wrappers, with every test still green.
+ *
+ * This is passed to the walk rather than applied to its answer, so a rejected
+ * candidate costs the next `$PATH` entry and not the whole search - the
+ * managers that ship shims are exactly the ones that put their directory in
+ * front of `/usr/local/bin`. When the walk does come back empty, the fallback
+ * is the npx path and its warning, which is what the machine had before the
  * walk: never worse than not looking.
  *
  * @param {string} candidate
@@ -95,7 +110,7 @@ export function resolveHypBin(env = process.env, entry = process.argv[1]) {
  */
 function runsUnderNode(candidate) {
   try {
-    return path.extname(fs.realpathSync(candidate)) === '.js'
+    return NODE_MODULE_EXTENSIONS.has(path.extname(fs.realpathSync(candidate)))
   } catch {
     return false
   }

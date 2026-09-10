@@ -112,9 +112,20 @@ export function isNpxBinPath(binPath, env = process.env) {
  * as one command runs and the next `npm ci` deletes them, so recording one
  * only trades npm's prune schedule for npm's install schedule.
  *
+ * `accept` is how a caller narrows "executable" to whatever it actually needs,
+ * without forking the walk. It runs last, after the file and `X_OK` checks, and
+ * a `false` keeps walking rather than ending the search: a rejected candidate
+ * is this directory's answer, never `$PATH`'s. That distinction is the whole
+ * point of the parameter. `@hypaware/claude-desktop` needs a path `node` can
+ * parse, because it writes `exec <node> <bin>`, and pnpm, volta and asdf all
+ * put a shell script or a compiled shim at this name; those managers also put
+ * their directory at the FRONT of `$PATH`, so filtering the single answer
+ * instead would hide an ordinary `npm install -g` sitting one entry behind it
+ * and send the operator off to run an install they have already run.
+ *
  * It answers "where is an installed `hypaware`", not "where is *this*
- * `hypaware`": the first executable of that name wins and no version is
- * compared, which is the one place it parts company with
+ * `hypaware`": the first accepted executable of that name wins and no version
+ * is compared, which is the one place it parts company with
  * `ensureDurableBinForNpx` and its deliberate `name@version` pin. Telling the
  * difference means resolving the candidate's own `package.json` across every
  * install layout (npm, pnpm, yarn, and volta/nvm/asdf shims) or spawning it
@@ -131,9 +142,11 @@ export function isNpxBinPath(binPath, env = process.env) {
  *
  * @param {NodeJS.ProcessEnv} [env]
  * @param {NodeJS.Platform} [platform]
+ * @param {(candidate: string) => boolean} [accept] extra test a candidate must
+ *   pass; a rejection resumes the walk at the next `$PATH` entry
  * @returns {string | undefined}
  */
-export function findInstalledHypawareBin(env = process.env, platform = process.platform) {
+export function findInstalledHypawareBin(env = process.env, platform = process.platform, accept) {
   const exts = platform === 'win32'
     ? (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
     : ['']
@@ -158,6 +171,7 @@ export function findInstalledHypawareBin(env = process.env, platform = process.p
         // something that can never execute, with nothing to say so.
         if (!statSync(candidate).isFile()) continue
         accessSync(candidate, fsConstants.X_OK)
+        if (accept !== undefined && !accept(candidate)) continue
         return candidate
       } catch {
         // not here, not a file, or not executable: keep walking
