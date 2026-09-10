@@ -18,9 +18,9 @@ import { parseCredentialHelperScript } from './profile.js'
 /**
  * Bound on the wrapper read. What this plugin generates is five short lines,
  * but `claude_desktop.helper_path` can point the check at any file at all, so
- * the read is capped (and stays inside Node's buffer pool) rather than
- * trusted. A file that overruns the cap carries no generated marker in its
- * prefix and is left alone anyway.
+ * the read is capped rather than trusted. A file that overruns the cap keeps
+ * only its whole lines (`readBakedPaths`), so the cap can cost a verdict but
+ * never invent one.
  */
 const HELPER_READ_LIMIT_BYTES = 4096
 

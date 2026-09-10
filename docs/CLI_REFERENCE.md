@@ -781,8 +781,9 @@ hyp client claude-desktop status
 ```
 
 Reports the resolved endpoint, credential mode, helper path, models, and bundle
-ID. A missing helper returns `1`. This command doesn't verify the installed
-property list.
+ID. A missing helper returns `1`, and so does a generated helper whose baked
+interpreter or CLI path has rotted away, which prints `STALE` and names the
+re-run. This command doesn't verify the installed property list.
 
 ```sh
 hyp client claude-desktop status
@@ -794,7 +795,8 @@ hyp client claude-desktop status
 hyp client claude-desktop verify
 ```
 
-Checks that the managed property list is present and current and that stale
+Checks that the managed property list is present and current, that the
+credential wrapper it names is present and still runnable, and that stale
 dialog residue is cleared. Those automatic checks determine the exit code. It
 also prints a manual in-app capture check, which doesn't affect the exit code.
 
