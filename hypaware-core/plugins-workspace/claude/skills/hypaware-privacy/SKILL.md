@@ -26,7 +26,7 @@ The review conversation will discuss the most sensitive content on the machine, 
 
 <!-- @ref LLP 0212#cli-is-the-verb [implements]: the CLI verb is the opt-out; the shell block below is the fallback for a machine without `hyp`, not the path this step takes -->
 
-Prefer `hyp session ignore --json`, which resolves the id and verifies the opt-out in one tested implementation and refuses rather than guessing. It resolves this session's id from `CLAUDE_CODE_SESSION_ID`, addresses **every** recorder advertising the control route, validates each reply the same three ways, and fails closed: it exits nonzero and prints no success when it cannot establish the right id, which is the answer this step needs. Only where it is unavailable, or cannot resolve the session, does the script below apply.
+Prefer `hyp session ignore --json`, which resolves the id and verifies the opt-out in one tested implementation and refuses rather than guessing. It resolves this session's id from `CLAUDE_CODE_SESSION_ID`, addresses **every** recorder advertising the control route, validates each reply the same three ways, and fails closed: it exits nonzero and prints no success when it cannot establish the right id, which is the answer this step needs. Only where it is unavailable (`command not found`) does the script below apply. A `hyp` that ran and refused is a stop, not a fallback: the script reads the same `CLAUDE_CODE_SESSION_ID`, so it cannot resolve a session the verb could not.
 
 Reading the receipt is not optional. The verb fails closed on the questions it can answer, but two of its **successes** are narrower than they look, and both are checked below.
 
