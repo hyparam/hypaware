@@ -181,7 +181,7 @@ test('the ephemeral-bin warning claims no tree a pnpm or yarn global root would 
     const where = describeEphemeralBinPath(bin, effect, {})
     // The two clauses that were false for a pnpm or yarn global install: it is
     // nobody's project, and no `npm ci` or branch switch will ever remove it.
-    assert.doesNotMatch(where, /a project's node_modules/, where)
+    assert.doesNotMatch(where, /inside a project's node_modules/, where)
     assert.doesNotMatch(where, /once an npm ci or a branch switch removes it/, where)
     // Still says what was actually observed and what the operator loses, which
     // is the whole reason the warning exists.

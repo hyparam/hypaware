@@ -473,7 +473,7 @@ for (const manager of ['pnpm', 'yarn']) {
     // global root. What it must not do is assert whose tree it is.
     assert.match(err, /npm install -g hypaware/)
     assert.match(err, /node_modules tree/)
-    assert.doesNotMatch(err, /project's node_modules/)
+    assert.doesNotMatch(err, /inside a project's node_modules/)
     assert.doesNotMatch(err, /once an npm ci or a branch switch removes it/)
     assert.doesNotMatch(err, /npx cache/)
   })

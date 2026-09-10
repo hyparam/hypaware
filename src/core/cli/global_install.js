@@ -190,7 +190,9 @@ export function isEphemeralBinPath(binPath, env = process.env) {
  * beside this.
  *
  * @param {string} binPath the recorded CLI path, as the caller will print it
- * @param {string} effect what stops working once that tree is gone
+ * @param {string} effect what stops working once that tree is gone, as a clause
+ *   carrying its own verb: it is spliced in front of "without warning once ...",
+ *   so "capture of cwd and git branch stops", not "cwd and git branch capture"
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {string}
  */
@@ -199,7 +201,7 @@ export function describeEphemeralBinPath(binPath, effect, env = process.env) {
     return `inside npm's npx cache; ${effect} without warning once npm prunes it`
   }
   return `inside a node_modules tree; ${effect} without warning once that tree is removed, `
-    + "as an npm ci or a branch switch removes a project's"
+    + "as an npm ci or a branch switch removes a project's node_modules"
 }
 
 /**
