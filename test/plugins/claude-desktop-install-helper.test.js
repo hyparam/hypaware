@@ -203,6 +203,19 @@ function writeExecutable(file) {
 }
 
 /**
+ * The top of a package-manager-owned tree: the manifest that makes
+ * `isEphemeralBinPath` call it ephemeral, and the lockfile beside it.
+ *
+ * @param {string} dir
+ * @param {string} lockfile
+ */
+function managerRoot(dir, lockfile) {
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'package.json'), '{"dependencies":{"hypaware":"1.0.0"}}\n')
+  fs.writeFileSync(path.join(dir, lockfile), '# lockfile\n')
+}
+
+/**
  * A temp root standing in for a machine running `npx hypaware`, plus the state
  * dir the wrapper is written into.
  *
@@ -249,6 +262,26 @@ function npxRig(opts = {}) {
     fs.symlinkSync(linkTarget, globalBin)
   }
 
+  // A `pnpm add -g` and a `yarn global add`, at each manager's default global
+  // dir. Both write a manifest and a lockfile beside their global root and put
+  // the package under a `node_modules` inside it, which is a project's shape
+  // exactly, so `isEphemeralBinPath` reads them ephemeral (issue #1625). The
+  // pnpm entry is inside the store the visible link points into, because that
+  // is the path `realpath` returns and the path the wrapper records.
+  const pnpmGlobalDir = path.join(root, '.local', 'share', 'pnpm', 'global', '5')
+  managerRoot(pnpmGlobalDir, 'pnpm-lock.yaml')
+  const pnpmGlobalCliPath = path.join(
+    pnpmGlobalDir, 'node_modules', '.pnpm', 'hypaware@1.0.0',
+    'node_modules', 'hypaware', 'bin', 'hypaware.js',
+  )
+  writeExecutable(pnpmGlobalCliPath)
+  const yarnGlobalDir = path.join(root, '.config', 'yarn', 'global')
+  managerRoot(yarnGlobalDir, 'yarn.lock')
+  const yarnGlobalCliPath = path.join(
+    yarnGlobalDir, 'node_modules', 'hypaware', 'bin', 'hypaware.js',
+  )
+  writeExecutable(yarnGlobalCliPath)
+
   const shimDir = path.join(root, 'pnpm-ish')
   const shimBin = path.join(shimDir, 'hypaware')
   if (opts.shimAhead) writeExecutable(shimBin)
@@ -257,6 +290,8 @@ function npxRig(opts = {}) {
     stateDir: root,
     npxCliPath,
     projectCliPath,
+    pnpmGlobalCliPath,
+    yarnGlobalCliPath,
     globalBin,
     shimBin,
     cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
@@ -410,6 +445,39 @@ test('with no CLI installed the project-local wrapper says what will break it', 
   assert.doesNotMatch(err, /npx cache/)
   assert.match(err, /npm install -g hypaware/)
 })
+
+// Issue #1625. pnpm and yarn write a manifest beside their GLOBAL root, so a
+// global install under either takes this same branch, and the wording used to
+// assert a project's `node_modules` removed by an `npm ci` or a branch switch.
+// For an operator whose only install is `pnpm add -g hypaware` there is no
+// checkout, no `npm ci` and no branch to switch, so the sentence sent them
+// looking for a tree they do not have. Nothing on disk separates the two
+// (test/core/global-install.test.js lays both out side by side), so what the
+// warning must do is describe what was observed and leave the tree to the path
+// it already prints.
+for (const manager of ['pnpm', 'yarn']) {
+  test(`a ${manager} global install is not described as a project the operator does not have`, async (t) => {
+    // Their own shim is on `$PATH` and nothing else is, which is that machine
+    // exactly: the walk refuses the shim as unparseable by node and comes back
+    // empty, so the global root is what gets recorded.
+    const rig = npxRig({ installedBin: false, shimAhead: true })
+    const entry = manager === 'pnpm' ? rig.pnpmGlobalCliPath : rig.yarnGlobalCliPath
+
+    const { code, err, body } = await runInstallHelperWithEntry(t, rig, entry)
+
+    assert.equal(code, 0)
+    assert.ok(body.includes(fs.realpathSync(entry)), `wrapper does not run ${entry}: ${body}`)
+    // The warning still fires and still names the repair, which does work here:
+    // `npm install -g` puts a node-parseable entry on `$PATH` for the walk to
+    // find, and this operator's wrapper really would rot if they removed the
+    // global root. What it must not do is assert whose tree it is.
+    assert.match(err, /npm install -g hypaware/)
+    assert.match(err, /node_modules tree/)
+    assert.doesNotMatch(err, /inside a project's node_modules/)
+    assert.doesNotMatch(err, /once an npm ci or a branch switch removes it/)
+    assert.doesNotMatch(err, /npx cache/)
+  })
+}
 
 test('a HypAware clone is not a project-local install', async (t) => {
   // `node <clone>/bin/hypaware.js` is the normal development entrypoint and

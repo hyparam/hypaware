@@ -11,7 +11,7 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
-import { findInstalledHypawareBin, isEphemeralBinPath, isNpxBinPath } from '../../../../src/core/cli/global_install.js'
+import { describeEphemeralBinPath, findInstalledHypawareBin, isEphemeralBinPath } from '../../../../src/core/cli/global_install.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
 import { resolveClaudeCodeVersion } from './claude_version.js'
@@ -306,18 +306,21 @@ export async function activate(ctx) {
             // to compare the marker's mode, format and port and never the
             // recorded hook command, so the repair had to name a detach first;
             // the probe now reads a hook command this predicate calls ephemeral
-            // - the `_npx` cache or a project's `node_modules` alike - as marker
-            // drift (issue #1607), so the re-run reaches this adapter and
+            // - the `_npx` cache, and any `node_modules` tree with a manifest
+            // beside it, a pnpm or yarn global root included (issue #1625) - as
+            // marker drift (issue #1607), so the re-run reaches this adapter and
             // rewrites the command. Narrowing either side reopens #1607 for
             // whichever tree the two stop agreeing on.
             if (hookBin.ephemeral) {
-              // Named for the tree it is actually in: npm's prune runs on
-              // npm's schedule, an `npm ci` on the operator's, so an operator
-              // told the wrong one goes looking in the wrong place. The repair
-              // is the same either way.
-              const where = isNpxBinPath(hookBin.binPath, ctx.env)
-                ? "inside npm's npx cache; capture of cwd and git branch stops without warning once npm prunes it"
-                : "inside a project's node_modules; capture of cwd and git branch stops without warning once an npm ci or a branch switch removes it"
+              // Named for the tree it is actually in, as far as the verdict
+              // can tell: npm's prune runs on npm's schedule, an `npm ci` on
+              // the operator's, so an operator told the wrong one goes looking
+              // in the wrong place. The repair is the same either way.
+              const where = describeEphemeralBinPath(
+                hookBin.binPath,
+                'capture of cwd and git branch stops',
+                ctx.env,
+              )
               warnings.push(
                 `the managed hook records ${hookBin.binPath}, ${where}. ` +
                 "Run 'npm install -g hypaware', then 'hyp client attach claude', to " +

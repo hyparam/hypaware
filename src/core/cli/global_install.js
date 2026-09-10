@@ -139,7 +139,8 @@ export function isNpxBinPath(binPath, env = process.env) {
  * write a manifest beside (pnpm's `global/<n>` and yarn's `config/yarn/global`
  * are the two) reads as ephemeral. What that costs is the `$PATH` walk each
  * caller already runs: coming back empty it records what it was handed,
- * exactly as before, and pays one warning naming the wrong tree; finding
+ * exactly as before, and pays one warning, which for that reason names no
+ * tree it cannot prove ({@link describeEphemeralBinPath}, issue #1625); finding
  * something it records the first durable `hypaware` on `$PATH`, which is the
  * copy a bare `hyp` runs anyway. Neither answer is a path that is not there,
  * which is the only outcome this predicate exists to prevent.
@@ -168,6 +169,39 @@ export function isEphemeralBinPath(binPath, env = process.env) {
   } catch {
     return false
   }
+}
+
+/**
+ * The human half of an ephemeral-bin warning: which tree the recorded CLI is
+ * in and what removes it, with `effect` naming what the caller's own feature
+ * loses when it goes. One function because both callers
+ * (`@hypaware/claude`'s managed hook, `@hypaware/claude-desktop`'s credential
+ * wrapper) are wording one verdict, {@link isEphemeralBinPath}'s.
+ *
+ * The `_npx` arm names its tree, because that path shape means npm's cache and
+ * nothing else. The other arm cannot: pnpm and yarn write a manifest beside
+ * their GLOBAL root (`global/<n>`, `config/yarn/global`), so such a root reads
+ * ephemeral here, and it carries the same manifest, lockfile and
+ * `node_modules` a project does, with nothing on the tree to separate them
+ * (issue #1625). Naming a project there sends those users looking for a
+ * checkout they do not have and an `npm ci` that will never run, so the
+ * removal is stated as a condition, the commonest cause is offered as the
+ * example it is, and which tree it is stays with the path every caller prints
+ * beside this.
+ *
+ * @param {string} binPath the recorded CLI path, as the caller will print it
+ * @param {string} effect what stops working once that tree is gone, as a clause
+ *   carrying its own verb: it is spliced in front of "without warning once ...",
+ *   so "capture of cwd and git branch stops", not "cwd and git branch capture"
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string}
+ */
+export function describeEphemeralBinPath(binPath, effect, env = process.env) {
+  if (isNpxBinPath(binPath, env)) {
+    return `inside npm's npx cache; ${effect} without warning once npm prunes it`
+  }
+  return `inside a node_modules tree; ${effect} without warning once that tree is removed, `
+    + "as an npm ci or a branch switch removes a project's node_modules"
 }
 
 /**
