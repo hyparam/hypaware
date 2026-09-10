@@ -291,21 +291,40 @@ for (const rel of SKILLS) {
   })
 }
 
-test('the claude privacy skill fallback names the real default gateway endpoint', () => {
-  // LLP 0212 recorded `http://127.0.0.1:8787` as a shipped defect: it is not
-  // the port an unpinned gateway binds, and on a plain OTEL attach there is no
-  // ANTHROPIC_BASE_URL to mask it, so the fallback addressed a closed port.
-  // Pinned to the constant rather than the literal so the two cannot drift.
-  const text = skillText('claude/skills/hypaware-privacy/SKILL.md')
-  assert.ok(
-    text.includes(`ANTHROPIC_BASE_URL:-${DEFAULT_GATEWAY_ENDPOINT}`),
-    `the fallback default must be DEFAULT_GATEWAY_ENDPOINT (${DEFAULT_GATEWAY_ENDPOINT})`
-  )
-  // Naming the right port somewhere is weaker than not naming the wrong one:
-  // the stale literal reintroduced in any other arm of the chain would leave
-  // the assertion above satisfied and the fallback still pointing nowhere.
-  assert.doesNotMatch(text, /127\.0\.0\.1:8787/, 'and the stale 8787 default must be gone from the file')
-})
+/**
+ * The expansion each copy's fallback default sits in. The claude script defaults
+ * `ANTHROPIC_BASE_URL` directly; the codex one defaults `BASE`, after
+ * `OPENAI_BASE_URL` and the `config.toml` read have both missed. So the positive
+ * assertion is per-copy. The negative one is not, and that is the point: #1620
+ * corrected the literal in the claude copy and pinned it with a claude-only
+ * `doesNotMatch`, leaving the codex copy on the same stale default with nothing
+ * to catch it (issue #1631).
+ *
+ * @type {Record<string, string>}
+ */
+const FALLBACK_DEFAULT = {
+  'claude/skills/hypaware-privacy/SKILL.md': `ANTHROPIC_BASE_URL:-${DEFAULT_GATEWAY_ENDPOINT}`,
+  'codex/skills/hypaware-privacy/SKILL.md': `BASE:-${DEFAULT_GATEWAY_ENDPOINT}`,
+}
+
+for (const rel of SKILLS) {
+  test(`${rel} fallback names the real default gateway endpoint`, () => {
+    // LLP 0212 recorded `http://127.0.0.1:8787` as a shipped defect: it is not
+    // the port an unpinned gateway binds, and where nothing sets a base url
+    // there is nothing to mask it, so the fallback addressed a closed port.
+    // Pinned to the constant rather than the literal so the two cannot drift.
+    const text = skillText(rel)
+    const expansion = FALLBACK_DEFAULT[rel]
+    assert.ok(
+      text.includes(expansion),
+      `${rel} must default its base to DEFAULT_GATEWAY_ENDPOINT, as ${expansion}`
+    )
+    // Naming the right port somewhere is weaker than not naming the wrong one:
+    // the stale literal reintroduced in any other arm of the chain would leave
+    // the assertion above satisfied and the fallback still pointing nowhere.
+    assert.doesNotMatch(text, /127\.0\.0\.1:8787/, 'and the stale 8787 default must be gone from the file')
+  })
+}
 
 /**
  * The receipt tells the agent to stop unless the recorder that captures THIS

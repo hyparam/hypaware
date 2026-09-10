@@ -119,7 +119,7 @@ if [ -z "$BASE" ]; then
   BASE="$(grep -A6 '^\[model_providers.hypaware\]' "$CODEX_HOME/config.toml" 2>/dev/null \
     | grep -m1 'base_url' | sed -E 's/.*"([^"]+)".*/\1/' || true)"
 fi
-BASE="${BASE:-http://127.0.0.1:8787}"
+BASE="${BASE:-http://127.0.0.1:18521}"
 BASE="${BASE%/v1}"; BASE="${BASE%/backend-api/codex}"; BASE="${BASE%/}"
 URL="${BASE}/_hypaware/ignore/session"
 
