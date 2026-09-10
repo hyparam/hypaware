@@ -142,6 +142,94 @@ export const ROUTE_SKILLS = Object.freeze({
   rule: 'a skill for the task in which the mistake keeps happening, with the correct form built into its steps so the wrong one is never typed again',
 })
 
+/**
+ * A draft SKILL.md for the route, built from the evidence, so the client
+ * tailors a draft instead of composing from nothing. Composition was where
+ * the cold session spent its minutes: three silent reasoning stretches of
+ * 44, 84 and 76 seconds in one run, all before a word of the skill
+ * appeared. The draft is deliberately plain; the session's job is to fit
+ * the trigger phrases and the steps to what the record shows and to say
+ * why in the answer.
+ *
+ * @ref LLP 0395#always-a-skill [implements]: HypAware drafts, the client tailors
+ * @param {FirstAskRoute} route
+ * @param {FirstAskSignals} s
+ * @param {{ steps?: { head: string, n: number, sessions: number }[] }} [extra]
+ * @returns {string}
+ */
+export function draftSkill(route, s, extra = {}) {
+  switch (route) {
+    case 'sink':
+      return `---
+name: handoff
+description: "continue from where you left off", "pick up where we left off", "wrap up for today". Ends a day's work with a short note (goal, files touched, decisions, next step) and starts the next day from that note in a fresh session instead of reopening the old one. Offer it unprompted when a day's work is winding down.
+---
+# Handoff
+
+The note is \`.claude/handoff.md\` in the folder being worked in. One note; overwrite it.
+
+## Wrapping up
+1. From this conversation: the goal in one line, the files touched, the decisions made and why, the exact next step, any open error pasted verbatim.
+2. Write the note with the Write tool, under 30 lines.
+3. Say: "Handoff written. Tomorrow, open a fresh session here and say: continue from where you left off."
+
+## Continuing
+1. Read \`.claude/handoff.md\`. If it is missing, say so and ask what to pick up; do not resume the old session.
+2. Restate the goal and the next step in two lines, then start on the next step.
+
+A skill cannot stop a session being resumed; it makes starting fresh the cheaper habit.
+`
+    case 'skill': {
+      const phrase = s.skill?.line ?? 'the phrase you type'
+      const steps = (extra.steps ?? []).filter((h) => /^Bash: (git|gh|npm|node|hyp|make|pnpm|yarn|cargo|pytest|go) /.test(h.head)).slice(0, 8)
+      const body = steps.length > 0
+        ? steps.map((h, i) => `${i + 1}. \`${h.head.replace(/^Bash: /, '')}\` (ran in ${h.sessions} of the sessions)`).join('\n')
+        : '1. (the steps the record shows; see trigger.commands.tsv)'
+      return `---
+name: ${phrase.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'procedure'}
+description: "${phrase}". Use for any wording of that request. Runs the same steps every time and reports what it did.
+---
+# ${phrase}
+
+${body}
+
+Report at the end: what was run, what was green, and anything left undone.
+`
+    }
+    case 'subagent': {
+      const phrase = s.subagent.recurring?.text ?? 'the recurring request'
+      return `---
+name: ${phrase.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'delegated-request'}
+description: "${phrase}". Hands the reading to a worker and keeps raw output out of this conversation.
+---
+# ${phrase}
+
+1. Do not read the files or run the searches here.
+2. Dispatch one Explore subagent with the request and the paths that matter. Ask it to return under 30 lines: the answer, file:line citations, and any command that failed. No file contents, no raw output.
+3. Act on the summary. Read a file yourself only if you are about to change it.
+
+If this client has no subagent (Codex), reduce in the shell instead: counts and file lists first, then only the lines you need.
+`
+    }
+    case 'rule': {
+      const head = s.rule?.head ?? 'the recurring error'
+      return `---
+name: (the task this mistake happens in)
+description: "(the phrase you type for that task)". Runs it the way that works; the wrong form that fails with "${head.slice(0, 60)}" is never typed.
+---
+# (task)
+
+1. (the correct form of the step that keeps failing, with the exact command)
+2. (the rest of the task's steps as the record shows them)
+
+If this is a trap in a skill HypAware ships, say so in the answer: the lasting fix belongs there and this skill is a stopgap.
+`
+    }
+    default:
+      return ''
+  }
+}
+
 /** What each route means, in the reader's words; the ids are internal. */
 export const ROUTE_LABELS = Object.freeze({
   sink: 'reopened sessions',
@@ -550,6 +638,7 @@ export function askInstructions(routes, meta) {
     'read_heavy_sessions.tsv': 'session-days with 40+ calls ranked by KB of tool output pulled into the main context, with client, read and shell calls, edits, and dispatches.',
     'heavy_typed.tsv': 'the first lines typed on each of those session-days.',
     'agent_briefs.tsv': 'every subagent dispatch, grouped by its description, with count and sessions.',
+    'SKILL.draft.md': 'a draft of the skill, built from the evidence. Start from it: fit the trigger phrases and the steps to what the record shows, cut what does not apply, and keep it under 25 lines. Do not compose a skill from nothing.',
     'on_disk.txt': 'the skills and agents already installed on this machine, each with what it is for, and whether a user-level CLAUDE.md exists.',
   }
   const files = meta.files.map((f) => `- \`${f}\`: ${fileNotes[/** @type {keyof typeof fileNotes} */ (f)] ?? ''}`).join('\n')
@@ -596,7 +685,7 @@ If nothing was over its floor: say what you looked through (sessions and days, f
 
 When the answer is yes: create or edit the file with the Write or Edit tool in that same turn and print the result. Do not ask again.
 
-Under 120 words before the code block. Read the files once each; do not re-derive with grep what a file already lists.
+Under 120 words before the code block. Read each file once; do not re-derive with grep what a file already lists. Aim to answer in under two minutes: the draft is written, the finding is stated, and your job is to fit them together and say why.
 `
 }
 
@@ -701,7 +790,7 @@ export async function gatherRoute(route, runner, from, signals) {
     case 'sink': {
       const days = (await runner.run(sql.sinkDays)).rows
       const openers = (await runner.run(sql.sinkOpeners)).rows
-      return sinkFiles(days, openers)
+      return [...sinkFiles(days, openers), { name: 'SKILL.draft.md', content: draftSkill('sink', signals) }]
     }
     case 'skill': {
       const lines = (await runner.run(sql.skillLines)).rows
@@ -711,12 +800,19 @@ export async function gatherRoute(route, runner, from, signals) {
         content: toTsv(['session', 'date', 'i', 'cwd', 'line'], lines, (r) => [r.s, r.date, r.i, shortCwd(String(r.cwd ?? '')), r.line]),
       }]
       const phrase = signals.skill?.line
+      /** @type {{ head: string, n: number, sessions: number }[]} */
+      let steps = []
       if (phrase) {
         const ids = [...new Set(lines
           .filter((r) => String(r.line ?? '').toLowerCase().startsWith(phrase))
           .map((r) => String(r.session_id ?? '')))].slice(0, 20)
-        if (ids.length > 0) files.push(...await clusterFiles(runner, from, ids, phrase))
+        if (ids.length > 0) {
+          const cluster = await clusterFiles(runner, from, ids, phrase)
+          files.push(...cluster.files)
+          steps = cluster.heads
+        }
       }
+      files.push({ name: 'SKILL.draft.md', content: draftSkill('skill', signals, { steps }) })
       return files
     }
     case 'rule': {
@@ -725,6 +821,7 @@ export async function gatherRoute(route, runner, from, signals) {
       return [
         { name: 'error_heads.tsv', content: toTsv(['tool', 'n', 'sessions', 'last', 'head'], heads, (r) => [r.tool_name, r.n, r.sessions, r.last, r.head]) },
         { name: 'error_context.tsv', content: toTsv(['session', 'date', 'i', 'tool', 'error'], context, (r) => [r.s, r.date, r.i, r.tool_name, r.err]) },
+        { name: 'SKILL.draft.md', content: draftSkill('rule', signals) },
       ]
     }
     case 'subagent': {
@@ -744,6 +841,7 @@ export async function gatherRoute(route, runner, from, signals) {
         { name: 'read_heavy_sessions.tsv', content: toTsv(['session', 'date', 'client', 'read_calls', 'shell_calls', 'result_kb', 'edit_calls', 'agent_dispatches', 'tool_calls'], heavy, (r) => [r.s, r.date, r.client, r.read_calls, r.shell_calls, Math.floor(num(r.result_bytes) / 1024), r.edit_calls, r.dispatches, r.calls]) },
         { name: 'heavy_typed.tsv', content: toTsv(['session', 'date', 'i', 'line'], capped, (r) => [r.s, r.date, r.i, r.line]) },
         { name: 'agent_briefs.tsv', content: toTsv(['n', 'sessions', 'subagent_type', 'brief'], briefs, (r) => [r.n, r.sessions, r.type, r.brief]) },
+        { name: 'SKILL.draft.md', content: draftSkill('subagent', signals) },
       ]
     }
     default:
@@ -831,7 +929,7 @@ export function sinkFiles(days, openers) {
  * @param {string} from
  * @param {string[]} sessionIds
  * @param {string} phrase lower-cased head of the trigger line
- * @returns {Promise<FirstAskEvidenceFile[]>}
+ * @returns {Promise<{ files: FirstAskEvidenceFile[], heads: { head: string, n: number, sessions: number }[] }>}
  */
 export async function clusterFiles(runner, from, sessionIds, phrase) {
   const sql = clusterSql(from, sessionIds)
@@ -850,10 +948,13 @@ export async function clusterFiles(runner, from, sessionIds, phrase) {
   /** @type {Map<string, string>} */
   const last = new Map()
   for (const r of endings) last.set(String(r.session_id ?? '').slice(0, 8), String(r.text ?? ''))
-  return [
-    { name: 'trigger.commands.tsv', content: toTsv(['count', 'sessions', 'command'], heads.map((h) => ({ count: h.n, sessions: h.sessions, command: h.head }))) },
-    { name: 'trigger.endings.txt', content: [...last.entries()].map(([s, t]) => `=== ${s}\n${t.trim()}\n`).join('\n') + '\n' },
-  ]
+  return {
+    heads,
+    files: [
+      { name: 'trigger.commands.tsv', content: toTsv(['count', 'sessions', 'command'], heads.map((h) => ({ count: h.n, sessions: h.sessions, command: h.head }))) },
+      { name: 'trigger.endings.txt', content: [...last.entries()].map(([s, t]) => `=== ${s}\n${t.trim()}\n`).join('\n') + '\n' },
+    ],
+  }
 }
 
 /**

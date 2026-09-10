@@ -13,6 +13,7 @@ import {
   commandHeads,
   computeSignals,
   describeRoute,
+  draftSkill,
   firstPerDay,
   frontMatterDescription,
   onDiskListing,
@@ -155,6 +156,26 @@ test('renderTriage: the record line comes first and the applied rule names the r
   assert.equal(describeRoute('skill', s), 'something you keep typing.')
 })
 
+test('draftSkill: the draft for a repeated line carries its phrase and the recorded steps', () => {
+  // @ref LLP 0395#always-a-skill [tests]: HypAware drafts, the client tailors
+  const s = quietSignals()
+  s.skill = { line: 'commit on appropriate branch and make a pr', sessions: 11, days: 8, typed: 12, others: [] }
+  const d = draftSkill('skill', s, { steps: [
+    { head: 'Bash: grep -n', n: 43, sessions: 4 },
+    { head: 'Bash: git checkout -b', n: 11, sessions: 10 },
+    { head: 'Bash: gh pr create', n: 12, sessions: 9 },
+    { head: 'Read: types.d.ts', n: 3, sessions: 1 },
+  ] })
+  assert.ok(d.startsWith('---\nname: commit-on-appropriate-branch-and-make-a-pr\n'))
+  assert.ok(d.includes('description: "commit on appropriate branch and make a pr".'))
+  assert.ok(d.includes('1. `git checkout -b` (ran in 10 of the sessions)'))
+  assert.ok(d.includes('2. `gh pr create` (ran in 9 of the sessions)'))
+  assert.ok(!d.includes('grep -n'), 'reading commands are not steps of the procedure')
+  assert.ok(draftSkill('sink', s).includes('name: handoff'))
+  assert.ok(draftSkill('rule', s).includes('(the task this mistake happens in)'))
+  assert.equal(draftSkill(/** @type {any} */ ('other'), s), '')
+})
+
 test('toTsv: cells lose their newlines and tabs', () => {
   const tsv = toTsv(['a', 'b'], [{ a: 'x\ny', b: 'p\tq' }])
   assert.equal(tsv, 'a\tb\nx y\tp q\n')
@@ -282,7 +303,7 @@ test('prepareFirstAskEvidence: rewrites the one directory with only the chosen r
   assert.equal(evidence.dir, root)
   assert.equal((await fsp.stat(root)).mode & 0o777, 0o700, 'the folder quotes the person\'s typed lines, so it is user-only')
   const names = (await fsp.readdir(evidence.dir)).sort()
-  assert.deepEqual(names, ['ASK.md', 'agent_briefs.tsv', 'heavy_typed.tsv', 'on_disk.txt', 'read_heavy_sessions.tsv', 'triage.txt'])
+  assert.deepEqual(names, ['ASK.md', 'SKILL.draft.md', 'agent_briefs.tsv', 'heavy_typed.tsv', 'on_disk.txt', 'read_heavy_sessions.tsv', 'triage.txt'])
   assert.ok(!names.includes('session_days.tsv'), 'the sink route was not gathered and the stale file is gone')
   const typed = await fsp.readFile(path.join(evidence.dir, 'heavy_typed.tsv'), 'utf8')
   assert.match(typed, /a0000001\t2026-08-20\t0\tfind every place we parse dates/)
