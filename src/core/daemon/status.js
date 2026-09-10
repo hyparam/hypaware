@@ -28,7 +28,7 @@ import { detectShadowedPlugins } from '../runtime/boot.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
-import { isNpxBinPath } from '../cli/global_install.js'
+import { isEphemeralBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
@@ -3012,8 +3012,9 @@ function markerHasRetiredHookField(markerObj) {
 }
 
 /**
- * Whether the marker's managed hook commands run the CLI out of npm's `_npx`
- * cache.
+ * Whether the marker's managed hook commands run the CLI out of a tree its
+ * package manager deletes on a schedule of its own: npm's `_npx` cache, or a
+ * project's own `node_modules`.
  *
  * The same class of drift as the retired field above, one field over: the
  * marker records what today's attach would refuse to write. A hook command
@@ -3024,13 +3025,19 @@ function markerHasRetiredHookField(markerObj) {
  * and this marker is current in every other key (port, mode, schema token,
  * asset set), so the repair short-circuits and changes nothing (issue #1607).
  *
- * The predicate is `_npx` and nothing else. A recorded path that merely no
- * longer resolves is left alone: a CLI moves for ordinary reasons (a node
- * version switch, a prefix change) and "gone from disk" cannot tell that apart
- * from a pruned cache, whereas an `_npx` path is npm-owned and prune-scheduled
- * by construction, whether or not it is still there today.
+ * The predicate is `isEphemeralBinPath`, the same one the adapter decides
+ * with when it bakes the command. Anything narrower here reopens #1607 one
+ * tree over: the adapter warns that a project-local hook command will stop
+ * capturing and names a re-attach as the repair, and a marker current in every
+ * other key short-circuits that re-attach, so the operator does as they are
+ * told and nothing changes. A recorded path that merely no longer resolves is
+ * still left alone: a CLI moves for ordinary reasons (a node version switch, a
+ * prefix change) and "gone from disk" cannot tell that apart from a deleted
+ * tree, whereas both of these are package-manager-owned and
+ * deletion-scheduled by construction, whether or not they are still there
+ * today.
  *
- * With no CLI installed anywhere the re-attach writes the cache path again,
+ * With no CLI installed anywhere the re-attach writes the same path again,
  * because it is the only entrypoint there is, and takes the adapter's existing
  * ephemeral-hook warning branch - which is the point, since an already-attached
  * user is exactly who never saw that warning.
@@ -3044,16 +3051,28 @@ function markerRecordsEphemeralHookBin(markerObj, env) {
   if (!isPlainObject(managed)) return false
   const entries = managed.hook_entries
   if (!Array.isArray(entries)) return false
+  // One answer per distinct path, not per entry. Attach writes six managed
+  // entries (`MANAGED_HOOK_SPECS` in the adapter) and every one of them names
+  // the same bin, so asking per entry is five repeats of a walk plus a
+  // `statSync` - work `isNpxBinPath` never did, on a function `hyp status` and
+  // the login attach-wait's one-second poll both call.
+  /** @type {Set<string> | undefined} */
+  let asked
   for (const entry of entries) {
     if (!isPlainObject(entry)) continue
     const bin = hookCommandBin(entry.command)
-    // Absolute, or no claim. `isNpxBinPath` resolves whatever it is handed, so
-    // a relative token - a hand-edited `node hypaware.js ...`, an empty quoted
-    // command - would be judged against the directory `hyp` happened to run
-    // in, and one marker would read stale from inside a cache and current from
-    // anywhere else. Every command attach writes is absolute, so the guard
-    // costs nothing and makes the verdict a property of the marker alone.
-    if (bin !== undefined && path.isAbsolute(bin) && isNpxBinPath(bin, env)) return true
+    // Absolute, or no claim. `isEphemeralBinPath` resolves whatever it is
+    // handed, so a relative token - a hand-edited `node hypaware.js ...`, an
+    // empty quoted command - would be judged against the directory `hyp`
+    // happened to run in, and one marker would read stale from inside a
+    // project and current from anywhere else. Every command attach writes is
+    // absolute, so the guard costs nothing and makes the verdict a property of
+    // the marker alone.
+    if (bin === undefined || !path.isAbsolute(bin)) continue
+    asked ??= new Set()
+    if (asked.has(bin)) continue
+    asked.add(bin)
+    if (isEphemeralBinPath(bin, env)) return true
   }
   return false
 }

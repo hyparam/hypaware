@@ -227,6 +227,16 @@ function npxRig(opts = {}) {
   writeExecutable(npxCliPath)
   writeExecutable(path.join(npxRoot, 'node_modules', '.bin', 'hypaware'))
 
+  // A checkout that carries `hypaware` as a dependency: the same hazard with
+  // no `_npx` tell, and the manifest beside the tree is what makes it one. Its
+  // `.bin` is on `$PATH` because that is where `npm run` puts it.
+  const projectDir = path.join(root, 'repo')
+  fs.mkdirSync(projectDir, { recursive: true })
+  fs.writeFileSync(path.join(projectDir, 'package.json'), '{"name":"app"}\n')
+  const projectCliPath = path.join(projectDir, 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+  writeExecutable(projectCliPath)
+  writeExecutable(path.join(projectDir, 'node_modules', '.bin', 'hypaware'))
+
   const globalBinDir = path.join(root, 'npm-global', 'bin')
   const globalBin = path.join(globalBinDir, 'hypaware')
   if (opts.installedBin === false) fs.mkdirSync(globalBinDir, { recursive: true })
@@ -246,6 +256,7 @@ function npxRig(opts = {}) {
   return {
     stateDir: root,
     npxCliPath,
+    projectCliPath,
     globalBin,
     shimBin,
     cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
@@ -254,6 +265,7 @@ function npxRig(opts = {}) {
       npm_config_cache: path.join(root, '.npm'),
       PATH: [
         path.join(npxRoot, 'node_modules', '.bin'),
+        path.join(projectDir, 'node_modules', '.bin'),
         ...(opts.shimAhead ? [shimDir] : []),
         globalBinDir,
       ].join(path.delimiter),
@@ -364,6 +376,55 @@ test('the runnability test tracks what node loads, not this package\'s bin name'
 
   assert.equal(code, 0)
   assert.ok(body.includes(rig.globalBin), `an .mjs entry was declined: ${body}`)
+  assert.equal(err, '')
+})
+
+// Issue #1619. `npm ci`, a branch switch, or a plain `rm -rf node_modules`
+// deletes a project-local install exactly as npm's prune deletes the `_npx`
+// cache, and Desktop then fails its credential helper inside the app with
+// nothing on this machine reporting it. The walk already refuses these
+// directories on the `$PATH` side; before this the entrypoint check did not,
+// so the path was baked into the wrapper flagged durable and nothing warned.
+test('the wrapper records the installed CLI, not a project-local node_modules path', async (t) => {
+  const rig = npxRig({ installedBin: true })
+
+  const { code, err, body } = await runInstallHelperWithEntry(t, rig, rig.projectCliPath)
+
+  assert.equal(code, 0)
+  assert.ok(body.includes(rig.globalBin), `wrapper does not run the installed CLI: ${body}`)
+  assert.ok(!body.includes(rig.projectCliPath), `wrapper was pinned to the project tree: ${body}`)
+  assert.equal(err, '', 'a durable path is not worth warning about')
+})
+
+test('with no CLI installed the project-local wrapper says what will break it', async (t) => {
+  const rig = npxRig({ installedBin: false })
+
+  const { code, err, body } = await runInstallHelperWithEntry(t, rig, rig.projectCliPath)
+
+  assert.equal(code, 0)
+  assert.ok(body.includes(fs.realpathSync(rig.projectCliPath)))
+  // Named for the tree it is actually in: the two are deleted by different
+  // acts, so telling an operator their wrapper is in an npx cache when it is
+  // in their own checkout sends them looking in the wrong place.
+  assert.match(err, /node_modules/)
+  assert.doesNotMatch(err, /npx cache/)
+  assert.match(err, /npm install -g hypaware/)
+})
+
+test('a HypAware clone is not a project-local install', async (t) => {
+  // `node <clone>/bin/hypaware.js` is the normal development entrypoint and
+  // carries a `package.json` of its own. It is not under a `node_modules`, so
+  // a developer never gets the warning and their wrapper is never repointed.
+  const rig = npxRig({ installedBin: true })
+  const clone = path.join(rig.stateDir, 'src', 'hypaware', 'bin', 'hypaware.js')
+  writeExecutable(clone)
+  fs.writeFileSync(path.join(rig.stateDir, 'src', 'hypaware', 'package.json'), '{}\n')
+
+  const { code, err, body } = await runInstallHelperWithEntry(t, rig, clone)
+
+  assert.equal(code, 0)
+  assert.ok(body.includes(fs.realpathSync(clone)), `wrapper was repointed: ${body}`)
+  assert.ok(!body.includes(rig.globalBin), `wrapper was repointed at ${rig.globalBin}`)
   assert.equal(err, '')
 })
 

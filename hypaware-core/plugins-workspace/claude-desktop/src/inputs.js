@@ -15,7 +15,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 
-import { findInstalledHypawareBin, isNpxBinPath } from '../../../../src/core/cli/global_install.js'
+import { findInstalledHypawareBin, isEphemeralBinPath } from '../../../../src/core/cli/global_install.js'
 
 import { DEFAULT_BUNDLE_ID, DEFAULT_MODELS, resolveGatewayBaseUrl } from './profile.js'
 
@@ -30,26 +30,36 @@ const NODE_MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
  * Desktop runs the wrapper outside any shell profile, so a bare `hyp`
  * on PATH is not a given; resolve the running CLI's entry script.
  *
- * Under `npx hypaware` that entry script lives in npm's `_npx` cache, which
- * npm prunes on its own schedule, so writing it into the wrapper records a
- * path that outlives what owns it. Desktop runs the wrapper with the app's
+ * Under `npx hypaware` that entry script lives in npm's `_npx` cache, and in a
+ * project that depends on `hypaware` it lives in that project's
+ * `node_modules`; `isEphemeralBinPath` reads both as what they are, a copy npm
+ * deletes on a schedule of its own, so writing either into the wrapper records
+ * a path that outlives what owns it. Desktop runs the wrapper with the app's
  * minimal environment and reads its stdout, so a vanished interpreter target
  * surfaces as a credential-helper failure inside the app, with nothing on this
  * machine reporting it. An installed CLI is durable, and resolving it here
  * still yields a concrete absolute path: the `$PATH` walk is spent once, when
  * the wrapper is generated, which is the point.
  *
- * With nothing installed the npx path is still written, flagged `ephemeral`
- * rather than refused: a wrapper that works until npm prunes the cache beats
- * no wrapper at all, and `install-helper` then says so instead of writing the
- * rot silently.
+ * A durable copy found this way may be a different version than the one that
+ * ran this command, which for a project-local entry script it usually is. What
+ * the wrapper needs of the path it bakes is that it still exists and still
+ * runs when Desktop next asks for a credential, and the command it runs is a
+ * credential fetch rather than any version-pinned surface; an operator who
+ * does mean a particular copy says so with `HYPAWARE_BIN`.
+ *
+ * With nothing installed the ephemeral path is still written, flagged
+ * `ephemeral` rather than refused: a wrapper that works until npm removes that
+ * tree beats no wrapper at all, and `install-helper` then says so instead of
+ * writing the rot silently.
  *
  * An explicit `HYPAWARE_BIN`/`HYP_BIN` is taken as given: it names a path the
  * operator chose, and second-guessing it would defeat the override.
  *
  * `entry` defaults to the running CLI's own entry script and is a parameter
- * only so a test can present an `_npx` entrypoint: nothing short of a real
- * `npx` run puts this package inside that cache.
+ * only so a test can present an ephemeral entrypoint: nothing short of a real
+ * `npx` run or a real project install puts this package inside one of those
+ * trees.
  *
  * @param {NodeJS.ProcessEnv} [env]
  * @param {string} [entry]
@@ -65,7 +75,7 @@ export function resolveHypBin(env = process.env, entry = process.argv[1]) {
   if (explicit !== undefined) return { binPath: path.resolve(explicit.trim()), ephemeral: false }
 
   const running = resolveEntryPath(entry)
-  if (!isNpxBinPath(running, env)) return { binPath: running, ephemeral: false }
+  if (!isEphemeralBinPath(running, env)) return { binPath: running, ephemeral: false }
   // Recorded as `$PATH` spells it, never as `realpathSync` resolves it: what a
   // global install puts on `$PATH` is usually a symlink into the package tree,
   // and the durable name is that link, not the versioned directory it

@@ -11,6 +11,7 @@ import {
   ensureDurableBinForNpx,
   findInstalledHypawareBin,
   globalHypawareBin,
+  isEphemeralBinPath,
   isNpxBinPath,
 } from '../../src/core/cli/global_install.js'
 
@@ -26,6 +27,88 @@ test('isNpxBinPath detects npm _npx cache entries', () => {
       npm_config_cache: '/Users/hyp/.npm',
     }),
     false
+  )
+})
+
+// The entrypoint side of the same question the walk answers for `$PATH`. Every
+// case here is a real install layout, because the whole difficulty is that a
+// global `npm install -g` and a project-local `npm install` both put the
+// package under a `node_modules`, and only one of them survives an `npm ci`.
+test('isEphemeralBinPath separates a project tree from every durable install', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ephemeral-bin-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+
+  /** @param {string} file */
+  const write = async (file) => {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, '{}\n')
+  }
+
+  // `npm install hypaware` inside a checkout: the manifest beside the tree is
+  // what says a project owns it, and `npm ci` in that project deletes it.
+  const project = path.join(root, 'repo')
+  await write(path.join(project, 'package.json'))
+  const projectBin = path.join(project, 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+  assert.equal(isEphemeralBinPath(projectBin, {}), true)
+
+  // `npm install -g hypaware`: the same `node_modules` segment, no project.
+  // Reading this one as ephemeral would warn on the very install the warning
+  // tells people to perform.
+  const prefix = path.join(root, 'npm-global')
+  await write(path.join(prefix, 'lib', 'node_modules', 'hypaware', 'package.json'))
+  const globalBin = path.join(prefix, 'lib', 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+  assert.equal(isEphemeralBinPath(globalBin, {}), false)
+
+  // The Windows global layout, where the package sits directly under the
+  // prefix. Structurally identical to a project tree apart from the manifest.
+  const winPrefix = path.join(root, 'AppData', 'Roaming', 'npm')
+  await write(path.join(winPrefix, 'node_modules', 'hypaware', 'package.json'))
+  assert.equal(
+    isEphemeralBinPath(path.join(winPrefix, 'node_modules', 'hypaware', 'bin', 'hypaware.js'), {}),
+    false
+  )
+
+  // A dependency nested under a global root. Every package carries a manifest,
+  // so only the OUTERMOST `node_modules` can decide: reading the nearest one
+  // would call this ephemeral because `somepkg/package.json` exists.
+  const nested = path.join(
+    prefix, 'lib', 'node_modules', 'somepkg', 'node_modules', 'hypaware', 'bin', 'hypaware.js'
+  )
+  await write(path.join(prefix, 'lib', 'node_modules', 'somepkg', 'package.json'))
+  assert.equal(isEphemeralBinPath(nested, {}), false)
+
+  // A HypAware developer running their own clone. Not under any
+  // `node_modules`, so the rule never reaches them and no warning ever fires
+  // on a machine whose entrypoint is exactly the one they meant to run.
+  const clone = path.join(root, 'src', 'hypaware')
+  await write(path.join(clone, 'package.json'))
+  assert.equal(isEphemeralBinPath(path.join(clone, 'bin', 'hypaware.js'), {}), false)
+
+  // Whole segments only, the same rigour as the `_npx` test: a directory whose
+  // name merely starts with `node_modules` is a directory.
+  const lookalike = path.join(root, 'keep')
+  await write(path.join(lookalike, 'package.json'))
+  assert.equal(
+    isEphemeralBinPath(path.join(lookalike, 'node_modules_old', 'hypaware', 'bin', 'hypaware.js'), {}),
+    false
+  )
+
+  // A project tree whose manifest cannot be read at all is left durable: the
+  // fail direction is the behaviour that shipped, never a warning invented on
+  // a machine with nothing wrong with it.
+  const manifestless = path.join(root, 'unmanifested')
+  await fs.mkdir(manifestless, { recursive: true })
+  assert.equal(
+    isEphemeralBinPath(path.join(manifestless, 'node_modules', 'hypaware', 'bin', 'hypaware.js'), {}),
+    false
+  )
+
+  // The npx cache still answers on its own tell, before any manifest is read.
+  assert.equal(
+    isEphemeralBinPath('/Users/hyp/.npm/_npx/abc/node_modules/hypaware/bin/hypaware.js', {
+      npm_config_cache: '/Users/hyp/.npm',
+    }),
+    true
   )
 })
 

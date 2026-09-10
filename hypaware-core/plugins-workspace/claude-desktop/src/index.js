@@ -3,6 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { isNpxBinPath } from '../../../../src/core/cli/global_install.js'
 import { Attr, getLogger } from '../../../../src/core/observability/index.js'
 
 import { CLAUDE_DESKTOP_CONFIG_SECTION, validateClaudeDesktopConfig } from './config.js'
@@ -287,10 +288,15 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
     // profile with no HypAware surface in the loop, so an npm prune of the
     // cache otherwise shows up only as the app losing its credentials.
     if (hypBin.ephemeral) {
+      // Named for the tree it is actually in: npm's prune runs on npm's
+      // schedule, an `npm ci` on the operator's, so an operator told the wrong
+      // one goes looking in the wrong place. The repair is the same either way.
+      const where = isNpxBinPath(hypBin.binPath, cmdCtx.env)
+        ? "inside npm's npx cache; Claude Desktop's credential helper fails without warning once npm prunes it"
+        : "inside a project's node_modules; Claude Desktop's credential helper fails without warning once an npm ci or a branch switch removes it"
       cmdCtx.stderr.write(
         `claude-desktop install-helper: warning: the wrapper runs ${hypBin.binPath}, `
-        + "inside npm's npx cache; Claude Desktop's credential helper fails without "
-        + "warning once npm prunes it. Run 'npm install -g hypaware', then "
+        + `${where}. Run 'npm install -g hypaware', then `
         + "'hyp client claude-desktop install-helper', to record a durable path\n",
       )
       // The stderr line is read once, by whoever is at the terminal now; the

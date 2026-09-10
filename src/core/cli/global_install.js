@@ -99,6 +99,78 @@ export function isNpxBinPath(binPath, env = process.env) {
 }
 
 /**
+ * Whether an entrypoint a command is about to write down names a copy of the
+ * CLI that will not outlive the writing.
+ *
+ * The entrypoint-side counterpart to the `$PATH` rule inside
+ * {@link findInstalledHypawareBin}, and deliberately not the same test. The
+ * walk judges a `$PATH` *directory*, where a `node_modules` segment is always
+ * some project's `.bin` and can be refused outright. This judges a *script
+ * inside a package tree*, and every npm-installed package lives under a
+ * `node_modules` - npm's own global root (`<prefix>/lib/node_modules/<pkg>`,
+ * or `<prefix>/node_modules/<pkg>` on Windows) included. Refusing every
+ * `node_modules` here would report a plain `npm install -g` as ephemeral,
+ * which is the one install this whole lane exists to steer people onto and the
+ * install its warning names as the repair.
+ *
+ * What separates them is whose tree it is. A project's `node_modules` sits
+ * beside that project's `package.json`, and `npm ci`, a branch switch, or a
+ * plain `rm -rf` deletes it just as npm's prune deletes the `_npx` cache; the
+ * global root has no manifest beside it, because it is npm's own directory and
+ * not any project's dependency tree. So the test is the outermost
+ * `node_modules` on the path and one `statSync` beside it. Outermost, because
+ * every nested dependency (`<root>/node_modules/a/node_modules/b`) has a
+ * manifest one level up whatever root it sits under: the enclosing project
+ * decides, not the package.
+ *
+ * A manifest that cannot be read answers "durable", so the fail direction is a
+ * missed ephemeral path - today's behaviour - and never a warning on a machine
+ * with nothing wrong with it. For the entrypoint callers that is the whole
+ * story, since nothing can be running out of a tree that is not there. It is
+ * weaker for `markerRecordsEphemeralHookBin`, which asks about a path recorded
+ * some time ago: delete the whole project and the manifest goes with it, so the
+ * recorded command reads durable again and the re-attach that would rewrite it
+ * fast-paths at "already attached". `_npx` keeps answering off the path shape
+ * alone and survives its own prune; this one does not survive an `rm -rf` of
+ * the project root. Closing that would mean calling a recorded path stale for
+ * merely not resolving, which is the case that function deliberately leaves
+ * alone (a CLI moves for ordinary reasons), so it is a known edge and not an
+ * oversight. A global root some other package manager does
+ * write a manifest beside (pnpm's `global/<n>` and yarn's `config/yarn/global`
+ * are the two) reads as ephemeral. What that costs is the `$PATH` walk each
+ * caller already runs: coming back empty it records what it was handed,
+ * exactly as before, and pays one warning naming the wrong tree; finding
+ * something it records the first durable `hypaware` on `$PATH`, which is the
+ * copy a bare `hyp` runs anyway. Neither answer is a path that is not there,
+ * which is the only outcome this predicate exists to prevent.
+ *
+ * @param {string} binPath
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {boolean}
+ */
+export function isEphemeralBinPath(binPath, env = process.env) {
+  if (isNpxBinPath(binPath, env)) return true
+  let dir = path.resolve(binPath)
+  /** @type {string | undefined} */
+  let projectRoot
+  for (;;) {
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    // Whole segment, the same rigour as the `_npx` test above: a directory
+    // named `node_modules_old` is a directory, not a dependency tree. Climbing
+    // upwards, the last match found is the outermost one.
+    if (path.basename(dir) === 'node_modules') projectRoot = parent
+    dir = parent
+  }
+  if (projectRoot === undefined) return false
+  try {
+    return statSync(path.join(projectRoot, 'package.json')).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
  * The absolute path of an already-installed HypAware CLI, or `undefined`.
  *
  * The read-only counterpart to `ensureDurableBinForNpx`, for a caller that must
@@ -162,6 +234,10 @@ export function findInstalledHypawareBin(env = process.env, platform = process.p
     // project-local install is the same hazard without the tell, and the next
     // `npm ci` removes it just as npm's prune removes the cache. Recording
     // either writes down a path that outlives nothing.
+    //
+    // Blunter than `isEphemeralBinPath`, on purpose: nothing durable is ever
+    // reached *through* a `node_modules` directory on `$PATH`, while a global
+    // install's own script lives under one by construction.
     if (isNpxBinPath(dir, env) || dir.split(path.sep).includes('node_modules')) continue
     for (const ext of exts) {
       const candidate = path.resolve(dir, 'hypaware' + ext)

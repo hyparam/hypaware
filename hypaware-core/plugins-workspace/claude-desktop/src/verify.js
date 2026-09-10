@@ -36,11 +36,17 @@ const HELPER_READ_LIMIT_BYTES = 4096
  * The two baked paths rot on different schedules, so they get different
  * predicates. `hypBin` inside npm's `_npx` cache is stale whether or not it is
  * still on disk today, because the cache is npm-owned and prune-scheduled by
- * construction: the same predicate and the same reasoning as core's
- * `markerRecordsEphemeralHookBin` for the sibling Claude hook (#1607). Either
- * path simply gone is stale on its own, which is the `nodeBin` case, since it
- * is `process.execPath` frozen at generation time and any routine node version
- * switch moves it.
+ * construction: the same reasoning as core's `markerRecordsEphemeralHookBin`
+ * for the sibling Claude hook (#1607). No longer the same predicate, though,
+ * and deliberately so: core widened to `isEphemeralBinPath` because a stale
+ * verdict there is what lets `hyp client attach claude` stop short-circuiting
+ * and rewrite the hook, and nothing else can reach that command. Here the
+ * repair is `install-helper`, which regenerates the wrapper unconditionally
+ * whatever this says, so the narrower test costs only an under-report: a
+ * project-local `hypBin` reads healthy until the tree is actually deleted,
+ * which the `missingBin` check below then catches. Either path simply gone is
+ * stale on its own, which is the `nodeBin` case, since it is `process.execPath`
+ * frozen at generation time and any routine node version switch moves it.
  *
  * `stale: false` is not a claim of health for a wrapper this plugin did not
  * write: an unreadable or unrecognised file is left alone, so the check never

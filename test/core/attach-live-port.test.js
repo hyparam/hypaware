@@ -377,6 +377,15 @@ test('a durable absolute hook command is not drift, so attach still fast-paths',
     // The guard on the fix: a machine attached from an installed CLI must keep
     // its no-op exit. Re-writing every settings.json on every `hyp client
     // attach claude` would be the regression.
+    //
+    // The global root is built here rather than named as `/usr/local/lib`,
+    // because the verdict now turns on whether a manifest sits beside the
+    // outermost `node_modules`: pointing at a real directory on the host
+    // would make this pass or fail on what that host has installed.
+    const globalRoot = path.join(home, 'usr', 'local', 'lib', 'node_modules', 'hypaware')
+    mkdirSync(path.join(globalRoot, 'bin'), { recursive: true })
+    writeFileSync(path.join(globalRoot, 'package.json'), '{}\n')
+    const durableBin = path.join(globalRoot, 'bin', 'hypaware.js')
     mkdirSync(path.join(home, '.claude'), { recursive: true })
     writeFileSync(
       path.join(home, '.claude', 'settings.json'),
@@ -391,9 +400,9 @@ test('a durable absolute hook command is not drift, so attach still fast-paths',
             hook_entries: [
               {
                 event: 'SessionStart',
-                command: '/usr/local/lib/node_modules/hypaware/bin/hypaware.js claude-hook session-context --state-file /s',
+                command: `${durableBin} claude-hook session-context --state-file /s`,
               },
-              { event: 'SessionStart', command: '/usr/local/lib/node_modules/hypaware/bin/hypaware.js claude-hook classify-cwd' },
+              { event: 'SessionStart', command: `${durableBin} claude-hook classify-cwd` },
             ],
           },
         },
@@ -409,6 +418,46 @@ test('a durable absolute hook command is not drift, so attach still fast-paths',
     assert.equal(code, 0)
     assert.deepEqual(attachCalls, [], 'a durable hook command is not drift')
     assert.match(stdout.text(), /already attached/)
+  })
+})
+
+test('a project-local hook command is drift, so the warning names a repair that works', async () => {
+  await withTempHome(async (home) => {
+    // The adapter warns that a hook command inside a project's `node_modules`
+    // stops capturing on the next `npm ci`, and names `npm install -g
+    // hypaware` plus a re-attach as the repair. That repair only reaches the
+    // adapter if this probe calls the marker stale; reading `_npx` alone would
+    // fast-path the re-attach and leave the rotting command exactly where it
+    // is, which is issue #1607 one tree over.
+    const projectBin = path.join(home, 'repo', 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+    mkdirSync(path.dirname(projectBin), { recursive: true })
+    writeFileSync(path.join(home, 'repo', 'package.json'), '{}\n')
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        _hypaware: {
+          version: '2.0.0',
+          port: 55555,
+          mode: 'otel',
+          settings_schema: 4,
+          managed: {
+            env: {},
+            hook_entries: [{ event: 'SessionStart', command: `${projectBin} claude-hook classify-cwd` }],
+          },
+        },
+      })
+    )
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx, stdout, stderr } = makeCtx({ home, attachCalls })
+
+    const code = await runAttach(['claude'], ctx)
+
+    assert.equal(code, 0, stderr.text())
+    assert.equal(attachCalls.length, 1, 'a project-local hook command must re-attach, not no-op')
+    assert.doesNotMatch(stdout.text(), /already attached/)
   })
 })
 
