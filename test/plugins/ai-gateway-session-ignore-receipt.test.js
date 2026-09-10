@@ -9,6 +9,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
+import { DEFAULT_GATEWAY_ENDPOINT } from '../../src/core/config/gateway_endpoint.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
 import { USAGE_POLICY_DROP } from '../../src/core/usage-policy/index.js'
 import { runSessionIgnore, runSessionStatus, runSessionUnignore } from '../../hypaware-core/plugins-workspace/ai-gateway/src/session_command.js'
@@ -199,6 +200,69 @@ for (const rel of SKILLS) {
     assert.match(text, /drop set, and nothing more/, 'state the narrow contract plainly')
   })
 }
+
+/* ------------------------------------------------------------------ */
+/* 3. Both privacy skills lead with the CLI verb, not the shell POST   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A privacy review's Step 1 opts the review session out before it discusses the
+ * machine's most sensitive content, so which surface it reaches for decides
+ * whether the opt-out reaches every recorder. `hyp session ignore` addresses
+ * each one advertising the control route (LLP 0256 #cli-posts-to-both); a shell
+ * `curl` reaches one, and since LLP 0262 the recorder capturing a Claude
+ * session is usually the OTHER one, the `@hypaware/claude` telemetry listener.
+ *
+ * Nothing downstream can catch that: the control route holds the id as an
+ * opaque token and answers `ignored: true` for whatever it was handed, so a
+ * recorder that was never asked is indistinguishable from a confirmed opt-out.
+ * The choice is a property of the markdown, which is why it is pinned here.
+ *
+ * @ref LLP 0212#cli-is-the-verb [tests]: the CLI verb is the opt-out; a shell
+ * POST may only appear below it, as the documented fallback.
+ */
+for (const rel of SKILLS) {
+  test(`${rel} reaches for the CLI verb before any shell POST`, () => {
+    const text = skillText(rel)
+    const start = text.indexOf('## Step 1')
+    const end = text.indexOf('## Step 2')
+    assert.ok(start >= 0 && end > start, 'Step 1 must still be a section of its own')
+    const step1 = text.slice(start, end)
+
+    const verbAt = step1.indexOf('hyp session ignore')
+    const postAt = step1.indexOf('/_hypaware/ignore/session')
+    assert.ok(verbAt >= 0, '`hyp session ignore` must be named in Step 1')
+    assert.ok(
+      postAt < 0 || verbAt < postAt,
+      'the CLI verb must come before the shell POST, which is the fallback and not the path'
+    )
+
+    // Framed as the preference, not offered as one of two equals: a model given
+    // two interchangeable recipes will pick either.
+    assert.match(
+      step1,
+      /Prefer `hyp session ignore --json`/,
+      'Step 1 must state the preference in words, not just mention the verb'
+    )
+    assert.match(
+      step1,
+      /Only where it is unavailable, or cannot resolve the session, does the script below apply/,
+      'the shell block must be scoped to where the verb cannot serve'
+    )
+  })
+}
+
+test('the claude privacy skill fallback names the real default gateway endpoint', () => {
+  // LLP 0212 recorded `http://127.0.0.1:8787` as a shipped defect: it is not
+  // the port an unpinned gateway binds, and on a plain OTEL attach there is no
+  // ANTHROPIC_BASE_URL to mask it, so the fallback addressed a closed port.
+  // Pinned to the constant rather than the literal so the two cannot drift.
+  const text = skillText('claude/skills/hypaware-privacy/SKILL.md')
+  assert.ok(
+    text.includes(`ANTHROPIC_BASE_URL:-${DEFAULT_GATEWAY_ENDPOINT}`),
+    `the fallback default must be DEFAULT_GATEWAY_ENDPOINT (${DEFAULT_GATEWAY_ENDPOINT})`
+  )
+})
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
