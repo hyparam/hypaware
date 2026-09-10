@@ -274,7 +274,10 @@ test('the drop is live set membership, not a durable tombstone', async () => {
     const runner = stageRunner(env, provider)
     try {
       await listener.control('POST', 'sess-private')
-      await runner.tick()
+      // Asserted before the emptiness check: a tick that failed for an
+      // unrelated reason also appends nothing, so without this the drop
+      // would be credited for a run that never scanned.
+      assert.equal((await runner.tick()).ok, true)
       assert.deepEqual(runner.appended, [])
 
       const receipt = await listener.control('DELETE', 'sess-private')

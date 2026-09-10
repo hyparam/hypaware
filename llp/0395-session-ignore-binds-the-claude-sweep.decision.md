@@ -110,8 +110,22 @@ deliberate re-import remains the user's call.
   as seen for the daemon's lifetime (LLP 0359 #file-fingerprints), so a later
   `hyp session unignore` does not resurrect an idle session on the next tick.
   It is recovered by the deliberate re-import above, or by the session
-  continuing (a changed transcript is read again). The direction of the
-  surprise is withheld data, not recorded data.
+  continuing (a changed transcript is read again). Within one daemon lifetime
+  the direction of the surprise is therefore withheld data, not recorded data.
+- **Withholding is not a tombstone, so whatever ends the hold imports what was
+  held back**, rather than only resuming from that point. Nothing records which
+  turns were withheld, the transcript on disk is unchanged by any of this, and
+  the sweep projects a session's whole window rather than a delta. Two things
+  therefore import the withheld turns retroactively: a daemon restart, which
+  starts both an empty set and an empty fingerprint map so every file is a
+  candidate again, and an `hyp session unignore` followed by more work in the
+  same session, which changes the transcript and lets the next tick read all of
+  it. This is LLP 0066 §ephemeral read forward rather than a defect of this
+  decision: the set is the whole of the mechanism, so it can only withhold
+  while it holds. It is called out because the drop now looks durable while it
+  holds, which is exactly when a user stops expecting it to lapse.
+  `docs/PRIVACY.md` says this in the user's words and points, as it already
+  did, at marking the directory for the answer that survives a restart.
 - Per tick the sweep pays one `Set.has` per grouped session, over a set that is
   empty on almost every machine. No allocation is added to the scan, and an
   ignored session's projection, git probe, and yield are skipped outright, so

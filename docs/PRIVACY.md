@@ -212,8 +212,18 @@ daemon holds the id, that scheduled import skips the session too, so the
 opt-out is not undone five minutes later. A re-import you ask for yourself
 (`hyp backfill claude`) runs in its own process and does not see the drop set,
 so it imports the session from the transcript: that is the deliberate
-re-import the in-memory design leaves to you. To keep a directory's sessions
-out for good, mark the directory instead.
+re-import the in-memory design leaves to you.
+
+The skip lasts exactly as long as the daemon holds the id, and it withholds
+rather than deletes. Your transcript stays on disk, and nothing records which
+turns were skipped, so whatever ends the hold imports those turns too instead
+of only recording from that moment on. Two things end it: a daemon restart,
+after which the next scheduled read takes the conversation you hid, and
+`hyp session unignore` followed by more work in the same session, which
+changes the transcript and lets the next read take all of it. If what you want
+is for those turns never to be recorded, mark the directory instead: that
+survives a restart. If they have already been recorded, delete them with
+`hyp privacy purge --session <id>` below.
 
 ## Deleting what was already recorded
 
