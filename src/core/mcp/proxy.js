@@ -35,8 +35,11 @@ export async function runMcpProxy({ target, org, ctx }) {
   // Built-in targets layered under the user's own `query.remotes`, exactly as
   // the verb attach path resolves them, so `--remote hyperparam` reaches the
   // shipped central server here too rather than reporting an unknown target.
+  // Own-key read, as on the verb attach path: an inherited Object.prototype
+  // member is truthy, so a target named `constructor` walked past this refusal
+  // and the probe below reported a TypeError message instead of the signpost.
   const remotes = effectiveRemotes(ctx.config)
-  const entry = remotes[target]
+  const entry = Object.hasOwn(remotes, target) ? remotes[target] : undefined
   if (!entry) {
     ctx.stderr.write(`hyp mcp serve: unknown remote target '${target}' - add it with 'hyp remote add ${target} <url>'\n`)
     return 2
