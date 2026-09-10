@@ -161,12 +161,13 @@ const SKILLS = [
  * The sentence each copy must carry to scope its shell fallback, pinned per copy
  * because the two fallbacks can serve different failures (issue #1628).
  *
- * The claude script reads the same `CLAUDE_CODE_SESSION_ID` the verb resolves
- * from, so it can serve no resolution failure at all: with the variable unset it
- * exits 1 before any POST, and the one refusal that happens with it set (a
- * second client also stating an id) Step 1 routes to a stated-id re-run rather
- * than here. A missing `hyp` is the whole of what its fallback covers, so a
- * sentence licensing more of them contradicts the routing further down Step 1.
+ * The claude script is never the right answer to an id-resolution failure: with
+ * `CLAUDE_CODE_SESSION_ID` unset it exits 1 before any POST, and the one such
+ * refusal that happens with the variable set (a second client also stating an
+ * id) Step 1 routes to the stated-id re-run rather than here, because that
+ * re-run reaches every recorder where the script reaches the gateway alone.
+ * A missing `hyp` is the whole of what its fallback covers, so a sentence
+ * licensing more of them contradicts the routing further down Step 1.
  *
  * The codex script resolves the container by walking every rollout for a `cwd`
  * match, where `resolveSessionIdForCli` refuses once that scan hits its
