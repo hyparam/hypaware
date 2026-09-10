@@ -266,9 +266,10 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
     ? /** @type {string} */ (argv[pathIndex + 1])
     : resolveHelperPath(sectionConfig, stateDir)
   try {
+    const hypBin = resolveHypBin(cmdCtx.env)
     const script = renderCredentialHelperScript({
       nodeBin: process.execPath,
-      hypBin: resolveHypBin(),
+      hypBin: hypBin.binPath,
       args: [...credential.helperCommandArgs],
       env: cmdCtx.env,
     })
@@ -277,6 +278,18 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
     fs.chmodSync(helperPath, 0o755)
     cmdCtx.stdout.write(`wrote credential wrapper to ${helperPath}\n`)
     cmdCtx.stdout.write("point the Desktop profile's inferenceCredentialHelper at this path\n")
+    // After the write, not instead of it: the wrapper works today, and what
+    // needs saying is what will stop working. Desktop runs it outside any shell
+    // profile with no HypAware surface in the loop, so an npm prune of the
+    // cache otherwise shows up only as the app losing its credentials.
+    if (hypBin.ephemeral) {
+      cmdCtx.stderr.write(
+        `claude-desktop install-helper: warning: the wrapper runs ${hypBin.binPath}, `
+        + "inside npm's npx cache; Claude Desktop's credential helper fails without "
+        + "warning once npm prunes it. Run 'npm install -g hypaware', then "
+        + "'hyp client claude-desktop install-helper', to record a durable path\n",
+      )
+    }
     return 0
   } catch (err) {
     cmdCtx.stderr.write(`claude-desktop install-helper: ${err instanceof Error ? err.message : String(err)}\n`)
