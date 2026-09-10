@@ -27,8 +27,11 @@ import { createHttpMcpClient, isAuthStatus, orgReadRefusedMessage } from './clie
 export async function runRemoteVerb({ verb, params, target, org, ctx }) {
   // Built-in targets (the shipped central server) layered under the user's
   // own `query.remotes`, so `--remote hyperparam` works with no `remote add`.
+  // Own-key read: an inherited Object.prototype member is truthy, so a target
+  // named `constructor` walked past this refusal and was signposted as an
+  // unrefreshable session rather than an unregistered target.
   const remotes = effectiveRemotes(ctx.config)
-  const entry = remotes[target]
+  const entry = Object.hasOwn(remotes, target) ? remotes[target] : undefined
   if (!entry) {
     return {
       ok: false,

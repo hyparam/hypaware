@@ -437,7 +437,11 @@ export async function runReportDelete(argv, ctx) {
 function resolveReportsTarget(params, ctx, cmd) {
   const remote = params.remote
   const target = remote !== undefined ? String(remote) : effectiveDefaultRemote(ctx.config)
-  const entry = effectiveRemotes(ctx.config)[target]
+  // Own-key read: an inherited Object.prototype member is truthy, so a target
+  // named `constructor` walked past the refusal below and reached
+  // `deriveReportsEndpoint(undefined).replace`.
+  const remotes = effectiveRemotes(ctx.config)
+  const entry = Object.hasOwn(remotes, target) ? remotes[target] : undefined
   if (!entry) {
     return { error: `hyp ${cmd}: unknown remote target '${target}' - add it with 'hyp remote add ${target} <url>'` }
   }
