@@ -229,7 +229,7 @@ test('the scheduled sweep does not re-import a session the CLI ignored', async (
 
 // The other half: a drop set is only safe if it drops exactly what is in it.
 // A sweep that stopped importing everything would be the worse bug.
-test('an ordinary session still imports on the same tick, ignored or empty set', async () => {
+test('an ordinary session still imports on the same tick, empty or absent set', async () => {
   const env = await stageEnv()
   try {
     await writeTranscript(env, 'sess-a', 'first prompt', 'first answer')
