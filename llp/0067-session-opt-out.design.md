@@ -670,6 +670,15 @@ against live rows.
   ([LLP 0066 §ephemeral](./0066-session-opt-out.spec.md#ephemeral), non-goal 2,
   no persistence): the durable mechanism is `.hypignore`. Recorded here so
   nobody "fixes" it by persisting the set.
+
+  > **Extended-by: [LLP 0395 #sweep-consults-the-set](./0395-session-ignore-binds-the-claude-sweep.decision.md#sweep-consults-the-set)**
+  > (2026-09-10), on the lane this bullet did not have. LLP 0358 later gave the
+  > Claude transcript provider an automatic in-daemon sweep, so "a separate
+  > process" stopped describing every re-import and the opt-out expired in
+  > under five minutes. `@hypaware/claude` now shares one activation-scoped
+  > set between its recorder and that sweep. The bullet still holds for the
+  > lane it was written about: `hyp backfill claude` runs in its own process
+  > with its own empty set and re-imports. The set is still not persisted.
 - **Raw-proxy / OTEL traffic:** no adapter, no resolved `session_id`, so no
   session drop, the same structural blindness as `.hypignore`
   ([LLP 0050 §why-not-the-gateway](./0050-ignore-enforced-in-adapters.decision.md)).

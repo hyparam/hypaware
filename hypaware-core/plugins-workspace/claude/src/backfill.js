@@ -80,6 +80,7 @@ export const DEFAULT_SWEEP_CRON = '*/5 * * * *'
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
  *   config?: JsonObject,
+ *   ignoredSessions?: Set<string>,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -132,6 +133,11 @@ export function createClaudeBackfillProvider(opts) {
         deriveRepo,
         resolver,
         sweepFingerprints,
+        // Empty in a CLI process, which is the separation LLP 0067 relied on;
+        // populated in the daemon, where the sweep and the recorder that holds
+        // the drop set are one process.
+        // @ref LLP 0395#sweep-consults-the-set [implements]
+        ignoredSessions: opts.ignoredSessions,
       })
     },
   }
@@ -179,11 +185,13 @@ function resolveSweepCron(config) {
  *   deriveRepo: (cwd: string | undefined) => Promise<{ git_remote?: string, repo_root?: string }>,
  *   resolver: UsagePolicyResolver,
  *   sweepFingerprints: Map<string, { ino: number, size: number, mtimeMs: number }>,
+ *   ignoredSessions?: Set<string>,
  * }} args
  * @returns {AsyncGenerator<BackfillItem>}
  */
 async function* runClaudeBackfill(args) {
   const { ctx, projectsDir, extraProjectsDirs, stateFile, clientName, deriveRepo, resolver, sweepFingerprints } = args
+  const { ignoredSessions } = args
   const log = ctx.log
   const window = resolveWindow(ctx)
   // Many sessions share a cwd (the same repo, often the same checkout), and
@@ -281,6 +289,7 @@ async function* runClaudeBackfill(args) {
   let sessionsProjected = 0
   let messagesProjected = 0
   let sessionsGated = 0
+  let sessionsIgnored = 0
   /** @type {Map<string, number>} */
   const unclaimedEntrypoints = new Map()
 
@@ -308,6 +317,25 @@ async function* runClaudeBackfill(args) {
     }
 
     for (const [sessionId, sessionEntries] of groupBySession(entries)) {
+      // Claude Code writes the transcript whatever the live drop decided, and
+      // the live drop wrote no row, so `part_id` dedupe cannot absorb a
+      // re-import. First in the loop, so an ignored session costs one
+      // `Set.has` and no window filter, projection, or git probe.
+      // @ref LLP 0395#sweep-consults-the-set [implements]: the automatic sweep
+      // shares the recorder's process, so it shares the recorder's drop set
+      if (ignoredSessions?.has(sessionId)) {
+        sessionsIgnored += 1
+        log.info('claude.backfill.session_ignore_drop', {
+          component: 'plugin.claude.backfill',
+          operation: 'usage_policy_drop',
+          policy_source: 'session_opt_out',
+          session_id: sessionId,
+          sweep: ctx.sweep === true,
+          status: 'ok',
+        })
+        continue
+      }
+
       const windowed = filterByWindow(sessionEntries, window)
       const record = pickLatestMatching(sessionRecords, { sessionId, transcriptPath: filePath })
 
@@ -428,6 +456,8 @@ async function* runClaudeBackfill(args) {
     // less than expected says why in its own summary line rather than
     // requiring a log trawl.
     sessions_gated: sessionsGated,
+    // Beside it, and for the same reason: what the live opt-out held back.
+    sessions_ignored: sessionsIgnored,
     ...(unclaimedEntrypoints.size > 0
       ? {
         unclaimed_entrypoints: [...unclaimedEntrypoints]
