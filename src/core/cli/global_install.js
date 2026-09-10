@@ -126,9 +126,13 @@ export function isNpxBinPath(binPath, env = process.env) {
  * A manifest that cannot be read answers "durable", so the fail direction is a
  * missed ephemeral path - today's behaviour - and never a warning on a machine
  * with nothing wrong with it. A global root some other package manager does
- * write a manifest beside (pnpm's `global/<n>` is one) reads as ephemeral, and
- * costs a warning, never the path: each caller still records what it was
- * handed when the `$PATH` walk comes back empty.
+ * write a manifest beside (pnpm's `global/<n>` and yarn's `config/yarn/global`
+ * are the two) reads as ephemeral. What that costs is the `$PATH` walk each
+ * caller already runs: coming back empty it records what it was handed,
+ * exactly as before, and pays one warning naming the wrong tree; finding
+ * something it records the first durable `hypaware` on `$PATH`, which is the
+ * copy a bare `hyp` runs anyway. Neither answer is a path that is not there,
+ * which is the only outcome this predicate exists to prevent.
  *
  * @param {string} binPath
  * @param {NodeJS.ProcessEnv} env
