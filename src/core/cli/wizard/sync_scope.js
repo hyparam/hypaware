@@ -201,7 +201,31 @@ export async function runWizardSyncScope(opts) {
         ...opts.candidates.map((d) => `  ${d.label}`),
       ],
     })
-    return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
+    // The standing opt-outs this confirm just revoked. The menu this
+    // replaced said so whenever it *kept* one ("Keeping local-only: ..."),
+    // and the standing CLI says so when it clears one, with the two
+    // qualifiers that go with the flip: it is future-only, and there is a
+    // command that puts it back. Silently dropping a privacy setting the
+    // user set on purpose, on the run that also enrolls them, is the case
+    // LLP 0188 #never-silent exists for - and the list above cannot carry
+    // it, because a row reads the same there whether it was already
+    // syncing or was local-only until this keypress.
+    // @ref LLP 0188#never-silent [implements]: the confirm names the standing opt-outs it revoked, not only what now syncs
+    // @ref LLP 0188#no-retroactive-ship [constrained-by]: the revocation is future-only, so the line says so rather than implying retained history ships
+    const cleared = [...optedOutBefore].sort()
+    if (cleared.length > 0) {
+      opts.stdout.write(
+        `No longer local-only: ${cleared.join(' · ')}. Future rows sync to your server; ` +
+        "rows already recorded are not sent. Change back with 'hyp privacy client <name> local-only'.\n"
+      )
+    }
+    return await finishSpan({ noQuestion: true, optedOut: [] }, opts, {
+      hidden_picks_syncing: hiddenCandidateSyncs,
+      // What the lane did, which `sources_opted_out` can no longer carry:
+      // it is 0 on every combined run by construction, so without this a
+      // "setup turned my sync back on" report has no signal behind it.
+      sources_cleared: cleared.length,
+    })
   }
 
   const ask = opts.prompt ?? defaultPromptFactory(opts)
@@ -341,8 +365,8 @@ async function promptSyncScopeSelection({ opts, ask, optedOutBefore }) {
  *
  * @param {WizardSyncScopeResult} result
  * @param {RunWizardSyncScopeOptions} opts
- * @param {{ hidden_picks_syncing?: boolean }} [extra] attributes only the
- *   caller knows, folded in when present
+ * @param {{ hidden_picks_syncing?: boolean, sources_cleared?: number }} [extra]
+ *   attributes only the caller knows, folded in when present
  * @returns {Promise<WizardSyncScopeResult>}
  */
 async function finishSpan(result, opts, extra) {
