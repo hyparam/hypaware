@@ -82,7 +82,15 @@ function readBakedPaths(helperPath) {
     fd = fs.openSync(helperPath, 'r')
     const buf = Buffer.allocUnsafe(HELPER_READ_LIMIT_BYTES)
     const read = fs.readSync(fd, buf, 0, HELPER_READ_LIMIT_BYTES, 0)
-    return parseCredentialHelperScript(buf.toString('utf8', 0, read))
+    const text = buf.toString('utf8', 0, read)
+    // A read that filled the cap may have cut the last line mid-token, and
+    // half a path is still absolute and still absent: the parse would hand
+    // back a truncated `hypBin` and the check would call a live wrapper
+    // STALE. Only whole lines are parsed, so the cap can cost a verdict but
+    // never invent one.
+    return parseCredentialHelperScript(
+      read < HELPER_READ_LIMIT_BYTES ? text : text.slice(0, text.lastIndexOf('\n') + 1),
+    )
   } catch {
     return undefined
   } finally {

@@ -42,7 +42,7 @@ function fixture(opts) {
  * baked paths under the test's control. Defaults to a wrapper that works:
  * this interpreter and a CLI entry script that is really on disk.
  *
- * @param {{ stateDir: string, nodeBin?: string, hypBin?: string }} opts
+ * @param {{ stateDir: string, nodeBin?: string, hypBin?: string, env?: Record<string, string> }} opts
  * @returns {string} the wrapper's path
  */
 function writeHelper(opts) {
@@ -56,6 +56,7 @@ function writeHelper(opts) {
     nodeBin: opts.nodeBin ?? process.execPath,
     hypBin,
     args: ['claude-account', 'credential'],
+    env: opts.env,
   }), { mode: 0o755 })
   return helperPath
 }
@@ -196,6 +197,30 @@ test('verify: a wrapper whose baked paths hold quotes and spaces is read back co
   const staleCode = await runVerify([], ctx2, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
   assert.equal(staleCode, 1, bufs2.stdout.text())
   assert.match(bufs2.stdout.text(), /baked CLI path no longer exists/)
+})
+
+test('verify: a wrapper longer than the bounded read is left alone, not cut into a false STALE', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  // Pad the embedded env until the 4096-byte cap lands 60 bytes into the
+  // baked CLI path. A half-read path is still absolute and still absent,
+  // which is a live wrapper reported broken: the cap may cost a verdict,
+  // never invent one.
+  const hypBin = path.join(stateDir, `${'c'.repeat(120)}.js`)
+  fs.writeFileSync(hypBin, '// stand-in CLI entry\n')
+  const args = ['claude-account', 'credential']
+  const probe = renderCredentialHelperScript({ nodeBin: process.execPath, hypBin, args, env: { HYP_HOME: '/x' } })
+  const pad = 4096 - 60 - probe.indexOf(hypBin)
+  assert.ok(pad > 0, 'the unpadded wrapper already overruns the cap')
+  writeHelper({ stateDir, hypBin, env: { HYP_HOME: `/x${'d'.repeat(pad)}` } })
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.doesNotMatch(bufs.stdout.text(), /STALE/)
 })
 
 test('verify: a present but stale plist is reported STALE and fails', async () => {
