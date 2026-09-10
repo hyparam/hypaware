@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import {
   GlobalInstallError,
+  describeEphemeralBinPath,
   ensureDurableBinForNpx,
   findInstalledHypawareBin,
   globalHypawareBin,
@@ -110,6 +111,95 @@ test('isEphemeralBinPath separates a project tree from every durable install', a
     }),
     true
   )
+})
+
+// Issue #1625. The verdict above is "a manifest sits beside the outermost
+// `node_modules`", and pnpm and yarn write one beside their GLOBAL root, so a
+// global install under either reads ephemeral. The warning built from that
+// verdict used to assert a project's `node_modules`, an `npm ci` and a branch
+// switch, none of which that operator has. This lays a real global root of
+// each beside a real project of each and shows why a third arm is not the fix:
+// the four trees carry the same manifest, the same lockfile and the same
+// `node_modules` (a pnpm project even carries the store directory a pnpm
+// global root does), so no test on the tree tells them apart, and the message
+// therefore has to claim neither.
+test('the ephemeral-bin warning claims no tree a pnpm or yarn global root would disprove', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-ephemeral-desc-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+
+  /**
+   * One package-manager-owned tree, laid out as that manager lays it out: the
+   * manifest and lockfile at the top, the package under `node_modules`, and for
+   * pnpm the store the visible entry is a link into (so the path recorded is
+   * the one `realpath` gives, which is what every caller writes down).
+   *
+   * @param {{ dir: string, lockfile: string, store: boolean }} spec
+   * @returns {Promise<string>} the CLI entry inside it
+   */
+  async function tree(spec) {
+    await fs.mkdir(spec.dir, { recursive: true })
+    await fs.writeFile(path.join(spec.dir, 'package.json'), '{"dependencies":{"hypaware":"1.0.0"}}\n')
+    await fs.writeFile(path.join(spec.dir, spec.lockfile), '# lockfile\n')
+    const inner = spec.store
+      ? path.join(spec.dir, 'node_modules', '.pnpm', 'hypaware@1.0.0', 'node_modules', 'hypaware')
+      : path.join(spec.dir, 'node_modules', 'hypaware')
+    const bin = path.join(inner, 'bin', 'hypaware.js')
+    await fs.mkdir(path.dirname(bin), { recursive: true })
+    await fs.writeFile(bin, '#!/usr/bin/env node\n')
+    return bin
+  }
+
+  // `pnpm add -g` and `yarn global add`, at the default global dirs.
+  const pnpmGlobal = await tree({
+    dir: path.join(root, '.local', 'share', 'pnpm', 'global', '5'),
+    lockfile: 'pnpm-lock.yaml',
+    store: true,
+  })
+  const yarnGlobal = await tree({
+    dir: path.join(root, '.config', 'yarn', 'global'),
+    lockfile: 'yarn.lock',
+    store: false,
+  })
+  // The same two managers inside a checkout, which is the tree the old wording
+  // asserted. Nothing above distinguishes these from the two above.
+  const pnpmProject = await tree({
+    dir: path.join(root, 'repo-pnpm'),
+    lockfile: 'pnpm-lock.yaml',
+    store: true,
+  })
+  const yarnProject = await tree({
+    dir: path.join(root, 'repo-yarn'),
+    lockfile: 'yarn.lock',
+    store: false,
+  })
+
+  const effect = 'capture stops'
+  /** @type {Set<string>} */
+  const said = new Set()
+  for (const bin of [pnpmGlobal, yarnGlobal, pnpmProject, yarnProject]) {
+    assert.equal(isEphemeralBinPath(bin, {}), true, `premise: ${bin} reads durable`)
+    const where = describeEphemeralBinPath(bin, effect, {})
+    // The two clauses that were false for a pnpm or yarn global install: it is
+    // nobody's project, and no `npm ci` or branch switch will ever remove it.
+    assert.doesNotMatch(where, /a project's node_modules/, where)
+    assert.doesNotMatch(where, /once an npm ci or a branch switch removes it/, where)
+    // Still says what was actually observed and what the operator loses, which
+    // is the whole reason the warning exists.
+    assert.match(where, /inside a node_modules tree/, where)
+    assert.match(where, new RegExp(`${effect} without warning`), where)
+    said.add(where)
+  }
+  // One sentence for all four, because one verdict produced all four: a
+  // message that varied here would be claiming a distinction nothing made.
+  assert.equal(said.size, 1, [...said].join(' | '))
+
+  // The other arm still names its tree, because `_npx` is npm's cache and
+  // nothing else, and an operator sent to look for a project when their path
+  // is in the cache is the failure this whole pair of arms exists to avoid.
+  const npx = '/Users/hyp/.npm/_npx/abc/node_modules/hypaware/bin/hypaware.js'
+  const cacheEnv = { npm_config_cache: '/Users/hyp/.npm' }
+  assert.match(describeEphemeralBinPath(npx, effect, cacheEnv), /inside npm's npx cache/)
+  assert.doesNotMatch(describeEphemeralBinPath(npx, effect, cacheEnv), /node_modules tree/)
 })
 
 // Whatever this returns gets written down and executed later, so every entry it
