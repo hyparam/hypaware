@@ -2236,6 +2236,18 @@ test('the automatic lane refuses a project-local install instead of installing b
     assert.equal(readSelfUpdateState(stateRoot).error, undefined)
     assert.equal(describeSelfUpdate({ stateRoot, env: {}, packageRoot }).line, null)
 
+    // Pinned because it is the one lane this verdict takes away rather than
+    // merely refuses earlier: read as a global candidate, a root ahead of the
+    // code the daemon booted reached the restart-only hand-over
+    // (LLP 0365 #running-version-is-tracked), which installs nothing. It is now
+    // as silent there as a source checkout, whose tree moves ahead the same way.
+    const ahead = await runSelfUpdatePass({
+      supervised: true, stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl, jitter: 0,
+      runningVersion: '0.9.0',
+    })
+    assert.deepEqual(ahead, { action: 'skipped', reason: 'project-local' })
+    assert.deepEqual(calls, [])
+
     // `hyp update` still probes (force) and still cannot apply, and names
     // which install shape it is rather than blaming a failed npm.
     const forced = await runSelfUpdatePass({

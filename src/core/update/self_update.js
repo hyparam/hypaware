@@ -446,6 +446,17 @@ function registryOrigin(raw) {
  * "self-update: degraded" line on `hyp status` for a machine with nothing wrong
  * with it (issue #1622).
  *
+ * One lane it does stop that no later refusal would have: the restart-only
+ * hand-over. `npm install` in the project moves the root ahead of the code the
+ * daemon loaded at boot, and read as `global-candidate` that reached
+ * LLP 0365 #running-version-is-tracked, which restarts the daemon onto a version
+ * already on disk and so costs neither a probe nor an install. This root is now
+ * as silent there as a source checkout, whose tree moves ahead the same way and
+ * which has never had that lane, so such a daemon stays on the code it booted
+ * until someone restarts it. Reaching that lane at all takes `hyp daemon install`
+ * having pinned a supervised service to this tree, which is the lane issue #1622
+ * is still open for, so the question is left with that one.
+ *
  * @ref LLP 0309#global-install-only [implements]: provenance guard on the running package root
  * @param {{ packageRoot?: string, env?: NodeJS.ProcessEnv }} [opts]
  * @returns {SelfInstallProvenance}
