@@ -749,7 +749,7 @@ function scriptedIo(answers) {
   }
 }
 
-test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled machine is still asked what syncs', async () => {
+test('runInitWizard end-to-end: join, back to the fork, local, and one combined picker controls collection and sync', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-wizard-e2e-'))
   const env = { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', NO_COLOR: '1' }
   const io = scriptedIo([
@@ -761,7 +761,8 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
     '2',    // disconnect?: No, stay connected
     '2',    // express gate (asked again on this pass): Customize
     '',     // pick menu: bare enter keeps the detected row checked (LLP 0274)
-    '',     // sync menu: bare enter keeps everything syncing
+    'b',    // new folders: return directly to the combined picker
+    '',     // combined picker: keep the selected row
     '1',    // new folders: Sync it automatically
   ])
   const stderr = makeBuf()
@@ -804,14 +805,14 @@ test('runInitWizard end-to-end: join, back to the fork, local, and the enrolled 
   assert.equal(out.split('How do you want to collect agent logs?').length - 1, 2)
   // Enrolled-state decisions survive the walk to the local pathway.
   assert.match(out, /This machine syncs to your team server\. Disconnect and go local-only\?/)
-  assert.match(out, /Choose what syncs\. Unchecked sources stay on this machine\./)
+  assert.match(out, /What do you want to collect and sync\?/)
+  assert.doesNotMatch(out, /Choose what syncs/)
   // The itinerary is the enrolled one (pick, sync, folders, finish), not
   // the solo two-step local one: the denominator is the same `enrolled()`
   // read both enrolled lanes are gated on, so a regression there shows up
   // here too.
-  assert.match(out, /Step 1 of 4 · Choose what to collect/)
-  assert.match(out, /Step 2 of 4 · Choose what syncs/)
-  assert.match(out, /Step 3 of 4 · Choose how new folders are handled/)
+  assert.match(out, /Step 1 of 3 · Choose what to collect and sync/)
+  assert.match(out, /Step 2 of 3 · Choose how new folders are handled/)
 
   // The run ended in a real config on disk, written after the last question.
   assert.match(String(result.configPath), /hypaware-config\.json$/)

@@ -634,7 +634,7 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
   if (defaultRows.length > 0 && opts.autoAccept) {
     narrateAcceptedGate({
       stdout: opts.stdout,
-      title: 'HypAware will record:',
+      title: opts.collectAndSync ? 'HypAware will record and sync:' : 'HypAware will record:',
       // One source per line; the locked suffix matches the menu rows'.
       items: defaultRowLabels({ defaultRows, lockedSet }),
     })
@@ -653,7 +653,9 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
       // No keys in the title: the TUI's hint line and the numbered
       // fallback's own select instructions each carry their controls,
       // so a parenthetical here said it twice on every terminal.
-      title: 'What do you want to collect?',
+      title: opts.collectAndSync
+        ? 'What do you want to collect and sync?'
+        : 'What do you want to collect?',
       // Carried on the question rather than composed into the title, so
       // the TUI paints it dim on its own line and the legacy numbered
       // fallback prints the same text as plain text.

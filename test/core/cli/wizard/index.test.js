@@ -366,7 +366,7 @@ test('runInitWizard: declining the express gate leaves the lanes prompting, posi
   assert.equal(opts._pickOpts.autoAccept, undefined)
   assert.equal(opts._syncOpts.autoAccept, undefined)
   assert.equal(opts._folderOpts.autoAccept, undefined)
-  assert.equal(opts._pickOpts.progress, 'Step 2 of 5 · Choose what to collect')
+  assert.equal(opts._pickOpts.progress, 'Step 2 of 4 · Choose what to collect and sync')
 })
 
 test('runInitWizard: a cancelled express gate exits 130 before any lane runs', async () => {
@@ -455,7 +455,7 @@ test('runInitWizard: a standing opt-out on a named row narrows the express gate\
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
   assert.equal(opts._expressOpts.enrolled, true)
-  assert.equal(opts._expressOpts.syncWithheld, true, 'the gate may not promise sync for a row the store withholds')
+  assert.equal(opts._expressOpts.syncWithheld, undefined, 'accepting explicitly enables sync for the selected row')
 })
 
 test('runInitWizard: with nothing withheld the express gate keeps its unqualified sync claim', async () => {

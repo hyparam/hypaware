@@ -627,3 +627,53 @@ test('a corrupt store with a dead stderr still skips instead of throwing', async
   assert.equal(prompted, false)
   assert.equal(await fs.readFile(storePath, 'utf8'), '{ nope')
 })
+
+// @ref LLP 0396#combined-selection [tests]: confirmation shares selected visible sources without another question
+for (const autoAccept of [false, true]) {
+  test(`combined collection and sync clears only selected policies (express=${autoAccept})`, async (t) => {
+    const { hypHome, env, stateDir } = await makeHome()
+    t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+    await writeClientSyncEntries({ stateDir, entries: [
+      { source: 'claude', class: 'local-only' },
+      { source: 'codex', class: 'local-only' },
+      { source: 'raw-anthropic', class: 'local-only' },
+    ] })
+    const result = await runWizardSyncScope({
+      stdout: makeBuf(), stderr: makeBuf(), env,
+      candidates: [descriptor('claude')],
+      candidatesHiddenIds: ['raw-anthropic'],
+      collectAndSync: true, autoAccept,
+      prompt: async () => { throw new Error('combined setup must not ask a second question') },
+    })
+    assert.deepEqual(result, { noQuestion: true, optedOut: [] })
+    assert.deepEqual((await readClientSyncEntries({ stateDir }))?.map((entry) => entry.source).sort(),
+      ['codex', 'raw-anthropic'])
+  })
+}
+
+test('combined selection preserves an unreadable policy store and warns', async (t) => {
+  const { hypHome, env, stateDir } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const file = clientSyncListPath(stateDir)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, 'broken')
+  const stderr = makeBuf()
+  const result = await runWizardSyncScope({
+    stdout: makeBuf(), stderr, env, candidates: [descriptor('claude')], collectAndSync: true,
+    prompt: async () => { throw new Error('no second question') },
+  })
+  assert.equal(result.skipped, true)
+  assert.match(stderr.text(), /unreadable/)
+  assert.equal(await fs.readFile(file, 'utf8'), 'broken')
+})
+
+test('combined selection materializes a fresh empty policy store', async (t) => {
+  const { hypHome, env, stateDir } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await runWizardSyncScope({
+    stdout: makeBuf(), stderr: makeBuf(), env,
+    candidates: [descriptor('claude')], collectAndSync: true,
+    prompt: async () => { throw new Error('no second question') },
+  })
+  assert.deepEqual(await readClientSyncEntries({ stateDir }), [])
+})

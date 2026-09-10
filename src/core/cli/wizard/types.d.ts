@@ -72,6 +72,8 @@ export type WizardStepName = 'join' | 'pick' | 'sync' | 'folders' | 'finale'
  * (LLP 0188 #locked).
  */
 export interface RunWizardSyncScopeOptions {
+  /** Collection picker already confirmed these sources for sharing. */
+  collectAndSync?: boolean
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream
@@ -481,6 +483,8 @@ export interface RunWizardJoinOptions {
  * prompting, matching today's `interactive = !opts.picks` split.
  */
 export interface RunWizardPickOptions {
+  /** Checked sources are collected locally and synced remotely. */
+  collectAndSync?: boolean
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream

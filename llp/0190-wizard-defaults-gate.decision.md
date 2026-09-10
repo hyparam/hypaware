@@ -15,6 +15,8 @@
 > store, seam enforcement) is untouched; what changes is how the two
 > wizard lanes ask.
 
+**Extended-by:** [LLP 0396](./0396-combined-collection-and-sync.spec.md) (combined collection and sharing selection).
+
 ## Context {#context}
 
 Dogfooding the wizard surfaced two prompt-shape problems.

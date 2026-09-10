@@ -202,12 +202,12 @@ test('TTY gate: the decline row names every question declining opens, on screen'
   assert.notEqual(row, -1, 'the decline row rendered')
   const gloss = lines[row + 1]
   assert.ok(gloss.includes(decline.summary), 'the gloss sits directly under the decline row')
-  // The three questions an enrolled decline opens, on the screen the user
+  // The two questions an enrolled decline opens, on the screen the user
   // decides on. The spec layer pins the exact sentence; this pins that the
   // renderer forwards all of it, because a gloss the frame truncates or
   // drops is a disclosure the user never reads.
-  // @ref LLP 0201#decline [tests]: all three lanes are named in the rendered frame, not just on the spec
-  for (const clause of ['what to record', 'what syncs', 'how new folders are handled']) {
+  // @ref LLP 0396#combined-selection [tests]: both questions are named in the rendered frame
+  for (const clause of ['what to record and sync', 'how new folders are handled']) {
     assert.ok(gloss.includes(clause), `the decline gloss must name "${clause}"; it read: ${gloss}`)
   }
 })

@@ -23,7 +23,10 @@ import {
 const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this machine.'
 
 /**
- * The wizard's sync-scope step (LLP 0188 #never-silent, LLP 0190
+ * Combined setup applies its confirmed collection choice without a prompt
+ * (LLP 0396). The standalone editor below retains its existing semantics.
+ *
+ * The legacy sync-scope step (LLP 0188 #never-silent, LLP 0190
  * #sync-gate): after the picker on every enrolled run, a multiselect
  * over the picked, non-locked sources. Checked means "syncs"; everything
  * is checked by default on a fresh join (default-sync is the point), and
@@ -178,6 +181,19 @@ export async function runWizardSyncScope(opts) {
     // this one that there is nothing here to step back *to* (LLP 0191
     // #back-edges).
     return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
+  }
+
+  // @ref LLP 0396#combined-selection [implements]: the collection answer also enables sharing, with no second picker
+  if (opts.collectAndSync) {
+    const entries = existing.filter((entry) => !candidateIds.has(entry.source))
+    // Materialize even an empty store so legacy migration cannot opt these sources out later.
+    await writeClientSyncEntries({ stateDir, entries })
+    narrateAcceptedGate({
+      stdout: opts.stdout,
+      title: 'These will sync to your server:',
+      items: [...(opts.locked ?? []), ...opts.candidates].map((d) => `  ${d.label}`),
+    })
+    return await finishSpan({ noQuestion: true, optedOut: [] }, opts)
   }
 
   const ask = opts.prompt ?? defaultPromptFactory(opts)
