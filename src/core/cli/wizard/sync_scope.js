@@ -186,9 +186,6 @@ export async function runWizardSyncScope(opts) {
 
   // @ref LLP 0396#combined-selection [implements]: the collection answer also enables sharing, with no second picker
   if (opts.collectAndSync) {
-    const entries = existing.filter((entry) => !candidateIds.has(entry.source))
-    // Materialize even an empty store so legacy migration cannot opt these sources out later.
-    await writeClientSyncEntries({ stateDir, entries })
     narrateAcceptedGate({
       stdout: opts.stdout,
       title: 'These will sync to your server:',
@@ -201,30 +198,16 @@ export async function runWizardSyncScope(opts) {
         ...opts.candidates.map((d) => `  ${d.label}`),
       ],
     })
-    // The standing opt-outs this confirm just revoked. The menu this
-    // replaced said so whenever it *kept* one ("Keeping local-only: ..."),
-    // and the standing CLI says so when it clears one, with the two
-    // qualifiers that go with the flip: it is future-only, and there is a
-    // command that puts it back. Silently dropping a privacy setting the
-    // user set on purpose, on the run that also enrolls them, is the case
-    // LLP 0188 #never-silent exists for - and the list above cannot carry
-    // it, because a row reads the same there whether it was already
-    // syncing or was local-only until this keypress.
-    // @ref LLP 0188#never-silent [implements]: the confirm names the standing opt-outs it revoked, not only what now syncs
-    // @ref LLP 0188#no-retroactive-ship [constrained-by]: the revocation is future-only, so the line says so rather than implying retained history ships
-    const cleared = [...optedOutBefore].sort()
-    if (cleared.length > 0) {
-      opts.stdout.write(
-        `No longer local-only: ${cleared.join(' · ')}. Future rows sync to your server; ` +
-        "rows already recorded are not sent. Change back with 'hyp privacy client <name> local-only'.\n"
-      )
+    if (opts.deferWrite) {
+      return await finishSpan({ noQuestion: true, optedOut: [], pendingSources: [...candidateIds] }, opts, {
+        hidden_picks_syncing: hiddenCandidateSyncs,
+        sources_cleared: 0,
+      })
     }
+    const cleared = await commitWizardSyncScope({ env: opts.env, stdout: opts.stdout, sources: [...candidateIds] })
     return await finishSpan({ noQuestion: true, optedOut: [] }, opts, {
       hidden_picks_syncing: hiddenCandidateSyncs,
-      // What the lane did, which `sources_opted_out` can no longer carry:
-      // it is 0 on every combined run by construction, so without this a
-      // "setup turned my sync back on" report has no signal behind it.
-      sources_cleared: cleared.length,
+      sources_cleared: cleared,
     })
   }
 
@@ -262,6 +245,39 @@ export async function runWizardSyncScope(opts) {
     )
   }
   return await finishSpan({ optedOut }, opts)
+}
+
+/**
+ * Apply only the final confirmed selection to the current policy store.
+ * Re-reading preserves unrelated edits made while the wizard was open and
+ * refuses to replace a store that became unreadable since the preview.
+ * @ref LLP 0396#combined-selection [implements]: clearing waits until the config has committed
+ * @param {{ env: NodeJS.ProcessEnv, stdout: RunWizardSyncScopeOptions['stdout'], sources: string[] }} opts
+ * @returns {Promise<number>} Number of standing opt-outs cleared.
+ */
+export async function commitWizardSyncScope(opts) {
+  return await withSpan('wizard.sync_scope.commit', {
+    [Attr.COMPONENT]: 'wizard',
+    [Attr.OPERATION]: 'wizard.sync_scope.commit',
+    candidates: opts.sources.length,
+  }, async (span) => {
+    const stateDir = readObservabilityEnv(opts.env).stateDir
+    const existing = (await readClientSyncEntries({ stateDir })) ?? []
+    const selected = new Set(opts.sources)
+    const entries = existing.filter((entry) => !selected.has(entry.source))
+    const cleared = existing.filter((entry) => selected.has(entry.source)).map((entry) => entry.source).sort()
+    // Materialize even an empty store so legacy migration cannot restore opt-outs.
+    await writeClientSyncEntries({ stateDir, entries })
+    span.setAttribute('sources_cleared', cleared.length)
+    // @ref LLP 0188#no-retroactive-ship [constrained-by]: clearing is future-only and names the standing control to reverse it
+    if (cleared.length > 0) {
+      opts.stdout.write(
+        `No longer local-only: ${cleared.join(' · ')}. Future rows sync to your server; ` +
+        "rows already recorded are not sent. Change back with 'hyp privacy client <name> local-only'.\n"
+      )
+    }
+    return cleared.length
+  }, { component: 'wizard' })
 }
 
 /**

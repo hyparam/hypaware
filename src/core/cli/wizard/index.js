@@ -42,7 +42,7 @@ import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from 
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
 import { runWizardSyncNow } from './sync_now.js'
-import { runWizardSyncScope } from './sync_scope.js'
+import { commitWizardSyncScope, runWizardSyncScope } from './sync_scope.js'
 import { runWizardFolderAsk } from './folder_ask.js'
 import { runWizardExpressGate } from './express.js'
 import { runConfigurePhase } from './configure.js'
@@ -191,6 +191,8 @@ async function runGuardedInitWizard(opts, guard) {
   let picked
   /** @type {string[]} */
   let sourcesOptedOut = []
+  /** @type {string[] | undefined} */
+  let pendingSyncSources
   /**
    * The standing new-folder answer this run left behind (LLP 0200), for
    * the finish log. Undefined on runs that never reach the lane.
@@ -568,6 +570,7 @@ async function runGuardedInitWizard(opts, guard) {
       backFromPick = false
 
       atPick: while (true) {
+        pendingSyncSources = undefined
         if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
         // The lanes' positions, resolved when their pathway is: a back
         // through the fork can land on the other pathway, whose itinerary
@@ -702,6 +705,7 @@ async function runGuardedInitWizard(opts, guard) {
                 .filter((d) => !visibleCandidateIds.has(d.id))
                 .map((d) => d.id),
               collectAndSync: true,
+              deferWrite: true,
               ...(opts.prompt ? { prompt: opts.prompt } : {}),
               ...(express ? { autoAccept: true } : {}),
               // The pick lane is always behind this one.
@@ -716,6 +720,7 @@ async function runGuardedInitWizard(opts, guard) {
               return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
             }
             sourcesOptedOut = syncScope.optedOut
+            pendingSyncSources = syncScope.pendingSources
 
             if (!(await guard.checkpoint())) return await cancelDeadOutput()
             const folderFn = opts.folderAsk ?? runWizardFolderAsk
@@ -825,6 +830,12 @@ async function runGuardedInitWizard(opts, guard) {
     }
     // Past this line a cancel is a cancel over a machine that changed.
     landedConfigPath = picked.configPath
+  }
+
+  // @ref LLP 0396#combined-selection [implements]: no opt-out is cleared until the selection questions and the config write succeed
+  if (pendingSyncSources) {
+    if (!(await guard.checkpoint())) return await cancelDeadOutput()
+    await commitWizardSyncScope({ env: opts.env, stdout: opts.stdout, sources: pendingSyncSources })
   }
 
   // Attended-only (LLP 0131): the configure phase itself no-ops when

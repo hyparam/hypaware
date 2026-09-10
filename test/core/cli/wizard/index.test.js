@@ -8,7 +8,7 @@ import path from 'node:path'
 
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
-import { clientSyncListPath, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
+import { clientSyncListPath, readClientSyncEntries, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
@@ -1505,3 +1505,74 @@ test('runInitWizard: local pathway never narrates the first-sync hold', async ()
   await runInitWizard(opts)
   assert.doesNotMatch(stdout.text(), /Nothing has been uploaded yet/)
 })
+
+// @ref LLP 0396#combined-selection [tests]: cancellation and Back cannot revoke a standing privacy choice
+for (const scenario of ['cancel', 'back', 'refuse', 'config-failure', 'policy-failure', 'corrupt-policy', 'commit']) {
+  test(`combined sharing is deferred through setup: ${scenario}`, async (t) => {
+    const home = await tmpHome()
+    t.after(() => fs.rm(home, { recursive: true, force: true }))
+    const env = { HYP_HOME: path.join(home, '.hyp') }
+    const stateDir = readObservabilityEnv(env).stateDir
+    const original = [{ source: 'claude', class: /** @type {'local-only'} */ ('local-only') }]
+    await writeClientSyncEntries({ stateDir, entries: original })
+    const configPath = path.join(home, 'config.json')
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+    let passes = 0
+    let configured = false
+    const { opts, stdout } = wizardOpts(home, {
+      gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+      confirm: async () => 'stay',
+      pick: async () => {
+        passes += 1
+        return pickResult({
+          configPath: scenario === 'config-failure' ? path.join(configPath, 'blocked.json') : configPath,
+          configPending: true,
+          sourcesPicked: passes === 1 ? ['claude'] : [],
+          descriptors: passes === 1 ? [{ id: 'claude', label: 'Claude Code' }] : [],
+        })
+      },
+      syncScope: runWizardSyncScope,
+      folderAsk: async () => {
+        assert.deepEqual(await readClientSyncEntries({ stateDir }), original,
+          'the running daemon still sees the old privacy choice throughout the questions')
+        assert.doesNotMatch(stdout.text(), /No longer local-only/)
+        if (scenario === 'cancel') return { cancelled: true }
+        if (scenario === 'back' && passes === 1) return { back: true }
+        return { mode: 'sync' }
+      },
+      confirmOverwrite: async () => {
+        assert.deepEqual(await readClientSyncEntries({ stateDir }), original)
+        if (scenario === 'corrupt-policy') await fs.writeFile(clientSyncListPath(stateDir), 'broken')
+        if (scenario === 'policy-failure') {
+          const rename = fs.rename.bind(fs)
+          t.mock.method(fs, 'rename', async (from, to) => {
+            if (to === clientSyncListPath(stateDir)) throw new Error('policy rename failed')
+            return rename(from, to)
+          })
+        }
+        if (scenario === 'commit') await writeClientSyncEntries({ stateDir, entries: [
+          ...original, { source: 'codex', class: 'local-only' },
+        ] })
+        return scenario !== 'refuse'
+      },
+      configure: async () => { configured = true; return { results: [] } },
+    })
+    if (scenario === 'config-failure' || scenario === 'policy-failure' || scenario === 'corrupt-policy') {
+      await assert.rejects(runInitWizard(opts))
+    } else {
+      const result = await runInitWizard(opts)
+      assert.equal(result.exitCode, scenario === 'cancel' ? 130 : scenario === 'refuse' ? 1 : 0)
+    }
+    if (scenario === 'corrupt-policy') {
+      assert.equal(await fs.readFile(clientSyncListPath(stateDir), 'utf8'), 'broken')
+    } else {
+      assert.deepEqual(await readClientSyncEntries({ stateDir }), scenario === 'commit'
+        ? [{ source: 'codex', class: 'local-only' }]
+        : original)
+    }
+    assert.equal(configured, scenario === 'commit' || scenario === 'back')
+    if (scenario === 'commit') assert.match(stdout.text(), /No longer local-only: claude/)
+    else assert.doesNotMatch(stdout.text(), /No longer local-only/)
+    if (scenario === 'back') assert.equal(passes, 2)
+  })
+}

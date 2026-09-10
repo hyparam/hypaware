@@ -59,9 +59,10 @@ keypress per screen.
 1. **Choose what to collect and sync.** A checklist of AI tools. Tools your
    team manages are already selected and locked; tools detected on your
    machine are pre-selected as well. A checked tool is recorded here *and*
-   shared with the server, so confirming this screen also clears any
+   shared with the server. Completing setup clears any
    standing `hyp privacy client <name> local-only` for the tools on it;
-   `hyp privacy client` changes that back afterwards.
+   cancelling before setup commits preserves those settings.
+   `hyp privacy client` changes them afterwards.
 2. **Choose how new folders are handled.** Whether recording in a project
    you have not worked in before syncs without asking, or asks you the
    first time. This is a standing preference; `hyp privacy folders`
