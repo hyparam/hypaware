@@ -11,7 +11,7 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
-import { findInstalledHypawareBin, isNpxBinPath } from '../../../../src/core/cli/global_install.js'
+import { findInstalledHypawareBin, isEphemeralBinPath, isNpxBinPath } from '../../../../src/core/cli/global_install.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
 import { resolveClaudeCodeVersion } from './claude_version.js'
@@ -309,9 +309,15 @@ export async function activate(ctx) {
             // (issue #1607), so the re-run reaches this adapter and rewrites
             // the command.
             if (hookBin.ephemeral) {
+              // Named for the tree it is actually in: npm's prune runs on
+              // npm's schedule, an `npm ci` on the operator's, so an operator
+              // told the wrong one goes looking in the wrong place. The repair
+              // is the same either way.
+              const where = isNpxBinPath(hookBin.binPath, ctx.env)
+                ? "inside npm's npx cache; capture of cwd and git branch stops without warning once npm prunes it"
+                : "inside a project's node_modules; capture of cwd and git branch stops without warning once an npm ci or a branch switch removes it"
               warnings.push(
-                `the managed hook records ${hookBin.binPath}, inside npm's npx cache; ` +
-                'capture of cwd and git branch stops without warning once npm prunes it. ' +
+                `the managed hook records ${hookBin.binPath}, ${where}. ` +
                 "Run 'npm install -g hypaware', then 'hyp client attach claude', to " +
                 'record a durable path'
               )
@@ -527,22 +533,33 @@ export async function activate(ctx) {
  * Daemon reconciliation runs in processor.js, so process.argv[1] is not
  * necessarily a CLI. Resolve the entrypoint from this installed package.
  *
- * Under `npx hypaware` that entrypoint is inside npm's `_npx` cache, which npm
- * prunes on its own schedule, so recording it writes a path that outlives what
- * owns it. The hook exits 0 and says nothing when its command is missing, so
- * the loss is silent: `cwd` and `git_branch` just stop arriving. An installed
- * CLI is durable, and resolving it here still yields a concrete absolute path -
- * the PATH lookup is spent once, at attach, which is the point.
+ * Under `npx hypaware` that entrypoint is inside npm's `_npx` cache, and in a
+ * project that depends on `hypaware` it is inside that project's
+ * `node_modules`; `isEphemeralBinPath` reads both as what they are, a copy npm
+ * deletes on a schedule of its own, so recording either writes a path that
+ * outlives what owns it. The hook exits 0 and says nothing when its command is
+ * missing, so the loss is silent: `cwd` and `git_branch` just stop arriving. An
+ * installed CLI is durable, and resolving it here still yields a concrete
+ * absolute path - the PATH lookup is spent once, at attach, which is the point.
  *
- * With nothing installed, the npx path still captures until npm prunes it, so
- * it is written and flagged `ephemeral` rather than refused.
+ * A durable copy found this way may be a different version than the one that
+ * ran this command, which for a project-local entrypoint it usually is. That
+ * is the trade this makes, in the same direction the `$PATH` walk already
+ * makes it: what the hook needs of the path it records is that it still exists
+ * and still runs, months later, from a working directory nobody has chosen
+ * yet, and the recorded command is `cwd` and `git_branch` capture rather than
+ * any version-pinned surface. An operator who does mean a particular copy says
+ * so with `HYPAWARE_BIN`.
+ *
+ * With nothing installed, the ephemeral path still captures until npm removes
+ * it, so it is written and flagged `ephemeral` rather than refused.
  *
  * An explicit `HYPAWARE_BIN`/`HYP_BIN` is taken as given: it names a path the
  * operator chose, and second-guessing it would defeat the override.
  *
- * `cliBinPath` defaults to this package's own CLI and is a parameter only so
- * a test can present an `_npx` entrypoint: nothing short of a real `npx` run
- * puts this package inside that cache.
+ * `cliBinPath` defaults to this package's own CLI and is a parameter only so a
+ * test can present an ephemeral entrypoint: nothing short of a real `npx` run
+ * or a real project install puts this package inside one of those trees.
  *
  * @param {NodeJS.ProcessEnv} env
  * @param {string} [cliBinPath]
@@ -551,7 +568,7 @@ export async function activate(ctx) {
 export function resolveHookBinPath(env, cliBinPath = CLI_BIN_PATH) {
   const explicit = firstNonEmpty(env.HYPAWARE_BIN, env.HYP_BIN)
   if (explicit) return { binPath: path.resolve(explicit), ephemeral: false }
-  if (!isNpxBinPath(cliBinPath, env)) return { binPath: cliBinPath, ephemeral: false }
+  if (!isEphemeralBinPath(cliBinPath, env)) return { binPath: cliBinPath, ephemeral: false }
   const installed = findInstalledHypawareBin(env)
   if (installed !== undefined) return { binPath: installed, ephemeral: false }
   return { binPath: cliBinPath, ephemeral: true }

@@ -51,6 +51,16 @@ async function rig(opts = {}) {
   const npxCliPath = path.join(npxRoot, 'node_modules', 'hypaware', 'bin', 'hypaware.js')
   await writeExecutable(path.join(npxBinDir, 'hypaware'))
 
+  // A checkout that carries `hypaware` as a dependency: the same hazard with
+  // no `_npx` tell, and the manifest beside the tree is what makes it one. Its
+  // `.bin` is on `$PATH` because that is where `npm run` puts it.
+  const projectDir = path.join(root, 'repo')
+  await fsp.mkdir(projectDir, { recursive: true })
+  await fsp.writeFile(path.join(projectDir, 'package.json'), '{"name":"app"}\n')
+  const projectBinDir = path.join(projectDir, 'node_modules', '.bin')
+  const projectCliPath = path.join(projectDir, 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+  await writeExecutable(path.join(projectBinDir, 'hypaware'))
+
   const globalBinDir = path.join(root, 'npm-global', 'bin')
   const globalBin = path.join(globalBinDir, 'hypaware')
   if (opts.installedBin === true) await writeExecutable(globalBin)
@@ -59,12 +69,13 @@ async function rig(opts = {}) {
   const env = {
     HOME: root,
     npm_config_cache: path.join(root, '.npm'),
-    PATH: [npxBinDir, globalBinDir].join(path.delimiter),
+    PATH: [npxBinDir, projectBinDir, globalBinDir].join(path.delimiter),
   }
 
   return {
     env,
     npxCliPath,
+    projectCliPath,
     globalBin,
     cleanup: () => fsp.rm(root, { recursive: true, force: true }),
   }
@@ -103,9 +114,52 @@ test('a durably installed entrypoint is recorded as it stands', async (t) => {
   t.after(() => r.cleanup())
 
   // The package's own CLI on a normal install: durable already, so the `$PATH`
-  // walk must not repoint the hook at some other copy.
+  // walk must not repoint the hook at some other copy. Note the shape: an
+  // `npm install -g` puts the package under a `node_modules` too, so a rule
+  // that refused every `node_modules` would land here and warn about the one
+  // install the warning tells people to perform.
   const durable = path.join(r.env.HOME, 'lib', 'node_modules', 'hypaware', 'bin', 'hypaware.js')
   assert.deepEqual(resolveHookBinPath(r.env, durable), { binPath: durable, ephemeral: false })
+})
+
+// Issue #1619. `npm ci`, a branch switch, or a plain `rm -rf node_modules`
+// deletes a project-local install exactly as npm's prune deletes the `_npx`
+// cache, and the hook that recorded it goes on exiting 0 while `cwd` and
+// `git_branch` capture stops. The walk already refuses these directories on
+// the `$PATH` side; before this the entrypoint check did not, so the path was
+// baked in flagged durable and nothing warned.
+test('a project-local entrypoint resolves to the installed CLI, not the project tree', async (t) => {
+  const r = await rig({ installedBin: true })
+  t.after(() => r.cleanup())
+
+  const resolved = resolveHookBinPath(r.env, r.projectCliPath)
+
+  assert.deepEqual(resolved, { binPath: r.globalBin, ephemeral: false })
+})
+
+test('with no CLI installed the project-local path is returned, flagged ephemeral', async (t) => {
+  const r = await rig({ installedBin: false })
+  t.after(() => r.cleanup())
+
+  // Same trade as the npx case: capture that works until the next `npm ci`
+  // beats no capture at all, so the path is still recorded and what changes is
+  // that the operator is told what will break it.
+  assert.deepEqual(resolveHookBinPath(r.env, r.projectCliPath), {
+    binPath: r.projectCliPath,
+    ephemeral: true,
+  })
+})
+
+test('a HypAware clone is not a project-local install', async (t) => {
+  const r = await rig({ installedBin: true })
+  t.after(() => r.cleanup())
+
+  // `node <clone>/bin/hypaware.js` is the normal development entrypoint and
+  // carries a `package.json` of its own. It is not under a `node_modules`, so
+  // it stays durable and a developer never gets the warning - and, more to the
+  // point, never has their hook silently repointed at some other copy.
+  const clone = path.join(r.env.HOME, 'src', 'hypaware', 'bin', 'hypaware.js')
+  assert.deepEqual(resolveHookBinPath(r.env, clone), { binPath: clone, ephemeral: false })
 })
 
 test('an explicit binary override wins over both', async (t) => {
