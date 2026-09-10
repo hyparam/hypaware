@@ -246,6 +246,124 @@ test('a marker already using managed.hook_entries stays a no-op', async () => {
   })
 })
 
+test('attach re-attaches a marker whose hook command runs the CLI from the npm _npx cache', async () => {
+  await withTempHome(async (home) => {
+    // Issue #1607. Everything the already-attached branch looks at is current:
+    // the live port, the OTEL mode, the current schema token, `hook_entries`
+    // under its current name. Only the recorded hook command is rotten - it
+    // runs the CLI out of npm's `_npx` cache, which npm prunes on its own
+    // schedule, after which the hook exits 0 in silence and `cwd` /
+    // `git_branch` capture is dead. The documented repair (install a durable
+    // CLI, re-attach) has to actually reach the adapter.
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        _hypaware: {
+          version: '2.0.0',
+          port: 55555,
+          mode: 'otel',
+          settings_schema: 4,
+          managed: {
+            env: {},
+            hook_entries: [
+              {
+                event: 'SessionStart',
+                command: '/home/u/.npm/_npx/9a1f0c2b/node_modules/.bin/hypaware claude-hook session-context --state-file /s',
+              },
+            ],
+          },
+        },
+      })
+    )
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx, stdout, stderr } = makeCtx({ home, attachCalls })
+
+    const code = await runAttach(['claude'], ctx)
+
+    assert.equal(code, 0, stderr.text())
+    assert.equal(attachCalls.length, 1, 'an _npx hook command must re-attach, not no-op')
+    assert.equal(attachCalls[0].endpoint, 'http://127.0.0.1:55555')
+    assert.doesNotMatch(stdout.text(), /already attached/)
+  })
+})
+
+test('an _npx hook command is drift even when the path is shell-quoted', async () => {
+  await withTempHome(async (home) => {
+    // The adapter single-quotes a bin path holding anything outside its safe
+    // set, so the probe has to read the quoted form too or a home with a space
+    // in it silently keeps its rotten hook.
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        _hypaware: {
+          version: '2.0.0',
+          port: 55555,
+          mode: 'otel',
+          settings_schema: 4,
+          managed: {
+            env: {},
+            hook_entries: [
+              { event: 'SessionStart', command: `'/home/u b/.npm/_npx/9a1f0c2b/node_modules/.bin/hypaware' claude-hook classify-cwd` },
+            ],
+          },
+        },
+      })
+    )
+
+    const descriptor = /** @type {any} */ ({
+      name: 'claude',
+      attachProbe: { format: 'json', settings_file: '.claude/settings.json', marker_key: '_hypaware' },
+    })
+    const probe = await probeClientAttachFromDescriptor({ descriptor, homeDir: home, env: {} })
+
+    assert.equal(probe.attached, true)
+    assert.equal(probe.markerFormatStale, true)
+  })
+})
+
+test('a durable absolute hook command is not drift, so attach still fast-paths', async () => {
+  await withTempHome(async (home) => {
+    // The guard on the fix: a machine attached from an installed CLI must keep
+    // its no-op exit. Re-writing every settings.json on every `hyp client
+    // attach claude` would be the regression.
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        _hypaware: {
+          version: '2.0.0',
+          port: 55555,
+          mode: 'otel',
+          settings_schema: 4,
+          managed: {
+            env: {},
+            hook_entries: [
+              {
+                event: 'SessionStart',
+                command: '/usr/local/lib/node_modules/hypaware/bin/hypaware.js claude-hook session-context --state-file /s',
+              },
+              { event: 'SessionStart', command: '/usr/local/lib/node_modules/hypaware/bin/hypaware.js claude-hook classify-cwd' },
+            ],
+          },
+        },
+      })
+    )
+    seedDaemonRun(home, 55555)
+    /** @type {Array<{ name: string, endpoint: string }>} */
+    const attachCalls = []
+    const { ctx, stdout } = makeCtx({ home, attachCalls })
+
+    const code = await runAttach(['claude'], ctx)
+
+    assert.equal(code, 0)
+    assert.deepEqual(attachCalls, [], 'a durable hook command is not drift')
+    assert.match(stdout.text(), /already attached/)
+  })
+})
 test('a schema-2 marker re-attaches into the scalar-safe backup format', async () => {
   await withTempHome(async (home) => {
     mkdirSync(path.join(home, '.claude'), { recursive: true })

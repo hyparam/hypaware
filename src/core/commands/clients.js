@@ -399,7 +399,9 @@ async function runClientLifecycle(action, argv, ctx) {
             //
             // The marker format is the same shape of drift as the mode. A
             // pre-schema marker can carry a reserved `hooks` key in managed
-            // entries or malformed-value backups while still sitting at the
+            // entries or malformed-value backups, and a marker written under
+            // `npx hypaware` records a hook command that runs the CLI from a
+            // cache npm prunes (issue #1607), all while still sitting at the
             // live port with the right mode and assets, so nothing else here
             // can see it. Re-attach rewrites the marker, which is the whole
             // migration, and it is gated on a live endpoint for the same reason

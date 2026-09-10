@@ -28,6 +28,7 @@ import { detectShadowedPlugins } from '../runtime/boot.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
+import { isNpxBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
@@ -3011,6 +3012,81 @@ function markerHasRetiredHookField(markerObj) {
 }
 
 /**
+ * Whether the marker's managed hook commands run the CLI out of npm's `_npx`
+ * cache.
+ *
+ * The same class of drift as the retired field above, one field over: the
+ * marker records what today's attach would refuse to write. A hook command
+ * baked under `npx hypaware` names a cache npm prunes on its own schedule,
+ * and the hook contract is exit-0-and-be-silent, so once it is pruned `cwd` /
+ * `git_branch` capture stops with nothing to show for it. Issue #1602 stopped
+ * attach writing that path, but only for an attach that reaches the adapter,
+ * and this marker is current in every other key (port, mode, schema token,
+ * asset set), so the repair short-circuits and changes nothing (issue #1607).
+ *
+ * The predicate is `_npx` and nothing else. A recorded path that merely no
+ * longer resolves is left alone: a CLI moves for ordinary reasons (a node
+ * version switch, a prefix change) and "gone from disk" cannot tell that apart
+ * from a pruned cache, whereas an `_npx` path is npm-owned and prune-scheduled
+ * by construction, whether or not it is still there today.
+ *
+ * With no CLI installed anywhere the re-attach writes the cache path again,
+ * because it is the only entrypoint there is, and takes the adapter's existing
+ * ephemeral-hook warning branch - which is the point, since an already-attached
+ * user is exactly who never saw that warning.
+ *
+ * @param {Record<string, unknown>} markerObj
+ * @param {NodeJS.ProcessEnv | undefined} env
+ * @returns {boolean}
+ */
+function markerRecordsEphemeralHookBin(markerObj, env) {
+  const managed = markerObj.managed
+  if (!isPlainObject(managed)) return false
+  const entries = managed.hook_entries
+  if (!Array.isArray(entries)) return false
+  for (const entry of entries) {
+    if (!isPlainObject(entry)) continue
+    const bin = hookCommandBin(entry.command)
+    if (bin !== undefined && isNpxBinPath(bin, env)) return true
+  }
+  return false
+}
+
+/**
+ * The CLI path a recorded hook command runs, in the two forms the adapter
+ * shell quoting produces: bare when the path holds only safe characters,
+ * single-quoted (an embedded quote written `'\''`) otherwise. Anything else,
+ * an empty command or an unterminated quote, is `undefined`: no claim, the
+ * same answer as a path that is not from a cache.
+ *
+ * @param {unknown} command
+ * @returns {string | undefined}
+ */
+function hookCommandBin(command) {
+  if (typeof command !== 'string') return undefined
+  const text = command.trimStart()
+  if (text === '') return undefined
+  if (text[0] !== "'") {
+    const end = text.indexOf(' ')
+    return end === -1 ? text : text.slice(0, end)
+  }
+  let out = ''
+  for (let i = 1; i < text.length; i++) {
+    if (text[i] !== "'") {
+      out += text[i]
+      continue
+    }
+    if (text.startsWith("'\\''", i)) {
+      out += "'"
+      i += 3
+      continue
+    }
+    return out
+  }
+  return undefined
+}
+
+/**
  * Probe on-disk client settings using the descriptor's attach_probe
  * definition. Supports JSON (marker key lookup) and TOML (header string
  * search) formats. Returns a probe result without importing any client
@@ -3075,7 +3151,8 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
         // the known-invalid field.
         ...(descriptor.name === 'claude' &&
           (markerHasRetiredHookField(markerObj) ||
-            markerObj.settings_schema !== CLAUDE_SETTINGS_MARKER_SCHEMA)
+            markerObj.settings_schema !== CLAUDE_SETTINGS_MARKER_SCHEMA ||
+            markerRecordsEphemeralHookBin(markerObj, env))
           ? { markerFormatStale: true }
           : {}),
       }
