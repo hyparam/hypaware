@@ -292,3 +292,78 @@ test('a successful refresh leaves no stage beside the asset', async () => {
   await refresh(h, regs)
   assert.deepEqual(await fs.readdir(path.join(h.home, '.claude/skills')), ['alpha'])
 })
+
+test('a refresh killed between the two renames restores the copy it stepped aside', async () => {
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+
+  // Exactly what a SIGKILL between `fs.rename(dest, old)` and
+  // `fs.rename(stage, dest)` leaves behind. Read as `missing`, the copy would
+  // be skipped on this boot and every boot after it, and the installed skill
+  // would be gone for good.
+  await fs.rename(dest, `${dest}.hyp-refresh-old`)
+  await fs.writeFile(path.join(src, 'SKILL.md'), 'v2', 'utf8')
+
+  const out = await refresh(h, regs)
+  assert.deepEqual(out.skipped, [])
+  assert.equal(out.refreshed.length, 1)
+  assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), 'v2')
+  assert.deepEqual(await fs.readdir(path.dirname(dest)), ['alpha'], 'nothing is left beside the asset')
+})
+
+test('a destination the user removed is still not put back when no stage sits beside it', async () => {
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+  await fs.rm(dest, { recursive: true })
+
+  const out = await refresh(h, regs)
+  assert.equal(out.skipped[0]?.reason, 'missing')
+  assert.equal(await exists(dest), false)
+})
+
+test('a stage left by a crashed refresh is cleared rather than accumulating', async () => {
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+
+  // A tree left mid-copy by an earlier boot. It carries a complete SKILL.md,
+  // so left in place the client would load it as a second, stale copy of the
+  // same skill and no prune could ever remove it (no ledger record names it).
+  await fs.mkdir(`${dest}.hyp-refresh`, { recursive: true })
+  await fs.writeFile(path.join(`${dest}.hyp-refresh`, 'SKILL.md'), 'half-written', 'utf8')
+  await fs.writeFile(path.join(src, 'SKILL.md'), 'v2', 'utf8')
+
+  const out = await refresh(h, regs)
+  assert.equal(out.refreshed.length, 1)
+  assert.deepEqual(await fs.readdir(path.dirname(dest)), ['alpha'])
+  assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), 'v2')
+})
+
+test('a copy that cannot be read is not reported to the user as one they edited', async () => {
+  if (process.getuid?.() === 0) return // root reads anything
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+
+  await fs.writeFile(path.join(src, 'SKILL.md'), 'v2', 'utf8')
+  await fs.chmod(path.join(dest, 'SKILL.md'), 0o000)
+  let out
+  try {
+    out = await refresh(h, regs)
+  } finally {
+    await fs.chmod(path.join(dest, 'SKILL.md'), 0o644)
+  }
+  assert.equal(out.skipped[0]?.reason, 'unreadable')
+  assert.match(out.stderr, /could not be read/)
+  assert.doesNotMatch(out.stderr, /has been edited/)
+})

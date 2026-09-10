@@ -84,7 +84,12 @@ changed, deciding each one by the install ledger.**
   renamed into place, so a copy that fails partway (a source tree half
   replaced by the update, a read error inside it) leaves the installed copy
   as it was. The install path's remove-then-copy would leave an empty
-  directory, which the next boot reads as a user edit and never repairs. A
+  directory, which the next boot reads as a user edit and never repairs. The
+  swap of a directory is two renames, so there is a window in which the
+  destination does not exist; the staging names are fixed rather than
+  process-scoped and the pass restores the stepped-aside copy before it reads
+  an absent destination as one the user removed, so a refresh killed inside
+  the window costs a boot and not the installed skill. A
   source that cannot be read at all is not a changed source: nothing is
   staged. Either failure is reported and the ledger record is carried
   unchanged, so the copy still sitting there stays prunable later.
