@@ -219,11 +219,14 @@ rather than deletes. Your transcript stays on disk, and nothing records which
 turns were skipped, so whatever ends the hold imports those turns too instead
 of only recording from that moment on. Two things end it: a daemon restart,
 after which the next scheduled read takes the conversation you hid, and
-`hyp session unignore` followed by more work in the same session, which
-changes the transcript and lets the next read take all of it. If what you want
-is for those turns never to be recorded, mark the directory instead: that
-survives a restart. If they have already been recorded, delete them with
-`hyp privacy purge --session <id>` below.
+`hyp session unignore`, after which the next scheduled read takes the hidden
+turns along with anything new. Having done no further work is not a second
+line of defence: it holds those turns back only where the daemon already read
+the transcript, unchanged, while the hold was on, so unignoring before the
+next read releases them anyway. If what you want is for those turns never to
+be recorded, mark the directory instead: that survives a restart. If they have
+already been recorded, delete them with `hyp privacy purge --session <id>`
+below.
 
 ## Deleting what was already recorded
 
