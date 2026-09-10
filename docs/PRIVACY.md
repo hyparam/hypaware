@@ -206,6 +206,15 @@ recorders' sets), and a fork (`claude --fork-session`, `codex fork`), which
 mints a new session id the opt-out no longer covers. A plain resume reuses
 the id.
 
+Claude Code writes its own transcript to `~/.claude/projects` whatever you
+tell HypAware, and the daemon re-reads that tree on a schedule. While the
+daemon holds the id, that scheduled import skips the session too, so the
+opt-out is not undone five minutes later. A re-import you ask for yourself
+(`hyp backfill claude`) runs in its own process and does not see the drop set,
+so it imports the session from the transcript: that is the deliberate
+re-import the in-memory design leaves to you. To keep a directory's sessions
+out for good, mark the directory instead.
+
 ## Deleting what was already recorded
 
 `hyp privacy purge` permanently deletes rows from this machine's local cache. It

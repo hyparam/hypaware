@@ -127,6 +127,16 @@ export async function activate(ctx) {
   // where the file never exists.
   const localOnlyList = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
 
+  // One per-session drop set for the whole plugin: the telemetry listener
+  // hosts the control route that writes it (LLP 0256) and the transcript
+  // backfill reads it, so `hyp session ignore` binds every lane this process
+  // runs. Memory only, and a daemon restart drops it, which is what keeps
+  // LLP 0067's ephemerality contract intact.
+  // @ref LLP 0395#sweep-consults-the-set [implements]: one set per activation,
+  // shared by the recorder and the scheduled sweep
+  /** @type {Set<string>} */
+  const ignoredSessions = new Set()
+
   gateway.registerExchangeProjector(
     createClaudeExchangeProjector({
       homeDir,
@@ -160,6 +170,7 @@ export async function activate(ctx) {
       pluginName: PLUGIN_NAME,
       localOnlyListPath: localOnlyList,
       config: ctx.config,
+      ignoredSessions,
     })
   )
 
@@ -449,6 +460,7 @@ export async function activate(ctx) {
         // @ref LLP 0254#policy-inline [implements]: the machine-local list is in
         //   scope at ingest, not only the committable dotfile
         localOnlyListPath: localOnlyList,
+        ignoredSessions,
       }),
     })
   } else {

@@ -91,7 +91,10 @@ const SPOOL_SWEEP_INTERVAL_MS = 60_000
  *   clientName: string,
  *   stateFile: string,
  *   localOnlyListPath?: string,
- * }} deps
+ *   ignoredSessions?: Set<string>,
+ * }} deps `ignoredSessions` is the plugin's one drop set (`activate()`), so
+ * the transcript backfill reads the object this listener's control route
+ * writes. Absent, the listener keeps a set of its own.
  */
 export function createStartClaudeTelemetrySource(deps) {
   /**
@@ -125,11 +128,16 @@ export function createStartClaudeTelemetrySource(deps) {
     // dies with the process, written through the identical control route and
     // matched verbatim against the `session.id` the events carry (LLP 0066
     // R5). Nothing about it touches disk.
+    //
+    // Owned by `activate()`, not by this `start()`, for the reason LLP 0067
+    // #set gives for putting the gateway's set on `GatewayState`: a source
+    // restart must not silently re-enable recording mid-session. It is also
+    // what lets the transcript sweep read what this route writes.
     // @ref LLP 0256#in-memory-only [implements]: no new on-disk contract; the
     //   durable expressions of the same intent stay `.hypignore` and the
     //   machine-local list
     /** @type {Set<string>} */
-    const ignoredSessions = new Set()
+    const ignoredSessions = deps.ignoredSessions ?? new Set()
 
     // The spool exists whether or not this daemon was up when attach ran:
     // Claude Code starts writing bodies the moment a session launches with
