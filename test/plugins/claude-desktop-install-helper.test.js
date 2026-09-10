@@ -11,6 +11,12 @@ import {
   HELPER_BASENAME,
   activate,
 } from '../../hypaware-core/plugins-workspace/claude-desktop/src/index.js'
+import { resolveHypBin } from '../../hypaware-core/plugins-workspace/claude-desktop/src/inputs.js'
+import { isNpxBinPath } from '../../src/core/cli/global_install.js'
+
+/**
+ * @import { TestContext } from 'node:test'
+ */
 
 /**
  * Minimal activation context: capture registered commands and provide
@@ -51,14 +57,15 @@ function fakeCtx(opts) {
  * @param {(argv: string[], cmdCtx: any) => Promise<number>} run
  * @param {string[]} argv
  * @param {any} [config]
+ * @param {NodeJS.ProcessEnv} [env]
  */
-async function invoke(run, argv, config) {
+async function invoke(run, argv, config, env) {
   let out = ''
   let err = ''
   const code = await run(argv, {
     stdout: { write: (s) => { out += s } },
     stderr: { write: (s) => { err += s } },
-    env: {},
+    env: env ?? {},
     config: config ?? { version: 2, plugins: [{ name: '@hypaware/ai-gateway' }] },
   })
   return { code, out, err }
@@ -140,4 +147,227 @@ test('activation succeeds without a credential and legacy commands explain the o
   assert.equal(result.code, 1)
   assert.match(result.err, /managed-profile commands require @hypaware\/claude-account/)
   assert.match(result.err, /scheduled transcript capture does not/)
+})
+
+/**
+ * The generated wrapper must never be pinned to npm's `_npx` cache.
+ *
+ * `install-helper` bakes an absolute CLI path into `credential-helper.sh`, and
+ * that path is the running CLI's own entry script. Under `npx hypaware` the
+ * running CLI *is* the npx cache checkout, so the wrapper records
+ * `~/.npm/_npx/<hash>/...`, which npm prunes on its own schedule. Desktop runs
+ * the wrapper outside any shell profile and reads its stdout, so a pruned cache
+ * surfaces as a credential-helper failure inside the app with nothing here
+ * reporting it (issue #1604, the sibling of #1602).
+ *
+ * Only a real `npx` run can put this package inside `_npx`, so these lay out a
+ * real `$PATH` the way npx lays one out - its own shim directory in front,
+ * anything durable behind it - and present the cache entrypoint as
+ * `process.argv[1]`, which is where `install-helper` reads the running CLI.
+ */
+
+/** @param {string} file */
+function writeExecutable(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, '#!/bin/sh\nexit 0\n')
+  fs.chmodSync(file, 0o755)
+}
+
+/**
+ * A temp root standing in for a machine running `npx hypaware`, plus the state
+ * dir the wrapper is written into.
+ *
+ * `installedBin` picks what sits at the global bin name: `npm install -g`
+ * links it onto the package's own `bin/hypaware.js`, which is what makes the
+ * wrapper's `exec <node> <hypBin>` work at all, while pnpm, volta and asdf put
+ * a shell script or a compiled shim there under the same name.
+ *
+ * `shimAhead` adds a second `hypaware`, a bare shell script, in its own `$PATH`
+ * directory in FRONT of the global bin. That is not a contrived ordering: pnpm,
+ * volta and asdf all install by putting their own directory ahead of
+ * `/usr/local/bin`, so on a machine carrying both, the shim is what a `$PATH`
+ * walk meets first and the durable install is what it meets second.
+ *
+ * @param {{ installedBin?: boolean | 'shim' | 'mjs', shimAhead?: boolean }} [opts]
+ */
+function npxRig(opts = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-bin-'))
+
+  const npxRoot = path.join(root, '.npm', '_npx', 'a1b2c3d4')
+  const npxCliPath = path.join(npxRoot, 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+  writeExecutable(npxCliPath)
+  writeExecutable(path.join(npxRoot, 'node_modules', '.bin', 'hypaware'))
+
+  const globalBinDir = path.join(root, 'npm-global', 'bin')
+  const globalBin = path.join(globalBinDir, 'hypaware')
+  if (opts.installedBin === false) fs.mkdirSync(globalBinDir, { recursive: true })
+  else if (opts.installedBin === 'shim') writeExecutable(globalBin)
+  else {
+    const entry = opts.installedBin === 'mjs' ? 'hypaware.mjs' : 'hypaware.js'
+    const linkTarget = path.join(root, 'npm-global', 'lib', 'node_modules', 'hypaware', 'bin', entry)
+    writeExecutable(linkTarget)
+    fs.mkdirSync(globalBinDir, { recursive: true })
+    fs.symlinkSync(linkTarget, globalBin)
+  }
+
+  const shimDir = path.join(root, 'pnpm-ish')
+  const shimBin = path.join(shimDir, 'hypaware')
+  if (opts.shimAhead) writeExecutable(shimBin)
+
+  return {
+    stateDir: root,
+    npxCliPath,
+    globalBin,
+    shimBin,
+    cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+    env: {
+      HOME: root,
+      npm_config_cache: path.join(root, '.npm'),
+      PATH: [
+        path.join(npxRoot, 'node_modules', '.bin'),
+        ...(opts.shimAhead ? [shimDir] : []),
+        globalBinDir,
+      ].join(path.delimiter),
+    },
+  }
+}
+
+/**
+ * Run `install-helper` with `process.argv[1]` pointed at `entry`, which is the
+ * only seam that decides which CLI the wrapper records.
+ *
+ * @param {TestContext} t
+ * @param {{ stateDir: string, env: NodeJS.ProcessEnv, cleanup: () => void }} rig
+ * @param {string} entry
+ */
+async function runInstallHelperWithEntry(t, rig, entry) {
+  const realArgv1 = process.argv[1]
+  process.argv[1] = entry
+  t.after(() => { process.argv[1] = realArgv1 })
+  t.after(() => rig.cleanup())
+
+  const { ctx, commands } = fakeCtx({ stateDir: rig.stateDir, mode: 'subscription' })
+  await activate(ctx)
+  const result = await invoke(
+    commands.get('client claude-desktop install-helper').run,
+    [],
+    undefined,
+    rig.env,
+  )
+  return { ...result, body: fs.readFileSync(path.join(rig.stateDir, HELPER_BASENAME), 'utf8') }
+}
+
+test('the generated wrapper records the installed CLI, not the npx cache path', async (t) => {
+  const rig = npxRig({ installedBin: true })
+  assert.equal(isNpxBinPath(rig.npxCliPath, rig.env), true, 'rig did not build an npx entrypoint')
+
+  const { code, err, body } = await runInstallHelperWithEntry(t, rig, rig.npxCliPath)
+
+  assert.equal(code, 0)
+  assert.ok(
+    body.includes(rig.globalBin),
+    `wrapper does not run the installed CLI: ${body}`,
+  )
+  assert.ok(
+    !body.includes('_npx'),
+    `wrapper was pinned to the npx cache: ${body}`,
+  )
+  assert.equal(err, '', 'a durable path is not worth warning about')
+})
+
+test('with no CLI installed the wrapper still works, and says what will break it', async (t) => {
+  const rig = npxRig({ installedBin: false })
+
+  const { code, err, body } = await runInstallHelperWithEntry(t, rig, rig.npxCliPath)
+
+  // A wrapper that works until npm prunes the cache beats no wrapper at all,
+  // so the path is still written. What changes is that it is no longer silent.
+  assert.equal(code, 0)
+  assert.ok(body.includes(fs.realpathSync(rig.npxCliPath)))
+  assert.match(err, /npx cache/)
+  assert.match(err, /npm install -g hypaware/)
+})
+
+test('a $PATH entry node cannot run is declined, not recorded as durable', async (t) => {
+  // pnpm, volta and asdf all put a shell script or a compiled shim at the
+  // global bin name. The wrapper runs `exec <node> <hypBin>`, so recording one
+  // writes a wrapper that fails on its very first run - strictly worse than
+  // the npx path it would displace, which works until npm prunes the cache.
+  // So the walk declines it and the machine keeps the path plus the warning.
+  const rig = npxRig({ installedBin: 'shim' })
+
+  const { code, err, body } = await runInstallHelperWithEntry(t, rig, rig.npxCliPath)
+
+  assert.equal(code, 0)
+  assert.ok(!body.includes(rig.globalBin), `wrapper records a shim node cannot run: ${body}`)
+  assert.ok(body.includes(fs.realpathSync(rig.npxCliPath)))
+  assert.match(err, /npx cache/)
+})
+
+test('a shim in front of a durable install does not end the search', async (t) => {
+  // The shim test above only proves a shim is not recorded. It is not enough:
+  // the walk stops at the first `hypaware` it meets, so testing runnability on
+  // that single answer throws away the search instead of continuing it. pnpm,
+  // volta and asdf all put their directory ahead of `/usr/local/bin`, so on a
+  // machine carrying both, the shim IS what the walk meets first - and the
+  // operator is then told to run `npm install -g hypaware`, which is precisely
+  // what put the durable install one entry behind it. Re-running never helps.
+  const rig = npxRig({ installedBin: true, shimAhead: true })
+
+  const { code, err, body } = await runInstallHelperWithEntry(t, rig, rig.npxCliPath)
+
+  assert.equal(code, 0)
+  assert.ok(!body.includes(rig.shimBin), `wrapper records a shim node cannot run: ${body}`)
+  assert.ok(body.includes(rig.globalBin), `the durable install behind the shim was missed: ${body}`)
+  assert.ok(!body.includes('_npx'), `wrapper was pinned to the npx cache: ${body}`)
+  assert.equal(err, '', 'a durable path was found, so there is nothing to repair')
+})
+
+test('the runnability test tracks what node loads, not this package\'s bin name', async (t) => {
+  // The check asks whether `node <path>` can run the target, so it accepts
+  // every extension node loads and not just the one `package.json` names
+  // today. Pinned to `hypaware.js`, a later rename of the bin entry would put
+  // every npx-run install back on an ephemeral wrapper, silently, with the
+  // suite still green - the failure mode this whole PR exists to remove.
+  const rig = npxRig({ installedBin: 'mjs' })
+
+  const { code, err, body } = await runInstallHelperWithEntry(t, rig, rig.npxCliPath)
+
+  assert.equal(code, 0)
+  assert.ok(body.includes(rig.globalBin), `an .mjs entry was declined: ${body}`)
+  assert.equal(err, '')
+})
+
+test('an ordinary durable install is recorded as it stands', async (t) => {
+  // The one regression that would be worse than the bug: repointing a working
+  // install at some other `hypaware` that happens to be on `$PATH`.
+  const rig = npxRig({ installedBin: true })
+  const durable = path.join(rig.stateDir, 'opt', 'hypaware', 'bin', 'hypaware.js')
+  writeExecutable(durable)
+
+  const { code, err, body } = await runInstallHelperWithEntry(t, rig, durable)
+
+  assert.equal(code, 0)
+  assert.ok(body.includes(fs.realpathSync(durable)), `wrapper was repointed: ${body}`)
+  assert.ok(!body.includes(rig.globalBin), `wrapper was repointed at ${rig.globalBin}`)
+  assert.equal(err, '')
+})
+
+test('an explicit binary override wins over both', (t) => {
+  const rig = npxRig({ installedBin: true })
+  t.after(() => rig.cleanup())
+  const cases = [
+    { override: { HYP_BIN: '/custom/hyp' }, expected: '/custom/hyp' },
+    { override: { HYPAWARE_BIN: '/preferred/hyp', HYP_BIN: '/custom/hyp' }, expected: '/preferred/hyp' },
+    // The emptiness test above trims, so the value taken has to trim too:
+    // ` /custom/hyp` is not absolute, and `path.resolve` would silently anchor
+    // it to whatever directory install-helper ran in.
+    { override: { HYP_BIN: '  /custom/hyp  ' }, expected: '/custom/hyp' },
+  ]
+  for (const { override, expected } of cases) {
+    assert.deepEqual(resolveHypBin({ ...rig.env, ...override }, rig.npxCliPath), {
+      binPath: path.resolve(expected),
+      ephemeral: false,
+    })
+  }
 })
