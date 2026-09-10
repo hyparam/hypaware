@@ -306,8 +306,9 @@ export async function activate(ctx) {
             // to compare the marker's mode, format and port and never the
             // recorded hook command, so the repair had to name a detach first;
             // the probe now reads a hook command this predicate calls ephemeral
-            // - the `_npx` cache or a project's `node_modules` alike - as marker
-            // drift (issue #1607), so the re-run reaches this adapter and
+            // - the `_npx` cache, and any `node_modules` tree with a manifest
+            // beside it, a pnpm or yarn global root included (issue #1625) - as
+            // marker drift (issue #1607), so the re-run reaches this adapter and
             // rewrites the command. Narrowing either side reopens #1607 for
             // whichever tree the two stop agreeing on.
             if (hookBin.ephemeral) {
