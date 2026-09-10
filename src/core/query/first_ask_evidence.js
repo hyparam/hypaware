@@ -539,6 +539,7 @@ export function askInstructions(routes, meta) {
   const fileNotes = {
     'triage.txt': 'the four signals, the record size, the rule as applied, and the route. Read first.',
     'session_days_summary.txt': 'context tokens per output token for single-day sessions, first days, and later days of multi-day sessions, plus the excess on later days.',
+    'worst_days.tsv': 'the reopened days that cost the most, each with what was typed first that day. Read this before the two files below; it is the join you would otherwise make by hand.',
     'session_days.tsv': 'one row per session per day: day number, days total, context tokens, output tokens, ratio, tool calls. Context is re-sent every turn, so a high ratio is a session paying to carry history.',
     'day_openers.tsv': 'the first lines typed each day in each session, so you can see what a reopened day was for.',
     'user_lines.tsv': 'every line typed in the window, 200-character cap, with session, date, position, cwd. Read all of it.',
@@ -585,7 +586,7 @@ This is the first thing a person sees after installing, and they will give it ab
 
 Open by saying what you did and what stood out, in your own words: that you looked through the last ${meta.windowDays ?? EVIDENCE_WINDOW_DAYS} days of sessions for ${meta.scope} and the one skill worth adding first. Then the recommendation itself, what the skill does and what phrase triggers it, and why, in a sentence or two. Then the evidence in prose: two or three plain facts with at most one number each, and one real example with its date and what was typed, told as a story rather than a citation. If you skipped something you had to skip, say so in a clause. A short bullet list is fine if it reads better than a paragraph; a table is not.
 
-Then, on its own line, something like "Here's the skill I'd add:", the file path under ~/.claude/skills/, and the exact SKILL.md in a fenced code block, under 30 lines including the front matter.
+Then, on its own line, something like "Here's the skill I'd add:", the file path under ~/.claude/skills/, and the exact SKILL.md in a fenced code block, under 25 lines including the front matter.
 
 Then ask whether to apply it, in one short sentence.
 
@@ -595,7 +596,7 @@ If nothing was over its floor: say what you looked through (sessions and days, f
 
 When the answer is yes: create or edit the file with the Write or Edit tool in that same turn and print the result. Do not ask again.
 
-Under 150 words before the code block.
+Under 120 words before the code block. Read the files once each; do not re-derive with grep what a file already lists.
 `
 }
 
@@ -795,8 +796,28 @@ export function sinkFiles(days, openers) {
     'context_tokens = input + cache_read + cache_write; every token in context is re-sent on every turn.',
     '',
   ].join('\n')
+  // The worst reopened days with what they were opened for, pre-joined:
+  // the reader wants "on the 28th you reopened the report work over a 400
+  // error", and joining two files by hand is the one thing a cold session
+  // spent its minutes on.
+  /** @type {Map<string, string>} */
+  const opener = new Map()
+  for (const r of firstPerDay(openers, 1)) opener.set(`${r.s}\t${r.date}`, oneLine(String(r.line ?? '')))
+  /** @type {{ s: string, date: string, dayNo: number, days: number, ctx: number, outp: number, excess: number, line: string }[]} */
+  const worst = []
+  for (const [s, list] of by) {
+    if (list.length < 2) continue
+    list.forEach((r, j) => {
+      if (j === 0) return
+      const e = num(r.ctx) - base * num(r.outp)
+      if (e <= 0) return
+      worst.push({ s, date: String(r.date), dayNo: j + 1, days: list.length, ctx: num(r.ctx), outp: num(r.outp), excess: e, line: opener.get(`${s}\t${r.date}`) ?? '' })
+    })
+  }
+  worst.sort((a, b) => b.excess - a.excess)
   return [
     { name: 'session_days_summary.txt', content: summary },
+    { name: 'worst_days.tsv', content: toTsv(['session', 'date', 'day_no', 'days_total', 'context_tokens', 'output_tokens', 'ctx_per_out', 'excess_tokens', 'first_line_that_day'], worst.slice(0, 15).map((w) => ({ session: w.s, date: w.date, day_no: w.dayNo, days_total: w.days, context_tokens: w.ctx, output_tokens: w.outp, ctx_per_out: (w.ctx / Math.max(w.outp, 1)).toFixed(0), excess_tokens: Math.round(w.excess), first_line_that_day: w.line }))) },
     { name: 'session_days.tsv', content: out.join('\n') + '\n' },
     { name: 'day_openers.tsv', content: toTsv(['session', 'date', 'i', 'cwd', 'first_lines_that_day'], firstPerDay(openers, 2), (r) => [r.s, r.date, r.i, shortCwd(String(r.cwd ?? '')), r.line]) },
   ]
