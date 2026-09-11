@@ -201,9 +201,12 @@ test('local-fs incremental export: ranged filename, watermark advance, skip-empt
   blobs = await listBlobs(dir)
   assert.deepEqual(blobs, ['all.0-2.jsonl'], 'no second blob written')
 
-  // Tick 3: append a row ⇒ a new blob covering only (2, 5].
+  // Tick 3: append a row ⇒ a new blob covering only (2, 5]. Called with no
+  // options at all, which the progress report must tolerate: the export
+  // contract requires the argument, but reading a field off it is new here,
+  // and a bare read would turn an omitted argument into a failed batch.
   rows.push({ _seq: 5, id: 'c' })
-  const r3 = await sink.exportBatch({ batchId: 'b3', partitions: [partition()] }, {})
+  const r3 = await sink.exportBatch({ batchId: 'b3', partitions: [partition()] }, /** @type {any} */ (undefined))
   assert.equal(r3.partitionsExported, 1)
   blobs = await listBlobs(dir)
   assert.deepEqual(blobs, ['all.0-2.jsonl', 'all.2-5.jsonl'], 'second blob embeds [sinceSeq=2, lastSeq=5]')

@@ -340,17 +340,28 @@ export async function runSync(argv, ctx) {
 export function createSyncProgress(volumes, now = Date.now) {
   let instance = ''
   let rows = 0
-  let started = now()
-  let lastAck = started
+  let startedAt = now()
+  let firstAck = 0
+  let lastAck = startedAt
   /** @type {TickOptions['onProgress']} */
   const update = (name, delta) => {
     if (!delta) {
       instance = name
       rows = 0
-      started = now()
-      lastAck = started
+      startedAt = now()
+      firstAck = 0
+      lastAck = startedAt
       return
     }
+    // The rate is measured from the first acknowledgement, not from the
+    // destination's start. The driver announces a destination before
+    // `discoverReadyPartitions` lists every dataset, flushes every pending
+    // spool and re-discovers, which on a first sync - the run this line exists
+    // for - is often the dominant cost and is paid once rather than per row.
+    // Charging it to the rate made the first ETA, the one the user reads,
+    // arbitrarily pessimistic: 60s of flush ahead of 12,000 rows at 2,000
+    // rows/s reported ~88s for 3.5s of remaining work.
+    if (firstAck === 0) firstAck = now()
     rows += delta.rows
     lastAck = now()
   }
@@ -362,15 +373,22 @@ export function createSyncProgress(volumes, now = Date.now) {
       ? `${groupThousands(rows)}/${groupThousands(total)} rows (${Math.min(99, Math.floor(rows / total * 100))}%)`
       : `${groupThousands(rows)} rows sent`
     const prefix = `${instance}: ${count}`
-    if (rows === 0) return `${prefix} | waiting for progress | ETA unavailable`
+    // Every line that cannot quote an ETA still ticks. `onProgress` is
+    // optional on the export contract and half the shipped sinks never call it
+    // (`@hypaware/s3`, and the table-format sink an iceberg destination
+    // instantiates), so without this their whole export renders one frozen
+    // line - worse than the elapsed seconds it replaced, and the exact "this
+    // has hung" reading the spinner exists to prevent.
+    const waited = Math.floor((now() - startedAt) / 1000)
+    if (rows === 0) return `${prefix} | waiting for progress (${waited}s) | ETA unavailable`
     // Ahead of the stall check, because a finalize is a stall: the last chunk
     // is acknowledged and the export is committing, so no further
     // acknowledgement is coming and a long one would otherwise flip a finished
     // transfer to "99% | waiting for progress" - the one reading that is both
     // alarming and wrong.
     if (rows === total) return `${instance}: ${groupThousands(rows)} rows sent | finalizing...`
-    if (now() - lastAck >= 15_000) return `${prefix} | waiting for progress | ETA unavailable`
-    const seconds = Math.max(1, (now() - started) / 1000)
+    if (now() - lastAck >= 15_000) return `${prefix} | waiting for progress (${waited}s) | ETA unavailable`
+    const seconds = Math.max(1, (now() - firstAck) / 1000)
     const rate = rows / seconds
     if (total === undefined || rows > total) return `${prefix} | ETA unavailable`
     const remaining = Math.max(1, Math.ceil((total - rows) / rate))

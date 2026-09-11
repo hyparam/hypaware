@@ -7,7 +7,7 @@ import { isTty } from './stdio.js'
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
 /**
- * Run `work` behind a one-line elapsed-time spinner.
+ * Run `work` behind a one-line spinner.
  *
  * Exists for the wizard's two long silent waits (the org-config converge
  * after login and the backfill import), where the last thing on screen was
@@ -20,6 +20,14 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  * stable. For a caller whose label restates a line it already printed (the
  * wizard's waits) that output is byte-identical to the pre-spinner run; a
  * caller that printed nothing there (`hyp sync`) gains this one line.
+ *
+ * `status` replaces the elapsed seconds with a line the caller recomputes on
+ * every frame (`hyp sync`'s acknowledged rows and ETA). It is read only on the
+ * animated path, so the caller's `label` is still the whole of what a script
+ * or a log file sees, and a `status` that means to be seen there has to be in
+ * the label too. Whatever it returns must keep saying that time is passing:
+ * this helper exists to stop a pause reading as a hang, and a status that can
+ * sit unchanged for a whole export gives that up.
  *
  * `quietWhenPlain` writes nothing at all on that plain path. It is for a
  * wait sitting in front of the caller's own first output, where the label
@@ -78,12 +86,20 @@ export async function withSpinner(opts, work) {
  * reach; `hyp sync` names a client and a destination in one label, which
  * wraps on any narrow pane.
  *
- * The label is what gives way, never the tail. The animating frame and the
- * elapsed seconds are the whole signal this helper exists to show, and
- * clamping the composed line from the right would drop `(12s)` first, on
- * every pane narrower than the label (about 53 columns for `hyp sync`, 66
- * for a history replay). Slicing is by code point, so a cut never lands
- * inside a surrogate pair.
+ * The label is what gives way first, never the tail. The animating frame and
+ * the suffix are the whole signal this helper exists to show, and clamping the
+ * composed line from the right would drop `(12s)` first, on every pane
+ * narrower than the label (about 53 columns for `hyp sync`, 66 for a history
+ * replay). Slicing is by code point, so a cut never lands inside a surrogate
+ * pair.
+ *
+ * There is a floor to that. A `status` suffix is as long as its caller makes
+ * it (`hyp sync`'s runs to about 44 columns), and once the suffix alone will
+ * not fit, giving up the whole label leaves nothing to give: the last resort
+ * cuts the composed line from the right after all, so a pane under about 48
+ * columns loses the end of `hyp sync`'s ETA. That is the ordering preference
+ * failing, not the invariant - one frame is still one row at every width, with
+ * no wrap and no trail, which is what this function is here to guarantee.
  *
  * Labels are plain text by contract: an escape sequence inside one would be
  * counted here as display columns and could be cut in half, leaving the

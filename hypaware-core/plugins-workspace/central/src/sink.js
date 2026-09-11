@@ -91,10 +91,10 @@ export function createForwardSink(args) {
   return {
     /**
      * @param {ExportBatch} batch
-     * @param {ExportOptions} _opts
+     * @param {ExportOptions} [opts]
      * @returns {Promise<ExportResult>}
      */
-    async exportBatch(batch, _opts) {
+    async exportBatch(batch, opts) {
       if (!Array.isArray(batch?.partitions) || batch.partitions.length === 0) {
         return { status: 'exported', partitionsExported: 0, bytesWritten: 0 }
       }
@@ -168,7 +168,7 @@ export function createForwardSink(args) {
               unsupportedDatasetsUntil,
               nowFn,
               requireWatermark: resolved.registration !== undefined,
-              onProgress: _opts.onProgress,
+              onProgress: opts?.onProgress,
             })
           })
           partitionExports.set(exportKey, pending)

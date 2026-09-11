@@ -25,11 +25,17 @@ test('sync progress estimates from acknowledged rows and resets per destination'
   progress.update('central')
   assert.match(progress.render(), /0\/1,000 rows \(0%\).*ETA unavailable/)
   now = 10_000
+  // The 10s before the first acknowledgement was the driver's dataset
+  // discovery and spool flush, which is paid once rather than per row, so it
+  // is not in the rate.
   progress.update('central', { rows: 250, bytes: 1000 })
-  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~30s')
-  now = 25_000
-  assert.match(progress.render(), /waiting for progress.*ETA unavailable/)
-  progress.update('central', { rows: 750, bytes: 3000 })
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~3s')
+  now = 20_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 500/1,000 rows (50%) | ETA ~10s')
+  now = 35_000
+  assert.match(progress.render(), /waiting for progress \(35s\).*ETA unavailable/)
+  progress.update('central', { rows: 500, bytes: 3000 })
   assert.match(progress.render(), /1,000 rows sent.*finalizing/)
   assert.doesNotMatch(progress.render(), /100%/)
   progress.update('archive')
@@ -37,6 +43,22 @@ test('sync progress estimates from acknowledged rows and resets per destination'
   progress.update('archive', { rows: 2001, bytes: 4000 })
   assert.match(progress.render(), /2,001 rows sent.*ETA unavailable/)
   assert.doesNotMatch(progress.render(), /%/)
+})
+
+test('sync progress keeps ticking for a destination whose sink never reports', () => {
+  let now = 0
+  const volumes = new Map([
+    ['archive', { status: /** @type {const} */ ('counted'), rows: 12_000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('archive')
+  // `onProgress` is optional on the export contract, and half the shipped
+  // sinks never call it: `@hypaware/s3`, and the table-format sink an iceberg
+  // destination instantiates. This one line is then their whole export, so it
+  // has to keep showing that something is still happening.
+  const frames = [0, 37_000, 94_000].map((at) => { now = at; return progress.render() })
+  assert.deepEqual(frames.map((frame) => /\((\d+)s\)/.exec(frame)?.[1]), ['0', '37', '94'])
+  assert.equal(new Set(frames).size, 3, 'a destination that never reports must not render a frozen line')
 })
 
 test('sync progress keeps finalizing through a commit longer than the stall window', () => {
