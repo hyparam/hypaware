@@ -1,4 +1,5 @@
 // @ts-check
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -18,7 +19,7 @@ import { diagnosePlugin } from '../../src/core/plugin_doctor/diagnose.js'
  * @param {string} [args.index] Contents of src/index.js (omit to skip the file).
  */
 async function fixture({ manifest, index }) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'doctor-fix-'))
+  const root = temporaryDirectory('doctor-fix-')
   await fs.writeFile(path.join(root, 'hypaware.plugin.json'), JSON.stringify(manifest, null, 2))
   if (index !== undefined) {
     await fs.mkdir(path.join(root, 'src'), { recursive: true })
@@ -216,7 +217,7 @@ test('invalid semver and missing entrypoint are caught statically', async () => 
 })
 
 test('an invalid manifest short-circuits with manifest_invalid', async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'doctor-fix-'))
+  const root = temporaryDirectory('doctor-fix-')
   await fs.writeFile(path.join(root, 'hypaware.plugin.json'), '{ not valid json')
   const report = await diagnosePlugin(root)
   assert.equal(report.ok, false)
@@ -466,7 +467,7 @@ test('a dry run points HYP_HOME at its throwaway root', async () => {
   // `<HYP_HOME>/exports` from `activate()`: without the redirect, diagnosing a
   // plugin wrote into the caller's real install, and the bundled agreement
   // test did it for the whole workspace on every `npm test`.
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'doctor-home-'))
+  const home = temporaryDirectory('doctor-home-')
   const root = await fixture({
     manifest: baseManifest({ contributes: { commands: [{ name: 'demo run', summary: 'Run the demo' }] } }),
     index:

@@ -1,4 +1,5 @@
 // @ts-check
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -33,7 +34,7 @@ import { anthropicUpstreamPreset } from '../../hypaware-core/plugins-workspace/c
 // @ref LLP 0114#fallback-is-visible [tests]: an idle gateway that was meant to be listening is readable from hyp status, not only from a log line
 
 async function makeHome() {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-idle-'))
+  const hypHome = temporaryDirectory('hyp-status-idle-')
   const stateRoot = path.join(hypHome, 'hypaware')
   await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
   await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify({ version: 2, plugins: [] }) + '\n')
@@ -262,7 +263,7 @@ const VALID_UPSTREAM = { name: 'anthropic', base_url: 'http://127.0.0.1:1', path
  * @returns {Promise<Record<string, unknown>>}
  */
 async function realGatewayDetails(upstreams, state = createGatewayState()) {
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-status-gateway-fixture-'))
+  const hypHome = temporaryDirectory('hyp-status-gateway-fixture-')
   const ctx = /** @type {any} */ ({
     config: { listen: '127.0.0.1:0', upstreams },
     env: { HOME: hypHome, HYP_HOME: hypHome },

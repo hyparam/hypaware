@@ -1,4 +1,5 @@
 // @ts-check
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -1060,7 +1061,7 @@ function fakeCtx(args) {
   let out = ''
   let err = ''
   const listen = args.endpoint ? args.endpoint.replace(/^https?:\/\//, '') : undefined
-  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-session-home-'))
+  const hypHome = temporaryDirectory('hyp-session-home-')
   const ctx = {
     stdout: { write: (/** @type {string} */ s) => { out += s; return true } },
     stderr: { write: (/** @type {string} */ s) => { err += s; return true } },
@@ -1142,7 +1143,7 @@ function dropContext(ignored) {
  * @param {{ file: string, id?: string, noThread?: boolean, sessionId?: unknown, legacy?: boolean, cwd: string, ageMs?: number, type?: string }[]} rollouts
  */
 function tempCodexHome(rollouts) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-home-'))
+  const home = temporaryDirectory('hyp-codex-home-')
   const dir = path.join(home, 'sessions', '2026', '01')
   fs.mkdirSync(dir, { recursive: true })
   for (const r of rollouts) {

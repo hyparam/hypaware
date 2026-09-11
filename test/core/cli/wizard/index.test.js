@@ -1,4 +1,5 @@
 // @ts-check
+import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -32,7 +33,7 @@ function makeBuf() {
 }
 
 async function tmpHome() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-wizard-index-'))
+  return temporaryDirectory('hypaware-wizard-index-')
 }
 
 /**

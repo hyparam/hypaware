@@ -1,4 +1,5 @@
 // @ts-check
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -14,7 +15,7 @@ import { deriveIdentityBase, readCredentials } from '../../src/core/remote/crede
 import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, formatFirstSyncDeadline, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
 
 async function tmpHome() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-login-'))
+  return temporaryDirectory('hyp-login-')
 }
 
 /**
