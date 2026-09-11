@@ -187,6 +187,13 @@ Written acceptance procedures:
   check. Also records that a repeat `hyp github backfill` re-appends by design
   (LLP 0374), so a row-count check is not read as a regression. See
   `docs/ACCEPTANCE.md`.
+- `cursor_editor_cli_capture`: opt-in/manual, needs a real Cursor editor and
+  Cursor CLI. The adapter reads a private, version-specific saved-session
+  format, so only a real client can say whether the recovered rows match what
+  the user saw. Proves editor Agent Chat, interactive CLI and headless CLI
+  independently, plus live hook delivery, WAL-committed recovery, replay
+  stability, and that inherited Claude hooks are not misattributed. See
+  `docs/ACCEPTANCE.md`.
 
 Good acceptance smoke candidates (no written procedure yet):
 
@@ -308,6 +315,7 @@ hyp dev smoke local_only_export_withhold
 hyp dev smoke source_optout_export_withhold
 hyp dev smoke github_local_only_withhold
 hyp dev smoke opencode_capture
+hyp dev smoke cursor_capture
 hyp dev smoke github_local_capture
 hyp dev smoke otel_loopback_capture
 hyp dev smoke local_parquet_export

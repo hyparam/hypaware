@@ -75,6 +75,13 @@ test('inherited Claude hooks neither record context, sweep spool, nor inject cla
     }) })
     assert.equal(effects, 0)
     await assert.rejects(fs.stat(stateFile), { code: 'ENOENT' })
+    // The binary's skip deliberately spares --help, so the handler must too.
+    let usage = ''
+    await runClaudeSessionContextHook(['--help'], /** @type {any} */ ({
+      env: { CURSOR_VERSION: '3.19.19' }, stdout: { write(v) { usage += v } },
+    }), { sweepSpool: /** @type {any} */ (() => { effects++ }) })
+    assert.match(usage, /usage: hyp claude-hook session-context/)
+    assert.equal(effects, 0)
   } finally { await fs.rm(home, { recursive: true, force: true }) }
 })
 

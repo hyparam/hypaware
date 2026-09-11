@@ -2001,6 +2001,13 @@ Record exact editor/CLI versions, OS, config paths and hook settings.
 8. Enable inherited HypAware Claude hooks. Cursor must not append Claude
    context or inject classification instructions. Verify the candidate in
    the actual editor and CLI, not only the environment-guard fixture.
+   Then check the other direction, which the fixture cannot: run attached
+   Claude Code from Cursor's integrated terminal and from a plain terminal,
+   print the hook process environment, and confirm Claude still records
+   session context and still sweeps its body spool in both. The skip keys on
+   `CURSOR_VERSION` alone, so a Cursor shell that exports it would silently
+   disable Claude's own lane. Record whether Cursor exports that variable to
+   terminals it launches.
 9. Measure hook latency, idle CPU, heap over more than 1,024 callbacks, queue
    saturation, large graphs and waiting-spool growth. Confirm bounded retries,
    clean shutdown and no raw payload spool. Billed token usage must remain

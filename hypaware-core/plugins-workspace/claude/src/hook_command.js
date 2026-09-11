@@ -59,13 +59,16 @@ const PLUGIN_NAME = '@hypaware/claude'
  *   subprocess helpers and the real sweep.
  */
 export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
-  // @ref LLP 0399#coexistence: inherited hooks are not Claude activity and
-  // must not write Claude context or run its body-spool maintenance.
-  if (ctx.env.CURSOR_VERSION) return 0
   if (argv.includes('--help') || argv.includes('-h')) {
     ctx.stdout.write('usage: hyp claude-hook session-context --state-file <absolute-path>\n')
     return 0
   }
+
+  // @ref LLP 0399#coexistence: inherited hooks are not Claude activity and
+  // must not write Claude context or run its body-spool maintenance. Below the
+  // help branch, which the binary's own skip also spares, so `--help` still
+  // answers in a Cursor environment.
+  if (ctx.env.CURSOR_VERSION) return 0
 
   // The recording half is already internally fault-tolerant, but it is wrapped
   // here too so the invariant holds structurally: whatever it does, the hook
