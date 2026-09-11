@@ -88,7 +88,7 @@ export async function runAsk(argv, ctx) {
     interactive: isTty(ctx.stdout) && isTty(ctx.stdin),
     ...(hasRows === undefined ? {} : { hasRows }),
     ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
-    prepareEvidence: () => prepareEvidenceFromCtx(ctx),
+    prepareEvidence: (client) => prepareEvidenceFromCtx(ctx, descriptors, client),
   })
   // `no-launcher` and `no-evidence` are the outcomes that are a failed
   // invocation rather than a choice: the user asked for the recommendation and
@@ -101,18 +101,26 @@ export async function runAsk(argv, ctx) {
 /**
  * The recommendation ask's gather (LLP 0398), run in-process against the
  * same runner the overview uses. The evidence lives in one folder under
- * the system temp directory, `<tmpdir>/hypaware/ask/`, rewritten on every
+ * the system temp directory, `<tmpdir>/hypaware-<uid>/ask/` (see
+ * `askDirName`), rewritten on every
  * ask: the client is started inside it, so its transcript label, cwd,
  * and any test file it writes stay out of the person's home directory
  * and out of whatever repo `hyp ask` was typed in. The path is fixed
  * rather than random because Claude Code asks once whether to trust a
  * new folder; a fresh random path would ask on every run.
  *
+ * `client` is the one the wizard is about to start. Its descriptor carries
+ * the skill and agent trees that client actually reads, which is what the
+ * instructions and the on-disk listing name: Codex and OpenCode do not
+ * load `~/.claude/skills`.
+ *
  * @ref LLP 0398#run-directory [implements]: a fixed temp folder owns the ask, not the caller's cwd and not the home directory
  * @param {CommandRunContext} ctx
+ * @param {Map<string, ClientDescriptor>} descriptors
+ * @param {string} client
  * @returns {Promise<FirstAskEvidence | undefined>}
  */
-async function prepareEvidenceFromCtx(ctx) {
+async function prepareEvidenceFromCtx(ctx, descriptors, client) {
   // The same notice sink the first look passes, for the same reason: the
   // runner filters local-only rows whether or not anyone listens, so a
   // withheld row nobody discloses turns `Recorded: N sessions` into a claim
@@ -122,10 +130,12 @@ async function prepareEvidenceFromCtx(ctx) {
   const runner = overviewRunnerFromCtx(ctx, firstLookNoticeSink(ctx.stderr))
   if (!runner || !runner.hasDataset(OVERVIEW_DATASET)) return undefined
   const homeDir = ctx.env.HOME || os.homedir()
+  const descriptor = descriptors.get(client)
   return prepareFirstAskEvidence({
     runner,
     root: path.join(ctx.env.TMPDIR || os.tmpdir(), askDirName(), 'ask'),
     homeDir,
+    ...(descriptor?.skillDir ? { client: { skillDir: descriptor.skillDir, ...(descriptor.agentDir ? { agentDir: descriptor.agentDir } : {}) } } : {}),
     say: (line) => ctx.stdout.write(`${line}\n`),
   })
 }

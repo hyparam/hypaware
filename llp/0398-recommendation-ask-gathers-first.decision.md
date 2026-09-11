@@ -59,7 +59,13 @@ applied to the first ask.
 
 <a id="always-a-skill"></a>**The answer is always one skill.** What the
 person is offered is a SKILL.md they can read, trigger by a phrase they
-already type, and edit. A skill is the most actionable place to start:
+already type, and edit. It goes in the skill tree of the client
+that is about to read the folder, taken from that client's descriptor
+(`skillDir` / `agentDir`): `hyp ask` starts whichever attached client can
+be launched, and Codex and OpenCode do not load `~/.claude/skills`. The
+same descriptor decides which trees `on_disk.txt` lists, or the rule that
+an existing skill is changed rather than duplicated is answered from a
+tree the reader never loads. A skill is the most actionable place to start:
 it lands on the first day, it is visible, and it is the person's own.
 Hooks and settings entries are invisible and fragile; an agent
 definition only matters once the lead picks it; an instruction-file
@@ -105,8 +111,20 @@ days, and the client is told to say how much was recorded and that there
 is not enough yet. A skill proposed from three sessions is a guess.
 
 <a id="human-turns"></a>**User text means human turns, deduplicated.**
-Every query excludes `conversation_source = 'claude_code'`, the OTEL lane
-that duplicates the transcript lane until #1464 is fixed. Every user-text
+Every query excludes `conversation_source = 'claude_code'`, which is how
+the OTEL lane duplicates the transcript lane (#1464; the cross-lane
+settlement landed, but a row that misses the flush-time pass keeps its
+twin). The exclusion is null-safe, because a row with no source label is
+not a duplicate of anything. It is also wider than its name: the live
+gateway stamps `claude_code` on any request whose User-Agent is
+`claude-cli/`, so the filter costs real rows on a machine that has no
+transcript lane at all. It is kept because the transcript sweep runs by
+default beside every Claude attach, and because everything the gather
+counts is counted per session (`count(distinct session_id)`, `min(...)`
+per session) - the duplicate lane changes only the raw `typed` total and
+the 30-call procedure window. A predicate that picks the duplicate rather
+than the label both producers share is the better answer and needs a
+column neither lane carries today. Every user-text
 query keeps only rows that are not sidechains and whose `user_type` is
 null, `external`, or `user`, and drops injected preambles (the AGENTS.md
 block Codex prepends, compaction summaries, skill invocations). The first

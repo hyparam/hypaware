@@ -359,7 +359,7 @@ export async function runWizardFirstAsk(opts) {
         let cwd
         if (chosen.prompt.id === RECOMMEND_PROMPT_ID) {
           try {
-            const evidence = opts.prepareEvidence ? await opts.prepareEvidence() : undefined
+            const evidence = opts.prepareEvidence ? await opts.prepareEvidence(chosen.launcher.client) : undefined
             if (evidence) {
               cwd = evidence.dir
               span.setAttribute('evidence_enough', evidence.enough !== false)

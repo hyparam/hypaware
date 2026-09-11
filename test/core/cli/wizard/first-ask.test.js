@@ -433,6 +433,8 @@ test('runWizardFirstAsk: the recommendation row gathers first and starts the cli
   const spawner = recordingSpawn()
   const chooser = selectReturning('recommend')
   let gathered = 0
+  /** @type {string | undefined} */
+  let askedFor
   const result = await runWizardFirstAsk({
     clients: ['claude'],
     descriptors: descriptors(),
@@ -442,12 +444,17 @@ test('runWizardFirstAsk: the recommendation row gathers first and starts the cli
     resolve: async () => '/usr/local/bin/claude',
     spawnFn: spawner.fn,
     select: chooser.fn,
-    prepareEvidence: async () => {
+    prepareEvidence: async (client) => {
       gathered += 1
+      askedFor = client
       return { dir: '/hyp/ask/20260907T050000Z', from: '2026-08-08', files: ['ASK.md'] }
     },
   })
   assert.equal(gathered, 1)
+  // The gather writes the instructions, and they name a skill tree. Which
+  // tree depends on who is about to read them, so the chosen client has to
+  // reach it: Codex and OpenCode do not load ~/.claude/skills.
+  assert.equal(askedFor, 'claude', 'the client the wizard chose is the one the gather is told about')
   assert.deepEqual(result, { launched: true, client: 'claude', promptId: 'recommend', exitCode: 0 })
   assert.equal(spawner.calls[0].opts.cwd, '/hyp/ask/20260907T050000Z')
   assert.match(spawner.calls[0].args[0], /Read ASK\.md first/)

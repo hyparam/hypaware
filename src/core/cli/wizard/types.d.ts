@@ -718,12 +718,14 @@ export interface RunWizardFirstAskOptions {
   stdin?: NodeJS.ReadableStream
   /**
    * Gathers the recommendation ask's evidence into a run directory and
-   * returns it (LLP 0398). Absent, failing, or returning `undefined`, the
+   * returns it (LLP 0398). Called with the client that is about to read the
+   * folder, so the instructions can name that client's own skill tree
+   * rather than Claude Code's. Absent, failing, or returning `undefined`, the
    * question does not launch at all: a client started on the bare question
    * answers it the cold way, which is the failure the gather exists to
    * remove, so the run reports `no-evidence` and exits non-zero.
    */
-  prepareEvidence?: () => Promise<FirstAskEvidence | undefined>
+  prepareEvidence?: (client: string) => Promise<FirstAskEvidence | undefined>
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream
   /** Test seams; production callers pass none of these. */

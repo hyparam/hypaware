@@ -228,3 +228,47 @@ test('prepareFirstAskEvidence: an empty record writes the not-enough page and ru
   assert.ok(page.includes('Recorded: 0 sessions over 0 session-days.'))
   assert.ok(page.includes('Nothing is typed often enough yet'))
 })
+
+test('evidenceSql: the duplicate-lane exclusion is null-safe', () => {
+  // `conversation_source` is a nullable column, and `NULL <> 'claude_code'`
+  // is NULL, which fails a WHERE. A row with no source label is not a
+  // duplicate of anything, so it belongs in the record.
+  const sql = evidenceSql('2026-08-08')
+  for (const stmt of [sql.record, sql.lines, sql.triggers(['x']), sql.calls(['s1']), sql.replies(['s1'])]) {
+    assert.ok(stmt.includes("(conversation_source is null or conversation_source <> 'claude_code')"), 'a null source is kept')
+  }
+})
+
+test('commandHeads: a call whose command fell outside the args slice is named by its tool, not by raw JSON', () => {
+  // The SQL cuts `tool_args` at 160 characters, so a call whose JSON puts a
+  // long `description` first loses `command` off the end. The head must not
+  // become the truncated blob: it never reads as a step, and it prints the
+  // person's own description text into the report.
+  const args = JSON.stringify({ description: 'y'.repeat(150), command: 'gh pr create --title x' }).slice(0, 160)
+  const [head] = commandHeads([{ session_id: 's1', tool_name: 'Bash', args }])
+  assert.equal(head.head, 'Bash')
+  assert.ok(!head.head.includes('yyy'), 'no JSON fragment, and no description text, in the head')
+})
+
+test('askInstructions and onDiskListing name the tree the reading client actually loads', async () => {
+  const codex = { skillDir: '.codex/skills' }
+  assert.ok(askInstructions({ scope: 'this machine', client: codex }).includes('~/.codex/skills/<name>/SKILL.md'))
+  assert.ok(!askInstructions({ scope: 'this machine', client: codex }).includes('~/.claude/skills/<name>'))
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  await fsp.mkdir(path.join(home, '.codex', 'skills', 'release'), { recursive: true })
+  const text = await onDiskListing({ homeDir: home, client: codex })
+  assert.ok(text.includes('## ~/.codex/skills (name: what it is for)\nrelease'))
+  assert.ok(!text.includes('agents (name: what it is for)'), 'a client with no agent tree gets no agents section')
+})
+
+test('onDiskListing: the 200-entry cap takes the first 200 by name, not by directory order', async () => {
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  const names = Array.from({ length: 210 }, (_, i) => `skill-${String(i).padStart(3, '0')}`)
+  const text = await onDiskListing({
+    homeDir: home,
+    readdir: /** @type {any} */ (async () => [...names].reverse()),
+    readFile: async () => { throw new Error('none') },
+  })
+  assert.ok(text.includes('skill-000'), 'the sorted head is listed whatever order the filesystem returned')
+  assert.ok(!text.includes('skill-209'), 'the sorted tail is what the cap drops')
+})
