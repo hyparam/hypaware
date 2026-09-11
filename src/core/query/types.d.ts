@@ -256,7 +256,4 @@ export interface FirstAskEvidence {
   /** Whether the record cleared RECORD_FLOOR; false means the answer stops at "not enough yet". */
   enough?: boolean
   candidates?: FirstAskCandidate[]
-  /** Kept for callers written against the routed version; the one-signal gather leaves it unset. */
-  routes?: string[]
-  signals?: unknown
 }

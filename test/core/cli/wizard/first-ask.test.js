@@ -72,7 +72,7 @@ function recordingSpawn() {
 const FIRST = SUGGESTED_PROMPTS[0]
 
 /** A gather that succeeds into a fixed folder (the launch needs one). */
-const fakeEvidence = async () => ({ dir: '/hyp/ask', from: '2026-08-08', routes: [/** @type {const} */ ('sink')], files: ['ASK.md'], signals: /** @type {any} */ ({}) })
+const fakeEvidence = async () => ({ dir: '/hyp/ask', from: '2026-08-08', files: ['ASK.md'] })
 
 /** @param {string|number} value */
 function selectReturning(value) {
@@ -444,7 +444,7 @@ test('runWizardFirstAsk: the recommendation row gathers first and starts the cli
     select: chooser.fn,
     prepareEvidence: async () => {
       gathered += 1
-      return { dir: '/hyp/ask/20260907T050000Z', from: '2026-08-08', routes: ['sink'], files: ['ASK.md'], signals: /** @type {any} */ ({}) }
+      return { dir: '/hyp/ask/20260907T050000Z', from: '2026-08-08', files: ['ASK.md'] }
     },
   })
   assert.equal(gathered, 1)

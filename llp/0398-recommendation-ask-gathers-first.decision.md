@@ -49,12 +49,12 @@ duplicate lane or every count is a third too high.
 <a id="in-process"></a>**HypAware gathers; the client reads.** For the
 recommendation row, `hyp ask` runs the evidence queries itself, through
 the same runner the overview uses, and writes the results as files. The
-client is told the evidence is in its folder and that it may run at
-most two `hyp query` commands, through the query skill, for a figure the
-files lack; the run that fetched its own evidence one slow query at a
-time is the reason for the cap. The model's effort goes to the part only a model can
-do: reading the evidence, finding the pattern, writing and testing the
-change. This is the split LLP 0140 made for the server's report agents,
+client is told the evidence is in its folder and to run no queries and no
+commands at all: the run that fetched its own evidence one slow query at
+a time spent 16 of its 22 minutes waiting, and a cap of two only made
+that failure smaller. Everything the answer needs is in the three files.
+The model's effort goes to the part only a model can do: reading the
+evidence, finding the pattern, writing the change. This is the split LLP 0140 made for the server's report agents,
 applied to the first ask.
 
 <a id="always-a-skill"></a>**The answer is always one skill.** What the
@@ -114,9 +114,13 @@ org run without these filters found "assess the exact planned action
 below" typed in 86 sessions: a Codex guardian review, not a person.
 
 <a id="run-directory"></a>**The client starts inside the evidence.** The
-files are written to `<tmpdir>/hypaware/ask/`, one user-only folder
+files are written to `<tmpdir>/hypaware-<uid>/ask/`, one user-only folder
 emptied and rewritten on every ask, and the client is spawned with that
-directory as its working directory. Under the temp directory rather than
+directory as its working directory. The uid is in the name because the
+folder is created `0700` and Linux shares one temp directory between every
+account on the host: without it the first person to run `hyp ask` leaves a
+parent nobody else can read, and every other account's gather fails on
+`EACCES` from then on. Under the temp directory rather than
 `HYP_HOME`, because `HYP_HOME` is inside the home directory by default
 and the point is that the session lands in neither the home directory
 nor a repo. The path is fixed, not random: Claude Code asks once whether
@@ -149,21 +153,28 @@ found, not like a report.** It opens by saying what it looked through
 and what stood out, gives the recommendation and why in a sentence or
 two, then the evidence in prose with one real example told as a story,
 then the file and the block to add, then a one-line offer to apply it,
-then one "Sources:" line carrying every file:line, session id, and, for
-any command, the test command and its output. No headings, no bold
-labels, no citations in the text, under 150 words before the block. An
+then one "Sources:" line carrying the candidate number and the figures
+used. No headings, no bold labels, no file names or session ids in the
+text, under 120 words before the block. An
 earlier shape with a fixed opening phrase and "Why" and "What I would
 add" headings was correct and read as generated; this one is the same
 content in a colleague's voice.
 
-Everything the earlier shape verified is still verified. It moved to the
-last line. The rules that produce it each close a failure the recorded
-runs showed:
+The earlier shape's verification moved to the last line, and shrank to
+what the gather can stand behind: the candidate number and the figures
+the files themselves carry. A citation the reader cannot check against
+anything on their screen is decoration, and a session id in the prose is
+the thing that made the earlier answers read as generated. The rules that
+produce the shape each close a failure the recorded runs showed:
 
-- Facts about a command, an error, or a tool come from a file read this
-  session, cited, or are written as pointers.
-- Any command in the change is run once against a real input, and the
-  output is shown.
+- Every fact in the answer comes from one of the three files, which were
+  gathered before the client started. Nothing is fetched, and nothing
+  about a command, an error, or a tool is asserted from memory.
+- The steps of the skill are the commands the record shows ran, in the
+  order it shows them. They are standard commands the person already
+  runs, so they are not re-run to be verified: a client that tests its
+  own suggestion is a client running commands, which #in-process rules
+  out.
 - The change is one skill (#always-a-skill). The on-disk listing the
   answer consults names the installed skills and agents with what each is
   for, and does not list hooks at all.
@@ -199,9 +210,10 @@ offer is made at the moment the first look has just shown the person their
 own rows.
 
 <a id="not-preauthorized"></a>**The launch is still not pre-authorized.**
-LLP 0198 #no-preauth stands. The client will ask before its first Bash
-command, which is the hook test; reading the evidence files needs no
-permission. This is why the gather is in-process: the shell-script
+LLP 0198 #no-preauth stands, and the shipped instructions ask for no
+command at all: reading the three evidence files needs no permission, and
+writing the SKILL.md happens only after the person says yes. This is why
+the gather is in-process: the shell-script
 version of this design needed a `sh gather.sh` call the client had to be
 allowed to run, and non-interactive runs lost a third of their tool calls
 to permission denials.

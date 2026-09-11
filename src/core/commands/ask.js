@@ -6,9 +6,11 @@ import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { isTty } from '../cli/stdio.js'
 import os from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 
 import { OVERVIEW_DATASET, OVERVIEW_PROBE_SQL, overviewRunnerFromCtx } from '../query/overview.js'
 import { prepareFirstAskEvidence } from '../query/first_ask_evidence.js'
+import { firstLookNoticeSink } from '../cli/wizard/first_look.js'
 import {
   SUGGESTED_PROMPTS,
   launchClient,
@@ -111,15 +113,44 @@ export async function runAsk(argv, ctx) {
  * @returns {Promise<FirstAskEvidence | undefined>}
  */
 async function prepareEvidenceFromCtx(ctx) {
-  const runner = overviewRunnerFromCtx(ctx)
+  // The same notice sink the first look passes, for the same reason: the
+  // runner filters local-only rows whether or not anyone listens, so a
+  // withheld row nobody discloses turns `Recorded: N sessions` into a claim
+  // about a record the reader was never told is partial. The advisory
+  // debounce line is dropped; the degrade warning is not.
+  // @ref LLP 0105 [implements]: the gather inherits both halves - the filter and the disclosure that it filtered
+  const runner = overviewRunnerFromCtx(ctx, firstLookNoticeSink(ctx.stderr))
   if (!runner || !runner.hasDataset(OVERVIEW_DATASET)) return undefined
   const homeDir = ctx.env.HOME || os.homedir()
   return prepareFirstAskEvidence({
     runner,
-    root: path.join(ctx.env.TMPDIR || os.tmpdir(), 'hypaware', 'ask'),
+    root: path.join(ctx.env.TMPDIR || os.tmpdir(), askDirName(), 'ask'),
     homeDir,
     say: (line) => ctx.stdout.write(`${line}\n`),
   })
+}
+
+/**
+ * The run directory's own name, carrying the uid where there is one.
+ *
+ * The folder is created `0700` because it quotes the person's own typed
+ * lines, and a recursive `mkdir` applies that mode to the parent it creates
+ * too. On Linux the system temp directory is shared by every account on the
+ * host, so a plain `hypaware/ask` hands the first user who runs `hyp ask` an
+ * unreadable `/tmp/hypaware`, and every other user's gather then fails on
+ * `EACCES` for good: the sticky bit stops them removing it, and `force` only
+ * swallows a path that is missing, not one that cannot be read. The uid keeps
+ * the path fixed per person, which is the property the client's trust dialog
+ * needs (LLP 0398 #run-directory), without making it shared between them.
+ * macOS and Windows already hand out a per-user temp directory, so there the
+ * name is belt and braces.
+ *
+ * @ref LLP 0398#run-directory [constrained-by]: one fixed folder per person, not one per host
+ * @returns {string}
+ */
+function askDirName() {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  return typeof uid === 'number' ? `hypaware-${uid}` : 'hypaware'
 }
 
 /**

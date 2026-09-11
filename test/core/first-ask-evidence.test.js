@@ -40,6 +40,9 @@ test('evidenceSql: every statement excludes the duplicate OTEL lane; user text i
     assert.ok(stmt.includes("not like '# AGENTS.md instructions%'"))
   }
   assert.ok(sql.lines.includes('having count(distinct session_id) >= 3 and count(distinct date) >= 3'))
+  for (const stmt of [sql.lines, sql.triggers(['x'])]) {
+    assert.ok(stmt.includes('length(content_text) between 12 and 160'), 'the occurrences counted are the same messages the candidate was found from')
+  }
   assert.ok(sql.triggers(["it's done"]).includes("'it''s done'"), 'a quote in a line is escaped')
 })
 
@@ -90,6 +93,39 @@ test('buildCandidates: steps are the procedure commands after the line, ranked b
   assert.deepEqual(c.other.map((o) => o.head), ['Read: README.md'])
   assert.equal(c.ending?.date, '2026-08-12')
   assert.match(c.ending?.text ?? '', /^Committed on topic and opened PR #720/, 'the ending is the first substantial reply after the procedure, not before it')
+})
+
+test('buildCandidates: the procedure window is timed, not string-compared, across a day boundary', () => {
+  // The cache hands a TIMESTAMP column back as a `Date`, and `String(date)`
+  // opens on the weekday name, so "Mon Sep 14" sorts before "Sun Sep 13".
+  // A session that crosses midnight is the ordinary evening session, and
+  // comparing the rendered strings drops every call it made after it.
+  const rows = {
+    lines: [{ line: 'ship it when the tests are green', sessions: 3, days: 3, typed: 3 }],
+    triggers: [{ session_id: 'sA', line: 'ship it when the tests are green', at: new Date('2026-09-13T23:50:00Z'), date: '2026-09-13', example: 'ship it when the tests are green' }],
+    calls: [
+      { session_id: 'sA', at: new Date('2026-09-13T23:00:00Z'), tool_name: 'Bash', args: '{"command":"git log --oneline -3"}' },
+      { session_id: 'sA', at: new Date('2026-09-14T00:05:00Z'), tool_name: 'Bash', args: '{"command":"git checkout -b topic"}' },
+      { session_id: 'sA', at: new Date('2026-09-14T00:06:00Z'), tool_name: 'Bash', args: '{"command":"gh pr create --title x"}' },
+    ],
+    replies: [{ session_id: 'sA', at: new Date('2026-09-14T00:07:00Z'), text: 'Opened the PR on topic and the checks are green.' }],
+  }
+  const [c] = buildCandidates(rows)
+  assert.deepEqual(c.steps.map((step) => step.command), ['git checkout -b', 'gh pr create'])
+  assert.ok(!c.steps.some((step) => step.command.startsWith('git log')), 'a call before the trigger is still not part of the procedure')
+  assert.equal(c.ending?.date, '2026-09-13')
+})
+
+test('buildCandidates: a procedure command past the eight kept is not reported as other activity', () => {
+  const verbs = ['git', 'gh', 'npm', 'node', 'hyp', 'make', 'cargo', 'go', 'docker']
+  const [c] = buildCandidates({
+    lines: [{ line: 'do the release', sessions: 3, days: 3, typed: 3 }],
+    triggers: [{ session_id: 's1', line: 'do the release', at: new Date('2026-09-01T10:00:00Z'), date: '2026-09-01', example: 'do the release' }],
+    calls: verbs.map((verb, i) => ({ session_id: 's1', at: new Date(`2026-09-01T10:0${i}:30Z`), tool_name: 'Bash', args: `{"command":"${verb} release"}` })),
+    replies: [],
+  })
+  assert.equal(c.steps.length, 8)
+  assert.deepEqual(c.other, [], 'the ninth is a step that did not fit, not context')
 })
 
 test('enoughRecorded: the record floor and the line floor both have to clear', () => {

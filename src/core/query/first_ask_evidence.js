@@ -111,7 +111,7 @@ export function evidenceSql(from) {
   return {
     record: `select count(*) as session_days, count(distinct session_id) as sessions from (select session_id, date from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2) s`,
     lines: `select lower(substr(content_text, 1, 42)) as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and length(content_text) between 12 and 160 group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 order by sessions desc limit ${CANDIDATES + 3}`,
-    triggers: (lines) => `select session_id, lower(substr(content_text, 1, 42)) as line, min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example from ai_gateway_messages where date >= '${from}' and ${human} and lower(substr(content_text, 1, 42)) in (${lines.map(sqlString).join(', ')}) group by 1, 2`,
+    triggers: (lines) => `select session_id, lower(substr(content_text, 1, 42)) as line, min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example from ai_gateway_messages where date >= '${from}' and ${human} and length(content_text) between 12 and 160 and lower(substr(content_text, 1, 42)) in (${lines.map(sqlString).join(', ')}) group by 1, 2`,
     calls: (ids) => `select session_id, message_created_at as at, tool_name, substr(cast(tool_args as varchar), 1, 160) as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and session_id in (${ids.map(sqlString).join(', ')}) order by session_id, message_created_at`,
     replies: (ids) => `select session_id, message_created_at as at, substr(content_text, 1, 500) as text from ai_gateway_messages where date >= '${from}' and role = 'assistant' and part_type = 'text' and length(content_text) > 200 and ${NOT_DUPLICATE_LANE} and session_id in (${ids.map(sqlString).join(', ')}) order by session_id, message_created_at`,
   }
@@ -198,18 +198,23 @@ export function buildCandidates(rows) {
     let ending
     for (const h of hits) {
       const sid = String(h.session_id ?? '')
-      const at = String(h.at ?? '')
-      const window = (callsBy.get(sid) ?? []).filter((c) => String(c.at ?? '') >= at).slice(0, CALLS_AFTER)
+      const at = instant(h.at)
+      const window = (callsBy.get(sid) ?? []).filter((c) => instant(c.at) >= at).slice(0, CALLS_AFTER)
       after.push(...window)
       if (!ending) {
-        const end = String(window.at(-1)?.at ?? at)
-        const reply = (repliesBy.get(sid) ?? []).find((r) => String(r.at ?? '') > end)
+        const last = window.at(-1)
+        const end = last ? instant(last.at) : at
+        const reply = (repliesBy.get(sid) ?? []).find((r) => instant(r.at) > end)
         if (reply) ending = { date: String(h.date ?? ''), text: oneLine(String(reply.text ?? '')) }
       }
     }
     const heads = commandHeads(after)
     const steps = heads.filter((h) => STEP_HEAD.test(h.head)).sort((a, b) => b.sessions - a.sessions).slice(0, 8)
-    const other = heads.filter((h) => !steps.includes(h)).slice(0, 5)
+    // Every procedure command is a step or nothing. Excluding only the
+    // eight that were kept drops the ninth into 'Other activity', where
+    // ASK.md tells the client to read it as context rather than as a step
+    // of the procedure it is part of.
+    const other = heads.filter((h) => !STEP_HEAD.test(h.head)).slice(0, 5)
     const first = hits.slice().sort((a, b) => compareStrings(String(a.date), String(b.date)))[0]
     out.push({
       line,
@@ -435,6 +440,26 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
 function num(v) {
   const n = typeof v === 'number' ? v : Number(v)
   return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * A `message_created_at` cell as comparable epoch milliseconds, however
+ * the engine materialized it. A TIMESTAMP column arrives from the parquet
+ * reader as a `Date`, and `String(date)` orders by weekday name before it
+ * orders by time ("Mon Sep 14" sorts before "Sun Sep 13"), so comparing
+ * the rendered strings selects the wrong tool calls for every session that
+ * crosses a day. `NaN` for a cell that is not a timestamp at all, which
+ * compares false in both directions: no procedure is better than one drawn
+ * from the wrong end of the session.
+ *
+ * @param {unknown} v
+ * @returns {number}
+ */
+function instant(v) {
+  if (v instanceof Date) return v.getTime()
+  if (typeof v === 'number') return v
+  if (typeof v === 'bigint') return Number(v)
+  return Date.parse(String(v ?? ''))
 }
 
 /** @param {string} s */
