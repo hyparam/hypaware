@@ -590,10 +590,16 @@ export async function runDaemon(opts = {}) {
           skills: boot.runtime.skills,
           agents: boot.runtime.agents,
         })
-        if (refresh.refreshed.length > 0 || refresh.skipped.length > 0) {
+        // A heal counts too: it is the one outcome that leaves the copies
+        // alone and still rewrites the ledger, and it is what the boots before
+        // it were reporting as `edited:<dest>`. Gated on the two lists alone,
+        // the boot that repairs an interrupted predecessor would be the first
+        // silent one, which is the opposite of what LLP 0400 decided.
+        if (refresh.refreshed.length > 0 || refresh.skipped.length > 0 || refresh.healed > 0) {
           fileLog.info('daemon.client_assets_refreshed', {
             refreshed: refresh.refreshed.map((asset) => asset.dest),
             skipped: refresh.skipped.map((asset) => `${asset.reason}:${asset.dest}`),
+            healed: refresh.healed,
             unchanged: refresh.unchanged,
           })
         }

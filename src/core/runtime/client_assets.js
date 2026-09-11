@@ -132,7 +132,7 @@ export async function materializeClientAssets(options) {
 export async function refreshClientAssets(options) {
   const { stateRoot, stderr } = options
   /** @type {ClientAssetRefresh} */
-  const outcome = { refreshed: [], skipped: [], unchanged: 0 }
+  const outcome = { refreshed: [], skipped: [], unchanged: 0, healed: 0 }
   if (!stateRoot) return outcome
 
   const ledger = await readClientAssetLedger(stateRoot)
@@ -222,7 +222,12 @@ export async function refreshClientAssets(options) {
         [Attr.STATUS]: 'ok',
         detail: dest,
       })
+      // The file is unchanged, so that is what it is counted as. The heal is
+      // counted again on its own, because it is the one outcome that writes
+      // the ledger without rewriting a copy: a caller weighing only
+      // `refreshed` and `skipped` would leave the write it caused unrecorded.
       outcome.unchanged += 1
+      outcome.healed += 1
       continue
     }
     if (!onDisk || !recorded.has(onDisk)) {

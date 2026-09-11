@@ -113,11 +113,20 @@ test('an unchanged source is read and left alone', async () => {
   const regs = registries([{ name: 'alpha', sourceDir: src }])
   await install(h, regs)
   const before = await readClientAssetLedger(h.stateRoot)
+  // A rewrite of the ledger produces byte-identical content here, so the
+  // records alone cannot say whether the pass wrote. Backdating the file makes
+  // the write itself visible: healing rides the one post-loop write and must
+  // not arm it on the copies that already match their record, or every steady
+  // state boot rewrites the ledger for nothing (LLP 0400 #one-write).
+  const ledgerPath = path.join(h.stateRoot, 'client-assets.json')
+  await fs.utimes(ledgerPath, new Date(0), new Date(0))
 
   const out = await refresh(h, regs)
   assert.equal(out.unchanged, 1)
+  assert.equal(out.healed, 0)
   assert.deepEqual(out.refreshed, [])
   assert.deepEqual(await readClientAssetLedger(h.stateRoot), before)
+  assert.equal((await fs.stat(ledgerPath)).mtimeMs, 0)
 })
 
 test('a changed source is re-copied and the ledger digest follows it', async () => {
@@ -433,6 +442,10 @@ test('a refresh killed before the ledger write heals its own record on the next 
   assert.deepEqual(out.skipped, [])
   assert.deepEqual(out.refreshed, [])
   assert.equal(out.unchanged, 1)
+  // Counted as a heal as well, or the one boot that rewrites the ledger
+  // without rewriting a copy is the one boot the daemon log says nothing
+  // about: its caller has nothing else to tell it from a no-op pass.
+  assert.equal(out.healed, 1)
   assert.equal(out.stderr, '')
   const [healed] = await readClientAssetLedger(h.stateRoot)
   assert.notEqual(healed.digest, stale.digest)
