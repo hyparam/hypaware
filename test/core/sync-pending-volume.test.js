@@ -230,7 +230,7 @@ const TWELVE_ROWS = Array.from({ length: 12 }, (_, i) => ({
   dropped: i + 1 === 5 || i + 1 === 9,
 }))
 
-test('the plan states pending rows, the resume point, and withheld rows per destination', async () => {
+test('the sharing plan states upload rows and excludes the accompanying copy from its totals', async () => {
   const hypHome = await makeHome('backlog')
   await writeWatermark({
     hypHome,
@@ -256,8 +256,8 @@ test('the plan states pending rows, the resume point, and withheld rows per dest
   // Past watermark seq 3: nine entries, two of them withheld.
   assert.match(stdout.text, /7 rows pending, captured since 2026-08-12T00:50Z/)
   assert.match(stdout.text, /2 rows withheld by policy \(not sent\)/)
-  // No watermark for `local` at all, so its range is the whole local history.
-  assert.match(stdout.text, /10 rows pending, the full local history/)
+  // The accompanying copy has a different cursor; it is not another upload.
+  assert.doesNotMatch(stdout.text, /10 rows pending|\/home\/u\/exports/)
   // The withheld rows are stated apart from the pending ones, never added in.
   assert.doesNotMatch(stdout.text, /9 rows pending/)
   assert.doesNotMatch(stdout.text, /12 rows pending/)
@@ -334,7 +334,7 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
   // direction load can only push it (#1105). Freezing the clock keeps every
   // deadline unreachable and leaves the row limit as the sole stop, which is
   // the shortfall this case exists to pin. Nothing here passes `rowLimit`, so
-  // the 200,000 below is the shipped limit and not a fixture's. A frozen clock
+  // the 2,000,000 below is the shipped limit and not a fixture's. A frozen clock
   // cannot also pin `DEFAULT_BUDGET_MS`: every budget above zero leaves the
   // deadline unreachable, so the same freeze that removes the flake removes
   // this case's hold on the budget. That default is pinned on its own injected
@@ -347,7 +347,7 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
     storage: /** @type {any} */ (fakeStorage({
       hypHome,
       entries: function* () {
-        for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
+        for (let seq = 1; seq <= 2500000; seq += 1) yield { seq }
       },
     })),
     stateRoot: stateDir(hypHome),
@@ -356,7 +356,7 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
 
   const volume = /** @type {any} */ (volumes.get('central'))
   assert.equal(volume.status, 'partial', 'a count stopped at its limit is a floor, not a total')
-  assert.equal(volume.rows, 200000, 'the floor is the row limit reached, never the 250,000 rows behind it')
+  assert.equal(volume.rows, 2000000, 'the floor is the row limit reached, never the 2,500,000 rows behind it')
 })
 
 test('`hyp sync` counts to the shipped scan limit, not to one its own call passed in', async () => {
@@ -381,7 +381,7 @@ test('`hyp sync` counts to the shipped scan limit, not to one its own call passe
     storage: fakeStorage({
       hypHome,
       entries: function* () {
-        for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
+        for (let seq = 1; seq <= 2500000; seq += 1) yield { seq }
       },
     }),
   })
@@ -389,10 +389,10 @@ test('`hyp sync` counts to the shipped scan limit, not to one its own call passe
   const code = await onFrozenClock(() => runSync(['--dry-run'], ctx))
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /at least 200,000 rows pending/, 'the command counts to the shipped limit, not to a caller\'s')
+  assert.match(stdout.text, /at least 2,000,000 rows pending/, 'the command counts to the shipped limit, not to a caller\'s')
   assert.doesNotMatch(
     stdout.text,
-    /250,000 rows pending/,
+    /2,500,000 rows pending/,
     'the floor is the limit the scan reached, never the rows behind it'
   )
 })
@@ -428,7 +428,7 @@ test('a four-digit backlog is grouped for a reader, not printed as a bare intege
   const code = await onFrozenClock(() => runSync(['--dry-run'], ctx))
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /1,234 rows pending, the full local history/)
+  assert.match(stdout.text, /1,234 rows pending, the full history/)
   assert.doesNotMatch(
     stdout.text,
     /1\.234 rows pending/,
@@ -452,7 +452,7 @@ test('the shipped wall-clock budget is the one that stops a long count, not a fi
   ])
   let t = 0
   const now = () => t
-  // Comfortably past the stop below, and comfortably short of the 200,000-row
+  // Comfortably past the stop below, and comfortably short of the 2,000,000-row
   // limit, so the budget is the only thing that can end this count.
   const entries = function* () {
     for (let seq = 1; seq <= 6000; seq += 1) {
@@ -827,7 +827,7 @@ test('rows still buffered in the spool make the count a floor rather than a sile
   // scan-limit case above is counted through `previewPendingRows` on a frozen
   // clock precisely so it stops asserting how fast the machine is (#1105), and
   // this is where the string it used to check is pinned instead.
-  assert.match(stdout.text, /at least 10 rows pending, the full local history/)
+  assert.match(stdout.text, /at least 10 rows pending, the full history/)
   assert.doesNotMatch(stdout.text, /^ +10 rows pending/m, 'a floor rendered as a total overstates what the scan saw')
   assert.doesNotMatch(stdout.text, /nothing pending/)
 })
@@ -912,6 +912,7 @@ test('a truncated count never claims a resume point it did not survey', async ()
     query: /** @type {any} */ (query),
     storage: /** @type {any} */ (storage),
     stateRoot: stateDir(hypHome),
+    rowLimit: 10,
   })
 
   const volume = /** @type {any} */ (volumes.get('central'))
@@ -1056,7 +1057,7 @@ test('an incomplete count marks the withheld line as a floor too, and an exact c
   // produced it, so one shortfall proves the rendering for all of them. This
   // case uses the cheapest one to stage, an unflushed spool: `runSync` does not
   // plumb `rowLimit`/`budgetMs`/`now`, so reaching `partial` by scan limit through
-  // it would cost a 250,000-row fixture counted against a real clock, which is the
+  // it would cost a 2,500,000-row fixture counted against a real clock, which is the
   // wall-clock dependence the scan-limit case above was rewritten to shed (#1105).
   const short = await makeHome('withheld-floor')
   const shortStorage = fakeStorage({ hypHome: short, entries: TWELVE_ROWS })
@@ -1200,9 +1201,15 @@ test('a local-only dataset counts for a local-fs destination and not for a centr
   const { ctx, stdout } = makeCtx({ hypHome, sinks: [central, local], storage })
   ctx.query = query
   assert.equal(await runSync(['--dry-run'], ctx), 0)
-  assert.match(stdout.text, /12 rows pending, the full local history/)
+  assert.doesNotMatch(stdout.text, /12 rows pending|\/home\/u\/exports/)
   assert.match(stdout.text, /nothing pending/)
   assert.doesNotMatch(stdout.text, /withheld by policy/)
+
+  // Explicitly syncing the file target still previews its own rows.
+  const fileRun = makeCtx({ hypHome, sinks: [local], storage })
+  fileRun.ctx.query = query
+  assert.equal(await runSync(['--dry-run'], fileRun.ctx), 0)
+  assert.match(fileRun.stdout.text, /12 rows pending, the full history/)
 })
 
 // ---------------------------------------------------------------------------

@@ -81,13 +81,12 @@ export async function runWizardSyncNow(opts) {
         }
 
         // One question, and it is `hyp sync`'s own: the child prints the
-        // plan (every destination, what is withheld) and asks its Y/n. A no
+        // plan (every upload target, what is withheld) and asks its Y/n. A no
         // is the wait. A lead line says what is starting, so the plan does
         // not read as a report the wizard forgot to introduce - an
-        // introduction only, because the child's own warning opens on
-        // "nothing has left this machine yet" a few lines later.
+        // introduction only; the child states the upload schedule and asks.
         // @ref LLP 0203#no-new-consent [implements]: the wizard asks nothing of its own; the informed prompt is the only one
-        opts.stdout.write('\n`hyp sync` shows what would leave and asks before sending:\n\n')
+        opts.stdout.write('\nReady to upload your selected logs:\n\n')
         const result = await runSyncChild(opts)
         span.setAttribute('exit_code', result.code ?? -1)
         if (result.error) {

@@ -50,10 +50,14 @@ experiences the window as the product not working yet.
 <a id="offer"></a>**Setup runs the release's own prompt, once.** On an
 attended, non-cancelled, non-dry-run install that enrolled *and* carries a
 live hold, the wizard prints one lead line after the first look and starts
-`hyp sync` on the terminal. The child prints its plan (every destination,
+`hyp sync` on the terminal. The child prints its plan (every upload target,
 what is withheld), the first-sync warning (the deadline, that the send
 includes imported history and cannot be undone, and how to review or exclude
 something first), and asks its Y/n. Yes is the release; no is the wait.
+
+As refined by LLP 0396#combined-selection, the accompanying file copy is not
+presented as another destination on a sharing run. It still runs under the
+same hold and confirmation, and failures are reported.
 
 Sending is the default of that prompt
 ([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md): confirms

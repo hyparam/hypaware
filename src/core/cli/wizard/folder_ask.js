@@ -49,7 +49,7 @@ export const FOLDER_ASK_OPTIONS = [
   {
     value: 'ask',
     label: 'Ask me the first time',
-    summary: 'Your first session in a new folder asks: sync, keep it local, or ignore it.',
+    summary: 'Choose sync, local-only, or ignore the first time you use a new folder.',
   },
 ]
 
