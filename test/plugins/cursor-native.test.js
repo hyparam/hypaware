@@ -144,6 +144,22 @@ test('native Read observes workspace, symlink and stricter policies; session ign
   } finally { await f.cleanup() }
 })
 
+test('one refused file block refuses the whole message, whatever block follows it', async () => {
+  const f = await fixture()
+  try {
+    await fs.writeFile(path.join(f.root, 'outside.txt'), 'private')
+    const block = (input, is_error) => ({ type: 'tool_result', name: 'Read', tool_use_id: String(Math.random()), input, content: 'text', is_error })
+    const exchange = /** @type {any} */ ({ session_id: f.session.id, cwd: f.cwd, messages: [{ role: 'tool', content: [
+      // Refused: resolves outside the workspace.
+      block({ path: '../outside.txt' }, false),
+      // A missing-file error is admissible on its own, and must not reinstate
+      // the message the block before it refused.
+      block({ path: 'missing.txt' }, true),
+    ] }] })
+    assert.equal((await cursorAdmission({}).filter(exchange))?.messages.length, 0)
+  } finally { await f.cleanup() }
+})
+
 test('sweep fingerprints advance only after successful non-dry recovery and manual runs bypass them', async () => {
   const f = await fixture()
   try {

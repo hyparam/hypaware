@@ -32,11 +32,14 @@ export function cursorAdmission(opts) {
             const full = path.resolve(cwd, file)
             try {
               const [root, target] = await Promise.all([realpath(cwd), realpath(full)])
-              if (!isEqualOrDescendant(target, root) || [path.dirname(full), path.dirname(target)].some((dir) => CLASS_RANK[resolver.resolve(dir).class] > rank)) allowed = false
+              // Every rejection breaks: a later block must never be able to
+              // reinstate a message an earlier one refused.
+              if (!isEqualOrDescendant(target, root) || [path.dirname(full), path.dirname(target)].some((dir) => CLASS_RANK[resolver.resolve(dir).class] > rank)) { allowed = false; break }
             } catch {
               // Missing-file errors contain no successful read contents. Keep
               // explicit errors only, still applying lexical directory policy.
               allowed = block.is_error === true && isEqualOrDescendant(full, cwd) && CLASS_RANK[resolver.resolve(path.dirname(full)).class] <= rank
+              if (!allowed) break
             }
           }
         }
