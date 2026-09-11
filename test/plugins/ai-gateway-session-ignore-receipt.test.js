@@ -405,11 +405,11 @@ for (const rel of SKILLS) {
   })
 }
 
-/** The words Step 1 opens its stop list with, bolded as the copy writes them. */
-const STOP_LIST_OPENER = '**Stop on any of these**'
+/** The words the claude copy's Step 1 opens its stop list with, bolded as it writes them. */
+const CLAUDE_STOP_LIST_OPENER = '**Stop on any of these**'
 
-/** The words Step 1 opens the two-clients-state-an-id refusal with. */
-const AMBIGUITY_OPENER = '**If the verb refuses because more than one client states an id**'
+/** The words the claude copy's Step 1 opens the two-clients-state-an-id refusal with. */
+const CLAUDE_AMBIGUITY_OPENER = '**If the verb refuses because more than one client states an id**'
 
 /**
  * The receipt tells the agent to stop unless the recorder that captures THIS
@@ -432,8 +432,8 @@ test('the claude privacy skill names the recorder id the listener reports', () =
   // The check has to be a stop condition, not an observation: the whole bug
   // this skill's Step 1 was rewritten for is an `ok` over a recorder that was
   // never addressed (issue #1615).
-  const at = step1.indexOf(STOP_LIST_OPENER)
-  assert.ok(at >= 0, `the receipt readings must be framed as stop conditions, opening "${STOP_LIST_OPENER}"`)
+  const at = step1.indexOf(CLAUDE_STOP_LIST_OPENER)
+  assert.ok(at >= 0, `the receipt readings must be framed as stop conditions, opening "${CLAUDE_STOP_LIST_OPENER}"`)
   const rest = step1.slice(at)
   const end = rest.search(/\n\s*\n/)
   const stopList = end < 0 ? rest : rest.slice(0, end)
@@ -484,8 +484,8 @@ test('the claude privacy skill names the recorder id the listener reports', () =
 test('the claude privacy skill answers an ambiguous id with the stated-id re-run, not the fallback', () => {
   const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
 
-  const at = step1.indexOf(AMBIGUITY_OPENER)
-  assert.ok(at >= 0, `Step 1 must still route the ambiguous case, opening "${AMBIGUITY_OPENER}"`)
+  const at = step1.indexOf(CLAUDE_AMBIGUITY_OPENER)
+  assert.ok(at >= 0, `Step 1 must still route the ambiguous case, opening "${CLAUDE_AMBIGUITY_OPENER}"`)
   const rest = step1.slice(at)
   const open = rest.indexOf('```')
   const close = rest.indexOf('```', open + 3)
