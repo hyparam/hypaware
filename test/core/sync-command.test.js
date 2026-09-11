@@ -139,6 +139,67 @@ test('sync reads a sink progress report the way it reads a sink result: a number
   await fs.rm(hypHome, { recursive: true, force: true })
 })
 
+test('sync progress does not let a zero-row report stand in for progress', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  now = 10_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~3s')
+  // A zero-row report is a truthy object with nothing acknowledged. Counting
+  // one as an acknowledgement keeps the line quiet for as long as the reports
+  // keep arriving, which is the stall the warning exists to surface.
+  for (let at = 11_000; at <= 100_000; at += 1_000) {
+    now = at
+    progress.update('central', { rows: 0, bytes: 0 })
+  }
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | waiting for progress (90s) | ETA unavailable')
+})
+
+test('sync progress does not anchor its rate at a zero-row report', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  // Zero-row reports arriving during the driver's setup work. Anchoring the
+  // rate on one charges that one-time setup to the transfer rate.
+  for (const at of [1_000, 5_000, 9_000]) {
+    now = at
+    progress.update('central', { rows: 0, bytes: 0 })
+  }
+  now = 10_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  now = 11_000
+  // 250 rows in the 1s since the first acknowledgement, not in the 11s since
+  // the destination started: 750 rows remaining at 250 rows/s.
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~3s')
+})
+
+test('a sink bare-calling onProgress cannot hold the stall warning off the line', async (t) => {
+  const hypHome = await makeHome('upload-progress-bare-loop')
+  let clock = Date.now()
+  t.mock.method(Date, 'now', () => clock)
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 123, bytes: 456 })
+    clock += 20_000
+    // A third-party sink may call `onProgress` with no argument at all, which
+    // the driver reads as zero rows. Twenty seconds of it is still a stall.
+    for (let i = 0; i < 50; i += 1) opts.onProgress()
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 456 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /central: 123 rows sent \| waiting for progress \(20s\)/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
 // `hyp sync` (LLP 0101 #no-release, as amended): the user-facing export verb
 // that replaced `hyp sink force`. What these cover is the consent gate, not
 // the tick - the driver's export path is already covered by the sink tests
