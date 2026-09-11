@@ -114,9 +114,12 @@ changed, deciding each one by the install ledger.**
   need a field the ledger does not have, and the work it saves is hashing a
   few dozen small files once per boot. Bounded by the ledger, not by uptime.
 - A source tree that holds an entry the copier skips (a symlink, a device)
-  never digests equal to its copy, so such an asset is re-copied on every
-  boot. No shipped skill has one; the cost if one did is one small copy per
-  boot, and the fix would be in the copier, not here.
+  still digests equal to its copy, because the hasher skips the same set: what
+  the copy does not carry, the digest does not cover. Covering it would re-copy
+  the asset on every boot, since the copy can never match (issue #1666).
+  [LLP 0401](./0401-the-asset-digest-covers-what-the-copier-carries.decision.md)
+  settles that and states what the narrowing gives up: such an entry added to an
+  installed copy no longer reads as a user edit.
 - `hyp skills install` keeps the role
   [LLP 0107 #every-attach](./0107-skills-ride-attach.decision.md#every-attach)
   gives it: the way to re-copy on demand, and now also the way to replace a

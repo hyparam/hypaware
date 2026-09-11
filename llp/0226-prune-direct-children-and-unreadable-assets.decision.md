@@ -108,7 +108,10 @@ silently migrate into "gone" the way it could when one `try` wrapped
 *inside* the tree never reaches either `try`'s error path: `hashTree` reads
 shape from `readdir`'s `Dirent` entries without following them, so a
 symlink whose target is gone hashes as an opaque entry by name, same as one
-whose target exists; nothing about it is unreadable in the first place.
+whose target exists; nothing about it is unreadable in the first place. (As of
+[LLP 0401 #digest-covers-the-copy](./0401-the-asset-digest-covers-what-the-copier-carries.decision.md#digest-covers-the-copy)
+`hashTree` skips such an entry outright rather than hashing it by name, which
+leaves that conclusion standing for a stronger reason.)
 
 ## Consequences {#consequences}
 
