@@ -22,7 +22,7 @@ import { groupThousands } from '../util/format_number.js'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
- * @import { PendingVolume } from '../../../src/core/sinks/types.js'
+ * @import { PendingVolume, TickOptions } from '../../../src/core/sinks/types.js'
  * @import { SourceHistoryReplayPreview } from '../../../hypaware-plugin-kernel-types.js'
  */
 
@@ -304,15 +304,12 @@ export async function runSync(argv, ctx) {
     stateRoot: stateDir,
     config: ctx.config,
   })
-  /** @type {{ now: Date, force: true, source: 'manual', sinkInstance?: string }} */
-  const tickOpts = { now: new Date(), force: true, source: 'manual' }
+  const progress = createSyncProgress(volumes)
+  /** @type {TickOptions} */
+  const tickOpts = { now: new Date(), force: true, source: 'manual', onProgress: progress.update }
   if (instance) tickOpts.sinkInstance = instance
-  // The tick is the long silent wait of this verb: one export per sink, each
-  // a network round trip, with nothing on screen between the user's "y" and
-  // the result lines. The driver reports per sink only once the whole tick
-  // settles, so an elapsed-time spinner is the progress that is available.
   const report = await withSpinner(
-    { stdout: ctx.stdout, env: ctx.env, label: `Sending to ${describeScope(destinations)}...` },
+    { stdout: ctx.stdout, env: ctx.env, label: 'Sending', status: progress.render },
     () => driver.tick(tickOpts)
   )
 
@@ -331,6 +328,78 @@ export async function runSync(argv, ctx) {
     )
   }
   return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
+}
+
+/**
+ * Reuse the consent preview without rescanning the backlog. Keep only the
+ * current destination's counters: sinks run sequentially, and each ETA covers
+ * that destination.
+ * @param {Map<string, PendingVolume>} volumes
+ * @param {() => number} [now]
+ */
+export function createSyncProgress(volumes, now = Date.now) {
+  let instance = ''
+  let rows = 0
+  let firstAck = 0
+  let lastAck = now()
+  /** @type {TickOptions['onProgress']} */
+  const update = (name, delta) => {
+    if (!delta) {
+      instance = name
+      rows = 0
+      firstAck = 0
+      lastAck = now()
+      return
+    }
+    // The rate is measured from the first acknowledgement, not from the
+    // destination's start. The driver announces a destination before
+    // `discoverReadyPartitions` lists every dataset, flushes every pending
+    // spool and re-discovers, which on a first sync - the run this line exists
+    // for - is often the dominant cost and is paid once rather than per row.
+    // Charging it to the rate made the first ETA, the one the user reads,
+    // arbitrarily pessimistic: 60s of flush ahead of 12,000 rows at 2,000
+    // rows/s reported ~88s for 3.5s of remaining work.
+    if (firstAck === 0) firstAck = now()
+    rows += delta.rows
+    lastAck = now()
+  }
+  const render = () => {
+    if (!instance) return 'Preparing upload...'
+    const volume = volumes.get(instance)
+    const total = volume?.status === 'counted' ? volume.rows : undefined
+    const count = total !== undefined && total > 0 && rows <= total
+      ? `${groupThousands(rows)}/${groupThousands(total)} rows (${Math.min(99, Math.floor(rows / total * 100))}%)`
+      : `${groupThousands(rows)} rows sent`
+    const prefix = `${instance}: ${count}`
+    // Every line that cannot quote an ETA still ticks, and what it ticks is
+    // the time since anything last moved. `onProgress` is optional on the
+    // export contract and half the shipped sinks never call it
+    // (`@hypaware/s3`, and the table-format sink an iceberg destination
+    // instantiates), so without this their whole export renders one frozen
+    // line - worse than the elapsed seconds it replaced, and the exact "this
+    // has hung" reading the spinner exists to prevent. Measuring the gap from
+    // the last acknowledgement rather than from the destination's start costs
+    // those sinks nothing (`lastAck` begins at the destination's start) and is
+    // the only reading that answers the question a waiting line raises: a
+    // destination that transferred healthily for 100s and has then been quiet
+    // for 20 otherwise reads `waiting for progress (120s)`, six times the gap.
+    const waited = Math.floor((now() - lastAck) / 1000)
+    if (rows === 0) return `${prefix} | waiting for progress (${waited}s) | ETA unavailable`
+    // Ahead of the stall check, because a finalize is a stall: the last chunk
+    // is acknowledged and the export is committing, so no further
+    // acknowledgement is coming and a long one would otherwise flip a finished
+    // transfer to "99% | waiting for progress" - the one reading that is both
+    // alarming and wrong.
+    if (rows === total) return `${instance}: ${groupThousands(rows)} rows sent | finalizing... (${waited}s)`
+    if (now() - lastAck >= 15_000) return `${prefix} | waiting for progress (${waited}s) | ETA unavailable`
+    const seconds = Math.max(1, (now() - firstAck) / 1000)
+    const rate = rows / seconds
+    if (total === undefined || rows > total) return `${prefix} | ETA unavailable`
+    const remaining = Math.max(1, Math.ceil((total - rows) / rate))
+    const eta = remaining < 60 ? `${remaining}s` : `${Math.ceil(remaining / 60)}m`
+    return `${prefix} | ETA ~${eta}`
+  }
+  return { update, render }
 }
 
 /**

@@ -7,13 +7,137 @@ import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
-import { runSync } from '../../src/core/commands/sync.js'
+import { createSyncProgress, runSync } from '../../src/core/commands/sync.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
   firstSyncHoldMarkerPath,
   writeFirstSyncHoldMarker,
 } from '../../src/core/usage-policy/first_sync_hold.js'
 import { writeClientSyncEntries, writeLocalOnlyEntries } from '../../src/core/usage-policy/index.js'
+
+test('sync progress estimates from acknowledged rows and resets per destination', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 100, resume: { kind: /** @type {const} */ ('beginning') } }],
+    ['archive', { status: /** @type {const} */ ('counted'), rows: 2000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  assert.match(progress.render(), /0\/1,000 rows \(0%\).*ETA unavailable/)
+  now = 10_000
+  // The 10s before the first acknowledgement was the driver's dataset
+  // discovery and spool flush, which is paid once rather than per row, so it
+  // is not in the rate.
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~3s')
+  now = 20_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 500/1,000 rows (50%) | ETA ~10s')
+  now = 35_000
+  // 15s since the acknowledgement at 20s, not 35s since the destination
+  // started: the number sits next to "waiting for progress" and is read as
+  // how long it has been stuck.
+  assert.match(progress.render(), /waiting for progress \(15s\).*ETA unavailable/)
+  progress.update('central', { rows: 500, bytes: 3000 })
+  assert.match(progress.render(), /1,000 rows sent.*finalizing/)
+  assert.doesNotMatch(progress.render(), /100%/)
+  progress.update('archive')
+  assert.match(progress.render(), /archive: 0\/2,000 rows/)
+  progress.update('archive', { rows: 2001, bytes: 4000 })
+  assert.match(progress.render(), /2,001 rows sent.*ETA unavailable/)
+  assert.doesNotMatch(progress.render(), /%/)
+})
+
+test('sync progress keeps ticking for a destination whose sink never reports', () => {
+  let now = 0
+  const volumes = new Map([
+    ['archive', { status: /** @type {const} */ ('counted'), rows: 12_000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('archive')
+  // `onProgress` is optional on the export contract, and half the shipped
+  // sinks never call it: `@hypaware/s3`, and the table-format sink an iceberg
+  // destination instantiates. This one line is then their whole export, so it
+  // has to keep showing that something is still happening.
+  const frames = [0, 37_000, 94_000].map((at) => { now = at; return progress.render() })
+  assert.deepEqual(frames.map((frame) => /\((\d+)s\)/.exec(frame)?.[1]), ['0', '37', '94'])
+  assert.equal(new Set(frames).size, 3, 'a destination that never reports must not render a frozen line')
+})
+
+test('sync progress keeps finalizing through a commit longer than the stall window', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  now = 5_000
+  progress.update('central', { rows: 1000, bytes: 4000 })
+  const committing = progress.render()
+  assert.match(committing, /central: 1,000 rows sent \| finalizing\.\.\. \(0s\)/)
+  // The last chunk is acknowledged, so by construction no further
+  // acknowledgement is coming: a commit that outlasts the stall window must
+  // not report a finished transfer as "99% | waiting for progress". It must
+  // still tick, though - a commit is the one wait long enough to need it.
+  now = 60_000
+  assert.match(progress.render(), /central: 1,000 rows sent \| finalizing\.\.\. \(55s\)/)
+  assert.notEqual(progress.render(), committing, 'a long commit must not render a frozen line')
+  assert.doesNotMatch(progress.render(), /waiting for progress|%/)
+})
+
+test('sync progress never treats a partial or missing count as a total', () => {
+  const progress = createSyncProgress(new Map([
+    ['central', { status: 'partial', rows: 10, withheldRows: 0, resume: { kind: 'unknown' } }],
+  ]))
+  for (const name of ['central', 'unknown']) {
+    progress.update(name)
+    progress.update(name, { rows: 5, bytes: 100 })
+    assert.match(progress.render(), /5 rows sent.*ETA unavailable/)
+    assert.doesNotMatch(progress.render(), /%/)
+  }
+})
+
+test('sync threads acknowledged progress through the driver to the terminal', async () => {
+  const hypHome = await makeHome('upload-progress')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 123, bytes: 456 })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 456 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /central: 123 rows sent/)
+  assert.match(stdout.text, /central: exported/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('sync reads a sink progress report the way it reads a sink result: a number or nothing', async () => {
+  const hypHome = await makeHome('upload-progress-hostile')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 7, bytes: 8 })
+    // An argument-less call is the plugin saying nothing. It must not reach
+    // the display as the kernel's own start-of-destination signal, which is
+    // what an absent progress object means there.
+    opts.onProgress()
+    // Counts come from sink code the kernel does not own, and land in a line
+    // somebody is watching an upload on.
+    opts.onProgress({ rows: 'lots', bytes: null })
+    // A negative is the same class of input, and the worse one: `rows`
+    // accumulates, so it holds the running total below the real one for the
+    // rest of the destination.
+    opts.onProgress({ rows: -5000, bytes: -1 })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 8 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.doesNotMatch(stdout.text, /NaN/)
+  assert.doesNotMatch(stdout.text, /-[\d,]+ rows sent/)
+  assert.match(stdout.text, /central: 7 rows sent/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
 
 // `hyp sync` (LLP 0101 #no-release, as amended): the user-facing export verb
 // that replaced `hyp sink force`. What these cover is the consent gate, not
@@ -66,7 +190,7 @@ function fakeSink(instanceName, config, result = {}) {
     config,
     exported,
     sink: {
-      async exportBatch(/** @type {unknown} */ batch) {
+      async exportBatch(/** @type {unknown} */ batch, /** @type {any} */ _opts = {}) {
         exported.push(batch)
         return { status: result.status ?? 'exported', partitionsExported: 0, bytesWritten: 0 }
       },

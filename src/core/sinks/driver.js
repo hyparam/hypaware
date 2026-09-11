@@ -8,7 +8,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 
 /**
- * @import { DatasetRegistration, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetRegistration, ExportProgress, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
  * @import { Span } from '../observability/runtime.js'
  * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
  * @import { DriverOptions, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
@@ -75,7 +75,8 @@ export function createSinkDriver(opts) {
       const schedule = typeof handle.config?.schedule === 'string' ? handle.config.schedule : '* * * * *'
       const isDue = tickOpts.force === true || cronMatches(schedule, now)
       if (!isDue) continue
-      const report = await runSink(handle, schedule, now)
+      tickOpts.onProgress?.(handle.instanceName)
+      const report = await runSink(handle, schedule, now, tickOpts.onProgress)
       sinks.push(report)
     }
     return { sinks }
@@ -85,9 +86,10 @@ export function createSinkDriver(opts) {
    * @param {ExtendedSinkHandle} handle
    * @param {string} schedule
    * @param {Date} now
+   * @param {TickOptions['onProgress']} onProgress
    * @returns {Promise<TickReport['sinks'][number]>}
    */
-  async function runSink(handle, schedule, now) {
+  async function runSink(handle, schedule, now, onProgress) {
     const instance = handle.instanceName
     const batchId = nextBatchId(now, instance)
     const partitions = await discoverReadyPartitions(handle)
@@ -118,7 +120,7 @@ export function createSinkDriver(opts) {
           const format = handle.encoder?.format ?? 'native'
           const reported = await handle.sink.exportBatch(
             { batchId, partitions },
-            { format, schedule }
+            { format, schedule, ...(onProgress ? { onProgress: (progress) => onProgress(instance, readExportProgress(progress)) } : {}) }
           )
           result = readExportResult(reported, partitions)
         } catch (err) {
@@ -371,6 +373,41 @@ function readExportResult(reported, partitions) {
     retryPartitions: Array.isArray(reported?.retryPartitions) ? reported.retryPartitions.slice() : partitions,
     error: typeof reported?.error === 'string' ? reported.error : undefined,
   }
+}
+
+/**
+ * One progress report from the plugin's object, read the way
+ * {@link readExportResult} reads its counts: a number or nothing.
+ *
+ * The same reason applies with one addition. `onProgress` is a plugin-facing
+ * callback on the kernel's export contract, so the numbers arrive from sink
+ * code the kernel does not own, and the caller is a spinner that renders them
+ * straight to the terminal. An absent, string, or `NaN` count is therefore not
+ * a wrong log field but `NaN rows sent | ETA ~NaNm` on the screen somebody is
+ * watching an upload on. A missing argument (`opts.onProgress()`) is the same
+ * case and must not reach the caller as the kernel's own start-of-destination
+ * signal, which is an absent progress object.
+ *
+ * @param {ExportProgress | null | undefined} reported
+ * @returns {ExportProgress}
+ */
+function readExportProgress(reported) {
+  return { rows: readCount(reported?.rows), bytes: readCount(reported?.bytes) }
+}
+
+/**
+ * A count from the plugin's object: a finite positive number, or nothing.
+ *
+ * Negative is screened with the rest. `rows` accumulates, so one negative
+ * report does not just render `-5,000/12,000 rows (-42%)`, it holds the
+ * running total below the real one for the rest of the destination and the
+ * finalizing branch never fires again.
+ *
+ * @param {unknown} value
+ * @returns {number}
+ */
+function readCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
 }
 
 /**
