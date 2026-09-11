@@ -615,7 +615,7 @@ function collectManagedHookEntries(managed) {
  * @param {Record<string, unknown>} value
  * @param {unknown[]} hookEntries
  */
-function stripManagedHooks(value, hookEntries) {
+export function stripManagedHooks(value, hookEntries) {
   const hooksRoot = value.hooks
   if (!isPlainObject(hooksRoot)) return
 
@@ -632,6 +632,9 @@ function stripManagedHooks(value, hookEntries) {
     /** @type {unknown[]} */
     const nextGroups = []
     for (const group of groups) {
+      // @ref LLP 0399#attachment: Cursor uses direct command arrays. The
+      // same disk undo names exact commands in either supported shape.
+      if (isManagedHandler(group, command) && groupMatcherEquals(group, matcher)) continue
       if (!isPlainObject(group) || !groupMatcherEquals(group, matcher) || !Array.isArray(group.hooks)) {
         nextGroups.push(group)
         continue

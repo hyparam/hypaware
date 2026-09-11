@@ -1,0 +1,260 @@
+[
+  {
+    "session_id": "0eb801c8-1d88-4294-a6a6-925c3eefe5c5",
+    "messages": [
+      {
+        "ordinal": 3,
+        "blob_id": "4025ff4158d7ceb74e68c7e657a0a49f52691baa4b19a3af0026f2f587ffb737",
+        "role": "assistant",
+        "id": "msg_9c030f9c-1cda-9315-965b-0315f1aa3af7",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reading only `notes.txt` now."
+          },
+          {
+            "type": "tool-call",
+            "toolCallId": "call-d05963b2-588e-4951-ac71-82f594016acd-0\nfc_9c030f9c-1cda-9315-965b-0315f1aa3af7_0",
+            "toolName": "Read",
+            "args": {
+              "path": "/tmp/hypaware-cursor-live-probe/workspace/notes.txt"
+            }
+          }
+        ]
+      },
+      {
+        "ordinal": 4,
+        "blob_id": "ee51290928c95444440132a3a2954131a2da12e2266a6556ff51d20d51c0bbec",
+        "role": "tool",
+        "id": "call-d05963b2-588e-4951-ac71-82f594016acd-0\nfc_9c030f9c-1cda-9315-965b-0315f1aa3af7_0",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "call-d05963b2-588e-4951-ac71-82f594016acd-0\nfc_9c030f9c-1cda-9315-965b-0315f1aa3af7_0",
+            "toolName": "Read",
+            "result": "The probe value is MARIGOLD-42.\n"
+          }
+        ]
+      },
+      {
+        "ordinal": 5,
+        "blob_id": "ff66266e5e8e198b829c2b25e1264277b9e772db2abdc12668098dcecdc48c40",
+        "role": "assistant",
+        "id": "msg_ad6669b6-9107-94d9-b73a-7780aa5a054a",
+        "content": [
+          {
+            "type": "text",
+            "text": "MARIGOLD-42"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "session_id": "7909a4ec-49bf-48af-bf2e-8a38a369bd6b",
+    "messages": [
+      {
+        "ordinal": 3,
+        "blob_id": "651b379504acb611402e6854e20f6eae39dc85b2b46528d7d047414f7a95928a",
+        "role": "assistant",
+        "id": "msg_f1125edf-0e47-9759-b27d-2cbf290fe464",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reading `notes.txt` only."
+          },
+          {
+            "type": "tool-call",
+            "toolCallId": "call-ebc0b34f-e78f-4071-ac02-6f2252751094-0\nfc_f1125edf-0e47-9759-b27d-2cbf290fe464_0",
+            "toolName": "Read",
+            "args": {
+              "path": "/tmp/hypaware-cursor-live-probe/workspace/notes.txt"
+            }
+          }
+        ]
+      },
+      {
+        "ordinal": 4,
+        "blob_id": "07a9bba58d917b141182ce9278a31249a6c08625dc9b4f2b9e66cf0c4ecab6f0",
+        "role": "tool",
+        "id": "call-ebc0b34f-e78f-4071-ac02-6f2252751094-0\nfc_f1125edf-0e47-9759-b27d-2cbf290fe464_0",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "call-ebc0b34f-e78f-4071-ac02-6f2252751094-0\nfc_f1125edf-0e47-9759-b27d-2cbf290fe464_0",
+            "toolName": "Read",
+            "result": "The probe value is MARIGOLD-42.\n"
+          }
+        ]
+      },
+      {
+        "ordinal": 5,
+        "blob_id": "4cc637cee6266063071549a5804fb831a8ca580ccca4e73c2d2a25807e250145",
+        "role": "assistant",
+        "id": "msg_f2afe901-4ef8-96e1-ba40-9feeac3bfd38",
+        "content": [
+          {
+            "type": "text",
+            "text": "**MARIGOLD-42**"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "session_id": "ec2e6c5a-9456-463f-b917-7fd3f2f3a416",
+    "messages": [
+      {
+        "ordinal": 3,
+        "blob_id": "31e9434ee261fd8396813ac51feb37040aa3fc1803d1e16fb613a567ccf4cdc5",
+        "role": "assistant",
+        "id": "msg_d7c59af9-9344-9477-86cc-83a77d4919f8",
+        "content": [
+          {
+            "type": "text",
+            "text": "Running the four read-only probe checks now."
+          },
+          {
+            "type": "tool-call",
+            "toolCallId": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-0\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_0",
+            "toolName": "Grep",
+            "args": {
+              "path": "/tmp/hypaware-cursor-live-probe/workspace/notes.txt",
+              "pattern": "MARIGOLD",
+              "output_mode": "content"
+            }
+          },
+          {
+            "type": "tool-call",
+            "toolCallId": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-1\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_1",
+            "toolName": "Glob",
+            "args": {
+              "target_directory": "/tmp/hypaware-cursor-live-probe/workspace",
+              "glob_pattern": "*"
+            }
+          },
+          {
+            "type": "tool-call",
+            "toolCallId": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-2\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_2",
+            "toolName": "Shell",
+            "args": {
+              "command": "printf \"SHELL-PROBE-OK\\n\"",
+              "description": "Print SHELL-PROBE-OK probe line"
+            }
+          },
+          {
+            "type": "tool-call",
+            "toolCallId": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-3\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_3",
+            "toolName": "Read",
+            "args": {
+              "path": "/tmp/hypaware-cursor-live-probe/workspace/missing-probe.txt"
+            }
+          }
+        ]
+      },
+      {
+        "ordinal": 4,
+        "blob_id": "1aea8de9252438850680de0e4aefc6c11ef8c5e43a0083d339b14c91e7dc8081",
+        "role": "tool",
+        "id": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-0\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_0",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-0\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_0",
+            "toolName": "Grep",
+            "result": "<workspace_result workspace_path=\"/tmp/hypaware-cursor-live-probe/workspace\">\nnotes.txt\n  1:The probe value is MARIGOLD-42.\n</workspace_result>"
+          }
+        ]
+      },
+      {
+        "ordinal": 5,
+        "blob_id": "9a64fa64bb95121c37cbd82b0569e53b3b7a1848c12e534e39b89f734954d159",
+        "role": "tool",
+        "id": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-1\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_1",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-1\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_1",
+            "toolName": "Glob",
+            "result": "Result of search in '/tmp/hypaware-cursor-live-probe/workspace' (total 2 files):\n- .cursor/hooks.json\n- notes.txt\n"
+          }
+        ]
+      },
+      {
+        "ordinal": 6,
+        "blob_id": "4139fc1372f82ba1a64edd6e432fcfa8fd9d839b0a09c2793218d7c62a3b0107",
+        "role": "tool",
+        "id": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-2\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_2",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-2\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_2",
+            "toolName": "Shell",
+            "result": "Rejected: "
+          }
+        ]
+      },
+      {
+        "ordinal": 7,
+        "blob_id": "daa4c2cb70487c581bd812ccdda97f022d294f1247c6deac594a0b7090a33ac1",
+        "role": "tool",
+        "id": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-3\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_3",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-3\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_3",
+            "toolName": "Read",
+            "result": "Error: File not found"
+          }
+        ]
+      },
+      {
+        "ordinal": 8,
+        "blob_id": "1080270088d00df9a85b09aea250ee48c7f52fdad1a504edf68261045b575784",
+        "role": "assistant",
+        "id": "msg_261b0a14-e096-94b6-ba73-edd9d6e05882",
+        "content": [
+          {
+            "type": "text",
+            "text": "Retrying the Shell probe \u2014 the first attempt was rejected."
+          },
+          {
+            "type": "tool-call",
+            "toolCallId": "call-c76a7d26-f78e-4421-b738-a05b676535d8-4\nfc_261b0a14-e096-94b6-ba73-edd9d6e05882_0",
+            "toolName": "Shell",
+            "args": {
+              "command": "printf \"SHELL-PROBE-OK\\n\"",
+              "description": "Print SHELL-PROBE-OK probe line"
+            }
+          }
+        ]
+      },
+      {
+        "ordinal": 9,
+        "blob_id": "6a00a2c13393e4d90c74c82976ba15192dcceedae0b05cbf01508a6b70488deb",
+        "role": "tool",
+        "id": "call-c76a7d26-f78e-4421-b738-a05b676535d8-4\nfc_261b0a14-e096-94b6-ba73-edd9d6e05882_0",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "call-c76a7d26-f78e-4421-b738-a05b676535d8-4\nfc_261b0a14-e096-94b6-ba73-edd9d6e05882_0",
+            "toolName": "Shell",
+            "result": "Rejected: "
+          }
+        ]
+      },
+      {
+        "ordinal": 10,
+        "blob_id": "ec15a80cd64d9a6a04656feddeae50c490e37efee66f88eddd7a34a4d68c1ef3",
+        "role": "assistant",
+        "id": "msg_746595a1-78a5-9a73-8fd2-02a35e7c36eb",
+        "content": [
+          {
+            "type": "text",
+            "text": "**Probe summary**\n\n1. **Grep (`MARIGOLD` in `notes.txt`)** \u2014 Match found: line 1, `The probe value is MARIGOLD-42.`\n\n2. **List workspace root** \u2014 No separate native `List` tool in this session; used `Glob` on the root instead. Two entries: `.cursor/hooks.json`, `notes.txt`.\n\n3. **Shell (`printf \"SHELL-PROBE-OK\\n\"`)** \u2014 Rejected twice; no stdout. Could not complete this check.\n\n4. **Read (`missing-probe.txt`)** \u2014 Error as expected: file not found."
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -678,6 +678,17 @@ test('two Codex threads sharing a session_id keep separate start time and tool l
   assert.equal(rowsT2[0].tool_name ?? null, null, 'no cross-thread tool-name resolution on a colliding tool_call id')
 })
 
+test('explicit unknown tool outcomes do not become success, while existing provider defaults remain intact', () => {
+  for (const [flag, expected] of [[undefined, 'success'], [false, 'success'], [true, 'error'], [null, undefined]]) {
+    const rows = aiGatewayRowsFromProjectedExchange({
+      provider: 'unknown', session_id: 'tool-outcome',
+      messages: [{ role: 'tool', content: [{ type: 'tool_result', tool_use_id: 'call', content: 'output',
+        ...(flag === undefined ? {} : { is_error: flag }) }] }],
+    })
+    assert.equal(/** @type {any} */ (rows[0].status)?.tool_status, expected)
+  }
+})
+
 test('per-message model wins over the exchange model; absent it falls back to the exchange model', () => {
   // The projector resolves model as `message.model ?? projection.model`. Drive
   // an exchange whose exchange-level model DIFFERS from a message's own model,

@@ -111,6 +111,11 @@ export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir
     }
     return withinBase(clientName, settingsFile, homeDir, path.join(homeDir, ...parts), field)
   }
+  // @ref LLP 0399#attachment: both native hook loaders use ~/.cursor even
+  // when CURSOR_CONFIG_DIR or XDG_CONFIG_HOME relocates CLI settings.
+  if (clientName === 'cursor') {
+    return withinBase(clientName, settingsFile, homeDir, path.join(homeDir, settingsFile), field)
+  }
   const envKey = `${clientName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_HOME`
   const override = env?.[envKey]
   if (typeof override === 'string' && override.length > 0) {

@@ -66,6 +66,12 @@ export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
     return 0
   }
 
+  // @ref LLP 0399#coexistence: inherited hooks are not Claude activity and
+  // must not write Claude context or run its body-spool maintenance. Below the
+  // help branch, which the binary's own skip also spares, so `--help` still
+  // answers in a Cursor environment.
+  if (ctx.env.CURSOR_VERSION) return 0
+
   // The recording half is already internally fault-tolerant, but it is wrapped
   // here too so the invariant holds structurally: whatever it does, the hook
   // exits 0 and the sweep below still runs.
@@ -115,6 +121,7 @@ async function recordSessionContext(argv, ctx, deps) {
     return
   }
 
+  if (typeof event.cursor_version === 'string') return
   const sessionId = str(event.session_id)
   const cwd = str(event.new_cwd) ?? str(event.cwd)
   if (!sessionId || !cwd) return
