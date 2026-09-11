@@ -973,8 +973,8 @@ async function runGuardedInitWizard(opts, guard) {
 
   // The closing offer comes last, after whichever of the narration and the
   // sync step this path ran: would you like HypAware to suggest a skill? A
-  // yes runs `hyp ask`, which starts the client in its own folder under the
-  // temp directory, never in the directory `hyp init` was run from; that is
+  // yes runs `hyp ask`, which starts the client in its own folder under
+  // `HYP_HOME`, never in the directory `hyp init` was run from; that is
   // what lets setup make the offer instead of printing a question to type.
   // @ref LLP 0398#setup-offer [implements]: setup offers to run the ask; a yes runs it as a child on this terminal
   /** @type {WizardSuggestSkillResult | undefined} */

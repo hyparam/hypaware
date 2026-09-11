@@ -6,7 +6,6 @@ import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { isTty } from '../cli/stdio.js'
 import os from 'node:os'
 import path from 'node:path'
-import process from 'node:process'
 
 import { OVERVIEW_DATASET, OVERVIEW_PROBE_SQL, overviewRunnerFromCtx } from '../query/overview.js'
 import { prepareFirstAskEvidence } from '../query/first_ask_evidence.js'
@@ -33,8 +32,8 @@ import {
  * installer, so the launch waits for a command the user runs themselves.
  *
  * With no argument it asks the one question worth asking first (which
- * skill to add): HypAware gathers the evidence into a folder under the
- * system temp directory and starts an attached client inside it, asking
+ * skill to add): HypAware gathers the evidence into a folder under
+ * `HYP_HOME` and starts an attached client inside it, asking
  * which client only when more than one could be started. With a question
  * it skips the gather and starts a client on that question in the
  * current directory, which is the shape a user reaches for once they know
@@ -100,21 +99,23 @@ export async function runAsk(argv, ctx) {
 
 /**
  * The recommendation ask's gather (LLP 0398), run in-process against the
- * same runner the overview uses. The evidence lives in one folder under
- * the system temp directory, `<tmpdir>/hypaware-<uid>/ask/` (see
- * `askDirName`), rewritten on every
- * ask: the client is started inside it, so its transcript label, cwd,
- * and any test file it writes stay out of the person's home directory
- * and out of whatever repo `hyp ask` was typed in. The path is fixed
- * rather than random because Claude Code asks once whether to trust a
- * new folder; a fresh random path would ask on every run.
+ * same runner the overview uses. The evidence lives in `<HYP_HOME>/ask/`,
+ * one folder rewritten on every ask: the client is started inside it, so
+ * its transcript label, cwd, and any test file it writes belong to this
+ * ask rather than to whatever repo `hyp ask` was typed in. The path is
+ * fixed rather than random because Claude Code asks once whether to trust
+ * a new folder; a fresh random path would ask on every run. It is under
+ * `HYP_HOME`, not the system temp directory, because every parent of the
+ * folder is then the person's own: on Linux the temp directory is shared
+ * by every account on the host, and a parent another account created
+ * first is a folder another account controls, files and cwd both.
  *
  * `client` is the one the wizard is about to start. Its descriptor carries
  * the skill and agent trees that client actually reads, which is what the
  * instructions and the on-disk listing name: Codex and OpenCode do not
  * load `~/.claude/skills`.
  *
- * @ref LLP 0398#run-directory [implements]: a fixed temp folder owns the ask, not the caller's cwd and not the home directory
+ * @ref LLP 0398#run-directory [implements]: a fixed folder under HYP_HOME owns the ask, not the caller's cwd and not a shared temp directory
  * @param {CommandRunContext} ctx
  * @param {Map<string, ClientDescriptor>} descriptors
  * @param {string} client
@@ -130,37 +131,15 @@ async function prepareEvidenceFromCtx(ctx, descriptors, client) {
   const runner = overviewRunnerFromCtx(ctx, firstLookNoticeSink(ctx.stderr))
   if (!runner || !runner.hasDataset(OVERVIEW_DATASET)) return undefined
   const homeDir = ctx.env.HOME || os.homedir()
+  const hypHome = ctx.env.HYP_HOME || path.join(homeDir, '.hyp')
   const descriptor = descriptors.get(client)
   return prepareFirstAskEvidence({
     runner,
-    root: path.join(ctx.env.TMPDIR || os.tmpdir(), askDirName(), 'ask'),
+    root: path.join(hypHome, 'ask'),
     homeDir,
     ...(descriptor?.skillDir ? { client: { skillDir: descriptor.skillDir, ...(descriptor.agentDir ? { agentDir: descriptor.agentDir } : {}) } } : {}),
     say: (line) => ctx.stdout.write(`${line}\n`),
   })
-}
-
-/**
- * The run directory's own name, carrying the uid where there is one.
- *
- * The folder is created `0700` because it quotes the person's own typed
- * lines, and a recursive `mkdir` applies that mode to the parent it creates
- * too. On Linux the system temp directory is shared by every account on the
- * host, so a plain `hypaware/ask` hands the first user who runs `hyp ask` an
- * unreadable `/tmp/hypaware`, and every other user's gather then fails on
- * `EACCES` for good: the sticky bit stops them removing it, and `force` only
- * swallows a path that is missing, not one that cannot be read. The uid keeps
- * the path fixed per person, which is the property the client's trust dialog
- * needs (LLP 0398 #run-directory), without making it shared between them.
- * macOS and Windows already hand out a per-user temp directory, so there the
- * name is belt and braces.
- *
- * @ref LLP 0398#run-directory [constrained-by]: one fixed folder per person, not one per host
- * @returns {string}
- */
-function askDirName() {
-  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  return typeof uid === 'number' ? `hypaware-${uid}` : 'hypaware'
 }
 
 /**

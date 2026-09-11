@@ -132,19 +132,13 @@ org run without these filters found "assess the exact planned action
 below" typed in 86 sessions: a Codex guardian review, not a person.
 
 <a id="run-directory"></a>**The client starts inside the evidence.** The
-files are written to `<tmpdir>/hypaware-<uid>/ask/`, one user-only folder
-emptied and rewritten on every ask, and the client is spawned with that
-directory as its working directory. The uid is in the name because the
-folder is created `0700` and Linux shares one temp directory between every
-account on the host: without it the first person to run `hyp ask` leaves a
-parent nobody else can read, and every other account's gather fails on
-`EACCES` from then on. Under the temp directory rather than
-`HYP_HOME`, because `HYP_HOME` is inside the home directory by default
-and the point is that the session lands in neither the home directory
-nor a repo. The path is fixed, not random: Claude Code asks once whether
-to trust a new folder, and a random path would ask on every run. This narrows LLP
-0198 #onboarding-list, which chose the caller's directory at the launch
-boundary, for this one row only. The reasons are specific to it:
+files are written to `<HYP_HOME>/ask/`, one user-only folder emptied and
+rewritten on every ask, and the client is spawned with that directory as
+its working directory. The path is fixed, not random: Claude Code asks
+once whether to trust a new folder, and a random path would ask on every
+run. This narrows LLP 0198 #onboarding-list, which chose the caller's
+directory at the launch boundary, for this one row only. The reasons are
+specific to it:
 
 - The prompt says "this folder", and the instructions are in `ASK.md`.
   A prompt that has to carry an absolute path is a prompt that breaks
@@ -157,6 +151,24 @@ boundary, for this one row only. The reasons are specific to it:
 - A hook the answer proposes has to be tested against a real transcript
   before it appears. The test writes a file. That file belongs in the
   run directory, not in a repo.
+
+Under `HYP_HOME` and not the system temp directory, because what the
+folder needs is that every parent of it is the person's own. An earlier
+revision put it at `<tmpdir>/hypaware-<uid>/ask/` so the session would
+land outside the home directory; review showed the cost. On Linux the
+temp directory is shared by every account on the host, and a uid is
+public, so another account can create `hypaware-<uid>` first and own the
+parent from then on. A `0700` folder inside a parent someone else owns is
+theirs to rename away and replace between the gather and the launch,
+which hands them both the evidence files and the directory the client
+starts in, project settings, hooks, and `ASK.md` included. A check on the
+parent would close that; a parent that is already the person's own never
+opens it. What the temp directory was buying was smaller than it read: a
+client's unprompted read surface is its working directory and what lies
+below, not the tree above it, so a session in `<HYP_HOME>/ask` reads that
+folder and asks for anything else, the cache beside it included. The one
+upward look is `CLAUDE.md` discovery in the folder's ancestors, which
+loads the person's own files as instructions.
 
 `hyp ask "<question>"` keeps the caller's directory. There is one
 folder, not one per run: the files exist so the client can read them

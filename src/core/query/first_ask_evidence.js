@@ -430,8 +430,7 @@ export function frontMatterDescription(text) {
 
 /**
  * Run the whole gather for one launch into `root`, which is emptied first
- * and created user-only: the files quote the person's own typed lines,
- * and on a shared machine the temp directory is not private by default.
+ * and created user-only: the files quote the person's own typed lines.
  * One folder, replaced on every ask; nothing reads it afterwards.
  *
  * @ref LLP 0398#run-directory [implements]: one directory, wiped and rewritten per ask, and the client starts inside it

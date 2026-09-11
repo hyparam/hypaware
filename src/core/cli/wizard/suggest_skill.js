@@ -9,9 +9,8 @@
  * output the reader has to act on later; an offer is the act itself, made
  * at the moment the first look has just shown them their own rows. The
  * launch is safe here now: `hyp ask` starts the client in a fixed folder
- * under the system temp directory (LLP 0398 #run-directory), never in
- * the directory setup was run from, which was the reason setup used to
- * print and stop.
+ * under `HYP_HOME` (LLP 0398 #run-directory), never in the directory
+ * setup was run from, which was the reason setup used to print and stop.
  *
  * @ref LLP 0398#setup-offer [implements]: setup offers the recommendation instead of listing questions
  * @ref LLP 0398#run-directory [constrained-by]: the client starts in the evidence folder, so setup may start it
