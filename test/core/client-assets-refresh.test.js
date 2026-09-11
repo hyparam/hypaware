@@ -142,6 +142,32 @@ test('a changed source is re-copied and the ledger digest follows it', async () 
   assert.deepEqual(again.refreshed, [])
 })
 
+test('a source holding a symlink settles instead of re-copying on every boot', async () => {
+  // `copyDir` skips a symlink, so the copy cannot hold one. Unless the digest
+  // skips it too, the source never digests equal to its copy: every boot fails
+  // the unchanged check, re-copies the tree, and rewrites the ledger with
+  // identical content.
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  await fs.symlink('SKILL.md', path.join(src, 'alias.md'))
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+  assert.deepEqual(await fs.readdir(dest), ['SKILL.md'])
+
+  // Backdated, so a rewrite of identical content still shows as a write.
+  const ledgerFile = path.join(h.stateRoot, 'client-assets.json')
+  const backdated = new Date(Date.now() - 60_000)
+  await fs.utimes(ledgerFile, backdated, backdated)
+  const before = await fs.stat(ledgerFile)
+
+  const out = await refresh(h, regs)
+  assert.equal(out.unchanged, 1)
+  assert.deepEqual(out.refreshed, [])
+  assert.deepEqual(out.skipped, [])
+  assert.equal((await fs.stat(ledgerFile)).mtimeMs, before.mtimeMs)
+})
+
 test('a copy the user edited is kept and named, even when the source moved on', async () => {
   const h = await makeHome()
   const src = await writeSkillSource(h.home, 'alpha', 'v1')

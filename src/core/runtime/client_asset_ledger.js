@@ -160,8 +160,8 @@ export async function writeClientAssetLedger(stateRoot, records) {
  *
  * Paths are hashed alongside the bytes so adding or renaming a file inside an
  * installed skill registers as a change; entries that are neither a file nor a
- * directory (a symlink someone dropped in) contribute their name only, so they
- * likewise cannot be mistaken for the tree we copied.
+ * directory (a symlink someone dropped in) are skipped, because `copyDir` skips
+ * them too and a source tree has to digest equal to the copy made of it.
  *
  * **The shape is hashed before anything else.** Without it the two branches
  * write into the same unframed byte stream and produce collisions across kinds:
@@ -209,11 +209,10 @@ export async function digestClientAsset(dest) {
  * error, a file `readdir` just listed that a concurrent actor removes before
  * the following `readFile` reaches it) falls into a second, narrower `try`
  * that always reports `missing: false`, so a failure below `dest` can never
- * be mistaken for `dest` itself being gone. A dangling symlink *inside* the
- * tree never reaches either `try`'s error path at all: `hashTree` reads
- * `Dirent` shape from `readdir` without following the entry, so a symlink
- * whose target is gone hashes as an opaque `o:` entry by name, the same as
- * one whose target exists.
+ * be mistaken for `dest` itself being gone. A symlink *inside* the tree never
+ * reaches either `try`'s error path at all: `hashTree` reads `Dirent` shape
+ * from `readdir` without following the entry, so it is skipped whether its
+ * target is gone or not.
  *
  * @param {string} dest
  * @returns {Promise<{ digest?: string, missing: boolean }>} `missing` is true
@@ -258,13 +257,17 @@ async function hashTree(root, dir, hash) {
   const entries = await fs.readdir(dir, { withFileTypes: true })
   entries.sort((a, b) => compareStrings(a.name, b.name))
   for (const entry of entries) {
+    // Exactly the set `copyDir` copies: an entry it skips must not reach the
+    // hash either, or a source tree holding one could never digest equal to
+    // the copy made of it, and the refresh would re-copy it on every boot.
+    if (!entry.isDirectory() && !entry.isFile()) continue
     const full = path.join(dir, entry.name)
     // The entry's shape leads its path, so a subdirectory named `x` and a file
     // named `x` cannot hash alike, and a file's bytes can never be read back as
     // the tree that would have followed a directory of the same name.
-    hash.update(`${entry.isDirectory() ? 'd' : entry.isFile() ? 'f' : 'o'}:${path.relative(root, full)}\n`)
+    hash.update(`${entry.isDirectory() ? 'd' : 'f'}:${path.relative(root, full)}\n`)
     if (entry.isDirectory()) await hashTree(root, full, hash)
-    else if (entry.isFile()) hash.update(await fs.readFile(full))
+    else hash.update(await fs.readFile(full))
   }
 }
 
