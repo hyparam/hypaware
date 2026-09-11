@@ -81,7 +81,7 @@ export async function runWizardSyncNow(opts) {
         }
 
         // One question, and it is `hyp sync`'s own: the child prints the
-        // plan (every destination, what is withheld) and asks its Y/n. A no
+        // plan (every upload target, what is withheld) and asks its Y/n. A no
         // is the wait. A lead line says what is starting, so the plan does
         // not read as a report the wizard forgot to introduce - an
         // introduction only; the child states the upload schedule and asks.

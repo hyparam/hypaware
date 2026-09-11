@@ -665,8 +665,9 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
  * own config rather than inventing a registration concept for one prompt.
  * An `http(s)` destination is off-machine on the evidence of the URL; a
  * filesystem path is on-machine on the evidence of the path. Anything else
- * reports `null` and the summary stays silent about it - a confirmation
- * prompt that guesses is worse than one that admits the gap.
+ * reports `null`, and a `null` is the one a sharing plan keeps: the filter
+ * drops what it knows stays here, never what it could not place. A
+ * confirmation prompt that guesses is worse than one that admits the gap.
  *
  * A server is named, never spelled as a URL. R1a binds the enrolling login's
  * surfaces by its own text, but its reason is about terminals, not about
@@ -752,9 +753,12 @@ async function readExclusions(stateDir) {
 }
 
 /**
- * The pre-confirmation summary: every destination, named, with **how much**
- * would leave through it, how far back that reaches, and the exclusions that
- * will not travel. "Are you sure?" with nothing to be sure *about* is a
+ * The pre-confirmation summary: every destination it is given, named, with
+ * **how much** would leave through it, how far back that reaches, and the
+ * exclusions that will not travel. On a sharing run the caller hands it the
+ * upload targets only (see `displayedDestinations`), so "every destination"
+ * is the caller's decision, not this renderer's.
+ * "Are you sure?" with nothing to be sure *about* is a
  * keystroke, not a decision, and a size-free plan was exactly that: identical
  * on a machine with three queued rows and one with a quarter of a million.
  *
@@ -886,7 +890,11 @@ function formatResumeInstant(iso) {
 function renderFirstSyncWarning(deadlineMs) {
   return (
     '\n' +
-    `  First upload: ${formatFirstSyncDeadline(deadlineMs)}, including your imported history.\n` +
+    // "by", because the printed instant is the deadline: LLP 0101 calls it
+    // "the latest the first sync can happen, not the earliest". Without it the
+    // line schedules an upload for tonight directly above a prompt whose bare
+    // enter uploads now, so the reader is told the opposite of what enter does.
+    `  First upload: by ${formatFirstSyncDeadline(deadlineMs)}, including your imported history.\n` +
     '  Sending now ends the review window. Uploads cannot be undone.\n' +
     '  To review exclusions: `hyp privacy` or the hypaware-privacy skill in Claude or Codex.\n'
   )
