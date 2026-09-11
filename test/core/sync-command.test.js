@@ -39,6 +39,24 @@ test('sync progress estimates from acknowledged rows and resets per destination'
   assert.doesNotMatch(progress.render(), /%/)
 })
 
+test('sync progress keeps finalizing through a commit longer than the stall window', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  now = 5_000
+  progress.update('central', { rows: 1000, bytes: 4000 })
+  assert.match(progress.render(), /central: 1,000 rows sent \| finalizing/)
+  // The last chunk is acknowledged, so by construction no further
+  // acknowledgement is coming: a commit that outlasts the stall window must
+  // not report a finished transfer as "99% | waiting for progress".
+  now = 60_000
+  assert.match(progress.render(), /central: 1,000 rows sent \| finalizing/)
+  assert.doesNotMatch(progress.render(), /waiting for progress|%/)
+})
+
 test('sync progress never treats a partial or missing count as a total', () => {
   const progress = createSyncProgress(new Map([
     ['central', { status: 'partial', rows: 10, withheldRows: 0, resume: { kind: 'unknown' } }],
@@ -63,6 +81,28 @@ test('sync threads acknowledged progress through the driver to the terminal', as
   assert.equal(await runSync(['--yes'], ctx), 0)
   assert.match(stdout.text, /central: 123 rows sent/)
   assert.match(stdout.text, /central: exported/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('sync reads a sink progress report the way it reads a sink result: a number or nothing', async () => {
+  const hypHome = await makeHome('upload-progress-hostile')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 7, bytes: 8 })
+    // An argument-less call is the plugin saying nothing. It must not reach
+    // the display as the kernel's own start-of-destination signal, which is
+    // what an absent progress object means there.
+    opts.onProgress()
+    // Counts come from sink code the kernel does not own, and land in a line
+    // somebody is watching an upload on.
+    opts.onProgress({ rows: 'lots', bytes: null })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 8 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.doesNotMatch(stdout.text, /NaN/)
+  assert.match(stdout.text, /central: 7 rows sent/)
   await fs.rm(hypHome, { recursive: true, force: true })
 })
 

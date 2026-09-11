@@ -8,7 +8,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 
 /**
- * @import { DatasetRegistration, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetRegistration, ExportProgress, ExportResult, QueryPartition } from '../../../hypaware-plugin-kernel-types.js'
  * @import { Span } from '../observability/runtime.js'
  * @import { ExtendedSinkHandle } from '../../../src/core/registry/types.js'
  * @import { DriverOptions, TickOptions, TickReport } from '../../../src/core/sinks/types.js'
@@ -120,7 +120,7 @@ export function createSinkDriver(opts) {
           const format = handle.encoder?.format ?? 'native'
           const reported = await handle.sink.exportBatch(
             { batchId, partitions },
-            { format, schedule, ...(onProgress ? { onProgress: (progress) => onProgress(instance, progress) } : {}) }
+            { format, schedule, ...(onProgress ? { onProgress: (progress) => onProgress(instance, readExportProgress(progress)) } : {}) }
           )
           result = readExportResult(reported, partitions)
         } catch (err) {
@@ -372,6 +372,29 @@ function readExportResult(reported, partitions) {
     bytesWritten: typeof reported?.bytesWritten === 'number' ? reported.bytesWritten : 0,
     retryPartitions: Array.isArray(reported?.retryPartitions) ? reported.retryPartitions.slice() : partitions,
     error: typeof reported?.error === 'string' ? reported.error : undefined,
+  }
+}
+
+/**
+ * One progress report from the plugin's object, read the way
+ * {@link readExportResult} reads its counts: a number or nothing.
+ *
+ * The same reason applies with one addition. `onProgress` is a plugin-facing
+ * callback on the kernel's export contract, so the numbers arrive from sink
+ * code the kernel does not own, and the caller is a spinner that renders them
+ * straight to the terminal. An absent, string, or `NaN` count is therefore not
+ * a wrong log field but `NaN rows sent | ETA ~NaNm` on the screen somebody is
+ * watching an upload on. A missing argument (`opts.onProgress()`) is the same
+ * case and must not reach the caller as the kernel's own start-of-destination
+ * signal, which is an absent progress object.
+ *
+ * @param {ExportProgress | null | undefined} reported
+ * @returns {ExportProgress}
+ */
+function readExportProgress(reported) {
+  return {
+    rows: typeof reported?.rows === 'number' && Number.isFinite(reported.rows) ? reported.rows : 0,
+    bytes: typeof reported?.bytes === 'number' && Number.isFinite(reported.bytes) ? reported.bytes : 0,
   }
 }
 

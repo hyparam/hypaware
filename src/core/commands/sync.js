@@ -363,11 +363,16 @@ export function createSyncProgress(volumes, now = Date.now) {
       : `${groupThousands(rows)} rows sent`
     const prefix = `${instance}: ${count}`
     if (rows === 0) return `${prefix} | waiting for progress | ETA unavailable`
+    // Ahead of the stall check, because a finalize is a stall: the last chunk
+    // is acknowledged and the export is committing, so no further
+    // acknowledgement is coming and a long one would otherwise flip a finished
+    // transfer to "99% | waiting for progress" - the one reading that is both
+    // alarming and wrong.
+    if (rows === total) return `${instance}: ${groupThousands(rows)} rows sent | finalizing...`
     if (now() - lastAck >= 15_000) return `${prefix} | waiting for progress | ETA unavailable`
     const seconds = Math.max(1, (now() - started) / 1000)
     const rate = rows / seconds
     if (total === undefined || rows > total) return `${prefix} | ETA unavailable`
-    if (rows === total) return `${instance}: ${groupThousands(rows)} rows sent | finalizing...`
     const remaining = Math.max(1, Math.ceil((total - rows) / rate))
     const eta = remaining < 60 ? `${remaining}s` : `${Math.ceil(remaining / 60)}m`
     return `${prefix} | ETA ~${eta}`
