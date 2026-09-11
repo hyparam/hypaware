@@ -2,6 +2,7 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 
 import { AI_GATEWAY_MESSAGES_DATASET, errMessage, projectedExchangeItem, resolveWindow } from '../../../../src/core/backfill/scan_util.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
@@ -26,6 +27,7 @@ export function createOpenCodeBackfillProvider(opts = {}) {
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import bounded OpenCode CLI and Desktop session exports',
     async *run(ctx) {
+      refreshSessionIgnores(opts.ignoredSessions)
       yield* runBackfill({
         ctx,
         resolver,

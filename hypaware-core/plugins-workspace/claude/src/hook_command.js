@@ -1,5 +1,7 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
+
 import { execFile } from 'node:child_process'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -128,6 +130,23 @@ async function recordSessionContext(argv, ctx, deps) {
     await appendSessionContext(stateFile, /** @type {any} */ (minimal))
   } catch {
     /* hook MUST never throw back into Claude: a write failure records nothing */
+  }
+
+  // @ref LLP 0403#hook-identity [implements]: hook stdin names the exact
+  // conversation; Claude's environment file passes it to subsequent Bash tools.
+  const envFile = str(ctx.env.CLAUDE_ENV_FILE)
+  if (event.hook_event_name === 'SessionStart' && envFile && path.isAbsolute(envFile)) {
+    try {
+      if (!sessionId.trim() || sessionId.includes('\0') || !sessionId.isWellFormed()
+          || Buffer.byteLength(sessionId) > 64 * 1024) {
+        throw new Error('invalid session identity')
+      }
+      // Preserve an unterminated line from another hook and quote shell data.
+      const quoted = "'" + sessionId.replaceAll("'", "'\\''") + "'"
+      await fs.appendFile(envFile, `\nexport CLAUDE_CODE_SESSION_ID=${quoted}\n`, { mode: 0o600 })
+    } catch {
+      ctx.stderr.write('hyp claude-hook: could not export the session ID; automatic session opt-out may be unavailable\n')
+    }
   }
 
   // Enriched record SECOND: run the (slower) git subprocesses, then append the

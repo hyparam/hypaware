@@ -90,8 +90,16 @@ curated HypAware registry.
   listener when one is running); `hyp session unignore` resumes, and
   `hyp session status` reports which it is right now. Each resolves the
   session id itself (Claude and Codex) and fails closed rather than guessing.
-  The opt-out is in-memory: a daemon restart drops it, and a fork
-  (`claude --fork-session`, `codex fork`) mints a new id it no longer covers.
+  The opt-out survives restarts until explicitly unignored and is honored by
+  transcript backfill. Forks (`claude --fork-session`, `codex fork`) need a new
+  exclusion. Ignoring does not purge prior records; unignoring permits older
+  transcript content to be imported again.
+  The managed Claude SessionStart hook exports the ID to Bash commands in
+  attached local Desktop Code sessions. Start or resume after upgrading so it
+  runs. If `CLAUDE_CODE_SESSION_ID` is absent, use an explicitly verified Claude
+  ID or report that opt-out is unconfirmed. A recent transcript or matching cwd
+  cannot establish the current Claude conversation; never substitute a Codex ID
+  from the same folder.
 - Decide what happens in new folders - by default they sync with no
   question; `hyp privacy folders ask` asks once per new folder instead, and
   `hyp privacy folders sync` returns to the default. It gates the question

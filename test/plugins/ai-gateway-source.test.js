@@ -2,6 +2,11 @@
 
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import fs from 'node:fs'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { setGatewayProcessTransport } from '../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js'
+import { bootKernel } from '../../src/core/runtime/boot.js'
+import { activate } from '../../hypaware-core/plugins-workspace/ai-gateway/src/index.js'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -553,3 +558,85 @@ test('a failure after the append does not roll the dedupe back onto rows that la
 async function settleFinalizers() {
   for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve))
 }
+
+// @ref LLP 0403#storage [tests]: damaged privacy state must not strand attached clients.
+for (const mode of ['inline', 'gateway']) for (const damage of ['corrupt', 'oversized', 'unreadable']) {
+  test(`gateway forwards without capture when exclusions are ${damage} (${mode})`, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-ignore-damage-'))
+    const upstream = await startEchoUpstream('provider-answer')
+    let source
+    try {
+      const store = new SessionIgnoreSet(path.join(root, 'hypaware'))
+      store.add('private')
+      const marker = path.join(store.directory, fs.readdirSync(store.directory)[0])
+      if (damage === 'unreadable') {
+        fs.renameSync(store.directory, `${store.directory}-saved`)
+        fs.writeFileSync(store.directory, 'not a directory')
+      } else fs.writeFileSync(marker, damage === 'corrupt' ? 'broken json' : 'x'.repeat(65537))
+      let startedCapture = 0
+      if (mode === 'gateway') setGatewayProcessTransport({
+        role: 'gateway',
+        recorder: {
+          startExchange() { startedCapture++; throw new Error('must not start capture') },
+          async drain() {},
+        },
+      })
+      const logged = []
+      const ctx = fakeCtx({ listen: '127.0.0.1:0' }, logged)
+      ctx.env.HYP_HOME = root
+      const registrations = new Map()
+      let api
+      ctx.provideCapability = (_name, _version, value) => { api = value }
+      ctx.sources = { register: item => registrations.set(item.name, item) }
+      ctx.commands = { get() {}, register() {} }
+      ctx.query = { getDataset() {}, registerDataset() {} }
+      ctx.backfillMaterializers = { get() {}, register() {} }
+      let projected = 0
+      let appended = 0
+      ctx.storage.appendRows = async () => { appended++ }
+      await activate(ctx)
+      api.registerUpstreamPreset({ name: 'echo', base_url: upstream.url, path_prefix: '/' })
+      api.registerExchangeProjector({ name: 'probe', match: () => true, project() { projected++; return undefined } })
+      source = await registrations.get('ai-gateway').start(ctx)
+      const status = await source.status()
+      const url = `http://${status.details.host}:${status.details.port}`
+      const response = await fetch(`${url}/v1/messages`, { method: 'POST', body: 'private content without session ID' })
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), 'provider-answer')
+      await settleFinalizers()
+      assert.equal(projected, 0)
+      assert.equal(appended, 0)
+      assert.equal(startedCapture, 0)
+      assert.match(status.lastError, /session exclusions.*capture.*disabled/i)
+      assert.ok(logged.some(item => item.event === 'session_ignore_load_failed'))
+      for (const method of ['GET', 'POST', 'DELETE']) {
+        const receipt = await fetch(`${url}/_hypaware/ignore/session?session_id=private`, {
+          method, ...(method === 'GET' ? {} : { body: JSON.stringify({ session_id: 'private' }) }),
+        })
+        assert.equal(receipt.status, 503, method)
+        assert.match(/** @type {any} */ (await receipt.json()).error, /session exclusions/i)
+      }
+    } finally {
+      await source?.stop()
+      setGatewayProcessTransport(undefined)
+      await upstream.close()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
+
+test('damaged exclusions do not prevent gateway or adapter activation in a real kernel boot', async () => {
+  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ignore-adapter-boot-'))
+  try {
+    const store = new SessionIgnoreSet(path.join(hypHome, 'hypaware'))
+    store.add('private')
+    fs.writeFileSync(path.join(store.directory, fs.readdirSync(store.directory)[0]), 'broken json')
+    const names = ['@hypaware/ai-gateway', '@hypaware/claude', '@hypaware/codex', '@hypaware/opencode']
+    const boot = await bootKernel({ hypHome, runId: 'ignore-adapter-boot', bootProfile: { activate: names } })
+    for (const name of names) {
+      const result = boot.activations.find(item => item.plugin.name === name)
+      assert.ok(result?.ok, `${name} activates with unreadable exclusions`)
+    }
+  } finally { fs.rmSync(hypHome, { recursive: true, force: true }) }
+})

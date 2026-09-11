@@ -1,5 +1,6 @@
 // @ts-check
 
+import { sessionIgnoreLoadError } from './session_ignore_store.js'
 import { drainRequestBody } from '../util/reject_body.js'
 
 /**
@@ -117,6 +118,13 @@ export function createControlHandler(opts) {
       return
     }
 
+    const loadError = sessionIgnoreLoadError(ignoredSessions)
+    if (loadError) {
+      drainRequestBody(req, res)
+      sendJson(res, 503, { error: loadError })
+      return
+    }
+
     const method = (req.method ?? 'GET').toUpperCase()
 
     // @ref LLP 0066#readable [implements]: the set is a privacy control, so it
@@ -168,12 +176,21 @@ export function createControlHandler(opts) {
       }
 
       let ignored
-      if (method === 'POST') {
-        ignoredSessions.add(sessionId)
-        ignored = true
-      } else {
-        ignoredSessions.delete(sessionId)
-        ignored = false
+      try {
+        if (method === 'POST') {
+          ignoredSessions.add(sessionId)
+          ignored = true
+        } else {
+          ignoredSessions.delete(sessionId)
+          ignored = false
+        }
+      } catch {
+        log?.error?.('session_ignore_persistence_failed', {
+          ...logFields, operation: 'ignore_session', method, status: 'error',
+          error_kind: 'session_ignore_persistence_failed',
+        })
+        sendJson(res, 500, { error: 'could not save session exclusion' })
+        return
       }
       const total = ignoredSessions.size
       log?.info?.(logEvent, {

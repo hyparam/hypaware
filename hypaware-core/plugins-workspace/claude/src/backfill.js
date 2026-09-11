@@ -1,6 +1,7 @@
 // @ts-check
 
 import fsp from 'node:fs/promises'
+import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 
 import {
   assignTranscriptIdentity,
@@ -192,6 +193,7 @@ function resolveSweepCron(config) {
 async function* runClaudeBackfill(args) {
   const { ctx, projectsDir, extraProjectsDirs, stateFile, clientName, deriveRepo, resolver, sweepFingerprints } = args
   const { ignoredSessions } = args
+  refreshSessionIgnores(ignoredSessions)
   const log = ctx.log
   const window = resolveWindow(ctx)
   // Many sessions share a cwd (the same repo, often the same checkout), and

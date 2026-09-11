@@ -6,6 +6,7 @@
 **Author:** Brendan / Claude
 **Date:** 2026-07-03
 **Related:** LLP 0016, LLP 0030, LLP 0049, LLP 0050, LLP 0051
+**Extended-by:** LLP 0403 (persistent session exclusions and Claude hook identity).
 
 > "Don't record *this conversation*": a temporary, in-memory, session-scoped
 > drop that writes no committable file and reverses when the session ends or on

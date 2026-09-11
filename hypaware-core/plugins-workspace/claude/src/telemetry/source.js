@@ -2,6 +2,7 @@
 
 import { Attr, getActiveSpan, withSpan } from '../../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../../src/core/observability/env.js'
+import { sessionIgnoreLoadError } from '../../../../../src/core/control/session_ignore_store.js'
 import { SESSION_IGNORE_ROUTE, createControlHandler } from '../../../../../src/core/control/session_ignore.js'
 import { resolveLiveSourceListenPortFromStatus } from '../../../../../src/core/daemon/status.js'
 import { createOtlpJsonServer, listenAndResolve } from '../../../../../src/core/otlp/server.js'
@@ -340,7 +341,8 @@ export function createStartClaudeTelemetrySource(deps) {
               : {}),
           },
         }
-        if (state.lastError) status.lastError = state.lastError
+        const error = sessionIgnoreLoadError(ignoredSessions) ?? state.lastError
+        if (error) status.lastError = error
         return status
       },
 
@@ -839,10 +841,12 @@ export function partitionIgnoredSessionEvents(events, ignoredSessions) {
   const kept = []
   /** @type {Map<string, ClaudeTelemetryEvent[]>} */
   const droppedBySession = new Map()
-  if (ignoredSessions.size === 0) return { kept: events.slice(), droppedBySession }
+  const unavailable = sessionIgnoreLoadError(ignoredSessions)
+  if (!unavailable && ignoredSessions.size === 0) return { kept: events.slice(), droppedBySession }
   for (const event of events) {
-    const sessionId = event.attributes['session.id']
-    if (typeof sessionId === 'string' && ignoredSessions.has(sessionId)) {
+    const rawId = event.attributes['session.id']
+    const sessionId = typeof rawId === 'string' ? rawId : ''
+    if (unavailable || (typeof rawId === 'string' && ignoredSessions.has(sessionId))) {
       const bucket = droppedBySession.get(sessionId)
       if (bucket) bucket.push(event)
       else droppedBySession.set(sessionId, [event])

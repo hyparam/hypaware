@@ -8,7 +8,7 @@ import type {
   AiGatewayUpstreamPreset,
   PluginActivationContext,
 } from '../../../../hypaware-plugin-kernel-types.d.ts'
-import type { Exchange } from './recorder.js'
+import type { Exchange, createNullExchange } from './recorder.js'
 import type { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
 
 export interface ExchangeInit {
@@ -162,7 +162,7 @@ export interface ProxyOptions {
     path: string | undefined
     requestHeaders: IncomingHttpHeaders
     upstreamPath?: string
-  }): Exchange
+  }): Exchange | ReturnType<typeof createNullExchange>
   /**
    * Handle a request under the reserved `/_hypaware/` control prefix. The
    * proxy short-circuits control requests BEFORE upstream matching (they
@@ -254,9 +254,8 @@ export interface GatewayState {
    * been asked to ignore. Lives on `GatewayState` (created once per plugin
    * activation, NOT per listener) so a config `reload()`, which tears down
    * and relaunches the listener, does not silently re-enable recording
-   * mid-session. No file, no cache column: dies with the daemon process.
-   * @ref LLP 0066#ephemeral [implements]: the set is deliberately process-local,
-   * which is the half of the caveat `EPHEMERAL_NOTE` has to keep telling users.
+   * mid-session. The persistent markers are loaded during activation.
+   * @ref LLP 0403#storage [implements]: activation loads saved exclusions.
    */
   ignoredSessions: Set<string>
 }

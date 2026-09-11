@@ -114,19 +114,14 @@ test('Step 1 resolves the rollout by cwd and refuses rather than guessing', () =
   assert.ok(resolveEnd > 0 && curlAt > resolveEnd, 'resolution (and its refusals) must precede the curl')
 })
 
-test('Step 1 reports the id as inferred and names both ways the opt-out lapses', () => {
+test('Step 1 reports the id as inferred and names persistence and the fork boundary', () => {
   // The staleness window is a bound, not a proof, so an id off disk is always
   // labelled. (#452)
   assert.match(step1, /ID_SOURCE="INFERRED from \$ROLLOUT on disk"/)
 
-  // Issue #455: the ephemerality caveat names the fork as well as the restart,
-  // matching `EPHEMERAL_NOTE` in ai-gateway/src/session_command.js.
   const prose = text.slice(text.indexOf('## Step 1'), text.indexOf('## Step 2'))
-  assert.match(prose, /gateway restart/)
+  assert.match(prose, /survives recorder and daemon restarts/)
   assert.match(prose, /codex fork/)
-  assert.doesNotMatch(
-    prose,
-    /a gateway restart drops it\.\s*(?:\n|$)/,
-    'the restart must not be presented as the only way the opt-out lapses'
-  )
+  assert.match(prose, /until explicitly removed/)
+
 })
