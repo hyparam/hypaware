@@ -5,6 +5,8 @@ import { ensureAiGatewayStorageContracts } from './storage_contracts.js'
 import { createStartSource } from './source.js'
 import { setAiGatewayRuntime } from './runtime.js'
 import { runSessionIgnore, runSessionStatus, runSessionUnignore } from './session_command.js'
+import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 
 /**
  * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -40,7 +42,7 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
  * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements]: owns the gateway capability + ai_gateway_messages; no client specifics
  */
 export async function activate(ctx) {
-  const state = createGatewayState()
+  const state = createGatewayState(new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir))
   const api = createAiGatewayApi(state, { storage: ctx.storage, clients: ctx.clients })
 
   ctx.provideCapability('hypaware.ai-gateway', '2.0.0', api)
@@ -68,7 +70,7 @@ export async function activate(ctx) {
       plugin: PLUGIN_NAME,
       category: 'capture-movement',
       audience: 'everyday',
-      summary: 'Stop recording this AI session on every local recorder (in-memory, until the daemon restarts)',
+      summary: 'Stop recording this AI session on every local recorder (saved until explicitly unignored)',
       usage: 'hyp session ignore [session-id] [--json]',
       run: runSessionIgnore,
     })
@@ -95,7 +97,7 @@ export async function activate(ctx) {
       summary: 'Report whether this AI session is being dropped right now (fails closed)',
       usage: 'hyp session status [session-id] [--json]',
       help: [
-        'Reads every live recorder advertising the shared in-memory session set. Exit codes:',
+        'Reads every live recorder advertising the session set. Exit codes:',
         '  0  confirmed ignored - every advertised recorder holds this session',
         '  1  confirmed NOT ignored - at least one recorder is recording it',
         '  3  unknown - the check could not be completed; assume you ARE recorded',

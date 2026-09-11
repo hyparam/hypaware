@@ -22,6 +22,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -294,4 +295,30 @@ test('the drop is live set membership, not a durable tombstone', async () => {
   } finally {
     await env.cleanup()
   }
+})
+
+
+test('a fresh importer and an existing manual importer both honor persisted exclusions', async () => {
+  const env = await stageEnv()
+  try {
+    await writeTranscript(env, 'private', PRIVATE_PROMPT, PRIVATE_ANSWER)
+    await writeTranscript(env, 'ordinary', 'ordinary prompt', 'ordinary answer')
+    const reader = new SessionIgnoreSet(env.homeDir)
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile, ignoredSessions: reader })
+    const writer = new SessionIgnoreSet(env.homeDir)
+    const listener = await startListener({ hypHome: env.homeDir, ignoredSessions: writer })
+    try { await listener.control('POST', 'private') } finally { await listener.stop() }
+    const manual = stageRunner(env, provider)
+    assert.equal((await manual.manual()).ok, true)
+    assert.deepEqual(sessionIds(manual.appended), ['ordinary'])
+    const fresh = stageRunner(env, createClaudeBackfillProvider({
+      homeDir: env.homeDir, stateFile: env.stateFile, ignoredSessions: new SessionIgnoreSet(env.homeDir),
+    }))
+    assert.equal((await fresh.tick()).ok, true)
+    assert.deepEqual(sessionIds(fresh.appended), ['ordinary'])
+    writer.delete('private')
+    const resumed = stageRunner(env, provider)
+    assert.equal((await resumed.manual()).ok, true)
+    assert.deepEqual(sessionIds(resumed.appended), ['ordinary', 'private'])
+  } finally { await env.cleanup() }
 })

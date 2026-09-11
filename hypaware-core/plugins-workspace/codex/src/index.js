@@ -3,6 +3,7 @@
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
@@ -171,6 +172,7 @@ export async function activate(ctx) {
   // outside the proxy) into `ai_gateway_messages` via `hyp backfill codex`.
   ctx.backfills.register(
     createCodexBackfillProvider({
+      ignoredSessions: new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir),
       homeDir,
       codexHome,
       clientName: CLIENT_NAME,

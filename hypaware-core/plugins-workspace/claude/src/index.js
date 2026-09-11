@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { SessionIgnoreSet } from '../../../../src/core/control/session_ignore_store.js'
 
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
@@ -127,15 +128,9 @@ export async function activate(ctx) {
   // where the file never exists.
   const localOnlyList = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
 
-  // One per-session drop set for the whole plugin: the telemetry listener
-  // hosts the control route that writes it (LLP 0256) and the transcript
-  // backfill reads it, so `hyp session ignore` binds every lane this process
-  // runs. Memory only, and a daemon restart drops it, which is what keeps
-  // LLP 0067's ephemerality contract intact.
-  // @ref LLP 0395#sweep-consults-the-set [implements]: one set per activation,
-  // shared by the recorder and the scheduled sweep
-  /** @type {Set<string>} */
-  const ignoredSessions = new Set()
+  // @ref LLP 0403#storage [implements]: load saved exclusions for both live
+  // recording and backfill, including a fresh manual importer.
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir)
 
   gateway.registerExchangeProjector(
     createClaudeExchangeProjector({

@@ -168,12 +168,21 @@ export function createControlHandler(opts) {
       }
 
       let ignored
-      if (method === 'POST') {
-        ignoredSessions.add(sessionId)
-        ignored = true
-      } else {
-        ignoredSessions.delete(sessionId)
-        ignored = false
+      try {
+        if (method === 'POST') {
+          ignoredSessions.add(sessionId)
+          ignored = true
+        } else {
+          ignoredSessions.delete(sessionId)
+          ignored = false
+        }
+      } catch {
+        log?.error?.('session_ignore_persistence_failed', {
+          ...logFields, operation: 'ignore_session', method, status: 'error',
+          error_kind: 'session_ignore_persistence_failed',
+        })
+        sendJson(res, 500, { error: 'could not save session exclusion' })
+        return
       }
       const total = ignoredSessions.size
       log?.info?.(logEvent, {

@@ -6,6 +6,7 @@
 **Generated-by:** neutral
 **Date:** 2026-07-06
 **Related:** LLP 0066, LLP 0049, LLP 0050, LLP 0051, LLP 0052
+**Extended-by:** LLP 0403 (persistent session exclusions and Claude hook identity).
 
 > Buildable design for the ephemeral per-session opt-out.
 > @ref LLP 0066 [implements]: realizes the session-opt-out spec (control route + session_id drop).

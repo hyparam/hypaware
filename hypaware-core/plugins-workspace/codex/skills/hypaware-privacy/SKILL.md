@@ -160,7 +160,7 @@ If the session id cannot be resolved (the script refuses on ambiguity, staleness
 
 **What `opt-out confirmed` proves, exactly.** `ignored: true` means the id is in the gateway's drop set, and nothing more. The gateway never inspects traffic, so it cannot tell a live session container from a thread id or a finished session's id: it answers `ignored: true` for whatever it was handed. The drop happens later, in the client adapter, against the `session_id` it stamps on the row. Everything that makes this opt-out real therefore happened *before* the POST, in resolving `payload.session_id` above - the reply is a receipt for the write, not a verified drop. Report it to the user that way, and never treat a follow-up `GET` as extra proof: it is the same set lookup answering the same question.
 
-The opt-out is held in memory by the running gateway and keyed on that one session id, so two things drop it: a **gateway restart**, and a **new session id** minted under what the user experiences as the same conversation (`codex fork <id>`; a plain `codex resume <id>` reuses the id). If the review spans either, re-run this step. `hyp session status` reports the current answer for the session you are in at any point.
+The opt-out is saved locally and survives recorder and daemon restarts until explicitly removed with `hyp session unignore`. A fork (`claude --fork-session`, `codex fork`) creates a new session ID that needs its own exclusion; a plain resume reuses the ID. Transcript backfill honors the saved exclusion. Unignoring permits earlier transcript content to be imported again. Use `hyp session status` to check the current answer.
 
 ## Step 2 - Check that backfill has settled (before surveying)
 

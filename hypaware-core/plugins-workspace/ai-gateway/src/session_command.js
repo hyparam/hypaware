@@ -26,25 +26,15 @@ const CONTROL_PATH = '/_hypaware/ignore/session'
 const FOLDER_GOVERNOR_NOTE = 'folder:  see `hyp privacy show` (this verb reports the session set only)'
 
 /**
- * Printed next to every confirmed `ignored`, by the writer and the reader
- * alike, so the two cannot drift apart.
- *
- * LLP 0066 §readable lists **two** ways the opt-out stops applying while the
- * user still believes it holds: the gateway restart that drops the set, and the
- * client minting a new `session_id` for what the user experiences as one
- * conversation. Naming only the restart reads as an exhaustive list, so a user
- * who forks is taught that the other way cannot happen. A fork mints the new id
- * (`claude --fork-session`, `codex fork`); a plain resume reuses it.
- *
- * @ref LLP 0066#readable [implements]: R9 - both ways an opt-out can stop
- * applying are named, so neither is discovered in the cache instead.
+ * The same lifetime note appears beside every confirmed read and write.
+ * @ref LLP 0403#contract [implements]: persistence replaces restart expiry.
  */
-const EPHEMERAL_NOTE =
-  'this opt-out is in-memory only: a gateway restart drops it, and a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers. Re-check with `hyp session status`.'
+const SESSION_IGNORE_NOTE =
+  'this opt-out survives daemon restarts until `hyp session unignore`; a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers. Re-check with `hyp session status`.'
 
 /**
  * What a confirmed `ignored` establishes, printed next to it by the writer and
- * the reader alike, for the same no-drift reason as `EPHEMERAL_NOTE`.
+ * the reader alike, for the same no-drift reason as `SESSION_IGNORE_NOTE`.
  *
  * The control route is a `Set` over opaque tokens: `POST` adds whatever it was
  * handed and answers `ignored: true`, `GET` is the same `Set.has`. Neither verb
@@ -213,7 +203,7 @@ export async function runSessionUnignore(argv, ctx) {
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
- * @ref LLP 0067#cli [implements]: the reader for the ephemeral opt-out set
+ * @ref LLP 0067#cli [implements]: the reader for the session opt-out set
  */
 export async function runSessionStatus(argv, ctx) {
   const parsed = parseArgv(argv)
@@ -472,7 +462,7 @@ async function runMutation(argv, ctx, method, usage) {
     )
   }
   if (primary.ignored) {
-    ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)
+    ctx.stdout.write(`${SESSION_IGNORE_NOTE}\n`)
     ctx.stdout.write(`${MEMBERSHIP_NOTE}\n`)
   }
   // The write verbs carry the same provenance caveats as the read: "ignored"
@@ -579,7 +569,7 @@ function writeStatus(ctx, json, report) {
     ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   } else if (report.status === 'ignored') {
     ctx.stdout.write(`session ${report.session_id}: ignored (${report.total} ignored in total)\n`)
-    ctx.stdout.write(`${EPHEMERAL_NOTE}\n`)
+    ctx.stdout.write(`${SESSION_IGNORE_NOTE}\n`)
     ctx.stdout.write(`${MEMBERSHIP_NOTE}\n`)
     writeRecorderStatusLines(ctx, secondaryRecorders(report))
     for (const note of provenanceNotes({
