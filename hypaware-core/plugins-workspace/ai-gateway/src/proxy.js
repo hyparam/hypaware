@@ -539,7 +539,7 @@ function handleRequest(upstreams, opts, pendingFinalizers, req, res) {
     finalized = true
     // A pass-through exchange produced no row and was never handed to the
     // recorder, so there is nothing to settle.
-    if (!recording) return
+    if (!recording || ('recording' in exchange && exchange.recording === false)) return
     // The guard above is the narrowing: only a real recorder exchange reaches
     // here, so the null stand-in is never handed to the settle path.
     const recorded = /** @type {Exchange} */ (exchange)

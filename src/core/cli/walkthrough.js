@@ -468,7 +468,7 @@ function tuiBackfillConsentPromptFactory(opts) {
     const choice = await select({
       title: backfillConsentTitle(providers, retentionDays),
       options: [
-        { value: 'yes', label: 'Yes - import it now', summary: 'Reads local transcripts into the query cache.' },
+        { value: 'yes', label: 'Yes - import it now', summary: 'Includes your existing conversation history.' },
         { value: 'no', label: 'No - skip for now', summary: 'You can import later with hyp backfill.' },
       ],
       default: 'yes',
@@ -2310,7 +2310,7 @@ async function runFinaleBackfill(args) {
           // the result line below replaces it; elsewhere it prints once.
           const startTag = dryRun ? '(dry-run) ' : ''
           const entry = await withSpinner(
-            { stdout, env, label: `${startTag}backfill ${provider}: importing local history…` },
+            { stdout, env, label: `${startTag}backfill ${provider}: importing history…` },
             () => backfill.run({ provider, dryRun, retentionDays, until })
           )
           summary.backfill.push(entry)

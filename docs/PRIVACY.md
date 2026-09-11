@@ -200,33 +200,32 @@ On the listener, a dropped session's spooled raw bodies are deleted, not
 merely skipped. Reverse it with `hyp session unignore`; `hyp session status`
 reports which state the session is in right now.
 
-The opt-out is in-memory and lasts for that session only. Two things drop it
-while you may still believe it holds: a daemon restart (which drops both
-recorders' sets), and a fork (`claude --fork-session`, `codex fork`), which
-mints a new session id the opt-out no longer covers. A plain resume reuses
-the id.
+Session exclusions are saved locally and survive recorder and daemon restarts
+until explicitly removed with `hyp session unignore`. A plain resume reuses
+the ID; a fork (`claude --fork-session`, `codex fork`) creates a new ID and
+needs its own exclusion. Existing in-memory exclusions must be reapplied once
+after upgrading; their old process state cannot be recovered.
 
-Claude Code writes its own transcript to `~/.claude/projects` whatever you
-tell HypAware, and the daemon re-reads that tree on a schedule. While the
-daemon holds the id, that scheduled import skips the session too, so the
-opt-out is not undone five minutes later. A re-import you ask for yourself
-(`hyp backfill claude`) runs in its own process and does not see the drop set,
-so it imports the session from the transcript: that is the deliberate
-re-import the in-memory design leaves to you.
+Claude (including Desktop transcripts), Codex, and OpenCode backfill read the
+saved exclusions, including a manual import in a separate process. The state
+lives under `<HYP_HOME>/hypaware/session-ignores/`. Saving must succeed before
+the command reports success. If saved exclusions are corrupt or unreadable,
+AI requests still forward, but capture and transcript imports pause. Session
+commands report an error rather than confirming an exclusion; source status
+also reports the problem. Repair the saved state and restart HypAware to
+restore recording with the saved exclusions intact.
 
-The skip lasts exactly as long as the daemon holds the id, and it withholds
-rather than deletes. Your transcript stays on disk, and nothing records which
-turns were skipped, so whatever ends the hold imports those turns too instead
-of only recording from that moment on. Two things end it: a daemon restart,
-after which the next scheduled read takes the conversation you hid, and
-`hyp session unignore`, after which the next scheduled read takes the hidden
-turns along with anything new. Having done no further work is not a second
-line of defence: it holds those turns back only where the daemon already read
-the transcript, unchanged, while the hold was on, so unignoring before the
-next read releases them anyway. If what you want is for those turns never to
-be recorded, mark the directory instead: that survives a restart. If they have
-already been recorded, delete them with `hyp privacy purge --session <id>`
-below.
+For attached local Claude Desktop Code sessions, the managed SessionStart hook
+exports the exact conversation ID to subsequent Bash commands. Start or resume
+a session after installing the update. Hosts that disable hooks or omit
+`CLAUDE_ENV_FILE` still require an explicitly verified ID. A matching cwd or
+recent transcript is not enough to identify a Claude conversation.
+
+Ignoring does not delete earlier records, client transcripts, or exported
+copies. Explicitly unignoring makes the whole transcript eligible for import
+again, including turns written while ignored. Delete previously captured local
+rows with `hyp privacy purge --session <id>` below. OpenClaw and Hermes session
+opt-out support remains outside this change.
 
 ## Deleting what was already recorded
 

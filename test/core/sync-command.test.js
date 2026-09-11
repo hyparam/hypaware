@@ -379,11 +379,15 @@ test('the held prompt states the window, the irreversibility, and the way out', 
   await runSync([], ctx)
 
   const text = stdout.text
-  assert.match(text, /FIRST SYNC: nothing has left this machine yet/)
-  assert.match(text, /ends the review\n  window \(until /)
+  // "by", not a bare timestamp: the instant is the deadline, which LLP 0101
+  // calls "the latest the first sync can happen, not the earliest". Scheduling
+  // it directly above a prompt whose bare enter sends now tells the reader the
+  // opposite of what enter does.
+  assert.match(text, /First upload: by .*including your imported history/)
+  assert.match(text, /ends the review window/)
   assert.match(text, /cannot be undone/)
   assert.match(text, /hypaware-privacy skill/)
-  assert.match(text, /hyp privacy set <path> local-only/)
+  assert.match(text, /hyp privacy`/)
 })
 
 test('--dry-run prints the plan, exports nothing, and keeps the window open', async () => {
@@ -418,7 +422,7 @@ test('the pending preview animates on a TTY and clears before the plan', async (
   // Transient: every frame is behind a line-clearing carriage return, and the
   // plan renders after the last clear rather than under a leftover label.
   assert.doesNotMatch(text, /Counting pending rows[^\r]*\n/)
-  assert.match(text.split('\r\x1b[2K').pop() ?? '', /destination/)
+  assert.match(text.split('\r\x1b[2K').pop() ?? '', /hyp sync:/)
 })
 
 test('the pending preview writes nothing off a TTY', async () => {
@@ -592,7 +596,7 @@ test('--history cannot bypass the first-sync review window', async () => {
   assert.ok(await holdExists(hypHome))
 })
 
-test('the plan names each destination and whether it leaves the machine', async () => {
+test('a sharing plan shows upload targets without counting the accompanying file copy', async () => {
   const hypHome = await makeHome('plan')
   const { ctx, stdout } = makeCtx({
     hypHome,
@@ -610,12 +614,70 @@ test('the plan names each destination and whether it leaves the machine', async 
   const text = stdout.text
   // A server is named, never spelled as a URL a terminal would autolink
   // (LLP 0100 R1a's reason, applied to this surface).
-  assert.match(text, /central\s+the 'prod' server\s+\(leaves this machine\)/)
+  assert.match(text, /central\s+the 'prod' server\n/)
   assert.doesNotMatch(text, /https:\/\//)
   assert.match(text, /\(run 'hyp remote list' to see server URLs\)/)
-  assert.match(text, /parquet\s+\/home\/u\/exports\s+\(stays on this machine\)/)
-  // An undeclarable destination says nothing rather than guessing either way.
+  assert.doesNotMatch(text, /parquet|\/home\/u\/exports|destinations|leaves this machine|stays on this machine|local-only/)
   assert.match(text, /mystery\s+@hypaware\/fake\n/)
+})
+
+test('sharing shows only upload progress and results but still writes the file copy', async () => {
+  for (const copyFirst of [true, false]) {
+    const hypHome = await makeHome('shared-copy')
+    const upload = fakeSink('central', { url: 'https://hypaware.example.com' })
+    const copy = fakeSink('archive-copy', { dir: '/home/u/exports' })
+    for (const handle of [upload, copy]) {
+      const exportBatch = handle.sink.exportBatch
+      handle.sink.exportBatch = async (batch, opts) => {
+        opts.onProgress({ rows: 123, bytes: 456 })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        return exportBatch(batch, opts)
+      }
+    }
+    const { ctx, stdout, stderr } = makeCtx({
+      hypHome, sinks: copyFirst ? [copy, upload] : [upload, copy],
+      tty: true, stdoutTty: true, answer: 'y',
+    })
+    assert.equal(await runSync([], ctx), 0)
+    assert.match(stdout.text, /central: 123 rows sent/)
+    assert.match(stdout.text, /central: exported/)
+    // `Preparing upload` alone cannot tell the two orders apart: the spinner
+    // renders its first frame before the tick starts, so that line is on
+    // screen in both. What distinguishes them is `Finishing`, which only a
+    // copy running *after* the upload can produce.
+    assert.match(stdout.text, /Preparing upload/)
+    assert[copyFirst ? 'doesNotMatch' : 'match'](stdout.text, /Finishing/)
+    assert.match(stderr.text, /Send now to /)
+    assert.doesNotMatch(stdout.text + stderr.text, /archive-copy|\/home\/u\/exports|\d destinations/)
+    assert.equal(copy.exported.length, 1)
+    assert.equal(upload.exported.length, 1)
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a failed accompanying copy remains visible and fails the command', async () => {
+  const hypHome = await makeHome('shared-copy-failed')
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [
+      fakeSink('central', { url: 'https://hypaware.example.com' }),
+      fakeSink('archive-copy', { dir: '/home/u/exports' }, { status: 'failed' }),
+    ],
+  })
+  assert.equal(await runSync(['--yes'], ctx), 1)
+  assert.match(stdout.text, /archive-copy: failed/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('a file-only sync still names its target and reports its result', async () => {
+  const hypHome = await makeHome('file-only-plan')
+  const { ctx, stdout } = makeCtx({
+    hypHome, sinks: [fakeSink('archive', { dir: '/home/u/exports' })],
+  })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /archive\s+\/home\/u\/exports/)
+  assert.match(stdout.text, /archive: exported/)
+  await fs.rm(hypHome, { recursive: true, force: true })
 })
 
 test('an unnamed server falls back to its host, still not a linkifiable URL', async () => {
@@ -629,7 +691,7 @@ test('an unnamed server falls back to its host, still not a linkifiable URL', as
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /central\s+elsewhere\.example\.com\s+\(leaves this machine\)/)
+  assert.match(stdout.text, /central\s+elsewhere\.example\.com\n/)
   assert.doesNotMatch(stdout.text, /https:\/\//)
 })
 
@@ -711,7 +773,7 @@ test('the plan counts the directories being withheld', async () => {
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /withholding 2 directories marked local-only, 1 directory marked ignore/)
+  assert.match(stdout.text, /excluded: 3 directories/)
 })
 
 test('the plan names the clients kept local-only (LLP 0188 #never-silent)', async () => {
@@ -731,11 +793,11 @@ test('the plan names the clients kept local-only (LLP 0188 #never-silent)', asyn
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /keeping these clients local-only: hermes · openclaw/)
+  assert.match(stdout.text, /excluded clients: hermes · openclaw/)
   assert.doesNotMatch(stdout.text, /no directories or clients are marked/)
 })
 
-test('with nothing marked, the plan says so in one line covering both stores', async () => {
+test('with no exclusions, the plan adds no policy narration', async () => {
   const hypHome = await makeHome('no-exclusions')
   const { ctx, stdout } = makeCtx({
     hypHome,
@@ -745,7 +807,7 @@ test('with nothing marked, the plan says so in one line covering both stores', a
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /no directories or clients are marked local-only or ignore/)
+  assert.doesNotMatch(stdout.text, /local-only|ignore|excluded|no directories or clients/)
 })
 
 test('with no hold, --yes exports without inventing a review window', async () => {
@@ -757,7 +819,7 @@ test('with no hold, --yes exports without inventing a review window', async () =
 
   assert.equal(code, 0)
   assert.equal(sink.exported.length, 1)
-  assert.doesNotMatch(stdout.text, /FIRST SYNC/)
+  assert.doesNotMatch(stdout.text, /First upload:/)
 })
 
 test('an unknown instance names the ones that exist', async () => {

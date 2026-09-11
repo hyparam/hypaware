@@ -25,7 +25,8 @@ import { AI_GATEWAY_SCHEMA_COLUMNS, aiGatewayTablePath, DATASET_NAME } from './d
 import { createEntrypointActivity } from './entrypoint_activity.js'
 import { createAiGatewayMessageProjector, rollbackAiGatewayStateJournal } from './message_projector.js'
 import { createChainedAgent, startProxy } from './proxy.js'
-import { createRecorder } from './recorder.js'
+import { sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
+import { createRecorder, createNullExchange } from './recorder.js'
 import { getGatewayProcessTransport } from './process_transport.js'
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'
@@ -157,7 +158,8 @@ export function createStartSource(state) {
           },
         }
         if (!proxy) status.message = 'idle: no upstreams configured, nothing to proxy'
-        if (liveState.lastError) status.lastError = liveState.lastError
+        const error = sessionIgnoreLoadError(state.ignoredSessions) ?? liveState.lastError
+        if (error) status.lastError = error
         return status
       },
 
@@ -308,6 +310,7 @@ async function launchListener(ctx, state, liveState) {
       transport.finish?.(exchange, ignoredSessions)
       return
     }
+    if (sessionIgnoreLoadError(state.ignoredSessions) || sessionIgnoreLoadError(ignoredSessions)) return
     /** @type {FinishedRow} */
     const row = exchange.finalize()
     const totalBytes = (row.request_bytes ?? 0) + (row.response_bytes ?? 0)
@@ -421,7 +424,9 @@ async function launchListener(ctx, state, liveState) {
   const bind = (listen) => startProxy({
     listen,
     upstreams,
-    startExchange: (init) => recorder.startExchange(init),
+    startExchange: (init) => sessionIgnoreLoadError(state.ignoredSessions)
+      ? createNullExchange()
+      : recorder.startExchange(init),
     onExchangeFinished,
     // Serve `/_hypaware/*` control requests locally over the gateway's
     // ignored-session set (POST/DELETE /_hypaware/ignore/session). Handled

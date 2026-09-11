@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import { FOLDER_ASK_OPTIONS, runWizardFolderAsk } from '../../../../src/core/cli/wizard/folder_ask.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
+import { CLASSIFICATION_CHOICES } from '../../../../src/core/usage-policy/classification.js'
 import { folderAskPath, readFolderAskMode, writeFolderAskMode } from '../../../../src/core/usage-policy/folder_ask.js'
 import { PromptBackRequestedError, PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 
@@ -348,4 +349,19 @@ test('the asked path survives a stderr that cannot take the warning', async () =
 
 test('the two options are exactly sync and ask', () => {
   assert.deepEqual(FOLDER_ASK_OPTIONS.map((o) => o.value), ['sync', 'ask'])
+})
+
+// The `ask` row's summary is the only place the wizard says what the
+// per-folder question will offer, and one of the three answers stops
+// recording the folder entirely. A summary that names fewer classes than
+// `CLASSIFICATION_CHOICES` presents makes that answer the surprise the
+// options' own contract exists to prevent (LLP 0106: the prompt copy is
+// load-bearing).
+// @ref LLP 0201#gate [tests]: each row is self-explaining, so the summary carries the consequence
+test('the ask option names every class the question it buys will offer', () => {
+  const ask = FOLDER_ASK_OPTIONS.find((o) => o.value === 'ask')
+  assert.ok(ask)
+  for (const choice of CLASSIFICATION_CHOICES) {
+    assert.match(ask.summary, new RegExp(choice.token), `the summary must name '${choice.token}'`)
+  }
 })

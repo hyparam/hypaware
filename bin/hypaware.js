@@ -18,6 +18,12 @@ import { useColor } from '../src/core/cli/stdio.js'
 
 const argv = process.argv.slice(2)
 
+// @ref LLP 0399#coexistence: Cursor inherits these Claude hook commands even
+// when Claude is inactive. Skip before config/dispatch can reject the command.
+if (process.env.CURSOR_VERSION && argv[0] === 'claude-hook' &&
+    (argv[1] === 'session-context' || argv[1] === 'classify-cwd') &&
+    !argv.includes('--help') && !argv.includes('-h')) process.exit(0)
+
 const stderr = colorizeStderr(process.stderr, process.env)
 const color = useColor(process.stderr, process.env)
 

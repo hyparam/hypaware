@@ -1415,7 +1415,9 @@ function buildStatus(block, isLastPart, role, finishReason) {
   /** @type {Record<string, unknown>} */
   const status = {}
   const b = isPlainObject(block) ? block : undefined
-  if (b && (b.type === 'tool_result' || b.type === 'web_search_tool_result')) {
+  // Explicit null means the producer cannot establish the outcome. Keep
+  // the legacy missing-field convention for providers that imply success.
+  if (b && b.is_error !== null && (b.type === 'tool_result' || b.type === 'web_search_tool_result')) {
     status.tool_status = b.is_error === true ? 'error' : 'success'
   }
   if (isLastPart && role === 'assistant' && finishReason) status.finish_reason = finishReason

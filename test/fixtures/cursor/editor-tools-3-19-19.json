@@ -1,0 +1,181 @@
+{
+  "source": {
+    "client": "editor Agent Chat",
+    "version": "3.19.19",
+    "date": "2026-09-10",
+    "kind": "real-client probe, sanitized"
+  },
+  "hooks": [
+    {
+      "content": "The probe value is MARIGOLD-42.\n",
+      "file_path": "/probe/workspace/notes.txt",
+      "hook_event_name": "beforeReadFile",
+      "conversation_id": "probe-editor-tools-id-1",
+      "generation_id": "probe-editor-tools-id-2",
+      "session_id": "probe-editor-tools-id-1",
+      "cursor_version": "3.19.19",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": "/probe/transcripts/probe-editor-tools-id-1/probe-editor-tools-id-1.jsonl",
+      "model": "grok-4.6"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-editor-tools-id-1",
+      "generation_id": "probe-editor-tools-id-2",
+      "session_id": "probe-editor-tools-id-1",
+      "cursor_version": "3.19.19",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": "/probe/transcripts/probe-editor-tools-id-1/probe-editor-tools-id-1.jsonl",
+      "tool_use_id": "probe-editor-tools-id-3",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "/probe/workspace/notes.txt"
+      },
+      "tool_output": "{\"file_path\":\"/probe/workspace/notes.txt\",\"content_length\":32}",
+      "duration": 478.143,
+      "model": "grok-4.6"
+    },
+    {
+      "content": "The probe value is MARIGOLD-42.\n",
+      "file_path": "/probe/workspace/notes.txt",
+      "hook_event_name": "beforeReadFile",
+      "conversation_id": "probe-editor-tools-id-1",
+      "generation_id": "probe-editor-tools-id-4",
+      "session_id": "probe-editor-tools-id-1",
+      "cursor_version": "3.19.19",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": "/probe/transcripts/probe-editor-tools-id-1/probe-editor-tools-id-1.jsonl",
+      "model": "grok-4.6"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-editor-tools-id-1",
+      "generation_id": "probe-editor-tools-id-4",
+      "session_id": "probe-editor-tools-id-1",
+      "cursor_version": "3.19.19",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": "/probe/transcripts/probe-editor-tools-id-1/probe-editor-tools-id-1.jsonl",
+      "tool_use_id": "probe-editor-tools-id-5",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "/probe/workspace/notes.txt"
+      },
+      "tool_output": "{\"file_path\":\"/probe/workspace/notes.txt\",\"content_length\":32}",
+      "duration": 0.852,
+      "model": "grok-4.6"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-editor-tools-id-1",
+      "generation_id": "probe-editor-tools-id-4",
+      "session_id": "probe-editor-tools-id-1",
+      "cursor_version": "3.19.19",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": "/probe/transcripts/probe-editor-tools-id-1/probe-editor-tools-id-1.jsonl",
+      "tool_use_id": "probe-editor-tools-id-6",
+      "tool_name": "Grep",
+      "tool_input": {
+        "pattern": "",
+        "file_path": "/probe/workspace",
+        "glob": "**/*",
+        "output_mode": "files_with_matches"
+      },
+      "tool_output": "{\"pattern\":\"\",\"success\":true}",
+      "duration": 8.364,
+      "model": "grok-4.6"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-editor-tools-id-1",
+      "generation_id": "probe-editor-tools-id-4",
+      "session_id": "probe-editor-tools-id-1",
+      "cursor_version": "3.19.19",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": "/probe/transcripts/probe-editor-tools-id-1/probe-editor-tools-id-1.jsonl",
+      "tool_use_id": "probe-editor-tools-id-7",
+      "tool_name": "Grep",
+      "tool_input": {
+        "pattern": ".",
+        "file_path": "/probe/workspace"
+      },
+      "tool_output": "{\"pattern\":\".\",\"success\":true}",
+      "duration": 7.016,
+      "model": "grok-4.6"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-editor-tools-id-1",
+      "generation_id": "probe-editor-tools-id-4",
+      "session_id": "probe-editor-tools-id-1",
+      "cursor_version": "3.19.19",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "cwd": "",
+      "transcript_path": "/probe/transcripts/probe-editor-tools-id-1/probe-editor-tools-id-1.jsonl",
+      "tool_use_id": "probe-editor-tools-id-8",
+      "tool_name": "Shell",
+      "tool_input": {
+        "command": "ls -la && pwd && echo \"---\" && head -n 20 notes.txt",
+        "cwd": "",
+        "timeout": 30000
+      },
+      "tool_output": "{\"output\":\"drwxr-xr-x@  - probe-user 10 Sep 14:39 .cursor\\n.rw-r--r--@ 32 probe-user 10 Sep 14:39 notes.txt\\n/probe/workspace\\n---\\nThe probe value is MARIGOLD-42.\\n\",\"exitCode\":0}",
+      "duration": 2327.497,
+      "model": "grok-4.6"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-editor-tools-id-1",
+      "generation_id": "probe-editor-tools-id-4",
+      "session_id": "probe-editor-tools-id-1",
+      "cursor_version": "3.19.19",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "transcript_path": "/probe/transcripts/probe-editor-tools-id-1/probe-editor-tools-id-1.jsonl",
+      "tool_use_id": "probe-editor-tools-id-9",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "/probe/workspace/.cursor/hooks.json"
+      },
+      "tool_output": "{\"file_path\":\"/probe/workspace/.cursor/hooks.json\",\"content_length\":3075}",
+      "duration": 1.128,
+      "model": "grok-4.6"
+    },
+    {
+      "hook_event_name": "postToolUse",
+      "conversation_id": "probe-editor-tools-id-1",
+      "generation_id": "probe-editor-tools-id-4",
+      "session_id": "probe-editor-tools-id-1",
+      "cursor_version": "3.19.19",
+      "workspace_roots": [
+        "/probe/workspace"
+      ],
+      "cwd": "",
+      "transcript_path": "/probe/transcripts/probe-editor-tools-id-1/probe-editor-tools-id-1.jsonl",
+      "tool_use_id": "probe-editor-tools-id-10",
+      "tool_name": "Shell",
+      "tool_input": {
+        "command": "wc -l notes.txt .cursor/hooks.json && file notes.txt .cursor/hooks.json",
+        "cwd": "",
+        "timeout": 30000
+      },
+      "tool_output": "{\"output\":\"       1 notes.txt\\n     101 .cursor/hooks.json\\n     102 total\\nnotes.txt:          ASCII text\\n.cursor/hooks.json: JSON data\\n\",\"exitCode\":0}",
+      "duration": 102.734,
+      "model": "grok-4.6"
+    }
+  ]
+}
