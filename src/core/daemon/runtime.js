@@ -22,6 +22,8 @@ import { createActionReconciler } from '../config/action_reconciler.js'
 import { attachHandler } from '../config/action_attach.js'
 import { backfillHandler } from '../config/action_backfill.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
+import { refreshClientAssets } from '../runtime/client_assets.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
@@ -563,6 +565,45 @@ export async function runDaemon(opts = {}) {
   // and reversal can never over-fire on a momentary `clients` gap.
   // @ref LLP 0045#part-1-the-client-seam-in-the-reconcile-context [implements]: daemon resolves clientDescriptors from the catalog, clients/endpoint from boot.runtime.capabilities when the gateway is enabled
   const clientSeam = resolveClientActionSeam({ boot, fileLog })
+
+  // ----- Refresh installed client assets (LLP 0397) -----
+  // The self-update relaunches the daemon onto the new package, and this is
+  // the first code that runs with the new skill sources on disk. The org
+  // reconciler will not re-copy them (its key covers the asset set, not the
+  // bytes) and a standalone host has no reconciler, so the booted daemon
+  // re-copies what the install ledger says is ours and whose source changed.
+  // Same inputs the attach handler threads, same inert cases: no client
+  // descriptors (a non-gateway boot), no HOME, or no registries.
+  // @ref LLP 0397#refresh-at-boot [implements]: one pass per boot, before the tick loop, reading the ledger for which clients to touch
+  {
+    const assetHome = env.HOME ?? ''
+    if (clientSeam.clientDescriptors && assetHome.length > 0 && (boot.runtime.skills || boot.runtime.agents)) {
+      // No `stderr`: the materializer already logs each skipped or failed
+      // asset with its reason, and the summary below names them again for
+      // daemon.log, so a per-asset stderr line would be the same warning a
+      // third time.
+      try {
+        const refresh = await refreshClientAssets({
+          descriptors: clientSeam.clientDescriptors,
+          homeDir: assetHome,
+          stateRoot: clientAssetStateRoot({ ...env, HYP_HOME: hypHome }, assetHome),
+          skills: boot.runtime.skills,
+          agents: boot.runtime.agents,
+        })
+        if (refresh.refreshed.length > 0 || refresh.skipped.length > 0) {
+          fileLog.info('daemon.client_assets_refreshed', {
+            refreshed: refresh.refreshed.map((asset) => asset.dest),
+            skipped: refresh.skipped.map((asset) => `${asset.reason}:${asset.dest}`),
+            unchanged: refresh.unchanged,
+          })
+        }
+      } catch (err) {
+        fileLog.error('daemon.client_assets_refresh_failed', {
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+  }
 
   /**
    * Run one reconcile pass against the effective config + backfill registry.
