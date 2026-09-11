@@ -170,7 +170,9 @@ export async function writeClientAssetLedger(stateRoot, records) {
  * bytes are `SKILL.md\nbody\n`. Either one is enough to let a file the user
  * authored inherit a digest we recorded for something else, and the digest is
  * the last thing standing between the prune and their files. Seeding the domain
- * (and marking each tree entry's own shape) makes the two spaces disjoint.
+ * (and marking each tree entry's own shape) makes the two spaces disjoint, and
+ * framing every variable-length run inside a tree with its own byte length
+ * makes the tree space injective (LLP 0402 #framed-entries).
  *
  * @param {string} dest
  * @returns {Promise<string | undefined>} `undefined` when the path is gone or
@@ -269,9 +271,17 @@ async function hashTree(root, dir, hash) {
     // The entry's shape leads its path, so a subdirectory named `x` and a file
     // named `x` cannot hash alike, and a file's bytes can never be read back as
     // the tree that would have followed a directory of the same name.
-    hash.update(`${entry.isDirectory() ? 'd' : 'f'}:${path.relative(root, full)}\n`)
+    // @ref LLP 0402#framed-entries [implements]: the path and the bytes are
+    //   each preceded by their own byte length, so nothing following an entry
+    //   can be read as part of it and two distinct trees cannot digest alike.
+    const rel = path.relative(root, full)
+    hash.update(`${entry.isDirectory() ? 'd' : 'f'}:${Buffer.byteLength(rel)}:${rel}\n`)
     if (entry.isDirectory()) await hashTree(root, full, hash)
-    else hash.update(await fs.readFile(full))
+    else {
+      const bytes = await fs.readFile(full)
+      hash.update(`${bytes.length}\n`)
+      hash.update(bytes)
+    }
   }
 }
 

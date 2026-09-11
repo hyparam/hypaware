@@ -1082,6 +1082,49 @@ test('a directory and a file never share a content digest', async () => {
   await fs.rm(root, { recursive: true, force: true })
 })
 
+// @ref LLP 0402#framed-entries [tests]: the digest a crafted edit must not be
+//   able to keep, which is what makes the prune's evidence gate mean anything.
+test('two distinct skill trees never share a content digest', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-digest-'))
+
+  // Inside the directory domain the entry line framed the path and stopped
+  // there, so one tree's next entry line was another tree's file content: two
+  // files of `''` and `'hello'` wrote the same stream as one file holding
+  // `f:b\nhello` (#1669). A crafted edit of that shape keeps the recorded
+  // digest intact, and the recorded digest is what lets the prune delete.
+  const pair = path.join(root, 'pair')
+  await fs.mkdir(pair, { recursive: true })
+  await fs.writeFile(path.join(pair, 'a'), '', 'utf8')
+  await fs.writeFile(path.join(pair, 'b'), 'hello', 'utf8')
+  const single = path.join(root, 'single')
+  await fs.mkdir(single, { recursive: true })
+  await fs.writeFile(path.join(single, 'a'), 'f:b\nhello', 'utf8')
+  assert.notEqual(
+    await digestClientAsset(pair),
+    await digestClientAsset(single),
+    'a two-file skill and a one-file skill spelling it out must not hash alike'
+  )
+
+  // Framing the bytes alone leaves the same ambiguity one level up, because a
+  // file name may itself hold a newline: the tail of the crafted name reads as
+  // the length line of the entry it stands in for: this pair digests alike
+  // under a hasher that frames the bytes and terminates the path at a newline,
+  // and only a path carrying its own length closes it.
+  const named = path.join(root, 'named')
+  await fs.mkdir(named, { recursive: true })
+  await fs.writeFile(path.join(named, 'a\n2'), '', 'utf8')
+  const lined = path.join(root, 'lined')
+  await fs.mkdir(lined, { recursive: true })
+  await fs.writeFile(path.join(lined, 'a'), '0\n', 'utf8')
+  assert.notEqual(
+    await digestClientAsset(named),
+    await digestClientAsset(lined),
+    'a newline in a file name must not read as another tree\'s framing'
+  )
+
+  await fs.rm(root, { recursive: true, force: true })
+})
+
 test("a user's file that collides with a retired skill's digest is left in place", async () => {
   const { home, env } = await makeHome()
   const keptSource = await writeSkillSource(home, 'hypaware-query', 'query body\n')
