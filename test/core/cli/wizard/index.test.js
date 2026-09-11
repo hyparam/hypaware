@@ -552,6 +552,37 @@ test('runInitWizard: a fully fleet-managed machine still probes the store for it
   assert.equal(opts._pickOpts.collectAndSync, undefined)
 })
 
+// The express fast path is one keypress over two lanes that both narrate,
+// and under the combined selection they narrate the same rows: the picker's
+// accept statement already carries the sync claim and the fleet suffixes, so
+// a second block one line later restates it with no fact of its own. Counted
+// off a real run through both lanes, because the duplication lives in how the
+// orchestrator wires them together.
+// @ref LLP 0396#combined-selection [tests]: an express run states the combined picture once
+test('runInitWizard: an express enrolled run states the sync row list once, not twice', async () => {
+  const { opts, stdout } = wizardOpts(await tmpHome(), {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+    express: async () => 'defaults',
+  })
+  // The real pick and sync lanes: the narration under test is theirs, and
+  // the wiring that prints it twice is the orchestrator's.
+  delete opts.pick
+  delete opts.syncScope
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+
+  const lines = stdout.text().split('\n')
+  const rowLines = lines.filter((l) => l === '  Claude Code')
+  assert.equal(rowLines.length, 1, `the row list was stated ${rowLines.length} times:\n${stdout.text()}`)
+  // The statement that survives is the combined one, so nothing goes unsaid
+  // (LLP 0188 #never-silent): it names the sync claim itself.
+  assert.ok(lines.includes('HypAware will record and sync:'), stdout.text())
+  assert.ok(!lines.includes('These will sync to your server:'), stdout.text())
+})
+
 test('runInitWizard: the team pathway runs the sync-scope and new-folder steps between pick and configure', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), { fork: async () => 'team' })
   const result = await runInitWizard(opts)

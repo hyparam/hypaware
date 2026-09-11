@@ -186,18 +186,26 @@ export async function runWizardSyncScope(opts) {
 
   // @ref LLP 0396#combined-selection [implements]: the collection answer also enables sharing, with no second picker
   if (opts.collectAndSync) {
-    narrateAcceptedGate({
-      stdout: opts.stdout,
-      title: 'These will sync to your server:',
-      // The org's rows keep the suffix the picker and the menu both give
-      // them: the list is the whole sync picture (LLP 0188 #locked), and
-      // unlabelled it reads as though every row on it were the user's to
-      // change here.
-      items: [
-        ...(opts.locked ?? []).map((d) => `  ${d.label}${LOCKED_LABEL_SUFFIX}`),
-        ...opts.candidates.map((d) => `  ${d.label}`),
-      ],
-    })
+    // `autoAccept` here means the picker already printed this list, under
+    // "HypAware will record and sync:" and with the same fleet suffixes, one
+    // line above; the revocation that once set this block apart prints at
+    // commit time. A declined run answers the picker as a menu, which
+    // confirms nothing, so there this block is still the statement that
+    // names what leaves the machine (LLP 0188 #never-silent).
+    if (!opts.autoAccept) {
+      narrateAcceptedGate({
+        stdout: opts.stdout,
+        title: 'These will sync to your server:',
+        // The org's rows keep the suffix the picker and the menu both give
+        // them: the list is the whole sync picture (LLP 0188 #locked), and
+        // unlabelled it reads as though every row on it were the user's to
+        // change here.
+        items: [
+          ...(opts.locked ?? []).map((d) => `  ${d.label}${LOCKED_LABEL_SUFFIX}`),
+          ...opts.candidates.map((d) => `  ${d.label}`),
+        ],
+      })
+    }
     if (opts.deferWrite) {
       return await finishSpan({ noQuestion: true, optedOut: [], pendingSources: [...candidateIds] }, opts, {
         hidden_picks_syncing: hiddenCandidateSyncs,

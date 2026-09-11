@@ -130,7 +130,10 @@ export interface RunWizardSyncScopeOptions {
   /**
    * Take the stated default without stopping at it (LLP 0201 #narrate):
    * the express gate already answered this lane, so it narrates the sync
-   * split the menu would have shown and proceeds.
+   * split the menu would have shown and proceeds. On the combined path
+   * (`collectAndSync`, LLP 0396) the picker already stated that split, so
+   * the lane applies the answer without restating it; set it only where the
+   * picker's narration carried the sync claim.
    */
   autoAccept?: boolean
 }

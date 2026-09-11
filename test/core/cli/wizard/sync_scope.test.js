@@ -651,20 +651,25 @@ for (const autoAccept of [false, true]) {
     assert.deepEqual(result, { noQuestion: true, optedOut: [] })
     assert.deepEqual((await readClientSyncEntries({ stateDir }))?.map((entry) => entry.source).sort(),
       ['codex', 'raw-anthropic'])
+    // The revocation, which no row list can state: claude was local-only
+    // until this confirm. codex and raw-anthropic are not named because
+    // neither is a visible candidate, so neither was revoked. Both arms
+    // print it; only the list above it differs.
+    const revocation = 'No longer local-only: claude. Future rows sync to your server; rows already recorded are not ' +
+      "sent. Change back with 'hyp privacy client <name> local-only'."
     // The statement is the whole sync picture, and the org's row is
     // labelled as the fleet's on it: without the suffix the list reads as
     // though every row on it were the user's to change (LLP 0188 #locked).
-    assert.deepEqual(stdout.text().split('\n').filter((l) => l !== ''), [
-      'These will sync to your server:',
-      `  capture gateway${LOCKED_LABEL_SUFFIX}`,
-      '  capture claude',
-      // The revocation, which the list above cannot state: claude was
-      // local-only until this confirm. codex and raw-anthropic are not
-      // named because neither is a visible candidate, so neither was
-      // revoked.
-      'No longer local-only: claude. Future rows sync to your server; rows already recorded are not sent. ' +
-        "Change back with 'hyp privacy client <name> local-only'.",
-    ], stdout.text())
+    // Express states that picture at the picker instead, so this lane adds
+    // only what the picker could not say.
+    assert.deepEqual(stdout.text().split('\n').filter((l) => l !== ''), autoAccept
+      ? [revocation]
+      : [
+          'These will sync to your server:',
+          `  capture gateway${LOCKED_LABEL_SUFFIX}`,
+          '  capture claude',
+          revocation,
+        ], stdout.text())
   })
 }
 
