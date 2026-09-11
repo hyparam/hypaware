@@ -7,6 +7,7 @@
 **Date:** 2026-09-11
 **Related:** LLP 0219 (#edited-assets-are-not-ours: the evidence rule this narrows), LLP 0226 (#unreadable-is-not-absent: the paragraph whose supporting sentence this makes obsolete), LLP 0284 (#digests-are-per-path: which records the gate reads), LLP 0397 (#ledger-decides: the boot refresh whose unchanged check this makes reachable), LLP 0400 (#one-write: the per-boot write this stops)
 **Extends:** LLP 0219
+**Extended-by:** LLP 0402 (frames each entry's path and bytes inside the set #digest-covers-the-copy fixed, which does change recorded tree digests; its #migration-is-the-boot-heal answers the hazard #migration names)
 
 > `copyDir` copies files and directories and skips every other entry;
 > `hashTree` folded any other entry into the digest as an `o:<relpath>` line. A

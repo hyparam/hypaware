@@ -7,6 +7,7 @@
 **Date:** 2026-09-11
 **Related:** LLP 0219 (#edited-assets-are-not-ours: the evidence rule this widens, for healing only), LLP 0284 (#digests-are-per-path: which digests the gate is asked of, and its "none re-recorded" clause), LLP 0397 (#ledger-decides, #edited-copies-are-kept: the refresh pass this runs inside), LLP 0226 (#unreadable-is-not-absent: the other narrowing of the same rule)
 **Extends:** LLP 0219, LLP 0284, LLP 0397
+**Extended-by:** LLP 0402 (#migration-is-the-boot-heal: gives #source-equality-is-ownership a second job, as the one-boot re-record that carries every skill record across a change of hasher; what heals and what is reported is unchanged)
 
 > The boot refresh rewrites every stale copy and then writes the ledger once,
 > after the whole loop. A kill inside that loop (a `hyp daemon restart` landing

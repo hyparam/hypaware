@@ -9,11 +9,13 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
 import { clientAssetStateRoot, digestClientAsset, readClientAssetLedger } from '../../src/core/runtime/client_asset_ledger.js'
+import { compareStrings } from '../../src/core/util/compare_strings.js'
 import { materializeClientAssets, refreshClientAssets } from '../../src/core/runtime/client_assets.js'
 
 /** @import { ClientDescriptor } from '../../src/core/types.js' */
@@ -484,6 +486,108 @@ test('a refresh killed before the ledger write heals its own record on the next 
   assert.equal(again.refreshed.length, 1)
   assert.deepEqual(again.skipped, [])
   assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), 'v3')
+})
+
+/**
+ * The digest a released hasher produced for a skill tree, before each entry
+ * framed the length of its path and of its bytes (LLP 0402). Spelled out here
+ * rather than derived from the shipped hasher: the migration's premise is that
+ * a ledger written by the previous release no longer matches, and a stale value
+ * taken from the current code would agree with itself whatever the code does.
+ *
+ * @param {string} dir
+ * @returns {Promise<string>}
+ */
+async function previousReleaseDigest(dir) {
+  const hash = createHash('sha256')
+  hash.update('dir\n')
+  /** @param {string} at */
+  const walk = async (at) => {
+    const entries = await fs.readdir(at, { withFileTypes: true })
+    entries.sort((a, b) => compareStrings(a.name, b.name))
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isFile()) continue
+      const full = path.join(at, entry.name)
+      hash.update(`${entry.isDirectory() ? 'd' : 'f'}:${path.relative(dir, full)}\n`)
+      if (entry.isDirectory()) await walk(full)
+      else hash.update(await fs.readFile(full))
+    }
+  }
+  await walk(dir)
+  return hash.digest('hex')
+}
+
+/**
+ * Rewrite every record's digest to `digest`, which is what a `client-assets.json`
+ * left by the previous release holds once the hasher moves under it.
+ *
+ * @param {string} stateRoot
+ * @param {string} digest
+ */
+async function backdateLedgerDigests(stateRoot, digest) {
+  const file = path.join(stateRoot, 'client-assets.json')
+  const doc = JSON.parse(await fs.readFile(file, 'utf8'))
+  for (const record of doc.assets) record.digest = digest
+  await fs.writeFile(file, `${JSON.stringify(doc, null, 2)}\n`, 'utf8')
+}
+
+// @ref LLP 0402#migration-is-the-boot-heal [tests]: the whole of the migration
+//   for a ledger the framing invalidated, and the reason it needs no new field.
+test('a ledger left by the previous hasher heals on the first boot instead of reporting an edit', async () => {
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+
+  // Exactly the upgrade: the copy on disk is untouched, and the record names
+  // the same bytes under the digest the released hasher produced for them.
+  const stale = await previousReleaseDigest(dest)
+  assert.notEqual(stale, await digestClientAsset(dest), 'the framing has to move the digest, or there is nothing to migrate')
+  await backdateLedgerDigests(h.stateRoot, stale)
+
+  // Bytes equal to the current source are ownership evidence in their own
+  // right (LLP 0400), so the first boot re-records rather than blaming the
+  // user for a hasher we moved: no `asset_edited`, nothing re-copied.
+  const out = await refresh(h, regs)
+  assert.deepEqual(out.skipped, [])
+  assert.deepEqual(out.refreshed, [])
+  assert.equal(out.unchanged, 1)
+  assert.equal(out.healed, 1)
+  assert.equal(out.stderr, '')
+  const [healed] = await readClientAssetLedger(h.stateRoot)
+  assert.equal(healed.digest, await digestClientAsset(dest))
+
+  // And the record is evidence again: the next source move is copied on it
+  // rather than skipped, which is what "frozen forever" would have cost.
+  await fs.writeFile(path.join(src, 'SKILL.md'), 'v2', 'utf8')
+  const again = await refresh(h, regs)
+  assert.equal(again.refreshed.length, 1)
+  assert.deepEqual(again.skipped, [])
+  assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), 'v2')
+})
+
+// @ref LLP 0402#no-silent-adoption [tests]: the half of the migration that has
+//   to hold, or it is worse than the collision it closed.
+test('the previous hasher\'s ledger does not hand the migration a copy the user edited', async () => {
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+
+  // Same upgrade, except the user took the copy over first. Re-recording
+  // whatever is on disk would adopt their file as ours and hand the prune a
+  // matching digest for it, which is worse than the collision being closed.
+  await backdateLedgerDigests(h.stateRoot, await previousReleaseDigest(dest))
+  await fs.writeFile(path.join(dest, 'SKILL.md'), 'mine', 'utf8')
+  const before = await readClientAssetLedger(h.stateRoot)
+
+  const out = await refresh(h, regs)
+  assert.equal(out.skipped[0]?.reason, 'edited')
+  assert.equal(out.healed, 0)
+  assert.deepEqual(await readClientAssetLedger(h.stateRoot), before)
+  assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), 'mine')
 })
 
 test('a copy the user edited to something the source never held is still theirs', async () => {
