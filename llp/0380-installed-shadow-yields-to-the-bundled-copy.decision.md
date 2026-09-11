@@ -95,11 +95,14 @@ closed.
   consumers that matched on it match nothing.
 - The `hyp plugin list --json` entry for a shadowed name carries
   `shadowed: true` under every profile, and the lock's `installed_at` and
-  `update` fields still ride on it. `version` and `source` report what runs:
-  the bundled copy when this boot activated it, and the idle lock entry's own
-  installed version when the config did not name it. `plugin list` boots the
-  `config` profile, so the excluded names this rule is about are usually not
-  active, and the mark comes from the bundled manifest set rather than from
-  what happened to activate.
+  `update` fields still ride on it. `version` and `source` report the copy
+  boot selects rather than the copy the lock holds: the bundled copy both
+  when this boot activated it and when the config named it but the boot came
+  up short of it (the name is in `unavailablePlugins`, and the shadowed lock
+  entry never ran, so it is not the copy that failed), and the idle lock
+  entry's own installed version when the config did not name it at all.
+  `plugin list` boots the `config` profile, so the excluded names this rule is
+  about are usually not active, and the mark comes from the bundled manifest
+  set rather than from what happened to activate.
 - `hyp plugin install` still accepts a bundled name. Refusing it at install
   time is a sensible follow-up; it is not part of this decision.

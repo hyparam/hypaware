@@ -10,6 +10,10 @@ import { PassThrough } from 'node:stream'
 import { createForwardSink } from '../../hypaware-core/plugins-workspace/central/src/sink.js'
 import { runSync } from '../../src/core/commands/sync.js'
 import { previewPendingRows } from '../../src/core/sinks/pending.js'
+import { createQueryStorageService } from '../../src/core/cache/storage.js'
+import { createSourceWithholdResolver } from '../../src/core/cache/source-withhold.js'
+import { appendRowsToTable } from '../../src/core/cache/iceberg/store.js'
+import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
 
 // `hyp sync`'s plan is the consent surface: it is where a person decides
 // whether to let captured data leave the machine. Naming the destinations
@@ -226,7 +230,7 @@ const TWELVE_ROWS = Array.from({ length: 12 }, (_, i) => ({
   dropped: i + 1 === 5 || i + 1 === 9,
 }))
 
-test('the plan states pending rows, the resume point, and withheld rows per destination', async () => {
+test('the sharing plan states upload rows and excludes the accompanying copy from its totals', async () => {
   const hypHome = await makeHome('backlog')
   await writeWatermark({
     hypHome,
@@ -252,8 +256,8 @@ test('the plan states pending rows, the resume point, and withheld rows per dest
   // Past watermark seq 3: nine entries, two of them withheld.
   assert.match(stdout.text, /7 rows pending, captured since 2026-08-12T00:50Z/)
   assert.match(stdout.text, /2 rows withheld by policy \(not sent\)/)
-  // No watermark for `local` at all, so its range is the whole local history.
-  assert.match(stdout.text, /10 rows pending, the full local history/)
+  // The accompanying copy has a different cursor; it is not another upload.
+  assert.doesNotMatch(stdout.text, /10 rows pending|\/home\/u\/exports/)
   // The withheld rows are stated apart from the pending ones, never added in.
   assert.doesNotMatch(stdout.text, /9 rows pending/)
   assert.doesNotMatch(stdout.text, /12 rows pending/)
@@ -330,7 +334,7 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
   // direction load can only push it (#1105). Freezing the clock keeps every
   // deadline unreachable and leaves the row limit as the sole stop, which is
   // the shortfall this case exists to pin. Nothing here passes `rowLimit`, so
-  // the 200,000 below is the shipped limit and not a fixture's. A frozen clock
+  // the 2,000,000 below is the shipped limit and not a fixture's. A frozen clock
   // cannot also pin `DEFAULT_BUDGET_MS`: every budget above zero leaves the
   // deadline unreachable, so the same freeze that removes the flake removes
   // this case's hold on the budget. That default is pinned on its own injected
@@ -343,7 +347,7 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
     storage: /** @type {any} */ (fakeStorage({
       hypHome,
       entries: function* () {
-        for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
+        for (let seq = 1; seq <= 2500000; seq += 1) yield { seq }
       },
     })),
     stateRoot: stateDir(hypHome),
@@ -352,7 +356,7 @@ test('a count that hits its scan budget is disclosed as a floor, never as a tota
 
   const volume = /** @type {any} */ (volumes.get('central'))
   assert.equal(volume.status, 'partial', 'a count stopped at its limit is a floor, not a total')
-  assert.equal(volume.rows, 200000, 'the floor is the row limit reached, never the 250,000 rows behind it')
+  assert.equal(volume.rows, 2000000, 'the floor is the row limit reached, never the 2,500,000 rows behind it')
 })
 
 test('`hyp sync` counts to the shipped scan limit, not to one its own call passed in', async () => {
@@ -377,7 +381,7 @@ test('`hyp sync` counts to the shipped scan limit, not to one its own call passe
     storage: fakeStorage({
       hypHome,
       entries: function* () {
-        for (let seq = 1; seq <= 250000; seq += 1) yield { seq }
+        for (let seq = 1; seq <= 2500000; seq += 1) yield { seq }
       },
     }),
   })
@@ -385,10 +389,10 @@ test('`hyp sync` counts to the shipped scan limit, not to one its own call passe
   const code = await onFrozenClock(() => runSync(['--dry-run'], ctx))
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /at least 200,000 rows pending/, 'the command counts to the shipped limit, not to a caller\'s')
+  assert.match(stdout.text, /at least 2,000,000 rows pending/, 'the command counts to the shipped limit, not to a caller\'s')
   assert.doesNotMatch(
     stdout.text,
-    /250,000 rows pending/,
+    /2,500,000 rows pending/,
     'the floor is the limit the scan reached, never the rows behind it'
   )
 })
@@ -424,7 +428,7 @@ test('a four-digit backlog is grouped for a reader, not printed as a bare intege
   const code = await onFrozenClock(() => runSync(['--dry-run'], ctx))
 
   assert.equal(code, 0)
-  assert.match(stdout.text, /1,234 rows pending, the full local history/)
+  assert.match(stdout.text, /1,234 rows pending, the full history/)
   assert.doesNotMatch(
     stdout.text,
     /1\.234 rows pending/,
@@ -448,7 +452,7 @@ test('the shipped wall-clock budget is the one that stops a long count, not a fi
   ])
   let t = 0
   const now = () => t
-  // Comfortably past the stop below, and comfortably short of the 200,000-row
+  // Comfortably past the stop below, and comfortably short of the 2,000,000-row
   // limit, so the budget is the only thing that can end this count.
   const entries = function* () {
     for (let seq = 1; seq <= 6000; seq += 1) {
@@ -823,7 +827,7 @@ test('rows still buffered in the spool make the count a floor rather than a sile
   // scan-limit case above is counted through `previewPendingRows` on a frozen
   // clock precisely so it stops asserting how fast the machine is (#1105), and
   // this is where the string it used to check is pinned instead.
-  assert.match(stdout.text, /at least 10 rows pending, the full local history/)
+  assert.match(stdout.text, /at least 10 rows pending, the full history/)
   assert.doesNotMatch(stdout.text, /^ +10 rows pending/m, 'a floor rendered as a total overstates what the scan saw')
   assert.doesNotMatch(stdout.text, /nothing pending/)
 })
@@ -908,6 +912,7 @@ test('a truncated count never claims a resume point it did not survey', async ()
     query: /** @type {any} */ (query),
     storage: /** @type {any} */ (storage),
     stateRoot: stateDir(hypHome),
+    rowLimit: 10,
   })
 
   const volume = /** @type {any} */ (volumes.get('central'))
@@ -1052,7 +1057,7 @@ test('an incomplete count marks the withheld line as a floor too, and an exact c
   // produced it, so one shortfall proves the rendering for all of them. This
   // case uses the cheapest one to stage, an unflushed spool: `runSync` does not
   // plumb `rowLimit`/`budgetMs`/`now`, so reaching `partial` by scan limit through
-  // it would cost a 250,000-row fixture counted against a real clock, which is the
+  // it would cost a 2,500,000-row fixture counted against a real clock, which is the
   // wall-clock dependence the scan-limit case above was rewritten to shed (#1105).
   const short = await makeHome('withheld-floor')
   const shortStorage = fakeStorage({ hypHome: short, entries: TWELVE_ROWS })
@@ -1196,9 +1201,15 @@ test('a local-only dataset counts for a local-fs destination and not for a centr
   const { ctx, stdout } = makeCtx({ hypHome, sinks: [central, local], storage })
   ctx.query = query
   assert.equal(await runSync(['--dry-run'], ctx), 0)
-  assert.match(stdout.text, /12 rows pending, the full local history/)
+  assert.doesNotMatch(stdout.text, /12 rows pending|\/home\/u\/exports/)
   assert.match(stdout.text, /nothing pending/)
   assert.doesNotMatch(stdout.text, /withheld by policy/)
+
+  // Explicitly syncing the file target still previews its own rows.
+  const fileRun = makeCtx({ hypHome, sinks: [local], storage })
+  fileRun.ctx.query = query
+  assert.equal(await runSync(['--dry-run'], fileRun.ctx), 0)
+  assert.match(fileRun.stdout.text, /12 rows pending, the full history/)
 })
 
 // ---------------------------------------------------------------------------
@@ -1348,3 +1359,90 @@ test('a partition named after some other dataset is counted in full, not skipped
   assert.equal(volume.rows, 12)
   assert.equal(volume.resume.kind, 'beginning')
 })
+
+for (const scenario of ['plain', 'withholding', 'legacy', 'absent-policy-columns']) {
+  test(`pending preview counts real Parquet rows without decoding nested payloads: ${scenario}`, async (t) => {
+    const hypHome = await makeHome(`projection-${scenario}`)
+    const legacy = scenario === 'legacy'
+    const withPolicy = scenario === 'withholding' || scenario === 'absent-policy-columns'
+    const policyColumns = scenario !== 'absent-policy-columns'
+    const storage = createQueryStorageService({
+      cacheRoot: cacheRoot(hypHome),
+      ...(withPolicy ? {
+        usagePolicyResolver: /** @type {any} */ ({
+          resolve: (/** @type {string} */ cwd) => ({ class: cwd === '/local' ? 'local-only' : 'full' }),
+        }),
+        sourceWithholdResolver: createSourceWithholdResolver({
+          withheldSourceIds: ['hermes', 'claude-desktop'],
+          datasetAttributionColumns: new Map([['ai_gateway_messages', 'client_name']]),
+          datasetOwnedSourceIds: new Map([['ai_gateway_messages', ['hermes', 'claude']]]),
+          clientEntrypointOwners: new Map([['cli', 'claude'], ['desktop', 'claude-desktop']]),
+        }),
+      } : {}),
+    })
+    const marker = 'sync-preview-payload:'
+    const payload = { content: [{ nested: { text: marker + 'x'.repeat(64 * 1024) } }] }
+    await appendRowsToTable(tablePathFor(hypHome), [
+      { name: 'attributes', type: 'JSON', nullable: true },
+      ...(legacy ? [] : [INGEST_SEQ_COLUMN]),
+      ...(policyColumns ? /** @type {const} */ ([
+        { name: 'cwd', type: 'STRING', nullable: true },
+        { name: 'client_name', type: 'STRING', nullable: true },
+        { name: 'entrypoint', type: 'STRING', nullable: true },
+      ]) : []),
+    ], [
+      { cwd: '/full', client_name: 'claude', entrypoint: 'cli', seq: null },
+      { cwd: '/full', client_name: 'claude', entrypoint: 'cli', seq: 1n },
+      { cwd: '/local', client_name: 'claude', entrypoint: 'cli', seq: 2n },
+      { cwd: '/full', client_name: 'hermes', entrypoint: 'cli', seq: 3n },
+      { cwd: '/full', client_name: 'claude', entrypoint: 'desktop', seq: 4n },
+      { cwd: '/full', client_name: null, entrypoint: null, seq: 5n },
+    ].map(({ seq, ...row }) => ({ ...row, attributes: payload, ...(legacy ? {} : { [INGEST_SEQ_COLUMN.name]: seq }) })))
+
+    // Observe the actual nested string decoder, not just the options passed to
+    // a stub. The full export read must exercise the probe before the preview
+    // proves it avoided that work, including on a table with no seq column.
+    let payloadDecodes = 0
+    const decode = TextDecoder.prototype.decode
+    t.mock.method(TextDecoder.prototype, 'decode', function (...args) {
+      const result = Reflect.apply(decode, this, args)
+      if (result.includes(marker)) payloadDecodes += 1
+      return result
+    })
+    for (const since of [undefined, { v: 1, seq: '1' }]) {
+      let rows = 0
+      let withheldRows = 0
+      for await (const entry of storage.readRowsSince(tablePathFor(hypHome), {
+        since: /** @type {any} */ (since), includeLegacy: since === undefined,
+      })) {
+        if (entry.dropped) withheldRows += 1
+        else rows += 1
+      }
+      if (since === undefined) {
+        assert.ok(payloadDecodes > 0, 'the full export read decodes the large nested payload')
+        assert.equal(rows, scenario === 'withholding' ? 2 : scenario === 'absent-policy-columns' ? 0 : 6)
+        assert.equal(withheldRows, scenario === 'withholding' ? 4 : scenario === 'absent-policy-columns' ? 6 : 0)
+      }
+      if (since) await writeWatermark({ hypHome, plugin: '@hypaware/fake', instance: 'dest', seq: since.seq, updatedAt: '2026-09-08T00:00:00.000Z' })
+      payloadDecodes = 0
+      const args = {
+        handles: /** @type {any[]} */ ([fakeSink('dest', {})]),
+        query: /** @type {any} */ (fakeQuery(hypHome)),
+        storage,
+        stateRoot: stateDir(hypHome),
+        now: () => 0,
+      }
+      const volume = (await previewPendingRows(args)).get('dest')
+      assert.equal(volume?.status, 'counted')
+      assert.equal(volume?.rows, rows, 'same eligible rows as a full export at this cursor')
+      assert.equal(volume?.withheldRows, withheldRows, 'same withheld rows as a full export at this cursor')
+      assert.equal(payloadDecodes, 0, 'counting must never decode the payload column')
+      if (rows + withheldRows > 0) {
+        const floor = (await previewPendingRows({ ...args, rowLimit: 2 })).get('dest')
+        assert.equal(floor?.status, 'partial')
+        assert.equal((floor?.rows ?? 0) + (floor?.withheldRows ?? 0), 2)
+        assert.equal(payloadDecodes, 0, 'the bounded count also avoids decoding payloads')
+      }
+    }
+  })
+}

@@ -312,7 +312,12 @@ export function refFilesFromGit(repoRoot, refs) {
     }
     level = next
   }
-  // Byte order of the full path, which is the order `ls-tree -r` lists in.
+  // The walk appends a level at a time, so `llp/tombstones/0018-x.md` lands
+  // behind every file of `llp/` rather than in path order. Sorting restores the
+  // full-path order `refFilesByLsTree` hands back, by UTF-16 code unit rather
+  // than the UTF-8 byte order `ls-tree -r` lists in: the two agree on every name
+  // the `NNNN-slug.type.md` convention allows, and no caller reads the order
+  // anyway (maps and sets downstream, `collisions` re-sorts its own output).
   for (const files of filesOfTree.values()) files.sort()
   for (const [ref, id] of treeOf) refFiles.set(ref, [...filesOfTree.get(id) ?? []])
   return refFiles

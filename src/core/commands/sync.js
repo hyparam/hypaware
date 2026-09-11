@@ -22,7 +22,7 @@ import { groupThousands } from '../util/format_number.js'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
- * @import { PendingVolume } from '../../../src/core/sinks/types.js'
+ * @import { PendingVolume, TickOptions } from '../../../src/core/sinks/types.js'
  * @import { SourceHistoryReplayPreview } from '../../../hypaware-plugin-kernel-types.js'
  */
 
@@ -153,6 +153,12 @@ export async function runSync(argv, ctx) {
     })
   }
 
+  // @ref LLP 0396#combined-selection [implements]: shared setup describes uploads; the accompanying file copy is not a second user choice
+  const displayedDestinations = destinations.some((d) => d.offMachine === true)
+    ? destinations.filter((d) => d.offMachine !== false)
+    : destinations
+  const displayedInstances = new Set(displayedDestinations.map((d) => d.instance))
+
   // Two refusals, both because the hold is driver-wide (LLP 0101 #hold)
   // while the consent in front of it would not be. They come before the plan
   // is rendered: a scoped plan is exactly the misleading artifact the first
@@ -216,7 +222,7 @@ export async function runSync(argv, ctx) {
       label: 'Counting pending rows...',
     },
     () => previewPendingRows({
-      handles,
+      handles: handles.filter((handle) => displayedInstances.has(handle.instanceName)),
       query: ctx.query,
       storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
       stateRoot: stateDir,
@@ -235,7 +241,7 @@ export async function runSync(argv, ctx) {
     hyp_withheld_rows: sum(volumes, (v) => v.withheldRows),
     hyp_exact_counts: [...volumes.values()].filter((v) => v.status === 'counted').length,
   })
-  ctx.stdout.write(renderPlan({ destinations, volumes, exclusions: await readExclusions(stateDir) }))
+  ctx.stdout.write(renderPlan({ destinations: displayedDestinations, volumes, exclusions: await readExclusions(stateDir) }))
   if (deadline !== null) ctx.stdout.write(renderFirstSyncWarning(deadline))
 
   if (dryRun) {
@@ -248,7 +254,7 @@ export async function runSync(argv, ctx) {
     yes,
     question: deadline !== null
       ? 'Send now and end the review window? [Y/n] '
-      : `Send now to ${describeScope(destinations)}? [Y/n] `,
+      : `Send now to ${describeScope(displayedDestinations)}? [Y/n] `,
     defaultYes: true,
   })
   if (outcome === 'no-tty') {
@@ -304,15 +310,31 @@ export async function runSync(argv, ctx) {
     stateRoot: stateDir,
     config: ctx.config,
   })
-  /** @type {{ now: Date, force: true, source: 'manual', sinkInstance?: string }} */
-  const tickOpts = { now: new Date(), force: true, source: 'manual' }
+  const progress = createSyncProgress(volumes)
+  let showProgress = false
+  let uploadStarted = false
+  let phaseStarted = Date.now()
+  /** @type {TickOptions} */
+  const tickOpts = {
+    now: new Date(), force: true, source: 'manual',
+    onProgress: (name, delta) => {
+      if (!delta) {
+        showProgress = displayedInstances.has(name)
+        phaseStarted = Date.now()
+      }
+      if (showProgress) {
+        uploadStarted = true
+        progress.update(name, delta)
+      }
+    },
+  }
   if (instance) tickOpts.sinkInstance = instance
-  // The tick is the long silent wait of this verb: one export per sink, each
-  // a network round trip, with nothing on screen between the user's "y" and
-  // the result lines. The driver reports per sink only once the whole tick
-  // settles, so an elapsed-time spinner is the progress that is available.
   const report = await withSpinner(
-    { stdout: ctx.stdout, env: ctx.env, label: `Sending to ${describeScope(destinations)}...` },
+    {
+      stdout: ctx.stdout, env: ctx.env, label: 'Sending',
+      status: () => showProgress ? progress.render()
+        : `${uploadStarted ? 'Finishing' : 'Preparing upload'}... (${Math.floor((Date.now() - phaseStarted) / 1000)}s)`,
+    },
     () => driver.tick(tickOpts)
   )
 
@@ -324,6 +346,9 @@ export async function runSync(argv, ctx) {
   }
 
   for (const r of report.sinks) {
+    // Successful file copies are incidental to sharing. Failures still need
+    // their diagnostic and continue to determine the command's exit code.
+    if (!displayedInstances.has(r.instance) && r.status === 'exported') continue
     ctx.stdout.write(
       `${r.instance}: ${r.status} (partitions=${r.partitionsExported}, bytes=${r.bytesWritten}${
         r.error ? `, error=${r.error}` : ''
@@ -331,6 +356,84 @@ export async function runSync(argv, ctx) {
     )
   }
   return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
+}
+
+/**
+ * Reuse the consent preview without rescanning the backlog. Keep only the
+ * current destination's counters: sinks run sequentially, and each ETA covers
+ * that destination.
+ * @param {Map<string, PendingVolume>} volumes
+ * @param {() => number} [now]
+ */
+export function createSyncProgress(volumes, now = Date.now) {
+  let instance = ''
+  let rows = 0
+  let firstAck = 0
+  let lastAck = now()
+  /** @type {TickOptions['onProgress']} */
+  const update = (name, delta) => {
+    if (!delta) {
+      instance = name
+      rows = 0
+      firstAck = 0
+      lastAck = now()
+      return
+    }
+    // A zero-row report acknowledges nothing. `onProgress` is on the published
+    // export contract and a bare `opts.onProgress()` arrives here normalized to
+    // zero rows, so a sink calling it in a loop would otherwise refresh
+    // `lastAck` on every pass and hold the stall warning off the line for as
+    // long as the loop ran.
+    if (!(delta.rows > 0)) return
+    // The rate is measured from the first acknowledgement, not from the
+    // destination's start. The driver announces a destination before
+    // `discoverReadyPartitions` lists every dataset, flushes every pending
+    // spool and re-discovers, which on a first sync - the run this line exists
+    // for - is often the dominant cost and is paid once rather than per row.
+    // Charging it to the rate made the first ETA, the one the user reads,
+    // arbitrarily pessimistic: 60s of flush ahead of 12,000 rows at 2,000
+    // rows/s reported ~88s for 3.5s of remaining work.
+    if (firstAck === 0) firstAck = now()
+    rows += delta.rows
+    lastAck = now()
+  }
+  const render = () => {
+    if (!instance) return 'Preparing upload...'
+    const volume = volumes.get(instance)
+    const total = volume?.status === 'counted' ? volume.rows : undefined
+    const count = total !== undefined && total > 0 && rows <= total
+      ? `${groupThousands(rows)}/${groupThousands(total)} rows (${Math.min(99, Math.floor(rows / total * 100))}%)`
+      : `${groupThousands(rows)} rows sent`
+    const prefix = `${instance}: ${count}`
+    // Every line that cannot quote an ETA still ticks, and what it ticks is
+    // the time since anything last moved. `onProgress` is optional on the
+    // export contract and half the shipped sinks never call it
+    // (`@hypaware/s3`, and the table-format sink an iceberg destination
+    // instantiates), so without this their whole export renders one frozen
+    // line - worse than the elapsed seconds it replaced, and the exact "this
+    // has hung" reading the spinner exists to prevent. Measuring the gap from
+    // the last acknowledgement rather than from the destination's start costs
+    // those sinks nothing (`lastAck` begins at the destination's start) and is
+    // the only reading that answers the question a waiting line raises: a
+    // destination that transferred healthily for 100s and has then been quiet
+    // for 20 otherwise reads `waiting for progress (120s)`, six times the gap.
+    const waited = Math.floor((now() - lastAck) / 1000)
+    if (rows === 0) return `${prefix} | waiting for progress (${waited}s) | ETA unavailable`
+    // Ahead of the stall check, because a finalize is a stall: the last chunk
+    // is acknowledged and the export is committing, so no further
+    // acknowledgement is coming and a long one would otherwise flip a finished
+    // transfer to "99% | waiting for progress" - the one reading that is both
+    // alarming and wrong.
+    if (rows === total) return `${instance}: ${groupThousands(rows)} rows sent | finalizing... (${waited}s)`
+    if (now() - lastAck >= 15_000) return `${prefix} | waiting for progress (${waited}s) | ETA unavailable`
+    const seconds = Math.max(1, (now() - firstAck) / 1000)
+    const rate = rows / seconds
+    if (total === undefined || rows > total) return `${prefix} | ETA unavailable`
+    const remaining = Math.max(1, Math.ceil((total - rows) / rate))
+    const eta = remaining < 60 ? `${remaining}s` : `${Math.ceil(remaining / 60)}m`
+    return `${prefix} | ETA ~${eta}`
+  }
+  return { update, render }
 }
 
 /**
@@ -562,8 +665,9 @@ function renderHistoryPlan({ source, destinations, previews, unsupported }) {
  * own config rather than inventing a registration concept for one prompt.
  * An `http(s)` destination is off-machine on the evidence of the URL; a
  * filesystem path is on-machine on the evidence of the path. Anything else
- * reports `null` and the summary stays silent about it - a confirmation
- * prompt that guesses is worse than one that admits the gap.
+ * reports `null`, and a `null` is the one a sharing plan keeps: the filter
+ * drops what it knows stays here, never what it could not place. A
+ * confirmation prompt that guesses is worse than one that admits the gap.
  *
  * A server is named, never spelled as a URL. R1a binds the enrolling login's
  * surfaces by its own text, but its reason is about terminals, not about
@@ -649,9 +753,12 @@ async function readExclusions(stateDir) {
 }
 
 /**
- * The pre-confirmation summary: every destination, named, with **how much**
- * would leave through it, how far back that reaches, and the exclusions that
- * will not travel. "Are you sure?" with nothing to be sure *about* is a
+ * The pre-confirmation summary: every destination it is given, named, with
+ * **how much** would leave through it, how far back that reaches, and the
+ * exclusions that will not travel. On a sharing run the caller hands it the
+ * upload targets only (see `displayedDestinations`), so "every destination"
+ * is the caller's decision, not this renderer's.
+ * "Are you sure?" with nothing to be sure *about* is a
  * keystroke, not a decision, and a size-free plan was exactly that: identical
  * on a machine with three queued rows and one with a quarter of a million.
  *
@@ -664,14 +771,9 @@ async function readExclusions(stateDir) {
  */
 function renderPlan({ destinations, volumes, exclusions }) {
   const width = Math.max(...destinations.map((d) => d.instance.length))
-  const lines = [`hyp sync: ${plural(destinations.length, 'destination')}\n`, '\n']
+  const lines = ['hyp sync:\n', '\n']
   for (const dest of destinations) {
-    const note = dest.offMachine === true
-      ? '  (leaves this machine)'
-      : dest.offMachine === false
-        ? '  (stays on this machine)'
-        : ''
-    lines.push(`  ${dest.instance.padEnd(width)}  ${dest.text}${note}\n`)
+    lines.push(`  ${dest.instance.padEnd(width)}  ${dest.text}\n`)
     for (const line of renderVolume(volumes?.get(dest.instance))) {
       lines.push(`  ${' '.repeat(width)}  ${line}\n`)
     }
@@ -683,20 +785,15 @@ function renderPlan({ destinations, volumes, exclusions }) {
   }
   lines.push('\n')
   if ('error' in exclusions) {
-    lines.push(`  warning: could not read the local-only list (${exclusions.error});\n`)
+    lines.push(`  warning: could not read the exclusions (${exclusions.error});\n`)
     lines.push('  exclusions still apply, but cannot be summarized here\n')
   } else {
     const clientLocalOnly = exclusions.clientLocalOnly ?? []
     if (exclusions.localOnly > 0 || exclusions.ignore > 0) {
-      const parts = []
-      if (exclusions.localOnly > 0) parts.push(`${plural(exclusions.localOnly, 'directory', 'directories')} marked local-only`)
-      if (exclusions.ignore > 0) parts.push(`${plural(exclusions.ignore, 'directory', 'directories')} marked ignore`)
-      lines.push(`  withholding ${parts.join(', ')}\n`)
-    } else if (clientLocalOnly.length === 0) {
-      lines.push('  no directories or clients are marked local-only or ignore\n')
+      lines.push(`  excluded: ${plural(exclusions.localOnly + exclusions.ignore, 'directory', 'directories')}\n`)
     }
     if (clientLocalOnly.length > 0) {
-      lines.push(`  keeping these clients local-only: ${clientLocalOnly.join(' · ')}\n`)
+      lines.push(`  excluded clients: ${clientLocalOnly.join(' · ')}\n`)
     }
   }
   return lines.join('')
@@ -759,7 +856,7 @@ function renderVolume(volume) {
  * @returns {string}
  */
 function renderResume(resume) {
-  if (resume.kind === 'beginning') return ', the full local history'
+  if (resume.kind === 'beginning') return ', the full history'
   if (resume.kind === 'since') return `, captured since ${formatResumeInstant(resume.at)}`
   return ''
 }
@@ -793,11 +890,13 @@ function formatResumeInstant(iso) {
 function renderFirstSyncWarning(deadlineMs) {
   return (
     '\n' +
-    '  FIRST SYNC: nothing has left this machine yet. Sending now ends the review\n' +
-    `  window (until ${formatFirstSyncDeadline(deadlineMs)}), includes your imported history,\n` +
-    '  and cannot be undone. To review or exclude anything first, run the\n' +
-    '  hypaware-privacy skill in Claude or Codex, or:\n' +
-    '    hyp privacy set <path> local-only\n'
+    // "by", because the printed instant is the deadline: LLP 0101 calls it
+    // "the latest the first sync can happen, not the earliest". Without it the
+    // line schedules an upload for tonight directly above a prompt whose bare
+    // enter uploads now, so the reader is told the opposite of what enter does.
+    `  First upload: by ${formatFirstSyncDeadline(deadlineMs)}, including your imported history.\n` +
+    '  Sending now ends the review window. Uploads cannot be undone.\n' +
+    '  To review exclusions: `hyp privacy` or the hypaware-privacy skill in Claude or Codex.\n'
   )
 }
 
@@ -805,14 +904,11 @@ function renderFirstSyncWarning(deadlineMs) {
  * Name the scope of an ordinary (unheld) confirmation by where the data
  * goes, so the question is answerable without scrolling back to the plan.
  *
- * @param {{ offMachine: boolean | null }[]} destinations
+ * @param {{ text: string }[]} destinations
  * @returns {string}
  */
 function describeScope(destinations) {
-  const offMachine = destinations.filter((d) => d.offMachine === true).length
-  if (offMachine === 0) return plural(destinations.length, 'destination')
-  if (offMachine === destinations.length) return `${plural(offMachine, 'destination')} off this machine`
-  return `${plural(destinations.length, 'destination')} (${offMachine} off this machine)`
+  return destinations.map((d) => d.text).join(', ')
 }
 
 /**

@@ -7,13 +7,198 @@ import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
-import { runSync } from '../../src/core/commands/sync.js'
+import { createSyncProgress, runSync } from '../../src/core/commands/sync.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
   firstSyncHoldMarkerPath,
   writeFirstSyncHoldMarker,
 } from '../../src/core/usage-policy/first_sync_hold.js'
 import { writeClientSyncEntries, writeLocalOnlyEntries } from '../../src/core/usage-policy/index.js'
+
+test('sync progress estimates from acknowledged rows and resets per destination', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 100, resume: { kind: /** @type {const} */ ('beginning') } }],
+    ['archive', { status: /** @type {const} */ ('counted'), rows: 2000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  assert.match(progress.render(), /0\/1,000 rows \(0%\).*ETA unavailable/)
+  now = 10_000
+  // The 10s before the first acknowledgement was the driver's dataset
+  // discovery and spool flush, which is paid once rather than per row, so it
+  // is not in the rate.
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~3s')
+  now = 20_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 500/1,000 rows (50%) | ETA ~10s')
+  now = 35_000
+  // 15s since the acknowledgement at 20s, not 35s since the destination
+  // started: the number sits next to "waiting for progress" and is read as
+  // how long it has been stuck.
+  assert.match(progress.render(), /waiting for progress \(15s\).*ETA unavailable/)
+  progress.update('central', { rows: 500, bytes: 3000 })
+  assert.match(progress.render(), /1,000 rows sent.*finalizing/)
+  assert.doesNotMatch(progress.render(), /100%/)
+  progress.update('archive')
+  assert.match(progress.render(), /archive: 0\/2,000 rows/)
+  progress.update('archive', { rows: 2001, bytes: 4000 })
+  assert.match(progress.render(), /2,001 rows sent.*ETA unavailable/)
+  assert.doesNotMatch(progress.render(), /%/)
+})
+
+test('sync progress keeps ticking for a destination whose sink never reports', () => {
+  let now = 0
+  const volumes = new Map([
+    ['archive', { status: /** @type {const} */ ('counted'), rows: 12_000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('archive')
+  // `onProgress` is optional on the export contract, and half the shipped
+  // sinks never call it: `@hypaware/s3`, and the table-format sink an iceberg
+  // destination instantiates. This one line is then their whole export, so it
+  // has to keep showing that something is still happening.
+  const frames = [0, 37_000, 94_000].map((at) => { now = at; return progress.render() })
+  assert.deepEqual(frames.map((frame) => /\((\d+)s\)/.exec(frame)?.[1]), ['0', '37', '94'])
+  assert.equal(new Set(frames).size, 3, 'a destination that never reports must not render a frozen line')
+})
+
+test('sync progress keeps finalizing through a commit longer than the stall window', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  now = 5_000
+  progress.update('central', { rows: 1000, bytes: 4000 })
+  const committing = progress.render()
+  assert.match(committing, /central: 1,000 rows sent \| finalizing\.\.\. \(0s\)/)
+  // The last chunk is acknowledged, so by construction no further
+  // acknowledgement is coming: a commit that outlasts the stall window must
+  // not report a finished transfer as "99% | waiting for progress". It must
+  // still tick, though - a commit is the one wait long enough to need it.
+  now = 60_000
+  assert.match(progress.render(), /central: 1,000 rows sent \| finalizing\.\.\. \(55s\)/)
+  assert.notEqual(progress.render(), committing, 'a long commit must not render a frozen line')
+  assert.doesNotMatch(progress.render(), /waiting for progress|%/)
+})
+
+test('sync progress never treats a partial or missing count as a total', () => {
+  const progress = createSyncProgress(new Map([
+    ['central', { status: 'partial', rows: 10, withheldRows: 0, resume: { kind: 'unknown' } }],
+  ]))
+  for (const name of ['central', 'unknown']) {
+    progress.update(name)
+    progress.update(name, { rows: 5, bytes: 100 })
+    assert.match(progress.render(), /5 rows sent.*ETA unavailable/)
+    assert.doesNotMatch(progress.render(), /%/)
+  }
+})
+
+test('sync threads acknowledged progress through the driver to the terminal', async () => {
+  const hypHome = await makeHome('upload-progress')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 123, bytes: 456 })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 456 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /central: 123 rows sent/)
+  assert.match(stdout.text, /central: exported/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('sync reads a sink progress report the way it reads a sink result: a number or nothing', async () => {
+  const hypHome = await makeHome('upload-progress-hostile')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 7, bytes: 8 })
+    // An argument-less call is the plugin saying nothing. It must not reach
+    // the display as the kernel's own start-of-destination signal, which is
+    // what an absent progress object means there.
+    opts.onProgress()
+    // Counts come from sink code the kernel does not own, and land in a line
+    // somebody is watching an upload on.
+    opts.onProgress({ rows: 'lots', bytes: null })
+    // A negative is the same class of input, and the worse one: `rows`
+    // accumulates, so it holds the running total below the real one for the
+    // rest of the destination.
+    opts.onProgress({ rows: -5000, bytes: -1 })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 8 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.doesNotMatch(stdout.text, /NaN/)
+  assert.doesNotMatch(stdout.text, /-[\d,]+ rows sent/)
+  assert.match(stdout.text, /central: 7 rows sent/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('sync progress does not let a zero-row report stand in for progress', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  now = 10_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~3s')
+  // A zero-row report is a truthy object with nothing acknowledged. Counting
+  // one as an acknowledgement keeps the line quiet for as long as the reports
+  // keep arriving, which is the stall the warning exists to surface.
+  for (let at = 11_000; at <= 100_000; at += 1_000) {
+    now = at
+    progress.update('central', { rows: 0, bytes: 0 })
+  }
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | waiting for progress (90s) | ETA unavailable')
+})
+
+test('sync progress does not anchor its rate at a zero-row report', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  // Zero-row reports arriving during the driver's setup work. Anchoring the
+  // rate on one charges that one-time setup to the transfer rate.
+  for (const at of [1_000, 5_000, 9_000]) {
+    now = at
+    progress.update('central', { rows: 0, bytes: 0 })
+  }
+  now = 10_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  now = 11_000
+  // 250 rows in the 1s since the first acknowledgement, not in the 11s since
+  // the destination started: 750 rows remaining at 250 rows/s.
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~3s')
+})
+
+test('a sink bare-calling onProgress cannot hold the stall warning off the line', async (t) => {
+  const hypHome = await makeHome('upload-progress-bare-loop')
+  let clock = Date.now()
+  t.mock.method(Date, 'now', () => clock)
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 123, bytes: 456 })
+    clock += 20_000
+    // A third-party sink may call `onProgress` with no argument at all, which
+    // the driver reads as zero rows. Twenty seconds of it is still a stall.
+    for (let i = 0; i < 50; i += 1) opts.onProgress()
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 456 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /central: 123 rows sent \| waiting for progress \(20s\)/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
 
 // `hyp sync` (LLP 0101 #no-release, as amended): the user-facing export verb
 // that replaced `hyp sink force`. What these cover is the consent gate, not
@@ -66,7 +251,7 @@ function fakeSink(instanceName, config, result = {}) {
     config,
     exported,
     sink: {
-      async exportBatch(/** @type {unknown} */ batch) {
+      async exportBatch(/** @type {unknown} */ batch, /** @type {any} */ _opts = {}) {
         exported.push(batch)
         return { status: result.status ?? 'exported', partitionsExported: 0, bytesWritten: 0 }
       },
@@ -194,11 +379,15 @@ test('the held prompt states the window, the irreversibility, and the way out', 
   await runSync([], ctx)
 
   const text = stdout.text
-  assert.match(text, /FIRST SYNC: nothing has left this machine yet/)
-  assert.match(text, /ends the review\n  window \(until /)
+  // "by", not a bare timestamp: the instant is the deadline, which LLP 0101
+  // calls "the latest the first sync can happen, not the earliest". Scheduling
+  // it directly above a prompt whose bare enter sends now tells the reader the
+  // opposite of what enter does.
+  assert.match(text, /First upload: by .*including your imported history/)
+  assert.match(text, /ends the review window/)
   assert.match(text, /cannot be undone/)
   assert.match(text, /hypaware-privacy skill/)
-  assert.match(text, /hyp privacy set <path> local-only/)
+  assert.match(text, /hyp privacy`/)
 })
 
 test('--dry-run prints the plan, exports nothing, and keeps the window open', async () => {
@@ -233,7 +422,7 @@ test('the pending preview animates on a TTY and clears before the plan', async (
   // Transient: every frame is behind a line-clearing carriage return, and the
   // plan renders after the last clear rather than under a leftover label.
   assert.doesNotMatch(text, /Counting pending rows[^\r]*\n/)
-  assert.match(text.split('\r\x1b[2K').pop() ?? '', /destination/)
+  assert.match(text.split('\r\x1b[2K').pop() ?? '', /hyp sync:/)
 })
 
 test('the pending preview writes nothing off a TTY', async () => {
@@ -407,7 +596,7 @@ test('--history cannot bypass the first-sync review window', async () => {
   assert.ok(await holdExists(hypHome))
 })
 
-test('the plan names each destination and whether it leaves the machine', async () => {
+test('a sharing plan shows upload targets without counting the accompanying file copy', async () => {
   const hypHome = await makeHome('plan')
   const { ctx, stdout } = makeCtx({
     hypHome,
@@ -425,12 +614,70 @@ test('the plan names each destination and whether it leaves the machine', async 
   const text = stdout.text
   // A server is named, never spelled as a URL a terminal would autolink
   // (LLP 0100 R1a's reason, applied to this surface).
-  assert.match(text, /central\s+the 'prod' server\s+\(leaves this machine\)/)
+  assert.match(text, /central\s+the 'prod' server\n/)
   assert.doesNotMatch(text, /https:\/\//)
   assert.match(text, /\(run 'hyp remote list' to see server URLs\)/)
-  assert.match(text, /parquet\s+\/home\/u\/exports\s+\(stays on this machine\)/)
-  // An undeclarable destination says nothing rather than guessing either way.
+  assert.doesNotMatch(text, /parquet|\/home\/u\/exports|destinations|leaves this machine|stays on this machine|local-only/)
   assert.match(text, /mystery\s+@hypaware\/fake\n/)
+})
+
+test('sharing shows only upload progress and results but still writes the file copy', async () => {
+  for (const copyFirst of [true, false]) {
+    const hypHome = await makeHome('shared-copy')
+    const upload = fakeSink('central', { url: 'https://hypaware.example.com' })
+    const copy = fakeSink('archive-copy', { dir: '/home/u/exports' })
+    for (const handle of [upload, copy]) {
+      const exportBatch = handle.sink.exportBatch
+      handle.sink.exportBatch = async (batch, opts) => {
+        opts.onProgress({ rows: 123, bytes: 456 })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        return exportBatch(batch, opts)
+      }
+    }
+    const { ctx, stdout, stderr } = makeCtx({
+      hypHome, sinks: copyFirst ? [copy, upload] : [upload, copy],
+      tty: true, stdoutTty: true, answer: 'y',
+    })
+    assert.equal(await runSync([], ctx), 0)
+    assert.match(stdout.text, /central: 123 rows sent/)
+    assert.match(stdout.text, /central: exported/)
+    // `Preparing upload` alone cannot tell the two orders apart: the spinner
+    // renders its first frame before the tick starts, so that line is on
+    // screen in both. What distinguishes them is `Finishing`, which only a
+    // copy running *after* the upload can produce.
+    assert.match(stdout.text, /Preparing upload/)
+    assert[copyFirst ? 'doesNotMatch' : 'match'](stdout.text, /Finishing/)
+    assert.match(stderr.text, /Send now to /)
+    assert.doesNotMatch(stdout.text + stderr.text, /archive-copy|\/home\/u\/exports|\d destinations/)
+    assert.equal(copy.exported.length, 1)
+    assert.equal(upload.exported.length, 1)
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a failed accompanying copy remains visible and fails the command', async () => {
+  const hypHome = await makeHome('shared-copy-failed')
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [
+      fakeSink('central', { url: 'https://hypaware.example.com' }),
+      fakeSink('archive-copy', { dir: '/home/u/exports' }, { status: 'failed' }),
+    ],
+  })
+  assert.equal(await runSync(['--yes'], ctx), 1)
+  assert.match(stdout.text, /archive-copy: failed/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
+test('a file-only sync still names its target and reports its result', async () => {
+  const hypHome = await makeHome('file-only-plan')
+  const { ctx, stdout } = makeCtx({
+    hypHome, sinks: [fakeSink('archive', { dir: '/home/u/exports' })],
+  })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /archive\s+\/home\/u\/exports/)
+  assert.match(stdout.text, /archive: exported/)
+  await fs.rm(hypHome, { recursive: true, force: true })
 })
 
 test('an unnamed server falls back to its host, still not a linkifiable URL', async () => {
@@ -444,7 +691,7 @@ test('an unnamed server falls back to its host, still not a linkifiable URL', as
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /central\s+elsewhere\.example\.com\s+\(leaves this machine\)/)
+  assert.match(stdout.text, /central\s+elsewhere\.example\.com\n/)
   assert.doesNotMatch(stdout.text, /https:\/\//)
 })
 
@@ -526,7 +773,7 @@ test('the plan counts the directories being withheld', async () => {
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /withholding 2 directories marked local-only, 1 directory marked ignore/)
+  assert.match(stdout.text, /excluded: 3 directories/)
 })
 
 test('the plan names the clients kept local-only (LLP 0188 #never-silent)', async () => {
@@ -546,11 +793,11 @@ test('the plan names the clients kept local-only (LLP 0188 #never-silent)', asyn
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /keeping these clients local-only: hermes · openclaw/)
+  assert.match(stdout.text, /excluded clients: hermes · openclaw/)
   assert.doesNotMatch(stdout.text, /no directories or clients are marked/)
 })
 
-test('with nothing marked, the plan says so in one line covering both stores', async () => {
+test('with no exclusions, the plan adds no policy narration', async () => {
   const hypHome = await makeHome('no-exclusions')
   const { ctx, stdout } = makeCtx({
     hypHome,
@@ -560,7 +807,7 @@ test('with nothing marked, the plan says so in one line covering both stores', a
 
   await runSync(['--dry-run'], ctx)
 
-  assert.match(stdout.text, /no directories or clients are marked local-only or ignore/)
+  assert.doesNotMatch(stdout.text, /local-only|ignore|excluded|no directories or clients/)
 })
 
 test('with no hold, --yes exports without inventing a review window', async () => {
@@ -572,7 +819,7 @@ test('with no hold, --yes exports without inventing a review window', async () =
 
   assert.equal(code, 0)
   assert.equal(sink.exported.length, 1)
-  assert.doesNotMatch(stdout.text, /FIRST SYNC/)
+  assert.doesNotMatch(stdout.text, /First upload:/)
 })
 
 test('an unknown instance names the ones that exist', async () => {

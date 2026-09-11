@@ -1,6 +1,7 @@
 import type {
   DatasetRegistration,
   ExportResult,
+  ExportProgress,
   HypAwareV2Config,
   QueryPartition,
   QueryRegistry,
@@ -166,6 +167,8 @@ export interface DriverOptions {
 }
 
 export interface TickOptions {
+  /** Undefined progress starts a destination; subsequent events are acknowledged deltas. */
+  onProgress?: (instance: string, progress?: ExportProgress) => void
   now?: Date
   /** Only fire one sink (test/manual use). */
   sinkInstance?: string

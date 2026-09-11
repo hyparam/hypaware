@@ -1,0 +1,285 @@
+// @ts-check
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { Readable } from 'node:stream'
+import process from 'node:process'
+
+import { serveStdio } from '../../src/core/mcp/stdio.js'
+
+// `handleMessage` promises the client always gets a reply: its catch turns any
+// throw into a `-32603` object. The object is not the reply. `serveStdio` is where
+// the "one line per message" guarantee is actually kept, and it wrote the response
+// with a bare `JSON.stringify`, so a response holding a value JSON cannot take made
+// that write raise, sent the failure to `onError` off-channel, and wrote no line at
+// all - the same forever-wait the `-32603` exists to end, one layer out and
+// invisible to a server that had already returned a well-formed object. PR #1544
+// closed the two paths that reached this from a hostile registration; these drive
+// the transport itself, because the point of the backstop is that a method added
+// later cannot reopen the hole.
+
+/**
+ * Drive messages through the real transport over real streams and report what
+ * the client would actually have received.
+ *
+ * @param {(message: any) => Promise<object | null>} handleMessage
+ * @param {object[]} messages
+ * @param {{ write: (chunk: string) => unknown }} [stdout]
+ * @returns {Promise<{ chunks: string[], errors: unknown[] }>}
+ */
+async function drive(handleMessage, messages, stdout) {
+  /** @type {string[]} */
+  const chunks = []
+  /** @type {unknown[]} */
+  const errors = []
+  await serveStdio({
+    server: { handleMessage },
+    stdin: Readable.from(messages.map((m) => JSON.stringify(m) + '\n')),
+    stdout: stdout ?? { write: (chunk) => chunks.push(chunk) },
+    onError: (err) => errors.push(err),
+  })
+  return { chunks, errors }
+}
+
+const unserializable = /** @type {[string, () => unknown][]} */ ([
+  ['a BigInt', () => 1n],
+  ['a cycle', () => { const o = /** @type {any} */ ({}); o.self = o; return o }],
+  ['a throwing toJSON', () => ({ toJSON() { throw new Error('no result for you') } })],
+])
+
+for (const [label, poison] of unserializable) {
+  for (const id of /** @type {(string | number)[]} */ ([7, 'req-7'])) {
+    test(`a response carrying ${label} still gets one -32603 line for id ${JSON.stringify(id)}`, async () => {
+      const { chunks, errors } = await drive(
+        async () => ({ jsonrpc: '2.0', id, result: { tools: [poison()] } }),
+        [{ jsonrpc: '2.0', id, method: 'tools/list' }],
+      )
+
+      assert.equal(chunks.length, 1)
+      assert.ok(chunks[0].endsWith('\n'))
+      const reply = JSON.parse(chunks[0])
+      assert.equal(reply.jsonrpc, '2.0')
+      assert.equal(reply.id, id)
+      assert.equal(reply.error.code, -32603)
+      assert.equal(typeof reply.error.message, 'string')
+      assert.equal(reply.result, undefined)
+      // The original failure is still reported off-channel: the fallback is a
+      // backstop for the client, not a way to hide the bug from the operator.
+      assert.equal(errors.length, 1)
+    })
+  }
+}
+
+test('the -32603 backstop carries the reason, so the client is told why', async () => {
+  const { chunks } = await drive(
+    async () => ({ jsonrpc: '2.0', id: 1, result: 1n }),
+    [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }],
+  )
+  assert.match(JSON.parse(chunks[0]).error.message, /BigInt/)
+})
+
+test('the backstop line forms for every id off the wire that JSON can write down', async () => {
+  // Every id the backstop can use arrived through `JSON.parse`, which cannot
+  // produce a BigInt, a cycle, a `toJSON`, or an `undefined`. Ids JSON-RPC does
+  // not sanction still parse, so the backstop must survive them too. It is not
+  // total, though: see the depth case below for the one id it cannot answer.
+  const ids = /** @type {any[]} */ ([0, -1, 1.5, '', 'x'.repeat(1000), null, [1, 2], { a: { b: 1 } }, true])
+  for (const id of ids) {
+    const { chunks } = await drive(
+      async () => ({ jsonrpc: '2.0', id, result: 1n }),
+      [{ jsonrpc: '2.0', id, method: 'ping' }],
+    )
+    assert.equal(chunks.length, 1, `no line for id ${JSON.stringify(id)}`)
+    assert.deepEqual(JSON.parse(chunks[0]).id, id)
+  }
+})
+
+test('a notification stays unanswered even when its response cannot be serialized', async () => {
+  // A message with no id is owed no reply, so the backstop must not invent one.
+  // The real server returns null here; a handler that answered anyway must
+  // still not put a line on the wire naming an id the client never sent.
+  const { chunks, errors } = await drive(
+    async (message) => message.method === 'notifications/initialized'
+      ? { jsonrpc: '2.0', result: 1n }
+      : null,
+    [{ jsonrpc: '2.0', method: 'notifications/initialized' }],
+  )
+  assert.deepEqual(chunks, [])
+  assert.equal(errors.length, 1)
+})
+
+test('a notification whose handler returns null writes nothing at all', async () => {
+  const { chunks, errors } = await drive(
+    async () => null,
+    [{ jsonrpc: '2.0', method: 'notifications/initialized' }],
+  )
+  assert.deepEqual(chunks, [])
+  assert.deepEqual(errors, [])
+})
+
+test('an honest response is written as exactly the bytes it was before', async () => {
+  const response = { jsonrpc: '2.0', id: 3, result: { tools: [{ name: 'query_sql', description: 'Run SQL', inputSchema: { type: 'object' } }] } }
+  const { chunks, errors } = await drive(
+    async () => response,
+    [{ jsonrpc: '2.0', id: 3, method: 'tools/list' }],
+  )
+  assert.deepEqual(errors, [])
+  assert.deepEqual(chunks, [JSON.stringify(response) + '\n'])
+})
+
+test('one bad response does not cost the messages either side of it their lines', async () => {
+  const { chunks, errors } = await drive(
+    async (message) => message.id === 2
+      ? { jsonrpc: '2.0', id: 2, result: 1n }
+      : { jsonrpc: '2.0', id: message.id, result: {} },
+    [
+      { jsonrpc: '2.0', id: 1, method: 'ping' },
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      { jsonrpc: '2.0', id: 3, method: 'ping' },
+    ],
+  )
+  assert.deepEqual(chunks.map((c) => JSON.parse(c).id), [1, 2, 3])
+  assert.equal(JSON.parse(chunks[1]).error.code, -32603)
+  assert.equal(errors.length, 1)
+})
+
+test('a stdout that throws on every write reaches onError once, with no unhandled rejection', async () => {
+  // The fallback write can fail the same way the first one did (a closed or
+  // erroring stdout). That path must still land in onError rather than loop or
+  // throw past the caller.
+  /** @type {unknown[]} */
+  const unhandled = []
+  const onUnhandled = (/** @type {unknown} */ err) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const { errors } = await drive(
+      async () => ({ jsonrpc: '2.0', id: 9, result: 1n }),
+      [{ jsonrpc: '2.0', id: 9, method: 'tools/list' }],
+      { write: () => { throw new Error('EPIPE') } },
+    )
+    // The original serialization failure, not the write failure that replaced
+    // it: the fallback write is swallowed so the operator still hears why.
+    assert.equal(errors.length, 1)
+    assert.match(String(/** @type {Error} */ (errors[0]).message), /BigInt/)
+    await new Promise((r) => setTimeout(r, 20))
+    assert.deepEqual(unhandled, [])
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+})
+
+test('a stdout that throws on an honest write still reaches onError', async () => {
+  const { errors } = await drive(
+    async () => ({ jsonrpc: '2.0', id: 9, result: {} }),
+    [{ jsonrpc: '2.0', id: 9, method: 'ping' }],
+    { write: () => { throw new Error('EPIPE') } },
+  )
+  assert.equal(errors.length, 1)
+  assert.equal(/** @type {Error} */ (errors[0]).message, 'EPIPE')
+})
+
+/**
+ * A depth `JSON.parse` takes and `JSON.stringify` will not, found by probing
+ * rather than pinned. Where `JSON.stringify` gives up is a stack artifact, not
+ * a language constant: measured here it is 4165 on Node 22 and 4459 on Node 24,
+ * and it moves linearly with `--stack-size` (2100 at 500KB, 8500 at 2000KB), so
+ * a hard number would make the test a bet on one box's stack and would fail red
+ * on any runtime that stringifies deeper. The first failing power of two is
+ * doubled so the transport's own call site is past the boundary too rather than
+ * sitting on it, where a few frames of difference could decide the result.
+ *
+ * @returns {number} the depth to use, or 0 if nothing in range defeated stringify
+ */
+function depthPastStringify() {
+  for (let depth = 1024; depth <= 1 << 20; depth *= 2) {
+    const nested = JSON.parse('['.repeat(depth) + ']'.repeat(depth))
+    try {
+      JSON.stringify(nested)
+    } catch (err) {
+      if (err instanceof RangeError) return depth * 2
+      throw err
+    }
+  }
+  return 0
+}
+
+test('an id too deep for JSON.stringify defeats the backstop, and says so rather than crashing', async () => {
+  // The limit of "serializable by construction". V8 parses deeper than it
+  // stringifies, so a structural id nested past a few thousand levels arrives
+  // intact and then raises a RangeError out of `JSON.stringify` - both out of
+  // the response that carries it and out of the backstop that would answer it.
+  // No line can correlate to an id that cannot be written down. Pinned so the
+  // gap is an executable statement rather than a claim that it cannot happen.
+  const depth = depthPastStringify()
+  assert.ok(depth > 0, 'no depth in range defeated JSON.stringify')
+  const line = '{"jsonrpc":"2.0","id":' + '['.repeat(depth) + ']'.repeat(depth) + ',"method":"ping"}'
+  const wire = JSON.parse(line)
+  assert.throws(() => JSON.stringify(wire.id), RangeError)
+
+  /** @type {string[]} */
+  const chunks = []
+  /** @type {unknown[]} */
+  const errors = []
+  await serveStdio({
+    server: { handleMessage: async (m) => ({ jsonrpc: '2.0', id: m.id, result: {} }) },
+    stdin: Readable.from([line + '\n']),
+    stdout: { write: (chunk) => chunks.push(chunk) },
+    onError: (err) => errors.push(err),
+  })
+  assert.deepEqual(chunks, [])
+  // Reported once and off-channel, not swallowed and not looped.
+  assert.equal(errors.length, 1)
+  assert.ok(errors[0] instanceof RangeError)
+})
+
+test('the backstop answers the id off the wire, not the one on the response', async () => {
+  // The wire id came through `JSON.parse`; the response id is whatever the
+  // handler built, and can be exactly the kind of value that made the write
+  // fail. Answering with the response's own id would let the poison choose the
+  // id of its own error reply and take the backstop line down with it.
+  const { chunks, errors } = await drive(
+    async () => ({ jsonrpc: '2.0', id: 1n, result: {} }),
+    [{ jsonrpc: '2.0', id: 5, method: 'ping' }],
+  )
+  assert.equal(chunks.length, 1)
+  assert.equal(JSON.parse(chunks[0]).id, 5)
+  assert.equal(JSON.parse(chunks[0]).error.code, -32603)
+  assert.equal(errors.length, 1)
+})
+
+test('a write that fails on an honest response is reported as itself, with no second write', async () => {
+  // The `try` covers the `JSON.stringify` and not the `write`. A stream that
+  // refuses one write must not be told the response could not be serialized
+  // (it could), and must not be handed a second line it did not ask for. The
+  // stream here accepts the second write, so a stray fallback would show up.
+  /** @type {string[]} */
+  const seen = []
+  let attempts = 0
+  const { errors } = await drive(
+    async () => ({ jsonrpc: '2.0', id: 5, result: {} }),
+    [{ jsonrpc: '2.0', id: 5, method: 'ping' }],
+    { write: (chunk) => { seen.push(chunk); if (++attempts === 1) throw new Error('EPIPE') } },
+  )
+  assert.equal(attempts, 1, 'the failed honest write must not be retried or followed by a fallback')
+  assert.equal(errors.length, 1)
+  assert.equal(/** @type {Error} */ (errors[0]).message, 'EPIPE')
+})
+
+test('a toJSON that throws a value String() cannot take still gets its line', async () => {
+  // `describeThrown`'s catch is load-bearing, not decoration. The reason string
+  // is built from whatever a `toJSON` threw, and `String()` raises on a value
+  // with no primitive conversion; that build happens before the fallback write,
+  // so a raise there escapes `writeResponse` with no line written at all and
+  // turns an answerable id straight back into the forever-wait. `Object.create(null)`
+  // is the shape: JSON.stringify propagates a thrown value verbatim.
+  const { chunks, errors } = await drive(
+    async () => ({ jsonrpc: '2.0', id: 5, result: { toJSON() { throw Object.create(null) } } }),
+    [{ jsonrpc: '2.0', id: 5, method: 'ping' }],
+  )
+  assert.equal(chunks.length, 1)
+  const reply = JSON.parse(chunks[0])
+  assert.equal(reply.id, 5)
+  assert.equal(reply.error.code, -32603)
+  assert.equal(typeof reply.error.message, 'string')
+  assert.equal(errors.length, 1)
+})

@@ -1,6 +1,8 @@
 // @ts-check
 
 import process from 'node:process'
+import { createProductClient, productAdapters } from '../product_telemetry/client.js'
+import { productEvent } from '../product_telemetry/collection.js'
 
 import {
   Attr,
@@ -20,10 +22,12 @@ import { createActionReconciler } from '../config/action_reconciler.js'
 import { attachHandler } from '../config/action_attach.js'
 import { backfillHandler } from '../config/action_backfill.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
+import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
+import { refreshClientAssets } from '../runtime/client_assets.js'
 import { createSinkDriver } from '../sinks/driver.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
-import { BOOT_FAILED_WARNING_PREFIX } from './boot_failure.js'
+import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
 import {
   clearControlRequests,
   watchControlRequests,
@@ -37,7 +41,7 @@ import {
   writePidFile,
 } from './pid.js'
 import { openDaemonLog } from './logs.js'
-import { statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
+import { readSourceIdentity, sourceHealth, statusFilePath, summarizeMaintenanceSkips, writeStatusFile } from './status.js'
 import {
   detectSupervisor,
   readSelfPackageIdentity,
@@ -46,7 +50,7 @@ import {
 } from '../update/self_update.js'
 
 /**
- * @import { AiGatewayCapability, ClientRegistry, JsonObject } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { AiGatewayCapability, ClientRegistry, JsonObject, SourceStatus } from '../../../hypaware-plugin-kernel-types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  * @import { BootKernelResult } from '../../../src/core/runtime/types.js'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
@@ -56,6 +60,7 @@ import {
 /**
  * @import {
  *   DaemonStatus,
+ *   SourceHealth,
  *   SourceSnapshot,
  *   SinkSnapshot,
  *   DaemonHandle,
@@ -65,6 +70,103 @@ import {
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000
 const MIN_TICK_INTERVAL_MS = 25
+
+/**
+ * How long a source's `status()` may take before a probe gives up on it.
+ * `status()` is plugin code and the kernel contract puts no bound on it, so a
+ * probe that never settles hangs whichever path awaits it. On the tick path a
+ * hang is silent and total - `persist()` is downstream of the refresh, so
+ * *every* field in `status.json` freezes, not just that source's, while the
+ * daemon goes on reporting itself healthy; and the shutdown refresh would hang
+ * `hyp daemon stop` with it. At boot it is worse: `startConfiguredSources`
+ * awaits one source at a time, so one hung probe stops the daemon from ever
+ * reaching `persist()` - no daemon, no status file, no error (issue #1508).
+ * Well under the tick interval floor so a slow probe cannot overlap itself
+ * into the next tick.
+ */
+const SOURCE_STATUS_TIMEOUT_MS = 5000
+
+/**
+ * Race a source's `status()` promise against `SOURCE_STATUS_TIMEOUT_MS`. Both
+ * probes go through here, so boot and the tick give up at the same point and
+ * report the same message, and there is one bound to change rather than two.
+ *
+ * The plugin's promise cannot be cancelled, only abandoned: `Promise.race`
+ * keeps its own handler on it, so a rejection arriving after the timeout has
+ * won is still handled rather than taking the daemon down as an unhandled
+ * rejection. The timer is cleared however the race settles, so a probe that
+ * answers leaves nothing pending.
+ *
+ * `keepAlive` is the one thing the two callers do not agree on, because the
+ * daemon unrefs its own timers (the tick interval included) and stays alive on
+ * its handles instead. On the tick path the timer must not be one of those
+ * handles: a probe still outstanding when the daemon is asked to stop would
+ * hold the process open past its own shutdown. At boot the daemon has none of
+ * its own yet - the control watcher installs at the tail of `runDaemon`, after
+ * every source has started - and an earlier source's own handle (a gateway's
+ * listening socket, say) is not something this probe can rely on: it depends
+ * on start order and on that source having bound one at all. So an unref'd
+ * wait here can still empty the event loop and exit the process mid-boot,
+ * which is the same "no daemon, no status file" outcome the bound exists to
+ * prevent, only sooner. Neither direction is observable through `runDaemon`,
+ * so both are pinned by a test against this function, which is why it is
+ * exported.
+ *
+ * @param {Promise<unknown>} probe
+ * @param {{ keepAlive?: boolean }} [opts]
+ * @returns {Promise<unknown>}
+ */
+function withStatusTimeout(probe, { keepAlive = false } = {}) {
+  /** @type {NodeJS.Timeout | undefined} */
+  let timer
+  return Promise.race([
+    probe,
+    new Promise((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`status probe exceeded ${SOURCE_STATUS_TIMEOUT_MS}ms`)),
+        SOURCE_STATUS_TIMEOUT_MS
+      )
+      if (!keepAlive && typeof timer.unref === 'function') timer.unref()
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
+/**
+ * The `details` a source reported, as a value the kernel owns.
+ *
+ * `details` is free-form by contract (`JsonObject`), so unlike the health
+ * fields beside it there is nothing to validate it against: all the status
+ * file asks of it is that it can be written. The round trip is that check and
+ * the copy at once. Every getter and every `toJSON` the plugin hung anywhere
+ * in the tree fires here, inside the try that already holds the plugin's
+ * promise, so a `details` the kernel cannot serialize is a probe that failed
+ * and takes the same path as one that threw or timed out. Passing the plugin's
+ * object on unread instead only moves that code to the `JSON.stringify` inside
+ * `persist()`, which sits on no guard at all: the status file stops being
+ * written while the daemon runs on, so `hyp status` reports boot-time data
+ * with nothing anywhere saying why (issue #1505).
+ *
+ * Serializing to nothing is not the same as failing to serialize. A value
+ * `JSON.stringify` drops rather than throws on (a function, a `toJSON` that
+ * returns `undefined`) is a source that reported no readable detail, not a
+ * probe that broke: it is the answer-that-omits-`details` the refresh already
+ * has a rule for, and the health beside it is still worth recording. Parsing
+ * that `undefined` back would instead throw a `SyntaxError` on the string
+ * `'undefined'` and take the whole answer down with it.
+ *
+ * @param {SourceStatus | null | undefined} reported
+ * @returns {JsonObject | undefined}
+ * @ref LLP 0394#health-rides-beside-state [implements]: a details the kernel cannot read is recorded no more than a health it cannot read
+ */
+function reportedDetails(reported) {
+  const details = reported?.details
+  if (details === undefined) return undefined
+  const text = JSON.stringify(details)
+  if (text === undefined) return undefined
+  return /** @type {JsonObject} */ (JSON.parse(text))
+}
 
 /**
  * The client-action handlers the daemon constructs its reconciler with, in the
@@ -144,16 +246,23 @@ export async function runDaemon(opts = {}) {
   const obsEnv = readObservabilityEnv(env)
   const hypHome = opts.hypHome ?? obsEnv.hypHome
   const stateRoot = `${hypHome}/hypaware`
+  const runtimeStateRoot = opts.runtimeStateRoot ?? stateRoot
   const tickIntervalMs = clampTickInterval(opts.tickIntervalMs)
   const installSignals = opts.installSignalHandlers !== false
   const runId = opts.runId ?? obsEnv.devRunId ?? `daemon-${process.pid}-${Date.now()}`
   const mode = opts.foreground === false ? 'detached' : 'foreground'
   const startedAtMs = Date.now()
+  const product = createProductClient({ env: { ...env, HYP_HOME: hypHome }, role: 'daemon' })
+  const lifecycle = (transition, outcome, error_code = 'other') => {
+    const event = productEvent('daemon.lifecycle', { transition, outcome, error_code })
+    if (event) product.emit([event])
+  }
+  lifecycle('start', 'success')
 
   installObservability()
   const log = getLogger('daemon')
   const instruments = getKernelInstruments()
-  const fileLog = openDaemonLog({ stateRoot, runId, mode })
+  const fileLog = openDaemonLog({ stateRoot: runtimeStateRoot, runId, mode })
 
   /** @type {DaemonStatus} */
   const status = {
@@ -201,7 +310,7 @@ export async function runDaemon(opts = {}) {
   // later, and without the handoff it would mistake that leftover for a
   // live request and stop the freshly booted daemon.
   // @ref LLP 0300#boot-clears-stale [implements]: leftovers are cleared, or recorded so they can never dispatch
-  const staleControlRequests = clearControlRequests(stateRoot)
+  const staleControlRequests = clearControlRequests(runtimeStateRoot)
   for (const [request, info] of Object.entries(staleControlRequests)) {
     fileLog.warn('daemon.control_clear_failed', { request, message: info.message })
   }
@@ -210,13 +319,13 @@ export async function runDaemon(opts = {}) {
   // crash during `bootKernel` still leaves something `daemon stop`
   // can detect (rather than the operator wondering where the daemon
   // went).
-  writePidFile(stateRoot, {
+  writePidFile(runtimeStateRoot, {
     pid: process.pid,
     startedAt: status.startedAt,
     runId,
     mode,
   })
-  writeStatusFile(stateRoot, status)
+  writeStatusFile(runtimeStateRoot, status)
   fileLog.info('daemon.starting', { config_path: opts.configPath ?? null })
 
   // ----- Config apply engine (LLP 0025 / LLP 0031) -----
@@ -268,7 +377,7 @@ export async function runDaemon(opts = {}) {
     instruments.daemonUptimeMs.record(status.uptimeMs, {
       hyp_daemon_state: status.state,
     })
-    writeStatusFile(stateRoot, status)
+    writeStatusFile(runtimeStateRoot, status)
   }
 
   /** @type {BootKernelResult} */
@@ -309,15 +418,33 @@ export async function runDaemon(opts = {}) {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     fileLog.error('daemon.boot_failed', { message })
+    lifecycle('ready', 'failure', 'startup_failed')
+    product.close()
     persist({ state: 'degraded', warnings: [`${BOOT_FAILED_WARNING_PREFIX}: ${message}`] })
-    clearPidFile(stateRoot)
+    clearPidFile(runtimeStateRoot)
     await fileLog.close()
     throw err
   }
 
   status.configPath = boot.configPath ?? undefined
+  // A plugin that did not come up leaves no source, no sink and no command
+  // behind, so every other line of this snapshot reads as it would on a boot
+  // nobody configured it for. Recorded on both surfaces this process owns: the
+  // file log a support bundle carries, and the snapshot `hyp status` reads.
+  //
+  // `unsatisfied` alongside `activations` because a throw is only one of the
+  // doors: a plugin the dependency resolver eliminated never reaches
+  // `activatePlugins`, so it leaves no activation record to find (issue #1580).
+  const failedPlugins = recordFailedPlugins({
+    activations: boot.activations,
+    unsatisfied: boot.unsatisfiedRequirements,
+    log: fileLog,
+  })
+  if (failedPlugins.length > 0) status.failedPlugins = failedPlugins
   status.sources = sourceSnapshots
   const anySourceFailed = sourceSnapshots.some((s) => s.state === 'failed')
+  product.setAdapters(productAdapters(boot.config?.plugins ?? []))
+  lifecycle('ready', anySourceFailed ? 'degraded' : 'success')
   if (sourceSnapshots.length === 0 || anySourceFailed) {
     status.state = anySourceFailed ? 'degraded' : 'healthy'
   } else {
@@ -438,6 +565,51 @@ export async function runDaemon(opts = {}) {
   // and reversal can never over-fire on a momentary `clients` gap.
   // @ref LLP 0045#part-1-the-client-seam-in-the-reconcile-context [implements]: daemon resolves clientDescriptors from the catalog, clients/endpoint from boot.runtime.capabilities when the gateway is enabled
   const clientSeam = resolveClientActionSeam({ boot, fileLog })
+
+  // ----- Refresh installed client assets (LLP 0397) -----
+  // The self-update relaunches the daemon onto the new package, and this is
+  // the first code that runs with the new skill sources on disk. The org
+  // reconciler will not re-copy them (its key covers the asset set, not the
+  // bytes) and a standalone host has no reconciler, so the booted daemon
+  // re-copies what the install ledger says is ours and whose source changed.
+  // Same inputs the attach handler threads, same inert cases: no client
+  // descriptors (a non-gateway boot), no HOME, or no registries.
+  // @ref LLP 0397#refresh-at-boot [implements]: one pass per boot, before the tick loop, reading the ledger for which clients to touch
+  {
+    const assetHome = env.HOME ?? ''
+    if (clientSeam.clientDescriptors && assetHome.length > 0 && (boot.runtime.skills || boot.runtime.agents)) {
+      // No `stderr`: the materializer already logs each skipped or failed
+      // asset with its reason, and the summary below names them again for
+      // daemon.log, so a per-asset stderr line would be the same warning a
+      // third time.
+      try {
+        const refresh = await refreshClientAssets({
+          descriptors: clientSeam.clientDescriptors,
+          homeDir: assetHome,
+          stateRoot: clientAssetStateRoot({ ...env, HYP_HOME: hypHome }, assetHome),
+          skills: boot.runtime.skills,
+          agents: boot.runtime.agents,
+        })
+        // A heal counts too: it is the one outcome that leaves the copies
+        // alone and still rewrites the ledger, and it is what the boots before
+        // it were reporting as `edited:<dest>`. Gated on the two lists alone,
+        // the boot that repairs an interrupted predecessor would be the first
+        // silent one, which is the opposite of what LLP 0400 decided.
+        if (refresh.refreshed.length > 0 || refresh.skipped.length > 0 || refresh.healed > 0) {
+          fileLog.info('daemon.client_assets_refreshed', {
+            refreshed: refresh.refreshed.map((asset) => asset.dest),
+            skipped: refresh.skipped.map((asset) => `${asset.reason}:${asset.dest}`),
+            healed: refresh.healed,
+            unchanged: refresh.unchanged,
+          })
+        }
+      } catch (err) {
+        fileLog.error('daemon.client_assets_refresh_failed', {
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+  }
 
   /**
    * Run one reconcile pass against the effective config + backfill registry.
@@ -591,19 +763,6 @@ export async function runDaemon(opts = {}) {
 
   // ----- Tick loop -----
   /**
-   * How long a source's `status()` may take before the tick gives up on it.
-   * `status()` is plugin code and the kernel contract puts no bound on it. It
-   * used to be awaited only at boot, where a probe that never settles is at
-   * least loud: the daemon does not start. On the tick path a hang is silent
-   * and total - `persist()` is downstream of the refresh, so *every* field in
-   * `status.json` freezes, not just that source's, while the daemon goes on
-   * reporting itself healthy; and the shutdown refresh would hang
-   * `hyp daemon stop` with it. Well under the tick interval floor so a slow
-   * probe cannot overlap itself into the next tick.
-   */
-  const SOURCE_STATUS_TIMEOUT_MS = 5000
-
-  /**
    * Last failure message logged per source, so a persistently broken probe
    * says so once instead of once per tick forever.
    *
@@ -615,41 +774,43 @@ export async function runDaemon(opts = {}) {
   const sourceProbesInFlight = new Set()
 
   /**
-   * Probe one source's `status()` details under a timeout, and never let the
+   * Probe one source's `status()` under a timeout, and never let the
    * plugin's promise outlive our interest in it. A timed-out probe cannot be
    * cancelled, so the source is skipped until its previous call settles.
    * Otherwise a permanently hung probe would start (and hold open) a fresh
    * `source.status` span on every tick for the daemon's life.
    *
+   * `status()` is plugin code, so what it resolves is not necessarily a
+   * `SourceStatus`: `null` is as easy to return as an object. The answer is
+   * therefore taken apart *here*, inside the same try that already contains
+   * the plugin's promise, and what leaves this function is only values the
+   * kernel built, the JSON copy of `details` included. A dereference of the
+   * plugin's object on the caller's side would be a throw on the tick's
+   * critical path, which is an unhandled rejection that never reaches
+   * `persist()`, freezing the whole status file and, on the shutdown path,
+   * the stop (issue #1490 round 1). Handing the object on unread only defers
+   * that throw to the `JSON.stringify` inside `persist()` (issue #1505).
+   *
+   * `answered` is what separates "the source said nothing" from "the probe
+   * never got an answer": both arrive with nothing to record, and only the
+   * first erases what was recorded before.
+   *
    * @param {string} name
-   * @returns {Promise<{ details: object | undefined, failure: string | undefined }>}
+   * @returns {Promise<{ answered: boolean, details: object | undefined, health: SourceHealth | undefined, failure: string | undefined }>}
    */
-  async function probeSourceDetails(name) {
+  async function probeSourceStatus(name) {
     if (sourceProbesInFlight.has(name)) {
-      return { details: undefined, failure: 'previous status probe has not settled' }
+      return { answered: false, details: undefined, health: undefined, failure: 'previous status probe has not settled' }
     }
     sourceProbesInFlight.add(name)
     const settle = () => sourceProbesInFlight.delete(name)
-    const probe = boot.runtime.sources.status(name).then((s) => s?.details ?? undefined)
+    const probe = boot.runtime.sources.status(name)
     probe.then(settle, settle)
-    /** @type {NodeJS.Timeout | undefined} */
-    let timer
     try {
-      const details = await Promise.race([
-        probe,
-        new Promise((_resolve, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(`status probe exceeded ${SOURCE_STATUS_TIMEOUT_MS}ms`)),
-            SOURCE_STATUS_TIMEOUT_MS
-          )
-          if (typeof timer.unref === 'function') timer.unref()
-        }),
-      ])
-      return { details: /** @type {object | undefined} */ (details), failure: undefined }
+      const answer = /** @type {SourceStatus | null | undefined} */ (await withStatusTimeout(probe))
+      return { answered: true, details: reportedDetails(answer), health: sourceHealth(answer), failure: undefined }
     } catch (err) {
-      return { details: undefined, failure: err instanceof Error ? err.message : String(err) }
-    } finally {
-      if (timer) clearTimeout(timer)
+      return { answered: false, details: undefined, health: undefined, failure: err instanceof Error ? err.message : String(err) }
     }
   }
 
@@ -681,27 +842,37 @@ export async function runDaemon(opts = {}) {
   }
 
   /**
-   * Re-read every started source's `status()` details into the snapshot
-   * list. Boot writes the details once (`startConfiguredSources`), which
-   * was enough while every detail was fixed at bind time (host, port,
-   * fallback marker). It is not enough for details that accrue as traffic
-   * flows: the gateway's `recent_entrypoints` would be frozen at "nothing
-   * seen yet" for the daemon's whole life, and `hyp status` reads exactly
-   * this file. Name, plugin, and state are left alone - liveness is the
-   * lifecycle's business, not a status probe's.
+   * Re-read every started source's `status()` into the snapshot list. Boot
+   * writes it once (`startConfiguredSources`), which was enough while every
+   * detail was fixed at bind time (host, port, fallback marker). It is not
+   * enough for what accrues as traffic flows: the gateway's
+   * `recent_entrypoints` would be frozen at "nothing seen yet" for the
+   * daemon's whole life, and `hyp status` reads exactly this file. Name,
+   * plugin, and `state` are left alone - liveness is the lifecycle's
+   * business, not a status probe's.
    *
-   * Best-effort per source: a source whose probe throws, times out, or
-   * returns nothing keeps the details it already had rather than losing
-   * them, and one bad source never blocks the next one or the persist
-   * below.
+   * Best-effort per source: a source whose probe throws, times out, or is
+   * skipped keeps what it already had rather than losing it, and one bad
+   * source never blocks the next one or the persist below. A probe that
+   * *did* answer replaces the health wholesale, including erasing it when
+   * the answer carried none: a `lastError` the source has stopped reporting
+   * is a failure that is over, and a stale copy of it would outlive the
+   * failure it describes. `details` is the deliberate exception, and keeps
+   * its last good value: each plugin shapes it differently and it accrues
+   * rather than reporting a condition, so an answer that omits it is not a
+   * source saying the detail is gone.
    *
-   * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: the tick refreshes source details so accruing details reach status.json
+   * @ref LLP 0164#status-reads-it-from-the-status-file [implements]: the tick refreshes source status so accruing details reach status.json
+   * @ref LLP 0394#health-rides-beside-state [implements]: what the source says about itself is recorded, not only its details
    */
-  async function refreshSourceDetails() {
+  async function refreshSourceStatus() {
     for (const snap of status.sources) {
       if (snap.state !== 'started') continue
-      const { details, failure } = await probeSourceDetails(snap.name)
-      if (details !== undefined) snap.details = details
+      const { answered, details, health, failure } = await probeSourceStatus(snap.name)
+      if (answered) {
+        if (details !== undefined) snap.details = details
+        snap.health = health
+      }
       noteProbeOutcome(snap.name, failure)
     }
   }
@@ -744,7 +915,7 @@ export async function runDaemon(opts = {}) {
       fileLog.error('daemon.tick_failed', { message })
     })
     status.sinks = collectSinkSnapshots({ runtime: boot.runtime, sinkSnapshots })
-    await refreshSourceDetails()
+    await refreshSourceStatus()
     persist()
 
     // The daily self-update check rides this tick rather than owning a
@@ -1040,6 +1211,7 @@ export async function runDaemon(opts = {}) {
   async function shutdown(reason) {
     if (shutdownInFlight) return done
     shutdownInFlight = true
+    product.pause()
     // Record that an orderly stop began, before anything that can block. The
     // settle below deliberately waits out an in-flight reconcile pass, which
     // is a multi-minute `hyp backfill` import by design, and `hyp daemon stop`
@@ -1113,7 +1285,7 @@ export async function runDaemon(opts = {}) {
     // running here, and after `stopAllSources` below their probes are gone.
     // A daemon that never reached a tick (or stopped between ticks) would
     // otherwise leave a status file claiming no client was ever seen.
-    await refreshSourceDetails()
+    await refreshSourceStatus()
     persist({ state: 'stopping' })
     fileLog.info('daemon.stopping', { reason })
 
@@ -1147,12 +1319,14 @@ export async function runDaemon(opts = {}) {
 
     const stoppedAt = new Date()
     persist({ state: 'stopped', stoppedAt: stoppedAt.toISOString() })
+    lifecycle('stop', 'success')
+    product.close()
     fileLog.info('daemon.stopped')
     // Await the flush before resolving `done`: a caller (or the #138
     // regression test) that reads `daemon.log` right after the daemon stops
     // must see every line, not a buffer the process abandoned on exit.
     await fileLog.close()
-    clearPidFile(stateRoot)
+    clearPidFile(runtimeStateRoot)
 
     if (installSignals) {
       removeSignalHandlers()
@@ -1221,6 +1395,12 @@ export async function runDaemon(opts = {}) {
         // based on a diff of loaded config is still deferred.
         for (const snap of status.sources) {
           if (snap.state !== 'started') continue
+          // The empty string is what a row carries when the boot walk could
+          // not read a plugin off the contribution, and it is no more a
+          // context key here than it is in `startConfiguredSources`: a source
+          // that would not say whose it is does not get reloaded under
+          // whatever that key holds, nor handed that key's config slice below.
+          if (snap.plugin === '') continue
           const ctx = boot.runtime.activationContexts.get(snap.plugin)
           if (!ctx) continue
           ctx.config = /** @type {JsonObject} */ (
@@ -1287,7 +1467,7 @@ export async function runDaemon(opts = {}) {
     // boot that hangs has no win32 stop path at all. When the Windows
     // service installer lands, arm the handlers next to writePidFile with
     // the same forward-reference/park pattern triggerShutdown already uses.
-    controlWatcher = watchControlRequests(stateRoot, {
+    controlWatcher = watchControlRequests(runtimeStateRoot, {
       onStop: () => { void shutdown('control') },
       onReload: () => { reloadSafely() },
       log: fileLog,
@@ -1477,7 +1657,8 @@ function describeSourceStartError(err, source) {
  * Start every registered source that has not auto-started during
  * `activate()`. Returns one snapshot per source (including the
  * already-started ones) so the status file lists everything the
- * operator expects to see.
+ * operator expects to see. Exported so the identity guard below can be pinned
+ * by a test: what it refuses never reaches the status file.
  *
  * @param {{ runtime: KernelRuntime, log: ReturnType<typeof getLogger>, fileLog: ReturnType<typeof openDaemonLog> }} args
  * @returns {Promise<SourceSnapshot[]>}
@@ -1486,32 +1667,54 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
   /** @type {SourceSnapshot[]} */
   const snapshots = []
   for (const contribution of runtime.sources.list()) {
-    const plugin = contribution.plugin
-    const existing = runtime.sources.started(contribution.name)
-    if (existing) {
-      const details = await safeStatus(runtime, contribution.name)
-      snapshots.push({
-        name: contribution.name,
-        plugin,
-        state: 'started',
-        details,
-      })
-      log.info('daemon.source_already_started', {
-        [Attr.PLUGIN]: plugin,
-        hyp_source: contribution.name,
+    // One guarded read of the identity for the whole iteration: every use
+    // below drives or labels a source by it, and a per-use read lets them
+    // disagree (issue #1535).
+    const identity = readSourceIdentity(runtime.sources, contribution)
+    if (!identity.registered) {
+      fileLog.warn('daemon.source_identity_unreadable', {
+        [Attr.COMPONENT]: 'daemon',
+        [Attr.OPERATION]: 'daemon.start_sources',
+        [Attr.ERROR_KIND]: 'unregistered_source_name',
+        status: 'skipped',
+        source: identity.name,
+        plugin: identity.plugin,
+        message: 'source could not be read back to the name it registered under; not started',
       })
       continue
     }
-    const ctx = runtime.activationContexts.get(plugin)
+    const { name, plugin } = identity
+    const existing = runtime.sources.started(name)
+    if (existing) {
+      const reported = await safeStatus(runtime, name, fileLog)
+      snapshots.push({
+        name,
+        plugin,
+        state: 'started',
+        details: reported.details,
+        health: reported.health,
+      })
+      log.info('daemon.source_already_started', {
+        [Attr.PLUGIN]: plugin,
+        hyp_source: name,
+      })
+      continue
+    }
+    // The empty string is what an unreadable `plugin` degrades to, and no
+    // manifest can carry it as a name (`validateManifest` requires a non-empty
+    // one), so it is not asked of the context map as though it were one: a
+    // contribution that would not say which plugin it belongs to must not be
+    // handed whatever that key happens to hold.
+    const ctx = plugin === '' ? undefined : runtime.activationContexts.get(plugin)
     if (!ctx) {
       const message = `no activation context recorded for plugin '${plugin}'`
       fileLog.error('daemon.source_start_failed', {
-        source: contribution.name,
+        source: name,
         plugin,
         message,
       })
       snapshots.push({
-        name: contribution.name,
+        name,
         plugin,
         state: 'failed',
         error: message,
@@ -1519,23 +1722,24 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
       continue
     }
     try {
-      await runtime.sources.start(contribution.name, ctx)
-      const details = await safeStatus(runtime, contribution.name)
+      await runtime.sources.start(name, ctx)
+      const reported = await safeStatus(runtime, name, fileLog)
       snapshots.push({
-        name: contribution.name,
+        name,
         plugin,
         state: 'started',
-        details,
+        details: reported.details,
+        health: reported.health,
       })
     } catch (err) {
-      const message = describeSourceStartError(err, contribution.name)
+      const message = describeSourceStartError(err, name)
       fileLog.error('daemon.source_start_failed', {
-        source: contribution.name,
+        source: name,
         plugin,
         message,
       })
       snapshots.push({
-        name: contribution.name,
+        name,
         plugin,
         state: 'failed',
         error: message,
@@ -1585,18 +1789,45 @@ async function stopAllSources({ runtime, fileLog }) {
 }
 
 /**
- * Best-effort source `.status()` invocation (failures should not
- * abort the daemon's snapshot capture).
+ * Read a started source's own report for the boot snapshot.
+ *
+ * `status()` is plugin code, and resolving an answer is not the same as being
+ * able to read one: a plugin is free to compute any field in a getter. The
+ * answer is therefore taken apart *here*, inside the same try that already
+ * contains the plugin's promise, and every field the caller reads off the
+ * result is one the kernel built - the shape `probeSourceStatus` uses on the
+ * tick path, so a reader does not have to remember which of the two is the
+ * safe one (issue #1504), `details` copied out of the plugin's object here
+ * rather than serialized out of it later (issue #1505).
+ *
+ * Answering at all is no more guaranteed than answering readably, so the
+ * plugin's promise is raced against the same bound the tick uses: an unbounded
+ * wait here is a daemon that never starts (issue #1508). A probe that times
+ * out is a probe that failed, and takes the path below with it.
+ *
+ * A probe that fails says nothing about liveness, so nothing here does: the
+ * source is left running and its snapshot carries no details and no health,
+ * rather than the `failed` that every later tick would skip for the daemon's
+ * life. The failure is logged under the tick's event, once, boot being a
+ * single probe per source.
  *
  * @param {KernelRuntime} runtime
  * @param {string} name
+ * @param {ReturnType<typeof openDaemonLog>} fileLog
+ * @returns {Promise<{ details: object | undefined, health: SourceHealth | undefined }>}
+ * @ref LLP 0394#health-rides-beside-state [implements]: a boot probe that cannot be read records no health, rather than failing the source
  */
-async function safeStatus(runtime, name) {
+async function safeStatus(runtime, name, fileLog) {
   try {
-    const status = await runtime.sources.status(name)
-    return status?.details ?? undefined
-  } catch {
-    return undefined
+    const answer = /** @type {SourceStatus | null | undefined} */ (await withStatusTimeout(runtime.sources.status(name), { keepAlive: true }))
+    return { details: reportedDetails(answer), health: sourceHealth(answer) }
+  } catch (err) {
+    fileLog.warn('daemon.source_status_failed', {
+      hyp_source: name,
+      message: err instanceof Error ? err.message : String(err),
+      error_kind: 'source_status_probe',
+    })
+    return { details: undefined, health: undefined }
   }
 }
 
@@ -1706,4 +1937,6 @@ export {
   pidFilePath,
   statusFilePath,
   resolveClientActionSeam,
+  startConfiguredSources,
+  withStatusTimeout,
 }

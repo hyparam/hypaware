@@ -40,10 +40,10 @@ const REFRESH_MODES = new Set(['never', 'auto', 'always'])
  * param), so neither belongs in the MCP tool schema.
  *
  * @param {string[]} argv
- * @returns {{ ok: true, controls: VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined }, rest: string[] } | { ok: false, error: string }}
+ * @returns {{ ok: true, controls: VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined, org?: string }, rest: string[] } | { ok: false, error: string }}
  */
 export function parseControlFlags(argv) {
-  /** @type {VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined }} */
+  /** @type {VerbRenderControls & { refresh: 'never'|'auto'|'always', refreshExplicit: boolean, remote: string | undefined, org?: string }} */
   const controls = {
     format: 'table',
     json: false,
@@ -111,6 +111,12 @@ export function parseControlFlags(argv) {
         controls.refreshExplicit = true
         break
       }
+      case '--org': {
+        const v = takeVal()
+        if (!v) return { ok: false, error: '--org expects an org label or *' }
+        controls.org = v
+        break
+      }
       case '--remote': {
         // Bare `--remote` (no value) selects the default target, resolved
         // downstream against config + built-ins; `--remote <name>` names one.
@@ -125,6 +131,9 @@ export function parseControlFlags(argv) {
     }
   }
 
+  if (controls.org !== undefined && controls.remote === undefined) {
+    return { ok: false, error: '--org requires --remote' }
+  }
   return { ok: true, controls, rest }
 }
 
@@ -256,7 +265,10 @@ export const STRICT_SHORT_FLAGS = { strictShortFlags: true }
  */
 export function parseCommandArgv(argv, inputSchema, opts = {}) {
   const aliases = opts.aliases ?? {}
-  const expanded = argv.map((token) => aliases[token] ?? token)
+  // `Object.hasOwn`, not a bare lookup: tokens come off the command line, so an
+  // `Object.prototype` name ('constructor', 'toString') would otherwise expand
+  // to the inherited function and the parse dies on it (issue #1601).
+  const expanded = argv.map((token) => (Object.hasOwn(aliases, token) ? aliases[token] : token))
   if (expanded.includes('--help') || expanded.includes('-h')) return { help: true }
   return argvToParams(inputSchema, expanded, { strictShortFlags: opts.strictShortFlags === true })
 }
@@ -276,7 +288,12 @@ export function validateToolArguments(inputSchema, args) {
   /** @type {Record<string, unknown>} */
   const params = {}
   for (const [key, raw] of Object.entries(args ?? {})) {
-    const prop = props[key]
+    // `Object.hasOwn`, not truthiness: `key` comes off the MCP wire, so an
+    // `Object.prototype` name ('constructor', '__proto__') would otherwise
+    // resolve to the inherited member and pass as a declared property. The CLI
+    // half refuses it (see `resolveFlag`); the two projections of one schema
+    // must not disagree about what an unknown argument is (issue #1601).
+    const prop = Object.hasOwn(props, key) ? props[key] : undefined
     if (!prop) return { ok: false, error: `unknown argument '${key}'` }
     if (raw === undefined || raw === null) continue
     if (prop.type === 'array') {
@@ -351,7 +368,7 @@ export function usageForVerb(name, inputSchema) {
       parts.push(`[${flag} <${prop.type === 'array' ? `${propName}...` : propName}>]`)
     }
   }
-  parts.push('[--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]')
+  parts.push('[--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]')
   return parts.join(' ')
 }
 
@@ -364,8 +381,11 @@ export function usageForVerb(name, inputSchema) {
  */
 function resolveFlag(props, flag) {
   const snake = flag.replace(/-/g, '_')
-  if (props[snake]) return snake
-  if (props[flag]) return flag
+  // `Object.hasOwn`, not truthiness: `flag` comes off the command line, so
+  // `--constructor` would otherwise bind Object.prototype's function as a
+  // declared property instead of refusing as an unknown flag.
+  if (Object.hasOwn(props, snake)) return snake
+  if (Object.hasOwn(props, flag)) return flag
   return undefined
 }
 

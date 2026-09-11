@@ -303,15 +303,21 @@ test('a stdout that dies at the folder-ask receipt cancels the run before the co
   await assert.rejects(fs.access(path.join(home, 'config.json')))
 })
 
-test('a stdout that dies during the sync narration stops the run before the folder lane opens', async () => {
+test('a stdout that dies during the express narration stops the run before the folder lane opens', async () => {
   const home = await tmpHome('hyp-guard-sync-')
   let folderConfirmAsked = false
   const opts = drivenOpts(home, {
     // Express accept: the lanes narrate instead of prompting, and the
-    // narration is the run's consent surface (LLP 0201 #narrate).
+    // narration is the run's consent surface (LLP 0201 #narrate). On an
+    // enrolled run that surface is the picker's accept statement, which
+    // states the whole collect-and-sync picture while the lane behind it
+    // applies the answer silently (LLP 0396 #combined-selection), so the
+    // real lane runs here and its first write is the one that dies.
     express: async () => 'defaults',
-    // The pick lane is scripted, so the first real narration writes are
-    // the sync lane's; kill the stream from the very first write.
+    pick: undefined,
+    // The composed config lands where the pick lane is told to put it, so
+    // a run that reached the commit point would leave this file behind.
+    env: { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', HYP_CONFIG: path.join(home, 'config.json') },
     stdout: throwingBuf(1),
     confirm: async () => { folderConfirmAsked = true; return 'ask' },
   })

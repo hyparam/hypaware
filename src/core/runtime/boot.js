@@ -27,7 +27,7 @@ import { discoverInstalledPlugins } from './installed.js'
 
 /**
  * @import { ActivePlugin, HypAwareV2Config, JsonObject, PluginName } from '../../../hypaware-plugin-kernel-types.js'
- * @import { LoadedManifest } from '../../../src/core/types.js'
+ * @import { LoadedManifest, UnsatisfiedRequirement } from '../../../src/core/types.js'
  * @import { ActivationResult } from '../../../src/core/runtime/types.js'
  * @import { BootKernelOptions, BootKernelResult, BootProfile } from '../../../src/core/runtime/types.js'
  * @import { ConfigLayerDrop, LoadConfigResult, PluginMetadata } from '../../../src/core/config/types.js'
@@ -184,6 +184,7 @@ export async function bootKernel(opts = {}) {
       const runtime = createKernelRuntime({
         commandRegistry,
         cacheRoot,
+        ...(opts.storage ? { storage: opts.storage } : {}),
         ...(opts.configControl ? { configControl: opts.configControl } : {}),
         sourceWithholdResolver: buildSourceWithholdResolver({ catalog, layered: merged, stateDir: stateRoot }),
       })
@@ -286,6 +287,7 @@ export async function bootKernel(opts = {}) {
           runId,
           skipped,
           withheldByProfile,
+          unsatisfiedRequirements: /** @type {UnsatisfiedRequirement[]} */ ([]),
           unavailablePlugins: [...new Set([...unloadable, ...wantedButWithheld])],
           clientDescriptors: catalog.clientDescriptors,
         }
@@ -339,6 +341,10 @@ export async function bootKernel(opts = {}) {
         runId,
         skipped,
         withheldByProfile,
+        // Which door `unavailablePlugins` below took, and why, for the caller
+        // that has to *say* why a plugin is missing rather than only that it
+        // is: the flat list underneath keeps names alone (issue #1580).
+        unsatisfiedRequirements: resolution.unsatisfied,
         // The one list of "this boot did not get its whole plugin set", for
         // callers that must not read a missing contribution as a withdrawn one.
         // Four doors, and only the first ever reaches an activation record: a
@@ -650,6 +656,32 @@ function computeSelectedPlugins({ bootProfile, config, discovered, installedName
     if (entry.enabled === false) continue
     const name = /** @type {PluginName} */ (entry.name)
     if (available.has(name)) out.add(name)
+  }
+  if (bootProfile === 'gateway') {
+    // Adapter routing registrations stay in the forwarding process. No source
+    // other than ai-gateway is started there, and its storage rejects access.
+    // @ref LLP 0038#implemented-boundary [implements]: activate gateway contributors without background sources or sinks
+    const selected = new Set(discovered.filter(({ manifest }) => out.has(manifest.name) && (
+      manifest.name === '@hypaware/ai-gateway' ||
+      manifest.requires?.capabilities?.['hypaware.ai-gateway'] !== undefined
+    )).map(({ manifest }) => manifest.name))
+    // Include configured dependencies of routing contributors. The ordinary
+    // dependency resolver still diagnoses a missing/unconfigured dependency.
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const { manifest } of discovered) {
+        if (!selected.has(manifest.name)) continue
+        for (const { manifest: candidate } of discovered) {
+          if (!out.has(candidate.name) || selected.has(candidate.name)) continue
+          if (manifest.requires?.plugins?.[candidate.name] !== undefined || Object.keys(manifest.requires?.capabilities ?? {}).some(cap => candidate.provides?.capabilities?.[cap] !== undefined)) {
+            selected.add(candidate.name)
+            changed = true
+          }
+        }
+      }
+    }
+    return selected
   }
   return out
 }

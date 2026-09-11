@@ -23,6 +23,7 @@ export type PluginDiagnosticKind =
   | 'activate_missing'
   | 'activate_threw'
   | 'contribution_not_registered'
+  | 'contribution_unreadable'
   | 'contribution_undeclared'
   | 'command_help_drift'
   | 'capability_unresolved'
@@ -94,6 +95,25 @@ export interface RegisteredSnapshot {
   capabilities: string[]
 }
 
+/**
+ * One registration the snapshot would not vouch for, and so left out of
+ * `RegisteredSnapshot`.
+ *
+ * The snapshot already said so, on the log and its stderr mirror. That is a
+ * different stream from the report, so a consumer reading stdout alone saw the
+ * declared-vs-registered diff taken against a snapshot with a hole in it, and
+ * nothing to say there was one (hyparam/hypaware#1569). The sentence is carried
+ * here as well as mirrored, so both surfaces say the same thing about it.
+ */
+export interface RefusedContribution {
+  /** What the snapshot calls it: `source`, `command`, `command alias`, ... */
+  kind: string
+  /** The name it claimed, or the empty string when it claimed nothing readable. */
+  name: string
+  /** Why it was left out, in the words the stderr mirror uses. */
+  message: string
+}
+
 export interface DryRunResult {
   /** True when the entrypoint imported and `activate()` resolved without throwing. */
   ok: boolean
@@ -101,6 +121,8 @@ export interface DryRunResult {
   error?: { kind: 'entrypoint_import_failed' | 'activate_missing' | 'activate_threw'; message: string }
   /** Always present (empty when the dry run never reached activation). */
   registered: RegisteredSnapshot
+  /** What the snapshot refused. Always present, empty on the honest path. */
+  refused: RefusedContribution[]
 }
 
 export type ScaffoldKind = 'source' | 'sink' | 'dataset'

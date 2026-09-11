@@ -97,10 +97,11 @@ const MCP_PATH = '/v1/mcp'
  * the single registered target URL, so no second URL is ever configured.
  *
  * @param {string} url the registered target URL (a base, or a full /v1/mcp URL)
+ * @param {string} [org] operator read selector, carried only on the MCP URL
  * @returns {string}
  * @ref LLP 0084#derive [implements]: MCP endpoint derives from the registered base; a path already ending /v1/mcp is honored verbatim
  */
-export function deriveMcpEndpoint(url) {
+export function deriveMcpEndpoint(url, org) {
   /** @type {URL} */
   let parsed
   try {
@@ -113,6 +114,16 @@ export function deriveMcpEndpoint(url) {
   // only normalizing a trailing slash. Otherwise treat the URL as a base and
   // append the MCP path after any existing path prefix.
   parsed.pathname = trimmedPath.endsWith(MCP_PATH) ? trimmedPath : `${trimmedPath}${MCP_PATH}`
+  // Rewrite the raw query string rather than calling `searchParams.set`: that
+  // setter re-serializes every existing parameter as form encoding, so a
+  // registered `%20` would come back as `+`, a `~` as `%7E`, and a valueless
+  // `?flag` would grow an `=`, all only when an operator passes --org. This way
+  // the target's own parameters reach the server exactly as registered.
+  if (org !== undefined) {
+    const kept = parsed.search.replace(/^\?/, '').split('&')
+      .filter((part) => part !== '' && part !== 'org' && !part.startsWith('org='))
+    parsed.search = `?${[...kept, `org=${encodeURIComponent(org)}`].join('&')}`
+  }
   return parsed.toString()
 }
 
@@ -180,13 +191,16 @@ export function remoteTokenEnvVar(target) {
  */
 export async function readCredentials(stateDir) {
   const parsed = await readRawCredentials(stateDir)
-  /** @type {Record<string, RemoteCredentialRecord>} */
-  const out = {}
+  // Object.fromEntries, not `out[target] = record`: a target named `__proto__`
+  // would run the inherited setter, dropping the record from the map and making
+  // it the prototype, from where it answers every other name's lookup.
+  /** @type {[string, RemoteCredentialRecord][]} */
+  const entries = []
   for (const [target, entry] of Object.entries(parsed)) {
     const record = normalizeRecord(entry)
-    if (record) out[target] = record
+    if (record) entries.push([target, record])
   }
-  return out
+  return Object.fromEntries(entries)
 }
 
 /**
@@ -297,10 +311,28 @@ function normalizeRecord(entry) {
  */
 export async function writeToken(stateDir, target, token) {
   await withCredentialsLock(stateDir, async () => {
-    const current = await readRawCredentials(stateDir, { mutable: true })
-    current[target] = { kind: 'static', token }
-    await writeCredentials(stateDir, current)
+    const current = await readRawCredentials(stateDir)
+    await writeCredentials(stateDir, putRecord(current, target, { kind: 'static', token }))
   })
+}
+
+/**
+ * The raw credential map with one target's record replaced, defined as an
+ * **own** key. Plain assignment cannot: `current['__proto__'] = record` runs
+ * Object.prototype's inherited setter, so the record becomes the map's
+ * prototype and JSON.stringify writes a store without it, which is how
+ * `hyp remote login --name=__proto__` reported a token it never stored. The
+ * appended pair wins over an earlier one of the same name, so this replaces or
+ * adds exactly as the assignment did, and returning a fresh map lets callers
+ * read the shared parse cache instead of cloning it to mutate in place.
+ *
+ * @param {Record<string, unknown>} current
+ * @param {string} target
+ * @param {Record<string, unknown>} record
+ * @returns {Record<string, unknown>}
+ */
+function putRecord(current, target, record) {
+  return Object.fromEntries([...Object.entries(current), [target, record]])
 }
 
 /**
@@ -340,19 +372,18 @@ export async function writeSession(stateDir, target, session) {
  * @ref LLP 0065#d1 [implements]: refresh commit is a compare-and-swap, so the double-hold window cannot resurrect or clobber a sibling write
  */
 async function commitSession(stateDir, target, session, ifRefreshToken) {
-  const current = await readRawCredentials(stateDir, { mutable: true })
+  const current = await readRawCredentials(stateDir)
   if (ifRefreshToken !== undefined) {
     const cur = /** @type {Record<string, any> | undefined} */ (current[target])
     if (!cur || typeof cur !== 'object' || cur.refreshToken !== ifRefreshToken) return false
   }
-  current[target] = {
+  await writeCredentials(stateDir, putRecord(current, target, {
     kind: 'oidc',
     refreshToken: session.refreshToken,
     accessJwt: session.accessJwt,
     expiresAt: session.expiresAt,
     org: session.org,
-  }
-  await writeCredentials(stateDir, current)
+  }))
   return true
 }
 
@@ -399,7 +430,10 @@ export async function resolveToken({ target, env, stateDir }) {
     return { ok: true, token: fromEnv, source: 'env' }
   }
   const creds = await readCredentials(stateDir)
-  const entry = creds[target]
+  // Own-key read: an inherited Object.prototype member is truthy, so a target
+  // named `constructor` walked past this presence check and died in bearerOf's
+  // `token.length` instead of reporting that it has no stored token.
+  const entry = Object.hasOwn(creds, target) ? creds[target] : undefined
   if (entry) {
     const token = bearerOf(entry)
     // A non-empty cached bearer is usable as-is; an oidc record is also present
@@ -443,7 +477,9 @@ export async function resolveAccessJwt({ target, env, stateDir, identityBase, no
   // below sees the freshest refresh token a sibling may have just rotated in.
   if (forceRefresh) rawCache = null
   const creds = await readCredentials(stateDir)
-  const entry = creds[target]
+  // Own-key read, as in resolveToken: an inherited member is truthy, so the
+  // miss was signposted as an unrefreshable session, not a logged-out target.
+  const entry = Object.hasOwn(creds, target) ? creds[target] : undefined
   if (!entry) {
     return { ok: false, error: noTokenError(target, envName) }
   }

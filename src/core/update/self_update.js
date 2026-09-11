@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { isEphemeralBinPath } from '../cli/global_install.js'
 import { warningsRecordBootFailure } from '../daemon/boot_failure.js'
 import { daemonRunDir, processIsAlive, readPidFile } from '../daemon/pid.js'
 import { LAUNCH_LABEL } from '../daemon/platform.js'
@@ -416,6 +417,46 @@ function registryOrigin(raw) {
  * checkout would create a second, skewed install beside the one
  * actually running.
  *
+ * A copy inside some project's `node_modules` is that second install one tree
+ * over: `npm install -g` lands beside it and never replaces it. Telling it from
+ * a global root takes more than "is there a `node_modules` segment", which both
+ * have; what separates them is the manifest beside the outermost one, which a
+ * project carries and `<prefix>/lib` does not. That is exactly the question
+ * `isEphemeralBinPath` asks, so it is reused rather than restated, and the
+ * module it lives in imports no kernel code, so the pre-boot lane stays as
+ * import-light as it was.
+ *
+ * A pnpm or yarn GLOBAL root answers the same way, because those two managers
+ * do write a manifest beside theirs (issue #1625), so `project-local` is the
+ * verdict for a whole install and not only for a dependency. That takes nothing
+ * an apply would have given them: `applySelfUpdate` compares the root against
+ * npm's own prefix, so it refused those roots before this change too. What it
+ * does take is the degraded line that refusal used to leave on `hyp status`,
+ * which named the repair (`npm install -g`) while it was there. `hyp update`
+ * still probes from anywhere and still names it, which is the surface
+ * #cli-surface reserves for the manual lane, and it is the same silence a
+ * checkout and an npx cache have had from the text line all along. Separating
+ * those roots from a project's tree needs a heuristic neither predicate has,
+ * and #1625 settled that as out of scope for this one.
+ *
+ * `applySelfUpdate` refuses this root anyway (it compares against npm's prefix),
+ * so what the verdict buys is everything around that refusal: no daily registry
+ * probe, no `npm config get prefix` spawned to ask what the path already
+ * answers, and no sticky `apply_failed` error putting a permanent
+ * "self-update: degraded" line on `hyp status` for a machine with nothing wrong
+ * with it (issue #1622).
+ *
+ * One lane it does stop that no later refusal would have: the restart-only
+ * hand-over. `npm install` in the project moves the root ahead of the code the
+ * daemon loaded at boot, and read as `global-candidate` that reached
+ * LLP 0365 #running-version-is-tracked, which restarts the daemon onto a version
+ * already on disk and so costs neither a probe nor an install. This root is now
+ * as silent there as a source checkout, whose tree moves ahead the same way and
+ * which has never had that lane, so such a daemon stays on the code it booted
+ * until someone restarts it. Reaching that lane at all takes `hyp daemon install`
+ * having pinned a supervised service to this tree, which is the lane issue #1622
+ * is still open for, so the question is left with that one.
+ *
  * @ref LLP 0309#global-install-only [implements]: provenance guard on the running package root
  * @param {{ packageRoot?: string, env?: NodeJS.ProcessEnv }} [opts]
  * @returns {SelfInstallProvenance}
@@ -429,6 +470,7 @@ export function classifySelfProvenance(opts = {}) {
   if (cache && root.startsWith(path.join(cache, '_npx') + path.sep)) return 'npx'
   if (fs.existsSync(path.join(root, '.git'))) return 'checkout'
   if (!segments.includes('node_modules')) return 'checkout'
+  if (isEphemeralBinPath(root, env)) return 'project-local'
   return 'global-candidate'
 }
 

@@ -131,7 +131,7 @@ function seedDaemonManagedAttach(home, port, mode = 'otel') {
   mkdirSync(path.join(home, '.claude'), { recursive: true })
   writeFileSync(
     path.join(home, '.claude', 'settings.json'),
-    JSON.stringify({ _hypaware: { version: '2.0.0', port, mode, settings_schema: 3 } })
+    JSON.stringify({ _hypaware: { version: '2.0.0', port, mode, settings_schema: 4 } })
   )
 }
 
@@ -401,7 +401,7 @@ test('the post-enable backfill offer is reached on the daemon-managed already-at
 
     assert.match(stdout.text(), /already attached/, 'the exit under test is the daemon-managed one')
     assert.equal(ran, true, 'the accept path must reach its own backfill offer on this exit too')
-    assert.match(stdout.text(), /backfill claude: ok/)
+    assert.match(stdout.text(), /backfill claude: nothing to import/)
 
     // The write really did land, so the enable half of the flow is genuine.
     const written = JSON.parse(readFileSync(path.join(home, '.hyp', 'hypaware-config.json'), 'utf8'))

@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { validateManifest } from '../../src/core/manifest.js'
-import { matchesSemverRange } from '../../src/core/semver.js'
+import { isValidRange, matchesSemverRange } from '../../src/core/semver.js'
 
 test('validateManifest accepts the plugin manifest fields the kernel consumes', () => {
   const result = validateManifest({
@@ -168,4 +168,60 @@ test('matchesSemverRange preserves zero-major caret behavior', () => {
   assert.equal(matchesSemverRange('0.3.0', '^0.2.3'), false)
   assert.equal(matchesSemverRange('0.0.3', '^0.0.3'), true)
   assert.equal(matchesSemverRange('0.0.4', '^0.0.3'), false)
+})
+
+test('matchesSemverRange covers compound, alternative, x and hyphen ranges', () => {
+  // A compound range is every comparator at once, an alternative set is any
+  // one of them, and both are shapes an ordinary npm dependency publishes.
+  assert.equal(matchesSemverRange('1.29.2', '>=1.28.0 <2.0.0'), true)
+  assert.equal(matchesSemverRange('2.0.0', '>=1.28.0 <2.0.0'), false)
+  assert.equal(matchesSemverRange('1.29.2', '>= 1.28.0 < 2.0.0'), true)
+  assert.equal(matchesSemverRange('2.1.0', '^1.29.0 || ^2.0.0'), true)
+  assert.equal(matchesSemverRange('3.0.0', '^1.29.0 || ^2.0.0'), false)
+  // An `x` (or an omitted position) stands for the whole span below it, and
+  // bounds a comparator by where that span ends rather than by 0.
+  assert.equal(matchesSemverRange('1.29.9', '1.29.x'), true)
+  assert.equal(matchesSemverRange('1.30.0', '1.29'), false)
+  assert.equal(matchesSemverRange('0.9.0', '0.x'), true)
+  assert.equal(matchesSemverRange('1.0.0', '0.x'), false)
+  assert.equal(matchesSemverRange('1.30.0', '>1.29'), true)
+  assert.equal(matchesSemverRange('1.29.9', '>1.29'), false)
+  assert.equal(matchesSemverRange('1.29.9', '<=1.29'), true)
+  assert.equal(matchesSemverRange('1.2.3', '1.2.3 - 2.0.0'), true)
+  assert.equal(matchesSemverRange('2.0.0', '1.2.3 - 2.0.0'), true)
+  assert.equal(matchesSemverRange('2.0.1', '1.2.3 - 2.0.0'), false)
+  assert.equal(matchesSemverRange('2.0.1', '1.2.3 - 2.0'), true)
+  // A shape outside the grammar is false rather than a guess.
+  assert.equal(matchesSemverRange('1.2.3', 'npm:other@1.2.3'), false)
+  assert.equal(matchesSemverRange('1.2.3', '>=1.2.3 <garbage'), false)
+})
+
+test('matchesSemverRange lets a wildcard swallow the positions below it', () => {
+  // npm reads `1.x.2` as `1.x.x`, so the patch under a wildcard minor bounds
+  // nothing. Keeping it would answer false for 1.0.0 and, worse, answer at all.
+  assert.equal(matchesSemverRange('1.0.0', '1.x.2'), true)
+  assert.equal(matchesSemverRange('1.0.0', '^1.x.2'), true)
+  assert.equal(matchesSemverRange('1.0.0', '>=1.x.2'), true)
+  assert.equal(matchesSemverRange('1.0.0', '<1.x.2'), false)
+  assert.equal(matchesSemverRange('2.0.0', '1.x.2'), false)
+})
+
+test('matchesSemverRange reads an empty alternative as the wildcard npm reads', () => {
+  // A stray leading or trailing `||` widens the set to everything rather than
+  // voiding the branch, which is how npm resolves it.
+  assert.equal(matchesSemverRange('9.9.9', '|| ^1.0.0'), true)
+  assert.equal(matchesSemverRange('9.9.9', '^1.0.0 ||'), true)
+  assert.equal(matchesSemverRange('9.9.9', '1.2.3||'), true)
+})
+
+test('matchesSemverRange refuses a range whose other alternative is unreadable', () => {
+  // npm rejects the whole range when one alternative is not a range at all, and
+  // the callers that gate on this answer have no validity check in front of
+  // them, so answering off the readable half alone would call a manifest
+  // declaring one satisfied. `isValidRange` already says the whole shape is
+  // unreadable; the matcher agrees rather than guessing from what it could read.
+  for (const range of ['^1.0.0 || file:../fork', '^1.0.0 || npm:other@1', 'garbage || ^1.0.0']) {
+    assert.equal(isValidRange(range), false, `${range} is not a readable range`)
+    assert.equal(matchesSemverRange('1.0.0', range), false, `${range} is not satisfied`)
+  }
 })

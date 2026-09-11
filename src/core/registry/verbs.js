@@ -29,22 +29,46 @@ export function createVerbRegistry(opts = {}) {
   const byTool = new Map()
 
   return {
+    // A verb claims three namespaces (verb name, MCP tool, CLI command) from
+    // two plugin properties, and {@link validateVerb} reads each exactly once
+    // before any of them is claimed. The registration is stored by reference,
+    // so `verb.name` and `verb.tool` are free to be accessors answering
+    // differently each time they are asked, and a second read for the `set` is
+    // not a refusal a hostile accessor has to beat: it answers an unclaimed key
+    // for `has()` and a claimed one for `set()`, and so displaces a registered
+    // verb, or the MCP tool slot of one. A third read decided the name the CLI
+    // command projected under, which put a verb in `hyp --help` under a name
+    // this registry had not keyed it by.
     register(verb) {
-      validateVerb(verb)
-      if (byName.has(verb.name)) {
-        throw new Error(`registerVerb: verb '${verb.name}' already registered`)
+      const { name, tool } = validateVerb(verb)
+      if (byName.has(name)) {
+        throw new Error(`registerVerb: verb '${name}' already registered`)
       }
-      if (byTool.has(verb.tool)) {
-        throw new Error(`registerVerb: tool '${verb.tool}' already registered (verb '${verb.name}')`)
+      if (byTool.has(tool)) {
+        throw new Error(`registerVerb: tool '${tool}' already registered (verb '${name}')`)
       }
-      byName.set(verb.name, verb)
-      byTool.set(verb.tool, verb)
-      // Project the CLI command now so `hyp <verb>` and `hyp --help` work.
-      // Idempotent: a runtime re-created over a shared command registry (or
-      // a verb whose name a command already occupies) must not double-register.
-      if (commandRegistry && !commandAlreadyRegistered(commandRegistry, verb.name)) {
-        commandRegistry.register(verbToCommand(verb))
+      // Project the CLI command so `hyp <verb>` and `hyp --help` work, and do
+      // the whole projection *before* the Maps are written, because the two
+      // `set`s are the only steps left that cannot fail. Both halves of the
+      // line below still can. Building the command runs the registration's
+      // accessors; registering it refuses an out-of-range `audience` and an
+      // alias that collides with a registered command, and iterates whatever
+      // `aliases` answered, so a value that is not iterable throws there.
+      // (The same boundary refuses an out-of-range `bootProfile`, but a verb
+      // never reaches that one: `verbToCommand` does not project the member,
+      // so the registry's own default is the only value it ever sees.) With
+      // either half after the `set`s a refusal left this registry holding a
+      // verb whose plugin the loader then marked failed: a plugin reported as
+      // not loaded and an MCP tool the kernel would still answer, and that one
+      // needs no hostile accessor at all. `register` now claims all three
+      // namespaces or none of them.
+      // Idempotent: a runtime re-created over a shared command registry (or a
+      // verb whose name a command already occupies) must not double-register.
+      if (commandRegistry && !commandAlreadyRegistered(commandRegistry, name)) {
+        commandRegistry.register(verbToCommand(verb, name))
       }
+      byName.set(name, verb)
+      byTool.set(tool, verb)
     },
     // Release a claimed verb name: both maps, plus the CLI command a verb
     // projection put under that name (and only that one). By-name,
@@ -56,8 +80,15 @@ export function createVerbRegistry(opts = {}) {
     unregister(name) {
       const verb = byName.get(name)
       if (!verb) return
+      // One read, so the tool slot released is the one just verified to hold
+      // this verb. Reading `verb.tool` again for the delete let a verb pass the
+      // identity check against its own slot and delete a *different* plugin's,
+      // taking that plugin's MCP tool off the surface. With one read, a verb
+      // whose answer has changed since it registered releases nothing at all,
+      // which costs it its own slot and nobody else's.
+      const tool = verb.tool
       byName.delete(name)
-      if (byTool.get(verb.tool) === verb) byTool.delete(verb.tool)
+      if (byTool.get(tool) === verb) byTool.delete(tool)
       retractCommand(commandRegistry, name)
     },
     get(name) {
@@ -66,8 +97,17 @@ export function createVerbRegistry(opts = {}) {
     getByTool(tool) {
       return byTool.get(tool)
     },
+    // Ordered by the keys, not by `a.name`: the key is the name this registry
+    // validated, while `verb.name` is a live plugin property. Reading it here
+    // runs plugin code inside a comparator, where a throw escapes before a
+    // single verb has been handed back, and where an accessor that merely stops
+    // answering with a string is the same outage, because `compareStrings`
+    // refuses a non-string. The one caller is the MCP host assembling its tool
+    // list, so that is the whole tool surface.
     list() {
-      return Array.from(byName.values()).sort((a, b) => compareStrings(a.name, b.name))
+      return Array.from(byName.keys())
+        .sort(compareStrings)
+        .map((name) => /** @type {VerbRegistration} */ (byName.get(name)))
     },
   }
 }
@@ -90,35 +130,59 @@ export function verbAuthClass(verb) {
   return verb.authClass ?? 'read'
 }
 
-/** @param {VerbRegistration} verb */
+/**
+ * Check a registration and hand back the two keys it claims.
+ *
+ * The keys are returned rather than left for the caller to read again, because
+ * every read of a plugin property is a fresh answer and what is checked here
+ * has to be the string the Maps are keyed from. `exposure`, `authClass` and
+ * `inputSchema` are read once each for the same reason: a truthiness test and
+ * a membership (or `typeof`) test on two reads can pass on a value that is not
+ * the one checked.
+ *
+ * `summary` and `inputSchema` are read again by the projection, which is not a
+ * second answer this function can prevent and does not need to: neither is a
+ * key, the command registry re-checks its own copy of `summary`, and the whole
+ * projection runs ahead of both `set`s, so a divergent second answer costs the
+ * registration itself and never another plugin's.
+ *
+ * @param {VerbRegistration} verb
+ * @returns {{ name: string, tool: string }}
+ */
 function validateVerb(verb) {
   if (!verb || typeof verb !== 'object') {
     throw new TypeError('registerVerb: verb must be an object')
   }
-  if (typeof verb.name !== 'string' || verb.name.length === 0) {
+  const name = verb.name
+  if (typeof name !== 'string' || name.length === 0) {
     throw new TypeError('registerVerb: verb.name is required')
   }
-  if (typeof verb.tool !== 'string' || verb.tool.length === 0) {
-    throw new TypeError(`registerVerb '${verb.name}': verb.tool is required`)
+  const tool = verb.tool
+  if (typeof tool !== 'string' || tool.length === 0) {
+    throw new TypeError(`registerVerb '${name}': verb.tool is required`)
   }
   if (typeof verb.summary !== 'string') {
-    throw new TypeError(`registerVerb '${verb.name}': summary is required`)
+    throw new TypeError(`registerVerb '${name}': summary is required`)
   }
-  if (!verb.inputSchema || typeof verb.inputSchema !== 'object') {
-    throw new TypeError(`registerVerb '${verb.name}': inputSchema is required`)
+  const inputSchema = verb.inputSchema
+  if (!inputSchema || typeof inputSchema !== 'object') {
+    throw new TypeError(`registerVerb '${name}': inputSchema is required`)
   }
   if (typeof verb.operation !== 'function') {
-    throw new TypeError(`registerVerb '${verb.name}': operation() is required`)
+    throw new TypeError(`registerVerb '${name}': operation() is required`)
   }
   if (typeof verb.render !== 'function') {
-    throw new TypeError(`registerVerb '${verb.name}': render() is required`)
+    throw new TypeError(`registerVerb '${name}': render() is required`)
   }
-  if (verb.exposure && !['cli+mcp', 'cli-only', 'local-only'].includes(verb.exposure)) {
-    throw new TypeError(`registerVerb '${verb.name}': unknown exposure '${verb.exposure}'`)
+  const exposure = verb.exposure
+  if (exposure && !['cli+mcp', 'cli-only', 'local-only'].includes(exposure)) {
+    throw new TypeError(`registerVerb '${name}': unknown exposure '${exposure}'`)
   }
-  if (verb.authClass && !['read', 'operator'].includes(verb.authClass)) {
-    throw new TypeError(`registerVerb '${verb.name}': unknown authClass '${verb.authClass}'`)
+  const authClass = verb.authClass
+  if (authClass && !['read', 'operator'].includes(authClass)) {
+    throw new TypeError(`registerVerb '${name}': unknown authClass '${authClass}'`)
   }
+  return { name, tool }
 }
 
 /**

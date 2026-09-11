@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { Attr, getLogger } from '../observability/index.js'
 import { createActivationContext, createKernelRuntime } from '../runtime/activation.js'
 import { createCommandRegistry } from '../registry/commands.js'
 import { createVerbRegistry } from '../registry/verbs.js'
@@ -12,9 +13,9 @@ import { createPluginPaths } from '../runtime/paths.js'
 import { createSourceRegistry } from '../registry/sources.js'
 
 /**
- * @import { ActivePlugin, PluginManifest, SourceContribution, StartedSource } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, CommandRegistration, PluginManifest, SourceContribution, StartedSource } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
- * @import { DryRunResult, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
+ * @import { DryRunResult, RefusedContribution, RegisteredCommand, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
  */
 
 const DRY_RUN_ID = 'doctor-dryrun'
@@ -72,6 +73,10 @@ const STUB_PROVIDER = '@doctor/stub-provider'
 export async function dryRunActivate(manifest, rootDir, opts = {}) {
   const knownCapabilities = opts.knownCapabilities ?? new Map()
   const snapshot = emptySnapshot()
+  // What the snapshot would not vouch for, returned beside it so the report a
+  // consumer reads carries the holes in it (hyparam/hypaware#1569).
+  /** @type {RefusedContribution[]} */
+  const refused = []
   const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-doctor-'))
   try {
     // Empty verb registry (no core verbs), so the kernel-projected
@@ -117,7 +122,7 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
     try {
       mod = await import(pathToFileURL(entrypointAbs).href)
     } catch (err) {
-      return { ok: false, error: { kind: 'entrypoint_import_failed', message: describe(err) }, registered: snapshot }
+      return { ok: false, error: { kind: 'entrypoint_import_failed', message: describe(err) }, registered: snapshot, refused }
     }
 
     if (typeof mod.activate !== 'function') {
@@ -128,6 +133,7 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
           message: `entrypoint '${manifest.entrypoint}' does not export an activate() function`,
         },
         registered: snapshot,
+        refused,
       }
     }
 
@@ -139,11 +145,12 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
       return {
         ok: false,
         error: { kind: 'activate_threw', message: describe(err) },
-        registered: snapshotRegistry(runtime, commandRegistry),
+        registered: snapshotRegistry(runtime, commandRegistry, refused),
+        refused,
       }
     }
 
-    return { ok: true, registered: snapshotRegistry(runtime, commandRegistry) }
+    return { ok: true, registered: snapshotRegistry(runtime, commandRegistry, refused), refused }
   } finally {
     await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
   }
@@ -156,36 +163,444 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * capabilities are excluded so only what the plugin itself provided
  * shows up.
  *
+ * Every name here but a skill's and an agent's is the key its registry
+ * validated and indexed by, taken through `registeredName`, not a fresh read
+ * of the record (those two are contained only, below). The source,
+ * dataset, init-preset and group registries store the object the plugin
+ * passed, by reference, and `CommandRegistry`'s shallow copy still carries
+ * the plugin's own `aliases`, so a re-read is the plugin answering the
+ * question again, free to answer differently (issue #1538). An operator runs
+ * `hyp plugin doctor` to see what a plugin claims before trusting it, so the
+ * divergence has no symptom: the report renders as a well-formed list, of a
+ * registry holding something else.
+ *
+ * `capabilities` is read plainly: `capabilities.list()` builds a fresh
+ * `{ name, version, provider }` per registration, so there is no live
+ * accessor left to contain. The values in it are still the plugin's:
+ * `provide` type-checks neither `name` nor `version`
+ * (hyparam/hypaware#1559), so this bucket, alone among the snapshot's, can
+ * hold something other than the `string` its type declares. It reaches no
+ * interpolation today only because `capabilities` is not in `CONTRIBUTIONS`
+ * and `checkProvidedCapabilities` only does `has()` against manifest keys,
+ * which is a fact about the current check set rather than a guarantee. The
+ * fix belongs in `provide`, the one place they enter: what it stores goes on
+ * to `findMatches`, so `require`, `has` and `fromProvider` all match on
+ * `name` and hand `version` to `matchesSemverRange`, and refusing the value
+ * here would leave the registry holding it for all three. `dep_graph` calls
+ * the same `provide`, so a check there covers that caller too, but nothing a
+ * plugin provides ever reaches it: `resolveDependencies` resolves over a
+ * capability registry of its own, seeded from manifests before any plugin
+ * activates, and no caller passes it the runtime's.
+ *
+ * Three listings are taken through `listed`: `CommandRegistry.list`,
+ * `listGroups` and `initPresets.list`. All three order by the keys their
+ * registries validated (hyparam/hypaware#1555), as
+ * `DatasetRegistry.listDatasets` (issue #1524) and `SourceRegistry.list`
+ * (issue #1530) already did, so the `name` a plugin left on a stored
+ * command, group or preset is asked for only by `registeredName` below,
+ * where it costs the one contribution rather than the bucket. The other
+ * five (`sources`, `sinks`, `datasets`, `skills` and `agents`) order by
+ * their own keys, build fresh objects, or copy the registry's own array,
+ * and none of them reads anything plugin-controlled. The three calls stay
+ * routed through `listed`; what it still guards is on that function.
+ *
+ * `skills` and `agents` are contained but not verified. `skills.register` and
+ * `agents.register` do build a registry-owned record out of the fields they
+ * validated, but `list()` hands the elements of that array straight back
+ * (`items.slice()` copies the array, not its entries) and `ctx.skills` and
+ * `ctx.agents` are on the activation context, so a plugin that calls `list()`
+ * inside its own `activate()` can install an accessor on the very record the
+ * registry holds. Neither registry is keyed, so there is no key to resolve a
+ * name back to and no divergence to detect here; the guard below can only stop
+ * a throwing accessor costing the whole run, and closing the rest belongs in
+ * those two registries (hyparam/hypaware#1552).
+ *
  * @param {ReturnType<typeof createKernelRuntime>} runtime
  * @param {ReturnType<typeof createCommandRegistry>} commandRegistry
  *   The same registry `runtime` was built over. Passed separately because
  *   group descriptions are not commands, so `KernelRuntime.commands` (the
  *   plugin-facing `CommandRegistry`) does not expose `listGroups`.
+ * @param {RefusedContribution[]} refused Appended to for every record left
+ *   out, so the caller can put the holes in its report rather than only on the
+ *   stderr mirror.
  * @returns {RegisteredSnapshot}
  */
-function snapshotRegistry(runtime, commandRegistry) {
+function snapshotRegistry(runtime, commandRegistry, refused) {
   const sinks = /** @type {ExtendedSinkRegistry} */ (runtime.sinks)
-  const commands = commandRegistry.list()
-  const groups = commandRegistry.listGroups()
+  // One read for both buckets. `commands` and `commandDetails` describe the
+  // same registrations, and two passes could disagree with each other as well
+  // as with the registry.
+  const commandDetails = readCommands(refused, commandRegistry)
   return {
-    sources: runtime.sources.list().map((c) => c.name),
-    sinks: sinks.listContributions().map((e) => e.contribution.name),
-    datasets: runtime.query.listDatasets().map((d) => d.name),
-    commands: commands.map((c) => c.name),
-    commandDetails: commands.map((c) => ({
-      name: c.name,
-      summary: c.summary,
-      aliases: [...(c.aliases ?? [])],
-      hidden: c.hidden === true,
-    })),
-    commandGroups: groups.map((g) => ({ name: g.name, ...(g.summary !== undefined ? { summary: g.summary } : {}) })),
-    skills: runtime.skills.list().map((s) => s.name),
-    agents: runtime.agents.list().map((a) => a.name),
-    init_presets: runtime.initPresets.list().map((p) => p.name),
+    sources: registeredNames(refused, runtime.sources.list(), 'source', (_, name) => runtime.sources.get(name)),
+    sinks: registeredNames(
+      refused,
+      sinks.listContributions(),
+      'sink',
+      // Keyed by plugin and name together, so both halves have to be right.
+      // `plugin` is taken off the registry's own wrapper rather than re-read
+      // off the contribution, which is the best this side can do: `register`
+      // builds the key from one read of `contribution.plugin` and the wrapper
+      // from the next one, so the two can differ under a drifting accessor
+      // (hyparam/hypaware#1553). A pair that misses is refused, which
+      // under-reports a real sink rather than reporting a false name.
+      (entry, name) => sinks.getContribution(entry.plugin, name),
+      (entry) => entry.contribution
+    ),
+    datasets: registeredNames(refused, runtime.query.listDatasets(), 'dataset', (_, name) => runtime.query.getDataset(name)),
+    commands: commandDetails.map((c) => c.name),
+    commandDetails,
+    commandGroups: readCommandGroups(refused, commandRegistry),
+    // No registry accessor to resolve through, so `itself` makes the resolve
+    // trivially true: what this buys is the containment, not the check.
+    skills: registeredNames(refused, runtime.skills.list(), 'skill', itself),
+    agents: registeredNames(refused, runtime.agents.list(), 'agent', itself),
+    init_presets: registeredNames(
+      refused,
+      listed(refused, 'init preset', () => runtime.initPresets.list()),
+      'init preset',
+      (_, name) => runtime.initPresets.get(name)
+    ),
     capabilities: runtime.capabilities
       .list()
       .filter((c) => c.provider !== STUB_PROVIDER)
       .map((c) => c.name),
+  }
+}
+
+/**
+ * The default `stored`: every registry but the sink one lists the object it
+ * holds.
+ *
+ * Doubles as the `resolve` for the two registries that are not keyed at all
+ * (`skills`, `agents`), where it makes the check trivially true and leaves
+ * only the containment `registeredName` wraps the read in.
+ *
+ * @param {any} record
+ * @returns {object}
+ */
+function itself(record) {
+  return record
+}
+
+/**
+ * The key one record is registered under, or `undefined` when it does not read
+ * back to one.
+ *
+ * The name is read exactly once and then resolved back through the registry: a
+ * record that is not what the registry answers with for the name it just
+ * claimed is not registered under that name, whatever it says. That is the
+ * guard `readIdentity` already applies to a backfill provider in
+ * `src/core/daemon/backfill_sweep.js`. The other remedy on the table is for
+ * `list()` to hand back the key it ordered by, so a consumer cannot re-read at
+ * all; that one belongs in the registries, not here.
+ *
+ * A refusal is recorded on `refused` and the record left out. A name this
+ * cannot vouch for is the one thing the report may not carry, and dropping it
+ * without a word is the same silence one entry smaller.
+ *
+ * Beyond the read: one lookup through the registry's own accessor, and nothing
+ * allocated per record.
+ *
+ * @template T
+ * @param {RefusedContribution[]} refused
+ * @param {T} record
+ * @param {string} kind What to call it in the report when it is refused.
+ * @param {(record: T, name: string) => unknown} resolve
+ *   What the registry answers for the name just read.
+ * @param {(record: T) => object} [stored] The object the registry holds, when
+ *   the listing wraps it.
+ * @returns {string | undefined}
+ */
+function registeredName(refused, record, kind, resolve, stored = itself) {
+  let claimed = ''
+  try {
+    const held = stored(record)
+    const read = /** @type {{ name?: unknown }} */ (held).name
+    if (typeof read === 'string') claimed = read
+    // Every `register` here refuses an empty name, so the empty string a
+    // record that claimed nothing readable carries resolves to nothing.
+    if (claimed.length > 0 && resolve(record, claimed) === held) return claimed
+  } catch {
+    // Reading the identity is what just failed. Whatever was read before the
+    // throw still names the record better than nothing does.
+  }
+  reportUnreadable(refused, kind, claimed)
+  return undefined
+}
+
+/**
+ * Every name in one registry's listing that reads back to its own key, in the
+ * order the registry listed them. A record that does not is left out, having
+ * said so.
+ *
+ * @template T
+ * @param {RefusedContribution[]} refused
+ * @param {T[]} records
+ * @param {string} kind
+ * @param {(record: T, name: string) => unknown} resolve
+ * @param {(record: T) => object} [stored]
+ * @returns {string[]}
+ */
+function registeredNames(refused, records, kind, resolve, stored) {
+  /** @type {string[]} */
+  const names = []
+  for (const record of records) {
+    const name = registeredName(refused, record, kind, resolve, stored)
+    if (name !== undefined) names.push(name)
+  }
+  return names
+}
+
+/**
+ * The registered commands, as the help checks read them.
+ *
+ * @param {RefusedContribution[]} refused
+ * @param {ReturnType<typeof createCommandRegistry>} commandRegistry
+ * @returns {RegisteredCommand[]}
+ */
+function readCommands(refused, commandRegistry) {
+  /** @type {RegisteredCommand[]} */
+  const details = []
+  for (const record of listed(refused, 'command', () => commandRegistry.list())) {
+    const name = registeredName(refused, record, 'command', (_, claimed) => commandRegistry.get(claimed))
+    if (name === undefined) continue
+    // `summary` and `hidden` are plugin-controlled too, and are read here
+    // beside the guarded name. Neither is a key, so neither can misattribute a
+    // finding, but an accessor that throws would escape `snapshotRegistry`,
+    // which runs outside the dry run's own catch, and cost `hyp plugin doctor`
+    // the whole run over one plugin. Contained to the same one entry a
+    // refused name costs.
+    //
+    // Containing the read is not enough on its own, because the value it
+    // answers with leaves: `RegisteredSnapshot` types `summary` a `string` and
+    // `checkCommandHelp` interpolates it, one module past this catch, so a
+    // `toString` that throws costs the run from there instead (issue #1557).
+    // `hidden` is narrowed to a boolean by `=== true`; `summary` is refused
+    // unless it is still the string `register` validated, which keeps the type
+    // every consumer acts on true rather than hardening each use of it.
+    /** @type {RegisteredCommand} */
+    let detail
+    try {
+      const summary = record.summary
+      if (typeof summary !== 'string') {
+        reportUnreadable(refused, 'command', name, 'answered with a summary that is not the string it registered')
+        continue
+      }
+      detail = {
+        name,
+        summary,
+        aliases: registeredAliases(refused, commandRegistry, record),
+        hidden: record.hidden === true,
+      }
+    } catch {
+      reportUnreadable(refused, 'command', name, 'did not answer for its summary or hidden flag')
+      continue
+    }
+    details.push(detail)
+  }
+  return details
+}
+
+/**
+ * The alias spellings that actually dispatch to this command.
+ *
+ * `register` copies the registration shallowly, so `record.aliases` is still
+ * the plugin's own value and iterating it here is another pass over a
+ * plugin-controlled iterable, free to name spellings the alias index does not
+ * hold (issue #1538). Each one is resolved back through the registry, which
+ * finds a command by alias, and only those that come back as this command are
+ * reported.
+ *
+ * That does not make the list complete. An iterable yielding fewer names than
+ * were indexed under-reports, and nothing here can see it: the alias index is
+ * private to the registry, so there is no set to compare against. Only `list()`
+ * handing back the registry's own keys would close that.
+ *
+ * The `includes` scan is quadratic in one command's alias count, which is one
+ * across the bundled set (17 aliases over 35 commands, none claiming two), and
+ * costs nothing for the commands that claim none.
+ *
+ * @param {RefusedContribution[]} refused
+ * @param {ReturnType<typeof createCommandRegistry>} commandRegistry
+ * @param {CommandRegistration} record
+ * @returns {string[]}
+ */
+function registeredAliases(refused, commandRegistry, record) {
+  /** @type {string[]} */
+  const aliases = []
+  try {
+    for (const alias of record.aliases ?? []) {
+      if (typeof alias !== 'string' || commandRegistry.get(alias) !== record) {
+        reportUnreadable(refused, 'command alias', typeof alias === 'string' ? alias : '')
+        continue
+      }
+      // A repeat is dropped rather than refused: the alias index is a map, so
+      // it holds one entry however many times the iterable names it.
+      if (!aliases.includes(alias)) aliases.push(alias)
+    }
+  } catch {
+    // A throw part way through the iterable reaches `snapshotRegistry`, which
+    // runs outside the dry run's own catch, so one hostile `Symbol.iterator`
+    // costs `hyp plugin doctor` the whole run rather than the plugin a
+    // finding. Keep what was drained before it and say the rest went missing.
+    reportUnreadable(refused, 'command alias', '')
+  }
+  return aliases
+}
+
+/**
+ * The registered group descriptions. `registerGroup` stores the object the
+ * plugin passed, so the name is read under the same guard as every other one,
+ * and the summary is read once beside it.
+ *
+ * @param {RefusedContribution[]} refused
+ * @param {ReturnType<typeof createCommandRegistry>} commandRegistry
+ * @returns {{ name: string, summary?: string }[]}
+ */
+function readCommandGroups(refused, commandRegistry) {
+  /** @type {{ name: string, summary?: string }[]} */
+  const groups = []
+  for (const record of listed(refused, 'command group', () => commandRegistry.listGroups())) {
+    const name = registeredName(refused, record, 'command group', (_, claimed) => commandRegistry.getGroup(claimed))
+    if (name === undefined) continue
+    // Contained, and checked, for the two reasons the command detail above is.
+    // No check reads a group summary today, so the value half is the same hole
+    // one field over rather than a second live crash.
+    let summary
+    try {
+      summary = record.summary
+    } catch {
+      reportUnreadable(refused, 'command group', name, 'did not answer for its summary')
+      continue
+    }
+    if (summary !== undefined && typeof summary !== 'string') {
+      reportUnreadable(refused, 'command group', name, 'answered with a summary that is not the string it registered')
+      continue
+    }
+    groups.push({ name, ...(summary !== undefined ? { summary } : {}) })
+  }
+  return groups
+}
+
+/**
+ * One registry's listing, or an empty one when producing it threw.
+ *
+ * Defence in depth today. It went in against a live hazard: the three
+ * listings it wraps are `CommandRegistry.list`, `listGroups` and
+ * `initPresets.list`, and at the commit that added this guard (issue #1538)
+ * all three still sorted through `compareStrings(a.name, b.name)` over the
+ * records they hold. They order by the keys their registries validated now
+ * (hyparam/hypaware#1555), so producing one of those listings reads no
+ * accessor a plugin left on a stored record and no hostile `name` reaches
+ * this catch. That is a fact about how those three list, not a rule about
+ * listings and not a claim that a `list()` cannot throw for some other
+ * reason: one that went back to reading a record would land here again,
+ * silently, and it costs a whole bucket.
+ *
+ * What it costs, when something does reach it: the throw arrives from
+ * `list()` itself rather than from anything this file reads, so there is no
+ * per-entry recovery to make and the consumer never sees an entry. Losing the
+ * bucket makes the doctor report every declared member of it as unregistered,
+ * which is wrong about the plugin, and the alternative is no report at all,
+ * because `snapshotRegistry` runs outside the dry run's own catch. The
+ * refusal itself is on `refused`, so the report says the bucket went missing
+ * rather than presenting a diff taken against nothing.
+ *
+ * Costs nothing on the honest path: one closure per bucket and no catch taken.
+ *
+ * @template T
+ * @param {RefusedContribution[]} refused
+ * @param {string} kind
+ * @param {() => T[]} list
+ * @returns {T[]}
+ */
+function listed(refused, kind, list) {
+  try {
+    return list()
+  } catch {
+    reportUnlistable(refused, kind)
+    return []
+  }
+}
+
+/**
+ * Say that one registration was left out of the snapshot, and why.
+ *
+ * @param {RefusedContribution[]} refused
+ * @param {string} kind
+ * @param {string} claimed The name it claimed, or the empty string when it
+ *   claimed nothing readable.
+ * @param {string} [why] What was wrong with it, when it was not the name. The
+ *   default clause is false about a record whose name read back fine and whose
+ *   `summary` was the accessor that threw.
+ */
+function reportUnreadable(refused, kind, claimed, why = 'is not registered under it') {
+  const named = claimed.length > 0 ? `'${claimed}'` : 'an unreadable name'
+  refuse(refused, kind, claimed, `a registered ${kind} claiming ${named} ${why}; left out of the report`, {
+    [Attr.ERROR_KIND]: 'unregistered_contribution_name',
+    contribution_kind: kind,
+    claimed_name: claimed,
+  })
+}
+
+/**
+ * Say that a whole bucket was left out, because the registry could not produce
+ * its listing at all. No name to carry: the throw came before any entry did.
+ *
+ * @param {RefusedContribution[]} refused
+ * @param {string} kind
+ */
+function reportUnlistable(refused, kind) {
+  refuse(refused, kind, '', `the registered ${kind} listing could not be read; every ${kind} left out of the report`, {
+    [Attr.ERROR_KIND]: 'unlistable_contributions',
+    contribution_kind: kind,
+  })
+}
+
+/**
+ * Both reports go to the same two places, in this order.
+ *
+ * Onto the result first, because that is the copy the caller renders: the
+ * declared-vs-registered diff is taken against a snapshot this record is
+ * missing from, so without it `checkContributions` says a registration the
+ * plugin made was never made (hyparam/hypaware#1569). Pushing before the emit
+ * keeps the report honest even when the logger cannot be built.
+ *
+ * Then out WARN, degraded, on the stderr mirror as well as the log, the way
+ * `CommandRegistry`'s own dropped-member warning is (LLP 0329#stderr-mirror):
+ * `hyp plugin doctor` runs on a default install, where no log provider is
+ * installed and the OTel half of the emit drops the record. The mirror is for
+ * the human watching the run, and it still leaves stdout alone so `--json`
+ * stays parseable.
+ *
+ * @param {RefusedContribution[]} refused
+ * @param {string} kind
+ * @param {string} name
+ * @param {string} message
+ * @param {Record<string, unknown>} attrs
+ */
+function refuse(refused, kind, name, message, attrs) {
+  refused.push({ kind, name, message })
+  warnDegraded(`hyp plugin doctor: ${message}`, attrs)
+}
+
+/**
+ * The emit half of {@link refuse}: WARN, degraded, on the stderr mirror.
+ *
+ * @param {string} message
+ * @param {Record<string, unknown>} attrs
+ */
+function warnDegraded(message, attrs) {
+  try {
+    getLogger('plugin-doctor', { mirrorStderr: true }).warn(message, {
+      [Attr.OPERATION]: 'doctor.snapshot',
+      [Attr.STATUS]: 'degraded',
+      ...attrs,
+    })
+  } catch {
+    // Nothing to say it on: the channel that would carry the report is the
+    // thing that just failed. The entry stays out of the snapshot either way.
   }
 }
 

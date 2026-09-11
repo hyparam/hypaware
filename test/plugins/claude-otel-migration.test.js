@@ -18,6 +18,8 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 import {
   activate as activateClaude,
@@ -33,6 +35,10 @@ import {
 import { ensureLocalCa } from '../../src/core/tls/ca.js'
 import { collectHypAwareStatus, probeClientAttachFromDescriptor } from '../../src/core/daemon/status.js'
 import { renderStatusText } from '../../src/core/commands/status.js'
+import { createActionReconciler } from '../../src/core/config/action_reconciler.js'
+import { createAttachHandler } from '../../src/core/config/action_attach.js'
+
+/** @import { ReconcileInput } from '../../src/core/config/types.js' */
 
 const GATEWAY_PORT = 18521
 const ENDPOINT = `http://127.0.0.1:${GATEWAY_PORT}`
@@ -168,6 +174,88 @@ function makeBuf() {
     },
   }
 }
+
+test('processor attach writes an executable CLI hook and respects explicit binary overrides', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const previousEntry = process.argv[1]
+  t.after(() => { process.argv[1] = previousEntry })
+  process.argv[1] = fileURLToPath(new URL('../../src/core/daemon/processor.js', import.meta.url))
+  const cli = fileURLToPath(new URL('../../bin/hypaware.js', import.meta.url))
+
+  await r.gateway.client.attach({ endpoint: ENDPOINT, stdout: makeBuf(), stderr: makeBuf() })
+  const settings = await r.read()
+  const command = settings.hooks.UserPromptSubmit[0].hooks[0].command
+  assert.ok(command.includes(cli), command)
+  assert.ok(!command.includes('processor.js'), command)
+  if (process.platform !== 'win32') {
+    const result = spawnSync('/bin/sh', ['-c', command], {
+      cwd: r.root,
+      env: { PATH: process.env.PATH, ...r.env, HYP_DEV_TELEMETRY: '1' },
+      input: JSON.stringify({ session_id: 'processor-hook-test', cwd: r.root }),
+      encoding: 'utf8',
+      timeout: 20_000,
+    })
+    assert.equal(result.status, 0, result.stderr || String(result.error))
+    const stateFile = path.join(r.stateRoot, 'plugins', 'claude', 'session-context.jsonl')
+    const rows = (await fsp.readFile(stateFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    assert.ok(rows.some(row => row.session_id === 'processor-hook-test' && row.cwd === r.root))
+  }
+
+  for (const env of [
+    { HYP_BIN: '/custom/hyp' },
+    { HYPAWARE_BIN: '/preferred/hyp', HYP_BIN: '/custom/hyp' },
+  ]) {
+    Object.assign(r.env, env)
+    await r.gateway.client.attach({ endpoint: ENDPOINT, stdout: makeBuf(), stderr: makeBuf() })
+    const value = await r.read()
+    assert.ok(value.hooks.UserPromptSubmit[0].hooks[0].command.includes(path.resolve(env.HYPAWARE_BIN ?? env.HYP_BIN)))
+  }
+})
+
+test('reconciliation repairs a 1.32 processor hook once at an unchanged endpoint', async (t) => {
+  const r = await rig()
+  t.after(() => r.cleanup())
+  const previousEntry = process.argv[1]
+  t.after(() => { process.argv[1] = previousEntry })
+  process.argv[1] = fileURLToPath(new URL('../../src/core/daemon/processor.js', import.meta.url))
+  await writeSettings({
+    port: GATEWAY_PORT, version: '1.32.0', settingsPath: r.settingsPath,
+    stateFile: path.join(r.stateRoot, 'plugins', 'claude', 'session-context.jsonl'),
+    binPath: process.argv[1], mode: MODE_OTEL, telemetryPort: 18522,
+    spoolDir: path.join(r.env.HYP_HOME, 'spool', 'claude-bodies'), claudeVersion: '2.1.233',
+  })
+  const broken = await r.read()
+  broken._hypaware.settings_schema = 3
+  await fsp.writeFile(r.settingsPath, JSON.stringify(broken))
+  const markerFile = path.join(r.stateRoot, 'config-control', 'client-actions.json')
+  await fsp.mkdir(path.dirname(markerFile), { recursive: true })
+  await fsp.writeFile(markerFile, JSON.stringify({ attach: { claude: {
+    status: 'done', request_key: 'claude', at: '2026-09-08T00:00:00.000Z',
+    endpoint: ENDPOINT, mode: 'otel', settings_schema: 3,
+  } } }))
+  const log = { debug() {}, info() {}, warn() {}, error() {} }
+  const reconciler = createActionReconciler({ stateRoot: r.stateRoot, handlers: [createAttachHandler()], log })
+  /** @type {ReconcileInput} */
+  const input = {
+    config: { version: 2, plugins: [{ name: '@hypaware/claude' }] },
+    env: r.env, endpoint: ENDPOINT,
+    backfills: /** @type {any} */ ({ list() { return [] } }),
+    clientDescriptors: new Map([['claude', CLAUDE_DESCRIPTOR]]),
+    clients: /** @type {any} */ ({ getClient() { return r.gateway.client } }),
+  }
+  const first = await reconciler.reconcile(input)
+  assert.deepEqual(first.results.map(result => result.outcome), ['done'])
+  const repaired = await r.read()
+  const cli = fileURLToPath(new URL('../../bin/hypaware.js', import.meta.url))
+  assert.ok(repaired.hooks.UserPromptSubmit[0].hooks[0].command.includes(cli))
+  assert.doesNotMatch(JSON.stringify(repaired), /processor\.js/)
+  assert.deepEqual(repaired.permissions, broken.permissions)
+  const raw = await r.raw()
+  const second = await reconciler.reconcile(input)
+  assert.deepEqual(second.results.map(result => result.outcome), ['skipped'])
+  assert.equal(await r.raw(), raw)
+})
 
 /**
  * The `hyp status` client line for this rig, produced the way the command

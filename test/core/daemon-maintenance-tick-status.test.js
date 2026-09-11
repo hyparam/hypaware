@@ -19,6 +19,7 @@ import path from 'node:path'
 import { runDaemon } from '../../src/core/daemon/runtime.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
 import { appendRowsToSourceTable, readCursorSync, writeCursor } from '../../src/core/cache/partition.js'
+import { pollJsonlFor } from '../helpers/poll_jsonl.js'
 
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
 /** @import { PartitionCursor } from '../../src/core/cache/types.js' */
@@ -60,35 +61,6 @@ async function tearOneDataFile(dir) {
     .map((e) => path.join(dataDir, e.name))
   assert.ok(torn, 'fixture invariant: the partition must hold a live data file to tear')
   await fs.truncate(torn, 4)
-}
-
-/**
- * Poll a JSONL file for a line matching `predicate`, since the tracer
- * exporter writes to an `fs.WriteStream` with no flush hook this daemon
- * ever calls: the write lands async relative to the tick's own promise
- * resolving.
- *
- * @param {string} filePath
- * @param {(record: any) => boolean} predicate
- * @param {number} timeoutMs
- * @returns {Promise<any>}
- */
-async function pollJsonlFor(filePath, predicate, timeoutMs) {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    try {
-      const raw = await fs.readFile(filePath, 'utf8')
-      for (const line of raw.split('\n')) {
-        if (!line) continue
-        const record = JSON.parse(line)
-        if (predicate(record)) return record
-      }
-    } catch (err) {
-      if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ENOENT') throw err
-    }
-    if (Date.now() > deadline) return undefined
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
 }
 
 test('a degraded maintenance tick sets the span status code, not just the attribute', async () => {

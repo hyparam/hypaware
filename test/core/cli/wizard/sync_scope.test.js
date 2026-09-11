@@ -8,6 +8,7 @@ import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
+import { LOCKED_LABEL_SUFFIX } from '../../../../src/core/cli/wizard/pick.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import {
   clientSyncListPath,
@@ -626,4 +627,126 @@ test('a corrupt store with a dead stderr still skips instead of throwing', async
   assert.deepEqual(result, { skipped: true, noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
   assert.equal(await fs.readFile(storePath, 'utf8'), '{ nope')
+})
+
+// @ref LLP 0396#combined-selection [tests]: confirmation shares selected visible sources without another question
+for (const autoAccept of [false, true]) {
+  test(`combined collection and sync clears only selected policies (express=${autoAccept})`, async (t) => {
+    const { hypHome, env, stateDir } = await makeHome()
+    t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+    await writeClientSyncEntries({ stateDir, entries: [
+      { source: 'claude', class: 'local-only' },
+      { source: 'codex', class: 'local-only' },
+      { source: 'raw-anthropic', class: 'local-only' },
+    ] })
+    const stdout = makeBuf()
+    const result = await runWizardSyncScope({
+      stdout, stderr: makeBuf(), env,
+      candidates: [descriptor('claude')],
+      locked: [descriptor('gateway')],
+      candidatesHiddenIds: ['raw-anthropic'],
+      collectAndSync: true, autoAccept,
+      prompt: async () => { throw new Error('combined setup must not ask a second question') },
+    })
+    assert.deepEqual(result, { noQuestion: true, optedOut: [] })
+    assert.deepEqual((await readClientSyncEntries({ stateDir }))?.map((entry) => entry.source).sort(),
+      ['codex', 'raw-anthropic'])
+    // The revocation, which no row list can state: claude was local-only
+    // until this confirm. codex and raw-anthropic are not named because
+    // neither is a visible candidate, so neither was revoked. Both arms
+    // print it; only the list above it differs.
+    const revocation = 'No longer local-only: claude. Future rows sync to your server; rows already recorded are not ' +
+      "sent. Change back with 'hyp privacy client <name> local-only'."
+    // The statement is the whole sync picture, and the org's row is
+    // labelled as the fleet's on it: without the suffix the list reads as
+    // though every row on it were the user's to change (LLP 0188 #locked).
+    // Express states that picture at the picker instead, so this lane adds
+    // only what the picker could not say.
+    assert.deepEqual(stdout.text().split('\n').filter((l) => l !== ''), autoAccept
+      ? [revocation]
+      : [
+          'These will sync to your server:',
+          `  capture gateway${LOCKED_LABEL_SUFFIX}`,
+          '  capture claude',
+          revocation,
+        ], stdout.text())
+  })
+}
+
+test('combined selection preserves an unreadable policy store and warns', async (t) => {
+  const { hypHome, env, stateDir } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const file = clientSyncListPath(stateDir)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, 'broken')
+  const stderr = makeBuf()
+  const result = await runWizardSyncScope({
+    stdout: makeBuf(), stderr, env, candidates: [descriptor('claude')], collectAndSync: true,
+    prompt: async () => { throw new Error('no second question') },
+  })
+  assert.equal(result.skipped, true)
+  assert.match(stderr.text(), /unreadable/)
+  assert.equal(await fs.readFile(file, 'utf8'), 'broken')
+})
+
+test('combined selection materializes a fresh empty policy store', async (t) => {
+  const { hypHome, env, stateDir } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await runWizardSyncScope({
+    stdout: makeBuf(), stderr: makeBuf(), env,
+    candidates: [descriptor('claude')], collectAndSync: true,
+    prompt: async () => { throw new Error('no second question') },
+  })
+  assert.deepEqual(await readClientSyncEntries({ stateDir }), [])
+})
+
+// Revoking a standing opt-out is a change to a privacy setting the user
+// set on purpose, so the confirm says which ones and how to undo it. The
+// menu this replaced printed the mirror line whenever it *kept* one, and
+// `hyp privacy client <name> sync` prints the same two qualifiers for the
+// identical store write. The "will sync" list above cannot carry this: a
+// row reads the same there whether it was already syncing or was
+// local-only until this keypress.
+// @ref LLP 0188#never-silent [tests]: the combined confirm names the opt-outs it revoked, with the future-only qualifier and the way back
+test('combined selection names the standing opt-outs it revokes, and the way back', async (t) => {
+  const { hypHome, env, stateDir } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeClientSyncEntries({ stateDir, entries: [
+    { source: 'claude', class: 'local-only' },
+    { source: 'codex', class: 'local-only' },
+  ] })
+  const stdout = makeBuf()
+  await runWizardSyncScope({
+    stdout, stderr: makeBuf(), env,
+    candidates: [descriptor('codex'), descriptor('claude')],
+    collectAndSync: true,
+    prompt: async () => { throw new Error('no second question') },
+  })
+  const line = stdout.text().split('\n').find((l) => l.startsWith('No longer local-only:'))
+  assert.ok(line, `the revocation was never stated; the screen read:\n${stdout.text()}`)
+  // Both revoked rows, in a stable order, so the line is not a sample.
+  assert.match(line, /^No longer local-only: claude · codex\./)
+  // The two qualifiers the standing CLI carries for this same write.
+  assert.match(line, /rows already recorded are not sent/)
+  assert.match(line, /hyp privacy client <name> local-only/)
+})
+
+// The other half: a run that revokes nothing says nothing. The line is a
+// report of a change, not a standing disclaimer, so a fresh join must not
+// print it over an empty store.
+test('combined selection stays silent when it revokes nothing', async (t) => {
+  const { hypHome, env, stateDir } = await makeHome()
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  await writeClientSyncEntries({ stateDir, entries: [{ source: 'raw-anthropic', class: 'local-only' }] })
+  const stdout = makeBuf()
+  await runWizardSyncScope({
+    stdout, stderr: makeBuf(), env,
+    candidates: [descriptor('claude')],
+    candidatesHiddenIds: ['raw-anthropic'],
+    collectAndSync: true,
+    prompt: async () => { throw new Error('no second question') },
+  })
+  // The hidden row's opt-out is untouched, so nothing was revoked.
+  assert.doesNotMatch(stdout.text(), /No longer local-only/)
+  assert.deepEqual((await readClientSyncEntries({ stateDir }))?.map((e) => e.source), ['raw-anthropic'])
 })

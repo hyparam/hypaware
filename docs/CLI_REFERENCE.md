@@ -1,10 +1,39 @@
 # HypAware CLI command reference
 
+[Documentation](README.md)
+
 This reference documents the visible commands shipped with HypAware. It uses
 the canonical `hyp` spelling. The `hypaware` binary accepts the same arguments.
 
 For installation, upgrade, recovery, and task-oriented workflows, see
 [Use the HypAware CLI](./CLI.md).
+
+## On this page
+
+- [Read command syntax](#read-command-syntax)
+- [Plugin-owned commands](#plugin-owned-commands)
+- [Set up and inspect HypAware](#set-up-and-inspect-hypaware)
+- [Query recorded data](#query-recorded-data)
+- [Render and manage reports](#render-and-manage-reports)
+- [Send data now](#send-data-now)
+- [Control the current session](#control-the-current-session)
+- [Manage AI clients and history](#manage-ai-clients-and-history)
+- [Control privacy](#control-privacy)
+- [Connect to or leave a central server](#connect-to-or-leave-a-central-server)
+- [Manage the daemon](#manage-the-daemon)
+- [Validate configuration](#validate-configuration)
+- [Manage the local cache](#manage-the-local-cache)
+- [Maintain exports](#maintain-exports)
+- [Manage plugins](#manage-plugins)
+- [Manage remote query targets](#manage-remote-query-targets)
+- [Serve MCP tools](#serve-mcp-tools)
+- [Build and maintain the activity graph](#build-and-maintain-the-activity-graph)
+- [Inspect vector indexes](#inspect-vector-indexes)
+- [Enrich the activity graph](#enrich-the-activity-graph)
+- [Update HypAware](#update-hypaware)
+- [Control optional product telemetry](#control-optional-product-telemetry)
+- [Print version information](#print-version-information)
+- [Develop plugins](#develop-plugins)
 
 ## Read command syntax
 
@@ -113,6 +142,9 @@ Typed query commands accept shared rendering controls such as `--format`,
 `--refresh never|auto|always` for local cache refresh and `--remote [TARGET]`
 for remote execution when the command is a remote-capable typed verb. You
 can't request an explicit local refresh and remote execution together.
+With `--remote`, an operator can add `--org <label|*>` to read one org by
+label or every org the account may read. It is rejected without `--remote`,
+and the server records each such read in that org's audit trail.
 
 ### `hyp query overview`
 
@@ -135,7 +167,7 @@ dataset is registered.
 ### `hyp query sql`
 
 ```text
-hyp query sql <sql> [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]
+hyp query sql <sql> [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
 Runs one read-only `SELECT` statement against registered datasets. Local
@@ -154,7 +186,7 @@ failures return `1`.
 ### `hyp query grep`
 
 ```text
-hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]
+hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
 Searches recorded `ai_gateway_messages` text without SQL. The pattern is a
@@ -211,7 +243,7 @@ hyp query schema ai_gateway_messages
 Plugin: `@hypaware/context-graph`.
 
 ```text
-hyp query graph neighbors <node> [--depth <depth>] [--type <type>] [--edge-type <edge_type...>] [--direction out|in|both] [--limit <limit>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target>]
+hyp query graph neighbors <node> [--depth <depth>] [--type <type>] [--edge-type <edge_type...>] [--direction out|in|both] [--limit <limit>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
 Resolves a node ID, natural key, or label, then walks the activity graph in
@@ -755,8 +787,9 @@ hyp client claude-desktop status
 ```
 
 Reports the resolved endpoint, credential mode, helper path, models, and bundle
-ID. A missing helper returns `1`. This command doesn't verify the installed
-property list.
+ID. A missing helper returns `1`, and so does a generated helper whose baked
+interpreter or CLI path has rotted away, which prints `STALE` and names the
+re-run. This command doesn't verify the installed property list.
 
 ```sh
 hyp client claude-desktop status
@@ -768,7 +801,8 @@ hyp client claude-desktop status
 hyp client claude-desktop verify
 ```
 
-Checks that the managed property list is present and current and that stale
+Checks that the managed property list is present and current, that the
+credential wrapper it names is present and still runnable, and that stale
 dialog residue is cleared. Those automatic checks determine the exit code. It
 also prints a manual in-app capture check, which doesn't affect the exit code.
 
@@ -1090,14 +1124,22 @@ hyp daemon stop
 ### `hyp daemon restart`
 
 ```text
-hyp daemon restart
+hyp daemon restart [--processing]
 ```
 
 Restarts an installed service. If no service is installed, it stops a
 foreground daemon and tells you how to relaunch or install it.
 
+`--processing` replaces only the supervised processing daemon (recording,
+sinks, backfill and maintenance) and leaves the gateway listener, its sockets
+and its in-flight streams alone. It asks the running gateway to bounce its
+child and returns as soon as the request is written; the gateway allows the
+child four seconds to stop before killing it. With no gateway supervising a
+processing daemon it prints that and returns `1`.
+
 ```sh
 hyp daemon restart
+hyp daemon restart --processing
 ```
 
 ## Validate configuration
@@ -1253,11 +1295,17 @@ hyp plugin list --json
 hyp plugin info <plugin>
 ```
 
-Prints manifest, source, lock, version, permissions, and update details for one
-installed plugin.
+Prints version, source, and lock details for one installed plugin, including
+its update state when a check has run. An install under a name this package
+bundles also gets a `shadowed:` line: boot selects the bundled copy, so that
+install never runs, and the line names the `hyp plugin remove` that clears it.
+Answers for a bundled plugin too: those have no install record, so it prints
+the version and root directory from the manifest instead. A name that is
+neither installed nor bundled exits 1.
 
 ```sh
 hyp plugin info @example/hypaware-plugin-widget
+hyp plugin info @hypaware/claude
 ```
 
 ### `hyp plugin outdated`
@@ -1408,7 +1456,7 @@ hyp remote remove team
 ### `hyp mcp serve`
 
 ```text
-hyp mcp serve [--remote <target>]
+hyp mcp serve [--remote <target> [--org <label|*>]]
 ```
 
 Serves active typed verbs over standard input and output, or proxies a named
@@ -1546,6 +1594,39 @@ committed-knowledge counts. It is read-only.
 ```sh
 hyp enrichment status
 ```
+
+## Update HypAware
+
+### `hyp update`
+
+```text
+hyp update
+```
+
+Checks the npm registry and installs a newer HypAware release into a global
+installation, then restarts the installed daemon. It also repairs a daemon
+still running an older version than the package on disk. Foreground daemons
+need a separate relaunch; source checkouts and npx-cache copies do not
+self-update. Failures return `1` with a reason and repair guidance.
+
+See [updating and recovery](CLI.md#upgrade-within-a-compatible-major-version).
+
+## Control optional product telemetry
+
+### `hyp telemetry`
+
+```text
+hyp telemetry [status|preview|off|enable local|enable organization]
+```
+
+Product telemetry defaults off. `status` reports consent, destination, and queue
+state; `preview` prints the next serialized batch or `null`. `enable local`
+retains an allowlisted preview queue without delivery. `enable organization`
+requires an eligible enrolled central destination. `off` removes pending copies
+and stops collection, but cannot retract records already accepted remotely.
+
+See [product telemetry](PRODUCT_TELEMETRY.md) for daemon restart requirements,
+the current draft implementation, and rollout limitations.
 
 ## Print version information
 

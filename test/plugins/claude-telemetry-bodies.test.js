@@ -308,7 +308,7 @@ test('a response body with no text block claims the usage its event row never ge
   assert.equal(usage.size, 0)
 })
 
-test('a response body with a text block leaves usage to the assistant_response event', () => {
+test('a response body that ends in a text block leaves usage to the assistant_response event', () => {
   const respFile = '/spool/c.response.json'
   const events = [
     evt('api_request', { request_id: REQUEST_ID, output_tokens: 113 }),
@@ -326,6 +326,50 @@ test('a response body with a text block leaves usage to the assistant_response e
   const text = /** @type {any} */ (projection.messages[1])
   assert.equal(thinking.attributes?.usage, undefined)
   assert.equal(text.attributes?.usage?.output_tokens, 113)
+})
+
+/**
+ * The order LLP 0390 records as the residual: `assistant_response` ahead of the
+ * body event, so the text row claims the `api_request` record and the tool row
+ * that #carrier-is-the-last-block would rather have gets nothing. What must
+ * hold in that order is the weaker property the section does promise, that the
+ * turn is still counted once, which is exactly what the body's own `usage`
+ * would break if it were still a fallback for a text-bearing response.
+ *
+ * @ref LLP 0390#claim-order-arbitrates [tests]: one row is stamped whichever
+ *   order the two events arrived in, so a SUM over this lane never doubles
+ */
+test('a text-bearing response body ending in a tool_use never falls back to its own usage', () => {
+  const respFile = '/spool/d.response.json'
+  const body = {
+    id: 'msg_texttool',
+    type: 'message',
+    role: 'assistant',
+    model: 'claude-haiku-4-5-20251001',
+    content: [
+      { type: 'text', text: 'Reading it now.' },
+      { type: 'tool_use', id: 'toolu_9', name: 'Read', input: { file_path: '/tmp/notes.txt' } },
+    ],
+    stop_reason: 'tool_use',
+    usage: { input_tokens: 73, output_tokens: 113 },
+  }
+  const events = [
+    evt('api_request', { request_id: REQUEST_ID, output_tokens: 113 }),
+    evt('assistant_response', { response: 'Reading it now.', request_id: REQUEST_ID, 'message.uuid': 'u-asst' }),
+    evt('api_response_body', { body_ref: respFile, request_id: REQUEST_ID }),
+  ]
+  const [projection] = projectClaudeTelemetryEvents(events, {
+    clientName: 'claude',
+    usageByRequestId: new Map(),
+    spooledBodies: new Map([
+      [respFile, /** @type {any} */ ({ kind: 'response', file: respFile, body })],
+    ]),
+  })
+  const carriers = /** @type {any[]} */ (projection.messages)
+    .filter((message) => message.attributes?.usage)
+  assert.equal(carriers.length, 1, 'exactly one row carries the response usage')
+  assert.equal(carriers[0].provider_uuid, 'u-asst')
+  assert.equal(carriers[0].attributes.usage.output_tokens, 113)
 })
 
 test('body-derived rows expand to the same part ids on replay', () => {

@@ -63,7 +63,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { matchesSemverRange, isValidRange } from '../../src/core/semver.js'
+import { matchesSemverRange, isValidRange, lowestVersion } from '../../src/core/semver.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const NODE_MODULES = path.join(REPO_ROOT, 'node_modules')
@@ -226,6 +226,11 @@ test('a declaration dedupes when the root pin satisfies it, not when it matches 
   for (const spec of ['1.29.2', '^1.29.2', '^1.28.2', '~1.29.0', '>=1.28.2', '*']) {
     assert.equal(against(spec), '', `${spec} dedupes onto the root pin`)
   }
+  // The rest of the npm range grammar, which a dependency is free to publish
+  // and npm dedupes exactly as it dedupes the single comparators above.
+  for (const spec of ['>=1.28.0 <2.0.0', '^1.29.0 || ^2.0.0', '1.29.x', '1.29', '1.28.0 - 1.30.0']) {
+    assert.equal(against(spec), '', `${spec} dedupes onto the root pin`)
+  }
   // A declaration the pin cannot satisfy is the failure this check is for, in
   // both directions. One message serves both, so what is asserted is that it
   // carries each remedy beside the direction that wants it: matching only
@@ -236,9 +241,16 @@ test('a declaration dedupes when the root pin satisfies it, not when it matches 
     assert.match(against(spec), /ABOVE the root pin, move the ROOT pin up/)
     assert.match(against(spec), /BELOW it wants an `overrides` entry naming 1\.29\.2/)
   }
-  // An unfamiliar range shape says that is what happened rather than claiming
-  // the declaration is out of range.
-  assert.match(against('>=1.28.0 <2.0.0'), /cannot judge/)
+  // The same grammar out of range is still out of range rather than
+  // unjudgeable, so it names a remedy instead of asking to be read by hand.
+  for (const spec of ['>=1.30.0 <2.0.0', '^1.30.0 || ^2.0.0', '1.27.x', '1.26.0 - 1.28.0']) {
+    assert.match(against(spec), /does not satisfy/, `${spec} is out of range for the root pin`)
+  }
+  // A range shape outside that grammar still says so rather than claiming the
+  // declaration is out of range: what the matcher cannot read reddens.
+  for (const spec of ['npm:hyparquet-fork@^1.29.0', 'github:hyparam/hyparquet#main', '>=1.28.0 <garbage']) {
+    assert.match(against(spec), /cannot judge/, `${spec} is not a range this check can read`)
+  }
   // A declaration with nothing in it is unreadable, not satisfied: the matcher
   // answers `true` for an empty or null range, so judging satisfaction first
   // would wave these through as deduped.
@@ -300,6 +312,30 @@ test('every read-path dependency that carries hyparquet is held at the floor', t
   const offenders = floorOffenders(dependencies, overrides, installedDeclarations, FLOORS, ROOT_PINS)
   assert.deepEqual(offenders, [], 'LLP 0222 #hyparquet-floor: an older copy resolving ' +
     `beside the floor answers relational bounds wrong:\n  ${offenders.join('\n  ')}`)
+})
+
+// The ABOVE-pin branch in `floorOffenders`, over the whole range grammar the
+// dedupe check reads. That branch fires only when `atOrAboveFloor` can bound
+// the declaration, so a shape it cannot bound falls past it, fails the floor
+// comparison below, and is then waved through by the very `overrides` entry
+// holding it down to the older pin: green on the case the branch exists for.
+test('a declaration above the root pin reddens whatever range shape it is written in', () => {
+  const deps = { hypgrep: '0.5.2' }
+  const floors = { hyparquet: '1.28.2' }
+  const pins = { hyparquet: '1.29.2' }
+  const entries = { hypgrep: { hyparquet: '$hyparquet' } }
+  const against = spec => floorOffenders(deps, entries, () => ({ hyparquet: spec }), floors, pins).join('\n')
+  for (const spec of ['1.30.0', '^1.30.0', '~1.30.0', '>=1.30.0']) {
+    assert.match(against(spec), /ABOVE the root pin/, `${spec} is above the pin`)
+  }
+  for (const spec of ['>=1.30.0 <2.0.0', '1.30.x', '^1.30.0 || ^2.0.0', '1.30.0 - 1.31.0', '>= 1.30.0']) {
+    assert.match(against(spec), /ABOVE the root pin/, `${spec} is above the pin`)
+  }
+  // A range with no lower bound admits versions below the floor, so it stays
+  // conservative rather than reading as above the pin.
+  for (const spec of ['*', '<1.29.0']) {
+    assert.doesNotMatch(against(spec), /ABOVE the root pin/, `${spec} admits versions below the floor`)
+  }
 })
 
 // A made-up manifest, because nothing here carries npm's `$name` override form
@@ -636,39 +672,21 @@ function pinsRoot(entry, dep, pins) {
  *
  * A range is judged by the lowest version it admits, so `^1.27.1` counts as
  * below a 1.28.2 floor even though npm would dedupe it to the root pin: the
- * remedy the message names (an overrides entry) is correct either way. An
- * upper-bounded or compound range is not judged at all, and reads as below the
- * floor, so an unfamiliar shape gets looked at rather than waved through.
+ * remedy the message names (an overrides entry) is correct either way. The
+ * bound is the kernel matcher's own, so this reads every shape
+ * `dedupeOffenders` reads satisfaction over rather than a narrower one: a
+ * declaration that is plainly above the floor but written as a compound or
+ * `||` range has to answer `true` here, or the ABOVE-pin branch gating on it
+ * never fires for one. A range with no lower bound (`*`, `<2.0.0`) admits
+ * below-floor versions, so it still reads as below the floor.
  *
- * @param {string | undefined} spec a version or a simple lower-bounded range
+ * @param {string | undefined} spec a version or a lower-bounded range
  * @param {string | undefined} floor an exact version
  * @returns {boolean}
  */
 function atOrAboveFloor(spec, floor) {
   const low = lowestVersion(spec)
-  const bound = lowestVersion(floor)
-  if (!low || !bound) return false
-  for (let i = 0; i < 3; i++) {
-    if (low[i] !== bound[i]) return low[i] > bound[i]
-  }
-  return true
-}
-
-/**
- * The `[major, minor, patch]` of a version, or of the lowest version a simple
- * range admits. Prerelease and build metadata are dropped; nothing in this
- * dependency set ships one.
- *
- * @param {string | undefined} spec
- * @returns {number[] | undefined} undefined when the shape is not a plain
- *   version or a lower-bounded range
- */
-function lowestVersion(spec) {
-  if (typeof spec !== 'string') return undefined
-  if (/[<|\s-]/.test(spec.trim())) return undefined
-  const match = /^[\^~>=v]*(\d+)\.(\d+)\.(\d+)$/.exec(spec.trim())
-  if (!match) return undefined
-  return [Number(match[1]), Number(match[2]), Number(match[3])]
+  return low !== undefined && floor !== undefined && matchesSemverRange(low, `>=${floor}`)
 }
 
 /**

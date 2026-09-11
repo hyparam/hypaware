@@ -2,6 +2,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { executePlan, readBatchColumn, selectedRowCount, valueAt } from 'squirreling'
 
 import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
 import {
@@ -603,7 +604,7 @@ export async function listLiveDataFiles(tablePath) {
  * The yielded-row filter below is always the authority on what comes out. On
  * top of it, and only when `includeLegacy` is false and no `whereIn`
  * accompanies it, the same predicate is
- * ALSO pushed into icebird's `scan({ where })` so whole data files whose
+ * ALSO pushed into icebird's scan so whole data files whose
  * manifest bound on the seq column sits at or below the watermark are never
  * opened (LLP 0040 §2's file-skip). The push is confined to that case because
  * icebird couples file/row-group pruning with a per-row match that DROPS nulls
@@ -637,7 +638,10 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   // seq field: every row is implicitly null-seq, so the seq is read as `null`
   // and the `includeLegacy` policy decides it.
   const hasSeqColumn = source.columns.includes(INGEST_SEQ_COLUMN.name)
-  let projected = columns && columns.length > 0 ? columns : source.columns
+  // Incremental count-only reads may request no payload columns. Preserve
+  // that empty projection even on legacy tables without seq; the cursor is
+  // forced below when present. Ordinary reads retain [] meaning all columns.
+  let projected = columns && (columns.length > 0 || filtering) ? columns : source.columns
   if (filtering && hasSeqColumn && !projected.includes(INGEST_SEQ_COLUMN.name)) {
     projected = [...projected, INGEST_SEQ_COLUMN.name]
   }
@@ -650,19 +654,14 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
   // WHOLE filter for a data file missing any column the filter names, so on a
   // file written before the seq column existed the lookup clause would be
   // dropped along with the seq clause. `since` is re-checked on every yielded
-  // row below and survives that; `whereIn` is not re-checked, and its contract
-  // is a predicate callers rely on rather than a pruning hint. No caller passes
-  // both today, and this gate means none can start to without noticing.
+  // row below and survives that; the lookup's row fallback relies on the
+  // source's WHERE enforcement. Keep the same pruning gate for both readers.
   const pushSince = filtering && hasSeqColumn && !includeLegacy && opts?.whereIn === undefined
-  const scan = source.scan({
-    columns: projected,
-    where: andExpr(
-      whereInExpr(source, opts?.whereIn),
-      pushSince ? seqAfterExpr(/** @type {bigint} */ (since)) : undefined,
-    ),
-  })
-  for await (const row of scan.rows()) {
-    const resolved = await resolveAsyncRow(row, projected)
+  const where = andExpr(
+    whereInExpr(source, opts?.whereIn),
+    pushSince ? seqAfterExpr(/** @type {bigint} */ (since)) : undefined,
+  )
+  for await (const resolved of scanResolvedRows(source, projected, where)) {
     if (filtering) {
       const seq = hasSeqColumn ? seqValue(resolved[INGEST_SEQ_COLUMN.name]) : null
       if (seq === null) {
@@ -674,6 +673,47 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
       }
     }
     yield resolved
+  }
+}
+
+/**
+ * Materialize only the current batch into row objects at the consumer boundary.
+ * Let the SQL engine schedule predicate columns, apply residual filters, and
+ * compose selections before reading output vectors. This preserves its equality
+ * semantics across types without allocating an AsyncRow per candidate row.
+ * Unknown projected columns retain the row reader's padding behavior.
+ *
+ * @param {ScannableDataSource} source
+ * @param {string[]} columns
+ * @param {ExprNode | undefined} where
+ * @returns {AsyncGenerator<Record<string, unknown>>}
+ */
+async function* scanResolvedRows(source, columns, where) {
+  if (source.schema && source.prepareScan && columns.every((name) => source.schema?.fields.some((field) => field.name === name))) {
+    // @ref LLP 0040#storage-api-extension [constrained-by]: seq/legacy policy is still checked at the row boundary
+    const result = executePlan({
+      plan: { type: 'Scan', table: 'cache', hints: { columns, where } },
+      context: { tables: { cache: source } },
+    })
+    if (result.batches) {
+      const indices = columns.map((name) => result.columns.indexOf(name))
+      for await (const batch of result.batches()) {
+        const vectors = await Promise.all(indices.map((columnIndex) => readBatchColumn({ batch, columnIndex })))
+        const count = selectedRowCount(batch.selection)
+        for (let i = 0; i < count; i++) {
+          /** @type {Record<string, unknown>} */
+          const row = {}
+          for (let j = 0; j < columns.length; j++) row[columns[j]] = valueAt(vectors[j], i)
+          yield row
+        }
+      }
+    } else {
+      for await (const row of result.rows()) yield await resolveAsyncRow(row, columns)
+    }
+    return
+  }
+  for await (const row of source.scan({ columns, where }).rows()) {
+    yield await resolveAsyncRow(row, columns)
   }
 }
 

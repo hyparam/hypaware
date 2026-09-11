@@ -11,6 +11,7 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
+import { describeEphemeralBinPath, findInstalledHypawareBin, isEphemeralBinPath } from '../../../../src/core/cli/global_install.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
 import { resolveClaudeCodeVersion } from './claude_version.js'
@@ -35,7 +36,7 @@ import { claudeBodySpoolDir, ensureClaudeBodySpool } from './telemetry/spool.js'
 const PLUGIN_NAME = '@hypaware/claude'
 const CLIENT_NAME = 'claude'
 const UPSTREAM_NAME = 'anthropic'
-const FALLBACK_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
+const CLI_BIN_PATH = fileURLToPath(new URL('../../../../bin/hypaware.js', import.meta.url))
 
 /**
  * The plugin's `config_sections` validator, surfaced as a side-effect-free
@@ -126,6 +127,16 @@ export async function activate(ctx) {
   // where the file never exists.
   const localOnlyList = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
 
+  // One per-session drop set for the whole plugin: the telemetry listener
+  // hosts the control route that writes it (LLP 0256) and the transcript
+  // backfill reads it, so `hyp session ignore` binds every lane this process
+  // runs. Memory only, and a daemon restart drops it, which is what keeps
+  // LLP 0067's ephemerality contract intact.
+  // @ref LLP 0395#sweep-consults-the-set [implements]: one set per activation,
+  // shared by the recorder and the scheduled sweep
+  /** @type {Set<string>} */
+  const ignoredSessions = new Set()
+
   gateway.registerExchangeProjector(
     createClaudeExchangeProjector({
       homeDir,
@@ -159,6 +170,7 @@ export async function activate(ctx) {
       pluginName: PLUGIN_NAME,
       localOnlyListPath: localOnlyList,
       config: ctx.config,
+      ignoredSessions,
     })
   )
 
@@ -218,6 +230,7 @@ export async function activate(ctx) {
               return
             }
             const port = endpointPort(attachCtx.endpoint)
+            const hookBin = resolveHookBinPath(ctx.env)
 
             // The base URL is never written and no proxy keys appear, which is
             // what keeps Remote Control's first-party predicate true with no
@@ -229,7 +242,7 @@ export async function activate(ctx) {
               version: ctx.plugin.version,
               stateFile,
               settingsPath,
-              binPath: resolveHookBinPath(ctx.env),
+              binPath: hookBin.binPath,
               mode: MODE_OTEL,
               telemetryPort,
               spoolDir,
@@ -282,8 +295,43 @@ export async function activate(ctx) {
             // apart: `malformed_blocks_repaired` names one specific repair, and
             // folding an unrelated warning into it would make the count lie.
             const warnings = spoolWarning === undefined
-              ? malformedWarnings
+              ? [...malformedWarnings]
               : [...malformedWarnings, spoolWarning]
+            // Nothing else will ever mention an ephemeral hook path: the hook
+            // exits 0 and says nothing once its command is gone, so the first
+            // symptom is columns that stopped arriving. Pushed onto a copy, so
+            // `malformed_blocks_repaired` keeps counting only repairs.
+            //
+            // The repair is a plain re-attach. The already-attached exit used
+            // to compare the marker's mode, format and port and never the
+            // recorded hook command, so the repair had to name a detach first;
+            // the probe now reads a hook command this predicate calls ephemeral
+            // - the `_npx` cache, and any `node_modules` tree with a manifest
+            // beside it, a pnpm or yarn global root included (issue #1625) - as
+            // marker drift (issue #1607), so the re-run reaches this adapter and
+            // rewrites the command. Narrowing either side reopens #1607 for
+            // whichever tree the two stop agreeing on.
+            if (hookBin.ephemeral) {
+              // Named for the tree it is actually in, as far as the verdict
+              // can tell: npm's prune runs on npm's schedule, an `npm ci` on
+              // the operator's, so an operator told the wrong one goes looking
+              // in the wrong place. The repair is the same either way.
+              const where = describeEphemeralBinPath(
+                hookBin.binPath,
+                'capture of cwd and git branch stops',
+                ctx.env,
+              )
+              warnings.push(
+                `the managed hook records ${hookBin.binPath}, ${where}. ` +
+                "Run 'npm install -g hypaware', then 'hyp client attach claude', to " +
+                'record a durable path'
+              )
+              logger.warn('client.attach.ephemeral_hook_bin', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                bin_path: hookBin.binPath,
+              })
+            }
 
             // A prior proxy marker makes this attach a migration. The settings
             // write above already released the proxy keys (the LLP 0232
@@ -423,6 +471,7 @@ export async function activate(ctx) {
         // @ref LLP 0254#policy-inline [implements]: the machine-local list is in
         //   scope at ingest, not only the committable dotfile
         localOnlyListPath: localOnlyList,
+        ignoredSessions,
       }),
     })
   } else {
@@ -486,14 +535,48 @@ export async function activate(ctx) {
 /**
  * Claude runs hooks from arbitrary working directories, so the managed hook
  * must use a concrete CLI entrypoint instead of assuming `hyp` is on PATH.
+ * Daemon reconciliation runs in processor.js, so process.argv[1] is not
+ * necessarily a CLI. Resolve the entrypoint from this installed package.
+ *
+ * Under `npx hypaware` that entrypoint is inside npm's `_npx` cache, and in a
+ * project that depends on `hypaware` it is inside that project's
+ * `node_modules`; `isEphemeralBinPath` reads both as what they are, a copy npm
+ * deletes on a schedule of its own, so recording either writes a path that
+ * outlives what owns it. The hook exits 0 and says nothing when its command is
+ * missing, so the loss is silent: `cwd` and `git_branch` just stop arriving. An
+ * installed CLI is durable, and resolving it here still yields a concrete
+ * absolute path - the PATH lookup is spent once, at attach, which is the point.
+ *
+ * A durable copy found this way may be a different version than the one that
+ * ran this command, which for a project-local entrypoint it usually is. That
+ * is the trade this makes, in the same direction the `$PATH` walk already
+ * makes it: what the hook needs of the path it records is that it still exists
+ * and still runs, months later, from a working directory nobody has chosen
+ * yet, and the recorded command is `cwd` and `git_branch` capture rather than
+ * any version-pinned surface. An operator who does mean a particular copy says
+ * so with `HYPAWARE_BIN`.
+ *
+ * With nothing installed, the ephemeral path still captures until npm removes
+ * it, so it is written and flagged `ephemeral` rather than refused.
+ *
+ * An explicit `HYPAWARE_BIN`/`HYP_BIN` is taken as given: it names a path the
+ * operator chose, and second-guessing it would defeat the override.
+ *
+ * `cliBinPath` defaults to this package's own CLI and is a parameter only so a
+ * test can present an ephemeral entrypoint: nothing short of a real `npx` run
+ * or a real project install puts this package inside one of those trees.
  *
  * @param {NodeJS.ProcessEnv} env
+ * @param {string} [cliBinPath]
+ * @returns {{ binPath: string, ephemeral: boolean }}
  */
-function resolveHookBinPath(env) {
+export function resolveHookBinPath(env, cliBinPath = CLI_BIN_PATH) {
   const explicit = firstNonEmpty(env.HYPAWARE_BIN, env.HYP_BIN)
-  if (explicit) return path.resolve(explicit)
-  if (process.argv[1]) return path.resolve(process.argv[1])
-  return FALLBACK_BIN_PATH
+  if (explicit) return { binPath: path.resolve(explicit), ephemeral: false }
+  if (!isEphemeralBinPath(cliBinPath, env)) return { binPath: cliBinPath, ephemeral: false }
+  const installed = findInstalledHypawareBin(env)
+  if (installed !== undefined) return { binPath: installed, ephemeral: false }
+  return { binPath: cliBinPath, ephemeral: true }
 }
 
 /**

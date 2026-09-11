@@ -409,6 +409,232 @@ test('a throwing mirror write costs the warning, not the registration', () => {
   assert.equal(commands.get('pr')?.name, 'proto')
 })
 
+// Two loops over `record.aliases` were two questions put to a plugin-controlled
+// `Symbol.iterator`, and nothing made it answer them the same way: the shallow
+// copy carries the caller's value, not its sequence. An iterable that named an
+// unclaimed alias to the collision check and a claimed one to the write passed
+// the check and then overwrote the alias it would have been refused.
+//
+// The statefulness lives in `Symbol.iterator`, which the registry's copy
+// carries by reference, so the fixture survives being copied and cannot pass
+// vacuously the way a one-shot getter would. `passes()` is asserted anyway: a
+// fixture that stopped answering differently per pass proves nothing here, and
+// must say so rather than go quiet.
+/**
+ * An `aliases` value that answers each iteration from `stages` in turn, the
+ * last stage standing for every pass after it.
+ *
+ * @param {(() => Iterable<string>)[]} stages
+ * @returns {{ aliases: Iterable<string>, passes: () => number }}
+ */
+function stagedAliases(...stages) {
+  let passes = 0
+  const aliases = {
+    [Symbol.iterator]() {
+      const stage = stages[Math.min(passes, stages.length - 1)]
+      passes += 1
+      return stage()[Symbol.iterator]()
+    },
+  }
+  return { aliases, passes: () => passes }
+}
+
+test('a stateful aliases iterable cannot displace a registered alias', () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand({ name: 'status', aliases: ['st'] }))
+  // Clean to the collision check, then the alias `status` already holds.
+  const staged = stagedAliases(
+    () => ['fresh'],
+    () => ['st']
+  )
+  commands.register(makeCommand({ name: 'hostile', aliases: staged.aliases }))
+  assert.equal(commands.get('st')?.name, 'status', "'st' still belongs to the command that claimed it")
+  assert.equal(commands.get('fresh')?.name, 'hostile', 'the registration lands under the names that were checked')
+  assert.equal(staged.passes(), 1, 'the alias sequence is asked for exactly once, or the fixture proves nothing')
+})
+
+// The other half of reading twice. `byName.set` sat between the two loops, so
+// an iterable that yielded cleanly to the check and threw partway through the
+// write left the command registered under a name whose aliases were partly
+// indexed: `register` reported failure and the registry kept the command.
+test('an aliases iterable that throws on a second pass leaves no half-registration', () => {
+  const commands = createCommandRegistry()
+  const staged = stagedAliases(
+    () => ['half', 'rest'],
+    () =>
+      (function* () {
+        yield 'half'
+        throw new Error('the alias sequence is gone')
+      })()
+  )
+  /** @type {unknown} */
+  let refusal
+  try {
+    commands.register(makeCommand({ name: 'hostile', aliases: staged.aliases }))
+  } catch (err) {
+    refusal = err
+  }
+  // Refusing is allowed. Refusing and keeping the command is not, and neither
+  // is keeping an alias for a command that is not there.
+  assert.equal(commands.has('hostile'), refusal === undefined, 'byName agrees with what register reported')
+  assert.equal(commands.has('half'), refusal === undefined, 'the alias index agrees with what register reported')
+  assert.equal(commands.has('rest'), refusal === undefined)
+  assert.equal(staged.passes(), 1, 'the alias sequence is asked for exactly once, or the fixture proves nothing')
+})
+
+// The drain must not soften the boundary: a non-iterable `aliases` is still a
+// TypeError out of `register`, and still raises it before anything is written.
+//
+// And it must not blur the diagnosis, which is the half `not iterable` alone
+// does not hold: draining with a spread makes V8 name the expression that did
+// the reading ("(record.aliases ?? []) is not iterable") where the loop makes
+// it name the value ("number 7 is not iterable"), and a plugin author has no
+// `record` to go look at. The assertion is the negative rather than the
+// engine's exact wording, which differs by V8 version and by the shape of the
+// expression: what must stay true is that the error names what the caller
+// passed and never how the registry read it.
+test('a non-iterable aliases is still refused at the boundary', () => {
+  const commands = createCommandRegistry()
+  assert.throws(
+    () => commands.register(makeCommand({ name: 'bad', aliases: 7 })),
+    (err) => err instanceof TypeError && /not iterable/.test(err.message) && !/record\.aliases/.test(err.message)
+  )
+  assert.equal(commands.has('bad'), false)
+  assert.equal(commands.size(), 0)
+})
+
+test('a plain-array aliases registers unchanged', () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand({ name: 'status', aliases: ['st', 'stat'] }))
+  commands.register(makeCommand({ name: 'query sql', aliases: ['sql'] }))
+  commands.register(makeCommand({ name: 'demo' }))
+  assert.deepEqual(
+    commands.list().map((c) => c.name),
+    ['demo', 'query sql', 'status']
+  )
+  assert.equal(commands.get('st')?.name, 'status')
+  assert.equal(commands.get('stat')?.name, 'status')
+  assert.equal(commands.get('sql')?.name, 'query sql')
+  assert.deepEqual(commands.get('status')?.aliases, ['st', 'stat'])
+  assert.equal(commands.size(), 3)
+  assert.equal(commands.match(['st', '--json'])?.command.name, 'status')
+})
+
+// What the collision check alone cannot see: values it accepts in full while
+// claiming names the plugin never wrote, with nothing thrown and nothing
+// logged. A string is the ordinary typo for this field, and the cost of
+// accepting it lands on a third party, so the refusal is checked from that
+// side too.
+test('a string aliases is refused instead of spread into one alias per character', () => {
+  const commands = createCommandRegistry()
+  assert.throws(
+    () => commands.register(makeCommand({ name: 'status', aliases: 'st' })),
+    (err) => err instanceof TypeError && /'status' has invalid aliases 'st'/.test(err.message)
+  )
+  assert.equal(commands.size(), 0)
+  assert.equal(commands.has('status'), false)
+  assert.equal(commands.has('s'), false, "'s' was never claimed")
+  assert.equal(commands.has('t'), false, "'t' was never claimed")
+  // The letters stay free for the plugin that means them.
+  commands.register(makeCommand({ name: 'sync', aliases: ['s'] }))
+  assert.equal(commands.get('s')?.name, 'sync')
+})
+
+// A non-string member goes into `aliasIndex` as a key of that type, and `get`
+// is a Map lookup the CLI only ever hands strings, so `7 !== '7'`: the entry
+// is unreachable forever while still holding the name against every later
+// registration.
+test('a non-string alias member is refused', () => {
+  const commands = createCommandRegistry()
+  assert.throws(
+    () => commands.register(makeCommand({ name: 'status', aliases: ['st', 7] })),
+    (err) => err instanceof TypeError && /'status' has invalid alias at index 1\b/.test(err.message)
+  )
+  assert.equal(commands.size(), 0)
+  // Refused whole: the good member before the bad one claims nothing either.
+  assert.equal(commands.has('st'), false)
+  assert.equal(commands.has('status'), false)
+})
+
+test('an empty-string alias member is refused', () => {
+  const commands = createCommandRegistry()
+  assert.throws(
+    () => commands.register(makeCommand({ name: 'status', aliases: [''] })),
+    (err) => err instanceof TypeError && /'status' has invalid alias at index 0\b/.test(err.message)
+  )
+  assert.equal(commands.size(), 0)
+  assert.equal(commands.has(''), false)
+})
+
+// The judgment call, pinned. A non-array iterable stays accepted: the drain
+// exists to read exactly one such sequence exactly once, and the two fixtures
+// that prove it once-only are non-array iterables. What the shape check owes
+// is that "iterable" is not the test, since a string is iterable too.
+test('a non-array iterable aliases is still accepted', () => {
+  const commands = createCommandRegistry()
+  const aliases = (function* () {
+    yield 'st'
+    yield 'stat'
+  })()
+  commands.register(makeCommand({ name: 'status', aliases }))
+  assert.equal(commands.get('st')?.name, 'status')
+  assert.equal(commands.get('stat')?.name, 'status')
+})
+
+// Ordering. Every non-iterable would fail the shape check too, so placing
+// that check before the drain would answer `aliases: 7` in the registry's
+// words instead of the engine's. The author must still get V8's error, which
+// names the value they passed.
+//
+// Asserted as properties, never as V8's sentence: the engine's exact wording
+// is a version detail, which is why the sibling test above pins the negative
+// too. What has to hold is that the error is the engine's (no
+// `CommandRegistry.register` prefix), that it names the value passed (7) and
+// not the expression that read it (`record.aliases`), and that it is the
+// 'not iterable' diagnosis rather than some later failure.
+test('a non-iterable aliases keeps the boundary error the drain raises', () => {
+  const commands = createCommandRegistry()
+  assert.throws(
+    () => commands.register(makeCommand({ name: 'bad', aliases: 7 })),
+    (err) =>
+      err instanceof TypeError &&
+      /\bnot iterable\b/.test(err.message) &&
+      /\b7\b/.test(err.message) &&
+      !/CommandRegistry\.register/.test(err.message) &&
+      !/record\.aliases/.test(err.message)
+  )
+  assert.equal(commands.has('bad'), false)
+  assert.equal(commands.size(), 0)
+})
+
+// Honest path. Every first-party plugin ships a plain string array, an empty
+// one, or nothing at all, so the shape check must be invisible to all three.
+test('the shape check leaves plain-array registrations untouched', () => {
+  const commands = createCommandRegistry()
+  commands.register(makeCommand({ name: 'status', aliases: ['st', 'stat'] }))
+  commands.register(makeCommand({ name: 'query sql', aliases: ['sql'] }))
+  commands.register(makeCommand({ name: 'daemon', aliases: [] }))
+  commands.register(makeCommand({ name: 'ask' }))
+  commands.register(makeCommand({ name: 'attach', aliases: Object.freeze(['at']) }))
+  assert.deepEqual(
+    commands.list().map((c) => c.name),
+    ['ask', 'attach', 'daemon', 'query sql', 'status']
+  )
+  assert.equal(commands.size(), 5)
+  for (const [alias, name] of [
+    ['st', 'status'],
+    ['stat', 'status'],
+    ['sql', 'query sql'],
+    ['at', 'attach'],
+  ]) {
+    assert.equal(commands.get(alias)?.name, name, `${alias} resolves to ${name}`)
+    assert.equal(commands.has(alias), true)
+  }
+  assert.deepEqual(commands.get('status')?.aliases, ['st', 'stat'])
+  assert.deepEqual(commands.get('daemon')?.aliases, [])
+  assert.equal(commands.get('ask')?.aliases, undefined)
+})
+
 /**
  * The optional members of `CommandRegistration`, read out of the published
  * declaration file rather than restated here. Both spellings the file uses

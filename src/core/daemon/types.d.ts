@@ -35,6 +35,25 @@ export interface SourceSnapshot {
   state: 'started' | 'failed' | 'stopped'
   error?: string
   details?: object
+  health?: SourceHealth
+}
+
+/**
+ * What a source last said about *itself*, as opposed to what the daemon
+ * observed about its lifecycle. Every field is the kernel contract's
+ * `SourceStatus` field of the same name, and every one is optional: a field
+ * that did not arrive usable is dropped rather than recorded wrong.
+ *
+ * It rides beside `SourceSnapshot.state` rather than replacing it because
+ * the two answer different questions and may disagree: `state` is the
+ * lifecycle's verdict ("this source started"), `health.state` is the
+ * source's own reading of how that is going ("and it is degraded").
+ */
+export interface SourceHealth {
+  state?: 'starting' | 'ready' | 'degraded' | 'stopped' | 'error'
+  message?: string
+  rowsWritten?: number
+  lastError?: string
 }
 
 /**
@@ -54,6 +73,29 @@ export interface RecentEntrypoint {
   lastSeen: string
   /** Rows projected under it since the daemon booted. */
   rows: number
+}
+
+/**
+ * One plugin whose `activate()` did not complete on this boot.
+ *
+ * The kernel catches per plugin and boots the rest, so the snapshot around
+ * this entry looks exactly like the snapshot of a boot that was never asked
+ * for the plugin at all: no source, no sink, no command, and no error. This
+ * is the entry that tells those two apart (issue #1556).
+ */
+export interface FailedPluginSnapshot {
+  name: string
+  /**
+   * `activate_failed`, `activate_missing`, or whatever the throw carried
+   * (bar `requires_unsatisfied`, which a throw's own label is rewritten to
+   * `activate_failed` rather than be mistaken for the door below) -
+   * and `requires_unsatisfied` when there was no throw because the dependency
+   * resolver eliminated the plugin before `activate()` ran (issue #1580). That
+   * one value is the discriminator `hyp status` branches on to pick a message
+   * and a repair; the resolver's own kind is kept in front of `message`.
+   */
+  errorKind: string
+  message: string
 }
 
 export interface SinkSnapshot {
@@ -131,6 +173,11 @@ export interface MaintenanceSkipSnapshot {
 }
 
 export interface DaemonStatus {
+  /** Independent process health; absent on pre-split status files. */
+  processes?: {
+    gateway: { pid?: number; state: string }
+    processing: { pid?: number; state: string; restarts: number }
+  }
   state: DaemonState
   pid: number
   /** ISO timestamp of the daemon process boot. */
@@ -163,6 +210,15 @@ export interface DaemonStatus {
   configPath?: string
   sources: SourceSnapshot[]
   sinks: SinkSnapshot[]
+  /**
+   * Plugins this daemon's boot could not activate, by either door that names
+   * one: a plugin whose `activate()` threw, and a plugin the dependency
+   * resolver eliminated for an unsatisfied `requires` and so never called
+   * `activate()` on at all (issue #1580). Absent, never `[]`, when every
+   * configured plugin came up, so a boot with nothing to report writes the
+   * file shape it always wrote.
+   */
+  failedPlugins?: FailedPluginSnapshot[]
   /**
    * What the last completed cache-maintenance tick left fragmented, and why
    * (LLP 0228#status-file-is-the-surface). Absent until a tick has run.
@@ -197,6 +253,9 @@ export type StatusDiagnosticKind =
   | 'capture_gap'
   | 'cache_flush_failing'
   | 'installed_plugin_shadowed'
+  | 'source_name_unregistered'
+  | 'plugin_activate_failed'
+  | 'plugin_requires_unsatisfied'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -395,6 +454,7 @@ export interface CacheFlushFailureReport {
 
 /** Service-level daemon state surfaced by `hyp status`. */
 export interface ServiceState {
+  processes?: DaemonStatus['processes']
   /** Service file present at the platform path. */
   installed: boolean
   /** Service registered with launchd/systemd. */
@@ -476,6 +536,14 @@ export interface HypAwareStatusReport {
    */
   configRecordsAnswer: boolean
   activePlugins: string[]
+  /**
+   * Plugins the running daemon could not activate, by either door: a throw from
+   * `activate()`, or elimination by the dependency resolver before it ran
+   * (issues #1556, #1580). Empty when no daemon is running:
+   * a snapshot left by an exited daemon is a record of how that run went, not
+   * a claim about now (LLP 0383#a-record-not-a-claim).
+   */
+  failedPlugins: string[]
   /**
    * Two-layer provenance (LLP 0031). Null on a host that never joined (a
    * single local layer: the V1 surface is unchanged). When set, the
@@ -857,6 +925,10 @@ export interface DaemonHandle {
 }
 
 export interface RunDaemonOptions {
+  /** Internal process-launch seam for resource limits and hermetic fault tests. */
+  processingExecArgv?: string[]
+  /** Private runtime files for a supervised processor; data/config keep hypHome. */
+  runtimeStateRoot?: string
   /** Override HYP_HOME (defaults from env). */
   hypHome?: string
   /** Explicit config file path. */
@@ -917,6 +989,18 @@ export interface BackfillSweepRunner {
     retentionDays?: number
     sweep?: boolean
   }): Promise<{ ok: boolean, scanned: number, rowsWritten: number, skipped: number }>
+}
+
+/**
+ * One backfill contribution's identity, read once out of the plugin's object and
+ * rebuilt as strings the kernel owns. Everything the sweep does after that
+ * read - the re-entrancy set, the dev run id, the log records, and the
+ * settlement handlers that run long after `tick()` returned - uses this
+ * instead of the contribution, so no later step can run a plugin accessor.
+ */
+export interface BackfillSweepProviderIdentity {
+  name: string
+  plugin: string
 }
 
 export interface BackfillSweepDriverOptions {

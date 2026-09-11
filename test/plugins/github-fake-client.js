@@ -118,3 +118,10 @@ export const silentLog = {
   warn() {},
   error() {},
 }
+
+/** Capture-only tests use a successful empty graph projection. */
+export const emptyGraph = {
+  async project() {
+    return { nodes: 0, edges: 0, nodesWritten: 0, edgesWritten: 0 }
+  },
+}

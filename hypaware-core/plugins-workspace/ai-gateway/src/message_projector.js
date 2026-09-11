@@ -186,7 +186,7 @@ export function createAiGatewayMessageProjector(opts) {
   return {
     /**
      * @param {AiGatewayExchangeInput | Record<string, unknown>} exchange
-     * @param {{ journal?: (() => void)[] }} [projectOpts] Pass a `journal`
+     * @param {{ journal?: (() => void)[], isSessionIgnored?: (id: string) => boolean }} [projectOpts] Pass a `journal`
      *   array to have every dedupe-state mutation this projection makes
      *   record its undo, so a caller whose append fails can hand it to
      *   `rollbackAiGatewayStateJournal` instead of leaving the shared state
@@ -195,7 +195,7 @@ export function createAiGatewayMessageProjector(opts) {
      */
     async projectExchange(exchange, projectOpts = {}) {
       const input = /** @type {AiGatewayExchangeInput} */ (exchange)
-      const projection = await dispatchProjector(projectors, input, log, isSessionIgnored)
+      const projection = await dispatchProjector(projectors, input, log, projectOpts.isSessionIgnored ?? isSessionIgnored)
       // An intentional `.hypignore` usage-policy drop is a TERMINAL success, not
       // a projection miss: the adapter already logged the rich
       // `plugin.<adapter>.usage_policy_drop` event at the seam, so the gateway

@@ -109,7 +109,58 @@ export function createCommandRegistry() {
     if (byName.has(record.name) || aliasIndex.has(record.name)) {
       throw new Error(`CommandRegistry.register: duplicate command name '${record.name}'`)
     }
-    for (const alias of record.aliases ?? []) {
+    // The copy above is shallow, so `record.aliases` is still the plugin's
+    // own value, and iterating it twice puts the same question to a
+    // plugin-controlled `Symbol.iterator` with nothing making it answer
+    // alike. One that names an unclaimed alias to the collision check and a
+    // claimed one to the write overwrites the alias it would have been
+    // refused; one that yields cleanly and then throws leaves `byName`
+    // holding the command with the alias index half written. Drained once,
+    // the names checked are the names written and every step after
+    // `byName.set` is total, so a registration claims both indexes or
+    // neither.
+    //
+    // Drained with the loop the two passes already used, not a spread: for a
+    // non-iterable `aliases` V8 names the offending value ("number 7 is not
+    // iterable"), where a spread names the expression that read it
+    // ("(record.aliases ?? []) is not iterable"). Every boundary error here
+    // exists to point a plugin author at their own registration, which is the
+    // whole reason `copyMiss` below says which member the copy did not carry,
+    // so an error naming a registry internal instead of the value passed is
+    // the one worth spending a second line to avoid.
+    /** @type {string[]} */
+    const aliases = []
+    for (const alias of record.aliases ?? []) aliases.push(alias)
+    // Shape, checked after the drain and not before it: every non-iterable
+    // fails this check too, and answering `aliases: 7` here would replace the
+    // boundary error the loop above raises, which names the value passed,
+    // with one about a list the author never wrote.
+    //
+    // A string is refused by name because no member rule can catch it:
+    // `aliases: 'st'`, the ordinary typo for this field, drains into 's' and
+    // 't', which are perfectly good aliases. Unrefused it claims two single
+    // letters globally, so the next plugin to register 's' for real is
+    // refused with a collision naming a command that never meant to claim it,
+    // one activation removed from the typo.
+    if (typeof record.aliases === 'string') {
+      throw new TypeError(
+        `CommandRegistry.register: '${record.name}' has invalid aliases '${record.aliases}' - ` +
+          'aliases must be a list of strings, and a bare string is read one character at a time'
+      )
+    }
+    // Named by index and type, never by rendering the member: a boundary
+    // error is the plugin author's only feedback, and converting a value they
+    // control is the one step here their own code could make throw.
+    for (let i = 0; i < aliases.length; i += 1) {
+      const alias = aliases[i]
+      if (typeof alias !== 'string' || alias.length === 0) {
+        throw new TypeError(
+          `CommandRegistry.register: '${record.name}' has invalid alias at index ${i} - every alias must ` +
+            `be a non-empty string, and this one is ${typeof alias === 'string' ? 'empty' : `of type ${typeof alias}`}`
+        )
+      }
+    }
+    for (const alias of aliases) {
       if (byName.has(alias) || aliasIndex.has(alias)) {
         throw new Error(
           `CommandRegistry.register: alias '${alias}' for '${record.name}' collides with an existing command`
@@ -117,7 +168,7 @@ export function createCommandRegistry() {
       }
     }
     byName.set(record.name, record)
-    for (const alias of record.aliases ?? []) {
+    for (const alias of aliases) {
       aliasIndex.set(alias, record.name)
     }
     warnDroppedOptionals(record.name, dropped)
@@ -173,16 +224,21 @@ export function createCommandRegistry() {
     if (!group || typeof group !== 'object') {
       throw new TypeError('CommandRegistry.registerGroup: group must be an object')
     }
-    if (typeof group.name !== 'string' || group.name.length === 0) {
+    // Read once, and key the map on what this line validated. Unlike
+    // `register` above there is no copy, so `group.name` is a live plugin
+    // property: reading it again for the `set` would store the group under a
+    // name nothing had checked, which is also the key `listGroups` orders by.
+    const name = group.name
+    if (typeof name !== 'string' || name.length === 0) {
       throw new TypeError('CommandRegistry.registerGroup: group.name must be a non-empty string')
     }
     if (group.summary !== undefined && typeof group.summary !== 'string') {
-      throw new TypeError(`CommandRegistry.registerGroup: '${group.name}' summary must be a string when present`)
+      throw new TypeError(`CommandRegistry.registerGroup: '${name}' summary must be a string when present`)
     }
     if (group.help !== undefined && typeof group.help !== 'string') {
-      throw new TypeError(`CommandRegistry.registerGroup: '${group.name}' help must be a string when present`)
+      throw new TypeError(`CommandRegistry.registerGroup: '${name}' help must be a string when present`)
     }
-    groups.set(group.name, group)
+    groups.set(name, group)
   }
 
   /** @param {string} name */
@@ -196,13 +252,37 @@ export function createCommandRegistry() {
    * to see what a plugin described is to already know the name. The agreement
    * check between a manifest and what `activate()` registers needs the set,
    * not a lookup.
+   *
+   * The order comes from the keys, not from `a.name`: the key is the name
+   * `registerGroup` validated, while `group.name` is a live property of the
+   * plugin's own object, which that function stores by reference. Reading it
+   * here would run plugin code inside a comparator, where a throw escapes
+   * into every caller of `listGroups()` before a single group has been handed
+   * back, and where `compareStrings` refuses a non-string, so an accessor
+   * that merely stops answering with a string is the same outage
+   * (issue #1555, after #1524 in the dataset registry).
    */
   function listGroups() {
-    return Array.from(groups.values()).sort((a, b) => compareStrings(a.name, b.name))
+    return Array.from(groups.keys())
+      .sort(compareStrings)
+      .map((name) => /** @type {CommandGroupRegistration} */ (groups.get(name)))
   }
 
+  /**
+   * Every registered command, ordered by name.
+   *
+   * Ordered by the keys for the reason {@link listGroups} gives, which
+   * survives the copy `register` takes: the key is the name validated off
+   * that copy, but `get()` hands the copy itself back to the registering
+   * plugin during `activate()`, so `record.name` can be redefined as an
+   * accessor afterwards. The callers a throw would escape into are
+   * `hyp --help`, group help, every dispatch that renders a command list,
+   * and the plugin doctor's dry run.
+   */
   function list() {
-    return Array.from(byName.values()).sort((a, b) => compareStrings(a.name, b.name))
+    return Array.from(byName.keys())
+      .sort(compareStrings)
+      .map((name) => /** @type {CommandRegistration} */ (byName.get(name)))
   }
 
   /** @param {string} name */

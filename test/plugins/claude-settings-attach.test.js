@@ -343,7 +343,7 @@ test('re-attach migrates the pre-2.1.257 nested hooks marker field', async () =>
     assert.equal(Object.hasOwn(marker.managed, 'hooks'), false)
     assert.ok(Array.isArray(marker.managed.hook_entries))
     assert.ok(marker.managed.hook_entries.length > 0)
-    assert.equal(marker.settings_schema, 3)
+    assert.equal(marker.settings_schema, 4)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

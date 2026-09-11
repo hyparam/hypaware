@@ -38,6 +38,7 @@ import { isWithinDir } from './contribution_names.js'
  *   ClientAssetInstall,
  *   ClientAssetLedgerRecord,
  *   ClientAssetMaterialization,
+ *   ClientAssetRefresh,
  *   ClientAssetRemoval,
  *   MaterializeClientAssetsOptions,
  *   PlannedClientAsset,
@@ -87,6 +88,250 @@ export async function materializeClientAssets(options) {
   }
   const { pruned, withheld } = await reconcileClientAssetLedger({ options, installed })
   return { installed, pruned, withheld }
+}
+
+/**
+ * Re-copy every installed client asset whose source bytes have moved on since
+ * the copy was made, and nothing else.
+ *
+ * The self-update replaces the package under an installed daemon, and with it
+ * the skill sources inside the package, but the copies under `~/.claude` and
+ * `~/.codex` are plain files that nothing re-reads. The org reconciler's
+ * freshness key deliberately covers the asset *set* and not the bytes (LLP 0138
+ * #currency), so an in-place rewrite of an existing skill never re-attaches,
+ * and a machine that never joined an org has no reconciler at all. This is the
+ * one place bytes are compared, and it runs where the new bytes first appear:
+ * the boot of the daemon that the update restarted onto.
+ *
+ * Which clients are refreshed is read from the install ledger, never from the
+ * live registries: a client with no ledger record has nothing HypAware wrote
+ * for it, and installing for it here would turn a refresh into an attach the
+ * user never asked for. Each planned copy that has a record is then decided by
+ * two digests. The bytes on disk must still match a digest we recorded for the
+ * path, or the user took the copy over and it is theirs to keep (the same
+ * evidence that gates a prune, LLP 0219 #edited-assets-are-not-ours, matched
+ * against every digest recorded for the path, LLP 0284) - unless they are the
+ * current source's own bytes, which say the copy is ours under a record that
+ * never caught up, and heal that record (LLP 0400). And the source must digest
+ * differently from that record, or there is nothing to copy. A path that is
+ * gone is not resurrected: removing it was a choice, and
+ * `hyp skills install` is the way to reverse that choice.
+ *
+ * Never throws and never removes: a copy that fails is reported and the record
+ * of the copy still sitting there is kept, exactly as an install failure is.
+ *
+ * @param {Omit<MaterializeClientAssetsOptions, 'clients' | 'dryRun'>} options
+ * @returns {Promise<ClientAssetRefresh>}
+ * @ref LLP 0397#ledger-decides [implements]: the ledger names the clients, and
+ *   two digests (recorded versus on disk, then source versus recorded) decide
+ *   each asset, so an update reaches the installed skills without a command.
+ * @ref LLP 0397#edited-copies-are-kept [implements]: a copy whose bytes match
+ *   neither a recorded digest nor the current source is skipped and named,
+ *   never overwritten.
+ */
+export async function refreshClientAssets(options) {
+  const { stateRoot, stderr } = options
+  /** @type {ClientAssetRefresh} */
+  const outcome = { refreshed: [], skipped: [], unchanged: 0, healed: 0 }
+  if (!stateRoot) return outcome
+
+  const ledger = await readClientAssetLedger(stateRoot)
+  if (ledger.length === 0) return outcome
+
+  // Every digest ever recorded for a path, across clients: two clients can
+  // share one asset directory, and the copy made for one is the bytes the
+  // other's record names.
+  // @ref LLP 0284#digests-are-per-path [constrained-by]: the match is asked of
+  //   every record naming the path, not of the one client's record.
+  /** @type {Map<string, Set<string>>} */
+  const recordedDigests = new Map()
+  for (const record of ledger) {
+    if (!record.digest) continue
+    let digests = recordedDigests.get(record.dest)
+    if (!digests) recordedDigests.set(record.dest, digests = new Set())
+    digests.add(record.digest)
+  }
+
+  const clients = [...new Set(ledger.map((record) => record.client))].sort()
+  const planned = planClientAssets({ ...options, clients })
+  // The digest the ledger should carry for a path when the pass ends: what a
+  // rewrite put there, or what a stale record never caught up with.
+  /** @type {Map<string, string>} */
+  const observed = new Map()
+  /** @type {Set<string>} */
+  const decided = new Set()
+  for (const { asset, client, dest } of planned) {
+    // A shared destination is decided once; the second client's plan names
+    // bytes the first already refreshed.
+    if (decided.has(dest)) continue
+    decided.add(dest)
+    const recorded = recordedDigests.get(dest)
+    if (!recorded) continue
+
+    let inspected = await inspectClientAsset(dest)
+    const stepped = `${dest}${REFRESH_OLD_SUFFIX}`
+    if (inspected.missing) {
+      // A refresh killed between {@link replaceAsset}'s two renames leaves the
+      // copy beside the destination under the staging name, with `dest` itself
+      // absent. That is not the user removing it, so it is put back before the
+      // decision is made: read as `missing` instead, the copy would be skipped
+      // on this boot and on every boot after it, and the installed skill would
+      // be gone for good. A copy the user really did remove finds no copy
+      // stepped aside beside it and stays gone.
+      const restored = await fs.rename(stepped, dest).then(() => true, () => false)
+      if (restored) inspected = await inspectClientAsset(dest)
+    } else {
+      // The destination is there, so anything still under a staging name is a
+      // leftover: a stage abandoned inside `copyDir`, or a copy stepped aside
+      // by a swap whose closing sweep failed. Each is a complete `SKILL.md`
+      // sitting in the client's skills directory under a name no ledger record
+      // covers, which the client loads as a second stale copy of the same skill
+      // and no prune can ever remove. {@link replaceAsset} clears them only on
+      // a boot that rewrites this asset, and for a source that never changes
+      // again that boot never comes - so the sweep belongs here, where every
+      // recorded destination is looked at once per boot. It also keeps the
+      // restore above honest: a stepped aside copy that outlives its own boot
+      // would otherwise resurrect a destination the user deleted on purpose.
+      await fs.rm(stepped, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(`${dest}${REFRESH_STAGE_SUFFIX}`, { recursive: true, force: true }).catch(() => {})
+    }
+    const { digest: onDisk, missing } = inspected
+    if (missing) {
+      outcome.skipped.push({ kind: asset.kind, name: asset.name, client, dest, reason: 'missing' })
+      continue
+    }
+    // The source is hashed in the same domain as the copy, so an unchanged
+    // asset digests equal to the record and costs one read, no write. It is
+    // read before the record is judged because equality with it is evidence in
+    // its own right: see the healing exit below.
+    const sourceDigest = onDisk ? await digestClientAsset(asset.source) : null
+    if (onDisk && sourceDigest === onDisk && !recorded.has(onDisk)) {
+      // Bytes no record names but the source holds: a copy of ours whose record
+      // never caught up, left by a pass killed after {@link replaceAsset}
+      // swapped the new bytes in and before the single ledger write below.
+      // Healing it on that same write costs nothing extra and lets an
+      // interrupted pass converge on the next boot, instead of the copy being
+      // reported as an edit, never refreshed, and never prunable.
+      // @ref LLP 0400#source-equality-is-ownership [implements]: bytes equal to
+      //   the current source are the evidence that heals a stale record.
+      observed.set(dest, onDisk)
+      getLogger('client-assets').info('client_assets.refresh_record_healed', {
+        [Attr.COMPONENT]: 'client-assets',
+        [Attr.OPERATION]: 'client_assets.refresh',
+        hyp_client: client,
+        [Attr.STATUS]: 'ok',
+        detail: dest,
+      })
+      // The file is unchanged, so that is what it is counted as. The heal is
+      // counted again on its own, because it is the one outcome that writes
+      // the ledger without rewriting a copy: a caller weighing only
+      // `refreshed` and `skipped` would leave the write it caused unrecorded.
+      outcome.unchanged += 1
+      outcome.healed += 1
+      continue
+    }
+    if (!onDisk || !recorded.has(onDisk)) {
+      stderr?.write(onDisk
+        ? `warning: ${asset.kind} '${asset.name}' at ${dest} has been edited since HypAware installed it; ` +
+          'left as is - run `hyp skills install` to replace it\n'
+        : `warning: ${asset.kind} '${asset.name}' at ${dest} could not be read; ` +
+          'left as is - run `hyp skills install` to replace it\n'
+      )
+      getLogger('client-assets').warn('client_assets.refresh_skipped', {
+        [Attr.COMPONENT]: 'client-assets',
+        [Attr.OPERATION]: 'client_assets.refresh',
+        hyp_client: client,
+        [Attr.STATUS]: 'ok',
+        [Attr.ERROR_KIND]: onDisk ? 'asset_edited' : 'digest_unreadable',
+        detail: dest,
+      })
+      outcome.skipped.push({ kind: asset.kind, name: asset.name, client, dest, reason: onDisk ? 'edited' : 'unreadable' })
+      continue
+    }
+
+    if (sourceDigest === onDisk) {
+      outcome.unchanged += 1
+      continue
+    }
+    // A source that cannot be read (a package mid-replacement, a plugin whose
+    // files are gone) is not a changed source: nothing is copied and nothing
+    // is touched, and the next boot asks again.
+    if (!sourceDigest) {
+      stderr?.write(`warning: ${asset.kind} '${asset.name}' for ${client} could not be refreshed: source ${asset.source} is unreadable\n`)
+      getLogger('client-assets').warn('client_assets.refresh_failed', {
+        [Attr.COMPONENT]: 'client-assets',
+        [Attr.OPERATION]: 'client_assets.refresh',
+        hyp_client: client,
+        [Attr.STATUS]: 'error',
+        [Attr.ERROR_KIND]: 'source_unreadable',
+        detail: dest,
+      })
+      outcome.skipped.push({ kind: asset.kind, name: asset.name, client, dest, reason: 'copy_failed' })
+      continue
+    }
+
+    try {
+      await replaceAsset(asset, dest)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      stderr?.write(`warning: ${asset.kind} '${asset.name}' for ${client} could not be refreshed: ${message}\n`)
+      getLogger('client-assets').warn('client_assets.refresh_failed', {
+        [Attr.COMPONENT]: 'client-assets',
+        [Attr.OPERATION]: 'client_assets.refresh',
+        hyp_client: client,
+        [Attr.STATUS]: 'error',
+        [Attr.ERROR_KIND]: 'asset_copy_failed',
+        detail: dest,
+      })
+      outcome.skipped.push({ kind: asset.kind, name: asset.name, client, dest, reason: 'copy_failed' })
+      continue
+    }
+    const digest = await digestClientAsset(dest)
+    if (digest) {
+      observed.set(dest, digest)
+    } else {
+      // The bytes landed but the record cannot follow them, which is the same
+      // degraded state a failed ledger write leaves below: from the next boot
+      // on, the copy this pass just wrote matches no recorded digest and is
+      // reported as a user edit. Say so, or the only trace is a summary line
+      // claiming the refresh succeeded.
+      getLogger('client-assets').warn('client_assets.refresh_digest_unread', {
+        [Attr.COMPONENT]: 'client-assets',
+        [Attr.OPERATION]: 'client_assets.refresh',
+        hyp_client: client,
+        [Attr.STATUS]: 'error',
+        [Attr.ERROR_KIND]: 'digest_unreadable',
+        detail: dest,
+      })
+    }
+    outcome.refreshed.push({ kind: asset.kind, name: asset.name, client, dest })
+  }
+
+  if (observed.size > 0) {
+    // Every record naming the path takes the digest observed there, whichever
+    // client it belongs to, or the next run would read the other client's
+    // record as a user edit.
+    const wrote = await writeClientAssetLedger(stateRoot, ledger.map((record) => {
+      const digest = observed.get(record.dest)
+      return digest ? { ...record, digest } : record
+    }))
+    // A ledger we could not write costs an install nothing, but it costs a
+    // refresh the file it just rewrote: the records still name the bytes this
+    // pass replaced, so from the next boot on HypAware's own copy matches no
+    // recorded digest and is reported as a user edit forever. Say so here,
+    // because the write itself swallows the error and nothing downstream can
+    // tell that "edited" was our own doing.
+    if (!wrote) {
+      getLogger('client-assets').warn('client_assets.refresh_ledger_unwritten', {
+        [Attr.COMPONENT]: 'client-assets',
+        [Attr.OPERATION]: 'client_assets.refresh',
+        [Attr.STATUS]: 'error',
+        [Attr.ERROR_KIND]: 'ledger_write_failed',
+        detail: stateRoot,
+      })
+    }
+  }
+  return outcome
 }
 
 /**
@@ -720,6 +965,15 @@ function attachMarkerAssets(stateRoot, client) {
  */
 const EMPTY_DIGESTS = new Set()
 
+/**
+ * Suffixes {@link replaceAsset} hangs off a destination while it swaps a
+ * refreshed copy in: the new bytes, and the copy they replace. Fixed, so a
+ * refresh killed mid-swap leaves names the next one recognizes rather than
+ * pid-stamped trees nothing can attribute or clean.
+ */
+const REFRESH_STAGE_SUFFIX = '.hyp-refresh'
+const REFRESH_OLD_SUFFIX = '.hyp-refresh-old'
+
 /** Why a removal is refused when the client has no asset directories at all. */
 const NO_BASE_DIRS_REASON =
   'no asset directories resolved for this client (no home directory, or none declared); refusing to remove'
@@ -816,4 +1070,68 @@ async function copyAsset(asset, dest) {
   }
   await fs.mkdir(path.dirname(dest), { recursive: true })
   await fs.copyFile(asset.source, dest)
+}
+
+/**
+ * {@link copyAsset} for a destination that already holds a copy worth keeping:
+ * the new bytes are staged beside it and renamed into place, so a copy that
+ * fails partway (a source tree half-replaced by an update, a read error in
+ * the middle of it) leaves the installed copy exactly as it was. The
+ * install-path `rm`-then-copy would leave an empty directory instead, which
+ * the next refresh reads as a user edit and never repairs.
+ *
+ * The stage is a sibling under the same asset directory, so the rename never
+ * crosses a filesystem, and it is removed on every exit but the rename.
+ *
+ * Both staging names are fixed rather than process-scoped, and both are
+ * cleared before use. A pid in the name would make every crashed refresh leave
+ * a tree the next one cannot recognize: a complete `SKILL.md` sitting in the
+ * client's skills directory under a name no ledger record covers, which the
+ * client loads as a second stale copy and no prune can ever remove. Fixed
+ * names make the leftovers recognizable: {@link refreshClientAssets} sweeps
+ * them off every destination it still finds in place, and restores the one
+ * that matters rather than leaving it orphaned. Nothing races over them: the
+ * refresh is the only caller, and the daemon that runs it refuses to boot
+ * beside a live one.
+ *
+ * @param {ResolvedClientAsset} asset
+ * @param {string} dest
+ * @returns {Promise<void>}
+ * @ref LLP 0397#refresh-never-removes [implements]: a refresh that fails
+ *   leaves the copy it found, so the stage is written first and the swap is a
+ *   rename.
+ */
+async function replaceAsset(asset, dest) {
+  const stage = `${dest}${REFRESH_STAGE_SUFFIX}`
+  await fs.rm(stage, { recursive: true, force: true })
+  try {
+    if (asset.kind === 'skill') {
+      await copyDir(asset.source, stage)
+      // Two renames, not one: renaming over a non-empty directory fails on
+      // every platform, so the old tree steps aside first. The window between
+      // them is two renames wide, and a crash inside it leaves the old copy
+      // under the `.hyp-refresh-old` name rather than deleted - which is why
+      // the refresh restores that name before it reads an absent `dest` as a
+      // copy the user removed.
+      const old = `${dest}${REFRESH_OLD_SUFFIX}`
+      await fs.rm(old, { recursive: true, force: true })
+      await fs.rename(dest, old)
+      try {
+        await fs.rename(stage, dest)
+      } catch (err) {
+        await fs.rename(old, dest).catch(() => {})
+        throw err
+      }
+      // The swap already landed, so a failure to sweep the old tree is not a
+      // failed refresh. Thrown, it would be reported as `copy_failed` and the
+      // new digest would go unrecorded, leaving the copy just written to read
+      // as a user edit on every later boot.
+      await fs.rm(old, { recursive: true, force: true }).catch(() => {})
+      return
+    }
+    await fs.copyFile(asset.source, stage)
+    await fs.rename(stage, dest)
+  } finally {
+    await fs.rm(stage, { recursive: true, force: true }).catch(() => {})
+  }
 }

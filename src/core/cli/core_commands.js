@@ -52,6 +52,7 @@ import {
   runUnignore,
 } from '../commands/clients.js'
 import { runPolicyClient, runPolicyFolders, runPolicyList, runPolicySet, runPolicyShow, runPolicyUnset } from '../commands/policy.js'
+import { runTelemetry } from '../product_telemetry/commands.js'
 
 /**
  * @import { CommandGroupRegistration, CommandRegistration } from '../../../hypaware-plugin-kernel-types.js'
@@ -133,6 +134,16 @@ const CORE_COMMAND_GROUPS = [
 function buildCoreCommands(registry) {
   return [
     {
+      name: 'telemetry',
+      category: 'privacy',
+      audience: 'everyday',
+      bootProfile: 'none',
+      summary: 'Inspect and control optional product telemetry',
+      usage: coreUsage('telemetry'),
+      help: 'Off by default. Local mode retains a bounded preview queue. Organization mode uses the existing enrolled gateway. Vendor sharing and standalone registration are unavailable. Preview prints the exact next queued payload. Off removes pending copies, not records already accepted remotely.',
+      run: runTelemetry,
+    },
+    {
       name: 'status',
       category: 'getting-started',
       audience: 'everyday',
@@ -184,6 +195,9 @@ function buildCoreCommands(registry) {
         '  --remote [target] run against a remote MCP target instead of the local\n' +
         '                    cache (bare --remote uses query.default_remote, else the\n' +
         "                    shipped default; manage targets with 'hyp remote').\n" +
+        '  --org <label|*>   with --remote, read one org by label or every org this\n' +
+        '                    account may read; operator-only, and each read is\n' +
+        "                    recorded in that org's audit trail.\n" +
         "See 'hyp query <subcommand> --help' for which flags a subcommand supports\n" +
         '(overview and schema, and the cache routines behind the query status/\n' +
         'refresh/maintain aliases, are local-only; query status rejects --remote\n' +
@@ -270,7 +284,7 @@ function buildCoreCommands(registry) {
     },
     {
       name: 'plugin info',
-      summary: 'Show details for an installed plugin',
+      summary: 'Show details for an installed or bundled plugin',
       usage: coreUsage('plugin info'),
       run: runPluginInfo,
     },
@@ -717,7 +731,7 @@ function buildCoreCommands(registry) {
       category: 'additional',
       audience: 'operator',
       summary: 'Serve this host\'s verbs as an MCP server for AI clients',
-      usage: 'hyp mcp serve [--remote <target>]',
+      usage: 'hyp mcp serve [--remote <target> [--org <label|*>]]',
       run: runMcp,
     },
     makeGroupCommand({

@@ -468,7 +468,7 @@ function tuiBackfillConsentPromptFactory(opts) {
     const choice = await select({
       title: backfillConsentTitle(providers, retentionDays),
       options: [
-        { value: 'yes', label: 'Yes - import it now', summary: 'Reads local transcripts into the query cache.' },
+        { value: 'yes', label: 'Yes - import it now', summary: 'Includes your existing conversation history.' },
         { value: 'no', label: 'No - skip for now', summary: 'You can import later with hyp backfill.' },
       ],
       default: 'yes',
@@ -2284,18 +2284,23 @@ async function runFinaleBackfill(args) {
           // best-effort: whatever took stdout may have taken stderr too
         }
       } else if (!consent) {
-        stdout.write('backfill: skipped (declined)\n')
+        // Names what was declined, for the reason the dead-surface notice
+        // above names it: a sweep-backed sibling imports a few lines below
+        // whatever the answer was, so a bare "backfill: skipped" is
+        // contradicted by the next line on screen. The manual path's own
+        // decline line already names its client (`clients.js`).
+        // @ref LLP 0391#decision [implements]: with the sweep announce line gone, the decline is what has to say whose import it covers
+        stdout.write(`backfill ${asked.join(', ')}: skipped (declined)\n`)
       }
       const toRun = providers.filter((p) => consent || sweeping.has(p))
       // Guard each provider so one failure neither aborts sibling
       // providers nor the daemon (re)start that resumes live capture.
       // This matches the attach/restart resilience above.
+      // No announce line for a sweep-backed provider: the spinner below
+      // already says an import is running, and the sweep itself was
+      // disclosed where it was enabled.
+      // @ref LLP 0391#decision [implements]: the finale's sweep disclosure is left to the pick, so this loop treats sweep-backed and asked providers alike
       for (const provider of toRun) {
-        if (sweeping.has(provider)) {
-          stdout.write(
-            `backfill ${provider}: the enabled periodic sweep imports its history on schedule; running the first import now\n`
-          )
-        }
         try {
           // Importing local history reads and writes potentially
           // thousands of rows with no other output. Without this the
@@ -2305,15 +2310,14 @@ async function runFinaleBackfill(args) {
           // the result line below replaces it; elsewhere it prints once.
           const startTag = dryRun ? '(dry-run) ' : ''
           const entry = await withSpinner(
-            { stdout, env, label: `${startTag}backfill ${provider}: importing local history…` },
+            { stdout, env, label: `${startTag}backfill ${provider}: importing history…` },
             () => backfill.run({ provider, dryRun, retentionDays, until })
           )
           summary.backfill.push(entry)
           const tag = entry.dryRun ? '(dry-run) ' : ''
-          stdout.write(
-            `${tag}backfill ${entry.provider}: ${entry.ok ? 'ok' : 'failed'} ` +
-            `(scanned ${entry.scanned}, wrote ${entry.rowsWritten}, skipped ${entry.skipped})\n`
-          )
+          // The counts matter when something was imported or went wrong;
+          // a clean zero is one short line, not a scan report.
+          stdout.write(`${tag}backfill ${entry.provider}: ${describeBackfillResult(entry)}\n`)
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           // Guarded for the same reason the dead-surface notice above is,
@@ -2340,6 +2344,39 @@ async function runFinaleBackfill(args) {
     },
     { component: 'walkthrough' }
   )
+}
+
+/**
+ * One line for a finished import, shared with `hyp client attach`'s own
+ * backfill report. Full counts only where they carry news: a failure, or a
+ * run that wrote rows. A clean zero says so plainly instead of printing a
+ * three-number scan report.
+ *
+ * The one zero that is still news is a nonzero scan that wrote nothing.
+ * "no history on disk" and "history found and none of it imported" are
+ * different faults with different fixes (a wrong path or an unreadable
+ * home, against a projection or dedupe that swallowed every row), and on
+ * this surface the scan count is the only thing that tells them apart, so
+ * that arm keeps it. A nonzero `skipped` does not move a run out of that
+ * arm: a skip is an item that yielded no rows, so the re-run whose every
+ * item is already committed skips all of them, and an item that genuinely
+ * failed fails its whole provider and lands on the failure arm above.
+ *
+ * A dry run writes nothing by construction, so its zero is not a fact
+ * about the history on disk and must not be reported as one. It states
+ * what the scan found and claims no import outcome.
+ *
+ * @param {{ ok: boolean, scanned: number, rowsWritten: number, skipped: number, dryRun?: boolean }} entry
+ * @returns {string}
+ */
+export function describeBackfillResult(entry) {
+  if (!entry.ok) return `failed (scanned ${entry.scanned}, wrote ${entry.rowsWritten}, skipped ${entry.skipped})`
+  if (entry.dryRun) return entry.scanned === 0 ? 'nothing to import' : `scanned ${entry.scanned}`
+  if (entry.rowsWritten === 0) {
+    return entry.scanned === 0 ? 'nothing to import' : `nothing new to import (scanned ${entry.scanned})`
+  }
+  const rows = entry.rowsWritten === 1 ? 'row' : 'rows'
+  return `imported ${entry.rowsWritten} ${rows} (scanned ${entry.scanned}, skipped ${entry.skipped})`
 }
 
 /**

@@ -173,12 +173,12 @@ export async function run({ harness, expect }) {
     expect.that(
       'finale: claude backfill imported its session rows',
       initText,
-      (v) => typeof v === 'string' && /backfill claude: ok \(scanned \d+, wrote [2-9]\d*/.test(v),
+      (v) => typeof v === 'string' && /backfill claude: imported [2-9]\d* rows \(scanned \d+/.test(v),
     )
     expect.that(
       'finale: codex backfill imported its session rows',
       initText,
-      (v) => typeof v === 'string' && /backfill codex: ok \(scanned \d+, wrote [2-9]\d*/.test(v),
+      (v) => typeof v === 'string' && /backfill codex: imported [2-9]\d* rows \(scanned \d+/.test(v),
     )
 
     // ----- User-visible query result: both clients' history landed -----

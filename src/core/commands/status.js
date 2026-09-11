@@ -1,16 +1,17 @@
 // @ts-check
 
 import { Attr, withSpan } from '../observability/index.js'
-import { collectHypAwareStatus, describeMaintenanceSkipReasons } from '../daemon/status.js'
+import { collectHypAwareStatus, describeMaintenanceSkipReasons, sourceHealth } from '../daemon/status.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { sanitizeLabel } from '../util/json_util.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { ENV_VAR_NAME } from '../daemon/launchd_env.js'
 import { formatFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
+import { productStatus } from '../product_telemetry/commands.js'
 
 /**
  * @import { AiGatewayCapability, CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
- * @import { HypAwareStatusReport, ServiceState } from '../../../src/core/daemon/types.js'
+ * @import { HypAwareStatusReport, ServiceState, SourceHealth } from '../../../src/core/daemon/types.js'
  * @import { ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  */
 
@@ -97,7 +98,7 @@ export async function runStatus(argv, ctx) {
           datasets,
           cacheRoot: ctx.storage.cacheRoot,
         })
-        ctx.stdout.write(JSON.stringify(payload, null, 2) + '\n')
+        ctx.stdout.write(JSON.stringify({ ...payload, product_telemetry: productStatus(ctx.env) }, null, 2) + '\n')
         return 0
       }
       renderStatusText({
@@ -107,6 +108,7 @@ export async function runStatus(argv, ctx) {
         cacheRoot: ctx.storage.cacheRoot,
         stdout: ctx.stdout,
       })
+      ctx.stdout.write(`product telemetry: ${productStatus(ctx.env).collection} (hyp telemetry status; hyp telemetry preview)\n`)
       return 0
     },
     { component: 'status' }
@@ -331,6 +333,7 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
       mode: report.daemon.mode ?? null,
       run_id: report.daemon.runId ?? null,
       platform: report.daemon.platform,
+      ...(report.daemon.processes ? { processes: report.daemon.processes } : {}),
       ...(report.daemon.error ? { error: report.daemon.error } : {}),
     },
     ...(report.selfUpdate ? { self_update: report.selfUpdate.json } : {}),
@@ -339,15 +342,19 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
     // running is not started, on either plane. The dead run's own last write
     // stays readable, byte-exact, from `hyp daemon status --json` (#1416).
     // @ref LLP 0385#sources-state-is-a-verdict [implements]: --json is a machine rendering of this report, not a second data source with different epistemics
-    sources: report.sources.map((s) => ({
-      name: s.name,
-      plugin: s.plugin,
-      state: s.state,
-      ...(report.layered
-        ? { provenance: report.layered.centralPlugins.includes(s.plugin) ? 'central' : 'local' }
-        : {}),
-      ...(s.error ? { error: s.error } : {}),
-    })),
+    sources: report.sources.map((s) => {
+      const health = sourceHealthJson(sourceHealth(s.health))
+      return {
+        name: s.name,
+        plugin: s.plugin,
+        state: s.state,
+        ...(report.layered
+          ? { provenance: report.layered.centralPlugins.includes(s.plugin) ? 'central' : 'local' }
+          : {}),
+        ...(s.error ? { error: s.error } : {}),
+        ...(health ? { health } : {}),
+      }
+    }),
     sinks: report.sinks.map((s) => ({
       instance: s.instance,
       plugin: s.plugin,
@@ -562,6 +569,46 @@ export function renderStatusJson({ report, clientNames, datasets, cacheRoot }) {
 }
 
 /**
+ * A source's own report of itself, as the machine plane spells it: the
+ * validated fields under this surface's snake_case spelling.
+ *
+ * @param {SourceHealth | undefined} health
+ * @returns {Record<string, unknown> | undefined}
+ * @ref LLP 0394#health-rides-beside-state [implements]: the reported fields reach an operator, under their published names
+ */
+function sourceHealthJson(health) {
+  if (!health) return undefined
+  return {
+    ...(health.state !== undefined ? { state: health.state } : {}),
+    ...(health.message !== undefined ? { message: health.message } : {}),
+    ...(health.rowsWritten !== undefined ? { rows_written: health.rowsWritten } : {}),
+    ...(health.lastError !== undefined ? { last_error: health.lastError } : {}),
+  }
+}
+
+/**
+ * The one text line a source's own report earns, or nothing.
+ *
+ * Only a source saying something is wrong prints: a `lastError`, or a state
+ * of `degraded`, `error` or `stopped`. Every healthy install reports a
+ * `message` and a `rowsWritten` on every tick, and a line per source per
+ * run would bury the block this is meant to make legible; those two stay on
+ * the machine plane, which is read by something that can filter.
+ *
+ * @param {SourceHealth | undefined} health
+ * @returns {string | undefined}
+ * @ref LLP 0394#quiet-when-healthy [implements]: the text plane speaks only for a source reporting trouble
+ */
+function sourceHealthLine(health) {
+  if (!health) return undefined
+  const state = health.state ?? ''
+  const lastError = printable(health.lastError, MAX_ERROR_CHARS)
+  if (!lastError && state !== 'degraded' && state !== 'error' && state !== 'stopped') return undefined
+  const detail = lastError || printable(health.message, MAX_ERROR_CHARS)
+  return `reports ${state || 'a failure'}${detail ? `: ${detail}` : ''}`
+}
+
+/**
  * How much of an `error` line a hostile file may spend. Wider than a label's
  * 120, because unlike a name this carries a real error message - typically an
  * fs or parser error naming a full path - and the clamp exists to stop the
@@ -655,8 +702,19 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   if (report.activePlugins.length === 0) {
     stdout.write('    (none - no config or no plugins selected)\n')
   } else {
+    // The list is the configured set, so a plugin that did not activate still
+    // belongs on it, tagged: unqualified, the line claims it is running when
+    // some or all of what it contributes is not. How much is not, the reason,
+    // and the repair are in the diagnostics block.
+    //
+    // "did not activate", not "failed to activate": one of the two doors into
+    // this set is a plugin the dependency resolver eliminated, which never ran
+    // a line of its own code to fail in (issue #1580). The wording is the one
+    // `hyp plugin list` already uses for the same set on the same install.
+    const failed = new Set(report.failedPlugins)
     for (const name of report.activePlugins) {
-      stdout.write(`    - ${name}${provenanceTag(report.layered, isCentralPlugin(report.layered, name))}\n`)
+      const tag = failed.has(name) ? '  [did not activate]' : ''
+      stdout.write(`    - ${name}${provenanceTag(report.layered, isCentralPlugin(report.layered, name))}${tag}\n`)
     }
   }
 
@@ -666,6 +724,8 @@ export function renderStatusText({ report, clientNames, datasets, cacheRoot, std
   } else {
     for (const s of report.sources) {
       stdout.write(`    - ${printable(s.name)}  (${printable(s.plugin)})  [${printable(s.state)}]${provenanceTag(report.layered, isCentralPlugin(report.layered, s.plugin))}\n`)
+      const health = sourceHealthLine(sourceHealth(s.health))
+      if (health) stdout.write(`        ${health}\n`)
     }
   }
 

@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0002, LLP 0012, LLP 0014
-**Extended-by:** LLP 0318 (opt-in, bounded process/runtime diagnostic metrics),
+**Extended-by:** LLP 0393 (draft request for a separate opt-in product channel), LLP 0318 (opt-in, bounded process/runtime diagnostic metrics),
 LLP 0339 (the non-dev shutdown budget in #shutdown-and-flush is no longer the
 literal 500ms recorded here: it is derived from the OTLP export timeout so it
 sits above it by construction; the dev budget stands),

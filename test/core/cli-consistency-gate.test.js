@@ -44,6 +44,7 @@ import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { dryRunActivate } from '../../src/core/plugin_doctor/dry_run.js'
 import { loadManifest } from '../../src/core/manifest.js'
+import { COMMANDS } from '../../src/core/product_telemetry/contract.js'
 import { usageForVerb } from '../../src/core/cli/verb_codec.js'
 import { verbToCommand } from '../../src/core/cli/verb_command.js'
 
@@ -368,6 +369,47 @@ test('--help never reaches the command body', async () => {
   assert.ok(out.includes('Long help for the fixture.\n'))
 })
 
+// --- product telemetry vocabulary --------------------------------------------
+
+/**
+ * The only labels `COMMANDS` carries that no registration owns. Dispatch
+ * reports bare `hyp --help`, a group's own help and an unknown subcommand as
+ * `help`, and `other`/`unknown` are the closed-set fallbacks a name outside
+ * the vocabulary collapses to.
+ */
+const SYNTHETIC_TELEMETRY_COMMANDS = ['help', 'other', 'unknown']
+
+/**
+ * Telemetry transmits `matched.command.name` only when `COMMANDS` already
+ * holds it, so a command missing from the list is never unsafe: it reports as
+ * `other`. It is also never noticed, because that undercount looks exactly
+ * like a command nobody ran. This is the only place the two lists meet, and it
+ * reads both directions: a new command has to be added, a deleted one removed.
+ *
+ * The comparison is against what this package ships, core plus the bundled
+ * workspace. A separately installed plugin's commands are outside the
+ * vocabulary by design and report as `other`; that closure is what makes the
+ * transmitted set auditable, so widening it is a design change, not a test
+ * fixup.
+ *
+ * @ref LLP 0393#contract [tests]: contract.js holds the coordinated v1 command vocabulary, so it has to stay the command surface
+ */
+test('the product telemetry command allowlist names exactly the shipped command surface', async () => {
+  const registry = await bundledRegistry()
+  const shipped = new Set([...registry.list().map((c) => c.name), ...SYNTHETIC_TELEMETRY_COMMANDS])
+  const allowed = new Set(COMMANDS)
+  assert.deepEqual(
+    [...shipped].filter((name) => !allowed.has(name)).sort(),
+    [],
+    'registered commands missing from COMMANDS in src/core/product_telemetry/contract.js: each reports as `other` instead of itself'
+  )
+  assert.deepEqual(
+    COMMANDS.filter((name) => !shipped.has(name)).sort(),
+    [],
+    'COMMANDS entries in src/core/product_telemetry/contract.js that no registration owns: delete them'
+  )
+})
+
 // --- top-level help ---------------------------------------------------------
 
 test('hyp --help renders the exact journey order and compact operations list', async () => {
@@ -381,7 +423,7 @@ test('hyp --help renders the exact journey order and compact operations list', a
     'client', 'privacy', 'session', 'join', 'leave', 'sync',
   ])
   assert.deepEqual(additionalCommandNames(out), [
-    'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'version', 'update', 'dev',
+    'daemon', 'config', 'cache', 'sink', 'plugin', 'remote', 'mcp', 'version', 'update', 'dev', 'telemetry',
   ])
   assert.doesNotMatch(out, /\b(?:admin|fleet)\b/)
 })

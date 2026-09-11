@@ -1,7 +1,7 @@
 // @ts-check
 
 import { requireGithubRuntime } from './runtime.js'
-import { runCaptureTick } from './tick.js'
+import { GRAPH_ERROR_REPO, runCaptureTick } from './tick.js'
 
 /**
  * @import { CommandRunContext } from './types.js'
@@ -22,7 +22,7 @@ export async function runGithub(_argv, ctx) {
     'hyp github <subcommand>\n' +
       '  backfill [owner/repo ...]  pull full history into github_events (cold-start)\n' +
       '  sync                       run one poll tick now (off the daemon)\n' +
-      "\nthen run 'hyp graph project' to project github_events into the node/edge graph\n",
+      '\nGitHub capture automatically projects github_events into the node/edge graph.\n',
   )
   return 0
 }
@@ -31,8 +31,7 @@ export async function runGithub(_argv, ctx) {
  * `hyp github backfill [owner/repo ...]` - the deliberate cold-start pull of
  * full history (polling is forward-only, so a freshly-configured repo has years
  * of history a poller would never see - LLP 0360). With no positional repos it
- * backfills the whole configured selection. Fills `github_events` only;
- * projection is a separate `hyp graph project`.
+ * backfills the whole configured selection and projects captured GitHub rows.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -52,17 +51,17 @@ export async function runGithubBackfill(argv, ctx) {
     ctx.stdout.write(`github backfill: ${result.events} event(s) across ${result.visited} repo(s)\n`)
     if (result.pending) ctx.stdout.write('github backfill: bounded work remains and will resume on the next GitHub capture tick\n')
     reportErrors(ctx, result.errors)
-    // Zero repos with an error reported is an inventory that never resolved,
-    // not a selection that missed: `reportErrors` already printed the real
-    // cause, so do not contradict it with a claim about the user's config.
-    if (only && result.repos === 0 && result.errors.length === 0) {
+    // Zero repos with a *capture* error reported is an inventory that never
+    // resolved, not a selection that missed: `reportErrors` already printed the
+    // real cause, so do not contradict it with a claim about the user's config.
+    // A failed projection shares that list (LLP 0392#retry) and is never that
+    // cause, so it must not stand in for one: letting it swallow this line
+    // leaves a user who named a repository outside the inventory reading a
+    // graph error instead of the reason their selection captured nothing.
+    const captured = result.errors.filter((e) => e.repo !== GRAPH_ERROR_REPO)
+    if (only && result.repos === 0 && captured.length === 0) {
       ctx.stderr.write(`hyp github backfill: none of [${only.join(', ')}] are in the active repository inventory\n`)
       return 1
-    }
-    // Nothing captured because the run errored leaves nothing new to project,
-    // so the next-step advice would only dress up a failure as progress.
-    if (result.repos > 0 || result.errors.length === 0) {
-      ctx.stdout.write("run 'hyp graph project' to project github_events into the graph\n")
     }
     return result.errors.length > 0 ? 1 : 0
   } catch (err) {

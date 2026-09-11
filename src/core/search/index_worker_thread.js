@@ -43,28 +43,11 @@ port.on('message', (/** @type {{ id: number, source: ArrayBuffer }} */ message) 
  */
 async function handle({ id, source }) {
   try {
-    const bytes = new Uint8Array(source)
-    // hypgrep reads through an AsyncBuffer; the whole file is already
-    // resident, so slicing is a copy out of memory.
-    const sourceFile = {
-      byteLength: bytes.byteLength,
-      /**
-       * @param {number} [start]
-       * @param {number} [end]
-       * @returns {ArrayBuffer}
-       */
-      slice(start, end) {
-        const view = bytes.subarray(start ?? 0, end ?? bytes.byteLength)
-        const out = new ArrayBuffer(view.byteLength)
-        new Uint8Array(out).set(view)
-        return out
-      },
-    }
     const indexFile = new ByteWriter()
-    const metadata = await parquetMetadataAsync(sourceFile)
+    const metadata = await parquetMetadataAsync(source)
     // @ref LLP 0264#shared [implements]: only the searchable columns are indexed; hypgrep's default would n-gram every string column, and the server measured system_text alone at 90.8% of decoded index text
     const textColumns = searchableStringColumns(metadata)
-    await createIndex({ sourceFile, sourceMetadata: metadata, indexFile, textColumns })
+    await createIndex({ sourceFile: source, sourceMetadata: metadata, indexFile, textColumns })
     const index = indexFile.getBuffer()
     port.postMessage({ id, index }, [index])
   } catch (err) {

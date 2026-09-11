@@ -28,6 +28,7 @@ import { detectShadowedPlugins } from '../runtime/boot.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
+import { isEphemeralBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
 import { atomicWriteJsonSync, readFileIfExistsSync } from '../util/fs_atomic.js'
 import { getAtDottedPath, isPlainObject, sanitizeLabel } from '../util/json_util.js'
@@ -43,7 +44,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
-import { warningsRecordBootFailure } from './boot_failure.js'
+import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -57,14 +58,16 @@ import {
 } from './linux.js'
 import {
   daemonRunDir,
+  processingStateRoot,
   processIsAlive,
   readPidFile,
 } from './pid.js'
 
 /**
- * @import { HypAwareV2Config, PluginConfigInstance } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { HypAwareV2Config, PluginConfigInstance, SourceContribution, SourceStatus } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { ClientActionStatus, ConfigControlStatus, ConfigValidationError } from '../../../src/core/config/types.js'
- * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
+ * @import { CacheFlushFailureReport, CaptureHealthReport, ClientActionReport, ClientActionsReport, ClientAttachReport, CollectStatusOptions, DaemonStatus, DroppedUpstreamAttribution, HypAwareStatusReport, MaintenanceSkippedPartition, MaintenanceSkipReason, MaintenanceSkipSnapshot, ProxyTrustReport, RecentEntrypoint, ServiceState, SinkSnapshot, SourceHealth, SourceSnapshot, StatusDiagnostic } from '../../../src/core/daemon/types.js'
  * @import { MaintenancePartitionReport, MaintenanceReport } from '../../../src/core/cache/types.js'
  * @import { Dirent } from 'node:fs'
  * @import { FileHandle } from 'node:fs/promises'
@@ -886,6 +889,115 @@ function liveStatusSources(stateRoot) {
 }
 
 /**
+ * How much of a source-reported sentence the status file keeps. Nothing on
+ * the way in bounds a plugin-authored string, and this file is rewritten
+ * every tick and read back by a command that prints it. Wider than
+ * `sanitizeLabel`'s default because these are sentences, not names.
+ * @ref LLP 0164#gateway-tracks-what-core-cannot-name [constrained-by]: a plugin string bound for status.json is bounded where it is recorded
+ */
+const MAX_SOURCE_HEALTH_CHARS = 200
+
+/** The health words `SourceStatus.state` is allowed to carry. */
+const SOURCE_HEALTH_STATES = new Set(['starting', 'ready', 'degraded', 'stopped', 'error'])
+
+/**
+ * What a source said about itself, in the form the status file records it.
+ *
+ * Each field is validated on its own terms and dropped when it did not arrive
+ * usable, because a plugin may return anything: the alternative is a status
+ * file asserting `rowsWritten: NaN` or a state word no reader knows. The
+ * daemon runs this on the way in and `hyp status` again on the way out, one
+ * function rather than two because the file outlives the build that wrote it,
+ * so what comes back out of it is no more trusted than what a plugin handed
+ * in.
+ *
+ * @param {SourceStatus | SourceHealth | null | undefined} reported
+ * @returns {SourceHealth | undefined}
+ * @ref LLP 0394#health-rides-beside-state [implements]: the published fields are recorded under their published names, validated and bounded
+ */
+export function sourceHealth(reported) {
+  if (!reported || typeof reported !== 'object') return undefined
+  /** @type {SourceHealth} */
+  const health = {}
+  const state = reported.state
+  if (typeof state === 'string' && SOURCE_HEALTH_STATES.has(state)) health.state = state
+  const message = sanitizeLabel(reported.message, MAX_SOURCE_HEALTH_CHARS)
+  if (message !== undefined) health.message = message
+  if (typeof reported.rowsWritten === 'number' && Number.isFinite(reported.rowsWritten)) {
+    health.rowsWritten = reported.rowsWritten
+  }
+  const lastError = sanitizeLabel(reported.lastError, MAX_SOURCE_HEALTH_CHARS)
+  if (lastError !== undefined) health.lastError = lastError
+  return Object.keys(health).length > 0 ? health : undefined
+}
+
+/**
+ * The name and plugin a source contribution is listed and driven under, and
+ * whether it is still answering with the name it registered under.
+ *
+ * `register` validated `name` and `plugin` once and stored the contribution by
+ * reference, so what it validated is not what a later read returns: both are
+ * free to be accessors. `sources.start(name, ctx)` resolves
+ * `contributions.get(name)` and starts *that* contribution, so a `name`
+ * answering with a neighbour's registered name starts the neighbour's source
+ * under this plugin's activation context, its config slice and its capability
+ * handles (issue #1535). `register` keys the Map by the string it validated, so
+ * resolving the name back to this same object is what makes that key mean
+ * anything here. It is the guard `readIdentity` already applies to a backfill
+ * provider in `src/core/daemon/backfill_sweep.js`.
+ *
+ * `plugin` is read in the same guarded pass because the boot walk hoisted it
+ * outside every try, and it picks the activation context beside the name, so it
+ * is no more a bare label than the name is. It resolves back through
+ * `ownerOf`, the plugin the kernel saw call `register`, rather than standing
+ * as the contribution's own claim: a source started under a neighbour's
+ * context gets that neighbour's config slice, paths, logger, capability
+ * handles and permission context (issue #1541). The registry records an owner
+ * only for a source registered through an activation context, so one
+ * registered straight on the registry still resolves to what it declares, and
+ * the resolution is gated on `registered` for the same reason the name is: an
+ * `ownerOf` keyed by a name answering with a neighbour's would label this
+ * contribution with the neighbour's plugin. A `plugin` that is no longer a
+ * string degrades to the empty string, which every caller must treat as "no
+ * plugin" rather than as a key to look up: it collapses the non-strings onto
+ * one string, and a string is the shape an activation-context lookup takes.
+ *
+ * `registered` false is the refusal, and it covers both ways the read can end
+ * badly: a name that resolves to another contribution or to none, and a read
+ * that threw, including one that got the name and threw on the plugin. A
+ * caller reporting the skip should say the identity would not read back rather
+ * than name one of the two. The `name` beside the refusal is whatever the
+ * contribution claimed before it (the empty string when it claimed nothing
+ * readable), so that caller can name it without reading the plugin's object
+ * again from inside its own handler.
+ *
+ * @param {ExtendedSourceRegistry | undefined} sources
+ * @param {SourceContribution} contribution
+ * @returns {{ name: string, plugin: string, registered: boolean }}
+ * @ref LLP 0012#contribution-surface [constrained-by]: unique source names are the registry's keys, so a consumer resolves a contribution back through them before driving it by name
+ */
+export function readSourceIdentity(sources, contribution) {
+  let name = ''
+  let plugin = ''
+  try {
+    const claimed = contribution.name
+    if (typeof claimed === 'string') name = claimed
+    const declared = contribution.plugin
+    if (typeof declared === 'string') plugin = declared
+    // `register` refuses an empty name, so the empty string a contribution that
+    // claimed nothing readable carries here resolves to nothing.
+    const registered = sources?.get?.(name) === contribution
+    const recorded = registered ? sources?.ownerOf?.(name) : undefined
+    if (typeof recorded === 'string' && recorded.length > 0) plugin = recorded
+    return { name, plugin, registered }
+  } catch {
+    // Reading the identity is what just failed. Whatever was read before the
+    // throw still names the contribution better than nothing does.
+    return { name, plugin, registered: false }
+  }
+}
+
+/**
  * @param {SourceSnapshot | undefined} source
  * @returns {Record<string, unknown> | undefined}
  */
@@ -1244,6 +1356,7 @@ export async function collectHypAwareStatus(opts = {}) {
     if (!daemon.runId) daemon.runId = daemonStatusFile.runId
     if (!daemon.mode) daemon.mode = daemonStatusFile.mode
     daemon.state = daemonStatusFile.state
+    daemon.processes = daemonStatusFile.processes
   }
 
   // ----- is the process that owns the pid still running its loop? -----
@@ -1270,7 +1383,10 @@ export async function collectHypAwareStatus(opts = {}) {
   // daemon's.
   const snapshotIsThisProcess =
     typeof daemonStatusFile?.pid !== 'number' || daemonStatusFile.pid === daemon.pid
-  const heartbeatAgeMs = daemon.running && snapshotIsThisProcess
+  // Is the snapshot a live daemon's own, and so readable in the present tense
+  // at all? Every reader below that makes a claim about *now* is gated on it.
+  const snapshotIsLive = daemon.running && snapshotIsThisProcess
+  const heartbeatAgeMs = snapshotIsLive
     ? daemonHeartbeatAgeMs(daemonStatusFile, Date.now())
     : null
   if (heartbeatAgeMs !== null && heartbeatAgeMs > DAEMON_HEARTBEAT_STALE_MS) {
@@ -1420,12 +1536,32 @@ export async function collectHypAwareStatus(opts = {}) {
   const sinks = []
   const runtimeSources = opts.runtime?.sources?.list?.() ?? []
   if (runtimeSources.length > 0) {
+    // The `started()` probe and the row it labels have to be asking about the
+    // same source, so both come from one guarded read (issue #1535). A
+    // contribution that cannot be read back to its registered name is left off
+    // the list rather than listed under a name that is not its own.
+    let unregistered = 0
     for (const contribution of runtimeSources) {
-      const started = opts.runtime?.sources?.started?.(contribution.name)
+      const identity = readSourceIdentity(opts.runtime?.sources, contribution)
+      if (!identity.registered) {
+        unregistered += 1
+        continue
+      }
+      const started = opts.runtime?.sources?.started?.(identity.name)
       sources.push({
-        name: contribution.name,
-        plugin: contribution.plugin,
+        name: identity.name,
+        plugin: identity.plugin,
         state: started ? 'started' : 'stopped',
+      })
+    }
+    if (unregistered > 0) {
+      diagnostics.push({
+        severity: 'warning',
+        kind: 'source_name_unregistered',
+        message: unregistered === 1
+          ? 'a registered source could not be read back to the name it registered under and is left off this list'
+          : `${unregistered} registered sources could not be read back to the names they registered under and are left off this list`,
+        repair: ['hyp plugin list'],
       })
     }
   } else if (daemonStatusFile && Array.isArray(daemonStatusFile.sources) && daemonStatusFile.sources.length > 0) {
@@ -1455,7 +1591,6 @@ export async function collectHypAwareStatus(opts = {}) {
     // dereferences `.name`, so a `null` in the list takes the whole report out
     // at the render rather than here.
     // @ref LLP 0348#stale-heartbeat-is-unresponsive [implements]: a snapshot left by an exited daemon is a record, not a claim about now
-    const snapshotIsLive = daemon.running && snapshotIsThisProcess
     sources.push(...daemonStatusFile.sources
       .filter((s) => !!s && typeof s === 'object')
       .map((s) => (
@@ -1465,6 +1600,110 @@ export async function collectHypAwareStatus(opts = {}) {
       )))
   } else {
     sources.push(...inferConfiguredSources(activePlugins))
+  }
+
+  // ----- plugins the running daemon could not activate (issues #1556, #1580) -----
+  // `activePlugins` above is the configured set: the right answer to what this
+  // machine is set up to do, the only answer available with no daemon running,
+  // and no answer at all to whether a plugin is running. The daemon is the only
+  // process that knows that, so it comes from the snapshot, whose entries are
+  // validated the way every borrowed list here is: the file is only known to
+  // hold an object (LLP 0164#status-reads-it-from-the-status-file).
+  // @ref LLP 0383#a-record-not-a-claim [constrained-by]: an `error` diagnostic is present tense, so it is raised off a live daemon's snapshot only
+  /** @type {string[]} */
+  const failedPlugins = []
+  const reportedFailures = snapshotIsLive && Array.isArray(daemonStatusFile?.failedPlugins)
+    ? daemonStatusFile.failedPlugins
+    : []
+  // Where the untruncated reason is. Both files, because either process can be
+  // the one that could not activate the plugin, and the entry does not say
+  // which. Same two paths `recent_errors` counts (LLP 0349), derived the same
+  // way, so the pointer cannot drift from the store it points at.
+  const activationLogGrep = reportedFailures.length === 0 ? ''
+    : `grep -s plugin_activate_failed ${path.join(daemonLogDir(stateRoot), 'daemon.log')} `
+      + `${path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log')}`
+  // The daemon's *own* sink rows, not the `sinks` list this collector builds
+  // further down: that one starts from `config.sinks`, where a request
+  // instance names its plugin whether or not anything came of it, so it would
+  // report a sink running for a plugin that failed in both processes. A row
+  // here is a handle the child materialized, and `materializeRequest` builds
+  // one only for a plugin with a live activation context that registered the
+  // contribution. Same shape guard as every other borrowed list here
+  // (LLP 0164#status-reads-it-from-the-status-file).
+  const liveSinks = reportedFailures.length === 0 || !Array.isArray(daemonStatusFile?.sinks)
+    ? []
+    : daemonStatusFile.sinks.filter((s) => !!s && typeof s === 'object')
+  for (const entry of reportedFailures) {
+    const name = sanitizeLabel(entry?.name)
+    if (name === undefined) continue
+    failedPlugins.push(name)
+    // An error, so it degrades `overall` through the existing severity rule.
+    // The daemon is up and the rest of the install works, but a plugin the
+    // operator configured is capturing nothing, and a machine that silently
+    // stopped capturing is the outage this surface exists to name.
+    // What is left of the plugin, read off the same snapshot the failure came
+    // from rather than asserted. A routing contributor activates in *both*
+    // daemon processes, and in the gateway it gets a storage proxy that throws
+    // on every cache call, so one that reads storage in `activate()` fails
+    // there and comes up in the processing daemon: its source is `started` in
+    // this very report while the entry says it never activated. "Nothing of it
+    // is running" is a claim this collector can check, so it checks it - for
+    // sinks as well as sources, because the same split state materializes a
+    // configured request-sink instance in the child (issue #1571).
+    //
+    // Commands are not in the sentence at all. A `DaemonStatus` has no field
+    // for them, so there is nothing to read; and asserting them anyway is not
+    // merely unchecked but wrong, since commands are dispatched from the CLI's
+    // own boot, where a plugin that only the gateway's storage proxy defeats
+    // activates normally. This very process can run the command in the same
+    // breath as calling it stopped.
+    const stillContributing = sources.some((s) => s.plugin === name && s.state === 'started')
+      || liveSinks.some((s) => s.plugin === name)
+    // What is left of the plugin, never why it is gone, so both doors below
+    // share it verbatim.
+    const runningTail = stillContributing
+      ? ' - it came up in only one of the daemon\'s two processes, so part of what it contributes is not running'
+      : ' - none of its sources or sinks are running'
+    const reason = sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'
+    if (entry.errorKind === REQUIRES_UNSATISFIED_ERROR_KIND) {
+      // A throw's severity, for the operator's reason rather than the author's:
+      // the plugin they configured is capturing nothing either way, and `error`
+      // is the only severity that moves `overall` off `healthy` - reporting
+      // this install healthy being the whole defect (issue #1580). A kind of its
+      // own because nothing else carries over: this plugin never ran a line of
+      // its own code, so "failed to activate" would be a false sentence and
+      // `hyp daemon restart` a repair that changes nothing while the config
+      // still asks for a set the resolver cannot satisfy.
+      diagnostics.push({
+        severity: 'error',
+        kind: 'plugin_requires_unsatisfied',
+        message: `plugin '${name}' did not activate - the dependency resolver eliminated it (${reason})` + runningTail,
+        // The reason is the resolver's own and names what is missing, so the
+        // repair is the config edit that supplies it or withdraws the request.
+        // Only a restart re-resolves: the daemon reads `requires` at boot.
+        repair: [
+          `enable what the reason names, or remove '${name}', in ${configPath}`,
+          'hyp daemon restart  # requires are resolved at boot',
+        ],
+      })
+      continue
+    }
+    diagnostics.push({
+      severity: 'error',
+      kind: 'plugin_activate_failed',
+      message: `plugin '${name}' failed to activate `
+        + `(${sanitizeLabel(entry.errorKind) ?? 'activate_failed'}): `
+        + reason
+        + runningTail,
+      // Not `hyp plugin list`: it prints the plugins *this* CLI boot activated
+      // plus the install lock, so the plugin that just failed is either missing
+      // from the output entirely (a bundled adapter, the likeliest subject) or
+      // sits under "Installed plugins" with nothing marking it as broken. The
+      // reason above is clamped to a sentence and the commonest real one is a
+      // module-resolution error longer than that, so the first repair is the
+      // record that kept it whole.
+      repair: [activationLogGrep, 'hyp daemon restart'],
+    })
   }
 
   // ----- recent client surfaces (LLP 0164) -----
@@ -2239,6 +2478,7 @@ export async function collectHypAwareStatus(opts = {}) {
     configValid,
     configRecordsAnswer,
     activePlugins,
+    failedPlugins,
     layered,
     daemon,
     sources,
@@ -2772,6 +3012,106 @@ function markerHasRetiredHookField(markerObj) {
 }
 
 /**
+ * Whether the marker's managed hook commands run the CLI out of a tree its
+ * package manager deletes on a schedule of its own: npm's `_npx` cache, or a
+ * project's own `node_modules`.
+ *
+ * The same class of drift as the retired field above, one field over: the
+ * marker records what today's attach would refuse to write. A hook command
+ * baked under `npx hypaware` names a cache npm prunes on its own schedule,
+ * and the hook contract is exit-0-and-be-silent, so once it is pruned `cwd` /
+ * `git_branch` capture stops with nothing to show for it. Issue #1602 stopped
+ * attach writing that path, but only for an attach that reaches the adapter,
+ * and this marker is current in every other key (port, mode, schema token,
+ * asset set), so the repair short-circuits and changes nothing (issue #1607).
+ *
+ * The predicate is `isEphemeralBinPath`, the same one the adapter decides
+ * with when it bakes the command. Anything narrower here reopens #1607 one
+ * tree over: the adapter warns that a project-local hook command will stop
+ * capturing and names a re-attach as the repair, and a marker current in every
+ * other key short-circuits that re-attach, so the operator does as they are
+ * told and nothing changes. A recorded path that merely no longer resolves is
+ * still left alone: a CLI moves for ordinary reasons (a node version switch, a
+ * prefix change) and "gone from disk" cannot tell that apart from a deleted
+ * tree, whereas both of these are package-manager-owned and
+ * deletion-scheduled by construction, whether or not they are still there
+ * today.
+ *
+ * With no CLI installed anywhere the re-attach writes the same path again,
+ * because it is the only entrypoint there is, and takes the adapter's existing
+ * ephemeral-hook warning branch - which is the point, since an already-attached
+ * user is exactly who never saw that warning.
+ *
+ * @param {Record<string, unknown>} markerObj
+ * @param {NodeJS.ProcessEnv | undefined} env
+ * @returns {boolean}
+ */
+function markerRecordsEphemeralHookBin(markerObj, env) {
+  const managed = markerObj.managed
+  if (!isPlainObject(managed)) return false
+  const entries = managed.hook_entries
+  if (!Array.isArray(entries)) return false
+  // One answer per distinct path, not per entry. Attach writes six managed
+  // entries (`MANAGED_HOOK_SPECS` in the adapter) and every one of them names
+  // the same bin, so asking per entry is five repeats of a walk plus a
+  // `statSync` - work `isNpxBinPath` never did, on a function `hyp status` and
+  // the login attach-wait's one-second poll both call.
+  /** @type {Set<string> | undefined} */
+  let asked
+  for (const entry of entries) {
+    if (!isPlainObject(entry)) continue
+    const bin = hookCommandBin(entry.command)
+    // Absolute, or no claim. `isEphemeralBinPath` resolves whatever it is
+    // handed, so a relative token - a hand-edited `node hypaware.js ...`, an
+    // empty quoted command - would be judged against the directory `hyp`
+    // happened to run in, and one marker would read stale from inside a
+    // project and current from anywhere else. Every command attach writes is
+    // absolute, so the guard costs nothing and makes the verdict a property of
+    // the marker alone.
+    if (bin === undefined || !path.isAbsolute(bin)) continue
+    asked ??= new Set()
+    if (asked.has(bin)) continue
+    asked.add(bin)
+    if (isEphemeralBinPath(bin, env)) return true
+  }
+  return false
+}
+
+/**
+ * The CLI path a recorded hook command runs, in the two forms the adapter
+ * shell quoting produces: bare when the path holds only safe characters,
+ * single-quoted (an embedded quote written `'\''`) otherwise. Anything else,
+ * an empty command or an unterminated quote, is `undefined`: no claim, the
+ * same answer as a path that is not from a cache.
+ *
+ * @param {unknown} command
+ * @returns {string | undefined}
+ */
+function hookCommandBin(command) {
+  if (typeof command !== 'string') return undefined
+  const text = command.trimStart()
+  if (text === '') return undefined
+  if (text[0] !== "'") {
+    const end = text.indexOf(' ')
+    return end === -1 ? text : text.slice(0, end)
+  }
+  let out = ''
+  for (let i = 1; i < text.length; i++) {
+    if (text[i] !== "'") {
+      out += text[i]
+      continue
+    }
+    if (text.startsWith("'\\''", i)) {
+      out += "'"
+      i += 3
+      continue
+    }
+    return out
+  }
+  return undefined
+}
+
+/**
  * Probe on-disk client settings using the descriptor's attach_probe
  * definition. Supports JSON (marker key lookup) and TOML (header string
  * search) formats. Returns a probe result without importing any client
@@ -2836,7 +3176,8 @@ export async function probeClientAttachFromDescriptor({ descriptor, homeDir, env
         // the known-invalid field.
         ...(descriptor.name === 'claude' &&
           (markerHasRetiredHookField(markerObj) ||
-            markerObj.settings_schema !== CLAUDE_SETTINGS_MARKER_SCHEMA)
+            markerObj.settings_schema !== CLAUDE_SETTINGS_MARKER_SCHEMA ||
+            markerRecordsEphemeralHookBin(markerObj, env))
           ? { markerFormatStale: true }
           : {}),
       }
@@ -3222,6 +3563,16 @@ const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\
  * to it at all, while the sink outbox carries one file per failed export batch
  * and nothing else writes one.
  *
+ * `daemon.log` is read twice because there are two of them (LLP 0038): the
+ * gateway keeps the one at the primary state root, and the processing child
+ * it supervises keeps its own below `processing/`. Every failure this counter
+ * was built for - tick, source, sink materialize, maintenance, config apply -
+ * is emitted by the kernel daemon, which is now the child, so reading only
+ * the primary log would report a quiet machine while the work that captures
+ * anything was failing. They are disjoint (one process appends to each), so
+ * the two counts add. A pre-split install has no `processing/` directory and
+ * the second read contributes nothing.
+ *
  * `dev-telemetry/logs-*.jsonl` is the third store, and it does overlap:
  * `recordFailure` in `src/core/sinks/driver.js` logs
  * `sink.export_batch.failed` through `getLogger` for the same batch
@@ -3238,11 +3589,13 @@ const OUTBOX_BATCH_TIMESTAMP = /-(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)-\
  */
 async function countRecentErrors(stateRoot, nowMs = Date.now()) {
   const sinceMs = nowMs - RECENT_ERROR_WINDOW_MS
-  const [daemonLog, sinkOutbox, devTelemetry] = await Promise.all([
+  const [gatewayLog, processingLog, sinkOutbox, devTelemetry] = await Promise.all([
     countDaemonLogErrors(path.join(daemonLogDir(stateRoot), 'daemon.log'), sinceMs),
+    countDaemonLogErrors(path.join(daemonLogDir(processingStateRoot(stateRoot)), 'daemon.log'), sinceMs),
     countSinkOutboxBatches(path.join(stateRoot, 'sinks'), sinceMs),
     countDevTelemetryErrors(devTelemetryDir(stateRoot), sinceMs),
   ])
+  const daemonLog = gatewayLog + processingLog
   /** @type {string[]} */
   const breakdown = []
   if (daemonLog > 0) breakdown.push(`${daemonLog} in the daemon log`)

@@ -133,6 +133,8 @@ export interface ContractRegistry {
  */
 export interface ContextGraphCapability {
   registerContract(contract: Contract): void
+  /** Project only contracts registered for this source dataset. */
+  project(sourceDataset: string): Promise<{ nodes: number; edges: number; nodesWritten: number; edgesWritten: number }>
   kit: {
     nodeId(type: string, naturalKey: string): string
     edgeId(srcId: string, type: string, dstId: string): string

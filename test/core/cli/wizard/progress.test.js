@@ -105,16 +105,16 @@ function wizardOpts(home, over = {}) {
 
 // --- the step vocabulary ---
 
-test('wizardStepProgress: the team pathway counts join, pick, sync, folders and finale', async () => {
-  assert.deepEqual(wizardItinerary('team'), ['join', 'pick', 'sync', 'folders', 'finale'])
-  assert.equal(wizardStepProgress('team', 'join'), 'Step 1 of 5 · Join your team')
-  assert.equal(wizardStepProgress('team', 'pick'), 'Step 2 of 5 · Choose what to collect')
-  assert.equal(wizardStepProgress('team', 'sync'), 'Step 3 of 5 · Choose what syncs')
+test('wizardStepProgress: the team pathway counts join, combined pick, folders and finale', async () => {
+  assert.deepEqual(wizardItinerary('team'), ['join', 'pick', 'folders', 'finale'])
+  assert.equal(wizardStepProgress('team', 'join'), 'Step 1 of 4 · Join your team')
+  assert.equal(wizardStepProgress('team', 'pick'), 'Step 2 of 4 · Choose what to collect and sync')
+  assert.equal(wizardStepProgress('team', 'sync'), undefined)
   // The new-folder question is its own lane (LLP 0200 #wizard): the sync
   // lane answers which adapters ship, this one answers what happens the
   // next time the user works somewhere new.
-  assert.equal(wizardStepProgress('team', 'folders'), 'Step 4 of 5 · Choose how new folders are handled')
-  assert.equal(wizardStepProgress('team', 'finale'), 'Step 5 of 5 · Finish setup')
+  assert.equal(wizardStepProgress('team', 'folders'), 'Step 3 of 4 · Choose how new folders are handled')
+  assert.equal(wizardStepProgress('team', 'finale'), 'Step 4 of 4 · Finish setup')
 })
 
 test('wizardStepProgress: the local pathway counts two steps', async () => {
@@ -128,23 +128,21 @@ test('wizardStepProgress: the local pathway counts two steps', async () => {
 })
 
 test('wizardStepProgress: a managed machine on the local pathway gains both enrolled lanes (LLP 0188, LLP 0200)', async () => {
-  assert.deepEqual(wizardItinerary('local', { managed: true }), ['pick', 'sync', 'folders', 'finale'])
-  assert.equal(wizardStepProgress('local', 'pick', { managed: true }), 'Step 1 of 4 · Choose what to collect')
-  assert.equal(wizardStepProgress('local', 'sync', { managed: true }), 'Step 2 of 4 · Choose what syncs')
-  assert.equal(wizardStepProgress('local', 'folders', { managed: true }), 'Step 3 of 4 · Choose how new folders are handled')
-  assert.equal(wizardStepProgress('local', 'finale', { managed: true }), 'Step 4 of 4 · Finish setup')
+  assert.deepEqual(wizardItinerary('local', { managed: true }), ['pick', 'folders', 'finale'])
+  assert.equal(wizardStepProgress('local', 'pick', { managed: true }), 'Step 1 of 3 · Choose what to collect and sync')
+  assert.equal(wizardStepProgress('local', 'sync', { managed: true }), undefined)
+  assert.equal(wizardStepProgress('local', 'folders', { managed: true }), 'Step 2 of 3 · Choose how new folders are handled')
+  assert.equal(wizardStepProgress('local', 'finale', { managed: true }), 'Step 3 of 3 · Finish setup')
 })
 
-// A question lane keeps its place in the total and states its position on
-// the machine where it turns out to have nothing to ask (LLP 0338
-// #counts-anyway). The sync lane on a fully fleet-managed machine is the
-// shipped instance: everything picked is the fleet's, so it states that
-// and asks nothing. Pinned by rendering the real lane, because the
-// alternatives this decision rejected - dropping the lane from the total,
-// or blanking its position line - are both invisible in `steps.js` and
-// only show up on the screen.
-// @ref LLP 0338#counts-anyway [tests]: a lane with no question still prints its position above the statement it makes instead
-test('the sync lane states its position even when it has nothing to ask', async () => {
+// The fully fleet-managed machine: everything picked is the fleet's, so
+// the lane states that and asks nothing. It carries no position line any
+// more - the combined picker took the lane's place in the itinerary
+// (LLP 0396 #combined-selection), and `wizardStepProgress(_, 'sync')` is
+// `undefined` on every pathway (asserted below) - so handing it one here
+// would pin a frame the wizard can no longer render.
+// @ref LLP 0396#combined-selection [tests]: the retired lane states its outcome with no position above it
+test('the sync lane states its outcome, with no position line, when it has nothing to ask', async () => {
   const stdout = makeBuf()
   const result = await runWizardSyncScope(/** @type {any} */ ({
     stdout,
@@ -154,7 +152,6 @@ test('the sync lane states its position even when it has nothing to ask', async 
     locked: [{ id: 'claude', label: 'Claude Code' }],
     lockedHidden: 0,
     candidatesHiddenIds: [],
-    progress: 'Step 3 of 5 · Choose what syncs',
     // The lane's prompt seam is `prompt`, not `confirm`: a guard on the
     // wrong field is inert, and a regression in the no-candidates arm
     // would reach the real stdin instead of failing here.
@@ -163,30 +160,16 @@ test('the sync lane states its position even when it has nothing to ask', async 
 
   assert.equal(result.noQuestion, true, 'the lane asked nothing')
   const lines = stdout.text().split('\n').filter((l) => l !== '')
-  // The position line, and then the statement that corrects what the
-  // label promised, in the same frame at the first moment it is knowable.
+  // The statement alone: no `Step n of m` above it, because the lane is
+  // not a counted screen any more.
   assert.deepEqual(lines, [
-    'Step 3 of 5 · Choose what syncs',
     'Everything you picked is managed by your fleet and always syncs.',
     '  Claude Code',
   ], stdout.text())
 })
 
-// The other half of the same decision: the lane keeps its place in the
-// total, not just its line. `wizardItinerary` takes the pathway and
-// `managed` and nothing else, and hands back a list no caller can edit,
-// so there is no seam through which a lane's emptiness could reach the
-// denominator - which is the point, since the sync lane's candidates are
-// the pick lane's result and the pick lane runs after the fork has fixed
-// the total (LLP 0338 #counts-anyway).
-// @ref LLP 0338#counts-anyway [tests]: the denominator is a function of the pathway alone, so an empty lane never leaves it
+// @ref LLP 0396#combined-selection [tests]: the combined itinerary is fixed before selection, even when no sources are editable
 test('wizardItinerary: no lane emptiness can reach the denominator', async () => {
-  // Every shape a lane's emptiness could arrive in, offered to the
-  // function at once. A future seam that read any of them - a candidate
-  // list, a `noQuestion` flag, a pick result - would drop `sync` from the
-  // total here, which is what this asserts cannot happen. Asserting only
-  // over `managed` would not: it passes just as well against a function
-  // that grew the seam, because nothing would be passing through it.
   const emptiness = /** @type {any} */ ({
     managed: true,
     syncEmpty: true,
@@ -202,32 +185,27 @@ test('wizardItinerary: no lane emptiness can reach the denominator', async () =>
     wizardItinerary('team', emptiness),
   ]
   for (const itinerary of forEveryMachine) {
-    assert.deepEqual(itinerary, ['join', 'pick', 'sync', 'folders', 'finale'])
+    assert.deepEqual(itinerary, ['join', 'pick', 'folders', 'finale'])
   }
-  assert.equal(wizardStepProgress('team', 'sync'), 'Step 3 of 5 · Choose what syncs')
-  assert.equal(wizardStepProgress('team', 'folders'), 'Step 4 of 5 · Choose how new folders are handled')
-  assert.equal(wizardStepProgress('team', 'sync', emptiness), 'Step 3 of 5 · Choose what syncs')
+  assert.equal(wizardStepProgress('team', 'sync'), undefined)
+  assert.equal(wizardStepProgress('team', 'folders'), 'Step 3 of 4 · Choose how new folders are handled')
+  assert.equal(wizardStepProgress('team', 'sync', emptiness), undefined)
   assert.equal(
     wizardStepProgress('team', 'folders', emptiness),
-    'Step 4 of 5 · Choose how new folders are handled'
+    'Step 3 of 4 · Choose how new folders are handled'
   )
 
-  // The other pathway that runs the lane, because it reaches it by the
-  // other route: `team` reads the sync lane off the table, a managed
-  // `local` run splices it in beside `pick`. A seam grown on that arm
-  // alone leaves every assertion above green, so the emptiness has to
-  // bounce off both routes and not just the one the shipped instance was
-  // rendered on.
+  // Enrolled local reconfiguration uses the same combined choice.
   for (const itinerary of [
     wizardItinerary('local', { managed: true }),
     wizardItinerary('local', emptiness),
   ]) {
-    assert.deepEqual(itinerary, ['pick', 'sync', 'folders', 'finale'])
+    assert.deepEqual(itinerary, ['pick', 'folders', 'finale'])
   }
-  assert.equal(wizardStepProgress('local', 'sync', emptiness), 'Step 2 of 4 · Choose what syncs')
+  assert.equal(wizardStepProgress('local', 'sync', emptiness), undefined)
   assert.equal(
     wizardStepProgress('local', 'folders', emptiness),
-    'Step 3 of 4 · Choose how new folders are handled'
+    'Step 2 of 3 · Choose how new folders are handled'
   )
 
   // An options bag cannot see the last seam: the returned list itself. It
@@ -238,7 +216,7 @@ test('wizardItinerary: no lane emptiness can reach the denominator', async () =>
   handed.splice(2, 1)
   assert.deepEqual(
     wizardItinerary('team'),
-    ['join', 'pick', 'sync', 'folders', 'finale'],
+    ['join', 'pick', 'folders', 'finale'],
     'the itinerary a caller was handed is not the one the next caller gets'
   )
 })
@@ -258,7 +236,7 @@ test('runInitWizard: the local pathway reads step 1 of 2 then step 2 of 2', asyn
   assert.equal(seen.finale.progress, 'Step 2 of 2 · Finish setup')
 })
 
-test('runInitWizard: the team pathway reads step 1/2/3/4/5 across join, pick, sync, folders and finale', async () => {
+test('runInitWizard: the team pathway counts four steps with no separate sync position', async () => {
   const { opts, seen } = wizardOpts(await tmpHome(), {
     fork: async () => 'team',
     syncScope: async (/** @type {any} */ o) => { seen.sync = o; return { optedOut: [] } },
@@ -266,11 +244,11 @@ test('runInitWizard: the team pathway reads step 1/2/3/4/5 across join, pick, sy
   })
   const result = await runInitWizard(opts)
   assert.equal(result.pathway, 'team')
-  assert.equal(seen.join.progress, 'Step 1 of 5 · Join your team')
-  assert.equal(seen.pick.progress, 'Step 2 of 5 · Choose what to collect')
-  assert.equal(seen.sync.progress, 'Step 3 of 5 · Choose what syncs')
-  assert.equal(seen.folders.progress, 'Step 4 of 5 · Choose how new folders are handled')
-  assert.equal(seen.finale.progress, 'Step 5 of 5 · Finish setup')
+  assert.equal(seen.join.progress, 'Step 1 of 4 · Join your team')
+  assert.equal(seen.pick.progress, 'Step 2 of 4 · Choose what to collect and sync')
+  assert.equal(seen.sync.progress, undefined)
+  assert.equal(seen.folders.progress, 'Step 3 of 4 · Choose how new folders are handled')
+  assert.equal(seen.finale.progress, 'Step 4 of 4 · Finish setup')
 })
 
 test('runInitWizard: the fork never carries a counter, before or after a failed join', async () => {
@@ -308,10 +286,10 @@ test('runInitWizard: a managed re-entry counts the pathway the fork returns, plu
   const result = await runInitWizard(opts)
   assert.equal(result.pathway, 'local')
   assert.equal(seen.fork.progress, undefined)
-  assert.equal(seen.pick.progress, 'Step 1 of 4 · Choose what to collect')
-  assert.equal(seen.sync.progress, 'Step 2 of 4 · Choose what syncs')
-  assert.equal(seen.folders.progress, 'Step 3 of 4 · Choose how new folders are handled')
-  assert.equal(seen.finale.progress, 'Step 4 of 4 · Finish setup')
+  assert.equal(seen.pick.progress, 'Step 1 of 3 · Choose what to collect and sync')
+  assert.equal(seen.sync.progress, undefined)
+  assert.equal(seen.folders.progress, 'Step 2 of 3 · Choose how new folders are handled')
+  assert.equal(seen.finale.progress, 'Step 3 of 3 · Finish setup')
 })
 
 test('runInitWizard: a non-interactive run carries no breadcrumb anywhere', async () => {

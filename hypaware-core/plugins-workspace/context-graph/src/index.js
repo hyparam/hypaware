@@ -4,6 +4,7 @@ import { runGraphCompact, runGraphProject } from './command.js'
 import { graphNeighborsVerb } from './verb.js'
 import { makeRowBuilders, nodeId, edgeId } from './contract-kit.js'
 import { createContractRegistry } from './contract-registry.js'
+import { projectGraph } from './project.js'
 import {
   EDGE_DATASET,
   graphDatasetRegistration,
@@ -14,23 +15,24 @@ import { setGraphRuntime } from './runtime.js'
 
 /**
  * @import { PluginActivationContext } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { ContextGraphCapability } from './types.js'
  */
 
 /** The capability version source plugins / connectors require to contribute a contract. */
-const CAPABILITY_VERSION = '1.0.0'
+const CAPABILITY_VERSION = '1.1.0'
 
 /**
  * Activate `@hypaware/context-graph`.
  *
  * Registers:
- *  - capability `hypaware.context-graph@1.0.0` - source plugins (or a
+ *  - capability `hypaware.context-graph@1.1.0` - source plugins (or a
  *    connector like `@hypaware/ai-gateway-graph`) call `registerContract` to
  *    contribute a projection contract, and build its rows with the shared
  *    `kit` (id recipe + provenance). The engine runs every registered contract.
  *  - dataset `node` and dataset `edge` - derived graph tables, fronted by
- *    the kernel-managed Iceberg cache (populated by the projection command,
- *    not by a live source)
+ *    the kernel-managed Iceberg cache (populated by the projection command
+ *    or a source's explicit projection request)
  *  - command `graph project` - runs the T0 deterministic projection over
  *    every registered source contract
  *  - command `graph compact` - merges duplicate node/edge rows and
@@ -42,11 +44,11 @@ const CAPABILITY_VERSION = '1.0.0'
  *    `hyp graph --help` and `hyp query graph --help` state the projection
  *    model instead of listing subcommands bare ([LLP 0214])
  *
- * Registration only; the projection runs on demand via the command (no
- * snapshot/commit hook exists, and eventual freshness is acceptable).
+ * Projection runs via the command or a source's capability call. The graph
+ * plugin itself registers no background source or timer.
  *
  * @param {PluginActivationContext} ctx
- * @ref LLP 0023#on-demand-projection [implements]: command-only projection keeps the plugin out of the daemon loop
+ * @ref LLP 0392#capability [implements]: sources request their own projection through the graph capability
  */
 export async function activate(ctx) {
   // The contract registry source plugins contribute into, exposed via the
@@ -58,6 +60,15 @@ export async function activate(ctx) {
   /** @type {ContextGraphCapability} */
   const capability = {
     registerContract: (contract) => registry.register(contract),
+    async project(sourceDataset) {
+      const contracts = registry.list().filter((c) => c.sourceDataset === sourceDataset)
+      if (contracts.length === 0) throw new Error(`graph project: no contract registered for source '${sourceDataset}'`)
+      return projectGraph({
+        query: ctx.query,
+        storage: /** @type {ExtendedQueryStorageService} */ (ctx.storage),
+        contracts,
+      })
+    },
     kit: { nodeId, edgeId, makeRowBuilders },
   }
   ctx.provideCapability('hypaware.context-graph', CAPABILITY_VERSION, capability)
@@ -67,7 +78,7 @@ export async function activate(ctx) {
 
   // The group's own voice. Neither prefix has a bare command, so without this
   // their `--help` is a subcommand table with no prose, and the projection
-  // model (derived, on demand, never live) has nowhere to be stated.
+  // model has nowhere to be stated.
   //
   // Both prefixes are registered because LLP 0248 splits the namespace in two:
   // `graph project|compact` stay direct operations under `graph`, while the
@@ -83,9 +94,9 @@ export async function activate(ctx) {
     'connect to the apps, models, tools, files, skills, programs, repos, and',
     'commits they touched.',
     '',
-    'It is built on demand and never updates itself. Run `hyp graph project`',
-    'before querying, and again after new sessions are recorded; projection is',
-    'idempotent, so re-running it is the cheap way to be current.',
+    'GitHub capture projects its data automatically. Run `hyp graph project`',
+    'to build all sources, including newly recorded sessions, before querying.',
+    'Projection is idempotent, so re-running it is safe.',
     '',
     'Two ways to read it, and they answer different questions:',
     '  hyp query sql "... from node/edge ..."   counts, rankings, group-by',

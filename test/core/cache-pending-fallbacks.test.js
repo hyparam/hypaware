@@ -371,17 +371,16 @@ test('a scan that could not read the table is retried on a cooldown, never on ev
     const saved = new Map(dataFiles.map((file) => [file, fsSync.readFileSync(file)]))
     for (const file of dataFiles) await fs.writeFile(file, 'not a parquet file')
 
-    // Count decode attempts at the only place they can happen: the local
-    // Iceberg resolver reads a data file whole before hyparquet can throw
-    // on it, so one read of a torn file is one attempted scan.
+    // Count reader construction: asyncBufferFromFile stats the torn file
+    // once before hyparquet requests ranges and rejects its invalid footer.
     const torn = new Set(dataFiles)
-    const realReadFileSync = fsSync.readFileSync
+    const realStat = fs.stat
     let scans = 0
     // @ts-ignore - test double over the resolver's one read seam
-    fsSync.readFileSync = (target, ...rest) => {
+    fs.stat = (target, ...rest) => {
       if (typeof target === 'string' && torn.has(target)) scans++
       // @ts-ignore
-      return realReadFileSync(target, ...rest)
+      return realStat(target, ...rest)
     }
     const tick = () => maintainCache({
       cacheRoot: storage.cacheRoot, compactOnly: true, storage, getSettleHook,
@@ -406,7 +405,7 @@ test('a scan that could not read the table is retried on a cooldown, never on ev
       await tick()
       assert.equal(scans, 2, 'and the fresh stamp cools the retry down again')
     } finally {
-      fsSync.readFileSync = realReadFileSync
+      fs.stat = realStat
       for (const [file, bytes] of saved) await fs.writeFile(file, bytes)
     }
 

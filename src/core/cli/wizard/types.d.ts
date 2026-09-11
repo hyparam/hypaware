@@ -72,6 +72,10 @@ export type WizardStepName = 'join' | 'pick' | 'sync' | 'folders' | 'finale'
  * (LLP 0188 #locked).
  */
 export interface RunWizardSyncScopeOptions {
+  /** Return the combined selection for application after the config commits. */
+  deferWrite?: boolean
+  /** Collection picker already confirmed these sources for sharing. */
+  collectAndSync?: boolean
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream
@@ -126,12 +130,17 @@ export interface RunWizardSyncScopeOptions {
   /**
    * Take the stated default without stopping at it (LLP 0201 #narrate):
    * the express gate already answered this lane, so it narrates the sync
-   * split the menu would have shown and proceeds.
+   * split the menu would have shown and proceeds. On the combined path
+   * (`collectAndSync`, LLP 0396) the picker already stated that split, so
+   * the lane applies the answer without restating it; set it only where the
+   * picker's narration carried the sync claim.
    */
   autoAccept?: boolean
 }
 
 export interface WizardSyncScopeResult {
+  /** Selected source ids to enable after the config commits; never a store snapshot. */
+  pendingSources?: string[]
   /** The user cancelled at the prompt; the wizard exits 130. */
   cancelled?: boolean
   /** The user stepped back out of the lane (LLP 0191); nothing written. */
@@ -481,6 +490,8 @@ export interface RunWizardJoinOptions {
  * prompting, matching today's `interactive = !opts.picks` split.
  */
 export interface RunWizardPickOptions {
+  /** Checked sources are collected locally and synced remotely. */
+  collectAndSync?: boolean
   stdout: NodeJS.WritableStream | { write(chunk: string): unknown }
   stderr: NodeJS.WritableStream | { write(chunk: string): unknown }
   stdin?: NodeJS.ReadableStream

@@ -3,6 +3,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { describeEphemeralBinPath } from '../../../../src/core/cli/global_install.js'
+import { Attr, getLogger } from '../../../../src/core/observability/index.js'
+
 import { CLAUDE_DESKTOP_CONFIG_SECTION, validateClaudeDesktopConfig } from './config.js'
 import { resolveHelperPath, resolveHypBin, resolveInputs } from './inputs.js'
 import {
@@ -11,7 +14,7 @@ import {
   renderManagedPreferencesPlist,
 } from './profile.js'
 import { runInstall } from './install.js'
-import { runVerify } from './verify.js'
+import { checkHelperScript, renderHelperLine, runVerify } from './verify.js'
 
 /**
  * @import { PluginActivationContext, CommandRunContext } from '../../../../hypaware-plugin-kernel-types.js'
@@ -156,12 +159,13 @@ export async function activate(ctx) {
     summary: 'Show the resolved Desktop profile inputs (endpoint, mode, helper)',
     usage: 'hyp client claude-desktop status',
     help: 'Prints what the profile WOULD be built from: the gateway endpoint, the credential mode '
-      + 'and auth scheme, the wrapper path and whether it exists on disk, the advertised models, and '
+      + 'and auth scheme, the wrapper path and whether it is there and still runnable, the advertised models, and '
       + 'the target bundle id. It reads config and disk only, changes nothing, and works on a non-Mac '
       + "admin box. It carries no secret: for sign-in state run 'hyp client claude-account status', "
       + "and for whether the install actually took, run 'hyp client claude-desktop verify' - this command answers "
       + 'what the inputs resolve to, not whether Desktop is configured. Exits nonzero when the '
-      + 'credential wrapper is missing, and when the inputs do not resolve at all - an ephemeral '
+      + 'credential wrapper is missing or stale (a wrapper this plugin generated whose baked '
+      + 'interpreter or CLI path has rotted away), and when the inputs do not resolve at all - an ephemeral '
       + "gateway listen (':0') has no stable port for a profile to point at.",
     run: async (_argv, cmdCtx) => {
       const credential = resolveCredential()
@@ -211,7 +215,8 @@ export async function activate(ctx) {
     audience: 'everyday',
     summary: 'Verify the Desktop plist install and print the in-app capture-check hint',
     usage: 'hyp client claude-desktop verify',
-    help: 'Checks the automatic half (managed plist present and up to date, dialog residue cleared) '
+    help: 'Checks the automatic half (managed plist present and up to date, the credential wrapper it '
+      + 'names present and still runnable, dialog residue cleared) '
       + 'and sets the exit code from it. Also prints the in-app half as a hint only (send a message in '
       + 'Claude Desktop, confirm it was captured); that half is never checked automatically and never '
       + 'blocks (LLP 0131#verify-is-a-hint).',
@@ -266,9 +271,10 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
     ? /** @type {string} */ (argv[pathIndex + 1])
     : resolveHelperPath(sectionConfig, stateDir)
   try {
+    const hypBin = resolveHypBin(cmdCtx.env)
     const script = renderCredentialHelperScript({
       nodeBin: process.execPath,
-      hypBin: resolveHypBin(),
+      hypBin: hypBin.binPath,
       args: [...credential.helperCommandArgs],
       env: cmdCtx.env,
     })
@@ -277,6 +283,35 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
     fs.chmodSync(helperPath, 0o755)
     cmdCtx.stdout.write(`wrote credential wrapper to ${helperPath}\n`)
     cmdCtx.stdout.write("point the Desktop profile's inferenceCredentialHelper at this path\n")
+    // After the write, not instead of it: the wrapper works today, and what
+    // needs saying is what will stop working. Desktop runs it outside any shell
+    // profile with no HypAware surface in the loop, so an npm prune of the
+    // cache otherwise shows up only as the app losing its credentials.
+    if (hypBin.ephemeral) {
+      // Named for the tree it is actually in, as far as the verdict can tell:
+      // npm's prune runs on npm's schedule, an `npm ci` on the operator's, so
+      // an operator told the wrong one goes looking in the wrong place. The
+      // repair is the same either way.
+      const where = describeEphemeralBinPath(
+        hypBin.binPath,
+        "Claude Desktop's credential helper fails",
+        cmdCtx.env,
+      )
+      cmdCtx.stderr.write(
+        `claude-desktop install-helper: warning: the wrapper runs ${hypBin.binPath}, `
+        + `${where}. Run 'npm install -g hypaware', then `
+        + "'hyp client claude-desktop install-helper', to record a durable path\n",
+      )
+      // The stderr line is read once, by whoever is at the terminal now; the
+      // wrapper it describes outlives that session and fails silently later.
+      // Recording the decision is what lets the machine be asked afterwards
+      // which path it baked in, the same signal `@hypaware/claude` emits for
+      // the identical choice on its managed hook.
+      getLogger('plugin.claude-desktop').warn('client.install_helper.ephemeral_hyp_bin', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        bin_path: hypBin.binPath,
+      })
+    }
     return 0
   } catch (err) {
     cmdCtx.stderr.write(`claude-desktop install-helper: ${err instanceof Error ? err.message : String(err)}\n`)
@@ -335,14 +370,17 @@ async function runProfile(argv, cmdCtx, sectionConfig, credential, stateDir) {
 async function runStatus(cmdCtx, sectionConfig, credential, stateDir) {
   try {
     const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
-    const helperExists = fs.existsSync(inputs.helperPath)
+    // `fs.existsSync` alone reported "installed" for a wrapper whose baked
+    // interpreter or CLI path had rotted away under it, which is the one
+    // machine that needs the re-run being told nothing is wrong (#1616).
+    const helper = checkHelperScript(inputs.helperPath, cmdCtx.env)
     cmdCtx.stdout.write(`endpoint: ${inputs.baseUrl}\n`)
     cmdCtx.stdout.write(`credential mode: ${credential.mode} (scheme ${inputs.authScheme})\n`)
-    cmdCtx.stdout.write(`helper: ${inputs.helperPath} (${helperExists ? 'installed' : 'NOT installed'})\n`)
+    cmdCtx.stdout.write(`helper: ${renderHelperLine(helper, inputs.helperPath)}\n`)
     cmdCtx.stdout.write(`models: ${inputs.models.join(', ')}\n`)
     cmdCtx.stdout.write(`bundle id: ${inputs.bundleId}\n`)
     cmdCtx.stdout.write("credential state: see 'hyp client claude-account status'\n")
-    return helperExists ? 0 : 1
+    return helper.present && !helper.stale ? 0 : 1
   } catch (err) {
     cmdCtx.stderr.write(`claude-desktop status: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1

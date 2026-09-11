@@ -23,8 +23,12 @@ import {
 const SYNC_SCOPE_MENU_TITLE = 'Choose what syncs. Unchecked sources stay on this machine.'
 
 /**
- * The wizard's sync-scope step (LLP 0188 #never-silent, LLP 0190
- * #sync-gate): after the picker on every enrolled run, a multiselect
+ * Combined setup applies its confirmed collection choice without a prompt
+ * (LLP 0396 #combined-selection), so `runInitWizard` no longer reaches the
+ * menu below; it stands unchanged for direct callers and its own tests.
+ *
+ * The menu, as it was before the combined picker (LLP 0188 #never-silent,
+ * LLP 0190 #sync-gate): after the picker on every enrolled run, a multiselect
  * over the picked, non-locked sources. Checked means "syncs"; everything
  * is checked by default on a fresh join (default-sync is the point), and
  * a re-entry renders the sources already opted out unchecked so
@@ -180,6 +184,41 @@ export async function runWizardSyncScope(opts) {
     return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
   }
 
+  // @ref LLP 0396#combined-selection [implements]: the collection answer also enables sharing, with no second picker
+  if (opts.collectAndSync) {
+    // `autoAccept` here means the picker already printed this list, under
+    // "HypAware will record and sync:" and with the same fleet suffixes, one
+    // line above; the revocation that once set this block apart prints at
+    // commit time. A declined run answers the picker as a menu, which
+    // confirms nothing, so there this block is still the statement that
+    // names what leaves the machine (LLP 0188 #never-silent).
+    if (!opts.autoAccept) {
+      narrateAcceptedGate({
+        stdout: opts.stdout,
+        title: 'These will sync to your server:',
+        // The org's rows keep the suffix the picker and the menu both give
+        // them: the list is the whole sync picture (LLP 0188 #locked), and
+        // unlabelled it reads as though every row on it were the user's to
+        // change here.
+        items: [
+          ...(opts.locked ?? []).map((d) => `  ${d.label}${LOCKED_LABEL_SUFFIX}`),
+          ...opts.candidates.map((d) => `  ${d.label}`),
+        ],
+      })
+    }
+    if (opts.deferWrite) {
+      return await finishSpan({ noQuestion: true, optedOut: [], pendingSources: [...candidateIds] }, opts, {
+        hidden_picks_syncing: hiddenCandidateSyncs,
+        sources_cleared: 0,
+      })
+    }
+    const cleared = await commitWizardSyncScope({ env: opts.env, stdout: opts.stdout, sources: [...candidateIds] })
+    return await finishSpan({ noQuestion: true, optedOut: [] }, opts, {
+      hidden_picks_syncing: hiddenCandidateSyncs,
+      sources_cleared: cleared,
+    })
+  }
+
   const ask = opts.prompt ?? defaultPromptFactory(opts)
   /** @type {{ optedOut: string[] } | { back: true }} */
   let selection
@@ -214,6 +253,39 @@ export async function runWizardSyncScope(opts) {
     )
   }
   return await finishSpan({ optedOut }, opts)
+}
+
+/**
+ * Apply only the final confirmed selection to the current policy store.
+ * Re-reading preserves unrelated edits made while the wizard was open and
+ * refuses to replace a store that became unreadable since the preview.
+ * @ref LLP 0396#combined-selection [implements]: clearing waits until the config has committed
+ * @param {{ env: NodeJS.ProcessEnv, stdout: RunWizardSyncScopeOptions['stdout'], sources: string[] }} opts
+ * @returns {Promise<number>} Number of standing opt-outs cleared.
+ */
+export async function commitWizardSyncScope(opts) {
+  return await withSpan('wizard.sync_scope.commit', {
+    [Attr.COMPONENT]: 'wizard',
+    [Attr.OPERATION]: 'wizard.sync_scope.commit',
+    candidates: opts.sources.length,
+  }, async (span) => {
+    const stateDir = readObservabilityEnv(opts.env).stateDir
+    const existing = (await readClientSyncEntries({ stateDir })) ?? []
+    const selected = new Set(opts.sources)
+    const entries = existing.filter((entry) => !selected.has(entry.source))
+    const cleared = existing.filter((entry) => selected.has(entry.source)).map((entry) => entry.source).sort()
+    // Materialize even an empty store so legacy migration cannot restore opt-outs.
+    await writeClientSyncEntries({ stateDir, entries })
+    span.setAttribute('sources_cleared', cleared.length)
+    // @ref LLP 0188#no-retroactive-ship [constrained-by]: clearing is future-only and names the standing control to reverse it
+    if (cleared.length > 0) {
+      opts.stdout.write(
+        `No longer local-only: ${cleared.join(' · ')}. Future rows sync to your server; ` +
+        "rows already recorded are not sent. Change back with 'hyp privacy client <name> local-only'.\n"
+      )
+    }
+    return cleared.length
+  }, { component: 'wizard' })
 }
 
 /**
@@ -317,8 +389,8 @@ async function promptSyncScopeSelection({ opts, ask, optedOutBefore }) {
  *
  * @param {WizardSyncScopeResult} result
  * @param {RunWizardSyncScopeOptions} opts
- * @param {{ hidden_picks_syncing?: boolean }} [extra] attributes only the
- *   caller knows, folded in when present
+ * @param {{ hidden_picks_syncing?: boolean, sources_cleared?: number }} [extra]
+ *   attributes only the caller knows, folded in when present
  * @returns {Promise<WizardSyncScopeResult>}
  */
 async function finishSpan(result, opts, extra) {

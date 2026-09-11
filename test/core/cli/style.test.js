@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { ANSI, colorizeStderr, paintChunk, paintLine } from '../../../src/core/cli/style.js'
+import { ANSI, colorizeStderr, paintChunk, paintLine, resyncLineStart } from '../../../src/core/cli/style.js'
 
 // The CLI severity palette (LLP 0189). Colour is applied once, where
 // `dispatch` binds stderr, so these tests pin two things: which leading word
@@ -179,6 +179,25 @@ test('a write that does not end in a newline leaves the next write mid-line', ()
   wrapped.write('note: ')
   wrapped.write('error: not a new diagnostic\n')
   assert.equal(sink.text(), `${DIM}note:${OFF} error: not a new diagnostic\n`)
+})
+
+test('a resync restores the line start the wrap could not see', () => {
+  // The wizard relays a piped child's stderr: its confirm ends mid-line and
+  // the tty, not this stream, echoes the answer that ends the line.
+  const sink = fakeStream(true)
+  const wrapped = colorizeStderr(sink, {})
+  wrapped.write('Send now? [Y/n] ')
+  resyncLineStart(wrapped)
+  wrapped.write('hyp sync: nothing was sent\n')
+  assert.equal(sink.text(), `Send now? [Y/n] ${RED}hyp sync:${OFF} nothing was sent\n`)
+})
+
+test('a resync on a stream that is not a wrap does nothing', () => {
+  // The echo target is whatever stderr the caller was handed, which on a
+  // `NO_COLOR` or piped run is the bare stream.
+  const sink = fakeStream(false)
+  resyncLineStart(colorizeStderr(sink, {}))
+  assert.equal(sink.text(), '')
 })
 
 test('the wrap preserves the rest of the stream surface', () => {

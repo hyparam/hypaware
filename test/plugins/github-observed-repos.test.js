@@ -14,6 +14,7 @@ import { writeCursors } from '../../hypaware-core/plugins-workspace/github/src/c
 import { createLocalObservedReposIndex } from '../../hypaware-core/plugins-workspace/github/src/observed-repos.js'
 import { setGithubRuntime } from '../../hypaware-core/plugins-workspace/github/src/runtime.js'
 import { runCaptureTick } from '../../hypaware-core/plugins-workspace/github/src/tick.js'
+import { emptyGraph, fakeClient } from './github-fake-client.js'
 
 /** @import { QueryStorageService } from '../../hypaware-core/plugins-workspace/github/src/types.d.ts' */
 
@@ -90,6 +91,7 @@ test('default capture tick uses local session evidence without GitHub enumeratio
   const report = await runCaptureTick(
     /** @type {any} */ ({
       stateDir,
+      graph: emptyGraph,
       config: {
         ignore: [],
         token_env: 'GITHUB_TOKEN',
@@ -394,6 +396,7 @@ test('an incomplete revalidation surfaces as bounded pending work on the capture
   const report = await runCaptureTick(
     /** @type {any} */ ({
       stateDir,
+      graph: emptyGraph,
       config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
       observedRepos: {
         async list() { return [] },
@@ -426,6 +429,7 @@ test('an incomplete revalidation surfaces as bounded pending work on the capture
 function failingInventoryRuntime(stateDir, err, onError = () => {}) {
   return /** @type {any} */ ({
     stateDir,
+    graph: emptyGraph,
     config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
     observedRepos: {
       async list() { throw err },
@@ -581,6 +585,40 @@ test('hyp github backfill reports the inventory failure without contradicting it
     out,
     /hyp graph project/,
     'nothing was captured, so the next-step advice would dress a failure up as progress',
+  )
+})
+
+// @ref LLP 0392#retry [tests]: a failed projection shares the tick's error list, so it must not be read as the capture verdict
+test('a failed projection does not swallow the inventory-miss reason for a named repository', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backfill-miss-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  // The inventory resolves fine and simply does not hold the named repository,
+  // which is the one thing the operator needs told. Automatic projection puts
+  // its own failure in the same error list (LLP 0392#retry), and that list is
+  // what the guard reads.
+  setGithubRuntime(/** @type {any} */ ({
+    stateDir,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => fakeClient({}),
+    storage: { cacheTablePath() { return '/cache/github_events' } },
+    graph: { async project() { throw new Error('graph storage unavailable') } },
+    log: { info() {}, error() {} },
+  }))
+  let err = ''
+  const ctx = /** @type {any} */ ({
+    stdout: { write() {} },
+    stderr: { write(/** @type {string} */ s) { err += s } },
+  })
+
+  const code = await runGithubBackfill(['acme/widgets'], ctx)
+
+  assert.equal(code, 1)
+  assert.match(err, /! \(graph\): graph storage unavailable/, 'the projection failure is still reported')
+  assert.match(
+    err,
+    /none of \[acme\/widgets\] are in the active repository inventory/,
+    'and it does not stand in for a capture error the tick never had',
   )
 })
 

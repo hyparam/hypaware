@@ -2,6 +2,7 @@
 
 **Type:** Decision
 **Status:** Accepted
+**Extended-by:** LLP 0393 (draft request for separate basic product runtime summaries)
 **Systems:** Observability
 **Author:** Phil / Codex
 **Date:** 2026-08-27

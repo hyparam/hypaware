@@ -33,7 +33,7 @@ import { resolveClientSettingsPath } from '../daemon/client_settings_path.js'
 import { probeClientAttachFromDescriptor, resolveLiveGatewayEndpointFromStatus } from '../daemon/status.js'
 import { askYesNo } from '../cli/confirm.js'
 import { isTty } from '../cli/stdio.js'
-import { defaultBackfillConsentPromptFactory, resolveSingleSourceEnablement } from '../cli/walkthrough.js'
+import { defaultBackfillConsentPromptFactory, describeBackfillResult, resolveSingleSourceEnablement } from '../cli/walkthrough.js'
 import { resolveRetentionDays, runBackfillProvider } from './backfill.js'
 import {
   CLASS_RANK,
@@ -399,7 +399,9 @@ async function runClientLifecycle(action, argv, ctx) {
             //
             // The marker format is the same shape of drift as the mode. A
             // pre-schema marker can carry a reserved `hooks` key in managed
-            // entries or malformed-value backups while still sitting at the
+            // entries or malformed-value backups, and a marker written under
+            // `npx hypaware` records a hook command that runs the CLI from a
+            // cache npm prunes (issue #1607), all while still sitting at the
             // live port with the right mode and assets, so nothing else here
             // can see it. Re-attach rewrites the marker, which is the whole
             // migration, and it is gated on a live endpoint for the same reason
@@ -1165,10 +1167,7 @@ async function maybeBackfillAfterEnable({ name, ctx }) {
   try {
     ctx.stdout.write(`backfill ${name}: importing local history…\n`)
     const result = await runBackfillProvider({ ctx, provider: name, dryRun: false, retentionDays, until })
-    ctx.stdout.write(
-      `backfill ${name}: ${result.ok ? 'ok' : 'failed'} ` +
-      `(scanned ${result.scanned}, wrote ${result.rowsWritten}, skipped ${result.skipped})\n`
-    )
+    ctx.stdout.write(`backfill ${name}: ${describeBackfillResult(result)}\n`)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     ctx.stderr.write(`backfill ${name} failed: ${message}\n`)

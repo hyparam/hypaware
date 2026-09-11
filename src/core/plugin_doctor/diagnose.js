@@ -9,7 +9,7 @@ import { dryRunActivate } from './dry_run.js'
 
 /**
  * @import { PluginManifest } from '../../../hypaware-plugin-kernel-types.js'
- * @import { DoctorReport, DryRunResult, NameListKey, PluginDiagnostic, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
+ * @import { DoctorReport, DryRunResult, NameListKey, PluginDiagnostic, RefusedContribution, RegisteredSnapshot } from '../../../src/core/plugin_doctor/types.js'
  */
 
 const GUIDE = 'docs/PLUGIN_AUTHORING.md'
@@ -35,6 +35,22 @@ const CONTRIBUTIONS = [
   { key: 'agents', nameField: 'name', label: 'agent', register: "ctx.agents.register({ name: '%s', plugin, clients, sourceFile })", anchor: 'agents' },
   { key: 'init_presets', nameField: 'name', label: 'init preset', register: "ctx.initPresets.register({ name: '%s', plugin, summary, run })", anchor: 'init-presets' },
 ]
+
+/**
+ * Where a finding about a refused registration points, by the label
+ * `snapshotRegistry` refuses under. The contribution labels resolve through
+ * CONTRIBUTIONS rather than being spelled a second time; an alias and a group
+ * description are both parts of a command declaration, so both point at
+ * `contributes.commands`. Anything not named here is still reported, against
+ * `activate()`, which is where the registration was made.
+ *
+ * @type {Map<string, string>}
+ */
+const REFUSAL_LOCATION = new Map([
+  ...CONTRIBUTIONS.map(({ key, label }) => /** @type {[string, string]} */ ([label, `/contributes/${key}`])),
+  ['command alias', '/contributes/commands'],
+  ['command group', '/contributes/commands'],
+])
 
 /**
  * Run every doctor check against a plugin directory and return a single
@@ -83,7 +99,7 @@ export async function diagnosePlugin(rootDir, opts = {}) {
   // the root error above already explains why nothing registered.
   const reachedActivation = dry.ok || dry.error?.kind === 'activate_threw'
   if (reachedActivation) {
-    checkContributions(manifest, dry.registered, diagnostics)
+    checkContributions(manifest, dry.registered, dry.refused, diagnostics)
     checkCommandHelp(manifest, dry.registered, diagnostics)
   }
   if (dry.ok) {
@@ -252,18 +268,48 @@ function diagnoseDryRunError(manifest, error) {
  * Missing-from-code is an error; registered-but-undeclared is a warning
  * (the manifest powers help text and discovery).
  *
+ * The diff is only as good as the snapshot, and the snapshot leaves out every
+ * registration it could not vouch for. Those are reported as
+ * `contribution_unreadable`, and a declared name one of them claimed is not
+ * also reported as never registered: it *was* registered, and telling the
+ * author to add the `register` call already in the file sends them to write a
+ * duplicate the registry would refuse (hyparam/hypaware#1569).
+ * `contribution_not_registered` keeps its meaning for the case it was written
+ * for, a contribution that never reached the registry at all.
+ *
  * @param {PluginManifest} manifest
  * @param {RegisteredSnapshot} registered
+ * @param {RefusedContribution[]} refused
  * @param {PluginDiagnostic[]} out
  */
-function checkContributions(manifest, registered, out) {
+function checkContributions(manifest, registered, refused, out) {
   const contributes = manifest.contributes ?? {}
+  // Names refused per label, so the diff below can tell refused from absent.
+  /** @type {Map<string, Set<string>>} */
+  const refusedNames = new Map()
+  for (const refusal of refused) {
+    const names = refusedNames.get(refusal.kind)
+    if (names) names.add(refusal.name)
+    else refusedNames.set(refusal.kind, new Set([refusal.name]))
+    out.push({
+      kind: 'contribution_unreadable',
+      severity: 'error',
+      location: REFUSAL_LOCATION.get(refusal.kind) ?? 'activate()',
+      message: refusal.message,
+      repair: [
+        'Register a plain object whose fields do not change between reads: the doctor re-reads the name, summary and aliases off the record the registry holds',
+        'Look for a getter, a Proxy, or a mutation of the registered object after the register() call',
+        `See ${GUIDE}#troubleshooting-doctor-diagnostics`,
+      ],
+    })
+  }
   for (const { key, nameField, label, register, anchor } of CONTRIBUTIONS) {
     const declared = declaredNames(contributes, key, nameField)
     const actual = new Set(registered[key])
 
     for (const name of declared) {
-      if (!actual.has(name)) {
+      // A name a refusal claimed is accounted for above, and was not absent.
+      if (!actual.has(name) && !refusedNames.get(label)?.has(name)) {
         out.push({
           kind: 'contribution_not_registered',
           severity: 'error',

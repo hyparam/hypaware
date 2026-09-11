@@ -7,7 +7,7 @@ import path from 'node:path'
 import os from 'node:os'
 
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
-import { appendRowsToTable, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
+import { appendRowsToTable, dataSourceForTable, deleteMatchingRows, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { INGEST_SEQ_COLUMN } from '../../src/core/cache/streaming-reader.js'
 
 /**
@@ -24,6 +24,148 @@ const COLS = [
   { name: 'id', type: 'INT64', nullable: false },
   { name: 'msg', type: 'STRING', nullable: false },
 ]
+
+test('batch-backed internal scans preserve typed values, projections and deleted positions across files', async () => {
+  const root = await makeTmpDir()
+  try {
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      ...COLS,
+      { name: 'flag', type: 'BOOLEAN', nullable: true },
+      { name: 'score', type: 'DOUBLE', nullable: true },
+      { name: 'at', type: 'TIMESTAMP', nullable: true },
+      { name: 'attrs', type: 'JSON', nullable: true },
+      INGEST_SEQ_COLUMN,
+    ]
+    // More than one native batch; deleting both leading and interior rows
+    // catches reading vector indices without composing the source selection.
+    for (let file = 0; file < 2; file++) {
+      await appendRowsToTable(root, columns, Array.from({ length: 1100 }, (_, i) => ({
+        id: file * 1100 + i,
+        msg: `row-${file}-${i}`,
+        flag: i % 3 === 0 ? null : i % 2 === 0,
+        score: i % 5 === 0 ? null : i / 3,
+        at: i % 7 === 0 ? null : new Date('2026-09-01T00:00:00Z'),
+        attrs: i % 11 === 0 ? null : { label: `value-${i}`, n: i },
+        [INGEST_SEQ_COLUMN.name]: i % 13 === 0 ? null : BigInt(file * 1100 + i),
+      })))
+    }
+    await deleteMatchingRows(root, (row) => Number(row.id) % 19 === 0, { columns: ['id'] })
+    const source = await dataSourceForTable(root)
+    assert.ok(source?.prepareScan)
+    for (const projection of [undefined, [], ['msg', 'score', 'attrs', 'at', 'flag'], ['id', 'unknown_column']]) {
+      const names = projection?.length ? projection : source.columns
+      /** @type {Record<string, unknown>[]} */
+      const expected = []
+      for await (const row of source.scan({ columns: names }).rows()) {
+        const resolved = row.resolved ? { ...row.resolved } : {}
+        for (const name of names) {
+          if (!Object.hasOwn(resolved, name)) resolved[name] = await row.cells[name]?.()
+        }
+        expected.push(resolved)
+      }
+      const actual = []
+      for await (const row of scanRowsFromTable(root, projection)) actual.push(row)
+      assert.deepEqual(actual, expected)
+    }
+    for (const includeLegacy of [true, false]) {
+      const actual = []
+      for await (const row of scanRowsFromTable(root, ['id'], { since: 1100n, includeLegacy })) {
+        actual.push(Number(row.id))
+      }
+      const expected = Array.from({ length: 2200 }, (_, id) => id).filter((id) =>
+        id % 19 !== 0 && ((id % 1100) % 13 === 0 ? includeLegacy : id > 1100))
+      assert.deepEqual(actual, expected)
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('lookup columns outside projection still filter rows before the incremental sequence check', async () => {
+  const root = await makeTmpDir()
+  try {
+    await appendRowsToTable(root, [...COLS, INGEST_SEQ_COLUMN], [
+      { id: 1, msg: 'keep', [INGEST_SEQ_COLUMN.name]: null },
+      { id: 2, msg: 'other', [INGEST_SEQ_COLUMN.name]: 20n },
+      { id: 3, msg: 'keep', [INGEST_SEQ_COLUMN.name]: 10n },
+      { id: 4, msg: 'keep', [INGEST_SEQ_COLUMN.name]: 20n },
+    ])
+    for (const includeLegacy of [true, false]) {
+      const actual = []
+      for await (const row of scanRowsFromTable(root, ['id'], {
+        since: 10n, includeLegacy, whereIn: { msg: ['keep'] },
+      })) actual.push(Number(row.id))
+      assert.deepEqual(actual, includeLegacy ? [1, 4] : [4])
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('targeted batches intersect lookup keys and deletes without exposing filter-only columns', async () => {
+  const root = await makeTmpDir()
+  try {
+    /** @type {ColumnSpec[]} */
+    const columns = [
+      ...COLS, { name: 'session_id', type: 'STRING', nullable: true },
+      { name: 'role', type: 'STRING', nullable: true },
+    ]
+    const rows = Array.from({ length: 2200 }, (_, id) => ({
+      id, msg: `message-${id}`,
+      session_id: id % 5 === 0 ? null : id % 2 === 0 ? 'a' : 'b',
+      role: id % 3 === 0 ? 'assistant' : 'user',
+    }))
+    await appendRowsToTable(root, columns, rows)
+    await deleteMatchingRows(root, (row) => Number(row.id) % 7 === 0, { columns: ['id'] })
+    for (const keys of [['a'], ['a', 'b', 'a'], ['absent']]) {
+      const actual = []
+      for await (const row of scanRowsFromTable(root, ['msg', 'id'], {
+        whereIn: { session_id: keys, role: ['assistant'] },
+      })) {
+        assert.deepEqual(Object.keys(row), ['msg', 'id'])
+        actual.push(Number(row.id))
+      }
+      assert.deepEqual(actual, rows.filter((row) => row.session_id !== null && keys.includes(row.session_id) &&
+        row.role === 'assistant' && row.id % 7 !== 0).map((row) => row.id))
+    }
+    // An absent projected field retains the row fallback's padding behavior.
+    const fallback = []
+    for await (const row of scanRowsFromTable(root, ['id', 'absent'], { whereIn: { session_id: ['a'] } })) {
+      assert.equal(row.absent, undefined)
+      fallback.push(Number(row.id))
+    }
+    assert.deepEqual(fallback, rows.filter((row) => row.session_id === 'a' && row.id % 7 !== 0).map((row) => row.id))
+    // Numeric coercion follows the same batch path, including deleted keys and
+    // a second predicate on a column absent from the output projection.
+    const numeric = []
+    for await (const row of scanRowsFromTable(root, ['msg'], {
+      whereIn: { id: ['6', '12', '42', '2106'], role: ['assistant'] },
+    })) numeric.push(row)
+    assert.deepEqual(numeric, [6, 12, 2106].map((id) => ({ msg: `message-${id}` })))
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('targeted scans preserve numeric lookup coercion and reject invalid lookup requests', async () => {
+  const root = await makeTmpDir()
+  try {
+    await appendRowsToTable(root, COLS, [{ id: 1, msg: 'one' }, { id: 2, msg: 'two' }])
+    const actual = []
+    for await (const row of scanRowsFromTable(root, ['msg'], { whereIn: { id: ['2'] } })) actual.push(row.msg)
+    assert.deepEqual(actual, ['two'])
+    /** @type {Record<string, string[]>[]} */
+    const invalid = [{ msg: [] }, { missing: ['x'] }]
+    for (const whereIn of invalid) {
+      await assert.rejects(async () => {
+        for await (const _ of scanRowsFromTable(root, ['id'], { whereIn })) {}
+      }, /cache lookup/)
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
 
 test('readRows back-compat: no opts is unchanged, internal fields never leak', async () => {
   const cacheRoot = await makeTmpDir()
@@ -271,29 +413,28 @@ test('a watermark prunes data files below it: an idle tick opens no data file', 
 })
 
 /**
- * Run `fn` with `fs.readFileSync` instrumented, returning the basenames of the
- * data files it opened. The local Iceberg resolver reads every file through
- * `fs.readFileSync`, so this is what "the scan never opened that file" means.
+ * Run `fn` with `fs.stat` instrumented, returning the basenames of the
+ * data files requested. The local Iceberg resolver stats each file once
+ * when constructing its range reader, before any slices are requested.
  *
  * @param {() => Promise<void>} fn
  * @returns {Promise<string[]>}
  */
 async function parquetOpens(fn) {
-  const fsSync = await import('node:fs')
-  const realRead = fsSync.default.readFileSync
+  const realRead = fs.stat
   /** @type {string[]} */
   const opened = []
-  fsSync.default.readFileSync = /** @type {typeof realRead} */ ((...args) => {
+  fs.stat = /** @type {typeof realRead} */ ((...args) => {
     const target = String(args[0])
     // Sidecar indexes and delete files are not the data files under test.
     if (target.endsWith('.parquet') && !target.endsWith('.index.parquet') &&
         !target.endsWith('-deletes.parquet')) opened.push(path.basename(target))
-    return realRead.apply(fsSync.default, /** @type {any} */ (args))
+    return realRead.apply(fs, /** @type {any} */ (args))
   })
   try {
     await fn()
   } finally {
-    fsSync.default.readFileSync = realRead
+    fs.stat = realRead
   }
   return opened
 }

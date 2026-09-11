@@ -3,9 +3,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { asyncBufferFromFile } from 'hyparquet'
 
 /**
- * @import { AsyncBuffer } from 'hyparquet'
  * @import { Writer } from 'hyparquet-writer/src/types.js'
  * @import { Lister, Resolver, WriterOptions } from 'icebird/src/types.js'
  * @import { AbortableWriter } from '../../../../src/core/cache/types.js'
@@ -24,8 +24,7 @@ export async function createLocalIcebergIO() {
   return {
     resolver: {
       reader(url) {
-        const bytes = fs.readFileSync(urlToPath(url))
-        return asyncBufferFromBytes(bytes)
+        return asyncBufferFromFile(urlToPath(url))
       },
       writer(url, options) {
         return localWriter(ByteWriter, urlToPath(url), options)
@@ -108,22 +107,6 @@ const STAGED_NAME_RE = /\.tmp\.\d+\.\d+\.[a-z0-9]*$/
  */
 export function isStagedWriteName(name) {
   return STAGED_NAME_RE.test(name)
-}
-
-/**
- * @param {Uint8Array} bytes
- * @returns {AsyncBuffer}
- */
-function asyncBufferFromBytes(bytes) {
-  return {
-    byteLength: bytes.byteLength,
-    slice(start, end) {
-      const sliced = bytes.subarray(start, end)
-      const out = new ArrayBuffer(sliced.byteLength)
-      new Uint8Array(out).set(sliced)
-      return out
-    },
-  }
 }
 
 /**

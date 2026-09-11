@@ -21,7 +21,7 @@ import type {
 import type { createCommandRegistry } from '../registry/commands.js'
 import type { ConfigLayerDrop } from '../config/types.d.ts'
 import type { ExtendedQueryStorageService } from '../cache/types.d.ts'
-import type { ClientDescriptor, LoadedManifest, FailedManifest } from '../types.d.ts'
+import type { ClientDescriptor, LoadedManifest, FailedManifest, UnsatisfiedRequirement } from '../types.d.ts'
 import type {
   CapabilityRegistryHandle,
   ExtendedSinkRegistry,
@@ -43,7 +43,7 @@ import type {
  *   allowlist. Reserved for the daemon and future installer paths
  *   that resolve plugin names from a different source.
  */
-export type BootProfile = 'config' | 'all-bundled' | 'all-available' | { activate: PluginName[] }
+export type BootProfile = 'config' | 'gateway' | 'all-bundled' | 'all-available' | { activate: PluginName[] }
 
 export interface BootKernelOptions {
   /** Override HYP_HOME (defaults from env). */
@@ -60,6 +60,8 @@ export interface BootKernelOptions {
   workspaceDir?: string
   /** Cache root for the kernel storage service. */
   cacheRoot?: string
+  /** Internal runtime override, used to deny cache access in the forwarding process. */
+  storage?: ExtendedQueryStorageService
   /** Pre-built command registry to inject into the kernel. */
   commandRegistry?: ReturnType<typeof createCommandRegistry>
   /** Override env (tests). */
@@ -101,6 +103,23 @@ export interface BootKernelResult {
    * `all-bundled`/`all-available` drop even when the config names them.
    */
   withheldByProfile: PluginName[]
+  /**
+   * What the dependency resolver rejected, with the reason it rejected it and
+   * the plugin it names. `unavailablePlugins` below folds these into a flat
+   * list of names, which is all the prune needs and all a caller can get back
+   * out of it; a caller that must *say* why a configured plugin is not running
+   * needs the reason too, and the daemon's status snapshot is one
+   * (issue #1580).
+   *
+   * Not every entry is a plugin that failed to activate, and not every entry
+   * for a plugin that did is the reason it did: a `cap_version_clash` is
+   * recorded against every provider of the clashing capability and eliminates
+   * none of them, and it is recorded before the pass that eliminates on
+   * `requires`, so a provider can carry a clash in front of the entry that
+   * actually eliminated it. A reader making a claim about a plugin must check
+   * `activations`, and one quoting a reason must skip the clash.
+   */
+  unsatisfiedRequirements: UnsatisfiedRequirement[]
   /**
    * Everything this boot did not get, in one list: plugins whose `activate()`
    * threw, plugins the dep graph eliminated for an unsatisfied `requires`,
@@ -278,6 +297,33 @@ export interface ClientAssetMaterialization {
   pruned: ClientAssetRemoval[]
   /** Retired destinations left in place and reported (edited, digest-less, refused, or un-removable). */
   withheld: ClientAssetRemoval[]
+}
+
+/**
+ * What one boot-time refresh did: the installed copies it rewrote because
+ * their source changed, the ones it left alone and why, and how many it read
+ * and found current.
+ */
+export interface ClientAssetRefresh {
+  refreshed: Omit<ClientAssetRemoval, 'dryRun'>[]
+  skipped: (Omit<ClientAssetRemoval, 'dryRun'> & {
+    /**
+     * `edited`: bytes no longer match any recorded digest. `unreadable`: the
+     * copy could not be read. `missing`: the copy is gone. `copy_failed`: the
+     * rewrite itself failed.
+     */
+    reason: 'edited' | 'unreadable' | 'missing' | 'copy_failed'
+  })[]
+  unchanged: number
+  /**
+   * How many of the `unchanged` copies had a stale record healed to the bytes
+   * found on disk (LLP 0400 #source-equality-is-ownership). A sub-count of
+   * `unchanged`, not a fourth outcome: the file was not touched. It is
+   * reported separately because a heal is the only outcome that writes the
+   * ledger without rewriting a copy, so a caller that logs only `refreshed`
+   * and `skipped` would record the change to disk nowhere.
+   */
+  healed: number
 }
 
 export interface MaterializeClientAssetsOptions {

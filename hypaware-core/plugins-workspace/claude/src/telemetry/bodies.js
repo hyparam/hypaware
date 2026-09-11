@@ -295,16 +295,18 @@ export function requestBodyFacts(spooled) {
  * thinking signature the events do not carry at all.
  *
  * Each block becomes its own projected message, mirroring the proxy
- * path's per-block decomposition, so the gateway's fallback content
- * hash gives the same block the same identity from either producer and
- * the repeated history of the next turn's request dedupes away.
+ * path's per-block decomposition, so the gateway's fallback content hash
+ * gives the same block the same identity every time this lane sees it and
+ * the repeated history of the next turn's request dedupes away. That hash
+ * is not the transcript's uuid, though, so the caller stamps the LLP 0027
+ * match-key on these messages and settlement collapses them onto the row
+ * the transcript sweep writes (LLP 0389 #match-key-on-bodies).
  *
- * A response with no text block never produces an `assistant_response`
- * event, so its usage would otherwise go unclaimed: the last gap block
- * carries it (from the `api_request` event when one arrived, else from
- * the body's own `usage`), along with the body's `stop_reason`. A
- * response WITH a text block leaves usage to the event that carries the
- * text, so a SUM over rows never counts a request twice.
+ * A response's usage rides its LAST row, along with the body's
+ * `stop_reason`, so the last gap block carries both whenever the response
+ * ends in a gap block (the tool_use of a `[text, tool_use]` turn, say) and
+ * leaves them to the `assistant_response` event when the response ends in
+ * text.
  *
  * @param {SpooledClaudeBody} spooled
  * @param {{
@@ -356,6 +358,11 @@ function responseGapMessages(spooled, ctx) {
   const frame = bodyFrame(spooled, event)
   const requestId = stringValue(event.attributes.request_id)
   const model = stringValue(body.model)
+  // @ref LLP 0390#carrier-is-the-last-block [implements]: the carrier is the
+  // response's LAST row, so these blocks own it exactly when the body ends in
+  // one. The transcript sweep picks that same block, so a `[text, tool_use]`
+  // turn both lanes captured still totals its tokens once (issue #1470).
+  const endsInGap = kept[kept.length - 1] === content[content.length - 1]
   const hasText = content.some((block) => isPlainObject(block) && block.type === 'text')
 
   /** @type {AiGatewayProjectedMessage[]} */
@@ -364,11 +371,17 @@ function responseGapMessages(spooled, ctx) {
     const message = gapMessage({ role: 'assistant', block: kept[i], event, frame })
     if (requestId) message.request_id = requestId
     if (model) message.model = model
-    if (i === kept.length - 1 && !hasText) {
+    if (i === kept.length - 1 && endsInGap) {
       const stopReason = stringValue(body.stop_reason)
       if (stopReason) message.stop_reason = stopReason
+      // @ref LLP 0390#claim-order-arbitrates [implements]: the pending
+      // `api_request` record is the one arbiter between this row and the
+      // `assistant_response` a text-bearing turn also produces, so the turn
+      // counts once whichever order the exporter flushed them in. The body's
+      // own `usage` is a fallback only for a response with no text, which has
+      // no `assistant_response` that could have claimed the record.
       const usage = (requestId ? claimUsage(ctx.usageByRequestId, requestId) : undefined)
-        ?? anthropicMessageAttributes(body)
+        ?? (hasText ? undefined : anthropicMessageAttributes(body))
       if (usage) message.attributes = /** @type {any} */ (usage)
     }
     out.push(message)

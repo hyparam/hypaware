@@ -6,6 +6,10 @@
 **Author:** Brendan / Claude
 **Date:** 2026-06-23
 **Related:** LLP 0016 (ai-gateway), LLP 0026 (claude-native-granularity), LLP 0030 (session-id-partition-key)
+**Extended-by:** [LLP 0390](./0390-otel-usage-rides-the-response-last-block.decision.md)
+(#one-carrier applied to the Claude OTEL lane, a fifth path, where one
+response's rows come from two events and the carrier is picked from the
+response body's last block)
 
 ## Summary
 

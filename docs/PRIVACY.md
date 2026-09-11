@@ -1,5 +1,7 @@
 # What HypAware records, and how to control it
 
+[Documentation](README.md)
+
 HypAware records AI activity on your machine. This page is the honest
 inventory: what is captured, where it goes, and every control you have over
 it. If your team is rolling HypAware out, this is the page to read before
@@ -114,6 +116,9 @@ records a proxy attach.
   are forwarded to your organization's central server, including
   conversation content. The controls below decide which rows that covers.
 
+The deployment's operators can read forwarded data across every org on the
+server, and each such read is recorded in that org's audit trail.
+
 ## The three usage classes
 
 Every directory subtree resolves to one class. Classes are evaluated from
@@ -201,6 +206,28 @@ recorders' sets), and a fork (`claude --fork-session`, `codex fork`), which
 mints a new session id the opt-out no longer covers. A plain resume reuses
 the id.
 
+Claude Code writes its own transcript to `~/.claude/projects` whatever you
+tell HypAware, and the daemon re-reads that tree on a schedule. While the
+daemon holds the id, that scheduled import skips the session too, so the
+opt-out is not undone five minutes later. A re-import you ask for yourself
+(`hyp backfill claude`) runs in its own process and does not see the drop set,
+so it imports the session from the transcript: that is the deliberate
+re-import the in-memory design leaves to you.
+
+The skip lasts exactly as long as the daemon holds the id, and it withholds
+rather than deletes. Your transcript stays on disk, and nothing records which
+turns were skipped, so whatever ends the hold imports those turns too instead
+of only recording from that moment on. Two things end it: a daemon restart,
+after which the next scheduled read takes the conversation you hid, and
+`hyp session unignore`, after which the next scheduled read takes the hidden
+turns along with anything new. Having done no further work is not a second
+line of defence: it holds those turns back only where the daemon already read
+the transcript, unchanged, while the hold was on, so unignoring before the
+next read releases them anyway. If what you want is for those turns never to
+be recorded, mark the directory instead: that survives a restart. If they have
+already been recorded, delete them with `hyp privacy purge --session <id>`
+below.
+
 ## Deleting what was already recorded
 
 `hyp privacy purge` permanently deletes rows from this machine's local cache. It
@@ -223,10 +250,16 @@ next batch write back rows you just deleted.
 
 ## Enrolling with a team: the first-sync review
 
-Enrollment never ships history silently. When `hyp remote login` (or
-`hyp join`) enrolls a machine, the first sync, which includes backfilled
-history, is held until at least 11:59pm local time that day, and the exact
-deadline is printed. Before it passes:
+An attended `hyp remote login` enrollment creates a first-sync review hold,
+including backfilled history. Login prints the deadline: the next local
+11:59pm, or the following day's 11:59pm if fewer than four hours remain.
+`hyp status` reports the hold. A confirmed all-destination `hyp sync` can
+release it early; otherwise it expires automatically.
+
+Token-based `hyp join` and re-logins do not create this hold. Apply privacy
+markings before unattended enrollment; see [headless setup](HEADLESS.md).
+
+Before an attended review deadline passes:
 
 open Claude Code or Codex and run the **`hypaware-privacy`** skill. It walks
 the captured directories with you, samples them for credentials, personal

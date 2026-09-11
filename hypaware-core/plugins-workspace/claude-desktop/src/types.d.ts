@@ -51,5 +51,19 @@ export interface VerifyResult {
   plistPresent: boolean
   plistUpToDate: boolean
   residueCleared: boolean
+  helper: HelperCheck
+  helperPath: string
   ok: boolean
+}
+
+/**
+ * Whether the generated credential wrapper still works. `stale: false` is not
+ * a claim of health for a wrapper this plugin did not write: an unrecognised
+ * file is left alone rather than judged (`checkHelperScript`).
+ */
+export interface HelperCheck {
+  present: boolean
+  stale: boolean
+  /** Which baked path rotted and how, ready to print. Set only when stale. */
+  detail?: string
 }
