@@ -327,6 +327,52 @@ for (const rel of SKILLS) {
 }
 
 /**
+ * The host-specific half of the ephemerality caveat: which restart drops the
+ * set, and which verb mints a new session id under the same conversation. Only
+ * the negative half is shared, and that is what the loop is for: the caveat was
+ * pinned on the codex copy alone
+ * (test/plugins/codex-privacy-skill-session-id.test.js), so the claude copy
+ * could regress to naming the restart by itself with nothing to catch it
+ * (issue #1635).
+ *
+ * @type {Record<string, { restart: RegExp, fork: RegExp }>}
+ */
+const EPHEMERAL_CAVEAT = {
+  'claude/skills/hypaware-privacy/SKILL.md': {
+    restart: /recorder restart/,
+    fork: /claude --fork-session/,
+  },
+  'codex/skills/hypaware-privacy/SKILL.md': {
+    restart: /gateway restart/,
+    fork: /codex fork/,
+  },
+}
+
+/**
+ * @ref LLP 0066#readable [tests]: R9 - a caveat that names the restart alone
+ * reads as the exhaustive list and teaches the user the fork cannot happen,
+ * which is the drift LLP 0212 §Context records as having shipped once already
+ * (issue #455).
+ */
+for (const rel of SKILLS) {
+  test(`${rel} names both ways the opt-out lapses, not the restart alone`, () => {
+    const step1 = privacyStep1(rel)
+    const caveat = EPHEMERAL_CAVEAT[rel]
+
+    assert.match(step1, caveat.restart, 'the restart that drops the set must be named')
+    assert.match(step1, caveat.fork, 'and so must the verb that mints a new session id')
+    // Naming the fork somewhere is weaker than not presenting the restart as
+    // the whole list: a caveat could name the fork in a later aside and still
+    // close its own sentence on the restart, which is what a reader acts on.
+    assert.doesNotMatch(
+      step1,
+      /a (?:gateway|recorder) restart drops it\.\s*(?:\n|$)/,
+      'the restart must not be presented as the only way the opt-out lapses'
+    )
+  })
+}
+
+/**
  * The receipt tells the agent to stop unless the recorder that captures THIS
  * session appears in `recorders`, which only works if the skill names the id
  * that recorder actually reports. `runMutation` fills `recorders[].recorder`
