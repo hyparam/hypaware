@@ -23,6 +23,15 @@ apply. An unreadable client policy store is preserved and exports fail closed
 with a warning, as before, and no screen on that run claims sharing it cannot
 enable. The standing privacy CLI remains available.
 
+After the shared-logs choice, setup describes the selected logs, history import,
+and upload progress without repeating a local-versus-remote distinction. The
+upload plan names upload targets, actual exclusions, and the first-upload
+schedule; it does not add a policy explanation when there are no exclusions.
+When sharing, the accompanying file copy is not counted or shown as another
+destination in the plan, confirmation, progress, or successful results. The
+copy still runs, and any failure is reported. A file-only sync still shows its
+target and progress.
+
 The policy write is deferred until the config commit succeeds, after the
 folder question and overwrite confirmation. Cancel, overwrite refusal, config
 write failure, and Back before that point leave standing client opt-outs intact.

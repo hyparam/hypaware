@@ -16,7 +16,7 @@ import { createSinkWatermarkStore } from './watermarks.js'
  * exact total. Generous, because the answer is worth having; bounded, because
  * this runs in front of a prompt somebody is waiting at.
  */
-const DEFAULT_ROW_LIMIT = 200000
+const DEFAULT_ROW_LIMIT = 2000000
 
 /**
  * Wall-clock budget for the whole preview. The row limit bounds work, this

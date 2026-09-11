@@ -229,7 +229,7 @@ test('the step spawns `hyp sync` on the inherited terminal, as the one question,
   assert.deepEqual(result, { asked: true, released: true })
   // The wizard put no question of its own: one lead line, then the child.
   // @ref LLP 0203#no-new-consent [tests]: the informed prompt is the only prompt
-  assert.match(o.stdout.text(), /`hyp sync` shows what would leave and asks before sending/)
+  assert.match(o.stdout.text(), /Ready to upload your selected logs:/)
   assert.doesNotMatch(o.stdout.text(), /Send now/)
   // Nothing claims the wait still stands; the child printed the sink report.
   assert.doesNotMatch(o.stdout.text(), /Nothing was sent/)
