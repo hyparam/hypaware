@@ -1970,7 +1970,8 @@ Record exact editor/CLI versions, OS, config paths and hook settings.
    UI or stream with native rows, including every human prompt, intermediate
    assistant segments, arguments, complete results, native tool IDs and correct
    error status. A missing prompt is the signal to check the typed user-message
-   suppression field, which no fixture exercises.
+   suppression field: a fixture pins the predicate, but only a real store can
+   say what the field means.
    `entrypoint` must identify the actual native editor/CLI store.
 3. Query `hyp query sql "select session_id, message_id, part_type, content_text,
    tool_call_id, status, entrypoint from ai_gateway_messages where client_name = 'cursor'"`.

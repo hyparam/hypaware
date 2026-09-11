@@ -80,6 +80,26 @@ test('CLI refuses unfinished assistant text, retains completed text without an e
   } finally { await f.cleanup() }
 })
 
+test('only the exact suppression value drops a typed prompt, and it drops nothing else', async () => {
+  const f = await fixture()
+  const turnFor = (user) => f.put(wire([1, wire([1, user], ...f.steps.map((ref) => [2, ref]), [3, 'native-generation'])]))
+  const userWith = (flag) => f.put(wire([1, 'Read and search notes.txt'], [2, 'native-user'], [25, 1789070400000], [5, flag]))
+  try {
+    f.writeRoot(wire(...f.refs.map((ref) => [1, ref]), [8, turnFor(userWith(1))]))
+    const suppressed = readCursorSession(f.session).exchanges[0].messages
+    assert.equal(suppressed.length, 7)
+    assert.equal(suppressed.some((m) => m.role === 'user'), false)
+    // Any other value keeps the prompt, so an unrelated flag cannot silently
+    // delete human speech while assistant and tool rows still land.
+    for (const flag of [0, 2]) {
+      f.writeRoot(wire(...f.refs.map((ref) => [1, ref]), [8, turnFor(userWith(flag))]))
+      const messages = readCursorSession(f.session).exchanges[0].messages
+      assert.equal(messages.length, 8)
+      assert.equal(messages[0].content, 'Read and search notes.txt')
+    }
+  } finally { await f.cleanup() }
+})
+
 test('archive/current overlap does not duplicate tools, and unknown tool outcomes stay unknown', async () => {
   const f = await fixture()
   try {
