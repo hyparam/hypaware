@@ -524,6 +524,12 @@ async function runGuardedInitWizard(opts, guard) {
       // sharing claim anywhere, so it never pays for the read.
       // @ref LLP 0396#combined-selection [constrained-by]: a screen claims sharing only where confirming it can enable sharing
       let syncWithheld = false
+      // Whether the pick lane is this pass's sharing choice, and so whether
+      // its title and its accept narration carry the sync claim. The sync
+      // lane reads it too: where that narration was made, it is the run's
+      // statement of what leaves the machine, and the lane behind it may not
+      // make it a second time.
+      let pickCollectAndSync = false
       // Every attended pass with default rows gets the gate, both
       // pathways: it is the wizard's only accept-or-customize screen, and
       // the lanes behind it are menus that never re-ask "defaults or
@@ -531,6 +537,7 @@ async function runGuardedInitWizard(opts, guard) {
       // @ref LLP 0201#gate [implements]: the gate is asked on every attended pass whose seeding yields default rows
       if (interactive) {
         syncWithheld = enrolled() && (await syncWithheldSafe({ opts }))
+        pickCollectAndSync = enrolled() && !syncWithheld
         // The tool names the accept row's summary sentence claims: the
         // pick lane's own default rows, computed once here, so
         // "everything" names exactly what the lane would record.
@@ -600,7 +607,7 @@ async function runGuardedInitWizard(opts, guard) {
           // so it says so - except where the confirm behind it cannot
           // clear an opt-out, which is the same condition that narrows
           // the gate's accept row above.
-          ...(interactive && enrolled() && !syncWithheld ? { collectAndSync: true } : {}),
+          ...(pickCollectAndSync ? { collectAndSync: true } : {}),
           ...(catalog ? { catalog } : {}),
           ...(opts.platform ? { platform: opts.platform } : {}),
           ...(locked ? { locked } : {}),
@@ -707,7 +714,13 @@ async function runGuardedInitWizard(opts, guard) {
               collectAndSync: true,
               deferWrite: true,
               ...(opts.prompt ? { prompt: opts.prompt } : {}),
-              ...(express ? { autoAccept: true } : {}),
+              // On the combined path this says the picker already narrated
+              // this list, not merely that the gate answered the lane, so it
+              // is set only where that narration carried the sync claim: a
+              // pass whose picker said "record" alone still needs the
+              // statement from here.
+              // @ref LLP 0396#combined-selection [implements]: the express run states the combined picture once, at the picker
+              ...(express && pickCollectAndSync ? { autoAccept: true } : {}),
               // The pick lane is always behind this one.
               allowBack: true,
             })
