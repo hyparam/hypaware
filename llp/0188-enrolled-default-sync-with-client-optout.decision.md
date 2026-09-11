@@ -14,6 +14,8 @@
 > per-item toggle LLP 0132 rejected becomes the mechanism. Central-config
 > sources remain always-sync and cannot be opted out.
 
+**Extended-by:** [LLP 0396](./0396-combined-collection-and-sync.spec.md) (combined collection and sharing selection).
+
 ## Context {#context}
 
 LLP 0132 decided that on a machine with a central layer, locally added

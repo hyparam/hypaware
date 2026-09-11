@@ -13,6 +13,8 @@
 > remaining question; no asks the real questions, linearly, with no further
 > accept-or-customize screens.
 
+**Extended-by:** [LLP 0396](./0396-combined-collection-and-sync.spec.md) (combined collection and sharing selection).
+
 ## Context {#context}
 
 [LLP 0190](./0190-wizard-defaults-gate.decision.md) gave the pick and sync

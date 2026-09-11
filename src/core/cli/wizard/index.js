@@ -24,7 +24,7 @@ import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
 import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
-import { optedOutClientSourceIds, readClientSyncEntries } from '../../usage-policy/index.js'
+import { readClientSyncEntries } from '../../usage-policy/index.js'
 import {
   LOCAL_INSTALL_RETENTION_DAYS,
   defaultConfirmSelectPromptFactory,
@@ -42,7 +42,7 @@ import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from 
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
 import { runWizardSyncNow } from './sync_now.js'
-import { runWizardSyncScope } from './sync_scope.js'
+import { commitWizardSyncScope, runWizardSyncScope } from './sync_scope.js'
 import { runWizardFolderAsk } from './folder_ask.js'
 import { runWizardExpressGate } from './express.js'
 import { runConfigurePhase } from './configure.js'
@@ -76,7 +76,7 @@ import { wizardStepProgress } from './steps.js'
  * as they are.
  *
  * Attended runs can also step *back* (LLP 0191): escape at a question
- * lane returns to the lane before it (folders to sync, sync to pick, pick
+ * lane returns to the lane before it (folders to pick, pick
  * to the express gate - or to the fork when this pass showed no gate - and
  * the gate itself to the fork, the fork to a reconfigure run's gate), with
  * a completed join reused rather than re-run and confirmed picks
@@ -191,6 +191,8 @@ async function runGuardedInitWizard(opts, guard) {
   let picked
   /** @type {string[]} */
   let sourcesOptedOut = []
+  /** @type {string[] | undefined} */
+  let pendingSyncSources
   /**
    * The standing new-folder answer this run left behind (LLP 0200), for
    * the finish log. Undefined on runs that never reach the lane.
@@ -296,8 +298,7 @@ async function runGuardedInitWizard(opts, guard) {
   }
 
   // The question lanes and their back edges (LLP 0191 #back-edges):
-  // escape steps one *screen* back - folders to sync (`continue atSync`,
-  // or past it to pick when the sync lane asked nothing), sync to pick
+  // escape steps one *screen* back - folders to the combined picker
   // (`continue atPick`), pick to the express gate (`continue atExpress`,
   // or straight to the fork when that pass has no gate to show),
   // the express gate to the fork (`continue atFork`), the fork to the
@@ -511,24 +512,34 @@ async function runGuardedInitWizard(opts, guard) {
       // the pick lane's back edge then reaches the fork directly, exactly
       // as it did before the gate existed.
       let expressShown = false
+      // The one probe both of this pass's sharing claims rest on: the
+      // express accept row ("Record and sync everything") and the combined
+      // picker's own title and accept narration. A store the confirm
+      // cannot read is a store it cannot clear (`sync_scope.js` warns and
+      // writes nothing), and the export seam then withholds every row, so
+      // no screen on that machine may say "and sync" - not the gate the
+      // user decides on, and not the menu behind a decline, which is the
+      // only screen a Customize run sees. Read once per pass, and only
+      // where the answer can change a claim: an unenrolled run makes no
+      // sharing claim anywhere, so it never pays for the read.
+      // @ref LLP 0396#combined-selection [constrained-by]: a screen claims sharing only where confirming it can enable sharing
+      let syncWithheld = false
       // Every attended pass with default rows gets the gate, both
       // pathways: it is the wizard's only accept-or-customize screen, and
       // the lanes behind it are menus that never re-ask "defaults or
       // customize" (LLP 0201 #decline).
       // @ref LLP 0201#gate [implements]: the gate is asked on every attended pass whose seeding yields default rows
       if (interactive) {
+        syncWithheld = enrolled() && (await syncWithheldSafe({ opts }))
         // The tool names the accept row's summary sentence claims: the
         // pick lane's own default rows, computed once here, so
         // "everything" names exactly what the lane would record.
         // Resolution failure degrades to no gate.
-        const { labels: rows, optOutIds } = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
+        const rows = await expressRowsSafe({ opts, catalog, locked, pickSeed, detect })
         // Nothing detected and nothing locked is nothing to accept, so
         // there is no gate to show; the pick lane opens its menu as it
         // always would (LLP 0201 #no-default-no-accept).
         if (rows.length > 0) {
-          // Only an enrolled run makes a sync claim at all, so only an
-          // enrolled run pays for the store read.
-          const syncWithheld = enrolled() && (await syncWithheldSafe({ opts, ids: optOutIds }))
           const expressFn = opts.express ?? runWizardExpressGate
           const choice = await expressFn({
             stdout: opts.stdout,
@@ -559,6 +570,7 @@ async function runGuardedInitWizard(opts, guard) {
       backFromPick = false
 
       atPick: while (true) {
+        pendingSyncSources = undefined
         if (interactive && !(await guard.checkpoint())) return await cancelDeadOutput()
         // The lanes' positions, resolved when their pathway is: a back
         // through the fork can land on the other pathway, whose itinerary
@@ -568,14 +580,13 @@ async function runGuardedInitWizard(opts, guard) {
         // `--dry-run` / preset / `--from-file` output is byte-identical to
         // what it was before the breadcrumb existed (LLP 0131
         // #attended-only). `managed` is part of the itinerary: it adds the
-        // sync lane to a managed machine's local-pathway run (LLP 0188).
+        // folder lane to a managed machine's local-pathway run.
         // An express run answers no more questions, so it states no more
         // positions: a "Step 3 of 5" above a narration would count screens
         // nobody is answering.
         const step = (/** @type {'pick' | 'sync' | 'folders' | 'finale'} */ name) =>
           express ? undefined : wizardStepProgress(pathway, name, { managed: enrolled() })
         const pickProgress = step('pick')
-        const syncProgress = step('sync')
         const foldersProgress = step('folders')
 
         const pickFn = opts.pick ?? runWizardPick
@@ -585,6 +596,11 @@ async function runGuardedInitWizard(opts, guard) {
           ...(opts.stdin ? { stdin: opts.stdin } : {}),
           env: opts.env,
           ...(pickProgress ? { progress: pickProgress } : {}),
+          // The menu is the sharing choice on an enrolled run (LLP 0396),
+          // so it says so - except where the confirm behind it cannot
+          // clear an opt-out, which is the same condition that narrows
+          // the gate's accept row above.
+          ...(interactive && enrolled() && !syncWithheld ? { collectAndSync: true } : {}),
           ...(catalog ? { catalog } : {}),
           ...(opts.platform ? { platform: opts.platform } : {}),
           ...(locked ? { locked } : {}),
@@ -639,22 +655,8 @@ async function runGuardedInitWizard(opts, guard) {
         // lane, or a later pass through the fork - re-seeds with it.
         pickSeed = picked.sourcesPicked
 
-        // The sync-scope step (LLP 0188 #never-silent): on every enrolled run -
-        // the team pathway, or an already-enrolled machine on any pathway - ask
-        // which of the picked, non-locked sources stay local-only. Whether the
-        // run is enrolled is `enrolled()`, not `managed`: see its definition for
-        // the join whose org-config converge timed out, which is enrolled with
-        // no central layer yet. Default-sync means an
-        // untouched prompt opts nothing out. Non-interactive runs skip it
-        // (LLP 0131 #attended-only): default-sync is the correct scripted
-        // outcome, and `hyp policy client` is the standing control.
+        // @ref LLP 0396#combined-selection [implements]: apply the picker's sharing answer without another question
         if (interactive && (pathway === 'team' || enrolled())) {
-          // The two enrolled-only questions, in order and with a back edge
-          // between them: which adapters ship (LLP 0188), then what happens
-          // in folders nobody has classified (LLP 0200). Separate lanes
-          // because they answer different axes; a back out of the folder
-          // question re-presents the sync lane, not the picker.
-          // @ref LLP 0200#wizard [implements]: the new-folder step follows the sync lane and backs into it
           atSync: while (true) {
             if (!(await guard.checkpoint())) return await cancelDeadOutput()
             const syncFn = opts.syncScope ?? runWizardSyncScope
@@ -702,7 +704,8 @@ async function runGuardedInitWizard(opts, guard) {
               candidatesHiddenIds: picked.descriptors
                 .filter((d) => !visibleCandidateIds.has(d.id))
                 .map((d) => d.id),
-              ...(syncProgress ? { progress: syncProgress } : {}),
+              collectAndSync: true,
+              deferWrite: true,
               ...(opts.prompt ? { prompt: opts.prompt } : {}),
               ...(express ? { autoAccept: true } : {}),
               // The pick lane is always behind this one.
@@ -717,6 +720,7 @@ async function runGuardedInitWizard(opts, guard) {
               return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
             }
             sourcesOptedOut = syncScope.optedOut
+            pendingSyncSources = syncScope.pendingSources
 
             if (!(await guard.checkpoint())) return await cancelDeadOutput()
             const folderFn = opts.folderAsk ?? runWizardFolderAsk
@@ -826,6 +830,12 @@ async function runGuardedInitWizard(opts, guard) {
     }
     // Past this line a cancel is a cancel over a machine that changed.
     landedConfigPath = picked.configPath
+  }
+
+  // @ref LLP 0396#combined-selection [implements]: no opt-out is cleared until the selection questions and the config write succeed
+  if (pendingSyncSources) {
+    if (!(await guard.checkpoint())) return await cancelDeadOutput()
+    await commitWizardSyncScope({ env: opts.env, stdout: opts.stdout, sources: pendingSyncSources })
   }
 
   // Attended-only (LLP 0131): the configure phase itself no-ops when
@@ -1257,10 +1267,6 @@ async function narrateEnrolledAbort(opts) {
  * is the right failure; guessing at a list the user is about to accept is
  * not.
  *
- * `optOutIds` rides along for the accept row's sync claim: the same rows
- * by id, minus the locked ones, which always sync (LLP 0188 #locked) and
- * so can never be what makes the claim false.
- *
  * @ref LLP 0201#gate [implements]: the gate names the pick lane's rows, from one computation, or is not shown
  * @param {{
  *   opts: RunInitWizardOptions,
@@ -1269,7 +1275,7 @@ async function narrateEnrolledAbort(opts) {
  *   pickSeed: PickerSource[] | undefined,
  *   detect: (args: { env: NodeJS.ProcessEnv }) => Promise<Set<PickerSource>>,
  * }} args
- * @returns {Promise<{ labels: string[], optOutIds: string[] }>}
+ * @returns {Promise<string[]>}
  */
 async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
   try {
@@ -1281,44 +1287,37 @@ async function expressRowsSafe({ opts, catalog, locked, pickSeed, detect }) {
       ...(pickSeed ? { initialSelection: pickSeed } : {}),
       detect,
     }))
-    return {
-      labels: seeding.defaultRows.map((d) => d.label),
-      optOutIds: seeding.defaultRows.filter((d) => !seeding.lockedSet.has(d.id)).map((d) => d.id),
-    }
+    return seeding.defaultRows.map((d) => d.label)
   } catch {
-    return { labels: [], optOutIds: [] }
+    return []
   }
 }
 
 /**
- * Does the client-sync store already withhold one of the rows the express
- * gate is about to name?
+ * A corrupt store cannot fulfill the combined selection's sync promise: the
+ * confirm cannot clear an opt-out it cannot read (`sync_scope.js` warns and
+ * writes nothing), and the export seam then withholds every row until the
+ * file is repaired, org-managed rows included (`source_withhold.js` throws
+ * before it filters the central ids out). So the probe reads the store on
+ * every enrolled attended pass rather than only on the runs that have a
+ * non-locked row to name: a fully fleet-managed machine has no such row and
+ * is exactly the machine whose entire export the corrupt file stops. Nor
+ * only on the passes that show a gate, because the pick lane makes the same
+ * claim in its title on the passes that do not.
  *
- * The accept row promises "Record and sync everything", and an express
- * accept preserves standing opt-outs verbatim rather than clearing them
- * (`sync_scope.js`'s auto-accept arm returns `optedOutBefore`), so on a
- * reconfigure the unqualified promise is false. The retired sync gate
- * carried this distinction itself ("Sync all" against "Keep this"); with
- * that gate gone the express row is the only screen the user decides on,
- * so it has to read the store the sync lane reads.
+ * The entries are read and discarded: the question is whether the file
+ * parses, not what is in it, and `readClientSyncEntries` is the one reader
+ * that answers it the way the export seam and `hyp status` do.
  *
- * Fails toward the weaker claim: an unreadable or throwing store answers
- * "withheld", because a gate that cannot prove everything syncs must not
- * say it does. That is also the run where the sync lane skips itself with
- * a warning and writes nothing, leaving whatever the store holds standing.
- *
- * @ref LLP 0188#opt-out [constrained-by]: the standing opt-out the accept keeps is the store's, so the claim about it is read from the store
- * @param {{ opts: RunInitWizardOptions, ids: string[] }} args
+ * @ref LLP 0396#combined-selection [constrained-by]: the accept row claims sync only where the confirm can enable it
+ * @param {{ opts: RunInitWizardOptions }} args
  * @returns {Promise<boolean>}
  */
-async function syncWithheldSafe({ opts, ids }) {
-  if (ids.length === 0) return false
+async function syncWithheldSafe({ opts }) {
   try {
     const stateDir = readObservabilityEnv(opts.env).stateDir
-    const entries = await readClientSyncEntries({ stateDir })
-    if (!entries || entries.length === 0) return false
-    const optedOut = new Set(optedOutClientSourceIds(entries))
-    return ids.some((id) => optedOut.has(id))
+    await readClientSyncEntries({ stateDir })
+    return false
   } catch {
     return true
   }

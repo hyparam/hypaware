@@ -8,7 +8,7 @@ import path from 'node:path'
 
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
-import { writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
+import { clientSyncListPath, readClientSyncEntries, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { OVERVIEW_PROBE_SQL } from '../../../../src/core/query/overview.js'
@@ -366,7 +366,7 @@ test('runInitWizard: declining the express gate leaves the lanes prompting, posi
   assert.equal(opts._pickOpts.autoAccept, undefined)
   assert.equal(opts._syncOpts.autoAccept, undefined)
   assert.equal(opts._folderOpts.autoAccept, undefined)
-  assert.equal(opts._pickOpts.progress, 'Step 2 of 5 · Choose what to collect')
+  assert.equal(opts._pickOpts.progress, 'Step 2 of 4 · Choose what to collect and sync')
 })
 
 test('runInitWizard: a cancelled express gate exits 130 before any lane runs', async () => {
@@ -439,10 +439,12 @@ test('runInitWizard: a managed machine reconfiguring down the local pathway stil
   assert.deepEqual(calls, ['gate', 'fork', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
 })
 
-// The accept row's sync claim is read off the store the sync lane reads,
-// because an express accept preserves standing opt-outs rather than
-// clearing them (LLP 0188 #opt-out).
-test('runInitWizard: a standing opt-out on a named row narrows the express gate\'s sync claim', async () => {
+// A standing opt-out no longer narrows anything: under the combined
+// selection the confirm clears it, so the row can promise sync (LLP 0396
+// #combined-selection). The store is still read - what it now answers is
+// whether the confirm *can* clear, not whether anything is standing.
+// @ref LLP 0396#combined-selection [tests]: a readable store lets the accept row keep its sync claim over a row the store withholds today
+test('runInitWizard: a standing opt-out no longer narrows the express gate\'s sync claim', async () => {
   const home = await tmpHome()
   const stateDir = readObservabilityEnv({ HYP_HOME: path.join(home, '.hyp') }).stateDir
   await writeClientSyncEntries({ stateDir, entries: [{ source: 'claude', class: 'local-only' }] })
@@ -455,7 +457,7 @@ test('runInitWizard: a standing opt-out on a named row narrows the express gate\
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
   assert.equal(opts._expressOpts.enrolled, true)
-  assert.equal(opts._expressOpts.syncWithheld, true, 'the gate may not promise sync for a row the store withholds')
+  assert.equal(opts._expressOpts.syncWithheld, undefined, 'accepting explicitly enables sync for the selected row')
 })
 
 test('runInitWizard: with nothing withheld the express gate keeps its unqualified sync claim', async () => {
@@ -485,6 +487,69 @@ test('runInitWizard: a solo run never pays for the store read', async () => {
   // Unenrolled the row claims no sync at all, so the store has no say.
   assert.equal(opts._expressOpts.enrolled, false)
   assert.equal(opts._expressOpts.syncWithheld, undefined)
+  // Nothing forwards from a solo machine, so the picker asks about
+  // collection only and never claims to be the sharing choice.
+  assert.equal(opts._pickOpts.collectAndSync, undefined)
+})
+
+/**
+ * A client policy store that exists and cannot be parsed: the one state in
+ * which confirming the combined picker cannot enable sharing.
+ *
+ * @param {string} home
+ */
+async function corruptClientSyncStore(home) {
+  const stateDir = readObservabilityEnv({ HYP_HOME: path.join(home, '.hyp') }).stateDir
+  const file = clientSyncListPath(stateDir)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, '{ not json')
+}
+
+// Both sharing claims drop together or neither does. The gate row is the
+// screen an express run decides on; the picker's title and accept
+// narration are the screens a Customize run decides on, and on an
+// unreadable store neither can be kept: `sync_scope.js` warns and writes
+// nothing, and the export seam then withholds every row.
+// @ref LLP 0396#combined-selection [tests]: an unreadable store drops the sync claim from the gate row and from the picker alike
+test('runInitWizard: an unreadable policy store drops the sync claim from every enrolled screen', async () => {
+  const home = await tmpHome()
+  await corruptClientSyncStore(home)
+  const { opts } = wizardOpts(home, {
+    gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+    confirm: async () => 'stay',
+    catalog: detectableCatalog(),
+    detect: async () => new Set(['claude']),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.equal(opts._expressOpts.enrolled, true)
+  assert.equal(opts._expressOpts.syncWithheld, true, 'the gate may not promise sync it cannot enable')
+  assert.equal(opts._pickOpts.collectAndSync, undefined, 'nor may the menu behind a decline')
+})
+
+// The machine the probe exists for. Everything the gate names is the
+// fleet's, so there is no non-locked row to check a standing opt-out
+// against - and that is exactly the machine whose entire export the
+// corrupt file stops, org rows included (`source_withhold.js` throws
+// before it filters the central ids out). A probe that ran only where a
+// non-locked row was named would report "everything syncs" here.
+// @ref LLP 0396#combined-selection [tests]: the store probe runs on every enrolled gate, including the machine with no row of its own
+test('runInitWizard: a fully fleet-managed machine still probes the store for its sync claim', async () => {
+  const home = await tmpHome()
+  await corruptClientSyncStore(home)
+  const { opts } = wizardOpts(home, {
+    fork: async () => 'team',
+    join: async () => ({ status: 'ok', lockedSources: ['claude'], managed: true }),
+    catalog: detectableCatalog(),
+    detect: async () => new Set(),
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  // The gate was shown at all: the locked row is a default row, so there
+  // is something to accept even with nothing detected.
+  assert.deepEqual(opts._expressOpts.rows, ['Claude Code'])
+  assert.equal(opts._expressOpts.syncWithheld, true, 'no non-locked row is not the same as nothing to check')
+  assert.equal(opts._pickOpts.collectAndSync, undefined)
 })
 
 test('runInitWizard: the team pathway runs the sync-scope and new-folder steps between pick and configure', async () => {
@@ -1440,3 +1505,74 @@ test('runInitWizard: local pathway never narrates the first-sync hold', async ()
   await runInitWizard(opts)
   assert.doesNotMatch(stdout.text(), /Nothing has been uploaded yet/)
 })
+
+// @ref LLP 0396#combined-selection [tests]: cancellation and Back cannot revoke a standing privacy choice
+for (const scenario of ['cancel', 'back', 'refuse', 'config-failure', 'policy-failure', 'corrupt-policy', 'commit']) {
+  test(`combined sharing is deferred through setup: ${scenario}`, async (t) => {
+    const home = await tmpHome()
+    t.after(() => fs.rm(home, { recursive: true, force: true }))
+    const env = { HYP_HOME: path.join(home, '.hyp') }
+    const stateDir = readObservabilityEnv(env).stateDir
+    const original = [{ source: 'claude', class: /** @type {'local-only'} */ ('local-only') }]
+    await writeClientSyncEntries({ stateDir, entries: original })
+    const configPath = path.join(home, 'config.json')
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+    let passes = 0
+    let configured = false
+    const { opts, stdout } = wizardOpts(home, {
+      gate: async () => ({ action: 'reconfigure', managed: true, report: {} }),
+      confirm: async () => 'stay',
+      pick: async () => {
+        passes += 1
+        return pickResult({
+          configPath: scenario === 'config-failure' ? path.join(configPath, 'blocked.json') : configPath,
+          configPending: true,
+          sourcesPicked: passes === 1 ? ['claude'] : [],
+          descriptors: passes === 1 ? [{ id: 'claude', label: 'Claude Code' }] : [],
+        })
+      },
+      syncScope: runWizardSyncScope,
+      folderAsk: async () => {
+        assert.deepEqual(await readClientSyncEntries({ stateDir }), original,
+          'the running daemon still sees the old privacy choice throughout the questions')
+        assert.doesNotMatch(stdout.text(), /No longer local-only/)
+        if (scenario === 'cancel') return { cancelled: true }
+        if (scenario === 'back' && passes === 1) return { back: true }
+        return { mode: 'sync' }
+      },
+      confirmOverwrite: async () => {
+        assert.deepEqual(await readClientSyncEntries({ stateDir }), original)
+        if (scenario === 'corrupt-policy') await fs.writeFile(clientSyncListPath(stateDir), 'broken')
+        if (scenario === 'policy-failure') {
+          const rename = fs.rename.bind(fs)
+          t.mock.method(fs, 'rename', async (from, to) => {
+            if (to === clientSyncListPath(stateDir)) throw new Error('policy rename failed')
+            return rename(from, to)
+          })
+        }
+        if (scenario === 'commit') await writeClientSyncEntries({ stateDir, entries: [
+          ...original, { source: 'codex', class: 'local-only' },
+        ] })
+        return scenario !== 'refuse'
+      },
+      configure: async () => { configured = true; return { results: [] } },
+    })
+    if (scenario === 'config-failure' || scenario === 'policy-failure' || scenario === 'corrupt-policy') {
+      await assert.rejects(runInitWizard(opts))
+    } else {
+      const result = await runInitWizard(opts)
+      assert.equal(result.exitCode, scenario === 'cancel' ? 130 : scenario === 'refuse' ? 1 : 0)
+    }
+    if (scenario === 'corrupt-policy') {
+      assert.equal(await fs.readFile(clientSyncListPath(stateDir), 'utf8'), 'broken')
+    } else {
+      assert.deepEqual(await readClientSyncEntries({ stateDir }), scenario === 'commit'
+        ? [{ source: 'codex', class: 'local-only' }]
+        : original)
+    }
+    assert.equal(configured, scenario === 'commit' || scenario === 'back')
+    if (scenario === 'commit') assert.match(stdout.text(), /No longer local-only: claude/)
+    else assert.doesNotMatch(stdout.text(), /No longer local-only/)
+    if (scenario === 'back') assert.equal(passes, 2)
+  })
+}
