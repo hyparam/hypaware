@@ -442,9 +442,17 @@ test('the claude privacy skill names the recorder id the listener reports', () =
   // in the receipt bullet above the list and in the stated-id re-run below it,
   // so a Step-1-wide `includes` is satisfied by either bystander and an edit
   // demoting the recorder check to commentary passes it (issue #1627).
+  //
+  // It pins the clause rather than the bare id for the same reason one level
+  // down: an aside inside this paragraph names the id too ("for reference,
+  // `"recorders"` usually lists `claude-telemetry`"), so a bare `includes`
+  // survives deleting the stop it is supposed to be guarding. The phrase is
+  // built from the imported id, which is what keeps skill and source pinned
+  // together.
+  const missingEntryClause = `no \`${CLAUDE_TELEMETRY_SOURCE}\` entry`
   assert.ok(
-    stopList.includes(CLAUDE_TELEMETRY_SOURCE),
-    `a missing ${CLAUDE_TELEMETRY_SOURCE} entry must be one of the stop conditions, not an aside elsewhere in Step 1`
+    stopList.includes(missingEntryClause),
+    `"${missingEntryClause}" must be one of the stop conditions, not an aside that only mentions the id`
   )
   assert.match(
     stopList,
@@ -456,7 +464,7 @@ test('the claude privacy skill names the recorder id the listener reports', () =
   // re-run states the id, so it reports `argument` by construction.
   assert.match(
     stopList,
-    /\bexception\b[^\n]*`argument`/,
+    /\bexception\b[\s\S]*`argument`/,
     'the stated-id re-run reports `argument`, so the stop must carry it as the exception'
   )
 })
@@ -482,7 +490,15 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   const open = rest.indexOf('```')
   const close = rest.indexOf('```', open + 3)
   assert.ok(open > 0 && close > open, 'and must still answer it with a command block')
-  const routing = rest.slice(0, close + 3)
+  // Through the paragraph after the fence, not just to the fence. A reroute
+  // reads most naturally as the next sentence after the answer ("If that also
+  // refuses, drop to the script below"), which a slice ending at the fence
+  // leaves outside the guard entirely (issue #1627).
+  const afterFence = rest.slice(close + 3)
+  const gap = afterFence.search(/\S/)
+  const brk = gap < 0 ? -1 : afterFence.slice(gap).search(/\n\s*\n/)
+  const follows = gap < 0 ? 0 : brk < 0 ? afterFence.length : gap + brk
+  const routing = rest.slice(0, close + 3 + follows)
 
   // Scoped to that block. Both `hyp session ignore` and the fallback are named
   // throughout Step 1, so a Step-1-wide match says nothing about where THIS
@@ -498,6 +514,14 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
     routing,
     /do \*{0,2}not\*{0,2} drop to the script below/,
     'and the gateway-only script must be refused in words, not left standing as the other option'
+  )
+  // The refusal is licensed to name the script once, to refuse it. Any other
+  // pointer to it in this block is a reroute whichever sentence carries it, so
+  // the licensed phrase is dropped before the block is held to that.
+  assert.doesNotMatch(
+    routing.replace(/do \*{0,2}not\*{0,2} drop to the script below/, ''),
+    /drop to the script|fall back to the script|use the script below/,
+    'nothing else in this block may send the ambiguous case to the gateway-only script'
   )
   assert.doesNotMatch(
     routing,
