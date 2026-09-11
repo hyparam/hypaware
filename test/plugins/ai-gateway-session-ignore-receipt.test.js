@@ -405,6 +405,12 @@ for (const rel of SKILLS) {
   })
 }
 
+/** The words the claude copy's Step 1 opens its stop list with, bolded as it writes them. */
+const CLAUDE_STOP_LIST_OPENER = '**Stop on any of these**'
+
+/** The words the claude copy's Step 1 opens the two-clients-state-an-id refusal with. */
+const CLAUDE_AMBIGUITY_OPENER = '**If the verb refuses because more than one client states an id**'
+
 /**
  * The receipt tells the agent to stop unless the recorder that captures THIS
  * session appears in `recorders`, which only works if the skill names the id
@@ -422,22 +428,106 @@ for (const rel of SKILLS) {
  */
 test('the claude privacy skill names the recorder id the listener reports', () => {
   const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+
+  // The check has to be a stop condition, not an observation: the whole bug
+  // this skill's Step 1 was rewritten for is an `ok` over a recorder that was
+  // never addressed (issue #1615).
+  const at = step1.indexOf(CLAUDE_STOP_LIST_OPENER)
+  assert.ok(at >= 0, `the receipt readings must be framed as stop conditions, opening "${CLAUDE_STOP_LIST_OPENER}"`)
+  const rest = step1.slice(at)
+  const end = rest.search(/\n\s*\n/)
+  const stopList = end < 0 ? rest : rest.slice(0, end)
+
+  // Scoped to the stop list itself. Step 1 names `claude-telemetry` twice more,
+  // in the receipt bullet above the list and in the stated-id re-run below it,
+  // so a Step-1-wide `includes` is satisfied by either bystander and an edit
+  // demoting the recorder check to commentary passes it (issue #1627).
+  //
+  // It pins the clause rather than the bare id for the same reason one level
+  // down: an aside inside this paragraph names the id too ("for reference,
+  // `"recorders"` usually lists `claude-telemetry`"), so a bare `includes`
+  // survives deleting the stop it is supposed to be guarding. The phrase is
+  // built from the imported id, which is what keeps skill and source pinned
+  // together.
+  const missingEntryClause = `no \`${CLAUDE_TELEMETRY_SOURCE}\` entry`
   assert.ok(
-    step1.includes(CLAUDE_TELEMETRY_SOURCE),
-    `Step 1 must name the listener's own recorder id (${CLAUDE_TELEMETRY_SOURCE}) for its coverage check to be actionable`
-  )
-  // And the check has to be a stop condition, not an observation: the whole
-  // bug this skill's Step 1 was rewritten for is an `ok` over a recorder that
-  // was never addressed (issue #1615).
-  assert.match(
-    step1,
-    /\*\*Stop on any of these\*\*/,
-    'the receipt readings must be framed as stop conditions, not as commentary'
+    stopList.includes(missingEntryClause),
+    `"${missingEntryClause}" must be one of the stop conditions, not an aside that only mentions the id`
   )
   assert.match(
-    step1,
+    stopList,
     /a `"session_id_source"` other than `claude_env`/,
     'an id resolved off disk for another session must be one of them'
+  )
+  // And the one documented exception to that stop, or Step 1 routes the
+  // ambiguous case to a re-run whose receipt trips the stop it just set: the
+  // re-run states the id, so it reports `argument` by construction.
+  assert.match(
+    stopList,
+    /\bexception\b[\s\S]*`argument`/,
+    'the stated-id re-run reports `argument`, so the stop must carry it as the exception'
+  )
+})
+
+/**
+ * Where Step 1 sends the one id-resolution refusal that happens with
+ * `CLAUDE_CODE_SESSION_ID` set: a second client stating an id too, so the verb
+ * will not guess. The answer is the same verb with the id stated, which still
+ * addresses every recorder; the shell block below reaches the gateway alone, so
+ * rerouting this refusal there reports an opt-out of the machine over a live
+ * telemetry listener - the `ok`-over-a-skipped-recorder failure Step 1 exists
+ * to prevent.
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: the re-run belongs here because it
+ * reaches both recorders where the script reaches one.
+ */
+test('the claude privacy skill answers an ambiguous id with the stated-id re-run, not the fallback', () => {
+  const step1 = privacyStep1('claude/skills/hypaware-privacy/SKILL.md')
+
+  const at = step1.indexOf(CLAUDE_AMBIGUITY_OPENER)
+  assert.ok(at >= 0, `Step 1 must still route the ambiguous case, opening "${CLAUDE_AMBIGUITY_OPENER}"`)
+  const rest = step1.slice(at)
+  const open = rest.indexOf('```')
+  const close = rest.indexOf('```', open + 3)
+  assert.ok(open > 0 && close > open, 'and must still answer it with a command block')
+  // Through the paragraph after the fence, not just to the fence. A reroute
+  // reads most naturally as the next sentence after the answer ("If that also
+  // refuses, drop to the script below"), which a slice ending at the fence
+  // leaves outside the guard entirely (issue #1627).
+  const afterFence = rest.slice(close + 3)
+  const gap = afterFence.search(/\S/)
+  const brk = gap < 0 ? -1 : afterFence.slice(gap).search(/\n\s*\n/)
+  const follows = gap < 0 ? 0 : brk < 0 ? afterFence.length : gap + brk
+  const routing = rest.slice(0, close + 3 + follows)
+
+  // Scoped to that block. Both `hyp session ignore` and the fallback are named
+  // throughout Step 1, so a Step-1-wide match says nothing about where THIS
+  // refusal is sent: a reroute that names the re-run in a later aside passes it.
+  assert.match(
+    routing,
+    /hyp session ignore --json "\$CLAUDE_CODE_SESSION_ID"/,
+    'the answer is the verb again with the id stated, which still reaches every recorder'
+  )
+  // The emphasis is optional because this copy bolds the refusal already
+  // (`do **not** drop`), and an unbolded rewrite is the same sentence.
+  assert.match(
+    routing,
+    /do \*{0,2}not\*{0,2} drop to the script below/,
+    'and the gateway-only script must be refused in words, not left standing as the other option'
+  )
+  // The refusal is licensed to name the script, to refuse it. Any other pointer
+  // to it in this block is a reroute whichever sentence carries it, so every
+  // instance of the licensed phrase is dropped before the block is held to
+  // that: restating the refusal is stronger prose, not a second route.
+  assert.doesNotMatch(
+    routing.replace(/do \*{0,2}not\*{0,2} drop to the script below/g, ''),
+    /drop to the script|fall back to the script|use the script below/,
+    'nothing else in this block may send the ambiguous case to the gateway-only script'
+  )
+  assert.doesNotMatch(
+    routing,
+    /_hypaware\/ignore\/session|curl /,
+    'an ambiguous id must not be answered with a gateway-only POST'
   )
 })
 
