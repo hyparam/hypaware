@@ -362,11 +362,12 @@ for (const rel of SKILLS) {
     const step1 = privacyStep1(rel)
     const caveat = EPHEMERAL_CAVEAT[rel]
 
-    // Scoped to the caveat's own paragraph rather than the whole of Step 1.
-    // Step 1 talks about restarts elsewhere - the claude copy says a bystander
-    // session "stays suppressed until its recorder restarts" - so a Step-1-wide
-    // /recorder restart/ is satisfied by prose that is not the caveat, and a
-    // caveat that dropped its restart half would still pass.
+    // The positive halves are scoped to the caveat's own paragraph rather than
+    // the whole of Step 1. Step 1 talks about restarts elsewhere - the claude
+    // copy says a bystander session "stays suppressed until its recorder
+    // restarts" - so a Step-1-wide /recorder restart/ is satisfied by prose
+    // that is not the caveat, and a caveat that dropped its restart half would
+    // still pass.
     const at = step1.indexOf(CAVEAT_OPENER)
     assert.ok(at >= 0, `Step 1 must still carry the caveat, opening "${CAVEAT_OPENER}"`)
     const rest = step1.slice(at)
@@ -380,10 +381,25 @@ for (const rel of SKILLS) {
     // close its own sentence on the restart, which is what a reader acts on.
     // The emphasis is optional because these copies bold the phrase already
     // (`a **recorder restart**`), and an exact-literal pin would read the
-    // markdown the file actually writes as a different sentence.
+    // markdown the file actually writes as a different sentence. For the same
+    // reason the match ignores case and steps over a parenthetical gloss: a
+    // caveat split into its own sentence capitalises the article ("A
+    // **recorder restart** drops it.") and the claude copy already glosses the
+    // restart inline ("(the daemon, the gateway, or the telemetry listener)"),
+    // so both are surface variants of the one sentence this forbids, not
+    // different sentences.
+    //
+    // This half keeps the whole of Step 1, which is where the codex-only pin
+    // has always run it. The scoping above exists because a positive match is
+    // satisfied by any prose that looks right, so a neighbouring sentence can
+    // stand in for a caveat that lost its half. This assertion has the opposite
+    // failure mode: it fires only on prose that really does close on the
+    // restart, so narrowing it to the paragraph only drops catches. A
+    // restart-only restatement further down Step 1 ("In short: a **recorder
+    // restart** drops it.") is the R9 failure whichever paragraph carries it.
     assert.doesNotMatch(
-      para,
-      /a \*{0,2}(?:gateway|recorder) restart\*{0,2} drops it\./,
+      step1,
+      /\ba \*{0,2}(?:gateway|recorder) restart\*{0,2}(?: \([^)]{0,80}\))? drops it\./i,
       'the restart must not be presented as the only way the opt-out lapses'
     )
   })
