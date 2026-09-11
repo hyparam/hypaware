@@ -119,3 +119,83 @@ test('daemon boot refreshes a stale installed skill, keeps an edited one, and in
     await fs.rm(home, { recursive: true, force: true })
   }
 })
+
+test('a boot that only heals a stale record says so in daemon.log', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-heal-home-'))
+  const hypHome = path.join(home, '.hyp')
+  const env = { ...process.env, HOME: home, HYP_HOME: hypHome }
+  const stateRoot = clientAssetStateRoot(env, home)
+  let handle
+  try {
+    const dest = path.join(home, '.claude', 'skills', 'hypaware-query')
+    await fs.mkdir(path.dirname(dest), { recursive: true })
+    await fs.cp(path.join(CLAUDE_SKILLS, 'hypaware-query'), dest, { recursive: true })
+
+    // The state a pass killed between the swap and its one ledger write
+    // leaves: the copy already holds the package's current bytes, the record
+    // still names the bytes that copy replaced. Nothing is rewritten on the
+    // boot that repairs it, so `refreshed` and `skipped` are both empty and
+    // the summary would be silent about the ledger it just rewrote.
+    await writeClientAssetLedger(stateRoot, [
+      { kind: 'skill', name: 'hypaware-query', client: 'claude', dest, digest: 'sha256-of-what-we-installed' },
+    ])
+
+    const configPath = defaultConfigPath(hypHome)
+    await fs.mkdir(path.dirname(configPath), { recursive: true })
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 2,
+      plugins: [
+        {
+          name: '@hypaware/ai-gateway',
+          config: {
+            listen: '127.0.0.1:0',
+            upstreams: [{ name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/' }],
+          },
+        },
+        { name: '@hypaware/claude' },
+      ],
+    }) + '\n')
+
+    handle = await runDaemon({
+      hypHome,
+      configPath,
+      env,
+      runId: 'client-assets-heal-test',
+      tickIntervalMs: 0,
+      installSignalHandlers: false,
+    })
+
+    const current = await digestClientAsset(dest)
+    assert.ok(current)
+    /** @type {string | undefined} */
+    let recorded
+    await waitFor(() => {
+      void readClientAssetLedger(stateRoot).then((l) => { recorded = l[0]?.digest })
+      return recorded === current
+    })
+    assert.equal(recorded, current, 'the stale record is healed to the bytes already on disk')
+
+    const logPath = path.join(stateRoot, 'logs', 'daemon.log')
+    /** @type {Record<string, unknown> | undefined} */
+    let line
+    await waitFor(() => {
+      const text = fs.readFile(logPath, 'utf8')
+      void text.then((t) => {
+        line = t.split('\n').filter(Boolean)
+          .map((l) => JSON.parse(l))
+          .find((r) => r.event === 'daemon.client_assets_refreshed')
+      })
+      return line !== undefined
+    })
+    assert.ok(line, 'the heal-only boot writes a daemon.log line rather than passing in silence')
+    assert.equal(line.healed, 1)
+    assert.deepEqual(line.refreshed, [])
+    assert.deepEqual(line.skipped, [])
+  } finally {
+    if (handle) {
+      await handle.stop()
+      await handle.done
+    }
+    await fs.rm(home, { recursive: true, force: true })
+  }
+})

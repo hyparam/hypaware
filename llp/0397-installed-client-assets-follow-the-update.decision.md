@@ -7,6 +7,7 @@
 **Date:** 2026-09-10
 **Related:** LLP 0138 (#currency: the reconciler key this leaves alone, and its consequence that named `hyp skills install` as the only re-copy), LLP 0219 (#ledger, #edited-assets-are-not-ours: the record and the evidence this reads), LLP 0284 (#digests-are-per-path: how a shared destination is matched), LLP 0309 (#cadence: the update this rides), LLP 0365 (the restart onto the new version that this runs at), LLP 0107 (#every-attach: the manual path that stays)
 **Extends:** LLP 0138, LLP 0309
+**Extended-by:** LLP 0400 (#source-equality-is-ownership: widens #edited-copies-are-kept - a copy whose bytes match no recorded digest but do equal the current source is ours, not the user's, and its record is healed rather than the copy reported as an edit)
 
 > The self-update replaces the package under a running daemon and restarts
 > it, so the skill sources inside the package move on. The copies of those

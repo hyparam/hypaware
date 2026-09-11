@@ -113,11 +113,20 @@ test('an unchanged source is read and left alone', async () => {
   const regs = registries([{ name: 'alpha', sourceDir: src }])
   await install(h, regs)
   const before = await readClientAssetLedger(h.stateRoot)
+  // A rewrite of the ledger produces byte-identical content here, so the
+  // records alone cannot say whether the pass wrote. Backdating the file makes
+  // the write itself visible: healing rides the one post-loop write and must
+  // not arm it on the copies that already match their record, or every steady
+  // state boot rewrites the ledger for nothing (LLP 0400 #one-write).
+  const ledgerPath = path.join(h.stateRoot, 'client-assets.json')
+  await fs.utimes(ledgerPath, new Date(0), new Date(0))
 
   const out = await refresh(h, regs)
   assert.equal(out.unchanged, 1)
+  assert.equal(out.healed, 0)
   assert.deepEqual(out.refreshed, [])
   assert.deepEqual(await readClientAssetLedger(h.stateRoot), before)
+  assert.equal((await fs.stat(ledgerPath)).mtimeMs, 0)
 })
 
 test('a changed source is re-copied and the ledger digest follows it', async () => {
@@ -436,4 +445,60 @@ test('a copy the user deleted is not resurrected by a leftover an earlier boot l
   const out = await refresh(h, regs)
   assert.equal(out.skipped[0]?.reason, 'missing')
   assert.equal(await exists(dest), false)
+})
+
+test('a refresh killed before the ledger write heals its own record on the next boot', async () => {
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+  const [stale] = await readClientAssetLedger(h.stateRoot)
+
+  // Exactly what a SIGKILL after `replaceAsset` swapped the new bytes in but
+  // before the one ledger write lands: the copy on disk is the new source, the
+  // record still names the bytes the pass replaced. Read as an edit, the copy
+  // is reported as the user's on this boot and on every boot after it, never
+  // refreshed again and never prunable when the asset retires.
+  await fs.writeFile(path.join(src, 'SKILL.md'), 'v2', 'utf8')
+  await fs.rm(dest, { recursive: true })
+  await fs.cp(src, dest, { recursive: true })
+
+  const out = await refresh(h, regs)
+  assert.deepEqual(out.skipped, [])
+  assert.deepEqual(out.refreshed, [])
+  assert.equal(out.unchanged, 1)
+  // Counted as a heal as well, or the one boot that rewrites the ledger
+  // without rewriting a copy is the one boot the daemon log says nothing
+  // about: its caller has nothing else to tell it from a no-op pass.
+  assert.equal(out.healed, 1)
+  assert.equal(out.stderr, '')
+  const [healed] = await readClientAssetLedger(h.stateRoot)
+  assert.notEqual(healed.digest, stale.digest)
+  assert.equal(healed.digest, await digestClientAsset(dest))
+
+  // The record is evidence again, not merely un-warned: the next source move
+  // is copied on that record rather than skipped as an edit.
+  await fs.writeFile(path.join(src, 'SKILL.md'), 'v3', 'utf8')
+  const again = await refresh(h, regs)
+  assert.equal(again.refreshed.length, 1)
+  assert.deepEqual(again.skipped, [])
+  assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), 'v3')
+})
+
+test('a copy the user edited to something the source never held is still theirs', async () => {
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+  const [before] = await readClientAssetLedger(h.stateRoot)
+
+  // The bytes differ from the record and from the source, so healing has no
+  // claim on them: only equality with the current source is evidence.
+  await fs.writeFile(path.join(dest, 'SKILL.md'), 'mine', 'utf8')
+  const out = await refresh(h, regs)
+  assert.equal(out.skipped[0]?.reason, 'edited')
+  assert.deepEqual(await readClientAssetLedger(h.stateRoot), [before])
+  assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), 'mine')
 })
