@@ -191,15 +191,19 @@ test('Step 1 stops on a receipt that resolved another session or missed the gate
 
   // The stop list is a list of names; the bullets above it are what tell the
   // agent what each name means. Both halves have to survive, or the stop is
-  // unreadable in one direction and unactionable in the other.
+  // unreadable in one direction and unactionable in the other. Each pin
+  // therefore spans the clause carrying the meaning, not just the name it
+  // hangs on: an intact name over a reversed explanation ("any other source
+  // is fine", "a list without one is harmless") reads as an all-clear, and a
+  // stop list on its own does not catch it.
   assert.match(
     prose,
-    /- `"session_id_source"` is `codex_env_rollout`[\s\S]{0,800}`hyp session unignore /,
-    'the session_id_source bullet must say what a wrong source did, and how to undo it'
+    /- `"session_id_source"` is `codex_env_rollout`[\s\S]{0,400}means the verb resolved \*\*a different session\*\*[\s\S]{0,400}`hyp session unignore /,
+    'the session_id_source bullet must say a wrong source resolved a different session, and how to undo it'
   )
   assert.match(
     prose,
-    /- `"recorders"` contains an entry for `gateway`, the recorder that captures this session\./,
-    'the recorders bullet must name the recorder the coverage check looks for'
+    /- `"recorders"` contains an entry for `gateway`, the recorder that captures this session\. A list without one means the gateway was never addressed\b/,
+    'the recorders bullet must name the recorder the coverage check looks for, and say what its absence means'
   )
 })
