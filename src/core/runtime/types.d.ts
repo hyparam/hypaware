@@ -315,6 +315,15 @@ export interface ClientAssetRefresh {
     reason: 'edited' | 'unreadable' | 'missing' | 'copy_failed'
   })[]
   unchanged: number
+  /**
+   * How many of the `unchanged` copies had a stale record healed to the bytes
+   * found on disk (LLP 0400 #source-equality-is-ownership). A sub-count of
+   * `unchanged`, not a fourth outcome: the file was not touched. It is
+   * reported separately because a heal is the only outcome that writes the
+   * ledger without rewriting a copy, so a caller that logs only `refreshed`
+   * and `skipped` would record the change to disk nowhere.
+   */
+  healed: number
 }
 
 export interface MaterializeClientAssetsOptions {
