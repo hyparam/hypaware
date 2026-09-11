@@ -2,6 +2,7 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { refreshSessionIgnores } from '../../../../src/core/control/session_ignore_store.js'
 
 import { sessionMetaCwd } from '../../../../src/core/codex/rollout_session_meta.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
@@ -95,6 +96,7 @@ const COMPONENT = 'plugin.codex.backfill'
  *   pluginName?: string,
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
+ *   ignoredSessions?: Set<string>,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -117,7 +119,7 @@ export function createCodexBackfillProvider(opts) {
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local Codex session rollouts into ai_gateway_messages',
     async *run(ctx) {
-      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver })
+      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, ignoredSessions: opts.ignoredSessions })
     },
   }
 }
@@ -183,11 +185,13 @@ function defaultUnsupportedLocations(homeDir) {
  *   unsupportedLocations: Array<{ kind: string, path: string, coveredBy?: string }>,
  *   clientName: string,
  *   resolver: UsagePolicyResolver,
+ *   ignoredSessions?: Set<string>,
  * }} args
  * @returns {AsyncGenerator<BackfillItem | BackfillEvent>}
  */
 async function* runCodexBackfill(args) {
   const { ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver } = args
+  refreshSessionIgnores(args.ignoredSessions)
   const log = ctx.log
   const window = resolveWindow(ctx)
 
@@ -233,6 +237,15 @@ async function* runCodexBackfill(args) {
     }
 
     for (const session of sessions) {
+      // @ref LLP 0403#backfill [implements]: key on the container, not thread ID.
+      if (args.ignoredSessions?.has(session.sessionId)) {
+        sessionsIgnored += 1
+        log.info('codex.backfill.session_ignore_drop', {
+          component: COMPONENT, operation: 'backfill.scan',
+          policy_source: 'session_opt_out', status: 'ignored',
+        })
+        continue
+      }
       // @ref LLP 0050 [implements]: capture-seam drop for backfill, symmetric
       // to the @hypaware/claude backfill skip. A session whose recorded cwd has
       // an ancestor `.hypignore` of class `ignore` is skipped before projecting

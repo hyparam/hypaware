@@ -30,7 +30,7 @@
     ],
     "sources": [{ "name": "opencode" }],
     "commands": [
-      { "name": "session ignore", "category": "capture-movement", "audience": "everyday", "summary": "Stop recording this AI session on every local recorder (in-memory, until the daemon restarts)" },
+      { "name": "session ignore", "category": "capture-movement", "audience": "everyday", "summary": "Stop recording this AI session on every local recorder (saved until explicitly unignored)" },
       { "name": "session unignore", "category": "capture-movement", "audience": "everyday", "summary": "Resume recording this AI session" },
       { "name": "session status", "category": "capture-movement", "audience": "everyday", "summary": "Report whether this AI session is being dropped right now (fails closed)" }
     ],

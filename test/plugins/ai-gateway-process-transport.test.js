@@ -1,6 +1,10 @@
 // @ts-check
 
 import test from 'node:test'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import assert from 'node:assert/strict'
 import { createCaptureReceiver, createCaptureSender, PENDING_BYTES } from '../../hypaware-core/plugins-workspace/ai-gateway/src/process_transport.js'
 
@@ -81,4 +85,26 @@ test('processor restart abandons old captures and resumes only new exchanges', (
   const next = sender.recorder.startExchange(init)
   sender.finish(next, new Set())
   assert.equal(frames.length, before + 2)
+})
+
+
+test('invalid exclusions cancel an in-flight remote capture and release its slot', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capture-ignore-'))
+  const { sender, init, frames } = fixture()
+  try {
+    const ignored = new SessionIgnoreSet(root)
+    ignored.add('private')
+    sender.message({ type: 'gateway.capture_ready' })
+    const exchange = sender.recorder.startExchange(init)
+    fs.writeFileSync(path.join(ignored.directory, fs.readdirSync(ignored.directory)[0]), 'broken json')
+    assert.throws(() => ignored.refresh())
+    sender.finish(exchange, ignored)
+    assert.equal(sender.snapshot().capture_active, 0)
+    assert.equal(exchange.finished, true)
+    assert.ok(frames.some(frame => /** @type {any} */ (frame).op === 'cancel'))
+    assert.ok(!frames.some(frame => /** @type {any} */ (frame).op === 'end'))
+  } finally {
+    sender.reset()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

@@ -1,0 +1,234 @@
+[
+  {
+    "session_id": "0eb801c8-1d88-4294-a6a6-925c3eefe5c5",
+    "root_blob_id": "7f7ab93cd3260f02f8f5c5c5c6a98c0796a9006b4dfaddaec775b8f22dcef26c",
+    "turns": [
+      {
+        "turn_index": 0,
+        "turn_blob_id": "0abe687ca5d5858b68e893d2e7b2cc5a5c813d4dc3734095500f8848c1a5f0ee",
+        "request_id": "f1e39950-3abf-46dd-8e5b-5cb3634da75c",
+        "user_message_id": "468dc892-81e1-46c4-a491-4c3e518fc6db",
+        "user_text": "Controlled capture probe. Read only notes.txt in this workspace using one file-read tool. Report the value in that file. Do not read any other file, run network tools, or modify files.",
+        "steps": [
+          {
+            "step_index": 0,
+            "kind": "thought_omitted"
+          },
+          {
+            "step_index": 1,
+            "blob_id": "7f1361565a433f04baa3e649e570f5447d4d95ef2444aa3ba36069402b789ad6",
+            "kind": "assistant",
+            "text": "Reading only `notes.txt` now.",
+            "started_at_ms": 1789076985142,
+            "completed_at_ms": 1789076985262
+          },
+          {
+            "step_index": 2,
+            "blob_id": "3286966b9269344c1887575ceff7c1d145fe9dee6c326e2413a306083a96dfb1",
+            "kind": "tool",
+            "tool_variant": 8,
+            "tool_call_id": "call-d05963b2-588e-4951-ac71-82f594016acd-0\nfc_9c030f9c-1cda-9315-965b-0315f1aa3af7_0",
+            "started_at_ms": 1789076985261,
+            "completed_at_ms": 1789076985725,
+            "result_variant": 1,
+            "path": "/tmp/hypaware-cursor-live-probe/workspace/notes.txt",
+            "content": "The probe value is MARIGOLD-42.\n",
+            "content_blob_id": "",
+            "exceeded_limit": 0
+          },
+          {
+            "step_index": 3,
+            "kind": "thought_omitted"
+          },
+          {
+            "step_index": 4,
+            "blob_id": "f7f747ae25a44ec35dfad6e892cc8ec18cba86cf93e897d2cd30ed95a8e23b21",
+            "kind": "assistant",
+            "text": "MARIGOLD-42",
+            "started_at_ms": 1789076988536,
+            "completed_at_ms": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "session_id": "7909a4ec-49bf-48af-bf2e-8a38a369bd6b",
+    "root_blob_id": "8306e9c81a52de2febf2cea83b21897a4e65309b698fdcc3c1cab442f25d7223",
+    "turns": [
+      {
+        "turn_index": 0,
+        "turn_blob_id": "a9b542028f9e8d7b697f0f6df06d06e409cfbb7b896f7723803e700d412070e4",
+        "request_id": "bd63ee4d-1e26-4939-89e9-4cc41d2a52fc",
+        "user_message_id": "0a84055c-2d4d-453d-b398-5732eb99864c",
+        "user_text": "Controlled hook probe. Read only notes.txt using one Read tool and report its value. No other reads, tools, network or writes.",
+        "steps": [
+          {
+            "step_index": 0,
+            "kind": "thought_omitted"
+          },
+          {
+            "step_index": 1,
+            "blob_id": "48bec279a74d8d57c3763461adc609156f971bc8277fcd42228342ddf0521bac",
+            "kind": "assistant",
+            "text": "Reading `notes.txt` only.",
+            "started_at_ms": 1789077515165,
+            "completed_at_ms": 1789077515170
+          },
+          {
+            "step_index": 2,
+            "blob_id": "38e4b3bf942fb9d111bfc2664450f4006a934ae242ed373227e305f18cc08c0e",
+            "kind": "tool",
+            "tool_variant": 8,
+            "tool_call_id": "call-ebc0b34f-e78f-4071-ac02-6f2252751094-0\nfc_f1125edf-0e47-9759-b27d-2cbf290fe464_0",
+            "started_at_ms": 1789077515169,
+            "completed_at_ms": 1789077515805,
+            "result_variant": 1,
+            "path": "/tmp/hypaware-cursor-live-probe/workspace/notes.txt",
+            "content": "The probe value is MARIGOLD-42.\n",
+            "content_blob_id": "",
+            "exceeded_limit": 0
+          },
+          {
+            "step_index": 3,
+            "kind": "thought_omitted"
+          },
+          {
+            "step_index": 4,
+            "blob_id": "2f1704162af082014cfa654530a7140222eb9313ff0f8a971a42691e56a10e70",
+            "kind": "assistant",
+            "text": "**MARIGOLD-42**",
+            "started_at_ms": 1789077517251,
+            "completed_at_ms": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "session_id": "ec2e6c5a-9456-463f-b917-7fd3f2f3a416",
+    "root_blob_id": "3c5d7356996859660dc035e9fefdaecf0005e833ff6ac84256cda465c6a852a3",
+    "turns": [
+      {
+        "turn_index": 0,
+        "turn_blob_id": "d9c5a835991d4d7adffdb93612a6ec7e1b9fbff1e277b4bef57349e4bcb32874",
+        "request_id": "aa433708-6f21-4b65-a472-ee256479d47a",
+        "user_message_id": "bc4b903b-d022-457a-976b-d14dbcfa867c",
+        "user_text": "Controlled tool contract probe, only in this disposable workspace. Perform these four read-only checks: (1) use the native Grep tool to search MARIGOLD in notes.txt with matching line output, (2) use the native List tool to list the workspace root, (3) use the Shell tool to run exactly printf \"SHELL-PROBE-OK\\\\n\", (4) use the native Read tool on missing-probe.txt to demonstrate a missing-file error. Do not read any other file or contact the network or write anything. Summarize each result.",
+        "steps": [
+          {
+            "step_index": 0,
+            "kind": "thought_omitted"
+          },
+          {
+            "step_index": 1,
+            "blob_id": "fbe7626686ac31f32956fed517cf8f8ae2baf30f14625859f8d9a29bc76dd5dd",
+            "kind": "assistant",
+            "text": "Running the four read-only probe checks now.",
+            "started_at_ms": 1789077901163,
+            "completed_at_ms": 1789077901492
+          },
+          {
+            "step_index": 2,
+            "blob_id": "153678215b23e1fd650a8b02d101adf949d150faccd3883753779ec746ae8c7e",
+            "kind": "tool",
+            "tool_variant": 5,
+            "tool_call_id": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-0\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_0",
+            "started_at_ms": 1789077901490,
+            "completed_at_ms": 1789077902303,
+            "result_variant": 1,
+            "args_field_numbers": [
+              1,
+              2,
+              4,
+              8,
+              11,
+              14,
+              16
+            ],
+            "result_field_numbers": [
+              1
+            ]
+          },
+          {
+            "step_index": 3,
+            "blob_id": "4383e8afb0cefeba551b3808646040f70b83783d439ab3646320ae9eba8c99fc",
+            "kind": "tool",
+            "tool_variant": 4,
+            "tool_call_id": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-1\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_1",
+            "started_at_ms": 1789077901796,
+            "completed_at_ms": 1789077902423,
+            "result_variant": 1,
+            "args_field_numbers": [
+              1,
+              2
+            ],
+            "result_field_numbers": [
+              1
+            ]
+          },
+          {
+            "step_index": 4,
+            "blob_id": "bf71e7d37e0a385e28a424ca67f380e65fada96f06e2d47a0b8f8f5076044912",
+            "kind": "tool",
+            "tool_variant": 8,
+            "tool_call_id": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-3\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_3",
+            "started_at_ms": 1789077902434,
+            "completed_at_ms": 1789077902680,
+            "result_variant": 2,
+            "path": "",
+            "error": "File not found"
+          },
+          {
+            "step_index": 5,
+            "blob_id": "93ca1cbbe536336727b7fbc818dd21877b089c1fd9552e887902f28b1db765b2",
+            "kind": "tool",
+            "tool_variant": 1,
+            "tool_call_id": "call-9adac0e2-b68e-4d3a-9190-efa3fa65ea2a-2\nfc_d7c59af9-9344-9477-86cc-83a77d4919f8_2",
+            "started_at_ms": 1789077902434,
+            "completed_at_ms": 1789077904302,
+            "result_variant": 4,
+            "command": "",
+            "rejection_command": "printf \"SHELL-PROBE-OK\\n\""
+          },
+          {
+            "step_index": 6,
+            "kind": "thought_omitted"
+          },
+          {
+            "step_index": 7,
+            "blob_id": "9624f1db3127abb49650ad619489a1ee4b57a2bf0bba7d44eb199b451abfc022",
+            "kind": "assistant",
+            "text": "Retrying the Shell probe \u2014 the first attempt was rejected.",
+            "started_at_ms": 1789077908024,
+            "completed_at_ms": 1789077908151
+          },
+          {
+            "step_index": 8,
+            "blob_id": "3ccfd535ee516498ba6e0f3942e907707de4970fd9ba8955561cb96adac80750",
+            "kind": "tool",
+            "tool_variant": 1,
+            "tool_call_id": "call-c76a7d26-f78e-4421-b738-a05b676535d8-4\nfc_261b0a14-e096-94b6-ba73-edd9d6e05882_0",
+            "started_at_ms": 1789077908207,
+            "completed_at_ms": 1789077908356,
+            "result_variant": 4,
+            "command": "",
+            "rejection_command": "printf \"SHELL-PROBE-OK\\n\""
+          },
+          {
+            "step_index": 9,
+            "kind": "thought_omitted"
+          },
+          {
+            "step_index": 10,
+            "blob_id": "a81d38cd24ce185c728ab3bf8d598e0958e0b5056288374a57e3215216bf05f6",
+            "kind": "assistant",
+            "text": "**Probe summary**\n\n1. **Grep (`MARIGOLD` in `notes.txt`)** \u2014 Match found: line 1, `The probe value is MARIGOLD-42.`\n\n2. **List workspace root** \u2014 No separate native `List` tool in this session; used `Glob` on the root instead. Two entries: `.cursor/hooks.json`, `notes.txt`.\n\n3. **Shell (`printf \"SHELL-PROBE-OK\\n\"`)** \u2014 Rejected twice; no stdout. Could not complete this check.\n\n4. **Read (`missing-probe.txt`)** \u2014 Error as expected: file not found.",
+            "started_at_ms": 1789077911661,
+            "completed_at_ms": null
+          }
+        ]
+      }
+    ]
+  }
+]

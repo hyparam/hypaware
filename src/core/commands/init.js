@@ -174,7 +174,7 @@ function hasInitFlags(argv) {
  * @ref LLP 0368#display-only [constrained-by]: a platform-gated row keeps its `--source` identity
  */
 export const INIT_SOURCE_CHOICES = Object.freeze(/** @type {PickerSource[]} */ ([
-  'claude', 'claude-desktop', 'codex', 'opencode', 'openclaw', 'hermes', 'raw-anthropic', 'raw-openai', 'otel',
+  'claude', 'claude-desktop', 'codex', 'opencode', 'cursor', 'openclaw', 'hermes', 'raw-anthropic', 'raw-openai', 'otel',
 ]))
 
 /**
@@ -187,7 +187,7 @@ export const INIT_SOURCE_CHOICES = Object.freeze(/** @type {PickerSource[]} */ (
  * @type {readonly InitFlags['clients'][number][]}
  */
 export const INIT_CLIENT_CHOICES = Object.freeze(/** @type {InitFlags['clients'][number][]} */ ([
-  'claude', 'claude-desktop', 'codex', 'opencode',
+  'claude', 'claude-desktop', 'codex', 'opencode', 'cursor',
 ]))
 
 /**

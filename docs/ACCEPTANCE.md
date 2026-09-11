@@ -1945,6 +1945,84 @@ over unchanged history by design too.
 
 ---
 
+## `cursor_editor_cli_capture`
+
+**What it proves:** native session recovery and hook delivery in editor Agent
+Chat, interactive CLI and headless CLI, independently. Required before a
+release claims compatibility. See [implementation evidence](cursor-capture-evidence.md).
+This remains a version-specific Draft integration.
+
+Use a disposable OS account or isolated Cursor installation and HypAware home.
+Keep activity in a disposable workspace and retain sanitized evidence only.
+Authenticate using the supported client flow with the operator's authorization.
+Record exact editor/CLI versions, OS, config paths and hook settings.
+
+1. Configure the candidate with `hyp setup --source cursor`, start the isolated
+   daemon and run `hyp client attach cursor --json` twice. The second attach
+   reports `changed: false`. Preserve and exercise an unrelated hook. Test CLI
+   config overrides: native chats follow `CURSOR_CONFIG_DIR`/`XDG_CONFIG_HOME`,
+   while user hooks remain in `~/.cursor/hooks.json`. Confirm generated commands
+   carry host and port without `http://`, which the tested CLI comment parser
+   would corrupt inside a quoted string.
+2. In each client mode, create text turns and repeated identical assistant
+   segments separated by tools. Include Read, Grep, Glob, Shell, dynamic tool
+   discovery, missing-file errors and rejected Shell calls. Compare the actual
+   UI or stream with native rows, including every human prompt, intermediate
+   assistant segments, arguments, complete results, native tool IDs and correct
+   error status. A missing prompt is the signal to check the typed user-message
+   suppression field: a fixture pins the predicate, but only a real store can
+   say what the field means.
+   `entrypoint` must identify the actual native editor/CLI store.
+3. Query `hyp query sql "select session_id, message_id, part_type, content_text,
+   tool_call_id, status, entrypoint from ai_gateway_messages where client_name = 'cursor'"`.
+   Verify identical text in different steps remains distinct. Redeliver hooks,
+   run `hyp backfill cursor --json`, restart the daemon and repeat backfill.
+   Native message/part IDs and counts must stay stable. Separately repeated
+   `beforeReadFile` deliveries may add observations, never completed tool calls.
+4. Keep Cursor's store open in WAL mode. Recover committed data before a
+   checkpoint to the main database. Exercise recovery during streaming and
+   pending tools: partial text must not take a completed response's identity.
+   Verify final CLI text lacking a completion timestamp still recovers. Test
+   interruption, cancellation, resume and regeneration, and compare IDs/content
+   before and after. A contradiction keeps the decision Draft and blocks a
+   compatibility claim until resolved.
+5. Stop HypAware, generate another turn with transcript export disabled, then
+   restart. Scheduled recovery must find native saved history, and a second
+   unchanged sweep must report unchanged roots with zero graph/materialization
+   work. Test `backfill.on_join: false`, a short `window_days`, and manual
+   backfill. Out-of-window dated messages must not be reintroduced.
+6. Verify `beforeReadFile` is a system/hook observation, with no invented tool
+   ID. Both observations and native Read results must drop unresolved success,
+   out-of-workspace, symlink-escape and stricter file policies. Test directory
+   ignore, explicit `hyp session ignore <id>`, and local-only export withholding.
+   A queued recovery must respect an ignore applied before persistence.
+7. Exercise malformed/missing blobs and an unsupported metadata version on
+   copies of disposable stores. Recovery reports fixed incomplete diagnostics,
+   does not expose payloads, and leaves other valid sessions recoverable.
+   Test native discovery/graph bounds and document unsupported subagent,
+   standalone shell and external-user-text cases. Do not claim full capture.
+8. Enable inherited HypAware Claude hooks. Cursor must not append Claude
+   context or inject classification instructions. Verify the candidate in
+   the actual editor and CLI, not only the environment-guard fixture.
+   Then check the other direction, which the fixture cannot: run attached
+   Claude Code from Cursor's integrated terminal and from a plain terminal,
+   print the hook process environment, and confirm Claude still records
+   session context and still sweeps its body spool in both. The skip keys on
+   `CURSOR_VERSION` alone, so a Cursor shell that exports it would silently
+   disable Claude's own lane. Record whether Cursor exports that variable to
+   terminals it launches.
+9. Measure hook latency, idle CPU, heap over more than 1,024 callbacks, queue
+   saturation, large graphs and waiting-spool growth. Confirm bounded retries,
+   clean shutdown and no raw payload spool. Billed token usage must remain
+   absent; context occupancy and hook counts are not billing semantics.
+10. Unload and detach. Owned hooks disappear; unrelated or edited hooks remain.
+    Record editor, interactive CLI and headless CLI as pass/fail/blocked.
+
+This gate does not prove cloud agents, Tab, Cmd+K, complete subagents,
+rewind revision history, deleted data recovery or canonical usage.
+
+---
+
 ## Other candidates
 
 `CLAUDE.md` lists further acceptance candidates that have no written

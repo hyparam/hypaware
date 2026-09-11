@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -1011,4 +1012,25 @@ test('diagnostic-only history source is detected but not used as canonical', asy
   } finally {
     await env.cleanup()
   }
+})
+
+
+test('backfill refreshes exclusions and keys on the Codex container rather than thread ID', async () => {
+  const env = await stageEnv()
+  try {
+    await writeModernRollout(env, 'rollout-test.jsonl', {
+      meta: { id: 'thread-id', session_id: 'container-id', cwd: '/work', timestamp: '2026-05-20T10:00:00Z' },
+      items: [{ payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] } }],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir, ignoredSessions: new SessionIgnoreSet(env.homeDir) })
+    const writer = new SessionIgnoreSet(env.homeDir)
+    writer.add('thread-id')
+    assert.equal((await collect(provider.run(runContext().ctx))).items.length, 1)
+    writer.add('container-id')
+    const run = runContext()
+    assert.equal((await collect(provider.run(run.ctx))).items.length, 0)
+    assert.ok(run.entries.some(e => e.message === 'codex.backfill.session_ignore_drop'))
+    writer.delete('container-id')
+    assert.equal((await collect(provider.run(runContext().ctx))).items.length, 1)
+  } finally { await env.cleanup() }
 })

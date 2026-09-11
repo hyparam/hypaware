@@ -502,7 +502,7 @@ in the cache. Delete those with the separate destructive step:
 hyp privacy purge <path> | --session <id> | --ignored | --all   # delete already-cached rows (prompts; --yes to skip)
 ```
 
-To pause recording for just the current Claude or Codex session (in-memory,
+To pause recording for just the current Claude or Codex session (saved across restarts,
 reversible) run `hyp session ignore` from inside it; `hyp session unignore`
 resumes and `hyp session status` reports the current answer.
 

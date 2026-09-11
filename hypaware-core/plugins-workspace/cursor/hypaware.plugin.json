@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/cursor",
+  "version": "1.0.0",
+  "description": "Cursor editor and CLI native session recovery with additional file observations. No provider routing or verified token accounting.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=22.12",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "network",
+    "spawn_process",
+    "read_home",
+    "write_home",
+    "read_state",
+    "write_state"
+  ],
+  "contributes": {
+    "client": {
+      "name": "cursor",
+      "skill_dir": ".cursor/skills",
+      "attach_probe": {
+        "format": "json",
+        "settings_file": ".cursor/hooks.json",
+        "marker_key": "_hypaware"
+      }
+    },
+    "picker": [
+      {
+        "name": "cursor",
+        "label": "Cursor",
+        "summary": "Recovers Cursor editor and CLI conversations and tool results, with additional file observations. Usage unavailable.",
+        "detect": {
+          "settings_file": ".cursor/hooks.json"
+        },
+        "compose": {
+          "plugin": {
+            "name": "@hypaware/cursor"
+          }
+        }
+      }
+    ],
+    "sources": [
+      {
+        "name": "cursor"
+      }
+    ],
+    "commands": [
+      {
+        "name": "session ignore",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Stop recording this AI session on every local recorder (in-memory, until the daemon restarts)"
+      },
+      {
+        "name": "session unignore",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Resume recording this AI session"
+      },
+      {
+        "name": "session status",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Report whether this AI session is being dropped right now (fails closed)"
+      }
+    ],
+    "config_sections": [
+      {
+        "section": "cursor",
+        "summary": "Cursor native hooks, session recovery and attach settings."
+      }
+    ]
+  }
+}
