@@ -9,6 +9,7 @@
 #ledger: the record it reads), LLP 0226 (#unreadable-is-not-absent: the last
 narrowing of the same condition), LLP 0138 (#one-materializer: the module the
 condition lives in)
+**Extended-by:** LLP 0400 (#source-equality-is-ownership: bytes equal to the current source heal a stale record, which is the re-recording this doc did not need; the evidence the prune acts on is unchanged)
 
 > One widening of [LLP 0219](./0219-retired-client-assets-are-pruned.decision.md),
 > found by the review of [#893](https://github.com/hyparam/hypaware/pull/893)

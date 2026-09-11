@@ -110,9 +110,11 @@ export async function materializeClientAssets(options) {
  * two digests. The bytes on disk must still match a digest we recorded for the
  * path, or the user took the copy over and it is theirs to keep (the same
  * evidence that gates a prune, LLP 0219 #edited-assets-are-not-ours, matched
- * against every digest recorded for the path, LLP 0284). And the source must
- * digest differently from that record, or there is nothing to copy. A path
- * that is gone is not resurrected: removing it was a choice, and
+ * against every digest recorded for the path, LLP 0284) - unless they are the
+ * current source's own bytes, which say the copy is ours under a record that
+ * never caught up, and heal that record (LLP 0400). And the source must digest
+ * differently from that record, or there is nothing to copy. A path that is
+ * gone is not resurrected: removing it was a choice, and
  * `hyp skills install` is the way to reverse that choice.
  *
  * Never throws and never removes: a copy that fails is reported and the record
@@ -123,8 +125,9 @@ export async function materializeClientAssets(options) {
  * @ref LLP 0397#ledger-decides [implements]: the ledger names the clients, and
  *   two digests (recorded versus on disk, then source versus recorded) decide
  *   each asset, so an update reaches the installed skills without a command.
- * @ref LLP 0397#edited-copies-are-kept [implements]: a copy whose bytes no
- *   longer match a recorded digest is skipped and named, never overwritten.
+ * @ref LLP 0397#edited-copies-are-kept [implements]: a copy whose bytes match
+ *   neither a recorded digest nor the current source is skipped and named,
+ *   never overwritten.
  */
 export async function refreshClientAssets(options) {
   const { stateRoot, stderr } = options
@@ -151,8 +154,10 @@ export async function refreshClientAssets(options) {
 
   const clients = [...new Set(ledger.map((record) => record.client))].sort()
   const planned = planClientAssets({ ...options, clients })
+  // The digest the ledger should carry for a path when the pass ends: what a
+  // rewrite put there, or what a stale record never caught up with.
   /** @type {Map<string, string>} */
-  const rewritten = new Map()
+  const observed = new Map()
   /** @type {Set<string>} */
   const decided = new Set()
   for (const { asset, client, dest } of planned) {
@@ -195,6 +200,31 @@ export async function refreshClientAssets(options) {
       outcome.skipped.push({ kind: asset.kind, name: asset.name, client, dest, reason: 'missing' })
       continue
     }
+    // The source is hashed in the same domain as the copy, so an unchanged
+    // asset digests equal to the record and costs one read, no write. It is
+    // read before the record is judged because equality with it is evidence in
+    // its own right: see the healing exit below.
+    const sourceDigest = onDisk ? await digestClientAsset(asset.source) : null
+    if (onDisk && sourceDigest === onDisk && !recorded.has(onDisk)) {
+      // Bytes no record names but the source holds: a copy of ours whose record
+      // never caught up, left by a pass killed after {@link replaceAsset}
+      // swapped the new bytes in and before the single ledger write below.
+      // Healing it on that same write costs nothing extra and lets an
+      // interrupted pass converge on the next boot, instead of the copy being
+      // reported as an edit, never refreshed, and never prunable.
+      // @ref LLP 0400#source-equality-is-ownership [implements]: bytes equal to
+      //   the current source are the evidence that heals a stale record.
+      observed.set(dest, onDisk)
+      getLogger('client-assets').info('client_assets.refresh_record_healed', {
+        [Attr.COMPONENT]: 'client-assets',
+        [Attr.OPERATION]: 'client_assets.refresh',
+        hyp_client: client,
+        [Attr.STATUS]: 'ok',
+        detail: dest,
+      })
+      outcome.unchanged += 1
+      continue
+    }
     if (!onDisk || !recorded.has(onDisk)) {
       stderr?.write(onDisk
         ? `warning: ${asset.kind} '${asset.name}' at ${dest} has been edited since HypAware installed it; ` +
@@ -214,9 +244,6 @@ export async function refreshClientAssets(options) {
       continue
     }
 
-    // The source is hashed in the same domain as the copy, so an unchanged
-    // asset digests equal to the record and costs one read, no write.
-    const sourceDigest = await digestClientAsset(asset.source)
     if (sourceDigest === onDisk) {
       outcome.unchanged += 1
       continue
@@ -256,7 +283,7 @@ export async function refreshClientAssets(options) {
     }
     const digest = await digestClientAsset(dest)
     if (digest) {
-      rewritten.set(dest, digest)
+      observed.set(dest, digest)
     } else {
       // The bytes landed but the record cannot follow them, which is the same
       // degraded state a failed ledger write leaves below: from the next boot
@@ -275,12 +302,12 @@ export async function refreshClientAssets(options) {
     outcome.refreshed.push({ kind: asset.kind, name: asset.name, client, dest })
   }
 
-  if (rewritten.size > 0) {
-    // Every record naming a rewritten path takes the new digest, whichever
+  if (observed.size > 0) {
+    // Every record naming the path takes the digest observed there, whichever
     // client it belongs to, or the next run would read the other client's
     // record as a user edit.
     const wrote = await writeClientAssetLedger(stateRoot, ledger.map((record) => {
-      const digest = rewritten.get(record.dest)
+      const digest = observed.get(record.dest)
       return digest ? { ...record, digest } : record
     }))
     // A ledger we could not write costs an install nothing, but it costs a
