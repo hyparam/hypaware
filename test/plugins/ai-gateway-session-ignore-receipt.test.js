@@ -327,6 +327,85 @@ for (const rel of SKILLS) {
 }
 
 /**
+ * The host-specific half of the ephemerality caveat: which restart drops the
+ * set, and which verb mints a new session id under the same conversation. Only
+ * the negative half is shared, and that is what the loop is for: the caveat was
+ * pinned on the codex copy alone
+ * (test/plugins/codex-privacy-skill-session-id.test.js), so the claude copy
+ * could regress to naming the restart by itself with nothing to catch it
+ * (issue #1635).
+ *
+ * @type {Record<string, { restart: RegExp, fork: RegExp }>}
+ */
+const EPHEMERAL_CAVEAT = {
+  'claude/skills/hypaware-privacy/SKILL.md': {
+    restart: /recorder restart/,
+    fork: /claude --fork-session/,
+  },
+  'codex/skills/hypaware-privacy/SKILL.md': {
+    restart: /gateway restart/,
+    fork: /codex fork/,
+  },
+}
+
+/** The words both copies open the caveat paragraph with. */
+const CAVEAT_OPENER = 'The opt-out is held in memory'
+
+/**
+ * @ref LLP 0066#readable [tests]: R9 - a caveat that names the restart alone
+ * reads as the exhaustive list and teaches the user the fork cannot happen,
+ * which is the drift LLP 0212 §Context records as having shipped once already
+ * (issue #455).
+ */
+for (const rel of SKILLS) {
+  test(`${rel} names both ways the opt-out lapses, not the restart alone`, () => {
+    const step1 = privacyStep1(rel)
+    const caveat = EPHEMERAL_CAVEAT[rel]
+
+    // The positive halves are scoped to the caveat's own paragraph rather than
+    // the whole of Step 1. Step 1 talks about restarts elsewhere - the claude
+    // copy says a bystander session "stays suppressed until its recorder
+    // restarts" - so a Step-1-wide /recorder restart/ is satisfied by prose
+    // that is not the caveat, and a caveat that dropped its restart half would
+    // still pass.
+    const at = step1.indexOf(CAVEAT_OPENER)
+    assert.ok(at >= 0, `Step 1 must still carry the caveat, opening "${CAVEAT_OPENER}"`)
+    const rest = step1.slice(at)
+    const end = rest.search(/\n\s*\n/)
+    const para = end < 0 ? rest : rest.slice(0, end)
+
+    assert.match(para, caveat.restart, 'the restart that drops the set must be named')
+    assert.match(para, caveat.fork, 'and so must the verb that mints a new session id')
+    // Naming the fork somewhere is weaker than not presenting the restart as
+    // the whole list: a caveat could name the fork in a later aside and still
+    // close its own sentence on the restart, which is what a reader acts on.
+    // The emphasis is optional because these copies bold the phrase already
+    // (`a **recorder restart**`), and an exact-literal pin would read the
+    // markdown the file actually writes as a different sentence. For the same
+    // reason the match ignores case and steps over a parenthetical gloss: a
+    // caveat split into its own sentence capitalises the article ("A
+    // **recorder restart** drops it.") and the claude copy already glosses the
+    // restart inline ("(the daemon, the gateway, or the telemetry listener)"),
+    // so both are surface variants of the one sentence this forbids, not
+    // different sentences.
+    //
+    // This half keeps the whole of Step 1, which is where the codex-only pin
+    // has always run it. The scoping above exists because a positive match is
+    // satisfied by any prose that looks right, so a neighbouring sentence can
+    // stand in for a caveat that lost its half. This assertion has the opposite
+    // failure mode: it fires only on prose that really does close on the
+    // restart, so narrowing it to the paragraph only drops catches. A
+    // restart-only restatement further down Step 1 ("In short: a **recorder
+    // restart** drops it.") is the R9 failure whichever paragraph carries it.
+    assert.doesNotMatch(
+      step1,
+      /\ba \*{0,2}(?:gateway|recorder) restart\*{0,2}(?: \([^)]{0,80}\))? drops it\./i,
+      'the restart must not be presented as the only way the opt-out lapses'
+    )
+  })
+}
+
+/**
  * The receipt tells the agent to stop unless the recorder that captures THIS
  * session appears in `recorders`, which only works if the skill names the id
  * that recorder actually reports. `runMutation` fills `recorders[].recorder`
