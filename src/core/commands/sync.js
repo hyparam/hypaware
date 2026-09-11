@@ -351,6 +351,12 @@ export function createSyncProgress(volumes, now = Date.now) {
       lastAck = now()
       return
     }
+    // A zero-row report acknowledges nothing. `onProgress` is on the published
+    // export contract and a bare `opts.onProgress()` arrives here normalized to
+    // zero rows, so a sink calling it in a loop would otherwise refresh
+    // `lastAck` on every pass and hold the stall warning off the line for as
+    // long as the loop ran.
+    if (!(delta.rows > 0)) return
     // The rate is measured from the first acknowledgement, not from the
     // destination's start. The driver announces a destination before
     // `discoverReadyPartitions` lists every dataset, flushes every pending
