@@ -3,10 +3,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import { PassThrough, Readable } from 'node:stream'
 
+import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import { runWizardPick } from '../../../../src/core/cli/wizard/pick.js'
 import { defaultOverwriteConfirmFactory, derivePickedClients } from '../../../../src/core/cli/walkthrough.js'
 import { discoverBundledPlugins } from '../../../../src/core/runtime/bundled.js'
@@ -72,7 +72,7 @@ function hermeticEnv(tmp) {
 }
 
 async function mkTmp() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-wizard-pick-'))
+  return temporaryDirectory('hypaware-wizard-pick-')
 }
 
 /**

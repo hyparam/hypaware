@@ -3,6 +3,7 @@
 
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import process from 'node:process'
@@ -58,17 +59,22 @@ export function run(forwardedArgs) {
     return 1
   }
 
-  const result = spawnSync(
-    process.execPath,
-    buildNodeTestArgs(files, forwardedArgs),
-    { stdio: 'inherit' },
-  )
-
-  if (result.error) {
-    process.stderr.write(`failed to spawn node --test: ${result.error.message}\n`)
-    return 1
+  // The parent owns this directory even when a test exits before its hooks run.
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-t-'))
+  try {
+    const result = spawnSync(
+      process.execPath,
+      buildNodeTestArgs(files, forwardedArgs),
+      { stdio: 'inherit', env: { ...process.env, TMPDIR: temp, TMP: temp, TEMP: temp } },
+    )
+    if (result.error) {
+      process.stderr.write(`failed to spawn node --test: ${result.error.message}\n`)
+      return 1
+    }
+    return result.status ?? 1
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true, maxRetries: 3 })
   }
-  return result.status ?? 1
 }
 
 /**
