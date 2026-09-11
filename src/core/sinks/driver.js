@@ -392,10 +392,22 @@ function readExportResult(reported, partitions) {
  * @returns {ExportProgress}
  */
 function readExportProgress(reported) {
-  return {
-    rows: typeof reported?.rows === 'number' && Number.isFinite(reported.rows) ? reported.rows : 0,
-    bytes: typeof reported?.bytes === 'number' && Number.isFinite(reported.bytes) ? reported.bytes : 0,
-  }
+  return { rows: readCount(reported?.rows), bytes: readCount(reported?.bytes) }
+}
+
+/**
+ * A count from the plugin's object: a finite positive number, or nothing.
+ *
+ * Negative is screened with the rest. `rows` accumulates, so one negative
+ * report does not just render `-5,000/12,000 rows (-42%)`, it holds the
+ * running total below the real one for the rest of the destination and the
+ * finalizing branch never fires again.
+ *
+ * @param {unknown} value
+ * @returns {number}
+ */
+function readCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
 }
 
 /**

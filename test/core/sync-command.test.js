@@ -34,7 +34,10 @@ test('sync progress estimates from acknowledged rows and resets per destination'
   progress.update('central', { rows: 250, bytes: 1000 })
   assert.equal(progress.render(), 'central: 500/1,000 rows (50%) | ETA ~10s')
   now = 35_000
-  assert.match(progress.render(), /waiting for progress \(35s\).*ETA unavailable/)
+  // 15s since the acknowledgement at 20s, not 35s since the destination
+  // started: the number sits next to "waiting for progress" and is read as
+  // how long it has been stuck.
+  assert.match(progress.render(), /waiting for progress \(15s\).*ETA unavailable/)
   progress.update('central', { rows: 500, bytes: 3000 })
   assert.match(progress.render(), /1,000 rows sent.*finalizing/)
   assert.doesNotMatch(progress.render(), /100%/)
@@ -70,12 +73,15 @@ test('sync progress keeps finalizing through a commit longer than the stall wind
   progress.update('central')
   now = 5_000
   progress.update('central', { rows: 1000, bytes: 4000 })
-  assert.match(progress.render(), /central: 1,000 rows sent \| finalizing/)
+  const committing = progress.render()
+  assert.match(committing, /central: 1,000 rows sent \| finalizing\.\.\. \(0s\)/)
   // The last chunk is acknowledged, so by construction no further
   // acknowledgement is coming: a commit that outlasts the stall window must
-  // not report a finished transfer as "99% | waiting for progress".
+  // not report a finished transfer as "99% | waiting for progress". It must
+  // still tick, though - a commit is the one wait long enough to need it.
   now = 60_000
-  assert.match(progress.render(), /central: 1,000 rows sent \| finalizing/)
+  assert.match(progress.render(), /central: 1,000 rows sent \| finalizing\.\.\. \(55s\)/)
+  assert.notEqual(progress.render(), committing, 'a long commit must not render a frozen line')
   assert.doesNotMatch(progress.render(), /waiting for progress|%/)
 })
 
@@ -118,12 +124,17 @@ test('sync reads a sink progress report the way it reads a sink result: a number
     // Counts come from sink code the kernel does not own, and land in a line
     // somebody is watching an upload on.
     opts.onProgress({ rows: 'lots', bytes: null })
+    // A negative is the same class of input, and the worse one: `rows`
+    // accumulates, so it holds the running total below the real one for the
+    // rest of the destination.
+    opts.onProgress({ rows: -5000, bytes: -1 })
     await new Promise((resolve) => setTimeout(resolve, 150))
     return { status: 'exported', partitionsExported: 1, bytesWritten: 8 }
   }
   const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
   assert.equal(await runSync(['--yes'], ctx), 0)
   assert.doesNotMatch(stdout.text, /NaN/)
+  assert.doesNotMatch(stdout.text, /-[\d,]+ rows sent/)
   assert.match(stdout.text, /central: 7 rows sent/)
   await fs.rm(hypHome, { recursive: true, force: true })
 })

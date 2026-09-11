@@ -323,7 +323,10 @@ test('upload progress counts acknowledgements, excluding retries and withheld ro
 
 test('a partition that fits in one chunk makes exactly one POST', async () => {
   const { sink, calls } = buildSink({ count: 10 })
-  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))
+  // The options argument is omitted on purpose: it is declared required and no
+  // in-repo caller drops it, but a bare dereference here throws inside the
+  // per-partition try and lands as a respooled 'central.forward.failed'.
+  const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ (undefined))
   assert.equal(result.status, 'exported')
   assert.equal(calls.length, 1)
   assert.equal(calls[0].rowCount, 10)
