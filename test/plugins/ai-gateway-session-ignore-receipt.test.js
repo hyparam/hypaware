@@ -515,11 +515,12 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
     /do \*{0,2}not\*{0,2} drop to the script below/,
     'and the gateway-only script must be refused in words, not left standing as the other option'
   )
-  // The refusal is licensed to name the script once, to refuse it. Any other
-  // pointer to it in this block is a reroute whichever sentence carries it, so
-  // the licensed phrase is dropped before the block is held to that.
+  // The refusal is licensed to name the script, to refuse it. Any other pointer
+  // to it in this block is a reroute whichever sentence carries it, so every
+  // instance of the licensed phrase is dropped before the block is held to
+  // that: restating the refusal is stronger prose, not a second route.
   assert.doesNotMatch(
-    routing.replace(/do \*{0,2}not\*{0,2} drop to the script below/, ''),
+    routing.replace(/do \*{0,2}not\*{0,2} drop to the script below/g, ''),
     /drop to the script|fall back to the script|use the script below/,
     'nothing else in this block may send the ambiguous case to the gateway-only script'
   )
