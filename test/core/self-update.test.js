@@ -2155,3 +2155,120 @@ test('a stuck boot on a version this updater did not install is not rolled back'
     await fsp.rm(dir, { recursive: true, force: true })
   }
 })
+
+test('classifySelfProvenance separates a project dependency from the global install', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-provenance-local-'))
+  try {
+    // A project that carries `hypaware` as a dependency and runs
+    // `node_modules/.bin/hyp`: `npm install -g` from there lands beside the
+    // copy actually running and never replaces it (issue #1622).
+    const project = path.join(dir, 'app')
+    await fsp.mkdir(project, { recursive: true })
+    await fsp.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.1' }))
+    const dep = path.join(project, 'node_modules', 'hypaware')
+    await fsp.mkdir(dep, { recursive: true })
+    assert.equal(classifySelfProvenance({ packageRoot: dep, env: {} }), 'project-local')
+
+    // A transitive dependency answers on the outermost tree, the rule
+    // `isEphemeralBinPath` already applies: the enclosing project decides.
+    const nested = path.join(project, 'node_modules', 'some-tool', 'node_modules', 'hypaware')
+    await fsp.mkdir(nested, { recursive: true })
+    assert.equal(classifySelfProvenance({ packageRoot: nested, env: {} }), 'project-local')
+
+    // Must not change: a real global install still self-updates, an npx
+    // run is still `npx`, and a dev clone of HypAware is not under any
+    // project's node_modules.
+    const globalRoot = path.join(dir, 'prefix', 'lib', 'node_modules', 'hypaware')
+    await fsp.mkdir(globalRoot, { recursive: true })
+    assert.equal(classifySelfProvenance({ packageRoot: globalRoot, env: {} }), 'global-candidate')
+    const clone = path.join(dir, 'code', 'hypaware')
+    await fsp.mkdir(path.join(clone, '.git'), { recursive: true })
+    assert.equal(classifySelfProvenance({ packageRoot: clone, env: {} }), 'checkout')
+    const npxRoot = path.join(dir, 'cache', '_npx', 'abc', 'node_modules', 'hypaware')
+    await fsp.mkdir(npxRoot, { recursive: true })
+    assert.equal(classifySelfProvenance({ packageRoot: npxRoot, env: {} }), 'npx')
+
+    // Pinned, not overlooked: pnpm and yarn write a manifest beside their
+    // GLOBAL root (issue #1625), so this predicate reads one as project-local.
+    // `applySelfUpdate` compares against npm's prefix and refused those roots
+    // before this verdict existed, so the answer costs them no apply, and
+    // separating them needs a heuristic #1625 put out of scope. Asserted so a
+    // later change to that verdict is a decision someone made on purpose.
+    const pnpmGlobal = path.join(dir, 'pnpm', 'global', '5')
+    await fsp.mkdir(path.join(pnpmGlobal, 'node_modules', 'hypaware'), { recursive: true })
+    await fsp.writeFile(path.join(pnpmGlobal, 'package.json'), JSON.stringify({ name: 'global', version: '0.0.1' }))
+    assert.equal(
+      classifySelfProvenance({ packageRoot: path.join(pnpmGlobal, 'node_modules', 'hypaware'), env: {} }),
+      'project-local'
+    )
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the automatic lane refuses a project-local install instead of installing beside it', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-self-local-pass-'))
+  try {
+    // A project-local root beside a real global prefix. Read as a global
+    // candidate it costs a daily registry probe, an `npm config get prefix`
+    // spawn, and a sticky `apply_failed: not_global_install` error that puts a
+    // permanent "degraded" line on a machine with nothing wrong with it.
+    const { runner, calls } = await fakeGlobalInstall(dir)
+    const project = path.join(dir, 'app')
+    const packageRoot = path.join(project, 'node_modules', 'hypaware')
+    await fsp.mkdir(packageRoot, { recursive: true })
+    await fsp.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.1' }))
+    await fsp.writeFile(
+      path.join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'hypaware', version: '1.0.0' })
+    )
+    const probe = fetchStub('1.1.0')
+    const stateRoot = path.join(dir, 'state')
+    await fsp.mkdir(stateRoot, { recursive: true })
+
+    const auto = await runSelfUpdatePass({
+      supervised: true, stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl, jitter: 0,
+    })
+    assert.deepEqual(auto, { action: 'skipped', reason: 'project-local' })
+    // Neither the network nor npm: the same silence a dev checkout gets.
+    assert.equal(probe.calledCount(), 0)
+    assert.deepEqual(calls, [])
+    assert.equal(readSelfUpdateState(stateRoot).error, undefined)
+    assert.equal(describeSelfUpdate({ stateRoot, env: {}, packageRoot }).line, null)
+
+    // Pinned because it is the one lane this verdict takes away rather than
+    // merely refuses earlier: read as a global candidate, a root ahead of the
+    // code the daemon booted reached the restart-only hand-over
+    // (LLP 0365 #running-version-is-tracked), which installs nothing. It is now
+    // as silent there as a source checkout, whose tree moves ahead the same way.
+    const ahead = await runSelfUpdatePass({
+      supervised: true, stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl, jitter: 0,
+      runningVersion: '0.9.0',
+    })
+    assert.deepEqual(ahead, { action: 'skipped', reason: 'project-local' })
+    assert.deepEqual(calls, [])
+
+    // `hyp update` still probes (force) and still cannot apply, and names
+    // which install shape it is rather than blaming a failed npm.
+    const forced = await runSelfUpdatePass({
+      supervised: true, force: true, stateRoot, env: {}, packageRoot, runner, fetchImpl: probe.impl,
+    })
+    assert.equal(forced.action, 'checked')
+    assert.equal(forced.reason, 'project-local')
+    assert.equal(forced.latest, '1.1.0')
+    assert.deepEqual(calls, [])
+    assert.equal(readSelfUpdateState(stateRoot).error, undefined)
+    assert.equal(describeSelfUpdate({ stateRoot, env: {}, packageRoot }).json.provenance, 'project-local')
+
+    // And the status comparison that reads `identity.version` as "the
+    // version installed on this machine" stays off: this render is not
+    // that install, so it must not tell an operator to restart onto it.
+    writePidFile(stateRoot, { pid: process.pid, startedAt: new Date().toISOString(), runId: 'test', mode: 'foreground' })
+    writeSelfUpdateState(stateRoot, { running_version: '0.9.0' })
+    const line = String(describeSelfUpdate({ stateRoot, env: {}, packageRoot }).line)
+    assert.doesNotMatch(line, /hyp daemon restart/)
+    assert.match(line, /1\.1\.0 available/)
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})

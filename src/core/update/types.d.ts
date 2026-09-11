@@ -52,8 +52,13 @@ export interface SelfUpdateState {
   }
 }
 
-/** Where the running code came from; only a global npm install may apply. */
-export type SelfInstallProvenance = 'npx' | 'checkout' | 'global-candidate'
+/**
+ * Where the running code came from; only a global npm install may apply.
+ * `project-local` is a copy under a `node_modules` tree carrying a manifest,
+ * which `npm install -g` installs beside rather than replaces (issue #1622):
+ * a project's dependency, and also a pnpm or yarn global root (issue #1625).
+ */
+export type SelfInstallProvenance = 'npx' | 'checkout' | 'project-local' | 'global-candidate'
 
 /** Outcome of one self-update pass. */
 export interface SelfUpdatePassResult {
