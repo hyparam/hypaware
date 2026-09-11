@@ -6,7 +6,7 @@
 **Author:** Claude
 **Date:** 2026-09-11
 **Related:** LLP 0219 (#edited-assets-are-not-ours: the evidence rule this widens, for healing only), LLP 0284 (#digests-are-per-path: which digests the gate is asked of, and its "none re-recorded" clause), LLP 0397 (#ledger-decides, #edited-copies-are-kept: the refresh pass this runs inside), LLP 0226 (#unreadable-is-not-absent: the other narrowing of the same rule)
-**Extends:** LLP 0219, LLP 0284
+**Extends:** LLP 0219, LLP 0284, LLP 0397
 
 > The boot refresh rewrites every stale copy and then writes the ledger once,
 > after the whole loop. A kill inside that loop (a `hyp daemon restart` landing
@@ -92,10 +92,20 @@ its record is healed to the digest observed on disk** {#source-equality-is-owner
 
 ## Consequences {#consequences}
 
-- An interrupted refresh costs one boot, not the asset. The next boot heals
-  every record the killed pass left behind and reports them as unchanged.
+- An interrupted refresh costs one boot, not the asset, as long as the sources
+  have not moved on again: the next boot heals every record the killed pass
+  left behind and reports them as unchanged.
+- The healing is not total, and the evidence is why. A copy left holding bytes
+  the source itself no longer holds, because a second update landed between the
+  kill and the healing boot, matches neither its record nor the source. It is
+  still reported as an edit, still never refreshed, and still not prunable, and
+  `hyp skills install` is still the repair. Nothing at that later boot can tell
+  our orphaned rewrite from a copy the user took over, and the two things that
+  could (recording the digest before the swap, a write per asset) are the ones
+  #one-write rejects.
 - A copy frozen as `edited` by this window on an already-shipped version repairs
-  itself on the first boot after this change, with no `hyp skills install`.
+  itself on the first boot after this change whose source still holds the bytes
+  the copy holds, with no `hyp skills install`.
 - The source digest is now read for a copy that matches no record, which the
   previous order skipped. That is one extra hash of a source tree per unmatched
   copy per boot, bounded by the ledger. A copy that cannot be read at all is
