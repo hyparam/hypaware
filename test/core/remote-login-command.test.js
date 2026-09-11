@@ -1,5 +1,4 @@
 // @ts-check
-import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -7,6 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { remoteLogin, runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
 import { hasAppliedCentralConfig } from '../../src/core/config/apply.js'

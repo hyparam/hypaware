@@ -1,13 +1,12 @@
 // @ts-check
-import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import http from 'node:http'
-import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'

@@ -1,12 +1,11 @@
 // @ts-check
-import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { diagnosePlugin } from '../../src/core/plugin_doctor/diagnose.js'
 
 /**

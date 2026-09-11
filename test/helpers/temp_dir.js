@@ -4,7 +4,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { after } from 'node:test'
 
-/** Fresh test-owned directory, removed after this test file finishes.
+/** Fresh test-owned directory, removed when the calling test finishes (node:test
+ * binds a module-level `after` to whatever is running), or when the file finishes
+ * when called outside a test. Do not hand one to a later test.
  * @param {string} prefix
  */
 export function temporaryDirectory(prefix) {

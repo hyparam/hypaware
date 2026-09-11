@@ -1,12 +1,11 @@
 // @ts-check
-import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 
+import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 import { clientSyncListPath, readClientSyncEntries, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
