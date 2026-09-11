@@ -1529,6 +1529,13 @@ export interface ExportBatch {
 export interface ExportOptions {
   format: string
   schedule: string
+  /** Incremental payload counts, reported only after a chunk or blob is acknowledged. */
+  onProgress?: (progress: ExportProgress) => void
+}
+
+export interface ExportProgress {
+  rows: number
+  bytes: number
 }
 
 export interface ExportResult {

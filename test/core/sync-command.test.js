@@ -7,13 +7,64 @@ import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
-import { runSync } from '../../src/core/commands/sync.js'
+import { createSyncProgress, runSync } from '../../src/core/commands/sync.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
   firstSyncHoldMarkerPath,
   writeFirstSyncHoldMarker,
 } from '../../src/core/usage-policy/first_sync_hold.js'
 import { writeClientSyncEntries, writeLocalOnlyEntries } from '../../src/core/usage-policy/index.js'
+
+test('sync progress estimates from acknowledged rows and resets per destination', () => {
+  let now = 0
+  const volumes = new Map([
+    ['central', { status: /** @type {const} */ ('counted'), rows: 1000, withheldRows: 100, resume: { kind: /** @type {const} */ ('beginning') } }],
+    ['archive', { status: /** @type {const} */ ('counted'), rows: 2000, withheldRows: 0, resume: { kind: /** @type {const} */ ('beginning') } }],
+  ])
+  const progress = createSyncProgress(volumes, () => now)
+  progress.update('central')
+  assert.match(progress.render(), /0\/1,000 rows \(0%\).*ETA unavailable/)
+  now = 10_000
+  progress.update('central', { rows: 250, bytes: 1000 })
+  assert.equal(progress.render(), 'central: 250/1,000 rows (25%) | ETA ~30s')
+  now = 25_000
+  assert.match(progress.render(), /waiting for progress.*ETA unavailable/)
+  progress.update('central', { rows: 750, bytes: 3000 })
+  assert.match(progress.render(), /1,000 rows sent.*finalizing/)
+  assert.doesNotMatch(progress.render(), /100%/)
+  progress.update('archive')
+  assert.match(progress.render(), /archive: 0\/2,000 rows/)
+  progress.update('archive', { rows: 2001, bytes: 4000 })
+  assert.match(progress.render(), /2,001 rows sent.*ETA unavailable/)
+  assert.doesNotMatch(progress.render(), /%/)
+})
+
+test('sync progress never treats a partial or missing count as a total', () => {
+  const progress = createSyncProgress(new Map([
+    ['central', { status: 'partial', rows: 10, withheldRows: 0, resume: { kind: 'unknown' } }],
+  ]))
+  for (const name of ['central', 'unknown']) {
+    progress.update(name)
+    progress.update(name, { rows: 5, bytes: 100 })
+    assert.match(progress.render(), /5 rows sent.*ETA unavailable/)
+    assert.doesNotMatch(progress.render(), /%/)
+  }
+})
+
+test('sync threads acknowledged progress through the driver to the terminal', async () => {
+  const hypHome = await makeHome('upload-progress')
+  const sink = fakeSink('central', { url: 'https://hypaware.example.com' })
+  sink.sink.exportBatch = async (_batch, opts) => {
+    opts.onProgress({ rows: 123, bytes: 456 })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    return { status: 'exported', partitionsExported: 1, bytesWritten: 456 }
+  }
+  const { ctx, stdout } = makeCtx({ hypHome, sinks: [sink], stdoutTty: true })
+  assert.equal(await runSync(['--yes'], ctx), 0)
+  assert.match(stdout.text, /central: 123 rows sent/)
+  assert.match(stdout.text, /central: exported/)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
 
 // `hyp sync` (LLP 0101 #no-release, as amended): the user-facing export verb
 // that replaced `hyp sink force`. What these cover is the consent gate, not
@@ -66,7 +117,7 @@ function fakeSink(instanceName, config, result = {}) {
     config,
     exported,
     sink: {
-      async exportBatch(/** @type {unknown} */ batch) {
+      async exportBatch(/** @type {unknown} */ batch, /** @type {any} */ _opts = {}) {
         exported.push(batch)
         return { status: result.status ?? 'exported', partitionsExported: 0, bytesWritten: 0 }
       },

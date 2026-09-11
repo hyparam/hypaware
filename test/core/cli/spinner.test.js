@@ -29,6 +29,18 @@ test('withSpinner off a TTY prints the label once and nothing else', async () =>
   assert.equal(stdout.text(), 'backfill claude: importing…\n')
 })
 
+test('withSpinner renders live status and keeps ETA visible on an 80-column terminal', async () => {
+  const stdout = makeStdout({ isTTY: true, columns: 80 })
+  let status = 'central: 0/12,000 rows (0%) | ETA unavailable'
+  await withSpinner({ stdout, label: 'Sending', env: {}, intervalMs: 5, status: () => status }, async () => {
+    status = 'central: 5,000/12,000 rows (41%) | ETA ~14s'
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  })
+  const frames = stdout.text().split('\r\x1b[2K').filter(Boolean)
+  assert.match(frames[frames.length - 1], /41%.*ETA ~14s$/)
+  assert.ok(frames.every((frame) => [...frame].length < 80))
+})
+
 test('withSpinner under HYP_NO_TUI=1 stays on the plain path even on a TTY', async () => {
   const stdout = makeStdout({ isTTY: true })
   await withSpinner({ stdout, label: 'waiting', env: { HYP_NO_TUI: '1' } }, async () => {})

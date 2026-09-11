@@ -35,6 +35,7 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  *   env?: NodeJS.ProcessEnv,
  *   intervalMs?: number,
  *   quietWhenPlain?: boolean,
+ *   status?: () => string,
  * }} opts
  * @param {() => Promise<T>} work
  * @returns {Promise<T>}
@@ -51,7 +52,7 @@ export async function withSpinner(opts, work) {
   let frame = 0
   const render = () => {
     const elapsed = Math.floor((Date.now() - started) / 1000)
-    const suffix = elapsed >= 1 ? ` (${elapsed}s)` : ''
+    const suffix = opts.status ? ` ${opts.status()}` : elapsed >= 1 ? ` (${elapsed}s)` : ''
     const head = `${FRAMES[frame % FRAMES.length]} `
     stdout.write(`\r\x1b[2K${clampToWidth(head, label, suffix, stdout)}`)
     frame += 1

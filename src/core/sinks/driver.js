@@ -75,7 +75,8 @@ export function createSinkDriver(opts) {
       const schedule = typeof handle.config?.schedule === 'string' ? handle.config.schedule : '* * * * *'
       const isDue = tickOpts.force === true || cronMatches(schedule, now)
       if (!isDue) continue
-      const report = await runSink(handle, schedule, now)
+      tickOpts.onProgress?.(handle.instanceName)
+      const report = await runSink(handle, schedule, now, tickOpts.onProgress)
       sinks.push(report)
     }
     return { sinks }
@@ -85,9 +86,10 @@ export function createSinkDriver(opts) {
    * @param {ExtendedSinkHandle} handle
    * @param {string} schedule
    * @param {Date} now
+   * @param {TickOptions['onProgress']} onProgress
    * @returns {Promise<TickReport['sinks'][number]>}
    */
-  async function runSink(handle, schedule, now) {
+  async function runSink(handle, schedule, now, onProgress) {
     const instance = handle.instanceName
     const batchId = nextBatchId(now, instance)
     const partitions = await discoverReadyPartitions(handle)
@@ -118,7 +120,7 @@ export function createSinkDriver(opts) {
           const format = handle.encoder?.format ?? 'native'
           const reported = await handle.sink.exportBatch(
             { batchId, partitions },
-            { format, schedule }
+            { format, schedule, ...(onProgress ? { onProgress: (progress) => onProgress(instance, progress) } : {}) }
           )
           result = readExportResult(reported, partitions)
         } catch (err) {

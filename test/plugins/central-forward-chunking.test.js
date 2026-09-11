@@ -299,6 +299,28 @@ test('forward sink chunks a large partition into bounded POSTs', async () => {
   }
 })
 
+test('upload progress counts acknowledgements, excluding retries and withheld rows', async () => {
+  let requests = 0
+  const progress = []
+  const { sink, calls } = buildSink({
+    count: 12_001,
+    dropRow: (i) => i === 0,
+    responder: () => {
+      requests += 1
+      assert.equal(progress.length, requests <= 2 ? 0 : 1)
+      return requests === 1 ? { status: 429, retryAfter: 1 } : requests === 3 ? 400 : 202
+    },
+  })
+  const result = await sink.exportBatch(/** @type {any} */ (batch), {
+    format: 'native', schedule: '* * * * *',
+    onProgress: (delta) => progress.push(delta),
+  })
+  assert.equal(result.status, 'failed')
+  assert.equal(progress.length, 1)
+  assert.equal(progress[0].rows, 5000)
+  assert.equal(progress[0].bytes, Buffer.byteLength(calls[1].lines.join('\n') + '\n'))
+})
+
 test('a partition that fits in one chunk makes exactly one POST', async () => {
   const { sink, calls } = buildSink({ count: 10 })
   const result = await sink.exportBatch(/** @type {any} */ (batch), /** @type {any} */ ({}))

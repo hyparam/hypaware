@@ -22,7 +22,7 @@ import { groupThousands } from '../util/format_number.js'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry } from '../../../src/core/registry/types.js'
- * @import { PendingVolume } from '../../../src/core/sinks/types.js'
+ * @import { PendingVolume, TickOptions } from '../../../src/core/sinks/types.js'
  * @import { SourceHistoryReplayPreview } from '../../../hypaware-plugin-kernel-types.js'
  */
 
@@ -304,15 +304,12 @@ export async function runSync(argv, ctx) {
     stateRoot: stateDir,
     config: ctx.config,
   })
-  /** @type {{ now: Date, force: true, source: 'manual', sinkInstance?: string }} */
-  const tickOpts = { now: new Date(), force: true, source: 'manual' }
+  const progress = createSyncProgress(volumes)
+  /** @type {TickOptions} */
+  const tickOpts = { now: new Date(), force: true, source: 'manual', onProgress: progress.update }
   if (instance) tickOpts.sinkInstance = instance
-  // The tick is the long silent wait of this verb: one export per sink, each
-  // a network round trip, with nothing on screen between the user's "y" and
-  // the result lines. The driver reports per sink only once the whole tick
-  // settles, so an elapsed-time spinner is the progress that is available.
   const report = await withSpinner(
-    { stdout: ctx.stdout, env: ctx.env, label: `Sending to ${describeScope(destinations)}...` },
+    { stdout: ctx.stdout, env: ctx.env, label: 'Sending', status: progress.render },
     () => driver.tick(tickOpts)
   )
 
@@ -331,6 +328,51 @@ export async function runSync(argv, ctx) {
     )
   }
   return report.sinks.some((r) => r.status === 'failed') ? 1 : 0
+}
+
+/**
+ * Reuse the consent preview without rescanning the backlog. Keep only the
+ * current destination's counters: sinks run sequentially, and each ETA covers
+ * that destination.
+ * @param {Map<string, PendingVolume>} volumes
+ * @param {() => number} [now]
+ */
+export function createSyncProgress(volumes, now = Date.now) {
+  let instance = ''
+  let rows = 0
+  let started = now()
+  let lastAck = started
+  /** @type {TickOptions['onProgress']} */
+  const update = (name, delta) => {
+    if (!delta) {
+      instance = name
+      rows = 0
+      started = now()
+      lastAck = started
+      return
+    }
+    rows += delta.rows
+    lastAck = now()
+  }
+  const render = () => {
+    if (!instance) return 'Preparing upload...'
+    const volume = volumes.get(instance)
+    const total = volume?.status === 'counted' ? volume.rows : undefined
+    const count = total !== undefined && total > 0 && rows <= total
+      ? `${groupThousands(rows)}/${groupThousands(total)} rows (${Math.min(99, Math.floor(rows / total * 100))}%)`
+      : `${groupThousands(rows)} rows sent`
+    const prefix = `${instance}: ${count}`
+    if (rows === 0) return `${prefix} | waiting for progress | ETA unavailable`
+    if (now() - lastAck >= 15_000) return `${prefix} | waiting for progress | ETA unavailable`
+    const seconds = Math.max(1, (now() - started) / 1000)
+    const rate = rows / seconds
+    if (total === undefined || rows > total) return `${prefix} | ETA unavailable`
+    if (rows === total) return `${instance}: ${groupThousands(rows)} rows sent | finalizing...`
+    const remaining = Math.max(1, Math.ceil((total - rows) / rate))
+    const eta = remaining < 60 ? `${remaining}s` : `${Math.ceil(remaining / 60)}m`
+    return `${prefix} | ETA ~${eta}`
+  }
+  return { update, render }
 }
 
 /**

@@ -168,6 +168,7 @@ export function createForwardSink(args) {
               unsupportedDatasetsUntil,
               nowFn,
               requireWatermark: resolved.registration !== undefined,
+              onProgress: _opts.onProgress,
             })
           })
           partitionExports.set(exportKey, pending)
@@ -720,10 +721,11 @@ function withDatasetRolloutLock(dataset, locks, fn) {
  *   persistWatermark?: boolean,
  *   rowFilter?: (row: Record<string, unknown>) => boolean,
  *   replayStats?: { rows: number, bytes: number },
+ *   onProgress?: ExportOptions['onProgress'],
  * }} args
  * @returns {Promise<number>} bytes successfully POSTed for this partition
  */
-async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, requireWatermark, sinceOverride, includeLegacyOverride, persistWatermark = true, rowFilter, replayStats }) {
+async function forwardPartition({ partition, signal, config, identityClient, storage, watermarks, fetchFn, log, abortSignal, sleepFn, registration, registeredDatasets, datasetRegistrations, unsupportedDatasetsUntil, nowFn, requireWatermark, sinceOverride, includeLegacyOverride, persistWatermark = true, rowFilter, replayStats, onProgress }) {
   if (!partition.tablePath || !storage.tableExists(partition.tablePath)) {
     log.warn('central.forward.skip_missing_partition', { hyp_dataset: partition.dataset })
     return 0
@@ -854,6 +856,7 @@ async function forwardPartition({ partition, signal, config, identityClient, sto
     bytesWritten += bytes
     chunkIndex += 1
     shippedRowCount += rows
+    onProgress?.({ rows, bytes })
     if (replayStats) {
       replayStats.rows += rows
       replayStats.bytes += bytes

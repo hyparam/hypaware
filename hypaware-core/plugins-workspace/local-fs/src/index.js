@@ -150,6 +150,7 @@ function buildSink({ baseDir, encoder, sinkCtx, query, storage, watermarks }) {
           // (idempotent overwrite): the blob sink's server-ledger stand-in.
           const filename = withSeqRangeFilename(blob.filename, reader.sinceSeq, reader.lastAfter.seq)
           const destPath = await writeBlob(baseDir, partition, filename, blob.bytes)
+          _opts.onProgress?.({ rows: reader.rowCount, bytes: blob.bytesWritten ?? 0 })
           // Durable now: advance the watermark to this blob's last row.
           if (wmKey) {
             await watermarks.write(wmKey, {
