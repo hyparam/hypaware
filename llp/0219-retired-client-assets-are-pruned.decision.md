@@ -6,7 +6,7 @@
 **Author:** Claude
 **Date:** 2026-08-13
 **Related:** LLP 0138 (#one-materializer, #marker-undo: the module this extends and the half-record it left), LLP 0107 (#currency, #reversal: why attach re-runs and what reversal may touch), LLP 0142 (the retirement that is still installed), LLP 0212 (the retirement that motivated #726), LLP 0215 (#not-in-scope: named this gap and deferred it)
-**Extended-by:** LLP 0226 (narrows #prune-on-materialize's condition three to a direct child, and splits #edited-assets-are-not-ours's "no digest" outcome into gone vs. unreadable), LLP 0284 (widens #edited-assets-are-not-ours's match from one client's record to every digest recorded for the path)
+**Extended-by:** LLP 0226 (narrows #prune-on-materialize's condition three to a direct child, and splits #edited-assets-are-not-ours's "no digest" outcome into gone vs. unreadable), LLP 0284 (widens #edited-assets-are-not-ours's match from one client's record to every digest recorded for the path), LLP 0401 (narrows what #edited-assets-are-not-ours's digest covers to the set the copier carries, so an entry the copy cannot hold no longer registers as a user edit)
 
 > Extends [LLP 0138](./0138-client-assets-one-install.decision.md), which made
 > one routine own copying client assets and recorded, on the org-driven half

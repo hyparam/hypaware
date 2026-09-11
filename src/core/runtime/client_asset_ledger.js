@@ -178,6 +178,8 @@ export async function writeClientAssetLedger(stateRoot, records) {
  * @ref LLP 0219#edited-assets-are-not-ours [implements]: a digest may only match
  *   what we actually wrote, so file-shaped and directory-shaped content are
  *   hashed in separate domains.
+ * @ref LLP 0401#edit-detection-narrows [constrained-by]: "what we wrote" is what
+ *   the copier carries, so an entry it cannot carry does not register as an edit.
  */
 export async function digestClientAsset(dest) {
   return (await inspectClientAsset(dest)).digest
@@ -260,6 +262,8 @@ async function hashTree(root, dir, hash) {
     // Exactly the set `copyDir` copies: an entry it skips must not reach the
     // hash either, or a source tree holding one could never digest equal to
     // the copy made of it, and the refresh would re-copy it on every boot.
+    // @ref LLP 0401#digest-covers-the-copy [implements]: the copier is the
+    //   authority on what a tree is, so the hash may never cover more.
     if (!entry.isDirectory() && !entry.isFile()) continue
     const full = path.join(dir, entry.name)
     // The entry's shape leads its path, so a subdirectory named `x` and a file
