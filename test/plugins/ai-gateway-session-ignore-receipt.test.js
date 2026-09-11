@@ -348,6 +348,9 @@ const EPHEMERAL_CAVEAT = {
   },
 }
 
+/** The words both copies open the caveat paragraph with. */
+const CAVEAT_OPENER = 'The opt-out is held in memory'
+
 /**
  * @ref LLP 0066#readable [tests]: R9 - a caveat that names the restart alone
  * reads as the exhaustive list and teaches the user the fork cannot happen,
@@ -359,14 +362,28 @@ for (const rel of SKILLS) {
     const step1 = privacyStep1(rel)
     const caveat = EPHEMERAL_CAVEAT[rel]
 
-    assert.match(step1, caveat.restart, 'the restart that drops the set must be named')
-    assert.match(step1, caveat.fork, 'and so must the verb that mints a new session id')
+    // Scoped to the caveat's own paragraph rather than the whole of Step 1.
+    // Step 1 talks about restarts elsewhere - the claude copy says a bystander
+    // session "stays suppressed until its recorder restarts" - so a Step-1-wide
+    // /recorder restart/ is satisfied by prose that is not the caveat, and a
+    // caveat that dropped its restart half would still pass.
+    const at = step1.indexOf(CAVEAT_OPENER)
+    assert.ok(at >= 0, `Step 1 must still carry the caveat, opening "${CAVEAT_OPENER}"`)
+    const rest = step1.slice(at)
+    const end = rest.search(/\n\s*\n/)
+    const para = end < 0 ? rest : rest.slice(0, end)
+
+    assert.match(para, caveat.restart, 'the restart that drops the set must be named')
+    assert.match(para, caveat.fork, 'and so must the verb that mints a new session id')
     // Naming the fork somewhere is weaker than not presenting the restart as
     // the whole list: a caveat could name the fork in a later aside and still
     // close its own sentence on the restart, which is what a reader acts on.
+    // The emphasis is optional because these copies bold the phrase already
+    // (`a **recorder restart**`), and an exact-literal pin would read the
+    // markdown the file actually writes as a different sentence.
     assert.doesNotMatch(
-      step1,
-      /a (?:gateway|recorder) restart drops it\.\s*(?:\n|$)/,
+      para,
+      /a \*{0,2}(?:gateway|recorder) restart\*{0,2} drops it\./,
       'the restart must not be presented as the only way the opt-out lapses'
     )
   })
