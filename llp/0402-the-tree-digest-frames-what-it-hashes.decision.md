@@ -121,10 +121,17 @@ costs one ledger write per home and stays inside
 - **The residue is named, not healed** {#residue}. Two cases the heal cannot
   reach, both of which fail towards reporting and away from deleting:
 
-  - A skill whose *source* also moved across the upgrade span (a user updating
-    across several releases at once) matches neither its record nor the new
-    source. It is reported `asset_edited`, and the warning already names the
-    repair: `hyp skills install`.
+  - A skill whose *source* also moved across the upgrade span matches neither
+    its record nor the new source. It is reported `asset_edited`, and the
+    warning already names the repair: `hyp skills install`. This is not only
+    the host that skipped several releases: a *single* release that lands this
+    framing and also edits a shipped skill body puts every skill it edited
+    here, and every later boot repeats the report until the repair is run. So
+    the release landing this changes no skill source, or its notes name each
+    skill it did. On a daemon boot that report is
+    `client_assets.refresh_skipped` with `asset_edited` in `daemon.log` and not
+    a line on the terminal, because the boot refresh passes no `stderr` by
+    design (LLP 0397); the copy itself is left exactly as it was.
   - A skill retired *in the same upgrade* has no source to be equal to, so the
     prune finds no matching record, withholds the directory, and reports
     `asset_modified`. A leave-behind the user is told about, which is the
@@ -150,5 +157,10 @@ costs one ledger write per home and stays inside
 - A release landing this is a release that changes a recorded digest format in
   all but name, so it is worth a release note: the first boot logs
   `client_assets.refresh_record_healed` for each installed skill, and a host
-  that skipped several releases may see one `asset_edited` warning per skill
-  whose source moved in between.
+  sees one `asset_edited` report per skill whose source moved in the same span,
+  whether that span is several releases or the one release landing this.
+- The heal runs inside the boot refresh, which only the daemon calls. A host
+  that never starts the daemon keeps its old-format records indefinitely, and
+  that is the safe direction: the prune withholds and reports on a record it
+  cannot match, and the next `hyp skills install` re-records every copy it
+  writes.
