@@ -637,7 +637,12 @@ test('sharing shows only upload progress and results but still writes the file c
     assert.equal(await runSync([], ctx), 0)
     assert.match(stdout.text, /central: 123 rows sent/)
     assert.match(stdout.text, /central: exported/)
-    assert.match(stdout.text, copyFirst ? /Preparing upload/ : /Finishing/)
+    // `Preparing upload` alone cannot tell the two orders apart: the spinner
+    // renders its first frame before the tick starts, so that line is on
+    // screen in both. What distinguishes them is `Finishing`, which only a
+    // copy running *after* the upload can produce.
+    assert.match(stdout.text, /Preparing upload/)
+    assert[copyFirst ? 'doesNotMatch' : 'match'](stdout.text, /Finishing/)
     assert.match(stderr.text, /Send now to /)
     assert.doesNotMatch(stdout.text + stderr.text, /archive-copy|\/home\/u\/exports|\d destinations/)
     assert.equal(copy.exported.length, 1)
