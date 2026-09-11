@@ -128,10 +128,14 @@ costs one ledger write per home and stays inside
     framing and also edits a shipped skill body puts every skill it edited
     here, and every later boot repeats the report until the repair is run. So
     the release landing this changes no skill source, or its notes name each
-    skill it did. On a daemon boot that report is
-    `client_assets.refresh_skipped` with `asset_edited` in `daemon.log` and not
-    a line on the terminal, because the boot refresh passes no `stderr` by
-    design (LLP 0397); the copy itself is left exactly as it was.
+    skill it did. On a daemon boot the report is not a line on the terminal,
+    because the boot refresh passes no `stderr` by design (LLP 0397). What
+    `daemon.log` carries is the pass summary,
+    `daemon.client_assets_refreshed` with `skipped: ["edited:<dest>"]`; the
+    per-asset `client_assets.refresh_skipped` goes to the OTel logs pipeline
+    instead, which a default install (no dev telemetry, no OTLP endpoint) has
+    no provider for, so that one is dropped. The copy itself is left exactly
+    as it was.
   - A skill retired *in the same upgrade* has no source to be equal to, so the
     prune finds no matching record, withholds the directory, and reports
     `asset_modified`. A leave-behind the user is told about, which is the
