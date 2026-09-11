@@ -367,3 +367,47 @@ test('a copy that cannot be read is not reported to the user as one they edited'
   assert.match(out.stderr, /could not be read/)
   assert.doesNotMatch(out.stderr, /has been edited/)
 })
+
+test('staging leftovers are swept even when the source never changes again', async () => {
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+
+  // A stage abandoned inside `copyDir`, and a copy stepped aside by a swap
+  // whose closing sweep failed. Both are complete skill directories the client
+  // would load as a second stale copy of `alpha`, and no ledger record names
+  // either, so no prune can ever remove them. `replaceAsset` clears them only
+  // on a boot that rewrites this asset, and the source here never changes.
+  for (const suffix of ['.hyp-refresh', '.hyp-refresh-old']) {
+    await fs.mkdir(`${dest}${suffix}`, { recursive: true })
+    await fs.writeFile(path.join(`${dest}${suffix}`, 'SKILL.md'), 'stale', 'utf8')
+  }
+
+  const out = await refresh(h, regs)
+  assert.equal(out.unchanged, 1)
+  assert.deepEqual(await fs.readdir(path.dirname(dest)), ['alpha'])
+  assert.equal(await fs.readFile(path.join(dest, 'SKILL.md'), 'utf8'), 'v1')
+})
+
+test('a copy the user deleted is not resurrected by a leftover an earlier boot left', async () => {
+  const h = await makeHome()
+  const src = await writeSkillSource(h.home, 'alpha', 'v1')
+  const regs = registries([{ name: 'alpha', sourceDir: src }])
+  await install(h, regs)
+  const dest = path.join(h.home, '.claude/skills/alpha')
+
+  // The swap landed but its closing `fs.rm` did not, so the copy it replaced
+  // is still sitting beside the destination when the boot ends.
+  await fs.mkdir(`${dest}.hyp-refresh-old`, { recursive: true })
+  await fs.writeFile(path.join(`${dest}.hyp-refresh-old`, 'SKILL.md'), 'v0-stale', 'utf8')
+  await refresh(h, regs)
+
+  // Only now does the user remove the skill. The next boot must read that as
+  // the choice it is, not restore the tree the earlier boot failed to sweep.
+  await fs.rm(dest, { recursive: true })
+  const out = await refresh(h, regs)
+  assert.equal(out.skipped[0]?.reason, 'missing')
+  assert.equal(await exists(dest), false)
+})

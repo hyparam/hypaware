@@ -89,7 +89,11 @@ changed, deciding each one by the install ledger.**
   destination does not exist; the staging names are fixed rather than
   process-scoped and the pass restores the stepped-aside copy before it reads
   an absent destination as one the user removed, so a refresh killed inside
-  the window costs a boot and not the installed skill. A
+  the window costs a boot and not the installed skill. The same pass sweeps
+  both staging names off a destination it finds in place, so a leftover never
+  outlives the boot after it: left, it is a second complete copy of the skill
+  under a name no ledger record covers, and one that outlived its boot would
+  turn the restore into a resurrection of a destination the user deleted. A
   source that cannot be read at all is not a changed source: nothing is
   staged. Either failure is reported and the ledger record is carried
   unchanged, so the copy still sitting there stays prunable later.

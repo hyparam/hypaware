@@ -164,16 +164,31 @@ export async function refreshClientAssets(options) {
     if (!recorded) continue
 
     let inspected = await inspectClientAsset(dest)
+    const stepped = `${dest}${REFRESH_OLD_SUFFIX}`
     if (inspected.missing) {
       // A refresh killed between {@link replaceAsset}'s two renames leaves the
       // copy beside the destination under the staging name, with `dest` itself
       // absent. That is not the user removing it, so it is put back before the
       // decision is made: read as `missing` instead, the copy would be skipped
       // on this boot and on every boot after it, and the installed skill would
-      // be gone for good. A copy the user really did remove finds no stage to
-      // restore and stays gone.
-      const restored = await fs.rename(`${dest}${REFRESH_OLD_SUFFIX}`, dest).then(() => true, () => false)
+      // be gone for good. A copy the user really did remove finds no copy
+      // stepped aside beside it and stays gone.
+      const restored = await fs.rename(stepped, dest).then(() => true, () => false)
       if (restored) inspected = await inspectClientAsset(dest)
+    } else {
+      // The destination is there, so anything still under a staging name is a
+      // leftover: a stage abandoned inside `copyDir`, or a copy stepped aside
+      // by a swap whose closing sweep failed. Each is a complete `SKILL.md`
+      // sitting in the client's skills directory under a name no ledger record
+      // covers, which the client loads as a second stale copy of the same skill
+      // and no prune can ever remove. {@link replaceAsset} clears them only on
+      // a boot that rewrites this asset, and for a source that never changes
+      // again that boot never comes - so the sweep belongs here, where every
+      // recorded destination is looked at once per boot. It also keeps the
+      // restore above honest: a stepped aside copy that outlives its own boot
+      // would otherwise resurrect a destination the user deleted on purpose.
+      await fs.rm(stepped, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(`${dest}${REFRESH_STAGE_SUFFIX}`, { recursive: true, force: true }).catch(() => {})
     }
     const { digest: onDisk, missing } = inspected
     if (missing) {
@@ -240,7 +255,23 @@ export async function refreshClientAssets(options) {
       continue
     }
     const digest = await digestClientAsset(dest)
-    if (digest) rewritten.set(dest, digest)
+    if (digest) {
+      rewritten.set(dest, digest)
+    } else {
+      // The bytes landed but the record cannot follow them, which is the same
+      // degraded state a failed ledger write leaves below: from the next boot
+      // on, the copy this pass just wrote matches no recorded digest and is
+      // reported as a user edit. Say so, or the only trace is a summary line
+      // claiming the refresh succeeded.
+      getLogger('client-assets').warn('client_assets.refresh_digest_unread', {
+        [Attr.COMPONENT]: 'client-assets',
+        [Attr.OPERATION]: 'client_assets.refresh',
+        hyp_client: client,
+        [Attr.STATUS]: 'error',
+        [Attr.ERROR_KIND]: 'digest_unreadable',
+        detail: dest,
+      })
+    }
     outcome.refreshed.push({ kind: asset.kind, name: asset.name, client, dest })
   }
 
@@ -1025,9 +1056,11 @@ async function copyAsset(asset, dest) {
  * a tree the next one cannot recognize: a complete `SKILL.md` sitting in the
  * client's skills directory under a name no ledger record covers, which the
  * client loads as a second stale copy and no prune can ever remove. Fixed
- * names make the leftovers self-clearing, and make the one that matters
- * recoverable by {@link refreshClientAssets} rather than orphaned. Nothing
- * races over them: the refresh is the only caller and runs once per boot.
+ * names make the leftovers recognizable: {@link refreshClientAssets} sweeps
+ * them off every destination it still finds in place, and restores the one
+ * that matters rather than leaving it orphaned. Nothing races over them: the
+ * refresh is the only caller, and the daemon that runs it refuses to boot
+ * beside a live one.
  *
  * @param {ResolvedClientAsset} asset
  * @param {string} dest
