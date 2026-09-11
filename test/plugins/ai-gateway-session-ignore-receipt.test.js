@@ -467,6 +467,55 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   )
 })
 
+/** The words both copies open their stop list with. */
+const STOP_LIST_OPENER = '**Stop on any of these**'
+
+/**
+ * The one receipt reading whose substance is host-agnostic, so it is pinned
+ * over both copies rather than per copy: `runMutation` reports `partial`
+ * (exit 3) when a recorder it addressed refused, and the recorder that refused
+ * is the one still recording, whichever client the session belongs to. Which
+ * sources and which recorder are right do differ by host, and are pinned in
+ * each copy's own suite.
+ *
+ * Looped because the per-copy guard is what let this drift: the check #1620
+ * added names `claude_env` and `claude-telemetry`, so it could only ever have
+ * run on one copy, and the codex copy carried no stop at all (issue #1633).
+ *
+ * @ref LLP 0256#cli-posts-to-both [tests]: partial is not swallowed, so the
+ * surface reading the receipt must not swallow it either.
+ */
+const PARTIAL_RECEIPT_BULLET =
+  /- exit `0` with `"status": "ok"`\. `"status": "partial"` \(exit 3\) means an addressed recorder \*\*refused and is still recording\*\*\./
+
+for (const rel of SKILLS) {
+  test(`${rel} stops on a partial receipt, where an addressed recorder kept recording`, () => {
+    const step1 = privacyStep1(rel)
+
+    assert.match(
+      step1,
+      PARTIAL_RECEIPT_BULLET,
+      'Step 1 must say what `partial` means: a recorder refused and is still recording'
+    )
+
+    // Scoped to the stop paragraph itself. Explaining `partial` in a bullet
+    // while leaving it out of the list the agent acts on is the shape that
+    // ships a documented-but-unenforced stop, so the whole-of-Step-1 match
+    // above cannot stand in for this one.
+    const at = step1.indexOf(STOP_LIST_OPENER)
+    assert.ok(at >= 0, `Step 1 must gather its stops under "${STOP_LIST_OPENER}"`)
+    const rest = step1.slice(at)
+    const end = rest.search(/\n\s*\n/)
+    const stops = end < 0 ? rest : rest.slice(0, end)
+    assert.match(stops, /`"status": "partial"`/, '`partial` must be one of the stops, not only an explanation')
+    assert.match(
+      stops,
+      /the review session is still being recorded/,
+      'and the stop must say what the user is being told'
+    )
+  })
+}
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */

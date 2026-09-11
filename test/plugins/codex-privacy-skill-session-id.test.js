@@ -47,12 +47,28 @@ const SKILL = path.resolve(
 
 const text = fs.readFileSync(SKILL, 'utf8')
 
-/** The first fenced bash block, which is Step 1's session-resolution script. */
+/**
+ * Step 1's session-resolution script, anchored on its shebang rather than on
+ * "the first fenced bash block": the verb Step 1 leads with now has a bash
+ * block of its own above this one, and every assertion here is about the
+ * script.
+ */
 const step1 = (() => {
-  const m = text.match(/```bash\n([\s\S]*?)```/)
-  assert.ok(m, 'the skill must still carry a fenced bash block')
+  const m = text.match(/```bash\n(#!\/usr\/bin\/env bash\n[\s\S]*?)```/)
+  assert.ok(m, 'the skill must still carry the fenced fallback script')
   return m[1]
 })()
+
+/** Step 1's prose, which is where the receipt readings and their stops live. */
+const prose = (() => {
+  const start = text.indexOf('## Step 1')
+  const end = text.indexOf('## Step 2')
+  assert.ok(start >= 0 && end > start, 'Step 1 must still be a section of its own')
+  return text.slice(start, end)
+})()
+
+/** The words Step 1 opens its stop list with. */
+const STOP_LIST_OPENER = '**Stop on any of these**'
 
 test('Step 1 sends the session container, never a thread id', () => {
   // The id that goes on the wire is read from `payload.session_id`.
@@ -119,9 +135,69 @@ test('Step 1 reports the id as inferred and names persistence and the fork bound
   // labelled. (#452)
   assert.match(step1, /ID_SOURCE="INFERRED from \$ROLLOUT on disk"/)
 
-  const prose = text.slice(text.indexOf('## Step 1'), text.indexOf('## Step 2'))
   assert.match(prose, /survives recorder and daemon restarts/)
   assert.match(prose, /codex fork/)
   assert.match(prose, /until explicitly removed/)
+})
 
+/**
+ * The host-specific half of the receipt reading (issue #1633).
+ *
+ * `hyp session ignore --json` reports which session it resolved and which
+ * recorders it reached, and both answers can be a confirmed success about
+ * something other than this session. Which values are the RIGHT ones is the
+ * part that cannot be shared with the claude copy: `resolveSessionIdForCli`
+ * reports `codex_env_rollout` (thread stated in `CODEX_THREAD_ID`, container
+ * read from its rollout) or `codex_rollout` (container inferred from a `cwd`
+ * match) for a Codex session, and a `claude_env` here means the verb opted out
+ * a Claude session sharing this shell while this one kept being recorded.
+ * Codex reaches HypAware through `base_url`, so the recorder that captures it
+ * is `gateway` (`resolveRecorderTargetsForCli`), where for a Claude session it
+ * is the telemetry listener.
+ *
+ * The checks are pinned inside the stop paragraph rather than anywhere in
+ * Step 1, because a reading the agent is not told to stop on is commentary.
+ * Issue #1627 records the claude guard's version of that gap: it asserts the
+ * recorder id appears in Step 1 and that a stop paragraph exists, never that
+ * the two meet, so a clause demoted to a receipt bullet still passes.
+ *
+ * @ref LLP 0066#readable [tests]: R10 - an answer that could not be
+ * established, or was established about another session, must not read as a
+ * completed check.
+ */
+test('Step 1 stops on a receipt that resolved another session or missed the gateway', () => {
+  const at = prose.indexOf(STOP_LIST_OPENER)
+  assert.ok(at >= 0, `Step 1 must gather its stops under "${STOP_LIST_OPENER}"`)
+  const rest = prose.slice(at)
+  const paraEnd = rest.search(/\n\s*\n/)
+  const stops = paraEnd < 0 ? rest : rest.slice(0, paraEnd)
+
+  assert.match(
+    stops,
+    /a `"session_id_source"` other than `codex_env_rollout` or `codex_rollout`/,
+    'the stop list must name the two sources a Codex session legitimately resolves by'
+  )
+  assert.match(
+    stops,
+    /no `gateway` entry in `"recorders"`/,
+    'and must stop when the recorder that captures this session was never addressed'
+  )
+
+  // The stop list is a list of names; the bullets above it are what tell the
+  // agent what each name means. Both halves have to survive, or the stop is
+  // unreadable in one direction and unactionable in the other. Each pin
+  // therefore spans the clause carrying the meaning, not just the name it
+  // hangs on: an intact name over a reversed explanation ("any other source
+  // is fine", "a list without one is harmless") reads as an all-clear, and a
+  // stop list on its own does not catch it.
+  assert.match(
+    prose,
+    /- `"session_id_source"` is `codex_env_rollout`[\s\S]{0,400}means the verb resolved \*\*a different session\*\*[\s\S]{0,400}`hyp session unignore /,
+    'the session_id_source bullet must say a wrong source resolved a different session, and how to undo it'
+  )
+  assert.match(
+    prose,
+    /- `"recorders"` contains an entry for `gateway`, the recorder that captures this session\. A list without one means the gateway was never addressed\b/,
+    'the recorders bullet must name the recorder the coverage check looks for, and say what its absence means'
+  )
 })
