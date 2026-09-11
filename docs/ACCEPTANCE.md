@@ -1967,8 +1967,10 @@ Record exact editor/CLI versions, OS, config paths and hook settings.
 2. In each client mode, create text turns and repeated identical assistant
    segments separated by tools. Include Read, Grep, Glob, Shell, dynamic tool
    discovery, missing-file errors and rejected Shell calls. Compare the actual
-   UI or stream with native rows, including intermediate assistant segments,
-   arguments, complete results, native tool IDs and correct error status.
+   UI or stream with native rows, including every human prompt, intermediate
+   assistant segments, arguments, complete results, native tool IDs and correct
+   error status. A missing prompt is the signal to check the typed user-message
+   suppression field, which no fixture exercises.
    `entrypoint` must identify the actual native editor/CLI store.
 3. Query `hyp query sql "select session_id, message_id, part_type, content_text,
    tool_call_id, status, entrypoint from ai_gateway_messages where client_name = 'cursor'"`.

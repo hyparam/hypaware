@@ -230,12 +230,12 @@ export function createStartCursorSource(deps = {}) {
             skip('native_recovery_scheduled')
             return
           }
+          // Every lifecycle hook already returned above, so the only way past
+          // the projector here is a beforeReadFile whose own fields are unusable.
           const projection = projectCursorHook(raw)
           if (!projection) {
-            const lifecycle = ['sessionStart', 'sessionEnd', 'stop', 'subagentStart', 'subagentStop'].includes(hook)
-            if (lifecycle) counts.lifecycle_events++
-            else counts.incomplete++
-            skip(lifecycle ? 'lifecycle_only' : 'incomplete_hook')
+            counts.incomplete++
+            skip('incomplete_hook')
             return
           }
           const write = serial.then(async () => {
