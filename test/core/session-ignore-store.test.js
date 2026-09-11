@@ -6,7 +6,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
+import { SessionIgnoreSet, sessionIgnoreLoadError } from '../../src/core/control/session_ignore_store.js'
 
 // @ref LLP 0403#storage [tests]: exact IDs, independent readers, bounded state.
 test('saved IDs survive a separate process and live reads need no disk access', () => {
@@ -18,7 +18,7 @@ test('saved IDs survive a separate process and live reads need no disk access', 
     set.add(ids[0])
     const moduleUrl = new URL('../../src/core/control/session_ignore_store.js', import.meta.url).href
     const out = spawnSync(process.execPath, ['--input-type=module', '-e',
-      `import { SessionIgnoreSet } from ${JSON.stringify(moduleUrl)}\nprocess.stdout.write(JSON.stringify([...new SessionIgnoreSet(process.argv[1])]))`, root], { encoding: 'utf8' })
+      `import { SessionIgnoreSet, sessionIgnoreLoadError } from ${JSON.stringify(moduleUrl)}\nprocess.stdout.write(JSON.stringify([...new SessionIgnoreSet(process.argv[1])]))`, root], { encoding: 'utf8' })
     assert.equal(out.status, 0, out.stderr)
     assert.deepEqual(JSON.parse(out.stdout).sort(), ids.sort())
     for (const name of fs.readdirSync(set.directory)) {
@@ -61,7 +61,7 @@ test('failed saves and removals preserve the last in-memory membership', () => {
     assert.throws(() => set.delete('keep'))
     assert.equal(set.has('new'), false)
     assert.equal(set.has('keep'), true)
-    assert.throws(() => new SessionIgnoreSet(root))
+    assert.match(sessionIgnoreLoadError(new SessionIgnoreSet(root)) ?? '', /capture is disabled/)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -73,9 +73,33 @@ test('corrupt and oversized markers fail closed without replacing memory', () =>
     const file = path.join(set.directory, fs.readdirSync(set.directory)[0])
     for (const data of ['broken json', '"different-id"', 'x'.repeat(65537)]) {
       fs.writeFileSync(file, data)
-      assert.throws(() => new SessionIgnoreSet(root))
+      assert.match(sessionIgnoreLoadError(new SessionIgnoreSet(root)) ?? '', /capture is disabled/)
       assert.throws(() => set.refresh())
       assert.equal(set.has('keep'), true)
     }
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+
+test('failed refresh disables capture and mutations until a complete valid reload', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-store-'))
+  try {
+    const set = new SessionIgnoreSet(root)
+    set.add('keep')
+    const file = path.join(set.directory, fs.readdirSync(set.directory)[0])
+    const original = fs.readFileSync(file)
+    fs.writeFileSync(file, 'broken json')
+    assert.throws(() => set.refresh())
+    assert.match(sessionIgnoreLoadError(set) ?? '', /capture is disabled/)
+    assert.throws(() => set.add('new'), /capture is disabled/)
+    assert.throws(() => set.delete('keep'), /capture is disabled/)
+    assert.equal(fs.readFileSync(file, 'utf8'), 'broken json')
+    assert.equal(set.has('keep'), true)
+    fs.writeFileSync(file, original)
+    set.refresh()
+    assert.equal(sessionIgnoreLoadError(set), undefined)
+    assert.deepEqual([...set], ['keep'])
+    set.add('new')
+    assert.deepEqual([...new SessionIgnoreSet(root)].sort(), ['keep', 'new'])
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })

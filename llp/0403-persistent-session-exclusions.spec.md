@@ -41,7 +41,18 @@ use a streamed directory iterator and refuse invalid markers or more than
 exclusions. Each writer checks capacity against its own snapshot; concurrent
 writers can exceed the aggregate limit, causing a later load to refuse rather
 than silently omit exclusions. Unreadable or corrupt state is an error, never
-an empty list. Atomic-writer temporary files are not committed markers.
+an empty list. Activation retains the error without disabling the gateway or
+adapter registration. The gateway forwards through its existing no-capture
+exchange, buffering no content and sending no capture to the processing child.
+Its processing path also refuses capture while its own state is unavailable.
+Claude telemetry and OpenCode snapshots suppress all sessions, even events
+without IDs. Backfill refresh still throws before import. Session control
+reads and writes return HTTP 503 rather than confirming membership while state
+is unavailable. Source status exposes the error and loading emits a bounded,
+content-free diagnostic. Repair the store and restart to reload every recorder;
+a successful backfill refresh also restores that reader. Failed refreshes
+preserve the prior membership but disable capture until a complete valid load.
+Atomic-writer temporary files are not committed markers.
 
 ## Transcript recovery {#backfill}
 
@@ -81,7 +92,9 @@ sessions that execute the hook, not cloud or Cowork sessions.
 
 Tests cover control POST and DELETE across fresh gateways, separate-process
 reads, exact IDs, independent writers, corrupt/oversized state, and failed
-mutations. A fresh Claude importer and a pre-existing manual provider honor
+mutations. Damaged-state regressions prove gateway activation and real HTTP
+forwarding without projection or writes, unconfirmed control receipts, and
+suppression in the telemetry and snapshot listeners. A fresh Claude importer and a pre-existing manual provider honor
 saved exclusions, while unrelated sessions import. Codex checks the container
 ID and refreshes changes. The hook regression sources its output in a real
 shell and runs the actual ID resolver, including resume, quoting, preservation

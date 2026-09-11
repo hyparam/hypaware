@@ -8,7 +8,7 @@ import type {
   AiGatewayUpstreamPreset,
   PluginActivationContext,
 } from '../../../../hypaware-plugin-kernel-types.d.ts'
-import type { Exchange } from './recorder.js'
+import type { Exchange, createNullExchange } from './recorder.js'
 import type { ExtendedSourceRegistry } from '../../../../src/core/registry/types.d.ts'
 
 export interface ExchangeInit {
@@ -162,7 +162,7 @@ export interface ProxyOptions {
     path: string | undefined
     requestHeaders: IncomingHttpHeaders
     upstreamPath?: string
-  }): Exchange
+  }): Exchange | ReturnType<typeof createNullExchange>
   /**
    * Handle a request under the reserved `/_hypaware/` control prefix. The
    * proxy short-circuits control requests BEFORE upstream matching (they

@@ -30,7 +30,7 @@ import test from 'node:test'
 
 import { aiGatewayBackfillMaterializer } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createClaudeBackfillProvider } from '../../hypaware-core/plugins-workspace/claude/src/backfill.js'
-import { createStartClaudeTelemetrySource } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
+import { createStartClaudeTelemetrySource, partitionIgnoredSessionEvents } from '../../hypaware-core/plugins-workspace/claude/src/telemetry/source.js'
 import { runBackfillProvider } from '../../src/core/commands/backfill.js'
 import {
   createBackfillMaterializerRegistry,
@@ -169,14 +169,14 @@ async function startListener(opts) {
   const details = /** @type {any} */ ((await source.status()).details)
   const endpoint = `http://127.0.0.1:${details.listen_port}/_hypaware/ignore/session`
   return {
-    /** @param {'POST' | 'DELETE'} method @param {string} sessionId */
-    async control(method, sessionId) {
+    /** @param {'POST' | 'DELETE'} method @param {string} sessionId @param {number} [expectedStatus] */
+    async control(method, sessionId, expectedStatus = 200) {
       const res = await fetch(endpoint, {
         method,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId }),
       })
-      assert.equal(res.status, 200)
+      assert.equal(res.status, expectedStatus)
       return /** @type {any} */ (await res.json())
     },
     stop: () => source.stop(),
@@ -320,5 +320,29 @@ test('a fresh importer and an existing manual importer both honor persisted excl
     const resumed = stageRunner(env, provider)
     assert.equal((await resumed.manual()).ok, true)
     assert.deepEqual(sessionIds(resumed.appended), ['ordinary', 'private'])
+  } finally { await env.cleanup() }
+})
+
+
+test('unreadable exclusions suppress all Claude telemetry, including events without session IDs', async () => {
+  const env = await stageEnv()
+  try {
+    const store = new SessionIgnoreSet(env.homeDir)
+    store.add('private')
+    const marker = path.join(store.directory, (await fsp.readdir(store.directory))[0])
+    await fsp.writeFile(marker, 'broken json')
+    const unavailable = new SessionIgnoreSet(env.homeDir)
+    const events = /** @type {any} */ ([{ attributes: { 'session.id': 'private' } }, { attributes: { 'session.id': 'other' } }, { attributes: {} }])
+    const result = partitionIgnoredSessionEvents(events, unavailable)
+    assert.deepEqual(result.kept, [])
+    assert.equal([...result.droppedBySession.values()].flat().length, 3)
+    const listener = await startListener({ hypHome: env.homeDir, ignoredSessions: unavailable })
+    try {
+      assert.match((await listener.control('POST', 'private', 503)).error, /capture is disabled/)
+    } finally { await listener.stop() }
+    const provider = createClaudeBackfillProvider({ homeDir: env.homeDir, stateFile: env.stateFile, ignoredSessions: unavailable })
+    const runner = stageRunner(env, provider)
+    assert.equal((await runner.manual()).ok, false)
+    assert.deepEqual(runner.appended, [])
   } finally { await env.cleanup() }
 })

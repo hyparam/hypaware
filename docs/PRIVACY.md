@@ -209,7 +209,11 @@ after upgrading; their old process state cannot be recovered.
 Claude (including Desktop transcripts), Codex, and OpenCode backfill read the
 saved exclusions, including a manual import in a separate process. The state
 lives under `<HYP_HOME>/hypaware/session-ignores/`. Saving must succeed before
-the command reports success; corrupt or unreadable state is an error.
+the command reports success. If saved exclusions are corrupt or unreadable,
+AI requests still forward, but capture and transcript imports pause. Session
+commands report an error rather than confirming an exclusion; source status
+also reports the problem. Repair the saved state and restart HypAware to
+restore recording with the saved exclusions intact.
 
 For attached local Claude Desktop Code sessions, the managed SessionStart hook
 exports the exact conversation ID to subsequent Bash commands. Start or resume

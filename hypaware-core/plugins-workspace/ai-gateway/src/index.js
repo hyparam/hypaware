@@ -42,7 +42,7 @@ const PLUGIN_NAME = '@hypaware/ai-gateway'
  * @ref LLP 0016#knows-nothing-about-claude-or-codex [implements]: owns the gateway capability + ai_gateway_messages; no client specifics
  */
 export async function activate(ctx) {
-  const state = createGatewayState(new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir))
+  const state = createGatewayState(new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log))
   const api = createAiGatewayApi(state, { storage: ctx.storage, clients: ctx.clients })
 
   ctx.provideCapability('hypaware.ai-gateway', '2.0.0', api)

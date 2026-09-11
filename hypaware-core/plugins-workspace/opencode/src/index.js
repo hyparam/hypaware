@@ -34,7 +34,7 @@ export async function activate(ctx) {
 
   ensureAiGatewayStorageContracts(ctx)
   const localPolicyPath = localOnlyListPath(readObservabilityEnv(ctx.env).stateDir)
-  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir)
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
   ctx.backfills.register(createOpenCodeBackfillProvider({
     localOnlyListPath: localPolicyPath,
     ignoredSessions,

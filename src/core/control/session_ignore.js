@@ -1,5 +1,6 @@
 // @ts-check
 
+import { sessionIgnoreLoadError } from './session_ignore_store.js'
 import { drainRequestBody } from '../util/reject_body.js'
 
 /**
@@ -114,6 +115,13 @@ export function createControlHandler(opts) {
     if (url.pathname !== SESSION_IGNORE_CONTROL_PATH) {
       drainRequestBody(req, res)
       sendJson(res, 404, { error: 'unknown control path', path: url.pathname })
+      return
+    }
+
+    const loadError = sessionIgnoreLoadError(ignoredSessions)
+    if (loadError) {
+      drainRequestBody(req, res)
+      sendJson(res, 503, { error: loadError })
       return
     }
 

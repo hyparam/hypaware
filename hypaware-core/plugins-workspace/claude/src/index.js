@@ -130,7 +130,7 @@ export async function activate(ctx) {
 
   // @ref LLP 0403#storage [implements]: load saved exclusions for both live
   // recording and backfill, including a fresh manual importer.
-  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir)
+  const ignoredSessions = new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log)
 
   gateway.registerExchangeProjector(
     createClaudeExchangeProjector({

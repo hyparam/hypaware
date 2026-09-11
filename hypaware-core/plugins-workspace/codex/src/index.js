@@ -172,7 +172,7 @@ export async function activate(ctx) {
   // outside the proxy) into `ai_gateway_messages` via `hyp backfill codex`.
   ctx.backfills.register(
     createCodexBackfillProvider({
-      ignoredSessions: new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir),
+      ignoredSessions: new SessionIgnoreSet(readObservabilityEnv(ctx.env).stateDir, ctx.log),
       homeDir,
       codexHome,
       clientName: CLIENT_NAME,
