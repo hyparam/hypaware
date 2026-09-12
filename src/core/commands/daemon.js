@@ -348,7 +348,7 @@ export async function runDaemonRestart(argv, ctx) {
 export async function runDaemonInstall(argv, ctx, opts = {}) {
   const parsed = parseDaemonInstallArgs(argv)
   if (parsed.help) {
-    ctx.stdout.write('usage: hyp daemon install [--config <path>] [--bin <path>] [--dry-run [--json]]\n')
+    ctx.stdout.write('usage: hyp daemon install [--config <path>] [--bin <path>] [--force] [--dry-run [--json]]\n')
     return 0
   }
   if (parsed.error) {
@@ -372,6 +372,8 @@ export async function runDaemonInstall(argv, ctx, opts = {}) {
     // into the _npx cache, so installDaemon upgrades it to a durable
     // global bin (LLP 0025: join stays a wrapper over this same path).
     binExplicit: parsed.binPath !== undefined,
+    force: parsed.force,
+    durableBin: { env: ctx.env, stdout: ctx.stdout, stderr: ctx.stderr, stdin: ctx.stdin },
     ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
     ...(homeDir !== undefined ? { homeDir } : {}),
     ...(parsed.platform !== undefined ? { platform: parsed.platform } : {}),
@@ -515,7 +517,7 @@ export async function runDaemonStart(argv, ctx) {
 
 /**
  * @param {string[]} argv
- * @returns {{ help?: boolean, error?: string, dryRun?: boolean, json?: boolean, configPath?: string, binPath?: string, platform?: NodeJS.Platform }}
+ * @returns {{ help?: boolean, error?: string, dryRun?: boolean, json?: boolean, force?: boolean, configPath?: string, binPath?: string, platform?: NodeJS.Platform }}
  */
 function parseDaemonInstallArgs(argv) {
   const parsed = parseCommandArgv(argv, {
@@ -526,13 +528,14 @@ function parseDaemonInstallArgs(argv) {
       config: { type: 'string' },
       bin: { type: 'string' },
       platform: { type: 'string', enum: ['darwin', 'linux'] },
+      force: { type: 'boolean', default: false },
     },
   })
   if ('help' in parsed) return { help: true }
   if (!parsed.ok) return { error: parsed.error }
-  const p = /** @type {{ 'dry-run': boolean, json: boolean, config?: string, bin?: string, platform?: NodeJS.Platform }} */ (parsed.params)
+  const p = /** @type {{ 'dry-run': boolean, json: boolean, force: boolean, config?: string, bin?: string, platform?: NodeJS.Platform }} */ (parsed.params)
   if (p.json && !p['dry-run']) return { error: '--json requires --dry-run' }
-  return { dryRun: p['dry-run'], json: p.json, configPath: p.config, binPath: p.bin, platform: p.platform }
+  return { dryRun: p['dry-run'], json: p.json, force: p.force, configPath: p.config, binPath: p.bin, platform: p.platform }
 }
 
 /**

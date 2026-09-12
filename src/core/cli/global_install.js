@@ -1,10 +1,11 @@
 // @ts-check
 
 import { spawn } from 'node:child_process'
-import { accessSync, constants as fsConstants, statSync } from 'node:fs'
+import { accessSync, constants as fsConstants, realpathSync, statSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { isTty } from './stdio.js'
 import { fileURLToPath } from 'node:url'
 
 /**
@@ -34,57 +35,110 @@ export class GlobalInstallError extends Error {
   }
 }
 
+/** A declined or unavailable durable install must stop setup before attach. */
+export class DurableBinRequiredError extends GlobalInstallError {}
+
 /**
- * When `npx hypaware` installs the daemon directly, `process.argv[1]`
- * points into npm's `_npx` cache. Install the same package globally
- * first and use that durable binary for launchd/systemd.
- *
- * Explicit `--bin` callers already supplied their stable entrypoint,
- * so this helper should only be called for default daemon installs.
+ * Resolve the CLI before persisting a service. Headless runs try the global
+ * install; an interactive run offers it first. Falling back to the existing
+ * tree needs explicit consent or --force.
  *
  * @param {{
  *   binPath: string,
  *   env: NodeJS.ProcessEnv,
- *   stdout: NodeJS.WritableStream | { write(chunk: string): unknown },
- *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
+ *   stdout: { write(chunk: string): unknown },
+ *   stderr: { write(chunk: string): unknown },
+ *   stdin?: NodeJS.ReadableStream,
+ *   interactive?: boolean,
+ *   force?: boolean,
+ *   confirm?: (question: string) => Promise<boolean>,
  *   runner?: CommandRunner,
  * }} opts
  * @returns {Promise<DurableBinResult>}
  */
-export async function ensureDurableBinForNpx(opts) {
+// @ref LLP 0404#install-policy [implements]: a fragile daemon path needs consent or force
+export async function ensureDurableBin(opts) {
   const binPath = path.resolve(opts.binPath)
-  if (!isNpxBinPath(binPath, opts.env)) {
+  if (!isEphemeralBinPath(binPath, opts.env)) {
     return { binPath, installed: false, skipped: true }
   }
 
   const pkg = await readPackageIdentity()
-  const packageSpec = `${pkg.name}@${pkg.version}`
+  // @ref LLP 0405#command [implements]: let npm resolve the unversioned package
+  const packageSpec = pkg.name
   const run = opts.runner ?? runCommand
+  const interactive = opts.interactive ?? isTty(opts.stdin ?? process.stdin)
+  const confirm = async (/** @type {string} */ question, defaultYes = false) => {
+    if (opts.confirm) return opts.confirm(question)
+    const { askYesNo } = await import('./confirm.js')
+    return askYesNo(opts, question, { defaultYes })
+  }
+  let failure = ''
+  const kind = isNpxBinPath(binPath, opts.env) ? 'npx' : 'node_modules install'
+  opts.stderr.write(`warning: ${binPath} is ${describeEphemeralBinPath(binPath,
+    'background capture and management commands can stop', opts.env)}.\n`)
 
-  opts.stdout.write(`npx detected: installing durable CLI with npm install -g ${packageSpec}\n`)
-  const install = await run('npm', ['install', '-g', packageSpec], {
-    env: opts.env,
-    cwd: PACKAGE_ROOT,
-  })
-  if (install.exitCode !== 0) {
-    const detail = compactCommandError(install)
-    throw new GlobalInstallError(
-      `npx detected, but npm install -g ${packageSpec} failed${detail ? `: ${detail}` : ''}. ` +
-      `Run 'npm install -g ${packageSpec}' manually, then rerun 'hyp setup', or pass ` +
-      `'--bin <stable-hypaware.js>' to use an explicit daemon binary.`
-    )
+  if (!interactive || await confirm(`Install a global CLI with npm install -g ${packageSpec}? [Y/n]: `, true)) {
+    opts.stdout.write(`${kind} detected: installing durable CLI with npm install -g ${packageSpec}\n`)
+    try {
+      const install = await run('npm', ['install', '-g', packageSpec], {
+        env: opts.env,
+        cwd: PACKAGE_ROOT,
+      })
+      if (install.exitCode !== 0) {
+        const detail = compactCommandError(install)
+        throw new GlobalInstallError(`npm install -g ${packageSpec} failed${detail ? `: ${detail}` : ''}`)
+      }
+      const prefix = await globalPrefix(run, opts.env)
+      const globalBin = globalHypawareBin(prefix, process.platform)
+      opts.stdout.write(`global CLI: ${globalBin}\n`)
+      return { binPath: globalBin, installed: true, skipped: false, packageSpec, globalPrefix: prefix }
+    } catch (err) {
+      if (!(err instanceof GlobalInstallError)) throw err
+      failure = err.message
+      opts.stderr.write(`warning: ${err.message}\n`)
+    }
   }
 
-  const prefix = await globalPrefix(run, opts.env)
-  const globalBin = globalHypawareBin(prefix, process.platform)
-  opts.stdout.write(`global CLI: ${globalBin}\n`)
-  return {
-    binPath: globalBin,
-    installed: true,
-    skipped: false,
-    packageSpec,
-    globalPrefix: prefix,
+  if (opts.force || (interactive && await confirm(
+    'Continue with this installation anyway? Removing its directory can break capture and CLI commands. [y/N]: '
+  ))) {
+    opts.stderr.write(`warning: continuing with ${binPath}; keep this installation directory to retain background capture.\n`)
+    return { binPath, installed: false, skipped: true }
   }
+  throw new DurableBinRequiredError(
+    (failure ? `${failure}. ` : '') +
+    `A durable CLI is required. Run 'npm install -g ${packageSpec}' and retry setup, ` +
+    'or pass --force to allow the existing installation despite the warning.'
+  )
+}
+
+/**
+ * npm injects temporary .bin directories into PATH. Only a durable command
+ * resolving to the selected CLI proves availability outside this invocation.
+ * This is advice only: never change the user's shell configuration.
+ * @param {string} binPath
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{ write(chunk: string): unknown }} stderr
+ */
+// @ref LLP 0404#shell-availability [implements]: print a repair and an absolute command without editing the shell
+export function writeCliPathGuidance(binPath, env, stderr) {
+  const ephemeral = isEphemeralBinPath(binPath, env)
+  const installed = findInstalledHypawareBin(env)
+  try {
+    if (!ephemeral && installed && realpathSync(installed) === realpathSync(binPath)) {
+      const alias = findInstalledHypawareBin(env, process.platform, undefined, 'hyp')
+      if (alias && realpathSync(alias) === realpathSync(binPath)) return
+    }
+  } catch { /* Missing or stale commands need the same guidance. */ }
+  const quote = (/** @type {string} */ value) => "'" + value.replaceAll("'", "'\\''") + "'"
+  stderr.write('warning: hyp is not confirmed available on your shell PATH for this installation.\n')
+  if (!ephemeral && path.basename(binPath) === 'hypaware') {
+    stderr.write(`For sh/bash/zsh, add this line to your shell configuration: export PATH=${quote(path.dirname(binPath))}:"$PATH"\n`)
+  } else {
+    stderr.write("To make hyp available outside this directory, run: npm install -g hypaware\n")
+  }
+  stderr.write(`Manage this installation now with: ${quote(process.execPath)} ${quote(binPath)} status\n`)
 }
 
 /**
@@ -207,7 +261,7 @@ export function describeEphemeralBinPath(binPath, effect, env = process.env) {
 /**
  * The absolute path of an already-installed HypAware CLI, or `undefined`.
  *
- * The read-only counterpart to `ensureDurableBinForNpx`, for a caller that must
+ * The read-only counterpart to `ensureDurableBin`, for a caller that must
  * record a CLI path on disk but cannot spend an `npm install -g` to get one: it
  * finds only what is already there, so it stays synchronous and total.
  *
@@ -231,9 +285,7 @@ export function describeEphemeralBinPath(binPath, effect, env = process.env) {
  *
  * It answers "where is an installed `hypaware`", not "where is *this*
  * `hypaware`": the first accepted executable of that name wins and no version
- * is compared, which is the one place it parts company with
- * `ensureDurableBinForNpx` and its deliberate `name@version` pin. Telling the
- * difference means resolving the candidate's own `package.json` across every
+ * is compared. Telling the difference means resolving the candidate's own `package.json` across every
  * install layout (npm, pnpm, yarn, and volta/nvm/asdf shims) or spawning it
  * for `--version`, and each buys the check by giving up either correctness on
  * a layout nobody enumerated or the synchronous, total contract above. So skew
@@ -250,9 +302,10 @@ export function describeEphemeralBinPath(binPath, effect, env = process.env) {
  * @param {NodeJS.Platform} [platform]
  * @param {(candidate: string) => boolean} [accept] extra test a candidate must
  *   pass; a rejection resumes the walk at the next `$PATH` entry
+ * @param {'hypaware' | 'hyp'} [command] which published alias to resolve
  * @returns {string | undefined}
  */
-export function findInstalledHypawareBin(env = process.env, platform = process.platform, accept) {
+export function findInstalledHypawareBin(env = process.env, platform = process.platform, accept, command = 'hypaware') {
   const exts = platform === 'win32'
     ? (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
     : ['']
@@ -274,7 +327,7 @@ export function findInstalledHypawareBin(env = process.env, platform = process.p
     // install's own script lives under one by construction.
     if (isNpxBinPath(dir, env) || dir.split(path.sep).includes('node_modules')) continue
     for (const ext of exts) {
-      const candidate = path.resolve(dir, 'hypaware' + ext)
+      const candidate = path.resolve(dir, command + ext)
       try {
         // `X_OK` alone is true for a directory, because directories are
         // searchable. A caller that records the answer would pin itself to
@@ -347,8 +400,8 @@ function runCommand(cmd, args, opts) {
     })
     let stdout = ''
     let stderr = ''
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8') })
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8') })
+    child.stdout.on('data', (chunk) => { stdout = (stdout + chunk.toString('utf8')).slice(-16384) })
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString('utf8')).slice(-16384) })
     child.on('error', (err) => {
       resolve({ exitCode: 1, stdout, stderr: err.message })
     })
