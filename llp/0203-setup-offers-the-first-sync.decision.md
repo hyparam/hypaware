@@ -50,7 +50,7 @@ experiences the window as the product not working yet.
 <a id="offer"></a>**Setup runs the release's own prompt, once.** On an
 attended, non-cancelled, non-dry-run install that enrolled *and* carries a
 live hold, the wizard prints one lead line after the first look and starts
-`hyp sync` on the terminal. The child prints its plan (every upload target,
+`hyp sync` on the terminal. The sync command prints its plan (every upload target,
 what is withheld), the first-sync warning (the deadline, that the send
 includes imported history and cannot be undone, and how to review or exclude
 something first), and asks its Y/n. Yes is the release; no is the wait.
@@ -76,8 +76,8 @@ deadline is true, and it is one line.
 
 Some runs reach the step and still never see the plan: `hyp init` admits an
 attended run whose stdout is a terminal and whose stdin is not
-(`hyp init < file`), and nothing may be spawned to prompt on a stdin like
-that; a spawn can fail; a child can exit before rendering its plan; and an
+(`hyp init < file`), and nothing may prompt on a stdin like
+that; a boot can fail; sync can return before rendering its plan; and an
 unforeseen throw can end the step. The paragraph has already stood down by
 then and nothing else on the run says any of it, so the step states the hold
 itself, carrying every fact the paragraph carried rather than only the
@@ -91,7 +91,7 @@ under a block the reader has already started scrolling past.
 
 The step never fails a finished install, on the same terms as the first look:
 every durable action succeeded minutes earlier, so a
-cancelled prompt, a failed spawn, or an unforeseen throw degrades to the wait
+cancelled prompt, a failed boot, or an unforeseen throw degrades to the wait
 the user already had.
 
 <a id="no-new-consent"></a>**The wizard adds no consent surface of its
@@ -110,30 +110,32 @@ That asks the informed question exactly once, builds nothing, and drops the
 menu whose only job was to decide whether to show the real question. A user
 who does not want to see the plan presses n.
 
-<a id="child-process"></a>**The sync runs in a child process, and that is a
-correctness requirement rather than a convenience.** `hyp init` boots the
-`all-available` profile, which withholds `@hypaware/central` even when the
-effective config names it, because a CLI boot must not acquire a server
-identity while materializing a sink. The wizard's own process therefore has
-no central sink handle: an in-process `ctx.commands.run('sync')` would render
-a plan omitting the one destination the release exists to unblock - precisely
-the misleading artifact R2 requires the plan to prevent, and the same reason
-`hyp sync <instance>` refuses to release at all.
+<a id="child-process"></a>**Sync loads the completed configuration in-process.**
+The wizard's `all-available` runtime predates setup's configuration writes
+and omits `@hypaware/central`. Reusing its `ctx.commands.run('sync')` would
+omit the central destination from the preview. The correctness requirement
+is a fresh configured runtime, not a fresh operating-system process.
 
-So the step spawns `bin/hypaware.js sync` with `process.execPath`, inheriting
-stdin and stdout and piping stderr straight back out (the pipe is read for the
-corroborating notice below, not to withhold anything from the terminal). The
-child boots from the config setup just wrote and sees
-the real sink set. Inheriting the terminal is safe for the reason
-[LLP 0198 #real-launch](./0198-setup-ends-on-a-question.decision.md#real-launch)
-establishes for `hyp ask`'s own spawn: the wizard's own prompt has resolved, so
-raw mode and the cursor are restored before the child draws anything. This step
-is now the only place onboarding hands the terminal to a child at all.
+Setup calls the existing `dispatch(['sync'], ...)` without an injected kernel
+or registry. Dispatch reads the effective configuration from disk, activates
+its configured plugins, materializes the sinks, and runs the existing sync
+command. It stops boot-started sources before returning. The wizard passes
+its environment and live input/output streams, after its own prompt has
+resolved and restored the terminal. No output is buffered or parsed.
+Stderr goes through a write-only adapter to preserve the old pipe's
+non-terminal readline mode: input stays canonical, so Ctrl+C delivers SIGINT
+and terminates onboarding instead of being consumed as a declined answer.
+The adapter resynchronizes diagnostic coloring after the terminal echoes an
+answer, whose newline does not pass through the adapter.
+
+This replaces the subprocess implementation as of 2026-09-12. The historical
+`child-process` anchor remains for existing rationale links. There is no
+second Node runtime, stderr relay, pipe-close timer, or process-exit handling.
 
 <a id="read-back"></a>**Whether it sent is read from the marker, never
 inferred from the exit code.** `hyp sync` exits 0 both when it releases and
 when the user reads the destination list and answers no. Setup therefore
-re-reads the hold after the child exits: a marker that is gone means it sent,
+re-reads the hold after sync returns: a marker that is gone means it sent,
 and a marker still present means it did not - in which case setup says so and
 restates the deadline, so a run ending on `sync cancelled` is not left
 ambiguous about what still holds. An unreadable re-read is treated as "still
@@ -149,23 +151,18 @@ rather than 0, which is what
 already requires of a release that cannot happen. Setup reads that code to pick
 which closing statement to print and which outcome to report, and it reads it
 before the marker, because the marker cannot contradict it: the code comes back
-before the child touched an export, so nothing was sent, while an absent marker
+before sync touched an export, so nothing was sent, while an absent marker
 is only weak evidence that something was ([LLP 0101](./0101-first-sync-review-window.decision.md)
 makes the read fail open, so a corrupt or lapsed marker also reads as absent).
 That is the same polarity as the paragraph above, not an exception to it -
 "released" is the claim that has to be earned, and no other exit code earns or
 forfeits it.
 
-The code is read with the sentence the child prints beside it, never alone. An
-exit code is a small integer with no namespace: Node returns 3 on an internal
-parse error, before a line of sync code has run, and a later `runSync` path
-could pick it for something else. Setup is about to repeat the explanation as
-its own closing statement, so it requires the notice the no-destinations branch
-writes as well as the code, and treats the code without it as any other
-non-zero exit. The corroboration is deliberately not a second look at the
-marker: that read fails open, so letting it veto here would put a run that
-provably sent nothing back on the "released" side, which is the polarity this
-section settles.
+The no-destinations code now comes directly from the command through the
+in-process dispatcher. It no longer shares a namespace with Node process
+exit statuses. Boot exceptions are handled as errors; a caught command
+exception returns 1. Setup therefore uses `SYNC_HELD_NO_DESTINATIONS_EXIT`
+without parsing diagnostic text. The hold read-back remains conservative.
 
 ## Why not {#why-not}
 
@@ -196,27 +193,27 @@ section settles.
 
 - A user with no privacy concern finishes setup with rows on the server by
   pressing enter, and a user who wants the window keeps it by answering `n`.
-  That is the polarity of the child's own confirm
+  That is the polarity of sync's own confirm
   ([LLP 0299](./0299-confirm-prompts-default-to-yes.decision.md)); the
   deleted wizard select's enter meant the opposite, and this decision no
   longer puts it in front.
 - On the attended path the deadline is stated twice per run (the join
   lane's line and the sync plan's warning) and asked about once. The
   declining run still ends on a line that restates the deadline and names
-  `hyp sync`, since the child's own prompt scrolls away with its answer, and
+  `hyp sync`, since sync's own prompt scrolls away with its answer, and
   [LLP 0101](./0101-first-sync-review-window.decision.md) requires the
   deadline surfaces to name the release verb.
 - [LLP 0100 R1](./0100-enrollment-privacy-review.spec.md#requirements)'s
   review hint (the `hypaware-privacy` skill) rides the sync plan's warning on
   this path, so the warning names the skill alongside `hyp privacy set`.
 - `wizard.finish` gains `sync_now` (`released`, `sync-declined`,
-  `child-failed`, `no-destinations`, `spawn-failed`, `skipped`), and the step
-  emits a `wizard.sync_now` span carrying the child's exit code and whether
+  `sync-failed`, `no-destinations`, `skipped`), and the step
+  emits a `wizard.sync_now` span carrying the command's return code and whether
   the marker cleared. The declined/released split is the measurement that says
   whether the window's default sizing matches the people in it, which is why
-  a child that exited non-zero is `child-failed` rather than a decline: it
+  a command that returned non-zero is `sync-failed` rather than a decline: it
   never reached its plan, and counting it as one would inflate the rate this
-  step exists to measure. `no-destinations` is carved out of `child-failed`
+  step exists to measure. `no-destinations` is carved out of `sync-failed`
   for the opposite reason: that run did not break, it had nowhere to send,
   and its closing statement says so rather than restating a deadline as if a
   destination existed.
