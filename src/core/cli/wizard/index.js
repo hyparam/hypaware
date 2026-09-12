@@ -13,6 +13,7 @@
  *   WizardOutputGuard,
  *   WizardPathway,
  *   WizardPickResult,
+ *   WizardSuggestSkillResult,
  *   WizardSyncNowResult,
  * } from '../../../../src/core/cli/wizard/types.js'
  * @import { FolderAskMode } from '../../../../src/core/usage-policy/types.js'
@@ -37,7 +38,7 @@ import {
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { useColor } from '../stdio.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
-import { writeSuggestedPrompts } from './first_ask.js'
+import { runWizardSuggestSkill } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
@@ -972,7 +973,8 @@ async function runGuardedInitWizard(opts, guard) {
 
   // ...and then the offer to end the wait: `hyp sync` itself, whose plan
   // and confirm are the one question about the first sync. It sits ahead of
-  // the question list because it is an action, and the list is output.
+  // the skill offer because a yes there hands the terminal to a client, and
+  // nothing of setup's should follow that.
   // @ref LLP 0203#offer [implements]: the enrolled closing sequence runs the release's own prompt, once
   /** @type {WizardSyncNowResult | undefined} */
   let syncNow
@@ -992,22 +994,24 @@ async function runGuardedInitWizard(opts, guard) {
     })
   }
 
-  // The closing question list comes last, after whichever of the narration
-  // and the sync step this path ran, but it is
-  // output only: onboarding never starts Claude Code or Codex. `hyp init`
-  // may have been run from any directory, and that directory must not become
-  // an agent session without an explicit launch command from the user.
-  // @ref LLP 0198#onboarding-list [implements]: the wizard prints questions and never launches a client from its caller's cwd
-  /** @type {'listed' | 'listed-empty' | 'skipped'} */
-  let firstAskListed = 'skipped'
-  if (interactive && !cancelled && opts.finale?.dryRun !== true) {
-    const hasRows = firstLookHadRows(firstLookResult)
-    writeSuggestedPrompts({
+  // The closing offer comes last, after whichever of the narration and the
+  // sync step this path ran: would you like HypAware to suggest a skill? A
+  // yes runs `hyp ask`, which starts the client in its own folder under
+  // `HYP_HOME`, never in the directory `hyp init` was run from; that is
+  // what lets setup make the offer instead of printing a question to type.
+  // @ref LLP 0398#setup-offer [implements]: setup offers to run the ask; a yes runs it as a child on this terminal
+  /** @type {WizardSuggestSkillResult | undefined} */
+  let suggestSkill
+  if (interactive && !cancelled && opts.finale?.dryRun !== true && (await guard.checkpoint())) {
+    suggestSkill = await runWizardSuggestSkill({
       stdout: opts.stdout,
-      footer: 'onboarding',
-      hasRows,
+      stderr: opts.stderr,
+      env: opts.env,
+      interactive: true,
+      hasRows: firstLookHadRows(firstLookResult),
+      ...(opts.stdin ? { stdin: opts.stdin } : {}),
+      ...(opts.suggestSkill ?? {}),
     })
-    firstAskListed = hasRows === false ? 'listed-empty' : 'listed'
   }
 
   log.info('wizard.finish', {
@@ -1019,13 +1023,12 @@ async function runGuardedInitWizard(opts, guard) {
     folder_ask: folderAsk ?? 'not-asked',
     express,
     cancelled,
-    // Which framing printed, not whether the step ran: `skipped` restates
-    // `pathway` and `cancelled` above it, while `listed-empty` is the one
-    // value nothing else on this line carries - the rate of installs
-    // finishing with an empty cache, which is backfill health read at the
-    // moment every install passes through.
+    // What the offer did: `no-rows` is the rate of installs finishing with
+    // an empty cache, which is backfill health read at the moment every
+    // install passes through; `launched` against `declined` is whether
+    // the offer is one people take.
     // @ref LLP 0198#empty-cache [implements]: the empty-cache framing is the measurement setup contributes
-    first_ask: firstAskListed,
+    suggest_skill: suggestSkill ? (suggestSkill.asked && suggestSkill.launched ? 'launched' : suggestSkill.reason) : 'skipped',
     // How often an enrolled install chooses not to wait is the measurement
     // that says whether the window is sized for the people in it.
     sync_now: syncNow ? (syncNow.asked && syncNow.released ? 'released' : syncNow.reason) : 'skipped',
@@ -1046,7 +1049,7 @@ async function runGuardedInitWizard(opts, guard) {
 }
 
 /**
- * Whether the first look found anything, as the first ask's `hasRows`.
+ * Whether the first look found anything, as the closing skill offer's `hasRows`.
  *
  * The two "did not show" reasons are not the same answer, and collapsing
  * them would be the bug:

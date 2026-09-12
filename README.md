@@ -82,10 +82,11 @@ On a TTY this launches the interactive walkthrough:
    per-client attach results, and a first look at what was captured: token
    volume per model, activity per day, which repos the sessions ran in, and
    which tools got called. Reprint it any time with `hyp query overview`.
-6. Last, it offers a few questions worth asking of that data and starts your
-   AI client on the one you pick, opening straight into the answer. Pick it
-   up again any time with `hyp ask`, or skip the menu with
-   `hyp ask "which sessions touched the auth module"`.
+6. Last, it asks whether you would like HypAware to suggest a skill. Yes
+   runs `hyp ask`: HypAware reads the last 30 days of that data for the one
+   skill worth adding first, then starts your AI client on the evidence to
+   explain and write it. Run `hyp ask` any time to take the offer later, or
+   ask something else with `hyp ask "which sessions touched the auth module"`.
 
 For unattended installs (CI, scripted bootstraps, dotfiles) use the
 non-interactive flags:

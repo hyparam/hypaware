@@ -4,7 +4,12 @@ import { collectHypAwareStatus } from '../daemon/status.js'
 import { buildWalkthroughClientDescriptorMap } from '../cli/walkthrough.js'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { isTty } from '../cli/stdio.js'
+import os from 'node:os'
+import path from 'node:path'
+
 import { OVERVIEW_DATASET, OVERVIEW_PROBE_SQL, overviewRunnerFromCtx } from '../query/overview.js'
+import { prepareFirstAskEvidence } from '../query/first_ask_evidence.js'
+import { firstLookNoticeSink } from '../cli/wizard/first_look.js'
 import {
   SUGGESTED_PROMPTS,
   launchClient,
@@ -16,27 +21,26 @@ import {
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ClientDescriptor } from '../../../src/core/types.js'
+ * @import { FirstAskEvidence } from '../../../src/core/query/types.js'
  */
 
 /**
  * `hyp ask [question]`
  *
- * The verb that makes setup's closing questions runnable. Setup prints
- * them and stops there, deliberately: it may have been invoked from an
- * installer or a directory the user does not want an agent session rooted
- * in, so the launch waits for a command run from a directory they chose.
+ * The verb that makes setup's closing question runnable. Setup prints it
+ * and stops there, deliberately: it may have been invoked from an
+ * installer, so the launch waits for a command the user runs themselves.
  *
- * With no argument it renders the same four questions and starts the
- * chosen client on the pick. With a question it skips the menu entirely,
- * which is the shape a user reaches for once they know what they want:
- * `hyp ask "which sessions touched the auth module"`.
+ * With no argument it asks the one question worth asking first (which
+ * skill to add): HypAware gathers the evidence into a folder under
+ * `HYP_HOME` and starts an attached client inside it, asking
+ * which client only when more than one could be started. With a question
+ * it skips the gather and starts a client on that question in the
+ * current directory, which is the shape a user reaches for once they know
+ * what they want: `hyp ask "which sessions touched the auth module"`.
  *
- * The working directory is `process.cwd()` by construction: nothing here
- * overrides it, because where the client starts is the whole reason this
- * is a separate command.
- *
- * @ref LLP 0198#re-runnable [implements]: the questions need a verb, or they are four sentences to retype
- * @ref LLP 0198#onboarding-list [constrained-by]: the launch boundary is where the user chose the directory
+ * @ref LLP 0198#re-runnable [implements]: the question needs a verb, or it is a sentence to retype
+ * @ref LLP 0398#run-directory [implements]: the recommendation starts in the evidence folder, a free-form question where it was typed
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -49,15 +53,15 @@ export async function runAsk(argv, ctx) {
 
   if (parsed.params.list === true) {
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
-    writeSuggestedPrompts({ stdout: ctx.stdout, footer: launchers.length > 0 ? 'ask' : 'paste' })
+    writeSuggestedPrompts({ stdout: ctx.stdout, footer: launchers.length > 0 ? 'ask' : 'no-launch' })
     return 0
   }
   const question = String(parsed.params.question ?? '').trim()
 
   if (question.length > 0) {
-    // A named question wants a launch, not a menu: resolve directly and
-    // say plainly when nothing can answer it, rather than falling back to
-    // a list of four questions the user did not ask for.
+    // A named question wants a launch, not the gather: resolve directly
+    // and say plainly when nothing can answer it, rather than falling back
+    // to the one question the user did not ask.
     const launchers = await resolveLaunchers({ clients, descriptors, env: ctx.env })
     if (launchers.length === 0) {
       ctx.stderr.write('hyp ask: no attached client can be started here.\n')
@@ -83,13 +87,59 @@ export async function runAsk(argv, ctx) {
     interactive: isTty(ctx.stdout) && isTty(ctx.stdin),
     ...(hasRows === undefined ? {} : { hasRows }),
     ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+    prepareEvidence: (client) => prepareEvidenceFromCtx(ctx, descriptors, client),
   })
-  // `no-launcher` is the one outcome that is a failed invocation rather
-  // than a choice: the user asked for the menu and there is nothing to
-  // put in it. Declining, a piped run that printed the list, and an empty
+  // `no-launcher` and `no-evidence` are the outcomes that are a failed
+  // invocation rather than a choice: the user asked for the recommendation and
+  // nothing could produce it. Declining, a piped run that printed the question, and an empty
   // cache are all 0 - in the last case nothing is broken, there is just
   // no history yet.
-  return outcome.launched === false && outcome.reason === 'no-launcher' ? 1 : 0
+  return outcome.launched === false && (outcome.reason === 'no-launcher' || outcome.reason === 'no-evidence') ? 1 : 0
+}
+
+/**
+ * The recommendation ask's gather (LLP 0398), run in-process against the
+ * same runner the overview uses. The evidence lives in `<HYP_HOME>/ask/`,
+ * one folder rewritten on every ask: the client is started inside it, so
+ * its transcript label, cwd, and any test file it writes belong to this
+ * ask rather than to whatever repo `hyp ask` was typed in. The path is
+ * fixed rather than random because Claude Code asks once whether to trust
+ * a new folder; a fresh random path would ask on every run. It is under
+ * `HYP_HOME`, not the system temp directory, because every parent of the
+ * folder is then the person's own: on Linux the temp directory is shared
+ * by every account on the host, and a parent another account created
+ * first is a folder another account controls, files and cwd both.
+ *
+ * `client` is the one the wizard is about to start. Its descriptor carries
+ * the skill and agent trees that client actually reads, which is what the
+ * instructions and the on-disk listing name: Codex and OpenCode do not
+ * load `~/.claude/skills`.
+ *
+ * @ref LLP 0398#run-directory [implements]: a fixed folder under HYP_HOME owns the ask, not the caller's cwd and not a shared temp directory
+ * @param {CommandRunContext} ctx
+ * @param {Map<string, ClientDescriptor>} descriptors
+ * @param {string} client
+ * @returns {Promise<FirstAskEvidence | undefined>}
+ */
+async function prepareEvidenceFromCtx(ctx, descriptors, client) {
+  // The same notice sink the first look passes, for the same reason: the
+  // runner filters local-only rows whether or not anyone listens, so a
+  // withheld row nobody discloses turns `Recorded: N sessions` into a claim
+  // about a record the reader was never told is partial. The advisory
+  // debounce line is dropped; the degrade warning is not.
+  // @ref LLP 0105 [implements]: the gather inherits both halves - the filter and the disclosure that it filtered
+  const runner = overviewRunnerFromCtx(ctx, firstLookNoticeSink(ctx.stderr))
+  if (!runner || !runner.hasDataset(OVERVIEW_DATASET)) return undefined
+  const homeDir = ctx.env.HOME || os.homedir()
+  const hypHome = ctx.env.HYP_HOME || path.join(homeDir, '.hyp')
+  const descriptor = descriptors.get(client)
+  return prepareFirstAskEvidence({
+    runner,
+    root: path.join(hypHome, 'ask'),
+    homeDir,
+    ...(descriptor?.skillDir ? { client: { skillDir: descriptor.skillDir, ...(descriptor.agentDir ? { agentDir: descriptor.agentDir } : {}) } } : {}),
+    say: (line) => ctx.stdout.write(`${line}\n`),
+  })
 }
 
 /**

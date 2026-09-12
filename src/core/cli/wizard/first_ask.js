@@ -1,15 +1,13 @@
 // @ts-check
 
 /**
- * Suggested questions shared by onboarding and `hyp ask`, plus the
- * explicit command's client launcher.
+ * The one question `hyp ask` puts, and the command's client launcher.
  *
- * The first look (`first_look.js`) proves there are rows. Onboarding then
- * prints what the user can ask, while an explicit `hyp ask` can spend those
- * rows by starting a client later.
+ * The first look (`first_look.js`) proves there are rows; setup then
+ * offers to run this (`suggest_skill.js`), and an explicit `hyp ask`
+ * spends those rows: it gathers the evidence and starts a client on it.
  *
- * @ref LLP 0198#onboarding-list [implements]: setup prints the shared questions without launching
- * @ref LLP 0198#first-ask [implements]: the explicit command keeps the live question menu
+ * @ref LLP 0198#first-ask [implements]: the explicit command owns the launch; the only pick left is the client
  *
  * @import { ChildProcess, SpawnOptions } from 'node:child_process'
  * @import { ClientDescriptor } from '../../../../src/core/types.js'
@@ -25,89 +23,47 @@ import process from 'node:process'
 import { Attr, withSpan } from '../../observability/index.js'
 import { PromptCancelledError, select } from '../tui/index.js'
 import { isPromptBackError } from '../tui/runtime.js'
+import { RECOMMEND_LAUNCH_PROMPT, RECOMMEND_PROMPT_ID } from '../../query/first_ask_evidence.js'
 
 /**
- * The questions setup offers.
+ * The question setup offers, and `hyp ask` starts.
  *
- * Every one asks what to *change*, not what happened: where the tokens
- * went, why agents stall, what repeated work deserves a skill, which
- * subagents would pay for themselves. A question whose best answer is a
- * number teaches the user that HypAware is a dashboard; a question whose
- * answer is a change teaches them it is a feedback loop, which is the
- * thing worth learning in the first minute.
+ * One question, whose answer is a skill rather than a number: which
+ * skill would be the most useful to add first. A question whose
+ * best answer is a number teaches the user that HypAware is a dashboard;
+ * one whose answer is a change teaches them it is a feedback loop, which
+ * is the thing worth learning in the first minute. The four earlier
+ * questions (token spend, repeated mistakes, a missing skill, a subagent
+ * worth adding) are answered by the one that gathers first: what the
+ * person types again and again, and what ran after it, instead of a
+ * cold client guessing at SQL (LLP 0398 #one-question).
  *
- * Phrased as a user would phrase them, never as skill invocations
- * (`@ref LLP 0011#no-architectural-names`): the skills' own `description`
- * fields do the routing, and a prompt naming one would teach the user a
- * vocabulary they should never need.
+ * Phrased as a user would phrase it, never as a skill invocation
+ * (`@ref LLP 0011#no-architectural-names`), and opening with "From my
+ * HypAware history" because `hyp ask` opens a session with no context.
  *
- * Each does name HypAware, in a leading "From my HypAware history"
- * clause. The product name is not an architectural name - it is the thing
- * the user just installed, and the words they would reach for themselves.
- * What the earlier "Based on the hypaware logs." prefix got wrong was
- * naming the *artifact* (a dataset the user has never seen) in a sentence
- * fragment bolted on ahead of the question. The clause has to stay,
- * though: `hyp ask` opens a session with no context, and a question about
- * "my sessions" with nothing pointing at the history is one a cold client
- * may answer from its own conversation, or refuse for want of data.
+ * `label` is the question as printed; `prompt` is what the client is
+ * started with. They differ because the prompt names the evidence folder
+ * the client is started in, which does not exist for a reader who is
+ * only shown the list, so the prompt is never printed as something to
+ * type.
  *
- * `which` and `what` are not interchangeable here. `which` presupposes a
- * set the reader could point at, so it is correct only for things already
- * in the recorded history (a task, a request, a stage of a workflow) and
- * wrong for a skill or a subagent that does not exist yet - "which skill
- * should I build" reads as a menu of skills the user already has. The
- * proposed thing takes `what`, the evidence it is proposed from takes
- * `which`, which is why the two forward-looking questions carry one of
- * each.
- *
- * Each is one subject with one criterion, closing on a short clause that
- * asks for the *mechanism* rather than restating the subject: "what drove
- * the cost", not "how much did it cost". The mechanism is the half only
- * the user's own sessions can answer, and the half that is actionable.
- * Each is scoped (a week, "across sessions", "over and over") so the
- * answer is a specific thing rather than a survey, which keeps it fast
- * under `@ref LLP 0054`'s bounded execution as well as pointed.
- *
- * `label` is what the menu shows; `prompt` is what the client is started
- * with. They differ because a menu row wants to be scannable and an
- * opening prompt wants to be specific.
- *
- * The labels are noun phrases rather than questions, and no two lean on
- * the same noun (spend, mistake, skill, subagent). The screen's own title already asks the question ("Ask
- * your first question"), so four rows repeating the interrogative spend
- * their first words on grammar the reader has had; and a set where three
- * rows said "tokens" scanned as one topic listed three times rather than
- * as four choices. Each row now differentiates on its own axis: spend,
- * friction, repetition, delegation.
- *
- * @ref LLP 0198#split [implements]: the questions are core's, because they are about core's datasets
+ * @ref LLP 0198#split [implements]: the question is core's, because it is about core's datasets
+ * @ref LLP 0398#one-question [implements]: one question, answered from gathered evidence, replaces the list
  * @type {ReadonlyArray<{ id: string, label: string, prompt: string }>}
  */
 export const SUGGESTED_PROMPTS = Object.freeze([
   {
-    id: 'tokens',
-    label: "Last week's biggest token spend",
-    prompt: 'From my HypAware history, which task took the biggest share of my tokens last week, and what drove the cost?',
-  },
-  {
-    id: 'errors',
-    label: 'The mistake my agents repeat',
-    prompt: 'From my HypAware history, what mistake do my agents keep repeating across sessions, and what triggers it?',
-  },
-  {
-    id: 'skills',
-    label: "The skill I'm missing",
-    prompt: 'From my HypAware history, what additional skill would save me the most repeated work, and which requests would it replace?',
-  },
-  {
-    id: 'subagents',
-    label: 'The subagent worth adding',
-    prompt: 'From my HypAware history, what subagent could I add to cut the most wasted effort, and which tasks would I delegate to it?',
+    // The one question (LLP 0398 #one-question). Its launch is preceded by
+    // a gather, and the prompt names the folder because the client is
+    // started inside it. The earlier four rows asked the same things a
+    // cold client could not answer well from SQL it wrote itself; they are
+    // answered from what the gather finds the person typing again and again.
+    id: RECOMMEND_PROMPT_ID,
+    label: 'Which one skill would be the most useful to add first?',
+    prompt: RECOMMEND_LAUNCH_PROMPT,
   },
 ])
-
-/** Menu value for the row that declines. Not a prompt id. */
-const NOT_NOW = '__not_now__'
 
 /**
  * Resolve an executable name against `$PATH`, returning its absolute
@@ -196,55 +152,52 @@ export async function resolveLaunchers({ clients, descriptors, env, platform, re
 }
 
 /**
- * The question list, in every framing that prints it.
+ * The question, in every framing that prints it.
  *
- * One renderer rather than one per caller: the questions, the
+ * One renderer rather than one per caller: the question, the
  * empty-history preamble, and the footers are a single surface, and a
  * second copy of them is how the "nothing recorded yet" sentence drifts
  * out of agreement with itself. Same one-place grounds as the frame
  * helper ([LLP 0189 #palette](../../../../llp/0189-cli-severity-colour.decision.md#palette)).
  *
- * `hasRows === false` swaps the preamble: every suggested question is
- * about recorded history, so a cache with nothing in it gets the list
- * framed as something to come back to, prefaced by the one fact that
- * makes the emptiness make sense - capture starts now, not
- * retroactively. `undefined` means the caller could not tell, which
- * never withholds the ordinary framing.
+ * What prints is the `label`, never the `prompt`: the prompt tells the
+ * client to read a folder that only `hyp ask` creates, so typed into a
+ * cold session it fails in exactly the way the gather exists to prevent.
+ *
+ * `hasRows === false` swaps the preamble: the question is about recorded
+ * history, so a cache with nothing in it gets it framed as something to
+ * come back to, prefaced by the one fact that makes the emptiness make
+ * sense - capture starts now, not retroactively. `undefined` means the
+ * caller could not tell, which never withholds the ordinary framing.
  *
  * `footer` says who is reading:
  *
  * - `ask`: a launch is possible, and this run is not doing one (declined,
  *   piped, or `--list`). Names the verb that would.
- * - `paste`: nothing here can be launched, so the questions still work
- *   typed into a session the user opens themselves.
- * - `onboarding`: setup, which never launches. Names what the verb is
- *   *for* (putting one of these to a client) before naming the directory
- *   it must be run from, because a footer that only states the
- *   constraint leaves the reader to infer what they would be running it
- *   to do. It names the attached client generically because launchability
- *   is manifest-contributed; adding a client must not require a second
- *   hardcoded list in this copy. Generically and *indefinitely*: this list
- *   prints whether or not anything is attached, so "your attached AI
- *   client" would be a claim about the reader's install that a
- *   `--source otel` run makes false.
+ * - `no-launch`: this run could not start a client (none attached and on
+ *   PATH, a spawn failure, an unforeseen error). There is no manual
+ *   route, because the answer needs the evidence only the verb gathers,
+ *   so it names what has to be true before the verb is worth running again.
+ *
+ * Setup no longer prints this: it offers to run the ask instead
+ * (`suggest_skill.js`), and carries its own empty-history note.
  *
  * @ref LLP 0198#empty-cache [implements]: no rows reframes the list, and the reason is stated
- * @ref LLP 0198#onboarding-list [implements]: setup's footer names `hyp ask` and the directory to run it from
  * @param {{
  *   stdout: { write(chunk: string): unknown },
- *   footer: 'ask' | 'paste' | 'onboarding',
+ *   footer: 'ask' | 'no-launch',
  *   hasRows?: boolean,
  * }} args
  */
 export function writeSuggestedPrompts({ stdout, footer, hasRows }) {
   if (hasRows === false) {
     stdout.write('\nNothing recorded yet: HypAware captures from your next session onward.\n')
-    stdout.write('Once you have some history, these are worth asking your AI client:\n')
+    stdout.write('Once you have some history, this is worth asking your AI client:\n')
   } else {
-    stdout.write('\nQuestions worth asking your AI client about this data:\n')
+    stdout.write('\nWorth asking your AI client about this data:\n')
   }
   for (const p of SUGGESTED_PROMPTS) {
-    stdout.write(`  ${p.prompt}\n`)
+    stdout.write(`  ${p.label}\n`)
   }
   stdout.write(`\n${promptListFooter(footer, hasRows)}\n`)
 }
@@ -257,23 +210,22 @@ export function writeSuggestedPrompts({ stdout, footer, hasRows }) {
  * wrong advice until there is something to run it against, so the
  * sentence becomes "run it *then*".
  *
- * @param {'ask' | 'paste' | 'onboarding'} footer
+ * @param {'ask' | 'no-launch'} footer
  * @param {boolean | undefined} hasRows
  * @returns {string}
  */
 function promptListFooter(footer, hasRows) {
   switch (footer) {
-    case 'paste':
-      // Must not name `hyp ask`: the reader either just ran it, or is
-      // being told nothing here can be started. Either way it would
-      // point at the screen they are already looking at.
-      return 'Paste one into an AI client session to get started.'
-    case 'onboarding':
-      return 'To ask any of these, run `hyp ask` from the directory where you want an attached AI client to start.'
+    case 'no-launch':
+      // The reader just ran `hyp ask` and nothing started, so a bare "run
+      // `hyp ask`" would point at the screen they are looking at. The
+      // sentence names the condition instead, and the verb only as what
+      // to run once it holds.
+      return 'Nothing was started. Once an attached client can be started here (see `hyp status`), run `hyp ask` again: it gathers the evidence first.'
     default:
       return hasRows === false
-        ? 'Run `hyp ask` then, to pick one and start your client on it.'
-        : 'Run `hyp ask` to pick one of these and start your client on it.'
+        ? 'Run `hyp ask` then, to start your client on it.'
+        : 'Run `hyp ask` to start your client on it.'
   }
 }
 
@@ -327,7 +279,7 @@ export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn }) {
  * failure, a cancelled prompt, or an unforeseen error all degrade to the
  * printed list.
  *
- * @ref LLP 0198#first-ask [implements]: the explicit command owns the live menu and launch
+ * @ref LLP 0198#first-ask [implements]: the explicit command owns the gather and the launch
  * @param {RunWizardFirstAskOptions} opts
  * @returns {Promise<FirstAskResult>}
  */
@@ -347,7 +299,7 @@ export async function runWizardFirstAsk(opts) {
         // been started, and "nothing recorded yet" is the more useful
         // half of it. `undefined` means the caller could not tell, which
         // is never a reason to withhold the offer.
-        // @ref LLP 0198#empty-cache [implements]: an empty cache suppresses the launch, not just the menu
+        // @ref LLP 0198#empty-cache [implements]: an empty cache suppresses the launch, not just the printed question
         if (opts.hasRows === false) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-rows')
@@ -367,7 +319,7 @@ export async function runWizardFirstAsk(opts) {
         if (launchers.length === 0) {
           span.setAttribute('status', 'skipped')
           span.setAttribute('skip_reason', 'no-launcher')
-          writeSuggestedPrompts({ stdout, footer: 'paste' })
+          writeSuggestedPrompts({ stdout, footer: 'no-launch' })
           return { launched: false, reason: /** @type {const} */ ('no-launcher') }
         }
         // `HYP_NO_TUI` is the same veto the prompt runtime honours. Reading
@@ -398,14 +350,40 @@ export async function runWizardFirstAsk(opts) {
         // Say what is about to happen before the terminal stops being
         // ours: a client that takes ~2s to draw its first frame reads as
         // a hang if nothing announced it.
-        stdout.write(`\nStarting ${chosen.launcher.label}...\n\n`)
+        // The gather runs to completion, every file on disk, before the
+        // client is spawned. No evidence means no launch: a client started
+        // on the bare question would answer it the cold way, which is the
+        // failure this ask exists to remove, so the run reports and stops.
+        // @ref LLP 0398#run-directory [implements]: the client starts inside the evidence, never before it and never without it
+        /** @type {string | undefined} */
+        let cwd
+        if (chosen.prompt.id === RECOMMEND_PROMPT_ID) {
+          try {
+            const evidence = opts.prepareEvidence ? await opts.prepareEvidence(chosen.launcher.client) : undefined
+            if (evidence) {
+              cwd = evidence.dir
+              span.setAttribute('evidence_enough', evidence.enough !== false)
+            }
+          } catch (err) {
+            span.setAttribute('evidence_error', err instanceof Error ? err.name : 'unknown')
+            opts.stderr?.write(`Could not gather the evidence: ${err instanceof Error ? err.message : 'error'}\n`)
+          }
+          if (!cwd) {
+            span.setAttribute('status', 'skipped')
+            span.setAttribute('skip_reason', 'no-evidence')
+            opts.stderr?.write('Nothing was started: the question is answered from evidence HypAware gathers first, and none could be gathered. Check `hyp status`, then run `hyp ask` again.\n')
+            return { launched: false, reason: /** @type {const} */ ('no-evidence') }
+          }
+        }
+        stdout.write(`\nStarting ${chosen.launcher.label}${cwd ? ` in ${cwd}` : ''}...\n\n`)
         const result = await launchClient({
           launcher: chosen.launcher,
           prompt: chosen.prompt.prompt,
           env,
-          // No cwd override: the client starts where the user ran `hyp
-          // ask`, which is the boundary that made this a separate command
+          // Every other row keeps the caller's cwd: where the client starts
+          // is the boundary that made this a separate command
           // (`@ref LLP 0198#onboarding-list`).
+          ...(cwd ? { cwd } : {}),
           ...(opts.spawnFn ? { spawnFn: opts.spawnFn } : {}),
         })
         if (!result.ok) {
@@ -413,7 +391,7 @@ export async function runWizardFirstAsk(opts) {
           span.setAttribute(Attr.ERROR_KIND, 'spawn_failed')
           span.setAttribute('launched', false)
           opts.stderr?.write(`Could not start ${chosen.launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
-          writeSuggestedPrompts({ stdout, footer: 'paste' })
+          writeSuggestedPrompts({ stdout, footer: 'no-launch' })
           return { launched: false, reason: /** @type {const} */ ('spawn-failed') }
         }
         span.setAttribute('launched', true)
@@ -427,7 +405,7 @@ export async function runWizardFirstAsk(opts) {
         span.setAttribute('status', 'error')
         span.setAttribute(Attr.ERROR_KIND, err instanceof Error ? err.name : 'unknown')
         try {
-          writeSuggestedPrompts({ stdout, footer: 'paste' })
+          writeSuggestedPrompts({ stdout, footer: 'no-launch' })
         } catch {
           // the stream itself is failing; the step is a courtesy, not a gate
         }
@@ -439,13 +417,13 @@ export async function runWizardFirstAsk(opts) {
 }
 
 /**
- * The menu half: which question, and (only when it is genuinely
- * ambiguous) which client answers it.
+ * Which client answers, when that is genuinely ambiguous. There is one
+ * question (LLP 0398 #one-question), so there is nothing to pick among
+ * and no screen for it: `hyp ask` goes straight from the gather to the
+ * launch. A machine with two launchable clients still gets asked which,
+ * framed as its own screen; cancelling that is "not now".
  *
- * Cancel is not a failure here. Escape and ctrl+c both mean "not now",
- * the same as the menu's own last row, because there is nothing left to
- * abandon: this runs after the last durable write.
- *
+ * @ref LLP 0398#one-question [implements]: no question menu; the only prompt left is the client pick
  * @param {RunWizardFirstAskOptions} opts
  * @param {FirstAskLauncher[]} launchers
  * @returns {Promise<{ prompt: (typeof SUGGESTED_PROMPTS)[number], launcher: FirstAskLauncher } | undefined>}
@@ -457,45 +435,16 @@ async function chooseQuestion(opts, launchers) {
     ...(opts.stdoutStream ? { stdout: opts.stdoutStream } : {}),
     env: opts.env,
   }
-  /** @type {string | number} */
-  let picked
-  try {
-    picked = await ask({
-      // Framed so the explicit command's interactive menu is visually
-      // distinct from its plain printed-list mode.
-      // @ref LLP 0198#frame [implements]: the explicit ask is drawn as its own screen
-      box: true,
-      title: 'Ask your first question',
-      items: launchers.length === 1
-        ? [`Starts ${launchers[0].label} on the question you pick.`]
-        : ['Starts your AI client on the question you pick.'],
-      // The default hint says "esc cancel", which is wrong here: there is
-      // nothing left to cancel, and escape means the same as the last row.
-      hint: 'up/down · enter start · esc not now',
-      options: [
-        ...SUGGESTED_PROMPTS.map((p) => ({ value: p.id, label: p.label })),
-        { value: NOT_NOW, label: 'Not now' },
-      ],
-      ...io,
-    })
-  } catch (err) {
-    if (err instanceof PromptCancelledError || isPromptBackError(err) || (err instanceof Error && err.name === 'PromptCancelledError')) {
-      return undefined
-    }
-    throw err
-  }
-  if (picked === NOT_NOW) return undefined
-  const prompt = SUGGESTED_PROMPTS.find((p) => p.id === picked)
-  if (!prompt) return undefined
-
+  const prompt = SUGGESTED_PROMPTS[0]
   if (launchers.length === 1) return { prompt, launcher: launchers[0] }
   /** @type {string | number} */
   let client
   try {
     client = await ask({
-      // The follow-up half of the same screen, so it keeps the same frame.
+      // The only screen: there is no question menu ahead of it, so the
+      // title names the job rather than pointing back at one.
       box: true,
-      title: 'Which client should answer it?',
+      title: 'Which client should recommend a skill?',
       options: launchers.map((l) => ({ value: l.client, label: l.label })),
       ...io,
     })

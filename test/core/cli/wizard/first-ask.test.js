@@ -71,6 +71,9 @@ function recordingSpawn() {
 /** The list is editable content; tests anchor on its shape, never on an id. */
 const FIRST = SUGGESTED_PROMPTS[0]
 
+/** A gather that succeeds into a fixed folder (the launch needs one). */
+const fakeEvidence = async () => ({ dir: '/hyp/ask', from: '2026-08-08', files: ['ASK.md'] })
+
 /** @param {string|number} value */
 function selectReturning(value) {
   /** @type {any[]} */
@@ -132,6 +135,7 @@ test('runWizardFirstAsk: a pick spawns the client with the question as argv', as
     resolve: async () => '/usr/local/bin/claude',
     spawnFn: spawner.fn,
     select: chooser.fn,
+    prepareEvidence: fakeEvidence,
   })
 
   assert.deepEqual(result, { launched: true, client: 'claude', promptId: FIRST.id, exitCode: 0 })
@@ -141,13 +145,13 @@ test('runWizardFirstAsk: a pick spawns the client with the question as argv', as
   assert.deepEqual(spawner.calls[0].args, [expected])
   // The child must own the terminal, or it draws over the ask menu's frame.
   assert.equal(spawner.calls[0].opts.stdio, 'inherit')
-  // No cwd is set: the client starts where the user ran the command.
-  assert.equal(spawner.calls[0].opts.cwd, undefined)
+  // The client starts inside the evidence folder, never the caller's directory.
+  assert.equal(spawner.calls[0].opts.cwd, '/hyp/ask')
   // Announced before the handoff: a client that takes a moment to draw
   // must not read as a hang.
   assert.match(stdout.text(), /Starting Claude Code/)
   // A launch replaces the list; it is not also printed.
-  assert.doesNotMatch(stdout.text(), /Questions worth asking/)
+  assert.doesNotMatch(stdout.text(), /Worth asking your AI client/)
 })
 
 test('launchClient: an explicit cwd is honoured, so the low-level seam stays parameterised', () => {
@@ -182,6 +186,7 @@ test('runWizardFirstAsk: every `{prompt}` slot in a manifest arg template is fil
     resolve: async () => '/bin/x',
     spawnFn: spawner.fn,
     select: selectReturning(FIRST.id).fn,
+    prepareEvidence: fakeEvidence,
   })
   assert.equal(result.launched, true)
   assert.deepEqual(spawner.calls[0].args.slice(0, 2), ['run', '--prompt'])
@@ -204,27 +209,22 @@ test('runWizardFirstAsk: no launchable client prints the list and launches nothi
   assert.deepEqual(result, { launched: false, reason: 'no-launcher' })
   assert.equal(spawner.calls.length, 0)
   const text = stdout.text()
-  assert.match(text, /Questions worth asking/)
-  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
-  // Nothing to start here, so the fallback names the manual route.
-  assert.match(text, /Paste one into an AI client session/)
+  assert.match(text, /Worth asking your AI client/)
+  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.label), `missing question ${p.id}`)
+  // The prompt names the evidence folder, which a reader with no launch
+  // does not have, so it is never offered as something to paste.
+  for (const p of SUGGESTED_PROMPTS) assert.ok(!text.includes(p.prompt), `prompt ${p.id} offered for pasting`)
+  // Nothing to start here, so the footer names the condition and the verb to run once it holds.
+  assert.match(text, /Once an attached client can be started here \(see `hyp status`\), run `hyp ask` again/)
 })
 
-test('onboarding only prints the questions and tells the user to choose the launch directory later', () => {
-  // @ref LLP 0198#onboarding-list [tests]: setup never launches or depends on client detection
+test('an empty cache frames the question as something to come back to', () => {
+  // @ref LLP 0198#empty-cache [tests]: no rows reframes the list, and the reason is stated
   const stdout = makeBuf()
-  writeSuggestedPrompts({ stdout, footer: 'onboarding', hasRows: true })
-  const text = stdout.text()
-  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
-  assert.match(text, /To ask any of these, run `hyp ask` from the directory where you want an attached AI client to start/)
-  assert.doesNotMatch(text, /Starting Claude Code|Starting Codex/)
-})
-
-test('onboarding with no detected dataset still prints the questions', () => {
-  const stdout = makeBuf()
-  writeSuggestedPrompts({ stdout, footer: 'onboarding', hasRows: false })
+  writeSuggestedPrompts({ stdout, footer: 'ask', hasRows: false })
   assert.match(stdout.text(), /Nothing recorded yet/)
-  for (const p of SUGGESTED_PROMPTS) assert.ok(stdout.text().includes(p.prompt), `missing prompt ${p.id}`)
+  for (const p of SUGGESTED_PROMPTS) assert.ok(stdout.text().includes(p.label), `missing question ${p.id}`)
+  assert.match(stdout.text(), /Run `hyp ask` then, to start your client on it/)
 })
 
 test('runWizardFirstAsk: the ask is framed, so it reads as a screen and not as more output', async () => {
@@ -241,8 +241,8 @@ test('runWizardFirstAsk: the ask is framed, so it reads as a screen and not as m
     spawnFn: recordingSpawn().fn,
     select: chooser.fn,
   })
-  // Both halves of the step: the question, then which client answers it.
-  assert.equal(chooser.seen.length, 2)
+  // One question, so the only screen is which client answers it.
+  assert.equal(chooser.seen.length, 1)
   for (const spec of chooser.seen) assert.equal(spec.box, true)
 })
 
@@ -271,7 +271,7 @@ test('runWizardFirstAsk: an empty cache suppresses the launch and says why', asy
   // retroactive beyond what backfill imported.
   assert.match(text, /captures from your next session onward/)
   // The questions still print, as something to come back to.
-  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.prompt), `missing prompt ${p.id}`)
+  for (const p of SUGGESTED_PROMPTS) assert.ok(text.includes(p.label), `missing question ${p.id}`)
   assert.match(text, /Run `hyp ask` then/)
 })
 
@@ -288,25 +288,26 @@ test('runWizardFirstAsk: an unknown row count never withholds the offer', async 
     resolve: async () => '/usr/local/bin/claude',
     spawnFn: spawner.fn,
     select: selectReturning(FIRST.id).fn,
+    prepareEvidence: fakeEvidence,
   })
   assert.equal(result.launched, true)
   assert.equal(spawner.calls.length, 1)
 })
 
-test('runWizardFirstAsk: "Not now" and a cancelled prompt both decline, and keep the list', async () => {
+test('runWizardFirstAsk: cancelling the client pick declines, and keeps the list', async () => {
+  // @ref LLP 0398#one-question [tests]: with no question menu, the client pick is the one place to say not now
   for (const chooser of [
-    selectReturning('__not_now__').fn,
     /** @type {any} */ (async () => { throw new PromptCancelledError() }),
   ]) {
     const stdout = makeBuf()
     const spawner = recordingSpawn()
     const result = await runWizardFirstAsk({
-      clients: ['claude'],
+      clients: ['claude', 'codex'],
       descriptors: descriptors(),
       stdout,
       env: {},
       interactive: true,
-      resolve: async () => '/usr/local/bin/claude',
+      resolve: async (bin) => `/usr/local/bin/${bin}`,
       spawnFn: spawner.fn,
       select: chooser,
     })
@@ -330,7 +331,7 @@ test('runWizardFirstAsk: a non-interactive run prints the list and never prompts
   })
   assert.deepEqual(result, { launched: false, reason: 'not-interactive' })
   assert.equal(chooser.seen.length, 0)
-  assert.match(stdout.text(), /Questions worth asking/)
+  assert.match(stdout.text(), /Worth asking your AI client/)
 })
 
 test('runWizardFirstAsk: a spawn failure degrades to the list, never a throw', async () => {
@@ -353,25 +354,27 @@ test('runWizardFirstAsk: a spawn failure degrades to the list, never a throw', a
     resolve: async () => '/usr/local/bin/claude',
     spawnFn: failing,
     select: selectReturning(FIRST.id).fn,
+    prepareEvidence: fakeEvidence,
   })
   assert.deepEqual(result, { launched: false, reason: 'spawn-failed' })
   assert.match(stderr.text(), /Could not start claude: ENOENT/)
-  assert.match(stdout.text(), /Questions worth asking/)
+  assert.match(stdout.text(), /Worth asking your AI client/)
 })
 
 test('runWizardFirstAsk: an unforeseen error is contained', async () => {
+  // Two clients, so the client pick (the one remaining prompt) is reached and throws.
   const stdout = makeBuf()
   const result = await runWizardFirstAsk({
-    clients: ['claude'],
+    clients: ['claude', 'codex'],
     descriptors: descriptors(),
     stdout,
     env: {},
     interactive: true,
-    resolve: async () => '/usr/local/bin/claude',
+    resolve: async (bin) => `/usr/local/bin/${bin}`,
     select: /** @type {any} */ (async () => { throw new TypeError('boom') }),
   })
   assert.deepEqual(result, { launched: false, reason: 'error' })
-  assert.match(stdout.text(), /Questions worth asking/)
+  assert.match(stdout.text(), /Worth asking your AI client/)
 })
 
 test('runWizardFirstAsk: two launchable clients ask which one answers', async () => {
@@ -381,7 +384,7 @@ test('runWizardFirstAsk: two launchable clients ask which one answers', async ()
   /** @type {any} */
   const chooser = async (spec) => {
     specs.push(spec)
-    return specs.length === 1 ? FIRST.id : 'codex'
+    return 'codex'
   }
   const result = await runWizardFirstAsk({
     clients: ['claude', 'codex'],
@@ -392,20 +395,19 @@ test('runWizardFirstAsk: two launchable clients ask which one answers', async ()
     resolve: async (bin) => `/usr/local/bin/${bin}`,
     spawnFn: spawner.fn,
     select: chooser,
+    prepareEvidence: fakeEvidence,
   })
   assert.deepEqual(result, { launched: true, client: 'codex', promptId: FIRST.id, exitCode: 0 })
-  assert.equal(specs.length, 2)
-  assert.match(specs[1].title, /Which client/)
+  assert.equal(specs.length, 1)
+  assert.match(specs[0].title, /Which client/)
   assert.equal(spawner.calls[0].cmd, '/usr/local/bin/codex')
 })
 
-test('the suggested prompts are a short list of distinct, routable questions', async () => {
+test('the suggested prompt is one routable question that names no machinery', async () => {
   // @ref LLP 0198#split [tests]: core owns the questions, and they name no machinery
-  // The exact count is editable content, not a contract. What is pinned is
-  // that the list stays short enough to scan and long enough to teach: a
-  // menu of one is not a curriculum, and one of ten is a wall.
-  assert.ok(SUGGESTED_PROMPTS.length >= 3 && SUGGESTED_PROMPTS.length <= 6,
-    `expected 3-6 questions, got ${SUGGESTED_PROMPTS.length}`)
+  // One question (LLP 0398 #one-question): the earlier rows became the
+  // routes it chooses between, so a second row here would be a regression.
+  assert.equal(SUGGESTED_PROMPTS.length, 1)
   assert.equal(new Set(SUGGESTED_PROMPTS.map((p) => p.id)).size, SUGGESTED_PROMPTS.length, 'ids must be unique')
   for (const p of SUGGESTED_PROMPTS) {
     assert.ok(p.id && p.label && p.prompt, 'every question needs an id, a label, and a prompt')
@@ -418,8 +420,71 @@ test('the suggested prompts are a short list of distinct, routable questions', a
 })
 
 test('every suggested label fits a narrow terminal without wrapping', async () => {
-  // A wrapped menu row costs two lines and reads as two options. 72 columns
-  // leaves room for the "> " cursor gutter inside an 80-column terminal.
+  // The label is the printed question. A wrapped one reads as two
+  // questions. 72 columns leaves room for the two-space indent inside an
+  // 80-column terminal.
   const tooLong = SUGGESTED_PROMPTS.filter((p) => p.label.length > 72)
   assert.deepEqual(tooLong.map((p) => `${p.id} (${p.label.length} cols)`), [])
+})
+
+test('runWizardFirstAsk: the recommendation row gathers first and starts the client in the run directory', async () => {
+  // @ref LLP 0398#run-directory [tests]: the client starts inside the evidence, on the folder-relative prompt
+  const stdout = makeBuf()
+  const spawner = recordingSpawn()
+  const chooser = selectReturning('recommend')
+  let gathered = 0
+  /** @type {string | undefined} */
+  let askedFor
+  const result = await runWizardFirstAsk({
+    clients: ['claude'],
+    descriptors: descriptors(),
+    stdout,
+    env: {},
+    interactive: true,
+    resolve: async () => '/usr/local/bin/claude',
+    spawnFn: spawner.fn,
+    select: chooser.fn,
+    prepareEvidence: async (client) => {
+      gathered += 1
+      askedFor = client
+      return { dir: '/hyp/ask/20260907T050000Z', from: '2026-08-08', files: ['ASK.md'] }
+    },
+  })
+  assert.equal(gathered, 1)
+  // The gather writes the instructions, and they name a skill tree. Which
+  // tree depends on who is about to read them, so the chosen client has to
+  // reach it: Codex and OpenCode do not load ~/.claude/skills.
+  assert.equal(askedFor, 'claude', 'the client the wizard chose is the one the gather is told about')
+  assert.deepEqual(result, { launched: true, client: 'claude', promptId: 'recommend', exitCode: 0 })
+  assert.equal(spawner.calls[0].opts.cwd, '/hyp/ask/20260907T050000Z')
+  assert.match(spawner.calls[0].args[0], /Read ASK\.md first/)
+  assert.match(stdout.text(), /Starting Claude Code in \/hyp\/ask\/20260907T050000Z/)
+})
+
+test('runWizardFirstAsk: a failed or absent gather refuses to launch', async () => {
+  // @ref LLP 0398#run-directory [tests]: no evidence, no launch; the cold answer is the failure this ask removes
+  for (const prepareEvidence of [
+    async () => { throw new Error('cache locked') },
+    async () => undefined,
+    undefined,
+  ]) {
+    const stdout = makeBuf()
+    const stderr = makeBuf()
+    const spawner = recordingSpawn()
+    const result = await runWizardFirstAsk({
+      clients: ['claude'],
+      descriptors: descriptors(),
+      stdout,
+      stderr,
+      env: {},
+      interactive: true,
+      resolve: async () => '/usr/local/bin/claude',
+      spawnFn: spawner.fn,
+      select: selectReturning(FIRST.id).fn,
+      ...(prepareEvidence ? { prepareEvidence } : {}),
+    })
+    assert.deepEqual(result, { launched: false, reason: 'no-evidence' })
+    assert.equal(spawner.calls.length, 0)
+    assert.match(stderr.text(), /Nothing was started/)
+  }
 })

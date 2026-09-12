@@ -223,3 +223,37 @@ export interface TimestampScope {
   /** The enclosing select's scope, for a correlated reference; absent at the top level. */
   outer?: TimestampScope
 }
+
+/**
+ * One line the person types again and again, with what the agent did
+ * after it (LLP 0398 #one-signal).
+ */
+export interface FirstAskCandidate {
+  /** The line, lower-cased, first 42 characters. */
+  line: string
+  sessions: number
+  days: number
+  typed: number
+  /** The earliest occurrence, as typed. */
+  example?: { date: string; text: string }
+  /** Sessions whose tool calls after the line were read. */
+  sessionsWithCalls: number
+  /** Procedure commands that ran after it, most sessions first. */
+  steps: { command: string; sessions: number }[]
+  /** Other tool activity after it, for context. */
+  other: { head: string; sessions: number }[]
+  /** How one such session ended: the first substantial reply after the procedure. */
+  ending?: { date: string; text: string }
+}
+
+/** What `prepareFirstAskEvidence` produced. */
+export interface FirstAskEvidence {
+  /** The folder the client is started in. */
+  dir: string
+  from: string
+  files: string[]
+  record?: { sessions: number; sessionDays: number }
+  /** Whether the record cleared RECORD_FLOOR; false means the answer stops at "not enough yet". */
+  enough?: boolean
+  candidates?: FirstAskCandidate[]
+}

@@ -60,7 +60,7 @@ export interface PromptChrome {
   /**
    * Draw a border around the whole frame. For a prompt that has to read as
    * its own screen rather than as one more paragraph in a scrolling run:
-   * the wizard's closing question list lands under the first look's tables
+   * the wizard's closing skill offer lands under the first look's tables
    * and rules, where an unframed prompt does not announce itself as the
    * one thing on screen still waiting for a keypress. Suppressed when the
    * frame would be wider than the terminal. An omitted field changes no
