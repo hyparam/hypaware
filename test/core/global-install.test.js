@@ -8,8 +8,10 @@ import path from 'node:path'
 
 import {
   GlobalInstallError,
+  DurableBinRequiredError,
+  writeCliPathGuidance,
   describeEphemeralBinPath,
-  ensureDurableBinForNpx,
+  ensureDurableBin,
   findInstalledHypawareBin,
   globalHypawareBin,
   isEphemeralBinPath,
@@ -307,14 +309,14 @@ test('findInstalledHypawareBin resumes the walk past a candidate accept rejects'
   assert.equal(findInstalledHypawareBin(env, process.platform, () => false), undefined)
 })
 
-test('ensureDurableBinForNpx installs the current package globally and returns the global bin', async () => {
+test('ensureDurableBin installs the current package globally and returns the global bin', async () => {
   /** @type {{ cmd: string, args: string[] }[]} */
   const calls = []
   const stdout = makeBuf()
   const env = { npm_config_cache: '/Users/hyp/.npm' }
   const packageSpec = await currentPackageSpec()
 
-  const result = await ensureDurableBinForNpx({
+  const result = await ensureDurableBin({
     binPath: '/Users/hyp/.npm/_npx/abc/node_modules/hypaware/bin/hypaware.js',
     env,
     stdout,
@@ -340,13 +342,14 @@ test('ensureDurableBinForNpx installs the current package globally and returns t
     cmd: 'npm',
     args: ['config', 'get', 'prefix'],
   })
-  assert.match(stdout.text(), /npx detected: installing durable CLI/)
+  assert.match(stdout.text(), /npx detected: installing durable CLI with npm install -g hypaware\n/)
+  assert.deepEqual(calls[0].args, ['install', '-g', 'hypaware'])
 })
 
-test('ensureDurableBinForNpx leaves stable bin paths untouched', async () => {
+test('ensureDurableBin leaves stable bin paths untouched', async () => {
   const binPath = path.resolve('/opt/hypaware/bin/hypaware.js')
   let called = false
-  const result = await ensureDurableBinForNpx({
+  const result = await ensureDurableBin({
     binPath,
     env: { npm_config_cache: '/Users/hyp/.npm' },
     stdout: makeBuf(),
@@ -363,11 +366,11 @@ test('ensureDurableBinForNpx leaves stable bin paths untouched', async () => {
   assert.equal(called, false)
 })
 
-test('ensureDurableBinForNpx reports npm install failures with a repair command', async () => {
+test('ensureDurableBin reports npm install failures with a repair command', async () => {
   const packageSpec = await currentPackageSpec()
 
   await assert.rejects(
-    ensureDurableBinForNpx({
+    ensureDurableBin({
       binPath: '/Users/hyp/.npm/_npx/abc/node_modules/hypaware/bin/hypaware.js',
       env: { npm_config_cache: '/Users/hyp/.npm' },
       stdout: makeBuf(),
@@ -392,7 +395,7 @@ test('ensureDurableBinForNpx reports npm install failures with a repair command'
 async function currentPackageSpec() {
   const raw = await fs.readFile(new URL('../../package.json', import.meta.url), 'utf8')
   const pkg = JSON.parse(raw)
-  return `${pkg.name}@${pkg.version}`
+  return pkg.name
 }
 
 /** @param {string} value */
@@ -411,3 +414,99 @@ function makeBuf() {
     },
   }
 }
+
+
+// @ref LLP 0404#install-policy [tests]: continuation requires consent or force after a failed or declined promotion
+for (const scenario of [
+  { name: 'accept global install', answers: [true], npmFails: false, promoted: true },
+  { name: 'decline promotion and accept existing path', answers: [false, true], npmFails: false, promoted: false },
+  { name: 'decline both choices', answers: [false, false], npmFails: false, rejects: true },
+  { name: 'accept existing path after npm fails', answers: [true, true], npmFails: true, promoted: false },
+  { name: 'decline existing path after npm fails', answers: [true, false], npmFails: true, rejects: true },
+]) {
+  test(`interactive durable CLI: ${scenario.name}`, async () => {
+    const answers = [...scenario.answers]
+    const stderr = makeBuf()
+    let installs = 0
+    const binPath = '/tmp/_npx/hypaware/bin/hypaware.js'
+    const operation = ensureDurableBin({
+      binPath, env: {}, stdout: makeBuf(), stderr, interactive: true,
+      confirm: async (question) => {
+        assert.match(question, answers.length === scenario.answers.length ? /Install a global CLI/ : /Continue with this installation/)
+        return answers.shift() ?? false
+      },
+      runner: async (_cmd, args) => {
+        if (args[0] === 'config') return { exitCode: 0, stdout: '/tmp/global', stderr: '' }
+        installs++
+        return { exitCode: scenario.npmFails ? 1 : 0, stdout: '', stderr: 'EACCES' }
+      },
+    })
+    if (scenario.rejects) await assert.rejects(operation, DurableBinRequiredError)
+    else {
+      const result = await operation
+      assert.equal(result.installed, scenario.promoted)
+      assert.equal(result.binPath, scenario.promoted ? globalHypawareBin('/tmp/global') : binPath)
+    }
+    assert.equal(answers.length, 0)
+    assert.equal(installs, scenario.answers[0] ? 1 : 0)
+    assert.match(stderr.text(), /npm prunes/)
+  })
+}
+
+test('headless durable CLI fails closed unless force permits the original path', async () => {
+  for (const force of [false, true]) {
+    const binPath = '/tmp/_npx/hypaware/bin/hypaware.js'
+    const stderr = makeBuf()
+    const operation = ensureDurableBin({
+      binPath, env: {}, stdout: makeBuf(), stderr, interactive: false, force,
+      confirm: async () => { assert.fail('headless must not prompt') },
+      runner: async () => ({ exitCode: 1, stdout: '', stderr: 'registry unavailable' }),
+    })
+    if (force) {
+      assert.equal((await operation).binPath, binPath)
+      assert.match(stderr.text(), /continuing with/)
+    } else await assert.rejects(operation, /registry unavailable.*--force/)
+  }
+})
+
+test('a prefix lookup failure also allows an explicit temporary fallback', async () => {
+  const binPath = '/tmp/_npx/hypaware/bin/hypaware.js'
+  const stderr = makeBuf()
+  const result = await ensureDurableBin({
+    binPath, env: {}, stdout: makeBuf(), stderr, interactive: false, force: true,
+    runner: async (_cmd, args) => ({ exitCode: args[0] === 'config' ? 1 : 0, stdout: '', stderr: 'no prefix' }),
+  })
+  assert.equal(result.binPath, binPath)
+  assert.match(stderr.text(), /npm config get prefix failed/)
+})
+
+test('PATH guidance ignores npm temporary bins and quotes paths without editing the shell', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "hyp-path's-"))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const binDir = path.join(root, 'global bin')
+  const binPath = path.join(binDir, 'hypaware')
+  await fs.mkdir(binDir)
+  await fs.writeFile(binPath, '#!/usr/bin/env node\n', { mode: 0o755 })
+  await fs.symlink(binPath, path.join(binDir, 'hyp'))
+  const temporary = path.join(root, 'node_modules', '.bin')
+  await fs.mkdir(temporary, { recursive: true })
+  await fs.symlink(binPath, path.join(temporary, 'hypaware'))
+  await fs.symlink(binPath, path.join(temporary, 'hyp'))
+  const stderr = makeBuf()
+  writeCliPathGuidance(binPath, { PATH: temporary }, stderr)
+  assert.match(stderr.text(), /export PATH=/)
+  assert.match(stderr.text(), /Manage this installation now with:/)
+  assert.ok(stderr.text().includes("'\\''"), 'apostrophes are shell escaped')
+  assert.match(stderr.text(), / status\n/)
+  const available = makeBuf()
+  writeCliPathGuidance(binPath, { PATH: temporary + path.delimiter + binDir }, available)
+  assert.equal(available.text(), '', 'a durable CLI and alias are available after npm exits')
+  const shadowDir = path.join(root, 'shadow')
+  await fs.mkdir(shadowDir)
+  await fs.writeFile(path.join(shadowDir, 'hyp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  writeCliPathGuidance(binPath, { PATH: shadowDir + path.delimiter + binDir }, available)
+  assert.match(available.text(), /not confirmed available/, 'an earlier hyp alias must not be ignored')
+  await fs.unlink(path.join(binDir, 'hyp'))
+  writeCliPathGuidance(binPath, { PATH: binDir }, available)
+  assert.match(available.text(), /not confirmed available/, 'hypaware alone does not prove the hyp alias')
+})

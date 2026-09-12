@@ -7,19 +7,21 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { installDaemon, renderDaemonInstall } from '../../src/core/daemon/install.js'
-import { isNpxBinPath, globalHypawareBin } from '../../src/core/cli/global_install.js'
+import { DurableBinRequiredError, isNpxBinPath, globalHypawareBin } from '../../src/core/cli/global_install.js'
 import { runDaemonInstall } from '../../src/core/commands/daemon.js'
 
 /**
  * @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunner } from '../../src/core/cli/types.js'
+ * @import { DaemonInstallOptions, DurableBinUpgradeSeam } from '../../src/core/daemon/types.js'
  */
 
-// Regression for #384: `ensureDurableBinForNpx` had a single call site in
+// Regression for #384: `ensureDurableBin` had a single call site in
 // the walkthrough finale, so `hyp daemon install` and the join/enroll
 // lane installed launchd/systemd against the ephemeral `_npx` bin. When
-// npx exits that bin is gone and the host has no `hyp` control surface.
+// npm prunes that bin, the host loses its daemon and `hyp` control surface.
 // The upgrade now lives inside installDaemon, so every enrollment path
-// inherits "a daemon is never installed against an `_npx` bin."
+// inherits the guard, with deliberate overrides specified in LLP 0404.
 
 const OK = { exitCode: 0, stdout: '', stderr: '' }
 
@@ -66,8 +68,8 @@ function fakeNpmRunner() {
 
 /**
  * @param {string} homeDir
- * @param {{ runner?: import('../../src/core/cli/types.js').CommandRunner }} [durable]
- * @param {Partial<import('../../src/core/daemon/types.js').DaemonInstallOptions>} [extra]
+ * @param {DurableBinUpgradeSeam} [durable]
+ * @param {Partial<DaemonInstallOptions>} [extra]
  */
 function darwinOpts(homeDir, durable, extra) {
   return {
@@ -155,3 +157,40 @@ test('runDaemonInstall dry-run still surfaces the _npx bin without a global inst
   assert.equal(code, 0)
   assert.ok(out.includes(NPX_BIN), 'dry-run renders the given bin, no durable upgrade')
 })
+
+
+test('a project-local CLI is promoted before writing a daemon service', async (t) => {
+  const home = tmpHome()
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const project = path.join(home, 'project')
+  fs.mkdirSync(project)
+  fs.writeFileSync(path.join(project, 'package.json'), '{}')
+  const binPath = path.join(project, 'node_modules/hypaware/bin/hypaware.js')
+  const { runner, calls } = fakeNpmRunner()
+  const plan = await installDaemon(darwinOpts(home, { runner, interactive: false }, { binPath }))
+  assert.equal(plan.binPath, GLOBAL_BIN)
+  assert.equal(calls.length, 2)
+  assert.ok(!fs.readFileSync(plan.targetPath, 'utf8').includes(project))
+})
+
+for (const mode of ['headless', 'force', 'interactive']) {
+  test(`failed global install: ${mode} daemon behavior`, async (t) => {
+    const home = tmpHome()
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+    let prompts = 0
+    const opts = darwinOpts(home, {
+      interactive: mode === 'interactive',
+      confirm: async () => { prompts++; return true },
+      runner: async () => ({ exitCode: 1, stdout: '', stderr: 'EACCES' }),
+    }, { force: mode === 'force' })
+    if (mode === 'headless') {
+      await assert.rejects(installDaemon(opts), DurableBinRequiredError)
+      assert.equal(fs.existsSync(opts.plistDir), false, 'refusal must not write a service')
+    } else {
+      const plan = await installDaemon(opts)
+      assert.equal(plan.binPath, NPX_BIN)
+      assert.ok(fs.readFileSync(plan.targetPath, 'utf8').includes(NPX_BIN))
+    }
+    assert.equal(prompts, mode === 'interactive' ? 2 : 0)
+  })
+}

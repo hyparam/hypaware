@@ -985,6 +985,7 @@ test('runInitWizard: an abandoned join is retriable and re-presents the fork', a
 test('runInitWizard: pre-baked picks skip gate, fork, and join entirely', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), {
     picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    force: true,
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
@@ -994,6 +995,8 @@ test('runInitWizard: pre-baked picks skip gate, fork, and join entirely', async 
   assert.deepEqual(calls, ['pick', 'configure', 'finale'])
   assert.equal(opts._pickOpts.picks.sources[0], 'claude')
   assert.equal(result.pathway, undefined)
+  assert.equal(opts._finaleArgs.force, true, 'force reaches the durable CLI decision')
+  assert.equal(opts._finaleArgs.interactive, false, 'headless setup must not prompt for a global install')
 })
 
 // --- exits: cancel and refusal ---

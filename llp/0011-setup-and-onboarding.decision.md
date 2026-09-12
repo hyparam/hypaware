@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0002, LLP 0010, LLP 0012
+**Extended-by:** LLP 0404 (durable CLI setup and explicit temporary-install override)
 
 > The first-run experience. Decomposed from `hypaware-design.md`
 > (Setup and Onboarding).
