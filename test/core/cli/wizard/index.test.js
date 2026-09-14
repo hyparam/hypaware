@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
+import { DurableBinRequiredError } from '../../../../src/core/cli/global_install.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 import { clientSyncListPath, readClientSyncEntries, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
@@ -985,6 +986,7 @@ test('runInitWizard: an abandoned join is retriable and re-presents the fork', a
 test('runInitWizard: pre-baked picks skip gate, fork, and join entirely', async () => {
   const { opts, calls } = wizardOpts(await tmpHome(), {
     picks: { sources: ['claude'], exportChoice: 'local-parquet', retentionDays: 30 },
+    force: true,
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 0)
@@ -994,6 +996,64 @@ test('runInitWizard: pre-baked picks skip gate, fork, and join entirely', async 
   assert.deepEqual(calls, ['pick', 'configure', 'finale'])
   assert.equal(opts._pickOpts.picks.sources[0], 'claude')
   assert.equal(result.pathway, undefined)
+  assert.equal(opts._finaleArgs.force, true, 'force reaches the durable CLI decision')
+  assert.equal(opts._finaleArgs.interactive, false, 'headless setup must not prompt for a global install')
+})
+
+// --- the durable CLI is settled before the fork (LLP 0404) ---
+
+const NPX_BIN = '/tmp/_npx/abc/node_modules/hypaware/bin/hypaware.js'
+
+/** @param {{ installOk?: boolean }} [o] */
+function fakeNpm(o = {}) {
+  /** @type {string[][]} */
+  const calls = []
+  const runner = async (/** @type {string} */ _cmd, /** @type {string[]} */ args) => {
+    calls.push(args)
+    if (args[0] === 'config') return { exitCode: 0, stdout: '/tmp/global', stderr: '' }
+    return { exitCode: o.installOk === false ? 1 : 0, stdout: '', stderr: 'EACCES' }
+  }
+  return { runner, calls }
+}
+
+// @ref LLP 0404#install-policy [tests]: the CLI question comes before the pathway question, and its answer reaches both pathways
+test('runInitWizard: the durable CLI is settled before the fork and its answer reaches join and finale', async () => {
+  const npm = fakeNpm()
+  let asked = 0
+  const { opts, calls } = wizardOpts(await tmpHome(), {
+    durableBin: { binPath: NPX_BIN, runner: npm.runner, confirm: async () => { asked++; return true } },
+    fork: async () => { assert.equal(asked, 1, 'the CLI question precedes the fork'); return 'team' },
+    join: async (/** @type {any} */ o) => { opts._joinOpts = o; return { status: 'ok', lockedSources: [], managed: true } },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(calls, ['gate', 'fork', 'join', 'pick', 'syncScope', 'folderAsk', 'configure', 'finale'])
+  assert.deepEqual(npm.calls[0], ['install', '-g', 'hypaware'])
+  assert.equal(opts._joinOpts.binPath, '/tmp/global/bin/hypaware', 'enrollment installs the settled CLI')
+  assert.equal(opts._finaleArgs.finale.binPath, '/tmp/global/bin/hypaware', 'the finale records the same CLI')
+})
+
+test('runInitWizard: refusing the temporary CLI ends the run before the fork, with nothing written', async () => {
+  const home = await tmpHome()
+  const npm = fakeNpm({ installOk: false })
+  const { opts, calls } = wizardOpts(home, {
+    durableBin: { binPath: NPX_BIN, runner: npm.runner, confirm: async () => false },
+  })
+  await assert.rejects(runInitWizard(opts), DurableBinRequiredError)
+  assert.deepEqual(calls, ['gate'], 'no fork, no join, no pick, no finale')
+  assert.equal(npm.calls.length, 0, 'a declined install is not attempted')
+  await assert.rejects(fs.access(path.join(home, '.hyp', 'hypaware-config.json')), 'no config is written before the fork')
+})
+
+test('runInitWizard: no daemon install means no CLI question', async () => {
+  for (const finale of [{ skipDaemon: true }, { dryRun: true }, { binPath: '/opt/hyp/bin/hypaware.js' }]) {
+    const { opts } = wizardOpts(await tmpHome(), {
+      finale,
+      durableBin: { binPath: NPX_BIN, runner: async () => assert.fail('npm must not run'), confirm: async () => assert.fail('no question') },
+    })
+    assert.equal((await runInitWizard(opts)).exitCode, 0)
+    assert.equal(opts._finaleArgs.finale.binPath, finale.binPath, 'an explicit --bin passes through untouched')
+  }
 })
 
 // --- exits: cancel and refusal ---

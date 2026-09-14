@@ -1,7 +1,7 @@
 import type { dispatch } from '../../../../src/core/cli/dispatch.js'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
-import type { CollectStatusOptions, HypAwareStatusReport } from '../../daemon/types.d.ts'
+import type { CollectStatusOptions, DurableBinUpgradeSeam, HypAwareStatusReport } from '../../daemon/types.d.ts'
 import type { FirstAskEvidence, OverviewQueryRunner } from '../../query/types.d.ts'
 import type { LoginOutcomeReason } from '../../remote/types.d.ts'
 import type { ClientDescriptor, PickerDescriptor, PluginCatalog } from '../../types.d.ts'
@@ -473,6 +473,12 @@ export interface RunWizardJoinOptions {
    */
   resolveLayered?: () => Promise<LayeredProvenance>
   /**
+   * The entrypoint the orchestrator settled for the daemon before the fork
+   * (LLP 0404), forwarded to the login lane's install as an explicit
+   * `--bin` so enrollment neither asks again nor records a different CLI.
+   */
+  binPath?: string
+  /**
    * The lane's position line (LLP 0135 #progress), e.g.
    * `Step 1 of 3 · Join your team`. The join lane owns no prompt spec, so
    * it prints the line itself where its narration would go, and prints that
@@ -795,6 +801,12 @@ export interface RunInitWizardOptions {
   agents?: { list(): { name: string; clients: ('claude' | 'codex')[]; sourceFile: string }[] }
   backfill?: PickerBackfillRunner
   finale?: PickerFinaleActions
+  /**
+   * Seam for the durable-CLI resolution the orchestrator runs before the
+   * fork (LLP 0404): the candidate entrypoint (default `process.argv[1]`)
+   * plus the npm runner and confirmation prompt tests replace.
+   */
+  durableBin?: DurableBinUpgradeSeam & { binPath?: string }
   /** Pre-baked picks: the non-interactive short-circuit. */
   picks?: PickerPicks
   exportOrigin?: PickerExportOrigin

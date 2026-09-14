@@ -3,7 +3,7 @@
 import process from 'node:process'
 
 import { Attr, getLogger, withSpan } from '../observability/index.js'
-import { ensureDurableBinForNpx, isNpxBinPath } from '../cli/global_install.js'
+import { ensureDurableBin, writeCliPathGuidance } from '../cli/global_install.js'
 
 import {
   LAUNCH_LABEL,
@@ -151,39 +151,25 @@ function withDaemonOp(op, platform, label, fn, okFields) {
 }
 
 /**
- * The single choke point that keeps a daemon from ever being pinned to
- * an ephemeral npx bin. When `npx hypaware` installs the daemon, the
- * resolved binPath points into npm's `~/.npm/_npx/<hash>/...` cache,
- * which vanishes the moment npx exits, leaving the host recorded but
- * with no `hyp` control surface (status/policy/detach/uninstall all
- * impossible). Every non-dry-run install funnels through `installDaemon`
- * (walkthrough finale, `hyp daemon install`, and the join/enroll lane),
- * so upgrading to a durable global bin here makes "a daemon is never
- * installed against an `_npx` bin" a single invariant instead of a
- * per-call-site obligation only the walkthrough remembered to honor.
- *
- * Escape hatches survive: an explicit `--bin` sets `binExplicit`, and
- * dry-run never reaches here (it renders through `planDaemonInstall`).
- *
+ * Every daemon installation resolves its CLI before writing a service unit.
+ * Explicit --bin remains an intentional entrypoint override.
  * @param {DaemonInstallOptions} options
  * @returns {Promise<{ binPath: string, globalInstall: DurableBinResult }>}
  */
 async function resolveDurableBinPath(options) {
   const seam = options.durableBin ?? {}
   const env = seam.env ?? process.env
-  if (options.binExplicit || !isNpxBinPath(options.binPath, env)) {
-    return {
+  const stderr = seam.stderr ?? process.stderr
+  const durable = options.binExplicit
+    ? { binPath: options.binPath, installed: false, skipped: true }
+    : await ensureDurableBin({
+      ...seam,
       binPath: options.binPath,
-      globalInstall: { binPath: options.binPath, installed: false, skipped: true },
-    }
-  }
-  const durable = await ensureDurableBinForNpx({
-    binPath: options.binPath,
-    env,
-    stdout: seam.stdout ?? process.stdout,
-    stderr: seam.stderr ?? process.stderr,
-    ...(seam.runner ? { runner: seam.runner } : {}),
-  })
+      force: options.force,
+      env,
+      stdout: seam.stdout ?? process.stdout,
+      stderr,
+    })
   return { binPath: durable.binPath, globalInstall: durable }
 }
 
@@ -218,6 +204,8 @@ export async function installDaemon(options) {
       const plan = platform === 'darwin'
         ? await macos.installLaunchAgent(withBin)
         : await linux.installSystemdUnit(withBin)
+      writeCliPathGuidance(binPath, merged.durableBin?.env ?? process.env,
+        merged.durableBin?.stderr ?? process.stderr)
       return Object.assign(plan, { globalInstall })
     },
     (plan) => ({

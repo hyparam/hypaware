@@ -7,7 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 import test from 'node:test'
 
-import { GlobalInstallError } from '../../src/core/cli/global_install.js'
+import { DurableBinRequiredError, GlobalInstallError } from '../../src/core/cli/global_install.js'
 import { runPickerFinale, runPickerWalkthrough } from '../../src/core/cli/walkthrough.js'
 import { SystemdUnitError } from '../../src/core/daemon/linux.js'
 import { LaunchAgentError } from '../../src/core/daemon/macos.js'
@@ -437,4 +437,22 @@ test('a service install that raised over a still-live daemon restarts it anyway'
   assert.equal(restarted, true, 'the daemon the failed reinstall left running is restarted, not written off')
   assert.deepEqual(summary.daemonRestart, { skipped: false, dryRun: false, ok: true })
   await fs.rm(home, { recursive: true, force: true })
+})
+
+
+test('a refused temporary CLI stops the finale before attach and threads force to the installer', async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-finale-durable-'))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  const events = []
+  await assert.rejects(runPickerFinale({
+    ...finaleArgs(home, events, makeBuf()),
+    force: true,
+    interactive: false,
+    installDaemonFn: async (options) => {
+      assert.equal(options.force, true)
+      assert.equal(options.durableBin?.interactive, false)
+      throw new DurableBinRequiredError('A durable CLI is required')
+    },
+  }), DurableBinRequiredError)
+  assert.deepEqual(events, [], 'attach and backfill must not run after refusal')
 })

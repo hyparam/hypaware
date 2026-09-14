@@ -358,3 +358,17 @@ test('defaultRunLogin: the failure detail still captures the lane stderr', async
   assert.equal(outcome.stderr, 'hyp remote login: not a member\n')
   assert.equal(stderr.text(), 'hyp remote login: not a member\n')
 })
+
+// @ref LLP 0404#install-policy [tests]: the daemon's entrypoint settled before the fork is what enrollment installs
+test('defaultRunLogin hands the settled binPath to the login lane, and nothing when there is none', async () => {
+  /** @type {any[]} */
+  const deps = []
+  const login = /** @type {any} */ (async (/** @type {any} */ _argv, /** @type {any} */ _ctx, /** @type {any} */ d) => {
+    deps.push(d)
+    return { exitCode: 0, reason: 'ok' }
+  })
+  const base = { stdout: makeBuf(), stderr: makeBuf(), env: {}, catalog: /** @type {any} */ ({}), ctx: /** @type {any} */ ({}) }
+  await defaultRunLogin({ ...base, binPath: '/usr/local/bin/hypaware' }, login)
+  await defaultRunLogin(base, login)
+  assert.deepEqual(deps, [{ compact: true, binPath: '/usr/local/bin/hypaware' }, { compact: true }])
+})

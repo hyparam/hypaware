@@ -37,6 +37,8 @@ import {
 } from '../walkthrough.js'
 import { isPromptBackError, isPromptCancelledError } from '../tui/runtime.js'
 import { useColor } from '../stdio.js'
+import { ensureDurableBin } from '../global_install.js'
+import { platformIsSupported } from '../../daemon/platform.js'
 import { evaluateReturningGate, runWizardFork } from './fork.js'
 import { runWizardSuggestSkill } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
@@ -298,6 +300,17 @@ async function runGuardedInitWizard(opts, guard) {
     if (gateExit) return gateExit
   }
 
+  // The CLI the daemon will record is settled here, once, before the
+  // pathway question. Both pathways install the same daemon, and the team
+  // pathway installs it inside the login lane, whose exit code cannot carry
+  // a refusal past enrollment: resolved inside that lane, "no" became
+  // `daemon_incomplete` and the run went on to attach clients to a daemon
+  // that was never written. Resolved up front, a refusal ends the run
+  // before anything is written, and every later install receives the
+  // answer as an explicit entrypoint, so no lane asks twice.
+  // @ref LLP 0404#install-policy [implements]: setup settles the CLI before the fork, and a refusal ends the run before config, attach, or backfill
+  const daemonBin = await resolveWizardDaemonBin(opts, interactive)
+
   // The question lanes and their back edges (LLP 0191 #back-edges):
   // escape steps one *screen* back - folders to the combined picker
   // (`continue atPick`), pick to the express gate (`continue atExpress`,
@@ -457,6 +470,7 @@ async function runGuardedInitWizard(opts, guard) {
           env: opts.env,
           catalog,
           ctx: opts.ctx,
+          ...(daemonBin !== undefined ? { binPath: daemonBin } : {}),
           ...(joinProgress ? { progress: joinProgress } : {}),
         })
         // Fail closed: every status but the two that completed a sign-in
@@ -875,6 +889,7 @@ async function runGuardedInitWizard(opts, guard) {
       // finished down the local path (LLP 0191 #join-not-undone).
       joinedAlready: joined !== undefined,
       daemonIncomplete,
+      daemonBin,
       // The finale is one step made of several acts, and the backfill
       // consent question sits behind three of them (install, attach,
       // asset copy), each narrating first. The boundary above cannot
@@ -1108,6 +1123,38 @@ function printJoinFailure(opts, join) {
 }
 
 /**
+ * The entrypoint every daemon install this run performs must record, or
+ * `undefined` when the run installs no daemon (dry run, `--no-daemon`, a
+ * platform with no installer). An explicit `--bin` is returned as given;
+ * anything else goes through the durable-CLI resolution (LLP 0404), which
+ * may install globally, keep a temporary tree on consent or `--force`, or
+ * throw `DurableBinRequiredError`.
+ *
+ * @param {RunInitWizardOptions} opts
+ * @param {boolean} interactive
+ * @returns {Promise<string | undefined>}
+ */
+async function resolveWizardDaemonBin(opts, interactive) {
+  const finale = opts.finale
+  if (!finale || finale.dryRun === true || finale.skipDaemon === true) return undefined
+  if (finale.binPath !== undefined) return finale.binPath
+  if (!platformIsSupported(/** @type {NodeJS.Platform} */ (opts.platform ?? process.platform))) return undefined
+  const { binPath: candidate = process.argv[1], ...seam } = opts.durableBin ?? {}
+  if (!candidate) return undefined
+  const durable = await ensureDurableBin({
+    ...seam,
+    binPath: candidate,
+    env: opts.env,
+    stdout: opts.stdout,
+    stderr: opts.stderr,
+    ...(opts.stdin ? { stdin: opts.stdin } : {}),
+    interactive,
+    force: opts.force,
+  })
+  return durable.binPath
+}
+
+/**
  * The wizard finale: the walkthrough's finale machinery plus the team
  * pathway's skips. When the machine joined in this run, `hyp status` is
  * consulted once so steps enrollment already performed are skipped rather
@@ -1121,13 +1168,15 @@ function printJoinFailure(opts, join) {
  *   picked: WizardPickResult,
  *   joinedAlready: boolean,
  *   daemonIncomplete: boolean,
+ *   daemonBin?: string,
  *   checkBoundary: () => Promise<boolean>,
  *   progress?: string,
  * }} args
  * @returns {Promise<FinaleSummary>}
  */
-async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, checkBoundary, progress }) {
+async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, daemonBin, checkBoundary, progress }) {
   const finaleActions = { ...(opts.finale ?? {}) }
+  if (daemonBin !== undefined) finaleActions.binPath = daemonBin
   /** @type {Set<string> | undefined} */
   let skipAttachClients
   if (joinedAlready) {
@@ -1184,6 +1233,7 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
         stderr: opts.stderr,
         retentionDays: picked.retentionDays,
         interactive: !opts.picks,
+        force: opts.force,
         ...(opts.stdin ? { stdin: opts.stdin } : {}),
         ...(opts.backfill ? { backfill: opts.backfill } : {}),
         ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),

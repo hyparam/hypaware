@@ -413,7 +413,7 @@ export async function runRemoteAdd(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait; `compact` is the wizard's join lane asking for one line per event instead of the standalone command's paragraphs
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean, binPath?: string }} [deps] test seam for the browser flow, gateway seeding, central-sink enrollment, and the post-enroll attach wait; `compact` is the wizard's join lane asking for one line per event instead of the standalone command's paragraphs, and `binPath` is the CLI that lane already resolved for the daemon (LLP 0404)
  * @returns {Promise<number>}
  * @ref LLP 0058#d1 [implements]: browser mode of `hyp remote login`; one command, one store, one more way to populate it
  */
@@ -435,7 +435,7 @@ export async function runRemoteLogin(argv, ctx, deps = {}) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean }} [deps]
+ * @param {{ login?: typeof loginWithBrowser, seed?: typeof seedLoginGateway, enroll?: typeof enrollCentralSink, waitForAttach?: typeof waitForClientAttach, compact?: boolean, binPath?: string }} [deps]
  * @returns {Promise<LoginOutcome>}
  * @ref LLP 0179#outcome [implements]: the login lane returns { exitCode, reason }; runRemoteLogin is the adapter that keeps the CLI contract a number
  */
@@ -486,6 +486,9 @@ export async function remoteLogin(argv, ctx, deps = {}) {
   // --no-daemon provisions the sink but leaves the service install by hand.
   const noForward = gate.params['no-forward'] === true
   const noDaemon = gate.params['no-daemon'] === true
+  // `--force` is `hyp daemon install`'s own flag, forwarded: keep a temporary
+  // CLI when a global one cannot be established (LLP 0404).
+  const force = gate.params.force === true
 
   const stdin = /** @type {any} */ (ctx.stdin ?? process.stdin)
   const stdinPiped = !!stdin && !stdin.isTTY
@@ -509,7 +512,7 @@ export async function remoteLogin(argv, ctx, deps = {}) {
   // as a static token. A piped token *without* a browser-mode flag already took
   // the static path above (`useStatic`), so nothing is swallowed silently there;
   // only an explicit `--no-browser` ignores a pipe, by design.
-  return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, compact: deps.compact === true }, ctx, {
+  return runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, force, compact: deps.compact === true, binPath: deps.binPath }, ctx, {
     login: deps.login ?? loginWithBrowser,
     seed: deps.seed ?? seedLoginGateway,
     enroll: deps.enroll ?? enrollCentralSink,
@@ -645,12 +648,12 @@ async function persistStaticToken(name, token, ctx) {
  * from one command, unless `--no-forward` declines it.
  *
  * @param {string} name
- * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean, compact?: boolean }} opts
+ * @param {{ org?: string, host?: string, noBrowser: boolean, noForward: boolean, noDaemon: boolean, force?: boolean, compact?: boolean, binPath?: string }} opts
  * @param {CommandRunContext} ctx
  * @param {{ login: typeof loginWithBrowser, seed: typeof seedLoginGateway, enroll: typeof enrollCentralSink, waitForAttach: typeof waitForClientAttach }} deps
  * @returns {Promise<LoginOutcome>}
  */
-async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, compact = false }, ctx, { login, seed, enroll, waitForAttach }) {
+async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon, force, compact = false, binPath }, ctx, { login, seed, enroll, waitForAttach }) {
   const remotes = await readConfiguredRemotes(ctx)
   const entry = Object.hasOwn(remotes, name) ? remotes[name] : undefined
   if (!entry) {
@@ -843,7 +846,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     /** @type {Awaited<ReturnType<typeof enrollCentralSink>>} */
     let result
     try {
-      result = await enroll({ ctx, url: centralUrl, gateway: session.gateway, noDaemon, compact })
+      result = await enroll({ ctx, url: centralUrl, gateway: session.gateway, noDaemon, compact, binPath, force })
     } catch (err) {
       ctx.stderr.write(`hyp remote login: signed in, but enrollment failed: ${err instanceof Error ? err.message : String(err)}\n`)
       return { exitCode: 1, reason: 'enroll_failed' }

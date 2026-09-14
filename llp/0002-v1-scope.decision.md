@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-01
 **Related:** LLP 0000, LLP 0007, LLP 0011, LLP 0017
+**Extended-by:** LLP 0404 (durable CLI setup and explicit temporary-install override)
 
 > These are the *as-shipped* decisions for V1, lifted from `finish-v1.md` before
 > it was tombstoned. Where they diverge from the broader target architecture in

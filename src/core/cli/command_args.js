@@ -160,7 +160,7 @@ export const CORE_COMMAND_ARGS = {
   'remote login': {
     // `<name>` in the old line, but a bare `hyp remote login` signs in to
     // the default target (LLP 0062 #bare-remote), so the target is optional.
-    usage: 'hyp remote login [name] [--token-file <path>] [--org <org>] [--host <label>] [--browser] [--no-browser] [--no-forward] [--no-daemon]',
+    usage: 'hyp remote login [name] [--token-file <path>] [--org <org>] [--host <label>] [--browser] [--no-browser] [--no-forward] [--no-daemon] [--force]',
     schema: {
       type: 'object',
       properties: {
@@ -172,6 +172,7 @@ export const CORE_COMMAND_ARGS = {
         'no-browser': { type: 'boolean', default: false },
         'no-forward': { type: 'boolean', default: false },
         'no-daemon': { type: 'boolean', default: false },
+        force: { type: 'boolean', default: false },
       },
       positional: ['name'],
     },

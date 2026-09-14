@@ -49,7 +49,7 @@ import { isTty } from './stdio.js'
  * @ref LLP 0299#decision [implements]: default yes unless a bare enter would destroy data
  * @ref LLP 0299#eof-declines [implements]: a stdin that cannot answer declines, whatever polarity the prompt printed
  *
- * @param {CommandRunContext} ctx
+ * @param {{ stdin?: NodeJS.ReadableStream, stderr: { write(chunk: string): unknown } }} ctx
  * @param {string} question rendered verbatim, including its `[Y/n]` or `[y/N]` suffix
  * @param {{ defaultYes?: boolean }} [opts]
  * @returns {Promise<boolean>}

@@ -9,7 +9,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { defaultConfigPath, loadConfigFile, prepareLocalConfigWrite } from '../config/schema.js'
 import { resolveCentralLayerPath } from '../config/apply.js'
 import { DEFAULT_GATEWAY_ENDPOINT, configuredGatewayEndpoint } from '../config/gateway_endpoint.js'
-import { GlobalInstallError } from './global_install.js'
+import { DurableBinRequiredError, GlobalInstallError } from './global_install.js'
 import { probeClientAttachFromDescriptor } from '../daemon/status.js'
 import { daemonIncompleteNote } from '../daemon/platform.js'
 import { ServiceOpError } from '../daemon/service_ops.js'
@@ -801,6 +801,7 @@ export async function runPickerWalkthrough(opts) {
       // we prompt for backfill consent. `--yes` / `--dry-run` carry picks
       // and backfill runs automatically.
       interactive: !opts.picks,
+      force: opts.force,
       ...(opts.stdin ? { stdin: opts.stdin } : {}),
       ...(opts.backfill ? { backfill: opts.backfill } : {}),
       ...(opts.backfillConsentPrompt ? { backfillConsentPrompt: opts.backfillConsentPrompt } : {}),
@@ -1607,6 +1608,7 @@ export async function waitForProxyCaBeforeAttach({ config, env, stderr, waitForC
  *   stderr: NodeJS.WritableStream | { write(chunk: string): unknown },
  *   retentionDays: number,
  *   interactive: boolean,
+ *   force?: boolean,
  *   stdin?: NodeJS.ReadableStream,
  *   backfill?: PickerBackfillRunner,
  *   backfillConsentPrompt?: AsyncBackfillConsentPrompt,
@@ -1712,7 +1714,8 @@ export async function runPickerFinale(args) {
           // walkthrough only signals whether binPath came from an
           // explicit --bin and reads the result back off the plan.
           binExplicit: finale.binPath !== undefined,
-          durableBin: { env, stdout, stderr },
+          force: args.force,
+          durableBin: { env, stdout, stderr, stdin: args.stdin, interactive: args.interactive },
           ...(homeDir ? { homeDir } : {}),
         }
         if (dryRun) {
@@ -1761,6 +1764,8 @@ export async function runPickerFinale(args) {
       },
       { component: 'walkthrough' }
     ).catch((err) => {
+      // @ref LLP 0404#install-policy [implements]: no attach after refusing a fragile daemon path
+      if (err instanceof DurableBinRequiredError) throw err
       const diagnosed = err instanceof ServiceOpError || err instanceof GlobalInstallError
       if (!diagnosed && !(err instanceof installMod.DaemonInstallError)) throw err
       installFailed = true

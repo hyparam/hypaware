@@ -824,19 +824,23 @@ export interface LaunchAgentInstallPlan {
 export type DaemonInstallPlan = LaunchAgentInstallPlan | SystemdInstallPlan
 
 /**
- * Override seam for the npx->durable global-bin upgrade installDaemon
- * runs before writing the service unit. Production leaves this unset
- * (process.env / process streams / the real npm runner); tests inject a
- * fake env + runner so no global npm install actually happens.
+ * CLI resolution context for installDaemon, before writing the service unit.
+ * Commands pass their streams and interaction mode; tests can replace npm
+ * and the confirmation prompt without changing a real installation.
  */
 export interface DurableBinUpgradeSeam {
   env?: NodeJS.ProcessEnv
   stdout?: { write(chunk: string): unknown }
   stderr?: { write(chunk: string): unknown }
   runner?: CommandRunner
+  stdin?: NodeJS.ReadableStream
+  interactive?: boolean
+  confirm?: (question: string) => Promise<boolean>
 }
 
 export interface DaemonInstallOptions {
+  /** Allow a temporary CLI when a durable installation cannot be established. */
+  force?: boolean
   /** Absolute path to the HypAware CLI entrypoint. */
   binPath: string
   /**
@@ -845,7 +849,7 @@ export interface DaemonInstallOptions {
    * `_npx` path (the explicit-bin escape hatch).
    */
   binExplicit?: boolean
-  /** Override seam for the npx->durable global-bin upgrade (tests only). */
+  /** CLI resolution context, including test overrides for npm and prompts. */
   durableBin?: DurableBinUpgradeSeam
   /** Config path passed to the daemon (defaults to ~/.hyp/hypaware-config.json). */
   configPath?: string

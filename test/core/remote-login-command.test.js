@@ -206,6 +206,26 @@ test('post-auth failures name their step rather than collapsing into the login f
   )
 })
 
+// @ref LLP 0404#install-policy [tests]: the login lane forwards the CLI decision to the installer it wraps
+test('--force and a pre-settled binPath reach enrollment verbatim', async () => {
+  const gwLogin = /** @type {any} */ (async () => gatewaySession())
+  const { ctx } = await makeCtx({ hypHome: await tmpHome() })
+  /** @type {any} */
+  let seen
+  const enroll = /** @type {any} */ (async (/** @type {any} */ args) => {
+    seen = args
+    return { provisioned: true, daemonCode: 3 }
+  })
+  const waitForAttach = /** @type {any} */ (async () => [])
+  await remoteLogin(['prod', '--force'], ctx, { login: gwLogin, enroll, waitForAttach, binPath: '/opt/hyp/bin/hypaware' })
+  assert.equal(seen.force, true)
+  assert.equal(seen.binPath, '/opt/hyp/bin/hypaware')
+  const { ctx: plain } = await makeCtx({ hypHome: await tmpHome() })
+  await remoteLogin(['prod'], plain, { login: gwLogin, enroll, waitForAttach })
+  assert.equal(seen.force, false)
+  assert.equal(seen.binPath, undefined)
+})
+
 test('a usage error and the exclusivity gate are distinguishable, both exit 2', async () => {
   const { ctx: usageCtx } = await makeCtx({ hypHome: await tmpHome() })
   assert.deepEqual(await remoteLogin(['prod', '--org'], usageCtx, {}), { exitCode: 2, reason: 'usage' })
