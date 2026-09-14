@@ -208,7 +208,7 @@ out-of-memory failures, CPU spikes, garbage collection, and event-loop stalls:
 ```sh
 HYP_OTEL_RUNTIME_METRICS=1 \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4319 \
-hyp daemon run --foreground
+hyp daemon run
 ```
 
 Point the endpoint at your own collector, not back at HypAware. The bundled
@@ -288,8 +288,6 @@ Attach a single client (idempotent: running twice is a no-op):
 
 ```sh
 hyp client attach <client>             # claude, codex, opencode, openclaw, ...
-# Equivalent flag form:
-hyp client attach --client <client>
 # Pre-rollover spelling, still accepted:
 hyp attach <client>
 ```
@@ -299,7 +297,6 @@ Detach (removes only HypAware-managed settings):
 ```sh
 hyp client detach <client>
 # Equivalent aliases:
-hyp client detach --client <client>
 hyp detach <client>
 hyp unattach <client>
 ```
@@ -551,7 +548,7 @@ run directly. The common Phase 8 conditions:
 |---------------------------------------|------------------------------------------------------------------------------------|-------------------------------------------------------------------------|
 | `config_missing`                      | no `~/.hyp/hypaware-config.json` was found                                         | `hyp setup` or `hyp setup --from-file <config.json>`                       |
 | `config_invalid`                      | the loaded config failed schema / cross-plugin validation                          | `hyp setup --from-file <config.json>`                                     |
-| `client_without_gateway`              | a gateway-backed client plugin (Claude / Codex / OpenClaw) is enabled but `@hypaware/ai-gateway` is not | re-run `hyp setup`, then `hyp client attach --client <name>`                     |
+| `client_without_gateway`              | a gateway-backed client plugin (Claude / Codex / OpenClaw) is enabled but `@hypaware/ai-gateway` is not | re-run `hyp setup`, then `hyp client attach <name>`                              |
 | `gateway_missing_anthropic_upstream`  | a gateway-routed Anthropic client (OpenClaw) is enabled but no Anthropic upstream is registered  | re-run `hyp setup` and pick the Anthropic upstream                        |
 | `gateway_missing_openai_upstream`     | `@hypaware/codex` enabled but no OpenAI upstream is registered                     | re-run `hyp setup` and pick the OpenAI upstream                           |
 | `sink_missing_encoder`                | a local-fs sink is configured but no encoder plugin is enabled                     | re-run `hyp setup` and pick "local Parquet export"                        |
@@ -627,7 +624,7 @@ channel, which an installed daemon exports nowhere by default: they reach none
 of `daemon.log`, `daemon.out.log`, or `daemon.err.log` under
 `<HYP_HOME>/hypaware/logs/`. To read one, reproduce the refusal against a
 daemon started with an exporter configured, either
-`HYP_DEV_TELEMETRY=1 hyp daemon run --foreground` (JSONL under
+`HYP_DEV_TELEMETRY=1 hyp daemon run` (JSONL under
 `<HYP_HOME>/hypaware/dev-telemetry/`) or `OTEL_EXPORTER_OTLP_ENDPOINT`
 pointed at your own collector, not back at HypAware.
 
