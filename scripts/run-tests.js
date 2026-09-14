@@ -73,7 +73,15 @@ export function run(forwardedArgs) {
     }
     return result.status ?? 1
   } finally {
-    fs.rmSync(temp, { recursive: true, force: true, maxRetries: 3 })
+    // Best effort. `force` only swallows ENOENT and `maxRetries` never retries
+    // EACCES, so a fixture the suite left unreadable (a test that chmod'd a
+    // directory and died before restoring it) would otherwise throw from here,
+    // discard the run's exit status, and report a green suite as a crash.
+    try {
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 3 })
+    } catch (err) {
+      process.stderr.write(`could not remove the test temp root ${temp}: ${/** @type {Error} */ (err).message}\n`)
+    }
   }
 }
 

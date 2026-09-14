@@ -280,7 +280,6 @@ async function realGatewayDetails(upstreams, state = createGatewayState()) {
     return /** @type {Record<string, unknown>} */ (status.details)
   } finally {
     await source.stop()
-    await fs.rm(hypHome, { recursive: true, force: true })
   }
 }
 

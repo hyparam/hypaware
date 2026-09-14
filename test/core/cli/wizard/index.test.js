@@ -1541,7 +1541,6 @@ test('runInitWizard: local pathway never narrates the first-sync hold', async ()
 for (const scenario of ['cancel', 'back', 'refuse', 'config-failure', 'policy-failure', 'corrupt-policy', 'commit']) {
   test(`combined sharing is deferred through setup: ${scenario}`, async (t) => {
     const home = await tmpHome()
-    t.after(() => fs.rm(home, { recursive: true, force: true }))
     const env = { HYP_HOME: path.join(home, '.hyp') }
     const stateDir = readObservabilityEnv(env).stateDir
     const original = [{ source: 'claude', class: /** @type {'local-only'} */ ('local-only') }]
