@@ -8,6 +8,7 @@ import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import { createSyncProgress, runSync } from '../../src/core/commands/sync.js'
+import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
   firstSyncHoldMarkerPath,
@@ -753,6 +754,41 @@ test('a hold that cannot be cleared fails loudly instead of exiting 0 with nothi
   } finally {
     await fs.chmod(policyDir, 0o700)
   }
+})
+
+// On a sharing machine the plan hides the accompanying file copy and the
+// preview counts narrow to match it, while that copy still exports. The
+// hidden count is the only thing on the line that says the narrowing
+// happened.
+test('the pending preview counts the destinations a sharing plan hides', async () => {
+  const hypHome = await makeHome('preview-hidden')
+  const { ctx } = makeCtx({
+    hypHome,
+    sinks: [
+      fakeSink('central', { url: 'https://hypaware.example.com' }),
+      fakeSink('parquet', { dir: '/home/u/exports' }),
+    ],
+    tty: true,
+  })
+
+  /** @type {any[]} */
+  const records = []
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { records.push(...batch) } }],
+  })
+  logs.setGlobalLoggerProvider(provider)
+  try {
+    await runSync(['--dry-run'], ctx)
+  } finally {
+    await provider.shutdown()
+  }
+
+  const preview = records.find((record) => record.body === 'sync.pending_preview')
+  assert.ok(preview, 'the preview must report what it counted')
+  assert.equal(preview.attributes.destinations, 1, 'the counts cover the printed upload target only')
+  assert.equal(preview.attributes.hyp_hidden_destinations, 1, 'the hidden file copy must be countable')
+  await fs.rm(hypHome, { recursive: true, force: true })
 })
 
 test('the plan counts the directories being withheld', async () => {
