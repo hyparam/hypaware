@@ -782,6 +782,8 @@ test('the pending preview counts the destinations a sharing plan hides', async (
     await runSync(['--dry-run'], ctx)
   } finally {
     await provider.shutdown()
+    // Restore the no-provider seam every later test in this file runs on.
+    logs.setGlobalLoggerProvider(/** @type {any} */ (null))
   }
 
   const preview = records.find((record) => record.body === 'sync.pending_preview')

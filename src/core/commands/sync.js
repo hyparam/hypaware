@@ -235,8 +235,9 @@ export async function runSync(argv, ctx) {
   //
   // The counts are over the displayed destinations, so they agree with the
   // plan printed below. On a sharing machine the hidden file copy still
-  // exports and still spends part of that elapsed time, so the line says how
-  // many destinations it left out rather than narrowing in silence.
+  // exports, so the line says how many destinations it left out rather than
+  // narrowing in silence. It spends none of the elapsed time above: the count
+  // is handed the displayed handles only.
   log.info('sync.pending_preview', {
     [Attr.COMPONENT]: 'cmd-sync',
     [Attr.OPERATION]: 'sync.pending_preview',
