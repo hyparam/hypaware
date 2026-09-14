@@ -30,8 +30,15 @@ npx and project-tree predicate. It does not add a persistent configuration key.
 - Headless installation attempts the global install. If it cannot establish the
   durable CLI, fail unless `--force` allows the original installation path.
   Setup's existing `--force` also retains its config-overwrite meaning.
-- Refusing the temporary path stops setup before client attachment and backfill.
-  Configuration already written by setup is retained. The failure exits nonzero.
+- Setup settles the CLI once, before the local-or-team question, and hands
+  the answer to the join lane and the finale as an explicit entrypoint. Both
+  pathways install the same daemon, and the team pathway installs it inside
+  the login lane, whose exit code cannot carry a refusal out; settled up front,
+  no lane asks twice.
+- Refusing the temporary path ends setup before configuration is written,
+  before client attachment, and before backfill. The failure exits nonzero.
+  `hyp join` and `hyp remote login` forward `--force` to the installer they
+  wrap, as they already forward `--bin`.
 - Explicit `--bin` remains an intentional entrypoint override. Dry runs only
   render, and read-only commands do not install packages or ask these questions.
 
@@ -43,9 +50,12 @@ removal consequence rather than claiming every such tree belongs to a project.
 
 A running daemon and a CLI available from the shell are separate outcomes.
 Ignore npm's temporary node_modules PATH additions when checking availability.
-If the durable commands cannot be confirmed to resolve to the selected CLI,
-print an actionable repair and an absolute command for managing this installation.
-For a newly installed global CLI, print the bin directory's PATH addition.
+If no `hyp` resolves on PATH outside them, print an actionable repair and an
+absolute command for managing this installation; for a newly installed global
+CLI, that repair is the bin directory's PATH addition. Any `hyp` that does
+resolve keeps the installer silent. Which copy it is goes unchecked: volta,
+asdf, mise and pnpm all answer with a shim, and a warning keyed on the exact
+file would fire on every one of those installs.
 Do not edit shell startup files. The current process cannot prove the environment
 of a future terminal; guidance must not claim that it has tested one.
 

@@ -1,7 +1,7 @@
 // @ts-check
 
 import { spawn } from 'node:child_process'
-import { accessSync, constants as fsConstants, realpathSync, statSync } from 'node:fs'
+import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -114,26 +114,20 @@ export async function ensureDurableBin(opts) {
 }
 
 /**
- * npm injects temporary .bin directories into PATH. Only a durable command
- * resolving to the selected CLI proves availability outside this invocation.
- * This is advice only: never change the user's shell configuration.
+ * npm injects temporary .bin directories into PATH, so only a `hyp` found
+ * outside them is still there after this command exits. Any such `hyp`
+ * keeps this quiet: which copy it is stays the user's business. This is
+ * advice only: never change the user's shell configuration.
  * @param {string} binPath
  * @param {NodeJS.ProcessEnv} env
  * @param {{ write(chunk: string): unknown }} stderr
  */
 // @ref LLP 0404#shell-availability [implements]: print a repair and an absolute command without editing the shell
 export function writeCliPathGuidance(binPath, env, stderr) {
-  const ephemeral = isEphemeralBinPath(binPath, env)
-  const installed = findInstalledHypawareBin(env)
-  try {
-    if (!ephemeral && installed && realpathSync(installed) === realpathSync(binPath)) {
-      const alias = findInstalledHypawareBin(env, process.platform, undefined, 'hyp')
-      if (alias && realpathSync(alias) === realpathSync(binPath)) return
-    }
-  } catch { /* Missing or stale commands need the same guidance. */ }
+  if (findInstalledHypawareBin(env, process.platform, undefined, 'hyp')) return
   const quote = (/** @type {string} */ value) => "'" + value.replaceAll("'", "'\\''") + "'"
-  stderr.write('warning: hyp is not confirmed available on your shell PATH for this installation.\n')
-  if (!ephemeral && path.basename(binPath) === 'hypaware') {
+  stderr.write('warning: hyp is not on your shell PATH.\n')
+  if (!isEphemeralBinPath(binPath, env) && path.basename(binPath) === 'hypaware') {
     stderr.write(`For sh/bash/zsh, add this line to your shell configuration: export PATH=${quote(path.dirname(binPath))}:"$PATH"\n`)
   } else {
     stderr.write("To make hyp available outside this directory, run: npm install -g hypaware\n")

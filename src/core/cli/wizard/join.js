@@ -218,7 +218,12 @@ export async function defaultRunLogin(opts, login = remoteLogin) {
   const teed = /** @type {CommandRunContext} */ ({ ...ctx, stdout: opts.stdout, stderr: capture.stream })
   // Compact: one line per event. The wizard's later screens carry the
   // privacy block's other sentences, so the lane prints the deadline alone.
-  const { exitCode, reason } = await login([], teed, { compact: true })
+  // The daemon's entrypoint was settled before the fork (LLP 0404); the
+  // lane's install records it rather than resolving one of its own.
+  const { exitCode, reason } = await login([], teed, {
+    compact: true,
+    ...(opts.binPath !== undefined ? { binPath: opts.binPath } : {}),
+  })
   return { exitCode, reason, stderr: capture.text() }
 }
 

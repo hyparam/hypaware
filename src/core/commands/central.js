@@ -168,8 +168,7 @@ export async function runJoin(argv, ctx) {
         return 0
       }
 
-      const installArgv = parsed.binPath !== undefined ? ['--bin', parsed.binPath] : []
-      const code = await runDaemonInstall(installArgv, ctx)
+      const code = await runDaemonInstall(daemonInstallArgv(parsed), ctx)
       if (code !== 0) {
         span.setAttribute('status', 'failed')
         span.setAttribute('error_kind', 'daemon_install_failed')
@@ -193,12 +192,12 @@ export async function runJoin(argv, ctx) {
  * server-owned org), not something the human typed, so provenance, not who
  * ran the command, picks the layer.
  *
- * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean, compact?: boolean }} args `compact` passes through to the daemon install's one-line report
+ * @param {{ ctx: CommandRunContext, url: string, gateway: LoginGatewayCredential, noDaemon: boolean, compact?: boolean, binPath?: string, force?: boolean }} args `compact` passes through to the daemon install's one-line report; `binPath` and `force` are the caller's CLI decision, forwarded to it verbatim
  * @returns {Promise<{ provisioned: boolean, connectedElsewhere?: string, daemonCode: number }>}
  * @ref LLP 0063#d2 [implements]: provision join's exact sink block (minus the bootstrap token) into the central-seed layer, then seed the login-minted identity into it
  * @ref LLP 0063#d5 [implements]: an enrolling login finishes with join's daemon install (join parity); --no-daemon prints the finish-by-hand command
  */
-export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact = false }) {
+export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact = false, binPath, force }) {
   const obsEnv = readObservabilityEnv(ctx.env)
   const stateRoot = obsEnv.stateDir
   const localPath = ctx.env.HYP_CONFIG ? path.resolve(ctx.env.HYP_CONFIG) : defaultConfigPath(obsEnv.hypHome)
@@ -271,8 +270,23 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact =
   }
 
   if (noDaemon) return { provisioned: true, daemonCode: 0 }
-  const daemonCode = await runDaemonInstall([], ctx, { compact })
+  const daemonCode = await runDaemonInstall(daemonInstallArgv({ binPath, force }), ctx, { compact })
   return { provisioned: true, daemonCode }
+}
+
+/**
+ * The enrollment lanes are wrappers over `hyp daemon install` (LLP 0025), so
+ * the two decisions about the CLI it records travel as its own flags: an
+ * explicit entrypoint, and `--force` for keeping a temporary one (LLP 0404).
+ *
+ * @param {{ binPath?: string, force?: boolean }} opts
+ * @returns {string[]}
+ */
+function daemonInstallArgv({ binPath, force }) {
+  return [
+    ...(binPath !== undefined ? ['--bin', binPath] : []),
+    ...(force ? ['--force'] : []),
+  ]
 }
 
 /**
@@ -308,7 +322,7 @@ async function rollbackCentralSeed(stateRoot) {
 
 /**
  * @param {string[]} argv
- * @returns {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean }}
+ * @returns {{ help?: boolean, error?: string, url?: string, token?: string, tokenFile?: string, binPath?: string, noDaemon?: boolean, force?: boolean }}
  */
 function parseJoinArgs(argv) {
   const parsed = parseCommandArgv(argv, {
@@ -319,12 +333,13 @@ function parseJoinArgs(argv) {
       'token-file': { type: 'string' },
       bin: { type: 'string' },
       'no-daemon': { type: 'boolean', default: false },
+      force: { type: 'boolean', default: false },
     },
     positional: ['url', 'token'],
   })
   if ('help' in parsed) return { help: true }
   if (!parsed.ok) return { error: parsed.error }
-  const p = /** @type {{ url?: string, token?: string, 'token-file'?: string, bin?: string, 'no-daemon': boolean }} */ (parsed.params)
+  const p = /** @type {{ url?: string, token?: string, 'token-file'?: string, bin?: string, 'no-daemon': boolean, force: boolean }} */ (parsed.params)
   if (p.url === undefined) return { error: 'missing <url> (see hyp join --help)' }
   // '-' as the token positional means "read from stdin", same as
   // omitting it on a piped invocation.
@@ -332,7 +347,7 @@ function parseJoinArgs(argv) {
   if (token !== undefined && p['token-file'] !== undefined) {
     return { error: 'pass the token either as an argument or via --token-file, not both' }
   }
-  return { url: p.url, token, tokenFile: p['token-file'], binPath: p.bin, noDaemon: p['no-daemon'] }
+  return { url: p.url, token, tokenFile: p['token-file'], binPath: p.bin, noDaemon: p['no-daemon'], force: p.force }
 }
 
 /**
