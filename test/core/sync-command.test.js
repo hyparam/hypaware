@@ -670,8 +670,15 @@ test('a copy sorting between two upload targets does not read as Finishing', asy
   const copyExport = copy.sink.exportBatch
   copy.sink.exportBatch = async (batch, opts) => {
     const before = stdout.text.length
-    // Long enough for the spinner (120ms frames) to render the hidden phase.
-    await new Promise((resolve) => setTimeout(resolve, 400))
+    // Wait for the spinner to actually draw a frame rather than for a fixed
+    // span: the frames are 120ms apart, but a loaded machine can stall past
+    // any sleep this test picks, and an empty window fails for a reason that
+    // has nothing to do with the label. Bounded so a spinner that never draws
+    // still fails on the assertion below instead of hanging the suite.
+    const drawnBy = Date.now() + 5000
+    while (stdout.text.length === before && Date.now() < drawnBy) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
     duringCopy = stdout.text.slice(before)
     return copyExport(batch, opts)
   }
