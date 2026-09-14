@@ -308,13 +308,75 @@ test('the gather is bounded in sessions and in rows, not only by the window', ()
   assert.equal(c.sessions, 500, 'the line is still reported as typed in every session that typed it')
   assert.equal(c.sessionsWithCalls, 40, 'the procedure was read from the sample, and the page says so')
   assert.deepEqual(c.steps.map((step) => [step.command, step.sessions]), [['git checkout -b', 40]], 'the count beside a step is the sample, not every session')
-  assert.ok(renderCandidates({ sessions: 500, sessionDays: 600 }, [c], true).includes('of the 40 most recent whose procedure was read'))
+  assert.ok(renderCandidates({ sessions: 500, sessionDays: 600 }, [c], true).includes('of the 40 sampled sessions whose procedure was read'))
 
   const anchors = sessionAnchors(sample)
   const sql = evidenceSql('2026-08-08')
   assert.equal(anchors.length, 40, 'one anchor a sampled session, whatever lines it typed')
   assert.ok(sql.calls(anchors).endsWith('limit 2400'), 'sixty rows a sampled session: twice the thirty-call window')
   assert.ok(sql.replies(anchors).endsWith('limit 2400'))
+})
+
+test('the sample is bounded across candidate lines, not only within one', () => {
+  // The per-line cap bounds one line; the two list statements pay for the
+  // sum of every line, once per scanned row for the anchor disjunction and
+  // once per named session for the row budget. Five lines in disjoint
+  // sessions name 200, and at 200 the statement is slower than the
+  // unbounded one it replaces (hypaware #1701 review round 2).
+  const at = (i) => new Date(Date.UTC(2026, 7, 10) + i * 60_000)
+  const triggers = []
+  for (let line = 0; line < 5; line += 1) {
+    for (let k = 0; k < 100; k += 1) {
+      const i = line * 100 + k
+      triggers.push({ session_id: `s${String(i).padStart(3, '0')}`, line: `line ${line}`, at: at(i), date: '2026-08-10', example: `line ${line}` })
+    }
+  }
+  const sample = sampleTriggers(triggers)
+  assert.equal(sample.length, 80, 'eighty in all, not five times forty')
+  const perLine = new Map()
+  for (const t of sample) perLine.set(t.line, (perLine.get(t.line) ?? 0) + 1)
+  assert.deepEqual([...perLine.values()], [16, 16, 16, 16, 16], 'the total is divided between the lines, not spent by whichever sorts first')
+  assert.equal(sampleTriggers(sample).length, 80, 'sampling a sampled list is still a no-op')
+  assert.ok(evidenceSql('2026-08-08').calls(sessionAnchors(sample)).endsWith('limit 4800'), 'the budget follows the bounded sample')
+
+  // One line is untouched by the total: it gets the whole per-line cap.
+  const one = sampleTriggers(triggers.filter((t) => t.line === 'line 0'))
+  assert.equal(one.length, 40, 'a single candidate line still reads its full forty')
+})
+
+test('a trigger instant that cannot be written into SQL costs its own session, not the whole gather', () => {
+  // `instant` has a bigint branch, so a message_created_at materialized as
+  // epoch nanoseconds is finite but outside the range `new Date(ms)
+  // .toISOString()` accepts. Unguarded it threw a RangeError out of
+  // `sqlTimestamp`, and the ask ended with no folder at all.
+  const good = new Date(Date.UTC(2026, 7, 10, 9, 0, 0))
+  const triggers = [
+    { session_id: 's1', line: 'ship it', at: 1_755_000_000_000_000_000n },
+    { session_id: 's2', line: 'ship it', at: good, date: '2026-08-10', example: 'ship it' },
+  ]
+  const sample = sampleTriggers(triggers)
+  assert.deepEqual(sample.map((t) => t.session_id), ['s2'], 'the unplaceable trigger never takes a slot in the sample')
+  const anchors = sessionAnchors(sample)
+  assert.deepEqual(anchors, [{ id: 's2', at: good.getTime() }])
+  assert.ok(evidenceSql('2026-08-08').calls(anchors).includes("timestamp '2026-08-10T09:00:00.000Z'"), 'the statement is still built, from the session that can be placed')
+  assert.deepEqual(sessionAnchors(triggers), [{ id: 's2', at: good.getTime() }], 'and the guard holds if the sample is bypassed')
+})
+
+test('an unplaceable trigger does not displace a recent one through a NaN comparator', () => {
+  // The bucket sort subtracts two instants, so an unparseable one makes
+  // the comparator return NaN, which is not an ordering: V8 leaves such
+  // rows wherever they fall, and they were surviving into the newest-forty
+  // sample and then being dropped, costing a session its procedure.
+  const line = 'ship it'
+  const triggers = []
+  for (let i = 0; i < 200; i += 1) {
+    triggers.push({ session_id: `g${String(i).padStart(3, '0')}`, line, at: new Date(Date.UTC(2026, 7, 10) + i * 60_000) })
+    if (i % 4 === 0) triggers.push({ session_id: `b${String(i).padStart(3, '0')}`, line, at: 'not a time' })
+  }
+  const sample = sampleTriggers(triggers)
+  assert.equal(sample.length, 40)
+  assert.equal(sample.filter((t) => typeof t.at === 'string').length, 0, 'no unparseable row holds a slot')
+  assert.equal(sessionAnchors(sample).length, 40, 'forty sessions sampled is forty sessions anchored')
 })
 
 test('sessionAnchors takes the earliest trigger a session has, and drops one it cannot place', () => {
@@ -402,5 +464,5 @@ test('a candidate reports the sessions whose procedure was read, not the session
   const [c] = buildCandidates({ lines: [{ line, sessions: 6, days: 6, typed: 6 }], triggers, calls, replies: [] })
   assert.equal(c.sessionsWithCalls, 2, 'four of the six returned no rows, and the page does not claim them')
   assert.deepEqual(c.steps.map((step) => [step.command, step.sessions]), [['git commit -m', 2]])
-  assert.ok(renderCandidates({ sessions: 60, sessionDays: 90 }, [c], true).includes('(sessions that ran it, of the 2 most recent whose procedure was read)'))
+  assert.ok(renderCandidates({ sessions: 60, sessionDays: 90 }, [c], true).includes('(sessions that ran it, of the 2 sampled sessions whose procedure was read)'))
 })

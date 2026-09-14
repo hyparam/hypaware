@@ -81,11 +81,45 @@ const CALLS_AFTER = 30
 const TRIGGER_SESSIONS = 40
 
 /**
+ * Sessions the two list statements may name in total, across every
+ * candidate line. The per-line cap alone is not a bound on the statement:
+ * five lines typed in five disjoint sets of sessions name
+ * `CANDIDATES * TRIGGER_SESSIONS` = 200, and the statement costs
+ * `O(sessions)` per scanned row (the anchor disjunction) and
+ * `O(sessions)` rows of sort buffer (the budget below), so both scale
+ * with the product rather than with 40.
+ *
+ * Measured through `executeQuerySql` over 500 sessions x 300 tool calls,
+ * the same 150,000-row shape as hypaware #1701, against the unbounded
+ * statement this replaces (150,000 rows, 15.8 s, 176 MB peak):
+ *
+ * ```
+ *  40 sessions   2,400 rows    3.7 s    25 MB
+ *  80 sessions   4,800 rows    8.8 s    55 MB
+ * 120 sessions   7,200 rows   12.8 s    79 MB
+ * 200 sessions  12,000 rows   27.5 s   122 MB
+ * ```
+ *
+ * At 200 the gather is slower than the unbounded statement it replaces
+ * and barely cheaper in memory, so the product is what has to be bounded.
+ * Eighty keeps a single candidate line at its full 40 and halves the cost
+ * of the worst case, and the sample stays fair by dividing the total
+ * between the lines rather than taking the newest 80 overall, which would
+ * read nothing for a line whose sessions are all older than another's.
+ */
+const TRIGGER_SESSIONS_TOTAL = 80
+
+/**
  * The row budget either session list is given for each session it names.
  * Twice the procedure window, because both statements read past what the
  * window is: a session that typed two candidate lines is anchored at the
  * earlier one, and the ending is the first substantial reply after the
  * window, so the replies inside it are read and dropped.
+ *
+ * Sessions, not triggers: a session that typed two candidate lines is
+ * anchored once and budgeted once, so it can need more than its share.
+ * Raising the budget to the trigger count would buy that back, at the
+ * sort-buffer cost `TRIGGER_SESSIONS_TOTAL` exists to bound.
  *
  * The statement's `limit` is the sum of the budgets, not a ceiling applied
  * to each session on its own. This engine cannot say the latter without a
@@ -147,6 +181,21 @@ function sqlString(s) {
  */
 function sqlTimestamp(ms) {
   return `timestamp '${new Date(ms).toISOString()}'`
+}
+
+/**
+ * Whether a trigger instant can be both compared and written into SQL.
+ * `Number.isFinite` is not enough on its own: `instant` has a `bigint`
+ * branch, so a `message_created_at` that materializes as epoch
+ * microseconds or nanoseconds yields a finite number that
+ * `new Date(ms).toISOString()` rejects with a `RangeError`. Unguarded,
+ * that throw leaves the ask with no folder at all, where one unplaceable
+ * session should only ever cost that session its procedure.
+ *
+ * @param {number} at
+ */
+function placeable(at) {
+  return Number.isFinite(at) && Math.abs(at) <= 8.64e15
 }
 
 /**
@@ -243,12 +292,16 @@ export function commandHeads(calls) {
 }
 
 /**
- * The newest `perLine` sessions that typed each candidate line. The
- * trigger query returns one row per session that typed one, and every row
- * of it becomes a session id in the two list statements, so this is what
- * makes them bounded. Per line rather than over the whole set, or a
- * candidate whose sessions are all older than another's gets none of its
- * procedure read.
+ * The newest sessions that typed each candidate line. The trigger query
+ * returns one row per session that typed one, and every row of it becomes
+ * a session id in the two list statements, so this is what makes them
+ * bounded. Per line rather than over the whole set, or a candidate whose
+ * sessions are all older than another's gets none of its procedure read.
+ *
+ * Each line gets an equal share of `TRIGGER_SESSIONS_TOTAL`, capped at
+ * `perLine`: the per-line cap bounds one line, but the statements pay for
+ * the sum of every line, so the sum is what the share bounds. One line
+ * still gets its full `perLine`; five get a fifth of the total each.
  *
  * The sample keeps its newest-first order, so the page shows the recent
  * record: the example is the oldest occurrence in the sample rather than
@@ -264,16 +317,23 @@ export function sampleTriggers(triggers, perLine = TRIGGER_SESSIONS) {
   /** @type {Map<string, Record<string, unknown>[]>} */
   const byLine = new Map()
   for (const t of triggers) {
+    // Dropped here rather than downstream. The sort below subtracts two
+    // instants, so an unplaceable one makes the comparator return NaN,
+    // which is not an ordering: the row survives into the sample, takes a
+    // slot from a session that has a procedure to read, and is dropped by
+    // `sessionAnchors` afterwards.
+    if (!placeable(instant(t.at))) continue
     const line = String(t.line ?? '')
     const bucket = byLine.get(line)
     if (bucket) bucket.push(t)
     else byLine.set(line, [t])
   }
+  const share = Math.min(perLine, Math.max(1, Math.floor(TRIGGER_SESSIONS_TOTAL / Math.max(1, byLine.size))))
   /** @type {Record<string, unknown>[]} */
   const out = []
   for (const bucket of byLine.values()) {
-    if (bucket.length > perLine) bucket.sort((a, b) => instant(b.at) - instant(a.at))
-    const take = Math.min(perLine, bucket.length)
+    if (bucket.length > share) bucket.sort((a, b) => instant(b.at) - instant(a.at))
+    const take = Math.min(share, bucket.length)
     for (let i = 0; i < take; i += 1) out.push(bucket[i])
   }
   return out
@@ -300,7 +360,7 @@ export function sessionAnchors(triggers) {
     const id = String(t.session_id ?? '')
     if (!id) continue
     const at = instant(t.at)
-    if (!Number.isFinite(at)) continue
+    if (!placeable(at)) continue
     const seen = earliest.get(id)
     if (seen === undefined || at < seen) earliest.set(id, at)
   }
@@ -430,7 +490,7 @@ export function renderCandidates(record, candidates, enough) {
     `## ${i + 1}. "${c.line}"`,
     `Typed ${c.typed} times in ${c.sessions} sessions on ${c.days} days.${c.example ? ` Example, ${c.example.date}: "${c.example.text}"` : ''}`,
     '',
-    `Commands that ran in the ${CALLS_AFTER} tool calls after it (sessions that ran it, of the ${c.sessionsWithCalls} most recent whose procedure was read):`,
+    `Commands that ran in the ${CALLS_AFTER} tool calls after it (sessions that ran it, of the ${c.sessionsWithCalls} sampled sessions whose procedure was read):`,
     ...(c.steps.length > 0 ? c.steps.map((s) => `- \`${s.command}\` (${s.sessions})`) : ['- (no standard commands)']),
     `Other activity: ${c.other.map((o) => `${o.head} (${o.sessions})`).join('; ') || 'none'}`,
     ...(c.ending ? ['', `How one ended (${c.ending.date}): "${c.ending.text}"`] : []),
