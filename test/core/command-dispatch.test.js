@@ -608,7 +608,7 @@ test('leaf command --help renders summary, usage, and long help', async () => {
   assert.equal(code, 0)
   const out = stdout.text()
   assert.match(out, /^hyp privacy ignore - Exclude a folder subtree/)
-  assert.match(out, /usage: hyp privacy ignore \[path\] \[--check\] \[--json\] \[--local-only \| --private \| --sync\]/)
+  assert.match(out, /usage: hyp privacy ignore \[path\]/)
   assert.match(out, /Writes a \.hypignore/)
 })
 
@@ -917,7 +917,7 @@ test('unattach alias routes a positional client through the core disk undo', asy
   assert.equal(out.client, 'claude')
 })
 
-test('attach rejects conflicting positional and flag client names', async () => {
+test('attach rejects the removed client flag', async () => {
   const { registry, kernel, calls } = fakeClientKernel()
   const stdout = makeBuf()
   const stderr = makeBuf()
@@ -932,7 +932,7 @@ test('attach rejects conflicting positional and flag client names', async () => 
 
   assert.equal(code, 2)
   assert.equal(stdout.text(), '')
-  assert.match(stderr.text(), /client specified multiple times \(codex, claude\)/)
+  assert.match(stderr.text(), /unknown argument: --client/)
   assert.deepEqual(calls, [])
 })
 

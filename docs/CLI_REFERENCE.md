@@ -498,7 +498,7 @@ hyp client status claude --json
 ### `hyp client attach`
 
 ```text
-hyp client attach [client] [--client <name>] [--dry-run] [--json]
+hyp client attach [client] [--dry-run] [--json]
 ```
 
 Writes only HypAware-managed client settings and installs registered skills and
@@ -520,7 +520,7 @@ XDG config home and session store.
 ### `hyp client detach`
 
 ```text
-hyp client detach [client] [--client <name>] [--dry-run] [--purge] [--json]
+hyp client detach [client] [--dry-run] [--purge] [--json]
 ```
 
 Replays the on-disk undo marker and removes only managed settings. It keeps
@@ -910,26 +910,25 @@ hyp privacy list --json
 ### `hyp privacy ignore`
 
 ```text
-hyp privacy ignore [path] [--check] [--json] [--local-only | --private | --sync]
+hyp privacy ignore [path]
 ```
 
-Without a class flag, writes a shareable `.hypignore` file at the explicit path
-or repository root. `--private`, `--local-only`, and `--sync` write the
-equivalent machine-local marking instead. `--check` reports without writing.
-The flags are mutually exclusive.
+Writes a shareable `.hypignore` file at the explicit path or repository root.
+Use `hyp privacy set <path> sync|local-only|ignore` for machine-local markings
+and `hyp privacy show [path]` to report without writing.
 
 ```sh
-hyp privacy ignore ./customer-data --check
+hyp privacy ignore ./customer-data
 ```
 
 ### `hyp privacy unignore`
 
 ```text
-hyp privacy unignore [path] [--local-only | --private | --sync]
+hyp privacy unignore [path]
 ```
 
-Without a class flag, removes the nearest governing `.hypignore`. A class flag
-removes the matching machine-local entry. It doesn't remove cached rows.
+Removes the nearest governing `.hypignore`. Use `hyp privacy unset <path>`
+to remove machine-local markings. It does not remove cached rows.
 
 ```sh
 hyp privacy unignore ./customer-data
@@ -1071,14 +1070,14 @@ hyp daemon uninstall
 ### `hyp daemon run`
 
 ```text
-hyp daemon run --foreground [--config <path>]
+hyp daemon run [--config <path>]
 ```
 
 Runs the daemon in the current terminal until it receives a stop signal.
-`--foreground` is required.
+`daemon start` starts the installed service.
 
 ```sh
-hyp daemon run --foreground
+hyp daemon run
 ```
 
 ### `hyp daemon start`
@@ -1157,7 +1156,7 @@ hyp config --help
 ### `hyp config validate`
 
 ```text
-hyp config validate [--path <file>]
+hyp config validate [file]
 ```
 
 Loads the effective configuration or an explicit file and cross-validates
@@ -1165,7 +1164,7 @@ plugin, dataset, source, and sink contracts. It is read-only. Validation
 failures return `1` with detailed pointers.
 
 ```sh
-hyp config validate --path ./hypaware-config.json
+hyp config validate ./hypaware-config.json
 ```
 
 ## Manage the local cache
@@ -1420,7 +1419,7 @@ secret to `ps` and to `set -x` traces on the runner:
 ```sh
 # setup
 printf '%s' "$HYP_CI_TOKEN" | hyp join https://hyp.example.com --no-daemon
-hyp daemon run --foreground &
+hyp daemon run &
 # ... the job's steps ...
 # teardown: flush what the schedule has not exported yet
 hyp sync --yes

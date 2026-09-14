@@ -359,7 +359,7 @@ test('renderDaemonInstall renders a deterministic systemd dry-run payload', () =
   assert.equal(plan.serviceKind, 'systemd unit: hypaware.service')
   assert.equal(plan.targetPath, '/home/hyp/.config/systemd/user/hypaware-test.service')
   assert.equal(plan.configPath, '/home/hyp/.hyp/hypaware-config.json')
-  assert.match(plan.content, /^ExecStart=\/usr\/local\/bin\/node \/opt\/hypaware\/bin\/hypaware\.js daemon run --foreground --config \/home\/hyp\/\.hyp\/hypaware-config\.json$/m)
+  assert.match(plan.content, /^ExecStart=\/usr\/local\/bin\/node \/opt\/hypaware\/bin\/hypaware\.js daemon run --config \/home\/hyp\/\.hyp\/hypaware-config\.json$/m)
   assert.match(plan.content, /^RestartSec=9$/m)
   assert.match(plan.content, /^Environment="HYP_ENV=test value"$/m)
   assert.deepEqual(plan.manageCommands[0], ['systemctl', '--user', 'daemon-reload'])
@@ -785,4 +785,43 @@ export async function activate(ctx) {
 `
   )
   return installDir
+}
+
+// @ref LLP 0406#installed-services [tests]: bare run and old installed-unit argv both start and stop in the invoking process
+for (const flags of [[], ['--foreground'], ['-f']]) {
+  test(`daemon run ${flags.join(' ')} starts and stops without a required mode flag`, async () => {
+    const { spawn } = await import('node:child_process')
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-daemon-run-argv-'))
+    const configPath = path.join(root, 'config.json')
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+    const child = spawn(process.execPath, [path.resolve('bin/hypaware.js'), 'daemon', 'run', ...flags, '--config', configPath], {
+      env: { ...process.env, HOME: root, HYP_HOME: root, HYP_DEV_TELEMETRY: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    let stopped = false
+    const timeout = setTimeout(() => child.kill('SIGKILL'), 20000)
+    child.stdout.on('data', chunk => {
+      stdout += chunk
+      if (!stopped && stdout.includes('daemon: running')) {
+        stopped = true
+        child.kill('SIGTERM')
+      }
+    })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    try {
+      const code = await new Promise((resolve, reject) => {
+        child.once('error', reject)
+        child.once('close', resolve)
+      })
+      assert.equal(code, 0, stderr)
+      assert.match(stdout, /daemon: running/)
+      assert.match(stdout, /daemon: stopped/)
+    } finally {
+      clearTimeout(timeout)
+      child.kill('SIGKILL')
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
 }

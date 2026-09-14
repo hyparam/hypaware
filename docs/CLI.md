@@ -168,7 +168,7 @@ For a repeatable reconfiguration from a reviewed file, validate the file and
 then replace the current local configuration:
 
 ```sh
-hyp config validate --path ./hypaware-config.json
+hyp config validate ./hypaware-config.json
 hyp setup --from-file ./hypaware-config.json --force
 hyp status
 ```
@@ -245,7 +245,7 @@ If you have a known-good configuration file, restore it through the supported
 setup path:
 
 ```sh
-hyp config validate --path ./known-good-config.json
+hyp config validate ./known-good-config.json
 hyp setup --from-file ./known-good-config.json --force
 hyp daemon install
 hyp status

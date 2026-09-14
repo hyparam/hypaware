@@ -14,7 +14,7 @@ Two things make headless different from a laptop install:
 - **No service manager.** Container runners usually lack launchd and
   systemd, so the daemon runs as a foreground process that your CI shell
   or supervisor backgrounds, via `hyp join --no-daemon` plus
-  `hyp daemon run --foreground`.
+  `hyp daemon run`.
 
 Every run that joins with one token lands under **one shared gateway** on the
 server, so a pipeline's runs stay grouped together. A token-based join
@@ -52,7 +52,7 @@ appears in `ps` output or `set -x` traces:
 ```sh
 # setup
 printf '%s' "$HYP_CI_TOKEN" | hyp join https://hyp.example.com --no-daemon
-hyp daemon run --foreground &
+hyp daemon run &
 
 # ... the job's agent steps run unchanged ...
 
@@ -82,7 +82,7 @@ jobs:
         run: |
           npm install -g hypaware
           printf '%s' "$HYP_CI_TOKEN" | hyp join https://hyp.example.com --no-daemon
-          hyp daemon run --foreground &
+          hyp daemon run &
       - name: Run the agent
         run: |
           # the job's agent steps, e.g.
@@ -109,7 +109,7 @@ systemd. Both are per-user services, not system ones: on Linux it is a systemd
 **user** unit, so a headless host needs `loginctl enable-linger <user>` for it
 to start at boot and to survive the last session logging out, and on macOS it
 is a LaunchAgent, which needs a logged-in user session. In a container image or a host without a
-service manager, keep `--no-daemon` and run `hyp daemon run --foreground` as
+service manager, keep `--no-daemon` and run `hyp daemon run` as
 the entrypoint or under your own supervisor. No teardown flush is needed on a
 machine that keeps running; the scheduled exports drain it. Flush with
 `hyp sync --yes` before deliberately retiring the machine.

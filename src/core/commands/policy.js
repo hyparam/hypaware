@@ -37,13 +37,12 @@ import { buildAttachPluginCatalog, runIgnoreCheck, runMarkMachineLocal, runUnmar
  * over the machine-local usage-class store that replaces the
  * `hyp ignore --sync`/`--local-only`/`--private` misnomer. `set` / `show` /
  * `unset` / `list` are thin runners over the marking internals hoisted in
- * `src/core/commands/clients.js`; the `hyp ignore`/`hyp unignore` flag forms
- * keep working as delegating compatibility aliases (see
+ * `src/core/commands/clients.js` (see
  * {@link runMarkMachineLocal}, {@link runUnmarkMachineLocal},
  * {@link runIgnoreCheck}). The store format, the shared resolver, and the
  * three-class lattice are untouched (LLP 0103 #cli). Every human line these
  * runners print goes through {@link PUBLIC_VOCABULARY}, so the verb answers
- * in the vocabulary it teaches; `--json` and the aliases do not.
+ * in the vocabulary it teaches; `--json` keeps the resolver vocabulary.
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy` verb surface that retires the `hyp ignore --sync` misnomer
  * @ref LLP 0111#surface [implements]: `policy set` / `show` / `unset` / `list`, registered as a `makeGroupCommand` group
@@ -83,9 +82,7 @@ const STORE_LABEL = 'machine-local policy store'
  * vocabulary the user typed and the hook and the privacy skill teach, never
  * the stored class or the store's file path. `--json` never routes through
  * this, so the machine contract keeps emitting the resolver vocabulary and
- * the real store path; the deprecated `hyp ignore` / `hyp unignore` flag
- * aliases do not pass it and keep their exact legacy output (LLP 0111
- * #aliases). A governing `.hypignore` is still named by its real path: it is
+ * the real store path. A governing `.hypignore` is still named by its real path: it is
  * a file the user can open and edit, not an internal.
  *
  * @ref LLP 0111#tokens [implements]: the class-to-token mapping is a CLI-edge rendering; the store and the JSON keep speaking `full`
@@ -106,9 +103,7 @@ const PUBLIC_VOCABULARY = {
  * which is exactly the internals-leaking vocabulary this verb exists to
  * avoid (LLP 0111 #tokens). Scoped to the four `policy` runners only
  * ({@link runPolicySet}, {@link runPolicyShow}, {@link runPolicyUnset},
- * {@link runPolicyList}): `hyp status` and the deprecated `hyp
- * ignore`/`hyp unignore` aliases keep the resolver's own wording (LLP 0111
- * #aliases).
+ * {@link runPolicyList}): `hyp status` keeps the resolver's own wording.
  *
  * Catching here also means the error never reaches the dispatcher's generic
  * catch, which is what tags the `command.run` span with `error_kind`. So this
@@ -217,8 +212,7 @@ function parsePolicyListArgs(argv) {
  *
  * Writes a machine-local usage-class marking for `<path>` in the
  * class-per-entry store (LLP 0103), delegating to
- * {@link runMarkMachineLocal}, the internal both this verb and the
- * `hyp ignore --sync`/`--local-only`/`--private` compatibility aliases call.
+ * {@link runMarkMachineLocal}.
  * `<path>` is required (the bare grammar makes it necessary: `hyp policy set
  * sync` would be ambiguous between a path and a class token) and resolved
  * against the command-context cwd, matching the sibling verbs; the resolved
@@ -261,12 +255,10 @@ export async function runPolicySet(argv, ctx) {
  * class, the governing source (`dotfile`/`machine-local`/`none`), the
  * governing file, and the residual already-cached row count with the
  * `hyp purge` hint. Prospective-only, never destructive. `--json` emits the
- * exact field set `hyp ignore --check --json` emits today (byte-compatible),
- * since {@link runIgnoreCheck} is the shared implementation both spellings
- * call.
+ * stable resolver field set from {@link runIgnoreCheck}.
  *
  * @ref LLP 0110 [implements]: the class-neutral `policy show`, the `hyp ignore --check` successor
- * @ref LLP 0111#show [implements]: `--json` stays byte-compatible with today's `--check --json` field set
+ * @ref LLP 0111#show [implements]: `--json` stays the established resolver field set is preserved
  * @ref LLP 0111#tokens [implements]: a corrupt store still speaks the policy-store wording, never "the local-only list"
  * @ref LLP 0103#reporting [constrained-by]: the report names which source governs (dotfile vs machine-local entry) and the class
  * @ref LLP 0103#cli [constrained-by]: the store, resolver, and class lattice are unchanged; only the verb spelling is new
@@ -297,8 +289,7 @@ export async function runPolicyShow(argv, ctx) {
  * every machine-local entry governing the target is removed, "back to the
  * implicit default" (LLP 0111 #unset), matching the store's one-entry-per-dir
  * shape. An optional trailing class token scopes removal to that class only
- * - the scoped form the `hyp unignore --sync`/`--local-only`/`--private`
- * aliases delegate to. Both forms delegate to {@link runUnmarkMachineLocal}.
+ * through {@link runUnmarkMachineLocal}.
  * `unset` never touches `.hypignore` dotfiles and never touches cached rows
  * (LLP 0104 boundary). Idempotent: nothing governing (of the given class, or
  * of any class) is a no-op success.

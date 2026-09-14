@@ -59,7 +59,7 @@ import { pluginStateDir } from './plugin.js'
  */
 
 /**
- * `hyp attach [client] [--client <name>] [--dry-run] [--json]`
+ * `hyp attach [client] [--dry-run] [--json]`
  *
  * Resolves the `hypaware.ai-gateway` capability, looks up the named
  * client adapter, and dispatches to the adapter's `attach()`. Each
@@ -75,7 +75,7 @@ export async function runAttach(argv, ctx) {
 }
 
 /**
- * `hyp detach [client] [--client <name>]`
+ * `hyp detach [client]`
  *
  * Reverses a client's attach. Unlike `attach`, detach does **not**
  * dispatch to a per-adapter hook: it routes through the single core,
@@ -161,7 +161,7 @@ async function runClientLifecycle(action, argv, ctx) {
   // Tracks which single client name (if any) this invocation just enabled
   // through T9's accept path at THIS gate, so the loop below knows to offer
   // T10's backfill consent for it once its attach() actually succeeds.
-  // `maybeInteractiveEnableAttach` already refuses `--client all`, so at
+  // `maybeInteractiveEnableAttach` already refuses `all`, so at
   // most one name can ever be set here.
   let capMissingActivatedName
   /** @type {AiGatewayCapability | undefined} */
@@ -806,7 +806,7 @@ async function maybeInteractiveEnableAttach({ name, ctx, parsed, enablement }) {
   // at all, which this prompt has nothing to enable either.
   if (enablement.state !== 'not_enabled') return { activated: false }
   // `hyp attach all` never prompts mid-run (see the call site's own comment);
-  // a bare `--client all` reaching here would ask once per missing client
+  // a bare `all` reaching here would ask once per missing client
   // with no way to say "no" to the rest.
   if (parsed.client === 'all') return { activated: false }
   if (parsed.json || !isTty(ctx.stdin)) return { activated: false }
@@ -1663,7 +1663,7 @@ function writeCoreDetachOutput({ ctx, name, json, quietNoop, result }) {
 }
 
 /**
- * Parse an optional positional client name plus `--client <name>`,
+ * Parse an optional positional client name plus
  * `--dry-run`, and `--json` from argv.
  * @param {string[]} argv
  */
@@ -1674,14 +1674,11 @@ function parseClientArgs(argv) {
   let requestedClient
   /**
    * @param {string | undefined} value
-   * @param {'--client'|'positional'} source
    * @returns {boolean}
    */
-  function setClient(value, source) {
+  function setClient(value) {
     if (!value || value.startsWith('-')) {
-      r.error = source === '--client'
-        ? '--client requires a name'
-        : 'client name is required'
+      r.error = 'client name is required'
       return false
     }
     // Match client names case-insensitively. The products are branded
@@ -1714,13 +1711,8 @@ function parseClientArgs(argv) {
       r.purge = true
       continue
     }
-    if (arg === '--client' || arg.startsWith('--client=')) {
-      const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
-      if (!setClient(value, '--client')) return r
-      continue
-    }
     if (!arg.startsWith('-')) {
-      if (!setClient(arg, 'positional')) return r
+      if (!setClient(arg)) return r
       continue
     }
     r.error = `unknown argument: ${arg}`
@@ -1803,7 +1795,7 @@ async function purgeProxyTrustResidue({ ctx }) {
 }
 
 /**
- * Resolve `--client all` to every registered client name; otherwise
+ * Resolve `all` to every registered client name; otherwise
  * return the requested name verbatim.
  *
  * @param {string} requested
@@ -1847,7 +1839,7 @@ function mergeClientRegistries(primary, fallback) {
 }
 
 /**
- * Resolve `--client all` to every known client name from the descriptor map
+ * Resolve `all` to every known client name from the descriptor map
  * (bundled+installed) for the disk-driven detach; otherwise return the
  * requested name verbatim (validated against the map at the call site). Detach
  * must not consult the live gateway registry: a client whose adapter was
@@ -1862,65 +1854,26 @@ function expandDetachClientNames(requested, descriptors) {
   return [requested]
 }
 
-// Usage string shared by the parse-error path and the CLI help registry
-// (LLP 0103 #cli): kept next to the parser so the two never drift apart.
-const IGNORE_USAGE = 'hyp ignore [path] [--check] [--json] [--local-only | --private | --sync]'
-
 /**
- * Parse `hyp ignore` / `hyp unignore` argv: an optional positional path, the
- * `--check` / `--json` flags (`--check` is meaningful for `ignore` only), and
- * the three machine-local marking flags (LLP 0103 #cli), mutually exclusive:
- * `--local-only` (unchanged since LLP 0072), `--private` (a machine-local
- * `ignore` entry), and `--sync` (an explicit machine-local `full` entry, this
- * task's pick for the explicit-sync spelling). Bare `hyp ignore <path>` with
- * none of the three keeps its LLP 0049 dotfile meaning.
- *
- * @ref LLP 0103#cli [implements]: `--private` / `--sync` flag parsing, mutually exclusive with `--local-only`
+ * Parse the optional dotfile target. Machine-local policy uses privacy set/show/unset.
  * @param {string[]} argv
- * @returns {{ check: boolean, json: boolean, localOnly: boolean, private: boolean, sync: boolean, path?: string, error?: string }}
+ * @returns {{ path?: string, error?: string }}
  */
+// @ref LLP 0406#surface [implements]: dotfile commands reject retired policy flags before any write
 function parseIgnoreArgs(argv) {
-  const empty = { check: false, json: false, localOnly: false, private: false, sync: false }
   const parsed = parseCommandArgv(argv, {
     type: 'object',
-    properties: {
-      path: { type: 'string' },
-      check: { type: 'boolean', default: false },
-      json: { type: 'boolean', default: false },
-      'local-only': { type: 'boolean', default: false },
-      private: { type: 'boolean', default: false },
-      sync: { type: 'boolean', default: false },
-    },
+    properties: { path: { type: 'string' } },
     positional: ['path'],
   }, STRICT_SHORT_FLAGS)
-  if ('help' in parsed) return { ...empty, error: `usage: ${IGNORE_USAGE}` }
-  if (!parsed.ok) return { ...empty, error: parsed.error }
-  const p = /** @type {{ path?: string, check: boolean, json: boolean, 'local-only': boolean, private: boolean, sync: boolean }} */ (
-    parsed.params
-  )
-  const markingFlags = [p['local-only'], p.private, p.sync].filter(Boolean).length
-  if (markingFlags > 1) {
-    return { ...empty, error: '--local-only, --private, and --sync are mutually exclusive' }
-  }
-  return { check: p.check, json: p.json, localOnly: p['local-only'], private: p.private, sync: p.sync, path: p.path }
+  if ('help' in parsed) return { error: 'usage: hyp privacy ignore [path]' }
+  if (!parsed.ok) return { error: parsed.error }
+  return /** @type {{ path?: string }} */ (parsed.params)
 }
 
 /**
- * `hyp ignore [path] [--check] [--local-only | --private | --sync]`
- *
- * Without any flag, writes a self-documenting `.hypignore` (comment header +
- * `ignore` token) so HypAware stops recording the folder subtree. The file
- * lands at the git **repo root** when the target is inside a repo, else at the
- * target directory; an explicit `path` overrides the default (cwd) target. The
- * write is idempotent (LLP 0049 R5): a path already governed by an ancestor
- * `.hypignore` is left as-is. With `--check`, reports status without writing.
- * With one of the three machine-local flags, marks the target in the
- * machine-local class-per-entry store instead of touching a dotfile
- * (LLP 0103 #cli): see {@link runMarkMachineLocal}. The bare-path dotfile
- * meaning is unchanged from LLP 0049.
- *
- * @ref LLP 0049#cli [implements]: the `hyp ignore` verb: write the dotfile at the repo root, idempotent, with a prospective-only `--check`
- * @ref LLP 0103#cli [implements]: `--private` / `--sync` dispatch to the machine-local marking verb, alongside the existing `--local-only`
+ * Write a .hypignore at the explicit path, or the repo root by default.
+ * @ref LLP 0049#cli [implements]: dotfile creation is idempotent and prospective-only
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -1934,30 +1887,6 @@ export async function runIgnore(argv, ctx) {
   // sibling verbs above), not the Node process cwd, so injected/remote/test
   // dispatch writes/removes/checks the tree the caller actually pointed at.
   const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
-  // @ref LLP 0111#aliases [implements]: the --check/--private/--local-only/--sync flag branches are deprecated compatibility aliases that delegate to exactly the hoisted internals the `policy` subcommands call, so alias behavior can never drift from the verb's; the flag forms' repo-root defaulting (repoRootDefaultTarget) is preserved here at the alias edge
-  if (parsed.check) return runIgnoreCheck({ targetDir: base, ctx, json: parsed.json })
-  if (parsed.private)
-    return runMarkMachineLocal({
-      targetDir: repoRootDefaultTarget(base, parsed.path),
-      ctx,
-      targetClass: 'ignore',
-      component: 'cmd-ignore',
-    })
-  if (parsed.localOnly)
-    return runMarkMachineLocal({
-      targetDir: repoRootDefaultTarget(base, parsed.path),
-      ctx,
-      targetClass: 'local-only',
-      component: 'cmd-ignore',
-    })
-  if (parsed.sync)
-    return runMarkMachineLocal({
-      targetDir: repoRootDefaultTarget(base, parsed.path),
-      ctx,
-      targetClass: 'full',
-      component: 'cmd-ignore',
-    })
-
   // Idempotent (R5): a fresh resolver reflects disk. Any governing ancestor
   // `.hypignore` already ignores `base` (V1 has no un-ignore directive, any
   // `.hypignore` resolves to `ignore`), so re-ignoring is a no-op success
@@ -1993,15 +1922,8 @@ export async function runIgnore(argv, ctx) {
 }
 
 /**
- * Shared target-resolution rule for the marking verbs that default to a git
- * repo root: an explicit `path` argument always wins (the caller pointed at
- * it directly), otherwise resolve `base` up to its containing repo root, or
- * `base` itself outside a repo. Shared by the `hyp ignore` bare-dotfile
- * branch and the deprecated `--private`/`--local-only`/`--sync` alias
- * branches so both keep one placement rule (LLP 0103 #cli). `policy set`
- * does not call this: it marks the resolved directory exactly as pointed at,
- * with no repo-root default (LLP 0111 #set); only the flag-alias edge needs
- * the legacy default preserved (LLP 0111 #aliases).
+ * Resolve the dotfile target: an explicit path wins, otherwise use the
+ * containing repo root or the cwd outside a repo.
  *
  * @param {string} base
  * @param {string | undefined} explicitPath
@@ -2012,13 +1934,9 @@ function repoRootDefaultTarget(base, explicitPath) {
 }
 
 /**
- * The human wording the deprecated `hyp ignore` / `hyp unignore` flag aliases
- * print: internals verbatim, which is exactly what they printed before the
- * `hyp policy` verb existed. Keeping it as the default of the shared writers
- * is what makes the aliases output-identical by construction (LLP 0111
- * #aliases) while `policy` renders the public vocabulary (LLP 0111 #tokens).
+ * Default rendering for direct internal callers. Privacy commands supply
+ * their public vocabulary; JSON always retains the resolver vocabulary.
  *
- * @ref LLP 0111#aliases [implements]: the alias spellings keep their exact stdout, internal class name and store path included
  * @type {PolicyHumanVocabulary}
  */
 const INTERNAL_VOCABULARY = {
@@ -2028,17 +1946,9 @@ const INTERNAL_VOCABULARY = {
 }
 
 /**
- * `hyp ignore --private [path]` / `hyp ignore --local-only [path]` /
- * `hyp ignore --sync [path]`
- *
- * Marks `targetDir` with `targetClass` in the machine-local class-per-entry
- * store (LLP 0103) instead of writing a `.hypignore`: never writes into a
- * repo (LLP 0071 R4, LLP 0100 R6), so the target need not exist on disk or be
- * a git repo. Verb-agnostic: the caller decides `targetDir` (the deprecated
- * `--private`/`--local-only`/`--sync` flag branches resolve it via
- * {@link repoRootDefaultTarget}, matching plain `hyp ignore`'s placement
- * rule; `policy set` passes its already-resolved path with no repo-root
- * default, LLP 0111 #set), so this one implementation backs both spellings.
+ * Mark the caller-resolved directory in the machine-local policy store.
+ * The directory need not exist; this never writes into the repository.
+ * Privacy set passes the exact requested directory (LLP 0111 #set).
  *
  * - `ignore`: rows from the scope are never recorded (enforced at the
  *   capture seam, same as a dotfile `ignore`).
@@ -2056,8 +1966,8 @@ const INTERNAL_VOCABULARY = {
  * existing *explicit* machine-local `full` entry (the implicit default for
  * an unlisted directory is not "already answered", LLP 0103).
  *
- * @ref LLP 0103#cli [implements]: the shared machine-local marking verb behind `--private` / `--local-only` / `--sync`
- * @ref LLP 0111#surface [implements]: also the shared implementation behind `policy set`; the `component` attribute names the dispatching verb and `vocabulary` picks that verb's human wording
+ * @ref LLP 0103#cli [implements]: machine-local class-per-entry marking
+ * @ref LLP 0111#surface [implements]: the implementation behind `policy set`; the `component` attribute names the dispatching verb and `vocabulary` picks that verb's human wording
  * @param {{ targetDir: string, ctx: CommandRunContext, targetClass: UsageClass, component: string, vocabulary?: PolicyHumanVocabulary }} args
  * @returns {Promise<number>}
  */
@@ -2099,17 +2009,13 @@ export async function runMarkMachineLocal({ targetDir, ctx, targetClass, compone
 }
 
 /**
- * `hyp unignore [path] [--local-only | --private | --sync]`
+ * `hyp unignore [path]`
  *
  * Removes the nearest governing `.hypignore`, re-enabling recording for the
  * subtree. Idempotent (LLP 0049 R5): unignoring a path that no `.hypignore`
- * governs succeeds as a no-op. With one of the three machine-local flags,
- * removes every machine-local entry of that class that governs the target
- * instead (LLP 0103 #cli, symmetric with the `hyp ignore` marking verbs):
- * see {@link runUnmarkMachineLocal}.
+ * governs succeeds as a no-op. Machine-local removal uses privacy unset.
  *
  * @ref LLP 0049#cli [implements]: the `hyp unignore` verb: remove the governing dotfile, idempotent
- * @ref LLP 0103#cli [implements]: `--private` / `--sync` dispatch to the symmetric machine-local unmarking verb
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  */
@@ -2119,24 +2025,10 @@ export async function runUnignore(argv, ctx) {
     ctx.stderr.write(`error: ${parsed.error}\n`)
     return 2
   }
-  if (parsed.check) {
-    ctx.stderr.write('error: --check is only valid for `hyp ignore`\n')
-    return 2
-  }
-  if (parsed.json) {
-    ctx.stderr.write('error: --json is only valid for `hyp ignore --check`\n')
-    return 2
-  }
   // Resolve a relative `path` arg against the command-context cwd (matching the
   // sibling verbs above), not the Node process cwd, so injected/remote/test
   // dispatch writes/removes/checks the tree the caller actually pointed at.
   const base = path.resolve(ctx.cwd ?? process.cwd(), parsed.path ?? '.')
-  // @ref LLP 0111#aliases [implements]: the --private/--local-only/--sync flag branches are deprecated compatibility aliases that delegate to exactly the hoisted class-scoped unmark internal the `policy unset` runner calls; the flag forms' cwd-relative target (no repo-root default) is preserved here at the alias edge
-  if (parsed.private) return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'ignore', component: 'cmd-unignore' })
-  if (parsed.localOnly)
-    return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'local-only', component: 'cmd-unignore' })
-  if (parsed.sync) return runUnmarkMachineLocal({ targetDir: base, ctx, targetClass: 'full', component: 'cmd-unignore' })
-
   const { governedBy } = createUsagePolicyResolver().resolve(base)
   if (!governedBy) {
     ctx.stdout.write(`not ignored (no .hypignore governs ${base})\n`)
@@ -2159,28 +2051,11 @@ export async function runUnignore(argv, ctx) {
 }
 
 /**
- * `hyp unignore --private [path]` / `hyp unignore --local-only [path]` /
- * `hyp unignore --sync [path]`
+ * Remove machine-local entries governing the caller-resolved directory.
+ * An optional class limits removal to that class. Cached rows and dotfiles
+ * are never removed; a scope with no matching entries is a no-op success.
  *
- * Removes every machine-local entry that governs `targetDir`, equal to it,
- * or an ancestor of it (the same segment-aware rule the shared resolver
- * applies, reused here via {@link scopeGoverns} rather than
- * re-derived, R8), mirroring dotfile `unignore`'s "remove the governing
- * thing" semantics. When `targetClass` is given, removal is scoped to that
- * one class and entries of a different class are left alone (LLP 0104
- * boundary: unmarking is class-scoped and non-destructive of cached rows
- * either way): this is what the `--private`/`--local-only`/`--sync`
- * `hyp unignore` flag branches pass. When `targetClass` is omitted, removal
- * is class-neutral: every machine-local entry governing `targetDir`, of any
- * class, is removed - `policy unset <path>`'s "back to the implicit
- * default" default (LLP 0111 #unset). Idempotent either way: no governing
- * entry (of that class, or of any class) is a no-op success. Verb-agnostic:
- * the caller resolves `targetDir` (today the flag forms' cwd-relative
- * `base`, with no repo-root default) and supplies `component` to name the
- * dispatching verb in the structured log event.
- *
- * @ref LLP 0103#cli [implements]: symmetric class-scoped removal for `--private` / `--local-only` / `--sync`
- * @ref LLP 0111#unset [implements]: the class-neutral `targetClass === undefined` branch backing `policy unset <path>`
+ * @ref LLP 0111#unset [implements]: optional class-scoped removal behind privacy unset
  * @param {{ targetDir: string, ctx: CommandRunContext, targetClass?: UsageClass, component: string, vocabulary?: PolicyHumanVocabulary }} args
  * @returns {Promise<number>}
  */
@@ -2226,29 +2101,12 @@ export async function runUnmarkMachineLocal({ targetDir, ctx, targetClass, compo
 }
 
 /**
- * `hyp ignore --check [path]`
+ * Report the governing policy and already-cached row count for privacy show.
+ * Reporting is prospective-only and never purges. For local-only scopes,
+ * residual rows are recorded locally and withheld from forwarding.
  *
- * Reports whether `path` (default cwd) is currently ignored, the resolved
- * usage class, and which source governs it, a `.hypignore` dotfile, or a
- * machine-local class-per-entry (LLP 0103 #cli: `--check` names the
- * governing source explicitly, not just the file path, so a `--private`/
- * `--local-only`/`--sync` mark and a committed dotfile read distinctly even
- * though both resolve through the same `resolve()` call), and the residual
- * count of already-cached rows from the scope. This is prospective-only:
- * `--check` never purges; it just surfaces the residue so the rule stays
- * debuggable (LLP 0049 #prospective-only), pointing at `hyp purge` for
- * removing it. For a `local-only`-governed scope, the residual count reads
- * as "recorded locally, withheld from forwarding" rather than "never
- * recorded".
- *
- * Verb-agnostic: the caller resolves `targetDir` (the flag form's
- * cwd-relative `base`, no repo-root default; `policy show` resolves the same
- * way), so this one implementation backs both `hyp ignore --check` and
- * `policy show`.
- *
- * @ref LLP 0049#prospective-only [implements]: `--check` reports the residual already-cached row count; it never deletes
- * @ref LLP 0103#reporting [implements]: `--check` names which source governs (dotfile vs machine-local entry) and the entry's class
- * @ref LLP 0111#show [implements]: also the shared implementation behind `policy show`; `vocabulary` moves only the human lines, so `--json` stays byte-compatible with the `--check --json` field set
+ * @ref LLP 0049#prospective-only [implements]: reports residue without deleting it
+ * @ref LLP 0111#show [implements]: human output uses public class names; JSON keeps the resolver fields
  * @param {{ targetDir: string, ctx: CommandRunContext, json: boolean, vocabulary?: PolicyHumanVocabulary }} args
  * @returns {Promise<number>}
  */
@@ -2286,8 +2144,7 @@ export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERN
   // (LLP 0111 #tokens): `class: sync` alone cannot be told apart from "I asked
   // and the user said sync". The privacy skill reads this line to decide
   // whether a directory has already been classified, so the implicit case
-  // must say so; `implicitSuffix` defaults to a no-op so the deprecated
-  // `--check` alias output is untouched (LLP 0111 #aliases).
+  // must say so; direct internal callers may omit the optional suffix.
   // @ref LLP 0111#show [implements]: the implicit-default class label is unmistakable, never confusable with an explicit user classification
   const implicitSuffix = result.governedBy ? '' : (vocabulary.implicitSuffix ?? (() => ''))()
   ctx.stdout.write(`path: ${targetDir}\n`)
@@ -2300,7 +2157,7 @@ export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERN
 }
 
 /**
- * Resolve the directory whose residual cached rows `hyp ignore --check`
+ * Resolve the directory whose residual cached rows `hyp privacy show`
  * should count: the directory containing the governing `.hypignore` when
  * governed by a dotfile (unchanged from before the machine-local list
  * existed), or, when governed by the machine-local store
@@ -2312,7 +2169,7 @@ export async function runIgnoreCheck({ targetDir, ctx, json, vocabulary = INTERN
  * the resolver made. Re-deriving it from `scopeGoverns` plus "longest declared
  * string" does not: once an entry can match through its canonical spelling,
  * the longest declared string and the deepest matching spelling are different
- * entries, and `--check` would scope its residual count to one while
+ * entries, and `privacy show` would scope its residual count to one while
  * reporting the other's class.
  *
  * @param {{ result: ResolveResult, base: string, stateDir: string, listPath: string }} args
@@ -2349,7 +2206,7 @@ async function countResidualCachedRows(scopeDir, ctx) {
     `WHERE cwd = '${lit}' OR cwd LIKE '${likePrefix}%' ` +
     `OR repo_root = '${lit}' OR repo_root LIKE '${likePrefix}%'`
   try {
-    // Residual-row COUNT for `hyp ignore --check`: the whole point is to
+    // Residual-row COUNT for `hyp privacy show`: the whole point is to
     // count rows recorded under a directory the user is restricting, so the
     // LLP 0105 visibility filter is bypassed; only the count (never content)
     // reaches the local consent surface.
@@ -2388,7 +2245,7 @@ function isUnderDir(p, dir) {
 }
 
 /**
- * `hyp skills install [--client <name>]`
+ * `hyp skills install`
  *
  * Materializes every registered skill **and subagent** into the right
  * per-client directories. One command, because a user asking for their
@@ -2539,7 +2396,7 @@ const HYPIGNORE_TEMPLATE = `# HypAware usage policy (.hypignore)
 # alike. Recording is suppressed at the capture seam; the live LLM call is
 # untouched (LLP 0049 / LLP 0050).
 #
-# Managed by \`hyp ignore\` / \`hyp unignore\`; \`hyp ignore --check\` reports
+# Managed by \`hyp ignore\` / \`hyp unignore\`; \`hyp privacy show\` reports
 # status. Removing this file re-enables recording for the subtree.
 #
 # The token below names the usage class. V1 implements only \`ignore\`.

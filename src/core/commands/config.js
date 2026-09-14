@@ -2,7 +2,7 @@
 
 import os from 'node:os'
 import path from 'node:path'
-import { parseCommandArgv } from '../cli/verb_codec.js'
+import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 
 import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
 import { validateConfig } from '../config/validate.js'
@@ -56,7 +56,7 @@ export async function runConfigValidate(argv, ctx) {
 /**
  * Resolve the config path. Precedence:
  *
- *  1. `--path <file>` on the command line.
+ *  1. `<file>` on the command line.
  *  2. `HYP_CONFIG` env var.
  *  3. `<HYP_HOME>/hypaware-config.json` (falling back to `$HOME/.hyp`
  *     when `HYP_HOME` is unset, matching `readObservabilityEnv`).
@@ -66,14 +66,18 @@ export async function runConfigValidate(argv, ctx) {
  * @returns {{ configPath: string, error?: undefined } | { error: string, configPath?: undefined }}
  */
 function parseConfigValidateArgv(argv, env) {
+  for (const token of argv) {
+    if (token === '--file' || token.startsWith('--file=')) return { error: `hyp config validate: unknown flag '${token}'` }
+  }
   const parsed = parseCommandArgv(argv, {
     type: 'object',
-    properties: { path: { type: 'string' } },
-  })
-  if ('help' in parsed) return { error: 'usage: hyp config validate [--path <file>]' }
+    properties: { file: { type: 'string' } },
+    positional: ['file'],
+  }, STRICT_SHORT_FLAGS)
+  if ('help' in parsed) return { error: 'usage: hyp config validate [file]' }
   if (!parsed.ok) return { error: `hyp config validate: ${parsed.error}` }
-  const p = /** @type {{ path?: string }} */ (parsed.params)
-  if (p.path) return { configPath: path.resolve(p.path) }
+  const p = /** @type {{ file?: string }} */ (parsed.params)
+  if (p.file) return { configPath: path.resolve(p.file) }
   if (env.HYP_CONFIG) return { configPath: path.resolve(env.HYP_CONFIG) }
   // @ref LLP 0300#home-resolution [implements]: env.HOME wins, os.homedir() is the fallback; '' is never a home (it would make `.hyp` cwd-relative)
   const hypHome = env.HYP_HOME || path.join(env.HOME || os.homedir(), '.hyp')

@@ -40,7 +40,7 @@ set of choices, since it is a replacement rather than an incremental patch.
 To apply a complete configuration file you have prepared:
 
 ```sh
-hyp config validate --path ./hypaware-config.json
+hyp config validate ./hypaware-config.json
 hyp setup --from-file ./hypaware-config.json --force
 hyp status
 ```

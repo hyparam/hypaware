@@ -100,7 +100,6 @@ export function buildPlist(options) {
   } = options
   const keepAlive = options.keepAlive !== false
   const runAtLoad = options.runAtLoad !== false
-  const foreground = options.foreground !== false
 
   if (!label || typeof label !== 'string') throw new LaunchAgentError('label is required')
   if (!nodePath || typeof nodePath !== 'string') throw new LaunchAgentError('nodePath is required')
@@ -113,7 +112,6 @@ export function buildPlist(options) {
 
   /** @type {string[]} */
   const programArgs = [nodePath, binPath, 'daemon', 'run']
-  if (foreground) programArgs.push('--foreground')
   programArgs.push('--config', configPath)
 
   const lines = [

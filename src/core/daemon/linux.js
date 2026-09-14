@@ -100,7 +100,6 @@ export function buildUnit(options) {
   const description = options.description ?? `HypAware daemon (${label})`
   const restart = options.restart !== false
   const restartSec = typeof options.restartSec === 'number' ? options.restartSec : 5
-  const foreground = options.foreground !== false
   const { nodePath, binPath, configPath, logDir, env } = options
 
   if (!nodePath || typeof nodePath !== 'string') throw new SystemdUnitError('nodePath is required')
@@ -118,7 +117,6 @@ export function buildUnit(options) {
     'daemon',
     'run',
   ]
-  if (foreground) execArgs.push('--foreground')
   execArgs.push('--config', quoteExecArg(configPath))
 
   const lines = [

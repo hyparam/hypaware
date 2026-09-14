@@ -1493,7 +1493,7 @@ instead of refusing every update as unsupervised.
 daemon's own label, `com.hyperparam.hypaware`, or begins with that label
 followed by a dot. Presence alone is deliberately not the test: macOS sets the
 variable in terminals (`0`) and GUI apps (`application.<bundle>...`) too, so a
-hand-run `hyp daemon run --foreground` carries one. No hermetic test can settle
+hand-run `hyp daemon run` carries one. No hermetic test can settle
 which value launchd actually delivers, because every fixture asserts the value
 the test itself wrote. Only a running LaunchAgent can answer, and a wrong
 answer is quiet: `hyp status` keeps advertising the release and `hyp update`
@@ -1523,7 +1523,7 @@ the baseline value later releases diff against.
   a non-global provenance before they ever reach the supervisor gate, so a
   checkout would pass this procedure while proving nothing.
 - The daemon installed and started as a LaunchAgent (`hyp daemon install`,
-  `hyp daemon start`), not `hyp daemon run --foreground`. A foreground daemon
+  `hyp daemon start`), not `hyp daemon run`. A foreground daemon
   is exactly the unsupervised case.
 - `jq` and `node` on `PATH`, and `sudo` if step 2 comes back empty.
 
