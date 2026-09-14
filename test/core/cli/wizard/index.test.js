@@ -3,9 +3,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 
+import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { DurableBinRequiredError } from '../../../../src/core/cli/global_install.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
@@ -32,7 +32,7 @@ function makeBuf() {
 }
 
 async function tmpHome() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'hypaware-wizard-index-'))
+  return temporaryDirectory('hypaware-wizard-index-')
 }
 
 /**
@@ -1637,7 +1637,6 @@ test('runInitWizard: local pathway never narrates the first-sync hold', async ()
 for (const scenario of ['cancel', 'back', 'refuse', 'config-failure', 'policy-failure', 'corrupt-policy', 'commit']) {
   test(`combined sharing is deferred through setup: ${scenario}`, async (t) => {
     const home = await tmpHome()
-    t.after(() => fs.rm(home, { recursive: true, force: true }))
     const env = { HYP_HOME: path.join(home, '.hyp') }
     const stateDir = readObservabilityEnv(env).stateDir
     const original = [{ source: 'claude', class: /** @type {'local-only'} */ ('local-only') }]

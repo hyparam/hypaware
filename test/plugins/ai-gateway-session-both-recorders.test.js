@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import http from 'node:http'
-import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'
@@ -301,7 +301,7 @@ async function withRefusingServer(fn) {
  */
 function daemonHome({ gatewayBase, listenerBase }) {
   const gatewayUrl = new URL(gatewayBase)
-  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-session-both-'))
+  const hypHome = temporaryDirectory('hyp-session-both-')
   const stateRoot = path.join(hypHome, 'hypaware')
   fs.mkdirSync(path.join(stateRoot, 'run'), { recursive: true })
   writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'test-run', mode: 'foreground' }))
@@ -336,7 +336,7 @@ function daemonHome({ gatewayBase, listenerBase }) {
 function fakeCtx(args) {
   let out = ''
   let err = ''
-  const hypHome = args.env?.HYP_HOME ?? fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-session-home-'))
+  const hypHome = args.env?.HYP_HOME ?? temporaryDirectory('hyp-session-home-')
   const ctx = {
     stdout: { write: (/** @type {string} */ s) => { out += s; return true } },
     stderr: { write: (/** @type {string} */ s) => { err += s; return true } },

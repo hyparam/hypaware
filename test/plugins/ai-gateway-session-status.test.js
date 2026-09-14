@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { SessionIgnoreSet } from '../../src/core/control/session_ignore_store.js'
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { createCodexExchangeProjector } from '../../hypaware-core/plugins-workspace/codex/src/exchange-projector.js'
@@ -1046,7 +1047,7 @@ function fakeCtx(args) {
   let out = ''
   let err = ''
   const listen = args.endpoint ? args.endpoint.replace(/^https?:\/\//, '') : undefined
-  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-session-home-'))
+  const hypHome = temporaryDirectory('hyp-session-home-')
   const ctx = {
     stdout: { write: (/** @type {string} */ s) => { out += s; return true } },
     stderr: { write: (/** @type {string} */ s) => { err += s; return true } },
@@ -1128,7 +1129,7 @@ function dropContext(ignored) {
  * @param {{ file: string, id?: string, noThread?: boolean, sessionId?: unknown, legacy?: boolean, cwd: string, ageMs?: number, type?: string }[]} rollouts
  */
 function tempCodexHome(rollouts) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-codex-home-'))
+  const home = temporaryDirectory('hyp-codex-home-')
   const dir = path.join(home, 'sessions', '2026', '01')
   fs.mkdirSync(dir, { recursive: true })
   for (const r of rollouts) {

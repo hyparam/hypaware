@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import http from 'node:http'
-import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { createControlHandler } from '../../src/core/control/session_ignore.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { writeStatusFile } from '../../src/core/daemon/status.js'
@@ -205,7 +205,7 @@ async function withControlServer(set, fn) {
  */
 function daemonHome(base) {
   const url = new URL(base)
-  const hypHome = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-session-impostor-'))
+  const hypHome = temporaryDirectory('hyp-session-impostor-')
   const stateRoot = path.join(hypHome, 'hypaware')
   fs.mkdirSync(path.join(stateRoot, 'run'), { recursive: true })
   writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'test-run', mode: 'foreground' }))
@@ -231,7 +231,7 @@ function fakeCtx(args) {
   let out = ''
   let err = ''
   const listen = args.endpoint ? args.endpoint.replace(/^https?:\/\//, '') : undefined
-  const hypHome = args.env?.HYP_HOME ?? fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-session-home-'))
+  const hypHome = args.env?.HYP_HOME ?? temporaryDirectory('hyp-session-home-')
   const ctx = {
     stdout: { write: (/** @type {string} */ s) => { out += s; return true } },
     stderr: { write: (/** @type {string} */ s) => { err += s; return true } },

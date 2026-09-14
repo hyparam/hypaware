@@ -3,6 +3,7 @@
 
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import process from 'node:process'
@@ -58,17 +59,30 @@ export function run(forwardedArgs) {
     return 1
   }
 
-  const result = spawnSync(
-    process.execPath,
-    buildNodeTestArgs(files, forwardedArgs),
-    { stdio: 'inherit' },
-  )
-
-  if (result.error) {
-    process.stderr.write(`failed to spawn node --test: ${result.error.message}\n`)
-    return 1
+  // The parent owns this directory even when a test exits before its hooks run.
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hyp-t-'))
+  try {
+    const result = spawnSync(
+      process.execPath,
+      buildNodeTestArgs(files, forwardedArgs),
+      { stdio: 'inherit', env: { ...process.env, TMPDIR: temp, TMP: temp, TEMP: temp } },
+    )
+    if (result.error) {
+      process.stderr.write(`failed to spawn node --test: ${result.error.message}\n`)
+      return 1
+    }
+    return result.status ?? 1
+  } finally {
+    // Best effort. `force` only swallows ENOENT and `maxRetries` never retries
+    // EACCES, so a fixture the suite left unreadable (a test that chmod'd a
+    // directory and died before restoring it) would otherwise throw from here,
+    // discard the run's exit status, and report a green suite as a crash.
+    try {
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 3 })
+    } catch (err) {
+      process.stderr.write(`could not remove the test temp root ${temp}: ${/** @type {Error} */ (err).message}\n`)
+    }
   }
-  return result.status ?? 1
 }
 
 /**

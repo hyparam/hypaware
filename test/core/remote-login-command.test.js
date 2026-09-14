@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { remoteLogin, runRemoteLogin, runRemoteRemove, waitForCentralConverge, waitForClientAttach } from '../../src/core/cli/remote_commands.js'
 import { daemonIncompleteNote } from '../../src/core/daemon/platform.js'
 import { hasAppliedCentralConfig } from '../../src/core/config/apply.js'
@@ -14,7 +15,7 @@ import { deriveIdentityBase, readCredentials } from '../../src/core/remote/crede
 import { computeFirstSyncDeadline, firstSyncHoldMarkerPath, formatFirstSyncDeadline, readFirstSyncDeadline } from '../../src/core/usage-policy/first_sync_hold.js'
 
 async function tmpHome() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'hyp-login-'))
+  return temporaryDirectory('hyp-login-')
 }
 
 /**
