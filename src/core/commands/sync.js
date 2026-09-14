@@ -312,7 +312,10 @@ export async function runSync(argv, ctx) {
   })
   const progress = createSyncProgress(volumes)
   let showProgress = false
-  let uploadStarted = false
+  // Counted, not a flag: destinations tick serially in instance-name order, so
+  // an accompanying file copy can run between two upload targets, and a flag
+  // set by the first would label that gap `Finishing` with an upload to come.
+  let displayedStarts = 0
   let phaseStarted = Date.now()
   /** @type {TickOptions} */
   const tickOpts = {
@@ -320,12 +323,10 @@ export async function runSync(argv, ctx) {
     onProgress: (name, delta) => {
       if (!delta) {
         showProgress = displayedInstances.has(name)
+        if (showProgress) displayedStarts += 1
         phaseStarted = Date.now()
       }
-      if (showProgress) {
-        uploadStarted = true
-        progress.update(name, delta)
-      }
+      if (showProgress) progress.update(name, delta)
     },
   }
   if (instance) tickOpts.sinkInstance = instance
@@ -333,7 +334,7 @@ export async function runSync(argv, ctx) {
     {
       stdout: ctx.stdout, env: ctx.env, label: 'Sending',
       status: () => showProgress ? progress.render()
-        : `${uploadStarted ? 'Finishing' : 'Preparing upload'}... (${Math.floor((Date.now() - phaseStarted) / 1000)}s)`,
+        : `${displayedStarts >= displayedInstances.size ? 'Finishing' : 'Preparing upload'}... (${Math.floor((Date.now() - phaseStarted) / 1000)}s)`,
     },
     () => driver.tick(tickOpts)
   )
