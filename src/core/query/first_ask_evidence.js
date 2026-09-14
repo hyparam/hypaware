@@ -21,15 +21,14 @@
  * back in under a minute. The other signals are not wrong; they are not
  * the first thing to say.
  *
- * Every query excludes `conversation_source = 'claude_code'`, which is
- * how the OTEL lane duplicates the transcript lane's rows on machines
- * that attached after 1.31 (hypaware #1464). The label is not the OTEL
- * lane's alone - the live gateway stamps it too, for any request whose
- * User-Agent is `claude-cli/` - so on a machine with no transcript lane
- * the exclusion costs real rows rather than duplicates. It is kept
- * because the transcript sweep runs by default beside every Claude
- * attach, and narrowed to be null-safe, since a row whose
- * `conversation_source` is null is not a duplicate of anything.
+ * Every query excludes the OTEL lane, which duplicates the transcript
+ * lane's rows on machines that attached after 1.31 (hypaware #1464).
+ * The lane is named by the provenance it stamps,
+ * `attributes.gateway.source = 'otel'`, not by `conversation_source`:
+ * the live gateway writes `claude_code` too, for any request whose
+ * User-Agent is `claude-cli/`, so filtering on the label dropped the
+ * gateway lane along with the twin and left a machine capturing Claude
+ * only through the gateway with an empty record.
  *
  * Every user-text query keeps only human turns: Codex guardian reviews,
  * subagent relays, and injected preambles arrive as `role = 'user'`.
@@ -76,7 +75,14 @@ const CALLS_AFTER = 30
  */
 const DEFAULT_CLIENT_DIRS = Object.freeze({ skillDir: '.claude/skills', agentDir: '.claude/agents' })
 
-const NOT_DUPLICATE_LANE = "(conversation_source is null or conversation_source <> 'claude_code')"
+/**
+ * An OTEL row always carries `claude_code` as well, so testing the cheap
+ * label first costs nothing and `or` short-circuits the JSON read onto
+ * the rows that could be a twin. Null-safe on both halves: a row with no
+ * source label, and a row with no gateway provenance, are each a
+ * duplicate of nothing.
+ */
+const NOT_DUPLICATE_LANE = "(conversation_source is null or conversation_source <> 'claude_code' or coalesce(json_extract(attributes, '$.gateway.source'), '') <> 'otel')"
 
 const HUMAN_TURN = [
   'coalesce(is_sidechain, false) = false',

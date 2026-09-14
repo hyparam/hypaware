@@ -6,6 +6,9 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { asyncRow } from 'squirreling'
+
+import { overviewRunnerFromCtx } from '../../src/core/query/overview.js'
 import {
   RECORD_FLOOR,
   askInstructions,
@@ -33,7 +36,7 @@ test('evidenceSql: every statement excludes the duplicate OTEL lane; user text i
   // @ref LLP 0398#human-turns [tests]: the duplicate lane never counts, and injected user text is not a person
   const sql = evidenceSql('2026-08-08')
   const stmts = [sql.record, sql.lines, sql.triggers(['x']), sql.calls(['a']), sql.replies(['a'])]
-  for (const stmt of stmts) assert.ok(stmt.includes("conversation_source <> 'claude_code'"))
+  for (const stmt of stmts) assert.ok(stmt.includes("coalesce(json_extract(attributes, '$.gateway.source'), '') <> 'otel'"))
   for (const stmt of [sql.lines, sql.triggers(['x'])]) {
     assert.ok(stmt.includes("user_type in ('external', 'user')"), 'Codex human turns count, guardian reviews do not')
     assert.ok(stmt.includes("not like 'Message Type:%'"), 'a pasted relay header is not a typed request')
@@ -229,13 +232,15 @@ test('prepareFirstAskEvidence: an empty record writes the not-enough page and ru
   assert.ok(page.includes('Nothing is typed often enough yet'))
 })
 
-test('evidenceSql: the duplicate-lane exclusion is null-safe', () => {
-  // `conversation_source` is a nullable column, and `NULL <> 'claude_code'`
-  // is NULL, which fails a WHERE. A row with no source label is not a
-  // duplicate of anything, so it belongs in the record.
+test('evidenceSql: the duplicate-lane exclusion names the OTEL lane, and is null-safe', () => {
+  // Both halves are nullable, and `NULL <> x` is NULL, which fails a
+  // WHERE. A row with no source label, and a row with no gateway
+  // provenance, are each a duplicate of nothing, so both belong in the
+  // record. The cheap label is tested first so the JSON read only runs
+  // over rows that could be a twin.
   const sql = evidenceSql('2026-08-08')
   for (const stmt of [sql.record, sql.lines, sql.triggers(['x']), sql.calls(['s1']), sql.replies(['s1'])]) {
-    assert.ok(stmt.includes("(conversation_source is null or conversation_source <> 'claude_code')"), 'a null source is kept')
+    assert.ok(stmt.includes("(conversation_source is null or conversation_source <> 'claude_code' or coalesce(json_extract(attributes, '$.gateway.source'), '') <> 'otel')"), 'a null on either half is kept, and the label alone drops nothing')
   }
 })
 
@@ -271,4 +276,111 @@ test('onDiskListing: the 200-entry cap takes the first 200 by name, not by direc
   })
   assert.ok(text.includes('skill-000'), 'the sorted head is listed whatever order the filesystem returned')
   assert.ok(!text.includes('skill-209'), 'the sorted tail is what the cap drops')
+})
+
+/**
+ * A gather whose runner is the executor `hyp query sql` uses: the lane
+ * predicate is SQL, so only the real engine says which rows it keeps.
+ *
+ * @param {Record<string, any>[]} rows
+ */
+async function gatherOverRows(rows) {
+  const columns = Object.keys(rows[0])
+  const dataset = {
+    discoverPartitions: async () => [],
+    createDataSource: async () => ({
+      columns,
+      numRows: rows.length,
+      scan: () => ({
+        async *rows() {
+          for (const row of rows) yield asyncRow(row, columns)
+        },
+      }),
+    }),
+  }
+  const ctx = /** @type {any} */ ({
+    query: {
+      getDataset: (/** @type {string} */ name) => (name === 'ai_gateway_messages' ? dataset : null),
+      listDatasets: () => [],
+    },
+    storage: {},
+    config: { version: 2 },
+    env: {},
+    cwd: '/w/project',
+  })
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-runs-'))
+  const homeDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  const runner = /** @type {any} */ (overviewRunnerFromCtx(ctx))
+  return prepareFirstAskEvidence({ runner, root, homeDir, now: new Date('2026-09-07T05:00:00Z') })
+}
+
+/**
+ * One `ai_gateway_messages` row, with every column the gather reads.
+ *
+ * @param {Record<string, any>} over
+ */
+function messageRow(over) {
+  return {
+    session_id: 'sA',
+    date: '2026-09-01',
+    role: 'user',
+    part_type: 'text',
+    conversation_source: 'claude_code',
+    attributes: null,
+    content_text: 'commit on appropriate branch and make a PR',
+    is_sidechain: false,
+    user_type: 'external',
+    message_created_at: '2026-09-01T10:00:00Z',
+    tool_name: null,
+    tool_args: null,
+    ...over,
+  }
+}
+
+/** The provenance each producer stamps through the shared exchange writer. */
+const OTEL_LANE = { conversation_source: 'claude_code', attributes: { gateway: { source: 'otel' } } }
+const TRANSCRIPT_LANE = { conversation_source: 'claude', attributes: { gateway: { source: 'backfill' } } }
+const GATEWAY_LANE = { conversation_source: 'claude_code', attributes: { gateway: { exchange_id: 'x1', upstream: 'api.anthropic.com' } } }
+
+test('the gather counts a machine whose only Claude capture is the live gateway', async () => {
+  // No transcript lane here, so excluding `claude_code` to drop the OTEL
+  // twin left nothing to recommend from over a full cache.
+  // @ref LLP 0398#human-turns [tests]: the duplicate is named by the lane that wrote it, not by the label two lanes share
+  const rows = []
+  for (const session of ['sA', 'sB', 'sC']) {
+    for (const date of ['2026-09-01', '2026-09-02', '2026-09-03']) {
+      rows.push(messageRow({ session_id: session, date, message_created_at: `${date}T10:00:00Z`, ...GATEWAY_LANE }))
+      rows.push(messageRow({ session_id: session, date, role: 'assistant', content_text: 'Done.', message_created_at: `${date}T10:05:00Z`, ...GATEWAY_LANE }))
+    }
+  }
+  const evidence = await gatherOverRows(rows)
+  assert.equal(evidence.record?.sessions, 3)
+  assert.equal(evidence.record?.sessionDays, 9)
+  assert.deepEqual(
+    evidence.candidates?.map((c) => [c.line, c.sessions, c.days, c.typed]),
+    [['commit on appropriate branch and make a pr', 3, 3, 9]],
+  )
+})
+
+test('the gather still settles a dual-captured turn to one row', async () => {
+  // Both lanes wrote every turn (hypaware #1464) and derive different
+  // `part_id`s, so nothing upstream collapses them. The OTEL row is the
+  // duplicate, and it says so: `attributes.gateway.source = 'otel'`.
+  const rows = []
+  for (const session of ['sA', 'sB', 'sC']) {
+    for (const date of ['2026-09-01', '2026-09-02', '2026-09-03']) {
+      for (const lane of [TRANSCRIPT_LANE, OTEL_LANE]) {
+        rows.push(messageRow({ session_id: session, date, message_created_at: `${date}T10:00:00Z`, ...lane }))
+        rows.push(messageRow({ session_id: session, date, role: 'assistant', content_text: 'Done.', message_created_at: `${date}T10:05:00Z`, ...lane }))
+      }
+    }
+  }
+  const evidence = await gatherOverRows(rows)
+  assert.equal(evidence.record?.sessions, 3)
+  assert.equal(evidence.record?.sessionDays, 9, 'nine session-days, not eighteen')
+  assert.deepEqual(
+    evidence.candidates?.map((c) => [c.line, c.sessions, c.days, c.typed]),
+    [['commit on appropriate branch and make a pr', 3, 3, 9]],
+    'nine turns typed, one row apiece',
+  )
 })
