@@ -655,6 +655,43 @@ test('sharing shows only upload progress and results but still writes the file c
   }
 })
 
+test('a copy sorting between two upload targets does not read as Finishing', async () => {
+  // Destinations tick serially in instance-name order (the sink registry sorts
+  // its listing), so a hidden file copy can run between two upload targets.
+  // One upload has run and another has not started, so "Finishing" is false.
+  const hypHome = await makeHome('shared-copy-between')
+  const first = fakeSink('alpha-remote', { url: 'https://hypaware.example.com' })
+  const copy = fakeSink('mid-copy', { dir: '/home/u/exports' })
+  const last = fakeSink('zeta-remote', { url: 'https://hypaware.example.com' })
+  let duringCopy = ''
+  const { ctx, stdout } = makeCtx({
+    hypHome, sinks: [first, copy, last], stdoutTty: true,
+  })
+  const copyExport = copy.sink.exportBatch
+  copy.sink.exportBatch = async (batch, opts) => {
+    const before = stdout.text.length
+    // Wait for the spinner to actually draw a frame rather than for a fixed
+    // span: the frames are 120ms apart, but a loaded machine can stall past
+    // any sleep this test picks, and an empty window fails for a reason that
+    // has nothing to do with the label. Bounded so a spinner that never draws
+    // still fails on the assertion below instead of hanging the suite.
+    const drawnBy = Date.now() + 5000
+    while (stdout.text.length === before && Date.now() < drawnBy) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    duringCopy = stdout.text.slice(before)
+    return copyExport(batch, opts)
+  }
+
+  assert.equal(await runSync(['--yes'], ctx), 0)
+
+  assert.notEqual(duringCopy, '', 'the spinner must have drawn while the copy ran')
+  assert.doesNotMatch(duringCopy, /Finishing/, 'an upload had not started yet')
+  assert.match(duringCopy, /Preparing upload/)
+  assert.equal(last.exported.length, 1)
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
 test('a failed accompanying copy remains visible and fails the command', async () => {
   const hypHome = await makeHome('shared-copy-failed')
   const { ctx, stdout } = makeCtx({
