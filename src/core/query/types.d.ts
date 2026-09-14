@@ -236,7 +236,7 @@ export interface FirstAskCandidate {
   typed: number
   /** The earliest occurrence in the sampled sessions, as typed. */
   example?: { date: string; text: string }
-  /** Sessions whose tool calls after the line were read: the newest sample of them, not every session that typed it. */
+  /** Sessions that returned tool calls after the line: drawn from the newest sample of them, not every session that typed it, and only those the shared row budget reached. */
   sessionsWithCalls: number
   /** Procedure commands that ran after it, most sessions first. */
   steps: { command: string; sessions: number }[]

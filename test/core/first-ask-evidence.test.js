@@ -21,6 +21,7 @@ import {
   prepareFirstAskEvidence,
   renderCandidates,
   sampleTriggers,
+  sessionAnchors,
   windowStart,
 } from '../../src/core/query/first_ask_evidence.js'
 
@@ -40,7 +41,7 @@ test('windowStart: thirty days back, as a UTC date', () => {
 test('evidenceSql: every statement excludes the duplicate OTEL lane; user text is human turns only', () => {
   // @ref LLP 0398#human-turns [tests]: the duplicate lane never counts, and injected user text is not a person
   const sql = evidenceSql('2026-08-08')
-  const stmts = [sql.record, sql.lines, sql.triggers(['x']), sql.calls(['a']), sql.replies(['a'])]
+  const stmts = [sql.record, sql.lines, sql.triggers(['x']), sql.calls([{ id: 'a', at: 0 }]), sql.replies([{ id: 'a', at: 0 }])]
   for (const stmt of stmts) assert.ok(stmt.includes("conversation_source <> 'claude_code'"))
   for (const stmt of [sql.lines, sql.triggers(['x'])]) {
     assert.ok(stmt.includes("user_type in ('external', 'user')"), 'Codex human turns count, guardian reviews do not')
@@ -242,7 +243,7 @@ test('evidenceSql: the duplicate-lane exclusion is null-safe', () => {
   // is NULL, which fails a WHERE. A row with no source label is not a
   // duplicate of anything, so it belongs in the record.
   const sql = evidenceSql('2026-08-08')
-  for (const stmt of [sql.record, sql.lines, sql.triggers(['x']), sql.calls(['s1']), sql.replies(['s1'])]) {
+  for (const stmt of [sql.record, sql.lines, sql.triggers(['x']), sql.calls([{ id: 's1', at: 0 }]), sql.replies([{ id: 's1', at: 0 }])]) {
     assert.ok(stmt.includes("(conversation_source is null or conversation_source <> 'claude_code')"), 'a null source is kept')
   }
 })
@@ -282,13 +283,13 @@ test('onDiskListing: the 200-entry cap takes the first 200 by name, not by direc
 })
 
 test('the gather is bounded in sessions and in rows, not only by the window', () => {
-  // @ref LLP 0398#consequences [tests]: the sample and the per-session row cap are what bound the two session lists
+  // @ref LLP 0398#consequences [tests]: the sample and the shared row budget are what bound the two session lists
   // hypaware #1701: `triggers` returned every session that typed a candidate
   // line in the last 30 days, and the two statements that list rows per
   // session then returned every row of every one of them. The calls
   // statement, measured through the engine on 500 sessions of 300 calls:
   // 150,000 rows, 227 MB peak, 33 MB still held, 16 s. With the sample and
-  // the cap: 2,400 rows, 33 MB peak, 0.6 MB held, 3 s.
+  // the budget: 2,400 rows, 33 MB peak, 0.6 MB held, 3 s.
   const line = 'commit on appropriate branch and make a pr'
   const triggers = Array.from({ length: 500 }, (_, i) => ({
     session_id: `s${String(i).padStart(3, '0')}`,
@@ -307,28 +308,56 @@ test('the gather is bounded in sessions and in rows, not only by the window', ()
   assert.equal(c.sessions, 500, 'the line is still reported as typed in every session that typed it')
   assert.equal(c.sessionsWithCalls, 40, 'the procedure was read from the sample, and the page says so')
   assert.deepEqual(c.steps.map((step) => [step.command, step.sessions]), [['git checkout -b', 40]], 'the count beside a step is the sample, not every session')
-  assert.ok(renderCandidates({ sessions: 500, sessionDays: 600 }, [c], true).includes('of the 40 most recent'))
+  assert.ok(renderCandidates({ sessions: 500, sessionDays: 600 }, [c], true).includes('of the 40 most recent whose procedure was read'))
 
-  const ids = sample.map((t) => String(t.session_id))
+  const anchors = sessionAnchors(sample)
   const sql = evidenceSql('2026-08-08')
-  assert.ok(sql.calls(ids).endsWith('limit 2400'), 'sixty rows a sampled session: twice the thirty-call window')
-  assert.ok(sql.replies(ids).endsWith('limit 2400'))
+  assert.equal(anchors.length, 40, 'one anchor a sampled session, whatever lines it typed')
+  assert.ok(sql.calls(anchors).endsWith('limit 2400'), 'sixty rows a sampled session: twice the thirty-call window')
+  assert.ok(sql.replies(anchors).endsWith('limit 2400'))
 })
 
-test('the engine stops the calls statement at its cap, whatever the sessions hold', async () => {
-  // A string assertion cannot say the cap is honored, only that it was
-  // written. The statement goes through the same `executeQuerySql` the
-  // gather runs on, over three sessions of a hundred calls each.
+test('sessionAnchors takes the earliest trigger a session has, and drops one it cannot place', () => {
+  // A session that typed two candidate lines is read from the earlier of
+  // them, or the later line's procedure would start before the rows begin.
+  // A trigger whose instant does not parse is dropped rather than read
+  // unanchored: `buildCandidates` compares every call against it and NaN
+  // compares false, so its rows could only ever be fetched and discarded.
+  const early = new Date(Date.UTC(2026, 7, 10, 9, 0, 0))
+  const late = new Date(Date.UTC(2026, 7, 10, 17, 0, 0))
+  const anchors = sessionAnchors([
+    { session_id: 's1', line: 'ship it', at: late },
+    { session_id: 's1', line: 'make a pr', at: early },
+    { session_id: 's2', line: 'ship it', at: 'not a time' },
+    { session_id: '', line: 'ship it', at: early },
+  ])
+  assert.deepEqual(anchors, [{ id: 's1', at: early.getTime() }])
+})
+
+test('the engine reads each session from its trigger, and stops the statement at its budget', async () => {
+  // A string assertion cannot say the budget is honored, only that it was
+  // written, and it cannot say the rows bought are the rows the page is
+  // built from. The statement goes through the same `executeQuerySql` the
+  // gather runs on, over three sessions of a hundred calls each with the
+  // candidate line typed at the seventieth - the ordinary shape, since a
+  // line like "commit on appropriate branch and make a pr" is typed after
+  // the work rather than before it.
   const columns = ['date', 'session_id', 'part_type', 'conversation_source', 'message_created_at', 'tool_name', 'tool_args']
-  const rows = Array.from({ length: 300 }, (_, i) => ({
-    date: '2026-08-10',
-    session_id: `s${Math.floor(i / 100)}`,
-    part_type: 'tool_call',
-    conversation_source: null,
-    message_created_at: new Date(Date.UTC(2026, 7, 10, 1, 0, i % 100)),
-    tool_name: 'Bash',
-    tool_args: '{"command":"git status --short"}',
-  }))
+  const base = Date.UTC(2026, 7, 10, 1, 0, 0)
+  const at = (session, index) => new Date(base + session * 86_400_000 + index * 60_000)
+  const rows = Array.from({ length: 300 }, (_, i) => {
+    const session = Math.floor(i / 100)
+    const index = i % 100
+    return {
+      date: '2026-08-10',
+      session_id: `s${session}`,
+      part_type: 'tool_call',
+      conversation_source: null,
+      message_created_at: at(session, index),
+      tool_name: 'Bash',
+      tool_args: index < 70 ? '{"command":"npm test --silent"}' : '{"command":"git commit -m wip"}',
+    }
+  })
   /** @type {AsyncDataSource} */
   const source = {
     columns,
@@ -346,6 +375,32 @@ test('the engine stops the calls statement at its cap, whatever the sessions hol
   }
   const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
   const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
-  const result = await executeQuerySql({ query: evidenceSql('2026-08-08').calls(['s0', 's1', 's2']), registry, storage })
-  assert.equal(result.rows.length, 180, 'three sessions of sixty rows, not the three hundred they hold')
+  const anchors = [0, 1, 2].map((session) => ({ id: `s${session}`, at: at(session, 70).getTime() }))
+  const result = await executeQuerySql({ query: evidenceSql('2026-08-08').calls(anchors), registry, storage })
+
+  const perSession = new Map()
+  for (const row of result.rows) perSession.set(String(row.session_id), (perSession.get(String(row.session_id)) ?? 0) + 1)
+  assert.deepEqual([...perSession.entries()].sort(), [['s0', 30], ['s1', 30], ['s2', 30]], 'every session named is read, not whichever ones sort first')
+  assert.ok(result.rows.every((row) => String(row.args).includes('git commit')), 'the rows bought are the procedure after the line, not the work before it')
+
+  // The unanchored form is what the budget starves: 180 rows taken off the
+  // front of s0 and s1, none of them after the line, and s2 unread.
+  const unanchored = `select session_id, message_created_at as at, substr(cast(tool_args as varchar), 1, 160) as args from ai_gateway_messages where date >= '2026-08-08' and part_type = 'tool_call' and session_id in ('s0', 's1', 's2') order by session_id, message_created_at limit 180`
+  const before = await executeQuerySql({ query: unanchored, registry, storage })
+  assert.equal(new Set(before.rows.map((row) => String(row.session_id))).size, 2, 'a global budget over whole sessions leaves the last session nothing')
+})
+
+test('a candidate reports the sessions whose procedure was read, not the sessions it asked for', () => {
+  // The two list statements share one row budget, so a long session can
+  // leave a later one with no rows at all. Counting the sampled sessions
+  // would print a denominator no step's numerator could reach: "git commit
+  // -m (2)" beside "of the 6 most recent".
+  const line = 'commit on appropriate branch and make a pr'
+  const at = (session) => new Date(Date.UTC(2026, 7, 10, 1, 0, 0) + session * 86_400_000)
+  const triggers = Array.from({ length: 6 }, (_, i) => ({ session_id: `s${i}`, line, at: at(i), date: '2026-08-10', example: line }))
+  const calls = [0, 1].flatMap((session) => [{ session_id: `s${session}`, at: new Date(at(session).getTime() + 1000), tool_name: 'Bash', args: '{"command":"git commit -m wip"}' }])
+  const [c] = buildCandidates({ lines: [{ line, sessions: 6, days: 6, typed: 6 }], triggers, calls, replies: [] })
+  assert.equal(c.sessionsWithCalls, 2, 'four of the six returned no rows, and the page does not claim them')
+  assert.deepEqual(c.steps.map((step) => [step.command, step.sessions]), [['git commit -m', 2]])
+  assert.ok(renderCandidates({ sessions: 60, sessionDays: 90 }, [c], true).includes('(sessions that ran it, of the 2 most recent whose procedure was read)'))
 })

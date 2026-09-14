@@ -81,11 +81,19 @@ const CALLS_AFTER = 30
 const TRIGGER_SESSIONS = 40
 
 /**
- * Rows either session list may return per sampled session. Twice the
- * procedure window, because both statements read past what they want: a
- * line typed part-way into a session puts calls ahead of its window, and
- * the ending is the first substantial reply after the window, so the
- * replies inside it are read and dropped.
+ * The row budget either session list is given for each session it names.
+ * Twice the procedure window, because both statements read past what the
+ * window is: a session that typed two candidate lines is anchored at the
+ * earlier one, and the ending is the first substantial reply after the
+ * window, so the replies inside it are read and dropped.
+ *
+ * The statement's `limit` is the sum of the budgets, not a ceiling applied
+ * to each session on its own. This engine cannot say the latter without a
+ * partitioned window function, which buffers its whole input and would
+ * undo the bound, while `order by ... limit` sorts in a buffer the limit
+ * itself sizes. So a session holding more than its share spends another's,
+ * and `sessionsWithCalls` counts the sessions whose calls actually came
+ * back rather than the sessions that were asked for.
  */
 const ROWS_PER_SESSION = CALLS_AFTER * 2
 
@@ -130,17 +138,52 @@ function sqlString(s) {
 }
 
 /**
- * The statements, keyed by step. All bounded: aggregates, or lists over
- * a sampled set of sessions, capped at `ROWS_PER_SESSION` rows for each
- * session named.
+ * Epoch milliseconds as a literal this engine compares against a
+ * TIMESTAMP column. The `timestamp` keyword is not decoration: a bare
+ * string literal compared to a TIMESTAMP matches nothing at all and
+ * returns zero rows rather than an error.
+ *
+ * @param {number} ms
+ */
+function sqlTimestamp(ms) {
+  return `timestamp '${new Date(ms).toISOString()}'`
+}
+
+/**
+ * The window of each named session that either list statement reads: from
+ * the session's own trigger onwards, never the whole session.
+ *
+ * Both statements are read by `buildCandidates`, which keeps only rows at
+ * or after the trigger. Without this the statements return each session
+ * from its first row, so the budget is spent on the calls that ran before
+ * the line was typed and the procedure after it is what the `limit` drops.
+ * A candidate line is typically typed after the work rather than before
+ * it, so that is not an edge case: it is the ordinary one.
+ *
+ * The `session_id in (...)` is redundant against the disjunction and kept
+ * anyway, because `and` short-circuits: a row from an unnamed session is
+ * rejected by the set test and never walks the disjunction.
+ *
+ * @param {{ id: string, at: number }[]} anchors
+ */
+function afterTrigger(anchors) {
+  const ids = anchors.map((a) => sqlString(a.id)).join(', ')
+  const windows = anchors.map((a) => `(session_id = ${sqlString(a.id)} and message_created_at >= ${sqlTimestamp(a.at)})`).join(' or ')
+  return `session_id in (${ids}) and (${windows})`
+}
+
+/**
+ * The statements, keyed by step. All bounded: aggregates, or lists over a
+ * sampled set of sessions, each read from its trigger onwards and given a
+ * budget of `ROWS_PER_SESSION` rows.
  *
  * @param {string} from
  * @returns {{
  *   record: string,
  *   lines: string,
  *   triggers: (lines: string[]) => string,
- *   calls: (sessionIds: string[]) => string,
- *   replies: (sessionIds: string[]) => string,
+ *   calls: (anchors: { id: string, at: number }[]) => string,
+ *   replies: (anchors: { id: string, at: number }[]) => string,
  * }}
  */
 export function evidenceSql(from) {
@@ -149,8 +192,8 @@ export function evidenceSql(from) {
     record: `select count(*) as session_days, count(distinct session_id) as sessions from (select session_id, date from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2) s`,
     lines: `select lower(substr(content_text, 1, 42)) as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and length(content_text) between 12 and 160 group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 order by sessions desc limit ${CANDIDATES + 3}`,
     triggers: (lines) => `select session_id, lower(substr(content_text, 1, 42)) as line, min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example from ai_gateway_messages where date >= '${from}' and ${human} and length(content_text) between 12 and 160 and lower(substr(content_text, 1, 42)) in (${lines.map(sqlString).join(', ')}) group by 1, 2`,
-    calls: (ids) => `select session_id, message_created_at as at, tool_name, substr(cast(tool_args as varchar), 1, 160) as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and session_id in (${ids.map(sqlString).join(', ')}) order by session_id, message_created_at limit ${ids.length * ROWS_PER_SESSION}`,
-    replies: (ids) => `select session_id, message_created_at as at, substr(content_text, 1, 500) as text from ai_gateway_messages where date >= '${from}' and role = 'assistant' and part_type = 'text' and length(content_text) > 200 and ${NOT_DUPLICATE_LANE} and session_id in (${ids.map(sqlString).join(', ')}) order by session_id, message_created_at limit ${ids.length * ROWS_PER_SESSION}`,
+    calls: (anchors) => `select session_id, message_created_at as at, tool_name, substr(cast(tool_args as varchar), 1, 160) as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${anchors.length * ROWS_PER_SESSION}`,
+    replies: (anchors) => `select session_id, message_created_at as at, substr(content_text, 1, 500) as text from ai_gateway_messages where date >= '${from}' and role = 'assistant' and part_type = 'text' and length(content_text) > 200 and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${anchors.length * ROWS_PER_SESSION}`,
   }
 }
 
@@ -236,6 +279,34 @@ export function sampleTriggers(triggers, perLine = TRIGGER_SESSIONS) {
   return out
 }
 
+/**
+ * One anchor per session in a sampled trigger list: the session's id and
+ * the earliest instant it typed any candidate line. Earliest, because a
+ * session that typed two of them needs both procedures readable, and the
+ * statements read forward from the anchor.
+ *
+ * A session whose trigger instant does not parse is dropped rather than
+ * read unanchored. `buildCandidates` compares every call against it, and
+ * `NaN` compares false in both directions, so such a session contributes
+ * no procedure however many of its rows are fetched.
+ *
+ * @param {Record<string, unknown>[]} triggers
+ * @returns {{ id: string, at: number }[]}
+ */
+export function sessionAnchors(triggers) {
+  /** @type {Map<string, number>} */
+  const earliest = new Map()
+  for (const t of triggers) {
+    const id = String(t.session_id ?? '')
+    if (!id) continue
+    const at = instant(t.at)
+    if (!Number.isFinite(at)) continue
+    const seen = earliest.get(id)
+    if (seen === undefined || at < seen) earliest.set(id, at)
+  }
+  return [...earliest].map(([id, at]) => ({ id, at }))
+}
+
 /** A command head that is a step of a procedure, not a read. */
 const STEP_HEAD = /^(Bash|exec): (git|gh|npm|node|hyp|make|pnpm|yarn|cargo|pytest|go|docker|curl) /
 
@@ -282,12 +353,18 @@ export function buildCandidates(rows) {
     const hits = triggers.filter((t) => String(t.line ?? '') === line)
     /** @type {Record<string, unknown>[]} */
     const after = []
+    // Sessions whose procedure was actually read, which is not the same as
+    // the sessions sampled: the list statements share one row budget, so a
+    // long session can leave a later one with nothing. Counting the hits
+    // would print a denominator no step's numerator could ever reach.
+    let read = 0
     /** @type {{ date: string, text: string } | undefined} */
     let ending
     for (const h of hits) {
       const sid = String(h.session_id ?? '')
       const at = instant(h.at)
       const window = (callsBy.get(sid) ?? []).filter((c) => instant(c.at) >= at).slice(0, CALLS_AFTER)
+      if (window.length > 0) read += 1
       after.push(...window)
       if (!ending) {
         const last = window.at(-1)
@@ -310,7 +387,7 @@ export function buildCandidates(rows) {
       days: num(l.days),
       typed: num(l.typed),
       example: first ? { date: String(first.date ?? ''), text: oneLine(String(first.example ?? '')) } : undefined,
-      sessionsWithCalls: hits.length,
+      sessionsWithCalls: read,
       steps: steps.map((h) => ({ command: h.head.replace(/^(Bash|exec): /, ''), sessions: h.sessions })),
       other: other.map((h) => ({ head: h.head, sessions: h.sessions })),
       ending,
@@ -353,7 +430,7 @@ export function renderCandidates(record, candidates, enough) {
     `## ${i + 1}. "${c.line}"`,
     `Typed ${c.typed} times in ${c.sessions} sessions on ${c.days} days.${c.example ? ` Example, ${c.example.date}: "${c.example.text}"` : ''}`,
     '',
-    `Commands that ran in the ${CALLS_AFTER} tool calls after it (sessions that ran it, of the ${c.sessionsWithCalls} most recent):`,
+    `Commands that ran in the ${CALLS_AFTER} tool calls after it (sessions that ran it, of the ${c.sessionsWithCalls} most recent whose procedure was read):`,
     ...(c.steps.length > 0 ? c.steps.map((s) => `- \`${s.command}\` (${s.sessions})`) : ['- (no standard commands)']),
     `Other activity: ${c.other.map((o) => `${o.head} (${o.sessions})`).join('; ') || 'none'}`,
     ...(c.ending ? ['', `How one ended (${c.ending.date}): "${c.ending.text}"`] : []),
@@ -527,9 +604,9 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
   let candidates = []
   if (lines.length > 0) {
     const triggers = sampleTriggers((await runner.run(sql.triggers(lines.map((l) => String(l.line ?? ''))))).rows)
-    const ids = [...new Set(triggers.map((t) => String(t.session_id ?? '')))].filter(Boolean)
-    const calls = ids.length > 0 ? (await runner.run(sql.calls(ids))).rows : []
-    const replies = ids.length > 0 ? (await runner.run(sql.replies(ids))).rows : []
+    const anchors = sessionAnchors(triggers)
+    const calls = anchors.length > 0 ? (await runner.run(sql.calls(anchors))).rows : []
+    const replies = anchors.length > 0 ? (await runner.run(sql.replies(anchors))).rows : []
     candidates = buildCandidates({ lines, triggers, calls, replies })
   }
   const enough = enoughRecorded(record, candidates)
