@@ -1454,28 +1454,25 @@ test('runInitWizard: a no to the skill offer names the verb and starts nothing',
 test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync question, before the skill offer', async () => {
   const home = await tmpHome()
   await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
-  let spawned = 0
+  let syncRuns = 0
   const { opts, stdout } = wizardOpts(home, {
     fork: async () => 'team',
     firstLook: firstLookWithRows(),
     syncNow: {
-      // A child that leaves the marker in place: the user read the plan and
+      // Sync leaves the marker in place: the user read the plan and
       // answered no.
-      spawnFn: /** @type {any} */ (() => {
-        spawned += 1
-        /** @type {Record<string, (arg: any) => void>} */
-        const handlers = {}
-        queueMicrotask(() => handlers.close?.(0))
-        return { on: (/** @type {string} */ event, /** @type {any} */ fn) => { handlers[event] = fn } }
-      }),
+      dispatchFn: async () => {
+        syncRuns += 1
+        return 0
+      },
     },
   })
   await runInitWizard(opts)
 
-  assert.equal(spawned, 1)
+  assert.equal(syncRuns, 1)
   const text = stdout.text()
   // The wizard asks nothing of its own, and its narration stands down for
-  // the child's plan: no paragraph, no menu, one lead line.
+  // the sync plan: no paragraph, no menu, one lead line.
   // @ref LLP 0203#no-new-consent [tests]: the informed prompt is the only prompt on the attended path
   assert.doesNotMatch(text, /Nothing has been uploaded yet/)
   assert.doesNotMatch(text, /Send your recorded history/)
@@ -1490,7 +1487,7 @@ test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync quest
 test('runInitWizard: a local install with no hold is never offered a sync', async () => {
   const { opts, stdout } = wizardOpts(await tmpHome(), {
     fork: async () => 'local',
-    syncNow: { spawnFn: () => { throw new Error('a local install must not sync') } },
+    syncNow: { dispatchFn: () => { throw new Error('a local install must not sync') } },
   })
   await runInitWizard(opts)
   assert.doesNotMatch(stdout.text(), /hyp sync/)

@@ -1,3 +1,4 @@
+import type { dispatch } from '../../../../src/core/cli/dispatch.js'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import type { CapabilityRegistry, CommandRunContext, HypAwareV2Config } from '../../../../hypaware-plugin-kernel-types.d.ts'
 import type { CollectStatusOptions, HypAwareStatusReport } from '../../daemon/types.d.ts'
@@ -632,29 +633,12 @@ export type FirstAskResult =
   | { launched: false; reason: 'no-launcher' | 'not-interactive' | 'declined' | 'spawn-failed' | 'no-rows' | 'no-evidence' | 'error' }
 
 /**
- * The closing "send now" offer's outcome (LLP 0203).
- *
- * `released` is read back from the hold marker, never inferred from the
- * child's exit code: `hyp sync` exits 0 both when it sends and when the
- * user reads its destination list and answers no. `sync-declined` is that
- * second case, and it is the only decline there is: the wizard puts no
- * question of its own ahead of the child's (LLP 0203 #no-new-consent).
- * `child-failed` is the still-held run whose child exited non-zero, which a
- * decline never does: it never reached its plan, so it is not a decline and
- * must not be counted as one.
- *
- * `no-destinations` is the one non-zero exit that is named rather than left
- * to `child-failed`: `hyp sync` found no sink to send to, which is not a run
- * that broke. It is told apart by the child's exit code
- * (`SYNC_HELD_NO_DESTINATIONS_EXIT`) together with the notice it prints on
- * that branch (`SYNC_HELD_NO_DESTINATIONS_NOTICE`), never by the marker,
- * which says only that nothing sent. Both halves are required: 3 is a small
- * integer any process can return, and this arm restates the explanation as
- * setup's closing statement.
+ * The closing sync outcome. The marker distinguishes release from decline;
+ * sync's return code distinguishes no destinations from a failed command.
  */
 export type WizardSyncNowResult =
   | { asked: true; released: true }
-  | { asked: true; released: false; reason: 'sync-declined' | 'child-failed' | 'no-destinations' | 'spawn-failed' }
+  | { asked: true; released: false; reason: 'sync-declined' | 'sync-failed' | 'no-destinations' }
   | { asked: false; reason: 'no-hold' | 'not-interactive' | 'error' }
 
 /** Options for `runWizardSyncNow`. */
@@ -674,7 +658,7 @@ export interface RunWizardSyncNowOptions {
   /** Real stream for the TUI, when `stdout` above is a buffer. */
   stdoutStream?: NodeJS.WritableStream
   /** Test seams; production callers pass none of these. */
-  spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess
+  dispatchFn?: typeof dispatch
   readDeadline?: () => Promise<number | null>
 }
 
