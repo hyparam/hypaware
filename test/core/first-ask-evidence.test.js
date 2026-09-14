@@ -6,6 +6,9 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { asyncRow } from 'squirreling'
+
+import { executeQuerySql } from '../../src/core/query/sql.js'
 import {
   RECORD_FLOOR,
   askInstructions,
@@ -17,8 +20,13 @@ import {
   onDiskListing,
   prepareFirstAskEvidence,
   renderCandidates,
+  sampleTriggers,
   windowStart,
 } from '../../src/core/query/first_ask_evidence.js'
+
+/**
+ * @import { AsyncDataSource } from 'squirreling/src/types.js'
+ */
 
 // The recommendation ask (LLP 0398): the one signal, the files the client
 // reads, and the folder the client is started in.
@@ -271,4 +279,73 @@ test('onDiskListing: the 200-entry cap takes the first 200 by name, not by direc
   })
   assert.ok(text.includes('skill-000'), 'the sorted head is listed whatever order the filesystem returned')
   assert.ok(!text.includes('skill-209'), 'the sorted tail is what the cap drops')
+})
+
+test('the gather is bounded in sessions and in rows, not only by the window', () => {
+  // @ref LLP 0398#consequences [tests]: the sample and the per-session row cap are what bound the two session lists
+  // hypaware #1701: `triggers` returned every session that typed a candidate
+  // line in the last 30 days, and the two statements that list rows per
+  // session then returned every row of every one of them. The calls
+  // statement, measured through the engine on 500 sessions of 300 calls:
+  // 150,000 rows, 227 MB peak, 33 MB still held, 16 s. With the sample and
+  // the cap: 2,400 rows, 33 MB peak, 0.6 MB held, 3 s.
+  const line = 'commit on appropriate branch and make a pr'
+  const triggers = Array.from({ length: 500 }, (_, i) => ({
+    session_id: `s${String(i).padStart(3, '0')}`,
+    line,
+    at: new Date(Date.UTC(2026, 7, 10) + i * 60_000),
+    date: '2026-08-10',
+    example: 'commit on appropriate branch and make a PR',
+  }))
+  const sample = sampleTriggers(triggers)
+  assert.equal(sample.length, 40, 'forty sessions a candidate, not every session that typed the line')
+  assert.equal(sample[0].session_id, 's499', 'newest first: what the person does now')
+  assert.equal(sample.at(-1)?.session_id, 's460')
+
+  const calls = triggers.map((t) => ({ session_id: t.session_id, at: new Date(Number(t.at) + 1000), tool_name: 'Bash', args: '{"command":"git checkout -b topic"}' }))
+  const [c] = buildCandidates({ lines: [{ line, sessions: 500, days: 20, typed: 500 }], triggers, calls, replies: [] })
+  assert.equal(c.sessions, 500, 'the line is still reported as typed in every session that typed it')
+  assert.equal(c.sessionsWithCalls, 40, 'the procedure was read from the sample, and the page says so')
+  assert.deepEqual(c.steps.map((step) => [step.command, step.sessions]), [['git checkout -b', 40]], 'the count beside a step is the sample, not every session')
+  assert.ok(renderCandidates({ sessions: 500, sessionDays: 600 }, [c], true).includes('of the 40 most recent'))
+
+  const ids = sample.map((t) => String(t.session_id))
+  const sql = evidenceSql('2026-08-08')
+  assert.ok(sql.calls(ids).endsWith('limit 2400'), 'sixty rows a sampled session: twice the thirty-call window')
+  assert.ok(sql.replies(ids).endsWith('limit 2400'))
+})
+
+test('the engine stops the calls statement at its cap, whatever the sessions hold', async () => {
+  // A string assertion cannot say the cap is honored, only that it was
+  // written. The statement goes through the same `executeQuerySql` the
+  // gather runs on, over three sessions of a hundred calls each.
+  const columns = ['date', 'session_id', 'part_type', 'conversation_source', 'message_created_at', 'tool_name', 'tool_args']
+  const rows = Array.from({ length: 300 }, (_, i) => ({
+    date: '2026-08-10',
+    session_id: `s${Math.floor(i / 100)}`,
+    part_type: 'tool_call',
+    conversation_source: null,
+    message_created_at: new Date(Date.UTC(2026, 7, 10, 1, 0, i % 100)),
+    tool_name: 'Bash',
+    tool_args: '{"command":"git status --short"}',
+  }))
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns,
+    numRows: rows.length,
+    scan(options) {
+      const rowColumns = options?.columns ?? columns
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *rows() {
+          for (const row of rows) yield asyncRow(row, rowColumns)
+        },
+      }
+    },
+  }
+  const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
+  const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
+  const result = await executeQuerySql({ query: evidenceSql('2026-08-08').calls(['s0', 's1', 's2']), registry, storage })
+  assert.equal(result.rows.length, 180, 'three sessions of sixty rows, not the three hundred they hold')
 })

@@ -251,8 +251,13 @@ to permission denials.
 ## Consequences {#consequences}
 
 The gather is five bounded queries, seconds on a warm cache, before the
-client starts. The answer then takes one to two minutes in a cold client:
-three file reads and the writing.
+client starts. Bounded by a ceiling, not only by the 30-day window: the
+sessions that typed a candidate line are however many they are, so the
+two statements that list rows per session read a newest-first sample of
+them, 40 a line, and return at most twice the procedure window for each
+one. Every count printed beside a step is the sample's, and so are the
+example and the ending. The answer then takes one to two minutes in a
+cold client: three file reads and the writing.
 
 The floor can be wrong for a machine. It is one exported object,
 `RECORD_FLOOR`, and `candidates.md` prints the record size it was judged
