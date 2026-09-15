@@ -181,13 +181,13 @@ test('sync dispatch receives the live streams and environment, without a stale k
 test('diagnostics keep their color after the terminal echoes a sync answer', async () => {
   const sink = Object.assign(makeBuf(), { isTTY: true })
   const o = opts({ dispatchFn: async (_argv, options) => {
-    options.stderr.write('Send now and end the review window? [Y/n] ')
+    options.stderr.write('Upload now? [Y/n] ')
     options.stderr.write('hyp sync: export failed\n')
     return 1
   } })
   await runWizardSyncNow({ ...o.args, stderr: colorizeStderr(sink, {}) })
   assert.equal(sink.text(),
-    `Send now and end the review window? [Y/n] ${ANSI.red}hyp sync:${ANSI.reset} export failed\n`)
+    `Upload now? [Y/n] ${ANSI.red}hyp sync:${ANSI.reset} export failed\n`)
 })
 
 for (const scenario of [
@@ -270,7 +270,7 @@ for (const answer of ['n', 'y']) {
         write(chunk, _encoding, done) {
           const text = String(chunk)
           stderr.write(text)
-          if (text.includes('Send now and end the review window?')) {
+          if (text.includes('Upload now?')) {
             questions++
             setImmediate(() => stdin.write(`${answer}\n`))
           }

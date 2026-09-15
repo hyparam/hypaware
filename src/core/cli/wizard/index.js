@@ -1259,8 +1259,9 @@ async function runWizardFinale({ opts, picked, joinedAlready, daemonIncomplete, 
  *
  * `offerFollows` silences the narration: when the closing sync offer is
  * about to run (the ordinary attended close), `hyp sync`'s own plan states
- * the deadline, the backfill, the review hint, and asks, so a paragraph
- * here said everything twice in a row. Every path that ends without the
+ * the deadline and the privacy hint, and asks, so a paragraph here said
+ * everything twice in a row (the backfill statement is dropped on that
+ * path, LLP 0407 #dropped). Every path that ends without the
  * offer (aborts, non-interactive, dry runs) keeps the paragraph, because
  * there it is the only sighting of the deadline and the way out. The
  * deadline is still read and returned either way, since the offer runs

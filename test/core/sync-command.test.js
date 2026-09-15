@@ -367,7 +367,7 @@ test('confirming during the review window ends it and exports', async () => {
   assert.match(stdout.text, /central: exported/)
 })
 
-test('the held prompt states the window, the irreversibility, and the way out', async () => {
+test('the held prompt states the deadline and the way out', async () => {
   const hypHome = await makeHome('held-warning')
   await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
   const { ctx, stdout } = makeCtx({
@@ -384,9 +384,7 @@ test('the held prompt states the window, the irreversibility, and the way out', 
   // calls "the latest the first sync can happen, not the earliest". Scheduling
   // it directly above a prompt whose bare enter sends now tells the reader the
   // opposite of what enter does.
-  assert.match(text, /First upload: by .*including your imported history/)
-  assert.match(text, /ends the review window/)
-  assert.match(text, /cannot be undone/)
+  assert.match(text, /Your logs upload by .*, or now if you say yes/)
   assert.match(text, /hypaware-privacy skill/)
   assert.match(text, /hyp privacy`/)
 })

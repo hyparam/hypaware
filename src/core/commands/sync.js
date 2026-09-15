@@ -260,7 +260,7 @@ export async function runSync(argv, ctx) {
     ctx,
     yes,
     question: deadline !== null
-      ? 'Send now and end the review window? [Y/n] '
+      ? 'Upload now? [Y/n] '
       : `Send now to ${describeScope(displayedDestinations)}? [Y/n] `,
     defaultYes: true,
   })
@@ -891,16 +891,19 @@ function formatResumeInstant(iso) {
 }
 
 /**
- * The escalated warning shown while the first-sync review window is open.
+ * The warning shown while the first-sync hold is open.
  *
  * This is the one prompt in the CLI where the user has never sent anything
- * before, so it says so, states what confirming gives up (the rest of the
- * window), and names the skill and the command that exclude something
- * first: a warning that only warns leaves the user with no move except yes
- * or no. On an attended enrolling `hyp init` this is also the only place the
- * review hint appears, since the wizard's own narration stands down for it.
+ * before, so it states the deadline the upload happens by on its own, and
+ * names the command and the skill that configure privacy settings first: a
+ * warning that only warns leaves the user with no move except yes or no. On
+ * an attended enrolling `hyp init` this is also the only place the privacy
+ * hint appears, since the wizard's own narration stands down for it. It does
+ * not restate that the upload includes imported history: on the wizard path
+ * the user answered the import question two screens earlier.
  *
  * @ref LLP 0100#requirements [implements]: R2's review window ends by deadline or by informed consent; R1's review hint rides here on the wizard path
+ * @ref LLP 0407#dropped [constrained-by]: no backfill statement and no irreversibility line, by decision
  * @param {number} deadlineMs
  * @returns {string}
  */
@@ -911,9 +914,8 @@ function renderFirstSyncWarning(deadlineMs) {
     // "the latest the first sync can happen, not the earliest". Without it the
     // line schedules an upload for tonight directly above a prompt whose bare
     // enter uploads now, so the reader is told the opposite of what enter does.
-    `  First upload: by ${formatFirstSyncDeadline(deadlineMs)}, including your imported history.\n` +
-    '  Sending now ends the review window. Uploads cannot be undone.\n' +
-    '  To review exclusions: `hyp privacy` or the hypaware-privacy skill in Claude or Codex.\n'
+    `  Your logs upload by ${formatFirstSyncDeadline(deadlineMs)}, or now if you say yes.\n` +
+    '  To exclude anything first, configure privacy settings with `hyp privacy`, or the hypaware-privacy skill in Claude or Codex.\n'
   )
 }
 

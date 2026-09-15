@@ -160,7 +160,7 @@ test('askYesNo declines at EOF even when the default is yes', async () => {
   const stderr = makeBuf()
   const answered = askYesNo(
     /** @type {any} */ ({ stdin, stderr }),
-    'Send now and end the review window? [Y/n] ',
+    'Upload now? [Y/n] ',
     { defaultYes: true }
   )
   stdin.end()

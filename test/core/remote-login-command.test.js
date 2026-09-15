@@ -332,15 +332,15 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   assert.equal(code, 0)
   const text = both.join('')
   const lines = text.split('\n')
-  // LLP 0063 D3 mechanic 1 names what the notice must say, and asks for the
-  // copy to be pinned verbatim: it is the consent surface, so compact may lose
-  // the line breaks but not the hedge and not one of the three consequences
-  // (forwarding, org config that attaches clients and backfills local history,
-  // the background service).
+  // LLP 0063 D3 mechanic 1 asks for the notice copy to be pinned verbatim: it
+  // is the consent surface, so compact may lose the line breaks but not the
+  // hedge, the forwarding consequence, or the background service. The org
+  // config consequence D3 also lists is deliberately not in the copy (see the
+  // comment above the write in remote_commands.js).
   assert.match(
     text,
-    /^note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config \(which can attach clients and backfill existing local history\), and installs a background service \(Ctrl-C to cancel\)$/m,
-    'the pre-auth notice keeps its hedge and all three consequences, as one line'
+    /^If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to the team server and a background service is installed\. Ctrl-C to cancel\.$/m,
+    'the pre-auth notice keeps its hedge and both consequences, as one line'
   )
   assert.match(text, /✓ Signed in to 'prod' as org /)
   assert.match(text, /✓ Forwarding to the 'prod' server \(run 'hyp remote list' to see its URL\)/)

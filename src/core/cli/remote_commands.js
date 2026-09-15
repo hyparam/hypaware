@@ -715,27 +715,28 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // sign-in is the accepting act. Phrased conditionally because the client
   // can't know pre-auth whether the server will mint a gateway credential.
   // @ref LLP 0063#d3 [implements]: default-on enrollment; the pre-auth notice is the consent surface, never a y/n prompt
+  // @ref LLP 0407#dropped [constrained-by]: the notice names two consequences in plain words; the org-config clause is left out by decision
   // Compact (the wizard's join lane, LLP 0135 #join) keeps the notice, its
-  // placement, its conditional phrasing, and all three consequences D3
-  // enumerates, and drops only the line breaks: one line, still before the
-  // browser. The hedge is not shortenable - the client still cannot know
-  // pre-auth whether a gateway will be minted, so a flat "signing in forwards
-  // your logs" is false against a forwarding-off org. Neither is the org-config
-  // clause: applying org config is what attaches clients and backfills the
-  // history already on disk, and no reader infers that from "forwards captured
-  // logs". This notice is the whole consent surface, so a consequence dropped
-  // here is one the user is never told before they authenticate.
+  // placement, and its conditional phrasing, and drops only the line breaks:
+  // one line, still before the browser. The hedge is not shortenable - the
+  // client still cannot know pre-auth whether a gateway will be minted, so a
+  // flat "signing in sends your logs" is false against a forwarding-off org.
+  // The notice names two consequences in plain words: logs go to the team
+  // server, and a background service is installed. D3's third consequence
+  // (org config that can attach clients and backfill local history) is left
+  // out on purpose: it confused new users more than it informed them, and the
+  // wizard's later steps show what gets recorded before anything is written.
   // The '--no-forward' sentence is the one thing left out: the wizard's lane
   // runs a bare login (LLP 0134 #no-token-join) and cannot pass the flag, and
   // the fork already offered the no-forwarding pathway as a choice.
   if (!alreadyEnrolled && !noForward) {
     if (compact) {
-      ctx.stderr.write('note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config (which can attach clients and backfill existing local history), and installs a background service (Ctrl-C to cancel)\n')
+      ctx.stderr.write('If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to the team server and a background service is installed. Ctrl-C to cancel.\n')
     } else {
-      ctx.stderr.write('note: if your org has enabled forwarding, signing in will enroll this machine:\n')
-      ctx.stderr.write('  it forwards captured logs to the server, applies org config (which can attach\n')
-      ctx.stderr.write('  clients and backfill existing local history), and installs a background service.\n')
-      ctx.stderr.write("  re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
+      ctx.stderr.write('If your org shares logs, signing in connects this machine to your team:\n')
+      ctx.stderr.write('  your recorded sessions are sent to the team server and a background\n')
+      ctx.stderr.write('  service is installed.\n')
+      ctx.stderr.write("  Re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
     }
   }
 
@@ -881,17 +882,20 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // install itself goes, so the message stays true in all three. Absent only
     // when the best-effort marker write above failed (LLP 0100 R1's message
     // rides the hold, never invents one that was not actually written).
-    // Compact prints the deadline alone. The wizard that asked for it states
-    // the rest of R1 (the backfill statement, the skill hint, the release verb)
-    // in its closing privacy narration, which every path through it reaches -
-    // the ordinary close and `narrateEnrolledAbort` alike - so the full block
-    // here would say everything twice on the same run.
+    // Compact prints the deadline alone; the rest of R1 lands after it. On the
+    // ordinary attended close `hyp sync`'s own plan carries the skill hint and
+    // the release verb, and the wizard's narration stands down for it
+    // (`offerFollows`). On every path that skips the offer (aborts,
+    // non-interactive, dry runs, and `narrateEnrolledAbort`) the wizard's
+    // closing privacy narration carries them instead. Either way the full
+    // block here would say everything twice on the same run.
     // The line states the deadline and the fact the hold guarantees, and
     // nothing about being prompted: the send-now offer (LLP 0203) runs only on
     // an attended, uncancelled, non-dry close, and at the deadline itself the
     // hold simply lapses (LLP 0101 #no-release). A promise of an ask here
     // would be false on exactly the paths where it would matter.
-    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the wizard's own narration carries the backfill statement, the skill hint, and the release verb
+    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the skill hint and the release verb land after it, from `hyp sync`'s plan on the attended close and from the wizard's narration on every path that skips the offer
+    // @ref LLP 0407#dropped: the backfill statement is no longer made on the attended close
     // @ref LLP 0387#adjacency [implements]: compact meets R1a as a pair - the forwarding line directly above carries the server name and the 'hyp remote list' lookup for both lines
     if (holdDeadline !== null && compact) {
       ctx.stderr.write(`✓ First sync no later than ${formatFirstSyncDeadline(holdDeadline)}; nothing has been uploaded yet\n`)

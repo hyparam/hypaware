@@ -53,7 +53,7 @@
       {
         "name": "claude",
         "label": "Claude Code",
-        "summary": "Records your Claude Code conversations (CLI and SDK, including OpenClaw's claude-cli backend). Setup attaches Claude Code, starts its local telemetry listener, and adds query skills.",
+        "summary": "Records your Claude Code conversations, including OpenClaw sessions that run through it. Setup edits Claude Code's settings, opens a local port, and adds query skills.",
         "detect": { "settings_file": ".claude/settings.json" },
         "compose": {
           "plugin": { "name": "@hypaware/claude" },

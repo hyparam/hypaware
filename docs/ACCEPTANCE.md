@@ -343,7 +343,7 @@ consume paid tokens. Do not delete any OpenCode session during this procedure.
 
    Also record the Desktop version from its About window. Pass condition: the
    visible `OpenCode` row is pre-checked and says it records CLI and Desktop
-   through a local plugin with bounded history recovery. Cancel the walkthrough
+   conversations and that setup adds a plugin file to OpenCode. Cancel the walkthrough
    without saving. A fresh installation that has never created the shared
    config directory is allowed to remain unchecked, but the row must still be
    visible and selectable. If this host intentionally sets `XDG_CONFIG_HOME`,

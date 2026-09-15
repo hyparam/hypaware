@@ -1536,8 +1536,8 @@ test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync quest
   // @ref LLP 0203#no-new-consent [tests]: the informed prompt is the only prompt on the attended path
   assert.doesNotMatch(text, /Nothing has been uploaded yet/)
   assert.doesNotMatch(text, /Send your recorded history/)
-  assert.ok(text.indexOf('First look') < text.indexOf('Ready to upload your selected logs:'))
-  assert.ok(text.indexOf('Ready to upload your selected logs:') < text.indexOf('Run `hyp ask` any time'))
+  assert.ok(text.indexOf('First look') < text.indexOf('Last step: upload your logs.'))
+  assert.ok(text.indexOf('Last step: upload your logs.') < text.indexOf('Run `hyp ask` any time'))
   // A run that ends on the wait still leaves the deadline and the release
   // verb on screen.
   assert.match(text, /Nothing was sent\. Your history stays on this machine until /)

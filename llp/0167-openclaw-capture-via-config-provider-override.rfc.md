@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-31
 **Related:** LLP 0109, LLP 0143, LLP 0144, LLP 0145, LLP 0146, LLP 0148, LLP 0149, LLP 0152, LLP 0157, LLP 0161, LLP 0162; issues #539, #543, #544
+**Extended-by:** LLP 0407 (#dropped: the picker rows say it in plain words without claude-cli or the sweep interval)
 **Spawned:** LLP 0168 (override replaces steering), LLP 0169 (attach surface returns), LLP 0170 (scheduled sweep), LLP 0171 (requirements spec), accepted 2026-07-31
 
 > Proposal: replace the OpenClaw steering plugin with two lanes that need

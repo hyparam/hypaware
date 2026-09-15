@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-07-31
 **Related:** LLP 0167 (the accepted RFC), LLP 0168, LLP 0169, LLP 0170 (the decisions this spec makes implementable), LLP 0157 (the prior spec; R8, R9, R10, R11, R14 remain binding), LLP 0163, LLP 0044, LLP 0045
+**Extended-by:** LLP 0407 (#dropped: R12 is satisfied by plain wording)
 
 > Requirements for implementing LLP 0168 (config override), LLP 0169
 > (attach surface), and LLP 0170 (scheduled sweep), replacing the dead
