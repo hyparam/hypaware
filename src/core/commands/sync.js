@@ -253,7 +253,7 @@ export async function runSync(argv, ctx) {
     ctx,
     yes,
     question: deadline !== null
-      ? 'Send now and end the review window? [Y/n] '
+      ? 'Upload now? [Y/n] '
       : `Send now to ${describeScope(displayedDestinations)}? [Y/n] `,
     defaultYes: true,
   })
@@ -895,9 +895,8 @@ function renderFirstSyncWarning(deadlineMs) {
     // "the latest the first sync can happen, not the earliest". Without it the
     // line schedules an upload for tonight directly above a prompt whose bare
     // enter uploads now, so the reader is told the opposite of what enter does.
-    `  First upload: by ${formatFirstSyncDeadline(deadlineMs)}, including your imported history.\n` +
-    '  Sending now ends the review window. Uploads cannot be undone.\n' +
-    '  To review exclusions: `hyp privacy` or the hypaware-privacy skill in Claude or Codex.\n'
+    `  Your logs upload by ${formatFirstSyncDeadline(deadlineMs)}, or now if you say yes.\n` +
+    '  To exclude anything first, configure privacy settings with `hyp privacy`, or the hypaware-privacy skill in Claude or Codex.\n'
   )
 }
 

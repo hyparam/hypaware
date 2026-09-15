@@ -71,7 +71,7 @@ export async function runWizardSyncNow(opts) {
         }
 
         // @ref LLP 0203#no-new-consent [implements]: sync owns the plan and the only confirmation
-        opts.stdout.write('\nReady to upload your selected logs:\n\n')
+        opts.stdout.write('\nLast step: upload your logs.\n\n')
         const code = await runConfiguredSync(opts)
         span.setAttribute('exit_code', code)
         if (code !== 0) span.setAttribute('status', 'error')

@@ -640,8 +640,7 @@ export function renderOverview({
     out += withheld
       ? '\nEvery recorded session in this window is marked local-only and not visible\n' +
         'from here. Re-run inside one of those directories, or with --include-local-only.\n'
-      : '\nNothing recorded yet. Start a session in a client you attached,\n' +
-        'then run `hyp query overview` again.\n'
+      : '\nNothing recorded yet.\n'
     return out
   }
 

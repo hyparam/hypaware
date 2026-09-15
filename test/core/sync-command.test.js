@@ -383,9 +383,7 @@ test('the held prompt states the window, the irreversibility, and the way out', 
   // calls "the latest the first sync can happen, not the earliest". Scheduling
   // it directly above a prompt whose bare enter sends now tells the reader the
   // opposite of what enter does.
-  assert.match(text, /First upload: by .*including your imported history/)
-  assert.match(text, /ends the review window/)
-  assert.match(text, /cannot be undone/)
+  assert.match(text, /Your logs upload by .*, or now if you say yes/)
   assert.match(text, /hypaware-privacy skill/)
   assert.match(text, /hyp privacy`/)
 })
