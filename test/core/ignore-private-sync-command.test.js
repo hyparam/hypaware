@@ -18,7 +18,7 @@ import {
  * @import { CommandRegistration, CommandRunContext } from '../../hypaware-plugin-kernel-types.js'
  */
 
-// `hyp ignore --private` / `hyp ignore --sync` / symmetric `hyp unignore`
+// `hyp privacy set <path> ignore` / `hyp privacy set <path> sync` / symmetric `hyp unignore`
 // (LLP 0103 #cli, task T2): the two new machine-local marking classes on top
 // of the class-per-entry store, alongside the pre-existing `--local-only`
 // (covered by `test/core/ignore-local-only-command.test.js`). These verbs
@@ -89,13 +89,13 @@ function stateDirOf(hypHome) {
 
 /* -------------------------------- ignore --private -------------------------------- */
 
-test('hyp ignore --private marks the repo root ignore in the machine-local store, never touching the repo', async () => {
+test('hyp privacy set <path> ignore marks the explicitly selected repo root ignore in the machine-local store, never touching the repo', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     mkdirSync(path.join(root, '.git'))
     const sub = path.join(root, 'src', 'deep')
     mkdirSync(sub, { recursive: true })
 
-    const res = await run('ignore', ['--private'], { cwd: sub, hypHome })
+    const res = await run('privacy set', [root, 'ignore'], { cwd: sub, hypHome })
     assert.equal(res.code, 0)
     assert.match(res.stdout, /marked .* as ignore/)
 
@@ -105,12 +105,12 @@ test('hyp ignore --private marks the repo root ignore in the machine-local store
   })
 })
 
-test('hyp ignore --private is idempotent: marking twice is a no-op success', async () => {
+test('hyp privacy set <path> ignore is idempotent: marking twice is a no-op success', async () => {
   await withSandbox(async ({ root, hypHome }) => {
-    const first = await run('ignore', ['--private'], { cwd: root, hypHome })
+    const first = await run('privacy set', [root, 'ignore'], { cwd: root, hypHome })
     assert.equal(first.code, 0)
 
-    const second = await run('ignore', ['--private'], { cwd: root, hypHome })
+    const second = await run('privacy set', [root, 'ignore'], { cwd: root, hypHome })
     assert.equal(second.code, 0)
     assert.match(second.stdout, /already ignore/)
 
@@ -119,11 +119,11 @@ test('hyp ignore --private is idempotent: marking twice is a no-op success', asy
   })
 })
 
-test('hyp ignore --private upgrades an existing local-only entry to ignore', async () => {
+test('hyp privacy set <path> ignore upgrades an existing local-only entry to ignore', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'local-only' }] })
 
-    const res = await run('ignore', ['--private'], { cwd: root, hypHome })
+    const res = await run('privacy set', [root, 'ignore'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     assert.match(res.stdout, /marked .* as ignore/)
 
@@ -132,11 +132,11 @@ test('hyp ignore --private upgrades an existing local-only entry to ignore', asy
   })
 })
 
-test('hyp ignore --private on a path already governed by a stricter .hypignore is a no-op naming the dotfile', async () => {
+test('hyp privacy set <path> ignore on a path already governed by a stricter .hypignore is a no-op naming the dotfile', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     writeFileSync(path.join(root, '.hypignore'), 'ignore\n')
 
-    const res = await run('ignore', ['--private'], { cwd: root, hypHome })
+    const res = await run('privacy set', [root, 'ignore'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     assert.match(res.stdout, /already ignore/)
     assert.match(res.stdout, new RegExp(path.join(root, '.hypignore').replace(/[.\\]/g, '\\$&')))
@@ -148,41 +148,41 @@ test('hyp ignore --private on a path already governed by a stricter .hypignore i
 
 /* --------------------------------- ignore --sync ---------------------------------- */
 
-test('hyp ignore --sync writes an explicit full entry (the "asked; syncs" marker)', async () => {
+test('hyp privacy set <path> sync writes an explicit full entry (the "asked; syncs" marker)', async () => {
   await withSandbox(async ({ root, hypHome }) => {
-    const res = await run('ignore', ['--sync'], { cwd: root, hypHome })
+    const res = await run('privacy set', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
-    assert.match(res.stdout, /marked .* as full/)
+    assert.match(res.stdout, /marked .* as sync/)
 
     const entries = await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) })
     assert.deepEqual(entries, [{ dir: root, class: 'full' }])
   })
 })
 
-test('hyp ignore --sync is idempotent against an existing explicit full entry, but not against the mere implicit default', async () => {
+test('hyp privacy set <path> sync is idempotent against an existing explicit full entry, but not against the mere implicit default', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     // Nothing governs yet: the implicit default already resolves to `full`,
     // but that is not the same as "explicitly answered" (LLP 0103), so the
     // mark still writes a new, durable entry rather than treating this cwd
     // as already-explicit.
-    const first = await run('ignore', ['--sync'], { cwd: root, hypHome })
+    const first = await run('privacy set', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(first.code, 0)
-    assert.match(first.stdout, /marked .* as full/, 'no entry existed yet, so this must write, not no-op')
+    assert.match(first.stdout, /marked .* as sync/, 'no entry existed yet, so this must write, not no-op')
 
-    const second = await run('ignore', ['--sync'], { cwd: root, hypHome })
+    const second = await run('privacy set', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(second.code, 0)
-    assert.match(second.stdout, /already full/, 'now an explicit entry exists, so this is idempotent')
+    assert.match(second.stdout, /already sync/, 'now an explicit entry exists, so this is idempotent')
 
     const entries = await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) })
     assert.deepEqual(entries, [{ dir: root, class: 'full' }], 'no duplicate entry')
   })
 })
 
-test('hyp ignore --sync downgrades an existing ignore entry back to full (re-marking is not destructive of cached rows)', async () => {
+test('hyp privacy set <path> sync downgrades an existing ignore entry back to full (re-marking is not destructive of cached rows)', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'ignore' }] })
 
-    const res = await run('ignore', ['--sync'], { cwd: root, hypHome })
+    const res = await run('privacy set', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
 
     const entries = await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) })
@@ -190,61 +190,25 @@ test('hyp ignore --sync downgrades an existing ignore entry back to full (re-mar
   })
 })
 
-/* ------------------------- deprecated-alias output stability ----------------------- */
-
-// LLP 0111 #aliases: the deprecated flag forms stay output-identical to what
-// they printed before the `hyp policy` verb existed, internal class name and
-// backing store path included. Issue #393 moved the *policy* verb's human
-// output to the public vocabulary; these aliases deliberately did not move, so
-// scripted callers of the old spelling see no change.
-test('hyp ignore --sync keeps its exact deprecated-alias confirmation, internal class and store path included', async () => {
-  await withSandbox(async ({ root, hypHome }) => {
-    const res = await run('ignore', [root, '--sync'], { cwd: root, hypHome })
-    assert.equal(res.code, 0)
-    assert.equal(res.stdout, `marked ${root} as full (${localOnlyListPath(stateDirOf(hypHome))})\n`)
-  })
-})
-
-test('hyp ignore --check keeps its exact deprecated-alias human output (resolver class, real store path)', async () => {
-  await withSandbox(async ({ root, hypHome }) => {
-    await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'full' }] })
-
-    const res = await run('ignore', ['--check'], { cwd: root, hypHome })
-    assert.equal(res.code, 0)
-    assert.match(res.stdout, /^class: full$/m)
-    const listPath = localOnlyListPath(stateDirOf(hypHome))
-    assert.match(res.stdout, new RegExp(`^governed-by: ${listPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'))
-  })
-})
-
-// LLP 0111 #show: `policy show` appends an "(implicit default, not yet
-// classified)" suffix to the class line for an unmarked directory, gated
-// through the vocabulary's optional `implicitSuffix` member. The deprecated
-// `--check` alias passes no vocabulary at all, so it must fall back to the
-// no-op and keep printing the bare resolver class, unchanged from before
-// that member existed.
-test('hyp ignore --check on an unmarked directory keeps its exact bare class line, no implicit-default suffix', async () => {
-  await withSandbox(async ({ root, hypHome }) => {
-    const res = await run('ignore', ['--check'], { cwd: root, hypHome })
-    assert.equal(res.code, 0)
-    assert.match(res.stdout, /^class: full$/m)
-    assert.doesNotMatch(res.stdout, /implicit default/)
-  })
-})
-
-/* -------------------------------- flag exclusivity --------------------------------- */
-
-test('hyp ignore rejects combining --local-only, --private, and --sync', async () => {
-  await withSandbox(async ({ root, hypHome }) => {
-    const res = await run('ignore', ['--private', '--sync'], { cwd: root, hypHome })
-    assert.equal(res.code, 2)
-    assert.match(res.stderr, /mutually exclusive/)
-  })
-})
+for (const name of ['ignore', 'unignore']) {
+  for (const flag of ['--check', '--private', '--local-only', '--sync', '--json']) {
+    test(`${name} rejects removed ${flag} without changing policy or dotfiles`, async () => {
+      await withSandbox(async ({ root, hypHome }) => {
+        await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'ignore' }] })
+        const res = await run(name, [root, flag], { cwd: root, hypHome })
+        assert.equal(res.code, 2)
+        assert.match(res.stderr, /unknown flag/)
+        assert.equal(res.stdout, '')
+        assert.deepEqual(await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) }), [{ dir: root, class: 'ignore' }])
+        assert.ok(!existsSync(path.join(root, '.hypignore')))
+      })
+    })
+  }
+}
 
 /* ------------------------------- unignore --private --------------------------------- */
 
-test('hyp unignore --private removes an ignore entry and is idempotent, leaving other classes untouched', async () => {
+test('hyp privacy unset <path> ignore removes an ignore entry and is idempotent, leaving other classes untouched', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     const other = path.join(root, 'other')
     mkdirSync(other, { recursive: true })
@@ -256,14 +220,14 @@ test('hyp unignore --private removes an ignore entry and is idempotent, leaving 
       ],
     })
 
-    const first = await run('unignore', ['--private'], { cwd: root, hypHome })
+    const first = await run('privacy unset', [root, 'ignore'], { cwd: root, hypHome })
     assert.equal(first.code, 0)
     assert.match(first.stdout, /removed 1 ignore entry/)
 
     const entries = await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) })
     assert.deepEqual(entries, [{ dir: other, class: 'local-only' }], 'the unrelated local-only entry survives')
 
-    const second = await run('unignore', ['--private'], { cwd: root, hypHome })
+    const second = await run('privacy unset', [root, 'ignore'], { cwd: root, hypHome })
     assert.equal(second.code, 0, 'unignoring an already-clean path still succeeds (R5)')
     assert.match(second.stdout, /not ignore/)
   })
@@ -271,28 +235,28 @@ test('hyp unignore --private removes an ignore entry and is idempotent, leaving 
 
 /* -------------------------------- unignore --sync ----------------------------------- */
 
-test('hyp unignore --sync removes an explicit full entry and is idempotent', async () => {
+test('hyp privacy unset <path> sync removes an explicit full entry and is idempotent', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'full' }] })
 
-    const first = await run('unignore', ['--sync'], { cwd: root, hypHome })
+    const first = await run('privacy unset', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(first.code, 0)
-    assert.match(first.stdout, /removed 1 full entry/)
+    assert.match(first.stdout, /removed 1 sync entry/)
     assert.deepEqual(await readLocalOnlyEntries({ stateDir: stateDirOf(hypHome) }), [])
 
-    const second = await run('unignore', ['--sync'], { cwd: root, hypHome })
+    const second = await run('privacy unset', [root, 'sync'], { cwd: root, hypHome })
     assert.equal(second.code, 0)
-    assert.match(second.stdout, /not full/)
+    assert.match(second.stdout, /not sync/)
   })
 })
 
 /* -------------------------------- --check source naming ------------------------------ */
 
-test('hyp ignore --check names the machine-local source for a --private mark', async () => {
+test('hyp privacy show names the machine-local source for a --private mark', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'ignore' }] })
 
-    const res = await run('ignore', ['--check', '--json'], { cwd: root, hypHome })
+    const res = await run('privacy show', ['--json'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.class, 'ignore')
@@ -301,20 +265,20 @@ test('hyp ignore --check names the machine-local source for a --private mark', a
   })
 })
 
-test('hyp ignore --check names the dotfile source when a .hypignore governs', async () => {
+test('hyp privacy show names the dotfile source when a .hypignore governs', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     writeFileSync(path.join(root, '.hypignore'), 'ignore\n')
 
-    const res = await run('ignore', ['--check', '--json'], { cwd: root, hypHome })
+    const res = await run('privacy show', ['--json'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.source, 'dotfile')
   })
 })
 
-test('hyp ignore --check names no source when nothing governs (the implicit default)', async () => {
+test('hyp privacy show names no source when nothing governs (the implicit default)', async () => {
   await withSandbox(async ({ root, hypHome }) => {
-    const res = await run('ignore', ['--check', '--json'], { cwd: root, hypHome })
+    const res = await run('privacy show', ['--json'], { cwd: root, hypHome })
     assert.equal(res.code, 0)
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.class, 'full')

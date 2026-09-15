@@ -873,7 +873,7 @@ export interface DaemonInstallOptions {
   restart?: boolean
   /** Linux: RestartSec= seconds (default 5). */
   restartSec?: number
-  /** Pass `--foreground` to the daemon (default true). */
+  /** @deprecated Service commands always run in the foreground. */
   foreground?: boolean
   /** macOS: override LaunchAgents dir. */
   plistDir?: string
@@ -944,7 +944,7 @@ export interface RunDaemonOptions {
   tickIntervalMs?: number
   /** Default true; smoke flows opt out and drive shutdown directly. */
   installSignalHandlers?: boolean
-  /** Phase 3 only supports foreground; surfaced for symmetry with `--foreground`. */
+  /** Whether the runtime reports foreground mode (default true). */
   foreground?: boolean
   /** Temp directory root for sink materialization scratch files. */
   tmpRoot?: string

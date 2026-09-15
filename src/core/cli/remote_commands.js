@@ -1214,7 +1214,7 @@ export async function runRemoteMint(argv, ctx, deps = {}) {
   // say a positional token lands in shell history and process listings - which
   // on a CI runner means `ps` and any `set -x` trace.
   ctx.stderr.write(`  setup:    printf '%s' "$HYP_CI_TOKEN" | hyp join ${joinTarget} --no-daemon\n`)
-  ctx.stderr.write('            hyp daemon run --foreground &\n')
+  ctx.stderr.write('            hyp daemon run &\n')
   ctx.stderr.write('  teardown: hyp sync --yes\n')
   return 0
 }

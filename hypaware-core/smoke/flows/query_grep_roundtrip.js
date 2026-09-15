@@ -117,8 +117,8 @@ export async function run({ harness, expect }) {
     const excludedCwd = path.join(harness.tmpDir, 'excluded-repo')
     await fs.mkdir(cleanCwd, { recursive: true })
     await fs.mkdir(excludedCwd, { recursive: true })
-    const r = await cli(['ignore', '--local-only', excludedCwd], cleanCwd)
-    expect.that('setup: hyp ignore --local-only exited 0', r.code, (v) => v === 0)
+    const r = await cli(['privacy', 'set', excludedCwd, 'local-only'], cleanCwd)
+    expect.that('setup: hyp privacy set <path> local-only exited 0', r.code, (v) => v === 0)
     return { cleanCwd, excludedCwd }
   })
 

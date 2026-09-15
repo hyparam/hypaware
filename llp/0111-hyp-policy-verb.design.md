@@ -7,6 +7,7 @@
 **Date:** 2026-07-16
 **Generated-by:** neutral
 **Related:** LLP 0110, LLP 0103, LLP 0049, LLP 0106
+**Extended-by:** LLP 0406 (removes deprecated ignore/unignore flag aliases)
 
 > Machine-local usage-class markings move from flags on `hyp ignore` to a
 > dedicated `hyp policy` command group: `set` / `show` / `unset` / `list`.

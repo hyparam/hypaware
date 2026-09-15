@@ -251,15 +251,12 @@ test('hyp policy set requires a path (bare class token alone is ambiguous, so it
 
 /* -------------------------------- policy show --------------------------------- */
 
-test('hyp policy show [path] --json is byte-compatible with hyp ignore --check --json for a machine-local mark', async () => {
+test('hyp policy show [path] --json reports the stable machine-readable fields for a machine-local mark', async () => {
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'ignore' }] })
 
-    const legacy = await run('ignore', ['--check', '--json'], { cwd: root, hypHome })
     const next = await run('policy show', [root, '--json'], { cwd: root, hypHome })
     assert.equal(next.code, 0)
-    assert.equal(legacy.code, 0)
-    assert.deepEqual(JSON.parse(next.stdout), JSON.parse(legacy.stdout))
 
     const parsed = JSON.parse(next.stdout)
     assert.equal(parsed.class, 'ignore')
@@ -311,10 +308,8 @@ test('hyp policy show --json keeps the stored vocabulary and the store path (unc
   await withSandbox(async ({ root, hypHome }) => {
     await writeLocalOnlyEntries({ stateDir: stateDirOf(hypHome), entries: [{ dir: root, class: 'full' }] })
 
-    const legacy = await run('ignore', ['--check', '--json'], { cwd: root, hypHome })
     const next = await run('policy show', [root, '--json'], { cwd: root, hypHome })
     assert.equal(next.code, 0)
-    assert.equal(next.stdout, legacy.stdout, 'byte-compatible with the --check --json shape')
 
     const parsed = JSON.parse(next.stdout)
     assert.equal(parsed.class, 'full', 'the JSON keeps emitting the resolver vocabulary')

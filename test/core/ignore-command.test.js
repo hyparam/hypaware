@@ -162,12 +162,12 @@ test('hyp unignore removes the governing .hypignore and is idempotent', async ()
 
 /* ------------------------------ ignore --check --------------------------- */
 
-test('hyp ignore --check reports an ignored path, its governor, and residual count', async () => {
+test('hyp privacy show reports an ignored path, its governor, and residual count', async () => {
   await withTempTree(async (root) => {
     const file = path.join(root, '.hypignore')
     writeFileSync(file, 'ignore\n')
 
-    const res = await run('ignore', ['--check'], { cwd: root })
+    const res = await run('privacy show', [], { cwd: root })
     assert.equal(res.code, 0)
     assert.match(res.stdout, /ignored: yes/)
     assert.match(res.stdout, new RegExp(`governed-by: ${file.replace(/[.\\]/g, '\\$&')}`))
@@ -177,9 +177,9 @@ test('hyp ignore --check reports an ignored path, its governor, and residual cou
   })
 })
 
-test('hyp ignore --check reports a clean path as not ignored with zero residue', async () => {
+test('hyp privacy show reports a clean path as not ignored with zero residue', async () => {
   await withTempTree(async (root) => {
-    const res = await run('ignore', ['--check'], { cwd: root })
+    const res = await run('privacy show', [], { cwd: root })
     assert.equal(res.code, 0)
     assert.match(res.stdout, /ignored: no/)
     assert.match(res.stdout, /governed-by: \(none\)/)
@@ -187,12 +187,12 @@ test('hyp ignore --check reports a clean path as not ignored with zero residue',
   })
 })
 
-test('hyp ignore --check --json emits a machine-readable status', async () => {
+test('hyp privacy show --json emits a machine-readable status', async () => {
   await withTempTree(async (root) => {
     const file = path.join(root, '.hypignore')
     writeFileSync(file, 'ignore\n')
 
-    const res = await run('ignore', ['--check', '--json'], { cwd: root })
+    const res = await run('privacy show', ['--json'], { cwd: root })
     assert.equal(res.code, 0)
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.ignored, true)
@@ -201,7 +201,7 @@ test('hyp ignore --check --json emits a machine-readable status', async () => {
   })
 })
 
-test('hyp ignore --check counts already-cached rows under the scope (LIKE superset, refined exactly)', async () => {
+test('hyp privacy show counts already-cached rows under the scope (LIKE superset, refined exactly)', async () => {
   await withTempTree(async (root) => {
     const scope = path.join(root, 'my_app') // underscore => LIKE wildcard trap
     mkdirSync(scope)
@@ -219,7 +219,7 @@ test('hyp ignore --check counts already-cached rows under the scope (LIKE supers
     ]
 
     const { query, storage } = makeAiGatewayCache(rows)
-    const res = await run('ignore', ['--check', '--json'], { cwd: scope, query, storage })
+    const res = await run('privacy show', ['--json'], { cwd: scope, query, storage })
     assert.equal(res.code, 0)
     const parsed = JSON.parse(res.stdout)
     assert.equal(parsed.ignored, true)

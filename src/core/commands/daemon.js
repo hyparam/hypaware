@@ -16,12 +16,8 @@ import { sanitizeLabel } from '../util/json_util.js'
  */
 
 /**
- * `hyp daemon run --foreground [--config <path>]`: boot the kernel as a daemon and
- * tend it in the current process until SIGTERM/SIGINT. Phase 3
- * intentionally only supports `--foreground`; the detached run path
- * lands with the Phase 4 launchd/systemd installers, so a no-flag
- * call surfaces a deterministic error instead of attempting to
- * background ourselves and silently failing.
+ * `hyp daemon run [--config <path>]`: boot the kernel as a daemon and
+ * tend it in the current process until SIGTERM/SIGINT.
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
@@ -30,12 +26,6 @@ export async function runDaemonRun(argv, ctx) {
   const parsed = parseDaemonRunArgs(argv)
   if (parsed.error) {
     ctx.stderr.write(`hyp daemon run: ${parsed.error}\n`)
-    return 2
-  }
-  if (!parsed.foreground) {
-    ctx.stderr.write(
-      'hyp daemon run: --foreground is required in Phase 3 (detached run lands with the Phase 4 installer)\n'
-    )
     return 2
   }
   const { runGatewayDaemon: runDaemon } = await import('../daemon/gateway.js')
@@ -47,7 +37,7 @@ export async function runDaemonRun(argv, ctx) {
       ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
       env: ctx.env,
       runId: ctx.env.DEV_RUN_ID,
-      foreground: parsed.foreground,
+      foreground: true,
     })
     ctx.stdout.write(`daemon: running (pid=${process.pid})\n`)
     const exitCode = await handle.done
@@ -331,7 +321,7 @@ export async function runDaemonRestart(argv, ctx) {
   const code = await runDaemonStop([], ctx)
   if (code !== 0) return code
   ctx.stdout.write('daemon restart: stopped. No installed service found;\n')
-  ctx.stdout.write('  re-run `hyp daemon run --foreground` to bring it back up,\n')
+  ctx.stdout.write('  re-run `hyp daemon run` to bring it back up,\n')
   ctx.stdout.write('  or `hyp daemon install` to set up the persistent service first.\n')
   return 0
 }
@@ -546,11 +536,12 @@ function parseDaemonRunArgs(argv) {
   const parsed = parseCommandArgv(argv, {
     type: 'object',
     properties: {
-      foreground: { type: 'boolean', default: false },
+      // @ref LLP 0406#installed-services [implements]: older installed units still pass this unadvertised compatibility flag
+      foreground: { type: 'boolean', default: true },
       config: { type: 'string' },
     },
   }, { aliases: { '-f': '--foreground' } })
-  if ('help' in parsed) return { foreground: false, error: 'usage: hyp daemon run --foreground [--config <path>]' }
+  if ('help' in parsed) return { foreground: false, error: 'usage: hyp daemon run [--config <path>]' }
   if (!parsed.ok) return { foreground: false, error: parsed.error }
   const p = /** @type {{ foreground: boolean, config?: string }} */ (parsed.params)
   return { foreground: p.foreground, configPath: p.config }

@@ -87,7 +87,7 @@ const NPM_DETAIL_CHARS = 600
  *
  * Presence of `XPC_SERVICE_NAME` is not the test: macOS sets it in every
  * process launchd spawned, including terminals (`0`) and GUI apps
- * (`application.<bundle>...`), so a hand-run `hyp daemon run --foreground`
+ * (`application.<bundle>...`), so a hand-run `hyp daemon run`
  * carries one too. Only the daemon's own label counts. systemd sets
  * `INVOCATION_ID` for the services it runs and for nothing interactive.
  *
@@ -870,7 +870,7 @@ export async function runSelfUpdatePass(opts = {}) {
       // boot is undone on the spot, not on tomorrow's schedule. Only under
       // a supervisor, for the same reason an apply is: the rollback
       // installs and then exits for a relaunch, and a hand-run
-      // `hyp daemon run --foreground` has nothing to relaunch it, so the
+      // `hyp daemon run` has nothing to relaunch it, so the
       // operator would get a silent downgrade and no daemon.
       // @ref LLP 0365#restart-needs-a-supervisor [constrained-by]: the rollback installs and exits, so it is gated like any other apply
       const rollback = supervised
