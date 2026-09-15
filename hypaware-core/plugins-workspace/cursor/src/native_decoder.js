@@ -129,7 +129,21 @@ export function createCursorDecoder({ log } = {}) {
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject })
         syncRef()
-        active.postMessage({ id, session, previousRoot })
+        try {
+          active.postMessage({ id, session, previousRoot })
+        } catch {
+          // A payload the structured clone refuses never reaches the thread,
+          // so no message will ever carry this id and nothing else would drop
+          // the entry. `updateRef` reads the map, so the delete has to come
+          // before the sync or the worker holds the loop open for a read that
+          // already rejected. The worker itself is untouched and still serves
+          // later reads, so this is one refused read rather than a dead
+          // decoder, and it carries the reader's fixed per-read code: the
+          // caller logs the message, and a raw `DOMException` is not it.
+          pending.delete(id)
+          syncRef()
+          reject(new CursorReadError('native_read_failed'))
+        }
       })
     },
     /** Terminate the worker; in-flight reads reject through the exit hook. */
