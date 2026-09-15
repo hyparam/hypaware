@@ -5,7 +5,7 @@
 **Systems:** CLI, Onboarding, Usage-Policy, Sinks, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-07-13
-**Extended-by:** [LLP 0387](./0387-compact-join-r1a-is-satisfied-by-an-adjacent-pair.decision.md)
+**Extended-by:** [LLP 0387](./0387-compact-join-r1a-is-satisfied-by-an-adjacent-pair.decision.md); LLP 0407 (#dropped: R1 no longer requires the backfill statement on the upload prompt)
 (#adjacency: in the wizard's compact join lane the forwarding line and the
 one-line deadline block satisfy R1a together, the first carrying the server
 name and the `hyp remote list` lookup for the pair)
