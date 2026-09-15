@@ -366,7 +366,7 @@ test('confirming during the review window ends it and exports', async () => {
   assert.match(stdout.text, /central: exported/)
 })
 
-test('the held prompt states the window, the irreversibility, and the way out', async () => {
+test('the held prompt states the deadline and the way out', async () => {
   const hypHome = await makeHome('held-warning')
   await writeFirstSyncHoldMarker({ stateDir: stateDir(hypHome) })
   const { ctx, stdout } = makeCtx({

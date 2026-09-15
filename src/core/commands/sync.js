@@ -875,14 +875,16 @@ function formatResumeInstant(iso) {
 }
 
 /**
- * The escalated warning shown while the first-sync review window is open.
+ * The warning shown while the first-sync hold is open.
  *
  * This is the one prompt in the CLI where the user has never sent anything
- * before, so it says so, states what confirming gives up (the rest of the
- * window), and names the skill and the command that exclude something
- * first: a warning that only warns leaves the user with no move except yes
- * or no. On an attended enrolling `hyp init` this is also the only place the
- * review hint appears, since the wizard's own narration stands down for it.
+ * before, so it states the deadline the upload happens by on its own, and
+ * names the command and the skill that configure privacy settings first: a
+ * warning that only warns leaves the user with no move except yes or no. On
+ * an attended enrolling `hyp init` this is also the only place the privacy
+ * hint appears, since the wizard's own narration stands down for it. It does
+ * not restate that the upload includes imported history: on the wizard path
+ * the user answered the import question two screens earlier.
  *
  * @ref LLP 0100#requirements [implements]: R2's review window ends by deadline or by informed consent; R1's review hint rides here on the wizard path
  * @param {number} deadlineMs

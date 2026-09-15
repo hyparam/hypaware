@@ -23,7 +23,7 @@
       {
         "name": "opencode",
         "label": "OpenCode",
-        "summary": "Records your OpenCode conversations (CLI and Desktop) and imports recent history.",
+        "summary": "Records your OpenCode conversations (CLI and Desktop) and imports recent history. Setup adds a plugin file to OpenCode.",
         "detect": { "settings_file": ".config/opencode/opencode.json" },
         "compose": { "plugin": { "name": "@hypaware/opencode" } }
       }

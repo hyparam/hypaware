@@ -24,7 +24,7 @@ test('real OpenCode picker row has the shared config-home probe and endpoint-fre
   const catalog = await realCatalog()
   const row = catalog.pickerDescriptors.get('opencode')
   assert.equal(row?.label, 'OpenCode')
-  assert.equal(row?.summary, 'Records your OpenCode conversations (CLI and Desktop) and imports recent history.')
+  assert.equal(row?.summary, 'Records your OpenCode conversations (CLI and Desktop) and imports recent history. Setup adds a plugin file to OpenCode.')
   assert.deepEqual(row?.detect, { settings_file: '.config/opencode/opencode.json' })
   assert.deepEqual(row?.compose, { plugin: { name: '@hypaware/opencode' } })
 

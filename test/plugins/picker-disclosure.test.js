@@ -44,7 +44,7 @@ test('claude picker summary discloses the attach and the skill install', async (
 // composition because the adapter uses its projected-exchange writer, but no
 // Claude traffic is routed through it and no Anthropic upstream is composed.
 // @ref LLP 0262#capture [tests]: the picker teaches the recorder that actually receives Claude content
-test('claude picker summary discloses that its local telemetry listener is started', async () => {
+test('claude picker summary discloses that a local port is opened', async () => {
   const summary = await pickerSummary('claude', 'claude')
   assert.match(summary, /opens a local port/i)
   assert.doesNotMatch(summary, /gateway|proxy/i)
@@ -56,7 +56,14 @@ test('codex picker summary discloses the gateway config write and the skill inst
   assert.match(summary, /skills/i)
 })
 
-test('otel picker summary discloses that a local receiver is started', async () => {
+// Attach writes a managed JavaScript file under OpenCode's config home
+// (`opencode/src/attach.js`), and this row is the only place that says so.
+test('opencode picker summary discloses the plugin file it adds', async () => {
+  const summary = await pickerSummary('opencode', 'opencode')
+  assert.match(summary, /adds a plugin file/i)
+})
+
+test('otel picker summary discloses that a local port is opened', async () => {
   const summary = await pickerSummary('otel', 'otel')
   assert.match(summary, /opens a local port/i)
 })
