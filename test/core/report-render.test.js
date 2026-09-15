@@ -29,6 +29,13 @@ test('docLabel states the slug\'s date, else the generic wording', () => {
   assert.equal(docLabel('usage-review'), 'Internal report · generated from HypAware data')
 })
 
+test('docLabel prefers an explicit generation date over the slug\'s', () => {
+  // A served report is slugged by the period it covers, so its leading date is the
+  // period's first day, not the day it was generated; the caller states the real one.
+  assert.equal(docLabel('2026-09-04-to-2026-09-13-usage-review', '2026-09-15'), 'Internal report · generated 2026-09-15 from HypAware data')
+  assert.equal(docLabel('usage-review', '2026-09-15'), 'Internal report · generated 2026-09-15 from HypAware data')
+})
+
 test('pageTitle takes the first heading, trimmed, else the fallback', () => {
   assert.equal(pageTitle('# Team AI Usage Review\n\nBody.\n', 'fallback'), 'Team AI Usage Review')
   // Trailing spaces on the heading line must not reach the rendered <title>.
@@ -106,6 +113,19 @@ test('renderReports builds every report and no stale output', () => {
   fs.rmSync(path.join(dir, `${OTHER}.md`))
   renderReports({ dir })
   assert.ok(!fs.existsSync(path.join(dir, 'html', OTHER)), 'a deleted report must leave no stale HTML')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('renderReports stamps an explicit generation date on every page of the tree', () => {
+  const dir = fixtureTree()
+  renderReports({ dir, generatedOn: '2026-09-15' })
+
+  for (const file of [path.join(dir, 'html', SLUG, 'index.html'), path.join(dir, 'html', SLUG, 'trends.html')]) {
+    const html = fs.readFileSync(file, 'utf8')
+    assert.match(html, /generated 2026-09-15 from HypAware data/, `${path.basename(file)} must carry the given date`)
+    assert.doesNotMatch(html, /generated 2026-08-02 /, `${path.basename(file)} must not fall back to the slug's date`)
+  }
 
   fs.rmSync(dir, { recursive: true, force: true })
 })

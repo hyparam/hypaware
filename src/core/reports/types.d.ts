@@ -6,6 +6,13 @@ export interface RenderOptions {
    * Never covers `assets/theme.css`, which is the user's (LLP 0196 #theme-layer).
    */
   refreshAssets?: boolean
+  /**
+   * The day the reports were generated, YYYY-MM-DD, for the masthead label. Applies to
+   * every report in the tree, so it suits a caller rendering one report at a time (the
+   * server renders each job into a single-report scratch tree). Omit for a local tree,
+   * where each slug's own leading date is its generation date.
+   */
+  generatedOn?: string
 }
 
 export interface RenderResult {
