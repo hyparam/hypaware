@@ -12,9 +12,12 @@
 //
 // `hypgrep` (LLP 0264 #dependency) was the first read-path dependency to
 // declare a hyparquet below the floor: 0.5.1 pinned 1.27.1, adopted behind a
-// root `overrides` entry. 0.5.2 declares the root pin itself, so that entry now
-// only restates what hypgrep already asks for, and `icebird` is the entry doing
-// the work: 0.8.28 declares 1.29.2, which the 1.30.0 root pin does not satisfy.
+// root `overrides` entry. Both entries are doing work at the pin this head
+// carries: 0.5.2 declares 1.30.0 and 0.8.28 declares 1.29.2, and the 1.30.1
+// root pin satisfies neither, so dropping either one nests a private copy
+// under that package. hypgrep's entry was a restatement while the root pin was
+// 1.30.0 and stopped being one the moment the pin moved past it, which is a
+// thing a patch bump does silently.
 // The two swap roles as upstream moves, which is why the checks below are
 // written against the pins rather than against either package by name. Three
 // kinds of check live here and they prove different things:
@@ -48,12 +51,13 @@
 // optionalDependencies are write-side and vector-side (`hyparquet-writer`,
 // `hypvector`); neither runs icebird's converter, so neither is checked here.
 // The root `overrides` do name one of them, and not as part of any floor: no
-// published `hyparquet-writer` declares 1.30.0, so once the root pin moved
-// there npm bound the hoisted writer to it regardless and then reported the
-// tree invalid. The entry says that binding is intended. Its key is
-// version-scoped (`hyparquet-writer@0.16.9`) on purpose: a bare key would also
-// reach the 0.16.1 copy nested under `hypvector` and drag it from 1.26.1 to
-// 1.30.0, which is a change to the vector path with nothing asking for it.
+// published `hyparquet-writer` declares 1.30.1 (0.16.9 declares 1.29.2), so
+// once the root pin moved there npm bound the hoisted writer to it regardless
+// and then reported the tree invalid. The entry says that binding is intended.
+// Its key is version-scoped (`hyparquet-writer@0.16.9`) on purpose: a bare key
+// would also reach the 0.16.1 copy nested under `hypvector` and drag it from
+// 1.26.1 to 1.30.1, which is a change to the vector path with nothing asking
+// for it.
 //
 // @ref LLP 0222#hyparquet-floor [tests]: a floor only holds if nothing below it resolves beside the pin, and the deduping the same section claims is a separate property that has to be held separately
 // @ref LLP 0264#dependency [tests]: hypgrep enters as a plain root dependency, held to the floor by an override
@@ -147,13 +151,15 @@ test('hypgrep is a plain dependency, held at the floor by an override', () => {
     'hypgrep is pinned exactly, in the idiom of every other dependency here')
   // The override was the whole of the adoption while hypgrep 0.5.1 declared
   // hyparquet 1.27.1: without the entry npm resolved that older copy privately
-  // under `node_modules/hypgrep`. 0.5.2 declares the root pin itself, so today
-  // the entry only restates what hypgrep already asks for, and it is asserted
-  // anyway because this is the one dependency whose declaration has already
-  // gone below the floor once. The header above says why the roles swap: a
-  // later hypgrep that declares below the pin resolves onto the hoisted copy
-  // with the entry in place and nests a private one without it, and that
-  // regression is silent. Asserted straight off the manifest so a dropped or
+  // under `node_modules/hypgrep`. It is the whole of the adoption again: 0.5.2
+  // declares 1.30.0, which the 1.30.1 root pin no longer satisfies, so without
+  // the entry npm nests a private 1.30.0 under `node_modules/hypgrep` and the
+  // read path runs on two hyparquets. It restated the declaration only while
+  // the root pin sat exactly on 1.30.0, which is how little it takes: the
+  // header above says why the roles swap, and a patch bump swapped them. A
+  // hypgrep that declares below the pin resolves onto the hoisted copy with
+  // the entry in place and nests a private one without it, and that regression
+  // is silent. Asserted straight off the manifest so a dropped or
   // misspelled entry reddens on a checkout with nothing installed, not only
   // where the resolved half below can run. It names the root pin rather than
   // the floor so the copy it forces is the one already hoisted, not a second
@@ -187,7 +193,7 @@ test('hypgrep is a plain dependency, held at the floor by an override', () => {
 //
 // icebird carries an override entry again: it declared the root pins itself
 // while the root pinned hyparquet 1.29.2, and 0.8.28 still declares 1.29.2 now
-// that the root pin is 1.30.0, so npm nests a private copy without one. An
+// that the root pin is 1.30.1, so npm nests a private copy without one. An
 // entry is worth having only while it names something the dependency does not
 // already ask for; one that merely restates the declaration is a second place
 // to forget to bump. That is why this check reads icebird's own installed
