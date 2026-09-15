@@ -2,8 +2,9 @@
 
 [Documentation](README.md)
 
-Joining a remote server automatically enables collection for that organization
-once gateway enrollment completes, including existing enrollments on the next CLI
+Enrolling with a remote server (`hyp join`, or `hyp remote login` without
+`--no-forward`) automatically enables collection for that organization once
+gateway enrollment completes, including existing enrollments on the next CLI
 invocation or daemon start after upgrading (LLP 0408). Standalone installations
 default to **off**, and a saved `off` or `local` preference always takes
 precedence. This feature has no vendor endpoint, shared secret, or registration

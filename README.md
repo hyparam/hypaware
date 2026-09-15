@@ -202,8 +202,9 @@ before invoking the CLI or the daemon.
 
 ### Product telemetry
 
-Joining a remote server automatically enables product telemetry for that
-organization once gateway enrollment completes. This also applies to existing
+Enrolling with a remote server (`hyp join`, or `hyp remote login` without
+`--no-forward`) automatically enables product telemetry for that organization
+once gateway enrollment completes. This also applies to existing
 enrollments on the next CLI invocation or daemon start after upgrading.
 Standalone installations default to off. A saved `off` or `local` preference
 always takes precedence.
