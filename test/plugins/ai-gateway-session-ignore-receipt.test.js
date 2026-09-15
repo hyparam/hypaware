@@ -435,6 +435,7 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   const brk = gap < 0 ? -1 : afterFence.slice(gap).search(/\n\s*\n/)
   const follows = gap < 0 ? 0 : brk < 0 ? afterFence.length : gap + brk
   const routing = rest.slice(0, close + 3 + follows)
+  const trailing = afterFence.slice(0, follows)
 
   // Scoped to that block. Both `hyp session ignore` and the fallback are named
   // throughout Step 1, so a Step-1-wide match says nothing about where THIS
@@ -457,9 +458,10 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // that: restating the refusal is stronger prose, not a second route.
   //
   // The destination is pinned, not the sentence: a reroute has to name where it
-  // sends the reader, and this file names that one destination three ways
-  // (`script`, `fall back` / `fallback`, `shell block`), while a bare forward
-  // reference ("state the id as below") names a direction and no destination.
+  // sends the reader, and this file names that one destination five ways
+  // (`script`, `fall back` / `fallback`, `block`, `control route`, `post to`),
+  // while a bare forward reference ("state the id as below") names a direction
+  // and no destination.
   // Enumerating sentences instead let a reroute worded any other way through
   // (issue #1686). Every inflection of the verb and every run of spaces,
   // hyphens or newlines between the two words is carried, so the guard does not
@@ -477,24 +479,49 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // rationale that trips this belongs there rather than being a reason to
   // loosen it.
   //
-  // What this knowingly does NOT catch: a reroute that names the destination in
-  // words this file never uses for it ("run the bash block below", "the recipe
-  // at the end of this step", "post to the control route yourself"). Closing
-  // those needs `block` or `below`, and both are ordinary forward references
-  // here: forbidding `\bbelow\b` reds "state the id as below" on the opener
-  // line, which is the measured reason #1686 rejected that candidate. So this
-  // is a drift guard over the file's own vocabulary for the fallback, not a
-  // proof that the refusal cannot be rerouted. Read a green as "no edit reached
-  // for the words this file uses for that destination", nothing wider.
+  // The name list is the file's own, and now all of it. The paragraph that
+  // introduces the destination this refusal refuses calls it "posts to the
+  // gateway control route directly", so `control route` and `post to` sit
+  // beside `script` and `fall back` on the same footing. `shell block` widens
+  // to bare `block`, which subsumes it: `block` is this file's noun for a
+  // fence, and this slice never refers to its own fence by that noun, so
+  // naming a block here names somewhere else to go. Those close "run the bash
+  // block below", "the block below is your answer" and "POST to the control
+  // route directly" wherever in the slice they sit, without touching `below`
+  // (issue #1724).
   assert.doesNotMatch(
     routing.replace(/do \*{0,2}not\*{0,2} drop to the script below/g, ''),
-    /\bscripts?\b|\b(?:fall(?:s|ing|en)?|fell)[\s-]*backs?\b|\bshell[\s-]*blocks?\b/i,
+    /\bscripts?\b|\b(?:fall(?:s|ing|en)?|fell)[\s-]*backs?\b|\bblocks?\b|\bcontrol[\s_-]*routes?\b|\bpost(?:s|ed|ing)?[\s-]+to\b/i,
     'nothing else in this block may name the gateway-only script, or reach for the verb that means it, whatever sentence carries it'
   )
   assert.doesNotMatch(
     routing,
     /_hypaware\/ignore\/session|curl /,
     'an ambiguous id must not be answered with a gateway-only POST'
+  )
+  // Structural, and the half that does not turn on vocabulary: the paragraph
+  // after the answer fence may not point forward. Position decides it, not the
+  // word. Before the fence a forward reference resolves to the fence itself,
+  // which is why "state the id as below" is ordinary prose on the opener line
+  // and why #1686 measured a slice-wide `\bbelow\b` as a false red. After the
+  // fence nothing licensed is left ahead: the answer has been given and its
+  // receipt read, and the next thing down the page is the gateway-only fallback
+  // the opener just refused. A forward pointer here therefore reaches that
+  // destination by construction, whatever noun it reaches for or whether it
+  // reaches for one at all, which is the open-ended wording class no list of
+  // names can close (issue #1724).
+  //
+  // Backward references stay legal, which is what keeps this paragraph's own
+  // "Read that receipt exactly as above" green: the gateway-only route lies
+  // below the slice, so nothing above it is that destination. The cost lands on
+  // this one paragraph: a genuine forward reference after the answer belongs a
+  // paragraph lower, outside the slice, which is where this file already keeps
+  // that material ("One nonzero exit, and only that one, sends you to the
+  // fallback").
+  assert.doesNotMatch(
+    trailing,
+    /\bbelow\b|\bbeneath\b|\bfurther down\b|\b(?:end of|later in) th(?:is|e) step\b/i,
+    'the paragraph after the answer may not point further down the page, where the only thing left is the fallback this refusal refused'
   )
 })
 
