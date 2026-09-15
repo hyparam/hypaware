@@ -455,10 +455,41 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // to it in this block is a reroute whichever sentence carries it, so every
   // instance of the licensed phrase is dropped before the block is held to
   // that: restating the refusal is stronger prose, not a second route.
+  //
+  // The destination is pinned, not the sentence: a reroute has to name where it
+  // sends the reader, and this file names that one destination three ways
+  // (`script`, `fall back` / `fallback`, `shell block`), while a bare forward
+  // reference ("state the id as below") names a direction and no destination.
+  // Enumerating sentences instead let a reroute worded any other way through
+  // (issue #1686). Every inflection of the verb and every run of spaces,
+  // hyphens or newlines between the two words is carried, so the guard does not
+  // turn on which form of the file's own verb an editor reached for, nor on
+  // where a reflow happened to break the line.
+  //
+  // Only the licensed phrase verbatim is stripped, so what this enforces is
+  // narrower than "no reroute": the block may name that destination once, in
+  // the refusal, and naming it a second time reds even to argue against it.
+  // That is deliberate, and it reaches the bare verb too: `fall back` reds here
+  // with no destination attached, so even "there is nothing to fall back on"
+  // trips it. The reasons not to drop are already written in the paragraphs on
+  // either side of this slice, which is where this file already puts them (the
+  // paragraph after the slice carries "a stop, not a reason to fall back"), so
+  // rationale that trips this belongs there rather than being a reason to
+  // loosen it.
+  //
+  // What this knowingly does NOT catch: a reroute that names the destination in
+  // words this file never uses for it ("run the bash block below", "the recipe
+  // at the end of this step", "post to the control route yourself"). Closing
+  // those needs `block` or `below`, and both are ordinary forward references
+  // here: forbidding `\bbelow\b` reds "state the id as below" on the opener
+  // line, which is the measured reason #1686 rejected that candidate. So this
+  // is a drift guard over the file's own vocabulary for the fallback, not a
+  // proof that the refusal cannot be rerouted. Read a green as "no edit reached
+  // for the words this file uses for that destination", nothing wider.
   assert.doesNotMatch(
     routing.replace(/do \*{0,2}not\*{0,2} drop to the script below/g, ''),
-    /drop to the script|fall back to the script|use the script below/,
-    'nothing else in this block may send the ambiguous case to the gateway-only script'
+    /\bscripts?\b|\b(?:fall(?:s|ing|en)?|fell)[\s-]*backs?\b|\bshell[\s-]*blocks?\b/i,
+    'nothing else in this block may name the gateway-only script, or reach for the verb that means it, whatever sentence carries it'
   )
   assert.doesNotMatch(
     routing,
