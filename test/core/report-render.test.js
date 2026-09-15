@@ -47,6 +47,10 @@ test('docLabel ignores a generation date that is not a bare YYYY-MM-DD', () => {
   )
   assert.equal(docLabel('usage-review', '2026-09-15T08:12:00.000Z'), 'Internal report · generated from HypAware data')
   assert.equal(docLabel('usage-review', '</span><img src=x onerror=alert(1)>'), 'Internal report · generated from HypAware data')
+  // Both anchors carry weight. A timestamp starts with a valid date, so it pins the
+  // trailing anchor; this value ends with one, so it pins the leading anchor. Without
+  // it, a suffix match would smuggle the markup prefix through whole.
+  assert.equal(docLabel('usage-review', '<img src=x onerror=alert(1)>2026-09-15'), 'Internal report · generated from HypAware data')
   assert.equal(docLabel('2026-08-02-usage-review', ''), 'Internal report · generated 2026-08-02 from HypAware data')
 })
 
