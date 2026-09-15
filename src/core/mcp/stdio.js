@@ -82,12 +82,15 @@ export function serveStdio({ server, stdin, stdout, onError }) {
  * stack-size artifact, not a language constant) raises a `RangeError` out of
  * `JSON.stringify` that `JSON.parse` never raised, defeating the fallback
  * exactly as it defeated the response carrying it, and the inner catch leaves
- * the line unsent. That is Node 22 and 24; Node 26 stringifies iteratively and
- * closes the gap, so how far this fallback reaches is a property of the
- * runtime, not of this code. That is the
- * one id this backstop cannot answer, and nothing could: a reply is correlated
- * by an id, and this one cannot be written down. A message with no id is a
- * notification, owed no reply, so it gets no invented one.
+ * the line unsent. That is the one id this backstop cannot answer, and nothing
+ * could: a reply is correlated by an id, and this one cannot be written down.
+ * A message with no id is a notification, owed no reply, so it gets no
+ * invented one.
+ *
+ * Which runtimes have that gap is a property of the runtime, not of this code:
+ * Node 22 and 24 do, and Node 26 stringifies iteratively and closes it, so
+ * there the fallback is total for every id `JSON.parse` can produce. The test
+ * that pins the gap probes for it and skips where it does not exist.
  *
  * The fallback write can fail the way the first one did, on a closed or
  * erroring stdout. That is not answerable on the protocol channel, so it is
