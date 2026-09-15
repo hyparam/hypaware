@@ -466,3 +466,81 @@ test('a candidate reports the sessions whose procedure was read, not the session
   assert.deepEqual(c.steps.map((step) => [step.command, step.sessions]), [['git commit -m', 2]])
   assert.ok(renderCandidates({ sessions: 60, sessionDays: 90 }, [c], true).includes('(sessions that ran it, of the 2 sampled sessions whose procedure was read)'))
 })
+
+test('the trigger statement is bounded by the sessions of a window, not by what those sessions typed', async () => {
+  // @ref LLP 0398#consequences [tests]: the group by is the trigger statement's ceiling, and a LIMIT would not be one
+  // hypaware #1715: it is the one gather statement with no `limit`, so the
+  // `group by` is what has to bound it. Through the same `executeQuerySql`
+  // the gather runs on, over a 30-day window holding two thousand sessions
+  // that each typed a candidate line: five times the messages returns the
+  // same rows, one a session a line, while the same predicate without the
+  // aggregate returns every typing.
+  const sessions = 2000
+  // Eight, which is over the five `prepareFirstAskEvidence` slices to: the
+  // bound is asserted against more lines than the statement is ever given.
+  const texts = Array.from({ length: 8 }, (_, i) => `commit on branch ${i} and open a pull request when green`)
+  const lines = texts.map((t) => t.slice(0, 42).toLowerCase())
+  const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
+  const base = Date.UTC(2026, 7, 10)
+
+  /** @param {number} typings */
+  function* messages(typings) {
+    for (let s = 0; s < sessions; s += 1) {
+      const at = base + (s % 30) * 86_400_000
+      const date = new Date(at).toISOString().slice(0, 10)
+      for (let k = 0; k < typings; k += 1) {
+        yield { date, session_id: `s${String(s).padStart(4, '0')}`, role: 'user', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: 'external', message_created_at: new Date(at + s * 1000 + k * 60_000), content_text: texts[s % texts.length] }
+      }
+      // One session types a second candidate line, so the row count carries
+      // the per-line half of the bound: without it every count below holds
+      // just as well for a statement grouped by session alone. The oldest
+      // session, so `sampleTriggers` (newest a line) never reaches it and
+      // the sample assertions stay exact.
+      if (s === 0) yield { date, session_id: 's0000', role: 'user', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: 'external', message_created_at: new Date(at + 30_000), content_text: texts[1] }
+    }
+  }
+
+  // Generated per scan, so the shape the test asserts on is not one the
+  // test itself has to hold.
+  /** @param {string} query @param {number} typings */
+  function run(query, typings) {
+    /** @type {AsyncDataSource} */
+    const source = {
+      columns,
+      numRows: sessions * typings,
+      scan(options) {
+        const rowColumns = options?.columns ?? columns
+        return {
+          appliedWhere: false,
+          appliedLimitOffset: false,
+          async *rows() {
+            for (const row of messages(typings)) yield asyncRow(row, rowColumns)
+          },
+        }
+      },
+    }
+    const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
+    const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
+    return executeQuerySql({ query, registry, storage })
+  }
+
+  const triggers = evidenceSql('2026-08-08').triggers(lines)
+  const once = await run(triggers, 1)
+  const often = await run(triggers, 5)
+  assert.equal(once.rows.length, sessions + 1, 'one row a session a candidate line, whatever else the window holds')
+  assert.equal(often.rows.length, sessions + 1, 'five times the messages, the same rows: the bound is sessions, not typings')
+
+  // The same predicate without the aggregate is the shape that is not
+  // bounded, and it is what the group by is a ceiling over. Without this
+  // the assertions above pass against a statement that has no bound at all.
+  const unaggregated = triggers
+    .replace('min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example', 'message_created_at as at, date, substr(content_text, 1, 160) as example')
+    .replace(' group by 1, 2', '')
+  const every = await run(unaggregated, 5)
+  assert.equal(every.rows.length, sessions * 5 + 1, 'every typing, which is what grows with how much was recorded')
+
+  // And what the two list statements are handed is a constant either way.
+  const sample = sampleTriggers(often.rows)
+  assert.equal(sample.length, 80, 'the sample takes eighty however many sessions typed a candidate line')
+  assert.equal(sessionAnchors(sample).length, 80)
+})
