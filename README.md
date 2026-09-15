@@ -200,6 +200,21 @@ installing or restarting the daemon.
 `HYP_HOME` defaults to `~/.hyp`. Override it by exporting `HYP_HOME=...`
 before invoking the CLI or the daemon.
 
+### Product telemetry
+
+Joining a remote server automatically enables product telemetry for that
+organization once gateway enrollment completes. This also applies to existing
+enrollments on the next CLI invocation or daemon start after upgrading.
+Standalone installations default to off. A saved `off` or `local` preference
+always takes precedence.
+
+Use `hyp telemetry status` to inspect the policy and destination,
+`hyp telemetry preview` to inspect the next payload, or `hyp telemetry off` to
+disable reporting and discard pending copies. Product telemetry contains bounded
+usage, health and runtime summaries; it excludes prompts, responses, command
+arguments and free-text errors. Delivery requires the server's telemetry receiver
+to be enabled.
+
 ### Runtime diagnostics
 
 HypAware can emit opt-in OTEL runtime metrics for diagnosing memory pressure,
