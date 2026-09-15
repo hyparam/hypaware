@@ -39,7 +39,13 @@ export function readGithubAuth(stateDir) {
         (data.refresh_expires_at !== undefined && !Number.isFinite(data.refresh_expires_at)))) throw new Error()
     return data
   } catch (err) {
-    if (/** @type {NodeJS.ErrnoException} */ (err)?.code === 'ENOENT') return null
+    const code = /** @type {NodeJS.ErrnoException} */ (err)?.code
+    if (code === 'ENOENT') return null
+    // A failure carrying an errno (EACCES, EMFILE, EIO) is an environment
+    // problem, not corruption: advising a re-login for it is destructive,
+    // because `loginGithub` overwrites the working record with `pending`
+    // before the device flow starts.
+    if (typeof code === 'string') throw authError('store', `credential file read failed (${code}); retry, and only log in again if it persists`)
     throw authError('store', 'credential file is invalid or not private; run `hyp github login` again')
   }
 }

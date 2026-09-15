@@ -114,3 +114,44 @@ test('authorization exists before the first request and append failure resumes i
   assert.equal(resumed.events, 1)
   assert.equal(f.rows.length, 1)
 })
+
+test('a terminal answer retires a one-time import; a transient failure keeps it', async (t) => {
+  const f = fixture(t)
+  f.runtime.captureRequestLimit = 400
+  const client = f.runtime.clientFactory?.()
+  assert.ok(client)
+  const issues = client.listIssuesPage
+  /** @type {Record<string, number>} */
+  const failWith = { 'o/one': 404, 'o/two': 500 }
+  client.listIssuesPage = async (owner, repo, ...rest) => {
+    const status = failWith[`${owner}/${repo}`]
+    if (status) {
+      f.calls.push(`listIssues:${owner}/${repo}`)
+      const err = /** @type {any} */ (new Error(`GitHub API ${status} for GET /repos/${owner}/${repo}/issues`))
+      err.status = status
+      err.hypErrorKind = 'github_api_error'
+      throw err
+    }
+    return issues(owner, repo, ...rest)
+  }
+  f.runtime.clientFactory = () => client
+  const first = await runCaptureTick(f.runtime, { mode: 'backfill', only: ['o/one', 'o/two'] })
+  assert.equal(first.errors.length, 2)
+  const afterFirst = readCursors(f.stateDir).repos
+  assert.equal(afterFirst['o/one'].one_time_import, undefined, 'a 404 retires the import')
+  assert.equal(afterFirst['o/one'].work, undefined)
+  assert.equal(afterFirst['o/two'].one_time_import, true, 'a 500 stays authorized for retry')
+  f.calls.length = 0
+  const poll = await runCaptureTick(f.runtime, { mode: 'poll' })
+  assert.equal(poll.errors.length, 1, 'only the transient failure retries')
+  assert.ok(f.calls.every((call) => call.endsWith('o/two')), 'the retired repository is never fetched again')
+  delete failWith['o/two']
+  const recovered = await runCaptureTick(f.runtime, { mode: 'poll' })
+  assert.deepEqual(recovered.errors, [])
+  assert.equal(readCursors(f.stateDir).repos['o/two'].one_time_import, undefined)
+  assert.equal(f.rows.length, 1)
+  delete failWith['o/one']
+  const reauthorized = await runCaptureTick(f.runtime, { mode: 'backfill', only: ['o/one'] })
+  assert.deepEqual(reauthorized.errors, [], 're-running backfill re-authorizes a retired import')
+  assert.equal(f.rows.length, 2)
+})

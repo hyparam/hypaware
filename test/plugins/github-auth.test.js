@@ -200,3 +200,15 @@ test('the refresh lock serializes independent CLI and daemon processes', async (
   assert.equal(fs.readFileSync(path.join(dir, 'refresh-count'), 'utf8'), '1')
   assert.equal(readGithubAuth(dir)?.access_token, 'child-access')
 })
+
+test('a transient read failure is reported as such, not as corruption inviting a destructive re-login', async (t) => {
+  if (process.platform === 'win32' || process.getuid?.() === 0) return t.skip('permission bits are not enforced here')
+  const dir = home(t)
+  await loginGithub(dir, loginOptions())
+  const authDir = path.join(dir, 'auth')
+  t.after(() => { try { fs.chmodSync(authDir, 0o700) } catch { /* already removed */ } })
+  fs.chmodSync(authDir, 0o000)
+  assert.throws(() => readGithubAuth(dir), /read failed \(EACCES\); retry/)
+  fs.chmodSync(authDir, 0o700)
+  assert.equal(readGithubAuth(dir)?.status, 'active', 'the working credential survives the transient failure')
+})

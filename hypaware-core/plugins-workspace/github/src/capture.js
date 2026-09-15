@@ -185,11 +185,27 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       // means here (LLP 0360#cursoring).
       const cleared = kind === 'github_foreign_origin' && cursor.work !== undefined
       if (cleared) delete cursor.work
+      // An answer that is terminal for the repository itself - unknown or
+      // inaccessible (404), gone (410), or moved (301, since redirects are
+      // never followed on a credential-bearing request) - retires a one-time
+      // import: the marker would otherwise re-enter every later tick and a
+      // typo'd `hyp github backfill` retries forever (LLP 0409#one-time-imports
+      // makes imports durable, not permanent). 403 is deliberately not
+      // terminal, because GitHub also answers rate limiting with it, and a
+      // throttled tick must not cancel an authorized import. Re-running
+      // `hyp github backfill owner/repo` re-authorizes after the cause is fixed.
+      const status = /** @type {{ status?: number }} */ (err)?.status
+      const retired = cursor.one_time_import === true && (status === 301 || status === 404 || status === 410)
+      if (retired) {
+        delete cursor.one_time_import
+        delete cursor.work
+      }
       log.error('github.repo_capture_failed', {
         repo,
         error: message,
         ...(kind ? { error_kind: kind } : {}),
         ...(cleared ? { work_cleared: true } : {}),
+        ...(retired ? { import_retired: true } : {}),
       })
     }
     events += repoEvents

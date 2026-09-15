@@ -4,18 +4,59 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createGithubClient } from '../../hypaware-core/plugins-workspace/github/src/github_client.js'
+import { createGithubClient, tokenFromGh } from '../../hypaware-core/plugins-workspace/github/src/github_client.js'
 import { silentLog } from './github-fake-client.js'
 
 test('API redirects are refused and malformed response bodies never appear in errors', async () => {
   const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
     async fetchImpl(_url, init) {
-      assert.equal(init?.redirect, 'error')
+      assert.equal(init?.redirect, 'manual')
       assert.ok(init?.signal instanceof AbortSignal)
       return new Response('sensitive-upstream-content')
     },
   })
   await assert.rejects(client.listViewerRepos(), /response was unreadable or timed out/)
+})
+
+test('a refused redirect reports its status and hint without the Location target', async () => {
+  /** @type {string[]} */
+  const urls = []
+  const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
+    async fetchImpl(url, _init) {
+      urls.push(String(url))
+      return new Response('moved-body', { status: 301, headers: { location: 'https://evil.example/steal?tok=x' } })
+    },
+  })
+  await assert.rejects(client.listViewerRepos(), (err) => {
+    assert.match(/** @type {Error} */ (err).message, /GitHub API 301 for GET/)
+    assert.match(/** @type {Error} */ (err).message, /renamed or transferred/)
+    assert.doesNotMatch(/** @type {Error} */ (err).message, /evil\.example|moved-body|secret/)
+    assert.equal(/** @type {HypError} */ (err).status, 301)
+    return true
+  })
+  assert.equal(urls.length, 1, 'the redirect is never followed')
+})
+
+test('network failures carry a runtime code or name, never upstream message text', async () => {
+  /** @param {unknown} thrown @returns {Promise<Error>} */
+  async function failWith(thrown) {
+    const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
+      async fetchImpl() { throw thrown },
+    })
+    try {
+      await client.listViewerRepos()
+    } catch (err) {
+      return /** @type {Error} */ (err)
+    }
+    throw new Error('expected rejection')
+  }
+  const dns = await failWith(new TypeError('fetch failed', { cause: Object.assign(new Error('getaddrinfo ENOTFOUND api.github.com'), { code: 'ENOTFOUND' }) }))
+  assert.match(dns.message, /failed or timed out \(ENOTFOUND\)/)
+  assert.doesNotMatch(dns.message, /getaddrinfo/)
+  const timeout = await failWith(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }))
+  assert.match(timeout.message, /failed or timed out \(TimeoutError\)/)
+  const opaque = await failWith(new TypeError('fetch failed', { cause: new Error('http://internal.example/leaky-detail') }))
+  assert.equal(opaque.message, 'GitHub API request failed or timed out')
 })
 
 /** @import { HypError } from '../../hypaware-core/plugins-workspace/github/src/types.d.ts' */
@@ -98,6 +139,13 @@ test('GitHub CLI lookup extends a launchd-style path only for the child', async 
   assert.ok(childPath.split(path.delimiter).includes('/opt/homebrew/bin'))
   assert.ok(childPath.split(path.delimiter).includes('/Users/tester/.local/share/mise/shims'))
   assert.equal(env.PATH, '/usr/bin:/bin')
+})
+
+test('an empty gh token is unavailable for every caller, not silently sent as a bearer', async () => {
+  await assert.rejects(
+    tokenFromGh({}, (_file, _args, _options, callback) => callback(null, '\n')),
+    /GitHub authentication unavailable/,
+  )
 })
 
 test('GitHub auth failure is safe and classified', async () => {

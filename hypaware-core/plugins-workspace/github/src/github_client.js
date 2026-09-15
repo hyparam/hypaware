@@ -115,9 +115,20 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
 
     let res
     try {
-      res = await doFetch(url, { headers, redirect: 'error', signal: AbortSignal.timeout(30_000) })
-    } catch {
-      const err = /** @type {HypError} */ (new Error('GitHub API request failed or timed out'))
+      // Never follow a redirect on a credential-bearing request: the token
+      // must not be re-sent to a Location the server chose. `manual` keeps
+      // that refusal while preserving the status, so a renamed or transferred
+      // repository reports `GitHub API 301` below instead of collapsing into
+      // a generic network failure.
+      res = await doFetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+    } catch (cause) {
+      // Carry a diagnosis without echoing anything server-controlled: an
+      // errno code or error name is a runtime constant, while messages can
+      // embed URLs or upstream text.
+      const code = /** @type {{ cause?: { code?: unknown } }} */ (cause)?.cause?.code
+      const name = /** @type {{ name?: unknown }} */ (cause)?.name
+      const tag = typeof code === 'string' ? code : name === 'TimeoutError' || name === 'AbortError' ? name : null
+      const err = /** @type {HypError} */ (new Error(`GitHub API request failed or timed out${tag ? ` (${tag})` : ''}`))
       err.hypErrorKind = 'github_network_error'
       throw err
     }
@@ -126,7 +137,8 @@ export function createGithubClient({ tokenEnv, env, log, stateDir, fetchImpl, ba
     if (!res.ok) {
       // No body, no token, no query string - just status + the path.
       const safePath = pathOf(url)
-      const hint = res.status === 401 ? '; check the configured token or run `hyp github login` again' : ''
+      const hint = res.status === 401 ? '; check the configured token or run `hyp github login` again'
+        : res.status >= 300 && res.status < 400 ? '; redirects are not followed - the repository may have been renamed or transferred' : ''
       const err = /** @type {HypError} */ (new Error(`GitHub API ${res.status} for GET ${safePath}${hint}`))
       err.hypErrorKind = 'github_api_error'
       err.status = res.status
@@ -275,7 +287,9 @@ export function tokenFromGh(env, execFileImpl = /** @type {any} */ (execFile)) {
         PATH: githubCliPath(env),
       },
     }, (err, stdout) => {
-      if (err) return reject(authUnavailable())
+      // An empty stdout on exit 0 is as unusable as a failure: guarding here
+      // covers every caller, not only the capture client's own token().
+      if (err || !stdout.trim()) return reject(authUnavailable())
       resolve(stdout)
     })
   })
