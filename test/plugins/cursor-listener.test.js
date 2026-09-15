@@ -36,11 +36,14 @@ async function fixture(deps = {}) {
   }
   const readOptions = { editorDb: path.join(root, 'native/state.vscdb'), cliRoot: path.join(root, 'native/chats') }
   const start = createStartCursorSource({ localOnlyListPath: policyPath, ignoredSessions, readOptions, ...deps })
-  const ctx = /** @type {any} */ ({ config: { listen_port: 0 }, storage, log: { info() {}, warn() {}, error() {} } })
+  /** @type {string[]} */
+  const events = []
+  const ctx = /** @type {any} */ ({ config: { listen_port: 0 }, storage,
+    log: { info(msg) { events.push(msg) }, warn(msg) { events.push(msg) }, error(msg) { events.push(msg) } } })
   let source = await start(ctx)
   let endpoint = `http://127.0.0.1:${(await source.status?.())?.details?.listen_port}`
   return {
-    root, policyPath, rows, storage, ignoredSessions, readOptions, get source() { return source }, get endpoint() { return endpoint },
+    root, policyPath, rows, storage, ignoredSessions, readOptions, events, get source() { return source }, get endpoint() { return endpoint },
     post: (body) => fetch(`${endpoint}/hook`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
     async restart() {
       await source.stop()
@@ -388,7 +391,17 @@ test('stop drains both recovery and receiver lanes while a maximal graph is mid-
     await f.source.stop()
     stopped = true
     const settled = f.rows.length
-    assert.equal((await f.source.status?.())?.details?.pending_recovery, 0)
+    const status = /** @type {any} */ (await f.source.status?.())
+    const details = status.details
+    assert.equal(details.pending_recovery, 0)
+    // The graph was mid-decode, so stop must have terminated it rather than
+    // waited it out. Without the terminate the read completes and records
+    // one native_read; this is what pins `stop` closing the live decoder.
+    assert.equal(details.native_reads, 0, 'stop waited out the decode instead of terminating it')
+    // A stop is not a capture failure: the final status line must not report
+    // the same error_kind a corrupt graph produces.
+    assert.equal(details.native_failures, 0)
+    assert.equal(status.lastError, undefined)
     // A terminated decode must not re-arm the queue stop just cleared, and no
     // write may land after stop resolved.
     await new Promise((resolve) => setTimeout(resolve, 250))
@@ -400,4 +413,29 @@ test('stop drains both recovery and receiver lanes while a maximal graph is mid-
     if (!stopped) await f.source.stop()
     await fs.rm(f.root, { recursive: true, force: true })
   }
+})
+
+test('back-to-back recovery passes share one decode thread, released once the source goes quiet', async () => {
+  const f = await fixture({ recoveryDelayMs: 10, decoderIdleMs: 120 })
+  const native = await cursorNativeFixture(f.readOptions.cliRoot, f.root)
+  const spawns = () => f.events.filter((event) => event === 'cursor.decoder.started').length
+  try {
+    // Hooks arrive throughout an agent run, so passes are back to back over a
+    // graph the fingerprint answers `unchanged`. An isolate per pass costs
+    // two orders of magnitude more than that answer.
+    const hook = () => f.post(envelope(f.root, { conversation_id: native.session.id, hook_event_name: 'postToolUse' }))
+    await hook()
+    await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
+    assert.equal(spawns(), 1)
+    for (let i = 0; i < 20; i++) {
+      await hook()
+      await waitFor(async () => (await f.source.status?.())?.details?.pending_recovery === 0)
+    }
+    assert.equal(spawns(), 1, 'a decode thread was respawned for a pass the fingerprint already answered')
+    // A daemon between agent runs still holds no decode thread: the release
+    // fires once passes stop, and the next pass spawns a fresh one.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await hook()
+    await waitFor(() => spawns() === 2)
+  } finally { native.close(); await f.cleanup() }
 })

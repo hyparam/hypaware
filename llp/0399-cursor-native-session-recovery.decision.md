@@ -193,8 +193,15 @@ the daemon's latency: a graph at the ceiling measured 109-144 ms of straight-lin
 work, and a pass runs sixteen of them, so decoding on the event loop stalled the
 hook receiver, the OTEL listener and the gateway together. The decode therefore
 runs on a worker thread, in the shape LLP 0264 #lifecycle already uses for
-sidecar builds: one worker serves one recovery pass or one backfill run and is
-closed with it, so an idle daemon holds no decode thread and no graph-sized heap.
+sidecar builds. One worker serves one backfill run, or a run of recovery passes
+that never leaves the queue empty, and is closed with it, so an idle daemon
+holds no decode thread and no graph-sized heap. It is not one worker per pass:
+hooks arrive throughout an agent run, so the queue refills every debounce and
+most passes only re-answer `unchanged` from the fingerprint. Spawning an isolate
+for each measured 29.8 ms of CPU against 0.20 ms inline, which at the one-second
+debounce is about three points of a core burned for as long as the run lasts.
+Holding the worker across those passes costs 13.5 MiB while the queue is busy
+and does not grow with the number of passes.
 Nothing about the reader changes; the SQLite handle and its read transaction move
 with it, so Cursor's store is never held open across a pause. Yielding between
 blobs would have been the alternative and was rejected for that reason.

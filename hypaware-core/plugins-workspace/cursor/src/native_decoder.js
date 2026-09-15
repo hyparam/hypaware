@@ -17,19 +17,24 @@ import { CursorReadError } from './native.js'
  * the alternative: it would hold Cursor's own read transaction open across
  * every pause.
  *
- * One worker serves one recovery pass or one backfill run and is closed with
- * it. Within a pass the reader decodes one graph at a time, so a pool buys
- * nothing, while a worker that outlived the pass would hold a graph-sized
- * heap between passes for no one.
+ * One worker serves one backfill run, or a run of recovery passes that never
+ * leaves the queue empty, and is closed with it. Within a pass the reader
+ * decodes one graph at a time, so a pool buys nothing, while a worker that
+ * outlived a drained queue would hold a graph-sized heap for no one. Spawning
+ * one per pass is the other extreme and costs more than it saves: hooks arrive
+ * throughout an agent run, so passes are back to back and most of them only
+ * re-answer `unchanged`.
  *
  * @import { CursorSession, CursorSnapshot } from '../../../../hypaware-core/plugins-workspace/cursor/src/types.js'
  *
  * @ref LLP 0399#resources [implements]: the native decode runs on a worker
  *   thread, so a bounded graph bounds CPU rather than daemon latency
- * @ref LLP 0264#lifecycle: the same worker-per-pass shape the grep sidecar
+ * @ref LLP 0264#lifecycle: the same worker handle shape the grep sidecar
  *   build already uses to keep maintenance off the daemon loop
+ *
+ * @param {{ log?: { info(msg: string, fields?: object): void } }} [args]
  */
-export function createCursorDecoder() {
+export function createCursorDecoder({ log } = {}) {
   /** @type {Worker | null} */
   let worker = null
   /**
@@ -90,8 +95,11 @@ export function createCursorDecoder() {
     started.on('error', () => {
       if (worker === started) worker = null
       // Worker errors carry module paths and stack frames; the reader's
-      // fixed-code contract is what the caller is allowed to log.
-      failAll(new CursorReadError('native_read_failed'))
+      // fixed-code contract is what the caller is allowed to log. But a
+      // thread that cannot run at all fails every session forever, so it
+      // gets its own code: `native_read_failed` on every row would read as
+      // a store full of corrupt graphs and hide a dead decoder.
+      failAll(new CursorReadError('native_decoder_unavailable'))
     })
     started.on('exit', () => {
       if (worker === started) worker = null
@@ -100,6 +108,9 @@ export function createCursorDecoder() {
     started.unref()
     syncRef = updateRef
     worker = started
+    // The signal the acceptance gate reads to tell a decode thread that
+    // appears for a run of passes from one that respawns on every pass.
+    log?.info('cursor.decoder.started', { component: 'plugin.cursor', operation: 'recovery.read' })
     return started
   }
 

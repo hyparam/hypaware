@@ -2015,8 +2015,10 @@ Record exact editor/CLI versions, OS, config paths and hook settings.
    saturation, large graphs and waiting-spool growth. Hook latency must hold
    through a recovery pass over the largest real stores on the machine, which
    is the measurement no fixture supplies: the decode runs on a worker thread
-   (LLP 0399 #resources), so also confirm the thread appears for a pass and is
-   gone between passes, and that peak RSS during a pass stays bounded. Confirm
+   (LLP 0399 #resources), so also confirm one thread appears while recovery has
+   queued work, that it is not respawned per pass during a live agent run, that
+   it is gone once the queue drains, and that peak RSS during a pass stays
+   bounded. Confirm
    bounded retries, clean shutdown and no raw payload spool. Billed token usage
    must remain absent; context occupancy and hook counts are not billing
    semantics.

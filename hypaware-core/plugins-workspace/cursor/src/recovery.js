@@ -70,7 +70,7 @@ export function createCursorBackfillProvider(opts = {}) {
       // One decoder serves the whole run and is closed with it, so a sweep
       // over a thousand stores neither blocks the daemon loop nor leaves a
       // decode thread alive between sweeps.
-      const decoder = createCursorDecoder()
+      const decoder = createCursorDecoder({ log: ctx.log })
       try {
         const admission = cursorAdmission(opts)
         const window = resolveWindow(ctx)
