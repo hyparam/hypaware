@@ -882,17 +882,19 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // install itself goes, so the message stays true in all three. Absent only
     // when the best-effort marker write above failed (LLP 0100 R1's message
     // rides the hold, never invents one that was not actually written).
-    // Compact prints the deadline alone. The wizard that asked for it states
-    // the rest of R1 (the backfill statement, the skill hint, the release verb)
-    // in its closing privacy narration, which every path through it reaches -
-    // the ordinary close and `narrateEnrolledAbort` alike - so the full block
-    // here would say everything twice on the same run.
+    // Compact prints the deadline alone; the rest of R1 lands after it. On the
+    // ordinary attended close `hyp sync`'s own plan carries the skill hint and
+    // the release verb, and the wizard's narration stands down for it
+    // (`offerFollows`). On every path that skips the offer (aborts,
+    // non-interactive, dry runs, and `narrateEnrolledAbort`) the wizard's
+    // closing privacy narration carries them instead. Either way the full
+    // block here would say everything twice on the same run.
     // The line states the deadline and the fact the hold guarantees, and
     // nothing about being prompted: the send-now offer (LLP 0203) runs only on
     // an attended, uncancelled, non-dry close, and at the deadline itself the
     // hold simply lapses (LLP 0101 #no-release). A promise of an ask here
     // would be false on exactly the paths where it would matter.
-    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the wizard's own narration carries the skill hint and the release verb
+    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the skill hint and the release verb land after it, from `hyp sync`'s plan on the attended close and from the wizard's narration on every path that skips the offer
     // @ref LLP 0407#dropped: the backfill statement is no longer made on the attended close
     // @ref LLP 0387#adjacency [implements]: compact meets R1a as a pair - the forwarding line directly above carries the server name and the 'hyp remote list' lookup for both lines
     if (holdDeadline !== null && compact) {
