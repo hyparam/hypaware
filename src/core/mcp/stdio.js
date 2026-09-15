@@ -89,8 +89,7 @@ export function serveStdio({ server, stdin, stdout, onError }) {
  *
  * Which runtimes have that gap is a property of the runtime, not of this code:
  * Node 22 and 24 do, and Node 26 stringifies iteratively and closes it, so
- * there the fallback is total for every id `JSON.parse` can produce. The test
- * that pins the gap probes for it and skips where it does not exist.
+ * there the fallback is total for every id `JSON.parse` can produce.
  *
  * The fallback write can fail the way the first one did, on a closed or
  * erroring stdout. That is not answerable on the protocol channel, so it is

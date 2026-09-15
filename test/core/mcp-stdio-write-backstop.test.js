@@ -82,7 +82,8 @@ test('the backstop line forms for every id off the wire that JSON can write down
   // Every id the backstop can use arrived through `JSON.parse`, which cannot
   // produce a BigInt, a cycle, a `toJSON`, or an `undefined`. Ids JSON-RPC does
   // not sanction still parse, so the backstop must survive them too. It is not
-  // total, though: see the depth case below for the one id it cannot answer.
+  // total, though: `writeResponse`'s own caveat records the one id it cannot
+  // answer, nested past the depth `JSON.stringify` will take.
   const ids = /** @type {any[]} */ ([0, -1, 1.5, '', 'x'.repeat(1000), null, [1, 2], { a: { b: 1 } }, true])
   for (const id of ids) {
     const { chunks } = await drive(
