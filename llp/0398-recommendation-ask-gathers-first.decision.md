@@ -251,7 +251,24 @@ to permission denials.
 ## Consequences {#consequences}
 
 The gather is five bounded queries, seconds on a warm cache, before the
-client starts. The answer then takes one to two minutes in a cold client:
+client starts. Bounded by a ceiling, not only by the 30-day window: the
+sessions that typed a candidate line are however many they are, so the
+two statements that list rows per session read a newest-first sample of
+them, 40 a line and 80 in all, each session from its own trigger onwards
+rather than from its first row, under one row budget of twice the
+procedure window per session named. The total matters as much as the
+per-line cap: both statements cost a pass over every named session for
+each row they scan, so five lines in disjoint sessions would name 200 and
+run slower than the unbounded statement this replaces. One line still
+reads its full 40; five share the 80 between them. Anchoring each session is what makes the budget buy
+the rows the page is built from; without it the budget is spent on the
+calls that ran before the line was typed. The budget is one sum and not
+a per-session ceiling, because SQL that says the latter needs a
+partitioned window function, which buffers its whole input and gives the
+bound back. So a long session can leave a later one unread, and every
+count printed beside a step is the count of the sessions that were read,
+never the count that was asked for. The example and the ending are the
+sample's too. The answer then takes one to two minutes in a cold client:
 three file reads and the writing.
 
 The floor can be wrong for a machine. It is one exported object,
