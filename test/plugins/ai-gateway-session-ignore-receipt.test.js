@@ -442,6 +442,9 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // position check would red it for its own `below`, so restating the refusal
   // after the answer would fail on the sentence the file requires.
   const LICENSED_REFUSAL = /do \*{0,2}not\*{0,2} drop to the script below/g
+  // The forward directions both position rules below read. One vocabulary in
+  // one place: written out twice, the two rules drift apart.
+  const FORWARD = '\\bbelow\\b|\\bbeneath\\b|\\bfurther down\\b|\\b(?:end of|later in) th(?:is|e) step\\b'
 
   // Scoped to that block. Both `hyp session ignore` and the fallback are named
   // throughout Step 1, so a Step-1-wide match says nothing about where THIS
@@ -539,17 +542,40 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // "Read that receipt exactly as above" green: the gateway-only route lies
   // below the slice, so nothing above it is that destination.
   //
-  // What the pair still does NOT catch, measured, because a green here is
+  // What the three still do NOT catch, measured, because a green here is
   // narrower than "no reroute": a forward pointer worded without any of these
   // four directions ("the last recipe in this section is your answer", "see the
-  // next code fence"), and any forward pointer at all placed in the opener
-  // paragraph instead of this one ("if that refuses too, keep reading further
-  // down"), which this predicate does not read. Widening it to the opener is
-  // what #1686 measured as a false red, so the residual is deliberate.
+  // next code fence"), and a forward pointer in the opener paragraph that names
+  // no block ("if that refuses too, keep reading further down", "use the recipe
+  // further down"), which this predicate does not read and the block rule below
+  // does not name. Reading the opener with a bare direction is what #1686
+  // measured as a false red, so that half of the residual is deliberate.
   assert.doesNotMatch(
     trailing.replace(LICENSED_REFUSAL, ''),
-    /\bbelow\b|\bbeneath\b|\bfurther down\b|\b(?:end of|later in) th(?:is|e) step\b/i,
+    new RegExp(FORWARD, 'i'),
     'the paragraph after the answer may not point further down the page, where the nearest thing is the fallback this refusal refused: a forward reference belongs one paragraph on, outside this slice'
+  )
+  // The same directions, gated on a block noun standing next to one, over the
+  // whole slice. The rule above reads the trailing paragraph only, so the
+  // opener paragraph gets no direction check at all, and #1686 measured a bare
+  // direction there as a false red ("state the id as below" is ordinary prose
+  // on that line). The noun is what makes the opener affordable, and it is what
+  // reds "run the bash block below" and "the block below is your answer"
+  // wherever in the slice they are written, which is what issue #1724 asked for
+  // and neither other rule gives: this file's own name for the fallback fence
+  // is `shell block`, so a bare `block` is not on the name list, and the rule
+  // above never reads the opener.
+  //
+  // Direction keeps this off that noun's honest uses and adjacency keeps it off
+  // sentences that merely mention both. Measured green: "Run the block above"
+  // (backward), "a block of ids is not supported" (no direction), and "the
+  // command block above is the one to run, and the bound is spelled out below"
+  // (both, too far apart to read as one pointer). That is the narrow form bare
+  // `block` was rejected for not being.
+  assert.doesNotMatch(
+    routing.replace(LICENSED_REFUSAL, ''),
+    new RegExp(`\\bblocks?\\b[^.\\n]{0,20}(?:${FORWARD})|(?:${FORWARD})[^.\\n]{0,20}\\bblocks?\\b`, 'i'),
+    'no part of this block may point forward to a block: the fence this step wants run is above it, so a block further down the page is the gateway-only fallback'
   )
 })
 
