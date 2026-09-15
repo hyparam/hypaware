@@ -3,6 +3,7 @@
   "version": "1.34.0",
   "type": "module",
   "description": "HypAware: AI agent observability with a plugin kernel. Records Claude Code, Codex, OTEL, and raw AI gateway traffic into one queryable history, kept on your machine or shared across machines and teams.",
+  "license": "MIT",
   "bin": {
     "hypaware": "./bin/hypaware.js",
     "hyp": "./bin/hypaware.js"
@@ -80,14 +81,14 @@
     "smoke": "node ./hypaware-core/smoke/index.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1128.0",
-    "@aws-sdk/credential-provider-ini": "3.973.15",
-    "hyparquet": "1.30.0",
+    "@aws-sdk/client-s3": "3.1132.0",
+    "@aws-sdk/credential-provider-ini": "3.973.16",
+    "hyparquet": "1.30.1",
     "hyparquet-compressors": "1.1.1",
     "hypgrep": "0.5.2",
     "hysnappy": "1.1.1",
     "icebird": "0.8.28",
-    "marked": "18.0.12",
+    "marked": "18.0.13",
     "squirreling": "0.16.5"
   },
   "optionalDependencies": {
@@ -96,18 +97,18 @@
   },
   "overrides": {
     "hyparquet-writer@0.16.9": {
-      "hyparquet": "1.30.0"
+      "hyparquet": "1.30.1"
     },
     "icebird": {
-      "hyparquet": "1.30.0"
+      "hyparquet": "1.30.1"
     },
     "hypgrep": {
-      "hyparquet": "1.30.0",
+      "hyparquet": "1.30.1",
       "hyparquet-writer": "0.16.9"
     }
   },
   "devDependencies": {
-    "@types/node": "26.5.0",
+    "@types/node": "26.6.0",
     "typescript": "7.0.2"
   }
 }

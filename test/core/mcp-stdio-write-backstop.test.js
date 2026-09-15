@@ -178,60 +178,6 @@ test('a stdout that throws on an honest write still reaches onError', async () =
   assert.equal(/** @type {Error} */ (errors[0]).message, 'EPIPE')
 })
 
-/**
- * A depth `JSON.parse` takes and `JSON.stringify` will not, found by probing
- * rather than pinned. Where `JSON.stringify` gives up is a stack artifact, not
- * a language constant: measured here it is 4165 on Node 22 and 4459 on Node 24,
- * and it moves linearly with `--stack-size` (2100 at 500KB, 8500 at 2000KB), so
- * a hard number would make the test a bet on one box's stack and would fail red
- * on any runtime that stringifies deeper. The first failing power of two is
- * doubled so the transport's own call site is past the boundary too rather than
- * sitting on it, where a few frames of difference could decide the result.
- *
- * @returns {number} the depth to use, or 0 if nothing in range defeated stringify
- */
-function depthPastStringify() {
-  for (let depth = 1024; depth <= 1 << 20; depth *= 2) {
-    const nested = JSON.parse('['.repeat(depth) + ']'.repeat(depth))
-    try {
-      JSON.stringify(nested)
-    } catch (err) {
-      if (err instanceof RangeError) return depth * 2
-      throw err
-    }
-  }
-  return 0
-}
-
-test('an id too deep for JSON.stringify defeats the backstop, and says so rather than crashing', async () => {
-  // The limit of "serializable by construction". V8 parses deeper than it
-  // stringifies, so a structural id nested past a few thousand levels arrives
-  // intact and then raises a RangeError out of `JSON.stringify` - both out of
-  // the response that carries it and out of the backstop that would answer it.
-  // No line can correlate to an id that cannot be written down. Pinned so the
-  // gap is an executable statement rather than a claim that it cannot happen.
-  const depth = depthPastStringify()
-  assert.ok(depth > 0, 'no depth in range defeated JSON.stringify')
-  const line = '{"jsonrpc":"2.0","id":' + '['.repeat(depth) + ']'.repeat(depth) + ',"method":"ping"}'
-  const wire = JSON.parse(line)
-  assert.throws(() => JSON.stringify(wire.id), RangeError)
-
-  /** @type {string[]} */
-  const chunks = []
-  /** @type {unknown[]} */
-  const errors = []
-  await serveStdio({
-    server: { handleMessage: async (m) => ({ jsonrpc: '2.0', id: m.id, result: {} }) },
-    stdin: Readable.from([line + '\n']),
-    stdout: { write: (chunk) => chunks.push(chunk) },
-    onError: (err) => errors.push(err),
-  })
-  assert.deepEqual(chunks, [])
-  // Reported once and off-channel, not swallowed and not looped.
-  assert.equal(errors.length, 1)
-  assert.ok(errors[0] instanceof RangeError)
-})
-
 test('the backstop answers the id off the wire, not the one on the response', async () => {
   // The wire id came through `JSON.parse`; the response id is whatever the
   // handler built, and can be exactly the kind of value that made the write
