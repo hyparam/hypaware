@@ -4,10 +4,12 @@ import test from 'node:test'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
+import { spawn } from 'node:child_process'
 import { cursorNativeFixture, growToMaximalGraph, wire } from '../../hypaware-core/smoke/lib/cursor_native_fixture.js'
 import { cursorFields, cursorStorePaths, findCursorSession, listCursorSessions, readCursorSession } from '../../hypaware-core/plugins-workspace/cursor/src/native.js'
 import { createCursorBackfillProvider, cursorAdmission } from '../../hypaware-core/plugins-workspace/cursor/src/recovery.js'
 import { createCursorDecoder } from '../../hypaware-core/plugins-workspace/cursor/src/native_decoder.js'
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 /** @param {'cli' | 'editor'} [frontend] */
 async function fixture(frontend = 'cli') {
@@ -230,3 +232,53 @@ test('the decoder returns the reader own result off the event loop, and a dead w
     await assert.rejects(decoder.read(f.session), /native_read_failed/)
   } finally { await decoder.close(); await f.cleanup() }
 })
+
+// Until hyparam/hypaware#1735 a read whose payload the structured clone
+// refused rejected on time and left the worker serving later reads, so the
+// only thing the leak showed was that the pending entry `syncRef` reads had
+// never been dropped and the loop could no longer drain. The exit code is
+// therefore the load-bearing assertion: the child's own watchdog is unref'd,
+// so it fires only if something else is holding the loop open, and the child
+// never calls the `close()` this would otherwise self-heal at.
+test('a read whose postMessage throws releases its pending entry and the worker ref, so the process can still exit', async () => {
+  const home = temporaryDirectory('cursor-decoder-clone-')
+  const decoderUrl = new URL('../../hypaware-core/plugins-workspace/cursor/src/native_decoder.js', import.meta.url)
+  const entry = path.join(home, 'nonclonable.mjs')
+  await fs.writeFile(entry, [
+    `import { createCursorDecoder } from ${JSON.stringify(decoderUrl.href)}`,
+    'const watchdog = setTimeout(() => { process.stderr.write("watchdog\\n"); process.exit(42) }, 10000)',
+    'watchdog.unref()',
+    'const decoder = createCursorDecoder()',
+    // `session` reaches `postMessage` untouched, so a method on it is a
+    // synchronous DataCloneError out of the structured clone.
+    'const session = { id: "s", dbPath: "/absent", frontend: "cli", notClonable() {} }',
+    'try {',
+    '  await decoder.read(session)',
+    '  process.stderr.write("resolved\\n")',
+    '} catch (err) {',
+    '  process.stderr.write("rejected:" + err.message + "\\n")',
+    '}',
+  ].join('\n'))
+  const child = await runNode(entry)
+  assert.match(child.stderr, /^rejected:native_read_failed$/m,
+    `the refused read rejects with the reader's fixed code, not a raw DOMException (stderr=${child.stderr})`)
+  assert.equal(child.code, 0,
+    `the process left on a drained loop instead of the watchdog (code=${child.code}, stderr=${child.stderr})`)
+})
+
+/**
+ * Run one module in a child `node`, and collect how it left.
+ *
+ * @param {string} entry
+ * @returns {Promise<{ code: number | null, stderr: string }>}
+ */
+function runNode(entry) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [entry], { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.on('error', reject)
+    child.on('close', (code) => resolve({ code, stderr }))
+  })
+}
