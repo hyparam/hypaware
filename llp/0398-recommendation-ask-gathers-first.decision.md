@@ -111,20 +111,19 @@ days, and the client is told to say how much was recorded and that there
 is not enough yet. A skill proposed from three sessions is a guess.
 
 <a id="human-turns"></a>**User text means human turns, deduplicated.**
-Every query excludes `conversation_source = 'claude_code'`, which is how
-the OTEL lane duplicates the transcript lane (#1464; the cross-lane
-settlement landed, but a row that misses the flush-time pass keeps its
-twin). The exclusion is null-safe, because a row with no source label is
-not a duplicate of anything. It is also wider than its name: the live
-gateway stamps `claude_code` on any request whose User-Agent is
-`claude-cli/`, so the filter costs real rows on a machine that has no
-transcript lane at all. It is kept because the transcript sweep runs by
-default beside every Claude attach, and because everything the gather
-counts is counted per session (`count(distinct session_id)`, `min(...)`
-per session) - the duplicate lane changes only the raw `typed` total and
-the 30-call procedure window. A predicate that picks the duplicate rather
-than the label both producers share is the better answer and needs a
-column neither lane carries today. Every user-text
+Every query excludes the OTEL lane, which duplicates the transcript lane
+(#1464; the cross-lane settlement landed, but a row that misses the
+flush-time pass keeps its twin). The lane is named by the provenance it
+stamps, `attributes.gateway.source = 'otel'`, which the OTEL listener
+writes on every row through the shared exchange writer (LLP 0252), and
+not by `conversation_source`: the live gateway stamps `claude_code` on
+any request whose User-Agent is `claude-cli/`, so a filter on the label
+took the gateway lane with the twin and left a machine capturing Claude
+only through the gateway with an empty record and nothing to recommend
+from. The predicate tests the cheap label first and `or` short-circuits,
+so the JSON read runs only over rows that could be a twin, and it is
+null-safe on both halves: a row with no source label, and a row with no
+gateway provenance, are each a duplicate of nothing. Every user-text
 query keeps only rows that are not sidechains and whose `user_type` is
 null, `external`, or `user`, and drops injected preambles (the AGENTS.md
 block Codex prepends, compaction summaries, skill invocations). The first
