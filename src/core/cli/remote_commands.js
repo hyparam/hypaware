@@ -715,6 +715,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // sign-in is the accepting act. Phrased conditionally because the client
   // can't know pre-auth whether the server will mint a gateway credential.
   // @ref LLP 0063#d3 [implements]: default-on enrollment; the pre-auth notice is the consent surface, never a y/n prompt
+  // @ref LLP 0407#dropped [constrained-by]: the notice names two consequences in plain words; the org-config clause is left out by decision
   // Compact (the wizard's join lane, LLP 0135 #join) keeps the notice, its
   // placement, and its conditional phrasing, and drops only the line breaks:
   // one line, still before the browser. The hedge is not shortenable - the
@@ -891,7 +892,8 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // an attended, uncancelled, non-dry close, and at the deadline itself the
     // hold simply lapses (LLP 0101 #no-release). A promise of an ask here
     // would be false on exactly the paths where it would matter.
-    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the wizard's own narration carries the backfill statement, the skill hint, and the release verb
+    // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the wizard's own narration carries the skill hint and the release verb
+    // @ref LLP 0407#dropped: the backfill statement is no longer made on the attended close
     // @ref LLP 0387#adjacency [implements]: compact meets R1a as a pair - the forwarding line directly above carries the server name and the 'hyp remote list' lookup for both lines
     if (holdDeadline !== null && compact) {
       ctx.stderr.write(`✓ First sync no later than ${formatFirstSyncDeadline(holdDeadline)}; nothing has been uploaded yet\n`)

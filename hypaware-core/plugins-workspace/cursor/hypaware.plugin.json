@@ -29,7 +29,7 @@
       {
         "name": "cursor",
         "label": "Cursor",
-        "summary": "Records your Cursor editor and CLI conversations and the files they touched. Token usage is not available.",
+        "summary": "Records your Cursor editor and CLI conversations, including the file contents and command output its tools see. Token usage is not available.",
         "detect": {
           "settings_file": ".cursor/hooks.json"
         },

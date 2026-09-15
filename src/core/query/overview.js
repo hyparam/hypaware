@@ -635,8 +635,7 @@ export function renderOverview({
     // "Nothing recorded yet" is a claim about the cache; when the LLP 0105
     // filter took every row it is a false one, and the withheld-row count
     // on stderr would be the only sign. Two different situations, two
-    // different sentences, neither of them "start a session" to someone
-    // whose sessions are all sitting there recorded.
+    // different sentences.
     out += withheld
       ? '\nEvery recorded session in this window is marked local-only and not visible\n' +
         'from here. Re-run inside one of those directories, or with --include-local-only.\n'

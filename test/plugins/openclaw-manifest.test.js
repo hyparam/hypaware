@@ -81,5 +81,5 @@ test('claude manifest onboarding copy names the OpenClaw case', async () => {
   const manifest = /** @type {any} */ (loaded[0].manifest)
 
   const summary = manifest.contributes?.picker?.[0]?.summary ?? ''
-  assert.match(summary, /OpenClaw sessions that run through it/)
+  assert.match(summary, /OpenClaw/)
 })

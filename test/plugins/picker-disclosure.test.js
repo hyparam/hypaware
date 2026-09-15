@@ -52,6 +52,7 @@ test('claude picker summary discloses that a local port is opened', async () => 
 
 test('codex picker summary discloses the gateway config write and the skill install', async () => {
   const summary = await pickerSummary('codex', 'codex')
+  assert.match(summary, /edits Codex's config/i)
   assert.match(summary, /local port/i)
   assert.match(summary, /skills/i)
 })
@@ -61,6 +62,14 @@ test('codex picker summary discloses the gateway config write and the skill inst
 test('opencode picker summary discloses the plugin file it adds', async () => {
   const summary = await pickerSummary('opencode', 'opencode')
   assert.match(summary, /adds a plugin file/i)
+})
+
+// `cursor/src/native.js` records tool results in full (file bodies and shell
+// output, LLP 0399 #file-content), so the row must claim that, not filenames.
+test('cursor picker summary discloses that file contents and command output are recorded', async () => {
+  const summary = await pickerSummary('cursor', 'cursor')
+  assert.match(summary, /file contents/i)
+  assert.match(summary, /command output/i)
 })
 
 test('otel picker summary discloses that a local port is opened', async () => {

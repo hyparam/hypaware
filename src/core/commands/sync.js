@@ -887,6 +887,7 @@ function formatResumeInstant(iso) {
  * the user answered the import question two screens earlier.
  *
  * @ref LLP 0100#requirements [implements]: R2's review window ends by deadline or by informed consent; R1's review hint rides here on the wizard path
+ * @ref LLP 0407#dropped [constrained-by]: no backfill statement and no irreversibility line, by decision
  * @param {number} deadlineMs
  * @returns {string}
  */
