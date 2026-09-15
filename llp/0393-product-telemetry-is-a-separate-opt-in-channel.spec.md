@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-08
 **Extends:** LLP 0021, LLP 0318
+**Extended-by:** LLP 0408 (automatic organization reporting for enrolled SaaS users)
 
 ## Contract {#contract}
 

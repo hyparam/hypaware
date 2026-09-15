@@ -2,7 +2,9 @@
 
 import path from 'node:path'
 import os from 'node:os'
+import fs from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
+import { MAX_CONFIG_DOCUMENT_BYTES, resolveCentralLayerPath } from '../config/apply.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 import { readSmallJson } from './outbox.js'
 
@@ -39,7 +41,16 @@ export function safeDestination(url) {
 
 /** @param {string} root */
 export function effectivePolicy(root) {
-  const policy = readSmallJson(path.join(root, 'policy.json'), 4096)
+  const policyPath = path.join(root, 'policy.json')
+  const saved = readSmallJson(policyPath, 4096)
+  // An unreadable or malformed preference must never become an automatic opt-in.
+  let automatic = false
+  try {
+    fs.lstatSync(policyPath)
+  } catch (error) {
+    automatic = /** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT'
+  }
+  const policy = automatic ? enrolledPolicy(root) : saved
   if (
     !policy ||
     policy.version !== 1 ||
@@ -108,10 +119,58 @@ export function effectivePolicy(root) {
     }
   return {
     mode: 'organization',
-    reason: 'explicit_organization',
+    reason: automatic ? 'enrolled_organization' : 'explicit_organization',
     binding: hash([policy.mode, policy.generation, enrollment]),
     policy,
     identity
+  }
+}
+
+/**
+ * Derive the SaaS default from the central layer, including the join seed.
+ * A leftover identity or a query-only remote is not an enrollment. Reads are
+ * bounded and never boot the kernel, scan captured data or write preferences.
+ * @ref LLP 0408#policy [implements]: enrollment enables reporting unless a local preference exists
+ * @param {string} root
+ */
+function enrolledPolicy(root) {
+  const stateRoot = path.dirname(root)
+  const configPath = resolveCentralLayerPath({ stateRoot })
+  const config = configPath ? readSmallJson(configPath, MAX_CONFIG_DOCUMENT_BYTES) : null
+  if (config?.version !== 2 || !config.sinks || typeof config.sinks !== 'object') return null
+  const sinks = Object.values(config.sinks).filter(
+    (sink) => sink?.plugin === '@hypaware/central'
+  )
+  if (sinks.length !== 1) return null
+  const sink = sinks[0].config
+  const url = sink?.url
+  // Same strictness as the explicit opt-in: a merely parseable url is not
+  // enough, because the raw string becomes the POST target. An empty `#`/`?`
+  // suffix survives `safeDestination`'s truthiness but would send the batch to
+  // the server root with the receiver path as a fragment.
+  if (typeof url !== 'string' || safeDestination(url) !== url.replace(/\/$/, ''))
+    return null
+  const identityPath = sink?.identity?.persisted_path ??
+    path.join(stateRoot, 'plugins', '@hypaware/central', 'identity.json')
+  if (typeof identityPath !== 'string') return null
+  const identity = readSmallJson(identityPath)
+  if (!identity || identity.central_url !== url ||
+    typeof identity.gateway_id !== 'string' || !identity.gateway_id ||
+    typeof identity.jwt !== 'string') return null
+  let claims
+  try {
+    claims = JSON.parse(Buffer.from(identity.jwt.split('.')[1], 'base64url').toString('utf8'))
+  } catch {
+    return null
+  }
+  if (typeof claims?.org !== 'string' || !claims.org) return null
+  return {
+    version: 1,
+    mode: 'organization',
+    generation: 'enrolled-organization-v1',
+    url,
+    identity_path: identityPath,
+    enrollment: hash([url, identity.gateway_id, claims.org])
   }
 }
 

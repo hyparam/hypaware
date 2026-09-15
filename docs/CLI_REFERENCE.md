@@ -1618,7 +1618,8 @@ See [updating and recovery](CLI.md#upgrade-within-a-compatible-major-version).
 hyp telemetry [status|preview|off|enable local|enable organization]
 ```
 
-Product telemetry defaults off. `status` reports consent, destination, and queue
+Product telemetry is automatic for enrolled organizations and defaults off on
+standalone installations. `status` reports consent, destination, and queue
 state; `preview` prints the next serialized batch or `null`. `enable local`
 retains an allowlisted preview queue without delivery. `enable organization`
 requires an eligible enrolled central destination. `off` removes pending copies

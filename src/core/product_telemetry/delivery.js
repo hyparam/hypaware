@@ -62,7 +62,8 @@ export function createDelivery(
         outbox.noteDrop()
         return
       }
-      const target = effective.policy.url + '/v1/telemetry'
+      const destination = effective.policy.url.replace(/\/$/, '')
+      const target = destination + '/v1/telemetry'
       const attempt = Math.min(16, (previous.attempt ?? 0) + 1)
       /** @param {string} state @param {number} [delay] */
       function pause(state, delay = 3600_000) {
@@ -92,7 +93,7 @@ export function createDelivery(
         if (effectivePolicy(root).binding !== binding)
           throw new Error('policy changed')
         const refresh = await fetchFn(
-          effective.policy.url + '/v1/identity/refresh',
+          destination + '/v1/identity/refresh',
           {
             method: 'POST',
             headers: { authorization: `Bearer ${token}` },

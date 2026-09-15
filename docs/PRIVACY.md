@@ -119,6 +119,13 @@ records a proxy attach.
 The deployment's operators can read forwarded data across every org on the
 server, and each such read is recorded in that org's audit trail.
 
+An enrolled machine also reports [product telemetry](PRODUCT_TELEMETRY.md) to
+the same organization automatically unless you saved a preference (LLP 0408):
+bounded usage, health and runtime summaries about HypAware itself, never
+conversation content, prompts, paths, or command arguments. `hyp telemetry off`
+turns it off durably and discards pending copies, `hyp telemetry status` shows
+the policy in force, and standalone installs stay off.
+
 ## The three usage classes
 
 Every directory subtree resolves to one class. Classes are evaluated from
@@ -285,3 +292,6 @@ to remove those too.
 HypAware's self-telemetry (under `~/.hyp/hypaware/dev-telemetry/`) is local
 and secret-safe by design: it records component / operation / status
 attributes, never credentials or raw prompt content.
+[Product telemetry](PRODUCT_TELEMETRY.md) is a separate channel: on a machine
+enrolled with an organization it is reported to that organization's server
+automatically, as described under "Where it goes" above.
