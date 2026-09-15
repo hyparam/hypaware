@@ -426,14 +426,56 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   const open = rest.indexOf('```')
   const close = rest.indexOf('```', open + 3)
   assert.ok(open > 0 && close > open, 'and must still answer it with a command block')
-  // Through the paragraph after the fence, not just to the fence. A reroute
-  // reads most naturally as the next sentence after the answer ("If that also
-  // refuses, drop to the script below"), which a slice ending at the fence
-  // leaves outside the guard entirely (issue #1627).
+  // Every paragraph after the fence down to the one that licenses the
+  // fallback, not just to the fence (issue #1627) and not just the first
+  // paragraph past it (issue #1685): a reroute reads as naturally one
+  // paragraph further on as it does in the next sentence after the answer.
+  //
+  // `command not found` is the boundary because it is the one condition this
+  // file licenses the fallback on, so the paragraph carrying it is the one
+  // whose subject is that route: it may name the destination and say when to
+  // take it, and a rewording of it ("a stop, not a reason to drop to the
+  // script below") stays green. Everything above it is still answering the
+  // ambiguous id, so a pointer to that destination there is a reroute
+  // whichever paragraph carries it.
+  //
+  // The condition, rather than a paragraph count, is what keeps that paragraph
+  // editable: reflow it, or split it after the condition, and both halves still
+  // sit at or below the condition, where a count would red the half that kept
+  // the word `fallback`. Split it the other way round and the half left holding
+  // "sends you to the fallback" above the condition reds - correctly, by this
+  // slice's own rule, because that is a pointer to the fallback written above
+  // the sentence that licenses it.
+  //
+  // Keying on content rather than on a count has its own residual, measured:
+  // this reads the FIRST `command not found` below the answer, so a reroute
+  // that names the condition on its way past ("treat it like `command not
+  // found` and drop to the script below") moves the boundary above itself and
+  // escapes. That is the one narrowing here that is silent: the phrase going
+  // missing entirely reds on the assertion just below, and the phrase landing
+  // in the first paragraph after the fence reds on `follows`. It is no wider
+  // than what the paragraph count it replaces already let through.
+  //
+  // That `follows` red has two causes, so it names both: the receipt and the
+  // condition merged into one paragraph, and the receipt paragraph mentioning
+  // the phrase in passing without rerouting anything. Only the first is the
+  // receipt losing its own paragraph, so a message naming only that one sends
+  // an editor who did the second looking for a blank line that is still there.
+  //
+  // The search is unbounded the other way too: move the condition down into the
+  // fallback paragraph and the slice widens over it, then reds on that
+  // paragraph's own `script` as though the routing prose had named it. That
+  // direction is loud rather than silent, but the message misdescribes it.
+  // Bounding the search to where the routing prose ends fixes the diagnosis and
+  // closes the narrowing with it, and is a change to the slice mechanism rather
+  // than to what issue #1685 asked for (issue #1731).
   const afterFence = rest.slice(close + 3)
-  const gap = afterFence.search(/\S/)
-  const brk = gap < 0 ? -1 : afterFence.slice(gap).search(/\n\s*\n/)
-  const follows = gap < 0 ? 0 : brk < 0 ? afterFence.length : gap + brk
+  const licensed = afterFence.indexOf('command not found')
+  assert.ok(licensed > 0, 'Step 1 must still license the fallback on `command not found`, below the answer')
+  const PARAGRAPH = /\n\s*\n/g
+  let follows = 0
+  for (let m = PARAGRAPH.exec(afterFence); m && m.index < licensed; m = PARAGRAPH.exec(afterFence)) follows = m.index
+  assert.ok(follows > 0, 'and the first `command not found` below the answer must sit below the receipt in a paragraph of its own: this one is in the first paragraph after the answer, either because the blank line below the receipt is gone or because the receipt paragraph names the phrase in passing')
   const routing = rest.slice(0, close + 3 + follows)
   const trailing = afterFence.slice(0, follows)
   // The one sentence this slice is licensed to write about the fallback, in the
@@ -517,7 +559,8 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
     /_hypaware\/ignore\/session|curl /,
     'an ambiguous id must not be answered with a gateway-only POST'
   )
-  // Structural: the paragraph after the answer fence may not point forward.
+  // Structural: no paragraph between the answer fence and the licensing
+  // condition may point forward.
   // This one turns on direction rather than on the destination's name, so it
   // reaches the reroute shape that needs no noun at all, which is the shape the
   // name list above cannot have (issue #1724). Position is what makes that
@@ -532,11 +575,11 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // the only thing below. Step 1's own receipt list points past it ("the bound
   // on all of it, spelled out below" reaches the guarantee paragraph), and
   // Steps 2-6 are below as well, so a legitimate forward reference from this
-  // paragraph reds too. That cost is real and it is bounded to this one
-  // paragraph: material that has to point forward belongs in the paragraph
-  // after it, outside the slice, which is where this file already keeps that
-  // material ("One nonzero exit, and only that one, sends you to the
-  // fallback").
+  // paragraph reds too. That cost is real and it is bounded to what sits
+  // above the licensing condition: material that has to point forward belongs
+  // at or below that paragraph, outside the slice, which is where this file
+  // already keeps that material ("One nonzero exit, and only that one, sends
+  // you to the fallback").
   //
   // Backward references stay legal, which is what keeps this paragraph's own
   // "Read that receipt exactly as above" green: the gateway-only route lies
@@ -549,14 +592,17 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // no block ("if that refuses too, keep reading further down", "use the recipe
   // further down"), which this predicate does not read and the block rule below
   // does not name. Reading the opener with a bare direction is what #1686
-  // measured as a false red, so that half of the residual is deliberate.
+  // measured as a false red, so that half of the residual is deliberate. Both
+  // survive displacement into a paragraph of their own, and so does a reroute
+  // written below the licensing condition, where the file's own introduction
+  // of the destination makes naming it legitimate again.
   assert.doesNotMatch(
     trailing.replace(LICENSED_REFUSAL, ''),
     new RegExp(FORWARD, 'i'),
-    'the paragraph after the answer may not point further down the page, where the nearest thing is the fallback this refusal refused: a forward reference belongs one paragraph on, outside this slice'
+    'no paragraph between the answer and the condition that licenses the fallback may point further down the page, where the nearest thing is the fallback this refusal refused: a forward reference belongs at or below that paragraph, outside this slice'
   )
   // The same directions, gated on a block noun standing next to one, over the
-  // whole slice. The rule above reads the trailing paragraph only, so the
+  // whole slice. The rule above reads the trailing paragraphs only, so the
   // opener paragraph gets no direction check at all, and #1686 measured a bare
   // direction there as a false red ("state the id as below" is ordinary prose
   // on that line). The noun is what makes the opener affordable, and it is what
