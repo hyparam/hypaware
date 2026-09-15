@@ -151,13 +151,15 @@ test('hypgrep is a plain dependency, held at the floor by an override', () => {
     'hypgrep is pinned exactly, in the idiom of every other dependency here')
   // The override was the whole of the adoption while hypgrep 0.5.1 declared
   // hyparquet 1.27.1: without the entry npm resolved that older copy privately
-  // under `node_modules/hypgrep`. 0.5.2 declares the root pin itself, so today
-  // the entry only restates what hypgrep already asks for, and it is asserted
-  // anyway because this is the one dependency whose declaration has already
-  // gone below the floor once. The header above says why the roles swap: a
-  // later hypgrep that declares below the pin resolves onto the hoisted copy
-  // with the entry in place and nests a private one without it, and that
-  // regression is silent. Asserted straight off the manifest so a dropped or
+  // under `node_modules/hypgrep`. It is the whole of the adoption again: 0.5.2
+  // declares 1.30.0, which the 1.30.1 root pin no longer satisfies, so without
+  // the entry npm nests a private 1.30.0 under `node_modules/hypgrep` and the
+  // read path runs on two hyparquets. It restated the declaration only while
+  // the root pin sat exactly on 1.30.0, which is how little it takes: the
+  // header above says why the roles swap, and a patch bump swapped them. A
+  // hypgrep that declares below the pin resolves onto the hoisted copy with
+  // the entry in place and nests a private one without it, and that regression
+  // is silent. Asserted straight off the manifest so a dropped or
   // misspelled entry reddens on a checkout with nothing installed, not only
   // where the resolved half below can run. It names the root pin rather than
   // the floor so the copy it forces is the one already hoisted, not a second
