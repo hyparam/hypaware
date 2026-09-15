@@ -129,6 +129,13 @@ export function createClaudeSettlementEnricher(opts) {
             projectsDir,
             sessionId,
             transcriptPath: sessionRecord?.transcript_path,
+            // Fallback roots for attached-Desktop sessions, whose sandboxed
+            // transcripts live outside projectsDir (see loadTranscript). Absent
+            // them the wire row keeps its fallback hash id forever, so the
+            // sweep's uuid copy of the same turn stands as a second row.
+            // @ref LLP 0133#attribution [implements]: the claude adapter scans
+            // the 3p container roots wherever it reads a transcript.
+            homeDir: opts.homeDir,
           })
           index = indexTranscriptEntries(entries)
         } catch {
