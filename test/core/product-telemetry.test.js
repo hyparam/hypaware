@@ -416,7 +416,7 @@ test('automatic bindings survive refresh and stop on leave or an organization ch
   assert.equal(effectivePolicy(root).mode, 'off')
 })
 
-for (const broken of ['missing identity', 'invalid identity', 'wrong destination', 'unsafe destination', 'missing org', 'ambiguous sinks', 'invalid config']) {
+for (const broken of ['missing identity', 'invalid identity', 'wrong destination', 'unsafe destination', 'missing org', 'ambiguous sinks', 'invalid config', 'fragment destination', 'query destination']) {
   test(`automatic reporting stays off with ${broken}`, (t) => {
     const home = temp(t)
     const remote = remoteEnrollment(home)
@@ -429,6 +429,14 @@ for (const broken of ['missing identity', 'invalid identity', 'wrong destination
       fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
     }
     if (broken === 'ambiguous sinks') Object.assign(remote.config.sinks, { other: remote.config.sinks.central })
+    // A bare `#`/`?` suffix parses and leaves `hash`/`search` empty, so it
+    // survives a truthiness check while making the POST target the server root.
+    for (const [kind, suffix] of [['fragment destination', '#'], ['query destination', '?']])
+      if (broken === kind) {
+        remote.config.sinks.central.config.url = 'https://example.invalid' + suffix
+        remote.identity.central_url = 'https://example.invalid' + suffix
+        fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+      }
     fs.writeFileSync(remote.configPath, broken === 'invalid config' ? '{bad' : JSON.stringify(remote.config))
     assert.equal(effectivePolicy(productRoot({ HYP_HOME: home })).mode, 'off')
   })

@@ -144,7 +144,12 @@ function enrolledPolicy(root) {
   if (sinks.length !== 1) return null
   const sink = sinks[0].config
   const url = sink?.url
-  if (typeof url !== 'string' || !safeDestination(url)) return null
+  // Same strictness as the explicit opt-in: a merely parseable url is not
+  // enough, because the raw string becomes the POST target. An empty `#`/`?`
+  // suffix survives `safeDestination`'s truthiness but would send the batch to
+  // the server root with the receiver path as a fragment.
+  if (typeof url !== 'string' || safeDestination(url) !== url.replace(/\/$/, ''))
+    return null
   const identityPath = sink?.identity?.persisted_path ??
     path.join(stateRoot, 'plugins', '@hypaware/central', 'identity.json')
   if (typeof identityPath !== 'string') return null
