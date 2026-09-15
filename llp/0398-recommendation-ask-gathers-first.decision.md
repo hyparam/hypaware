@@ -271,6 +271,27 @@ never the count that was asked for. The example and the ending are the
 sample's too. The answer then takes one to two minutes in a cold client:
 three file reads and the writing.
 
+The statement that finds the triggers is the one of the five that carries
+no `LIMIT`, and the `group by` is its ceiling rather than an omission. It
+returns a row a session a candidate line, so it is bounded by the distinct
+sessions of a rolling 30-day window over at most eight lines, never by
+messages: measured through the engine over two thousand such sessions,
+five times the typings returned the same two thousand rows while the same
+predicate without the aggregate returned ten thousand. A `LIMIT` would
+not bound what the engine materializes either, because the streaming
+aggregate builds every group before it yields the first row: over three
+thousand sessions, `limit 500` measured the same 4.2 s and 210 MB peak as
+no limit and saved 0.7 MB of the heap still held. What a group costs is
+about 300 bytes, and the scan is what the window sizes: at a fixed
+135,000-row scan, 8 groups against 3,000 held 0.9 MB against 1.8 MB and
+took the same 4.0 s. The one form that sizes a sort buffer,
+`order by at desc limit N`, measured no cheaper than either, because the
+groups are all built before anything is sorted, and it would take the
+newest sessions overall: the starvation the per-line share exists to
+avoid, paid for a bound that is not there. So four
+statements say their bound in SQL and the fifth says it in its shape, and
+the sample is what the answer is built from either way.
+
 The floor can be wrong for a machine. It is one exported object,
 `RECORD_FLOOR`, and `candidates.md` prints the record size it was judged
 against.

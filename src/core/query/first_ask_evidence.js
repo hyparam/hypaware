@@ -240,6 +240,13 @@ export function evidenceSql(from) {
   return {
     record: `select count(*) as session_days, count(distinct session_id) as sessions from (select session_id, date from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2) s`,
     lines: `select lower(substr(content_text, 1, 42)) as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and length(content_text) between 12 and 160 group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 order by sessions desc limit ${CANDIDATES + 3}`,
+    // The one statement here with no `limit`, because the `group by` is its
+    // ceiling and a `limit` would not be one (hypaware #1715): the engine
+    // builds every group before it yields a row, and the one form that sizes
+    // a buffer, `order by at desc limit`, takes the newest sessions overall,
+    // which is what `sampleTriggers` divides its total between the lines
+    // to avoid.
+    // @ref LLP 0398#consequences [constrained-by]: a row a session a candidate line is the bound; a LIMIT buys nothing and would pick a different sample
     triggers: (lines) => `select session_id, lower(substr(content_text, 1, 42)) as line, min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example from ai_gateway_messages where date >= '${from}' and ${human} and length(content_text) between 12 and 160 and lower(substr(content_text, 1, 42)) in (${lines.map(sqlString).join(', ')}) group by 1, 2`,
     calls: (anchors) => `select session_id, message_created_at as at, tool_name, substr(cast(tool_args as varchar), 1, 160) as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${anchors.length * ROWS_PER_SESSION}`,
     replies: (anchors) => `select session_id, message_created_at as at, substr(content_text, 1, 500) as text from ai_gateway_messages where date >= '${from}' and role = 'assistant' and part_type = 'text' and length(content_text) > 200 and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${anchors.length * ROWS_PER_SESSION}`,
