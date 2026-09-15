@@ -24,9 +24,10 @@ npx hypaware
 ```
 
 This opens a guided setup. The first question is how you want to collect
-agent logs. Select **Collect shared agent logs**.
+agent logs. Select **Sync to the cloud** (it is already selected, so a
+bare enter takes it).
 
-<img src="images/wizard-fork.png" width="480" alt="The setup's opening choice, with Collect shared agent logs selected: Collect shared agent logs, Collect agent logs locally, or Quit.">
+<img src="images/wizard-fork.png" width="480" alt="The setup's opening choice, with Sync to the cloud selected: Sync to the cloud, or Local only.">
 
 ## Follow the prompts
 

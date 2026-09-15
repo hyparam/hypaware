@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-08-10
 **Related:** LLP 0129 (#fork: the copy this rewords), LLP 0182 (every machine reaches the fork), LLP 0134 (#login-lane: the lane behind the shared row), LLP 0000 (the product this screen must explain)
+**Extended-by:** [LLP 0410](./0410-fork-two-rows-sync-default.decision.md) (#collect-labels: the Quit row is withdrawn, the rows are relabelled "Sync to the cloud" / "Local only", and sync becomes the bare-enter default; the "never preselecting it" clause no longer holds)
 
 > Extends [LLP 0129 §fork](./0129-init-wizard-fork.decision.md#fork).
 > The fork's *mechanics* are untouched: it is still the wizard's first

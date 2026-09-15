@@ -16,7 +16,7 @@
 // run at all.
 //
 // @ref LLP 0190#eof-everywhere [tests]: a spent stdin lands on the prompt's stated default rather than waiting on an answer that can never come
-// @ref LLP 0129#fork [tests]: quit stays the fork's answer when the terminal stops answering, so nothing is reconfigured by accident
+// @ref LLP 0410#eof-quits [tests]: quit stays the fork's answer when the terminal stops answering, even though sync is the printed default
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -89,22 +89,22 @@ async function spentStdin() {
   return stdin
 }
 
-test('fork menu takes its printed default on a stdin that ends without a line', async () => {
+test('fork menu quits on a stdin that ends without a line', async () => {
   const stdin = new PassThrough()
   const stdout = makeBuf()
   const choice = legacyForkPrompt({ stdout: /** @type {any} */ (stdout), stderr: /** @type {any} */ (makeBuf()), stdin, env: {} }, buildForkOptions())
   stdin.end()
 
-  // Quit, the default the menu printed, and the answer a bare enter gives:
+  // Quit, not the printed default: that default opens a sign-in, and EOF
+  // is the proof nobody is there to want it (LLP 0299 #eof-declines).
   // `runInitWizard` turns it into exit 0 with nothing written, which is
   // also what the TUI path returns for a real ctrl+c at this screen.
   assert.equal(await settles(choice, 'fork menu at EOF'), 'quit')
-  // The question is still asked, byte for byte: the default is taken
-  // because it was advertised, not instead of advertising it.
-  assert.match(stdout.text(), /Choose \[1-3, default 3\]: $/)
+  // The question is still asked, byte for byte.
+  assert.match(stdout.text(), /Choose \[1-2, default 1\]: $/)
 })
 
-test('fork menu takes its printed default on a stdin that was already spent', async () => {
+test('fork menu quits on a stdin that was already spent', async () => {
   const stdin = await spentStdin()
   const choice = legacyForkPrompt({ stdout: /** @type {any} */ (makeBuf()), stderr: /** @type {any} */ (makeBuf()), stdin, env: {} }, buildForkOptions())
 
