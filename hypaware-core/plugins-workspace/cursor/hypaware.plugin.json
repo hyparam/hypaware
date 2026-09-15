@@ -29,7 +29,7 @@
       {
         "name": "cursor",
         "label": "Cursor",
-        "summary": "Recovers Cursor editor and CLI conversations and tool results, with additional file observations. Usage unavailable.",
+        "summary": "Records your Cursor editor and CLI conversations and the files they touched. Token usage is not available.",
         "detect": {
           "settings_file": ".cursor/hooks.json"
         },

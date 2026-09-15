@@ -36,7 +36,7 @@ async function pickerSummary(plugin, row) {
 
 test('claude picker summary discloses the attach and the skill install', async () => {
   const summary = await pickerSummary('claude', 'claude')
-  assert.match(summary, /attaches/i)
+  assert.match(summary, /edits Claude Code's settings/i)
   assert.match(summary, /skills/i)
 })
 
@@ -46,24 +46,24 @@ test('claude picker summary discloses the attach and the skill install', async (
 // @ref LLP 0262#capture [tests]: the picker teaches the recorder that actually receives Claude content
 test('claude picker summary discloses that its local telemetry listener is started', async () => {
   const summary = await pickerSummary('claude', 'claude')
-  assert.match(summary, /starts its local telemetry listener/i)
+  assert.match(summary, /opens a local port/i)
   assert.doesNotMatch(summary, /gateway|proxy/i)
 })
 
 test('codex picker summary discloses the gateway config write and the skill install', async () => {
   const summary = await pickerSummary('codex', 'codex')
-  assert.match(summary, /local gateway/i)
+  assert.match(summary, /local port/i)
   assert.match(summary, /skills/i)
 })
 
 test('otel picker summary discloses that a local receiver is started', async () => {
   const summary = await pickerSummary('otel', 'otel')
-  assert.match(summary, /starts a local receiver/i)
+  assert.match(summary, /opens a local port/i)
 })
 
 test('openclaw picker summary discloses the gateway-config rewrite', async () => {
   const summary = await pickerSummary('openclaw', 'openclaw')
-  assert.match(summary, /rewrites OpenClaw's gateway config/i)
+  assert.match(summary, /edits OpenClaw's gateway config/i)
 })
 
 // A running OpenClaw gateway keeps routing at the old baseUrl until it is
@@ -114,15 +114,15 @@ test('claude-desktop picker summary states that capture makes no Desktop changes
 // B1, resolved by disclosure: keep the composition, state it plainly).
 test('claude-desktop picker summary discloses the Claude Code capture, history import, and attach', async () => {
   const summary = await pickerSummary('claude-desktop', 'claude-desktop')
-  assert.match(summary, /Claude Code capture/i)
-  assert.match(summary, /Claude Code CLI history/i)
-  assert.match(summary, /attach Claude Code/i)
+  assert.match(summary, /records Claude Code/i)
+  assert.match(summary, /Claude Code history/i)
+  assert.match(summary, /may edit its settings/i)
 })
 
 // The shared ai-gateway plugin supplies the backfill materializer and also
 // binds its listener, so the transcript-only row still discloses that local
 // side effect even though no Desktop traffic is redirected through it.
-test('claude-desktop picker summary discloses that a local gateway listener is started', async () => {
+test('claude-desktop picker summary discloses that a local port is opened', async () => {
   const summary = await pickerSummary('claude-desktop', 'claude-desktop')
-  assert.match(summary, /starts a local gateway listener/i)
+  assert.match(summary, /opens a local port/i)
 })

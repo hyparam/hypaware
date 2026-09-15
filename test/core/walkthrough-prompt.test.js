@@ -43,7 +43,7 @@ test('picker prompt prints context under source options and defaults export to l
   assert.equal(result.exportPicked, 'local-parquet')
 
   const text = stdout.text()
-  assert.match(text, /5\) OpenTelemetry\n     Records logs, traces, and metrics your tools send over local OTLP HTTP/)
+  assert.match(text, /5\) OpenTelemetry\n     Records logs, traces, and metrics from tools that support OpenTelemetry/)
   assert.doesNotMatch(text, /Anthropic API/)
   assert.doesNotMatch(text, /OpenAI API/)
   // The export question is no longer rendered.
