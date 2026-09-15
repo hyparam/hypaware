@@ -124,22 +124,32 @@ export function createClaudeSettlementEnricher(opts) {
         // settlement for the session (that would re-open the #258 hole).
         /** @type {ReturnType<typeof indexTranscriptEntries> | undefined} */
         let index
-        try {
-          const entries = await transcriptLoader.load({
-            projectsDir,
-            sessionId,
-            transcriptPath: sessionRecord?.transcript_path,
-            // Fallback roots for attached-Desktop sessions, whose sandboxed
-            // transcripts live outside projectsDir (see loadTranscript). Absent
-            // them the wire row keeps its fallback hash id forever, so the
-            // sweep's uuid copy of the same turn stands as a second row.
-            // @ref LLP 0133#attribution [implements]: the claude adapter scans
-            // the 3p container roots wherever it reads a transcript.
-            homeDir: opts.homeDir,
-          })
-          index = indexTranscriptEntries(entries)
-        } catch {
-          index = undefined
+        // Resolve the transcript only for a group that actually reads the
+        // index, i.e. one holding a match_key row. `settleSelect` also admits
+        // pure null-cwd rows (the #258 race), and a group of those alone would
+        // otherwise resolve a whole transcript to build an index nothing
+        // consults - which, with `homeDir` armed below, is a Desktop container
+        // sweep whose cost grows with every conversation the machine has held.
+        // `.some` short-circuits, so a group that does need the index pays one
+        // extra key read.
+        if (indices.some((i) => readMatchKey(rows[i].attributes))) {
+          try {
+            const entries = await transcriptLoader.load({
+              projectsDir,
+              sessionId,
+              transcriptPath: sessionRecord?.transcript_path,
+              // Fallback roots for attached-Desktop sessions, whose sandboxed
+              // transcripts live outside projectsDir (see loadTranscript).
+              // Absent them the wire row keeps its fallback hash id forever, so
+              // the sweep's uuid copy of the same turn stands as a second row.
+              // @ref LLP 0133#attribution [implements]: the claude adapter
+              // scans the 3p container roots wherever it reads a transcript.
+              homeDir: opts.homeDir,
+            })
+            index = indexTranscriptEntries(entries)
+          } catch {
+            index = undefined
+          }
         }
 
         for (const i of indices) {

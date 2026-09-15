@@ -193,6 +193,38 @@ test('settleBatch collapses an attached-Desktop wire row onto the sweep uuid row
   }
 })
 
+test('a session group with no match_key row never resolves a transcript', async () => {
+  const env = await stageEnv()
+  try {
+    // `settleSelect` admits pure null-cwd rows (the #258 race) alongside fallback
+    // rows, and those never read the transcript index. Resolving one for them
+    // is not free: with `homeDir` passed, a shared-tree miss sweeps the Desktop
+    // container, whose per-session sandbox homes grow with every conversation.
+    let loads = 0
+    const transcriptLoader = { load: async () => { loads += 1; return [] } }
+    const enricher = createClaudeSettlementEnricher({
+      homeDir: env.homeDir, stateFile: env.stateFile, transcriptLoader,
+    })
+
+    const nullCwd = {
+      message_id: 'u-native', part_id: 'u-native#0', part_index: 0, role: 'assistant',
+      session_id: 'sess-nullcwd', conversation_id: null, client_name: 'claude', cwd: null,
+      attributes: { gateway: { exchange_id: 'ex' } },
+    }
+    await enricher.settle([nullCwd], settleCtx())
+    assert.equal(loads, 0, 'a null-cwd-only group must not resolve a transcript it never reads')
+
+    await enricher.settle([fallbackRow({
+      session_id: 'sess-fb', role: 'assistant', content_text: 'x',
+      match_key: matchKey('assistant', [{ type: 'text', text: 'x' }]),
+    })], settleCtx())
+    assert.equal(loads, 1, 'a group that does carry a match_key still resolves its transcript')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+
 // --- helpers ---------------------------------------------------------
 
 // @ref LLP 0030#decision: the settlement enricher groups fallback rows by
