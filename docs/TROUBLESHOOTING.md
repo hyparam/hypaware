@@ -123,8 +123,9 @@ your installation if you configured another home.
 For an OTLP `421 Misdirected Request`, see the
 [listener addressing guide](../README.md#an-otlp-exporter-is-refused-with-421-misdirected-request).
 For CPU or memory diagnosis, see [runtime diagnostics](../README.md#runtime-diagnostics).
-Optional [product telemetry](PRODUCT_TELEMETRY.md) has separate controls and
-defaults off; it is not the captured conversations or the local diagnostic log.
+[Product telemetry](PRODUCT_TELEMETRY.md) has separate controls; it is
+automatic for enrolled organizations, defaults off on standalone installations,
+and is not the captured conversations or the local diagnostic log.
 
 When reporting a problem, include the version, failing command, exit status,
 relevant status repair lines, and a short log excerpt around the failure.

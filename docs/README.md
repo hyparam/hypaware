@@ -41,7 +41,8 @@ query tools. Command availability follows the active configuration. Run
 ## Contributors and advanced reference
 
 - [Plugin authoring](PLUGIN_AUTHORING.md): scaffold, validate, and implement a plugin.
-- [Product telemetry](PRODUCT_TELEMETRY.md): opt-in controls, current draft
+- [Product telemetry](PRODUCT_TELEMETRY.md): the enrollment default and its
+  controls, current draft
   implementation, and rollout limitations.
 - [Acceptance procedures](ACCEPTANCE.md): manual release checks for real clients,
   installed services, and upgrades.

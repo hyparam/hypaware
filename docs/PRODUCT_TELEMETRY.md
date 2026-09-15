@@ -2,8 +2,13 @@
 
 [Documentation](README.md)
 
-Collection defaults **off**. This feature has no vendor endpoint, shared secret,
-registration request, or automatic permission derived from organization enrollment.
+Enrolling with a remote server (`hyp join`, or `hyp remote login` without
+`--no-forward`) automatically enables collection for that organization once
+gateway enrollment completes, including existing enrollments on the next CLI
+invocation or daemon start after upgrading (LLP 0408). Standalone installations
+default to **off**, and a saved `off` or `local` preference always takes
+precedence. This feature has no vendor endpoint, shared secret, or registration
+request.
 
 ```
 hyp telemetry status

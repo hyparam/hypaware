@@ -36,6 +36,8 @@ import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { createProductClient } from '../../src/core/product_telemetry/client.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
+import { productStatus, runTelemetry } from '../../src/core/product_telemetry/commands.js'
 
 /** @param {any} t */
 function temp(t) {
@@ -294,8 +296,8 @@ test('queue rejects oversized, malformed and non-allowlisted batches without thr
 })
 
 // The default has to be pinned through the CLI, not only through the policy
-// reader: an installation nobody has opted in has no queue to preview later.
-test('an installation with no policy queues nothing and creates no telemetry state', async (t) => {
+// reader: a standalone installation has no queue to preview later.
+test('a standalone installation with no policy queues nothing and creates no telemetry state', async (t) => {
   const home = temp(t)
   const env = { HYP_HOME: home }
   const root = productRoot(env)
@@ -313,6 +315,132 @@ test('an installation with no policy queues nothing and creates no telemetry sta
   assert.equal(fs.existsSync(root), false)
   assert.deepEqual(createOutbox(root).entries(), [])
 })
+
+/** @param {string} home @param {boolean} [customPath] */
+function remoteEnrollment(home, customPath = false) {
+  const stateRoot = path.join(home, 'hypaware')
+  const identityPath = customPath ? path.join(home, 'custom-identity.json') :
+    path.join(stateRoot, 'plugins', '@hypaware/central', 'identity.json')
+  const configPath = centralSeedPath(stateRoot)
+  const identity = {
+    central_url: 'https://example.invalid/',
+    gateway_id: randomUUID(),
+    jwt: `header.${Buffer.from(JSON.stringify({ org: 'org-a' })).toString('base64url')}.signature`
+  }
+  const config = {
+    version: 2,
+    sinks: { central: { plugin: '@hypaware/central', config: {
+      url: identity.central_url,
+      identity: customPath ? { persisted_path: identityPath } : {}
+    } } }
+  }
+  fs.mkdirSync(path.dirname(identityPath), { recursive: true })
+  fs.mkdirSync(path.dirname(configPath), { recursive: true })
+  fs.writeFileSync(identityPath, JSON.stringify(identity))
+  fs.writeFileSync(configPath, JSON.stringify(config))
+  return { identityPath, configPath, identity, config }
+}
+
+for (const applied of [false, true]) {
+  test(`enrolled users automatically collect and deliver with ${applied ? 'applied config and custom identity' : 'join seed'}`, async (t) => {
+    const home = temp(t)
+    const env = { HYP_HOME: home }
+    const root = productRoot(env)
+    const remote = remoteEnrollment(home, applied)
+    const initial = effectivePolicy(root)
+    if (applied) {
+      fs.renameSync(remote.configPath, path.join(path.dirname(remote.configPath), 'config.a.json'))
+      fs.symlinkSync('config.a.json', path.join(path.dirname(remote.configPath), 'active'))
+    }
+    assert.equal(productStatus(env).policy, 'enrolled_organization')
+    assert.equal(effectivePolicy(root).binding, initial.binding)
+    await dispatch(['--version'], { env, stdout: { write() {} }, stderr: { write() {} } })
+    assert.equal(fs.existsSync(path.join(root, 'policy.json')), false)
+    const queue = createOutbox(root)
+    assert.equal(queue.entries().length, 1)
+    const requests = []
+    const fetchFn = /** @type {typeof fetch} */ (async (url, options) => {
+      requests.push({ url, options })
+      assert.equal(url, 'https://example.invalid/v1/telemetry')
+      assert.equal(new Headers(options?.headers).get('authorization'), `Bearer ${remote.identity.jwt}`)
+      return options?.method === 'POST' ?
+        new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 }) : capability()
+    })
+    await createDelivery(root, { fetchFn }).drain()
+    assert.equal(requests.length, 2)
+    assert.equal(queue.entries().length, 0)
+  })
+}
+
+test('automatic reporting honors off, local and malformed saved preferences', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  remoteEnrollment(home)
+  const client = createProductClient({ env })
+  client.emit([/** @type {any} */ (productEvent('heartbeat', { uptime_s: 1 }))])
+  assert.equal(createOutbox(root).entries().length, 1)
+  await runTelemetry(['off'], /** @type {any} */ ({ env, stdout: { write() {} }, stderr: { write() {} } }))
+  assert.equal(effectivePolicy(root).mode, 'off')
+  assert.equal(createOutbox(root).entries().length, 0)
+  client.emit([/** @type {any} */ (productEvent('heartbeat', { uptime_s: 2 }))])
+  client.close()
+  assert.equal(createOutbox(root).entries().length, 0)
+  writePolicy(root, 'local')
+  assert.equal(effectivePolicy(root).mode, 'local')
+  fs.writeFileSync(path.join(root, 'policy.json'), '{broken')
+  assert.equal(effectivePolicy(root).mode, 'off')
+})
+
+test('automatic bindings survive refresh and stop on leave or an organization change', async (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const remote = remoteEnrollment(home)
+  const before = effectivePolicy(root)
+  remote.identity.jwt = `header.${Buffer.from(JSON.stringify({ org: 'org-a', exp: 123 })).toString('base64url')}.signature`
+  fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+  assert.equal(effectivePolicy(root).binding, before.binding)
+  const queue = createOutbox(root, { now: () => NOW })
+  assert(queue.append(batch(), /** @type {string} */ (before.binding)))
+  remote.identity.jwt = `header.${Buffer.from(JSON.stringify({ org: 'org-b' })).toString('base64url')}.signature`
+  fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+  assert.notEqual(effectivePolicy(root).binding, before.binding)
+  let requests = 0
+  await createDelivery(root, { now: () => NOW, fetchFn: /** @type {typeof fetch} */ (async () => {
+    requests++
+    return capability()
+  }) }).drain()
+  assert.equal(requests, 0)
+  assert.equal(queue.entries().length, 0)
+  fs.unlinkSync(remote.configPath)
+  assert.equal(effectivePolicy(root).mode, 'off')
+})
+
+for (const broken of ['missing identity', 'invalid identity', 'wrong destination', 'unsafe destination', 'missing org', 'ambiguous sinks', 'invalid config', 'fragment destination', 'query destination']) {
+  test(`automatic reporting stays off with ${broken}`, (t) => {
+    const home = temp(t)
+    const remote = remoteEnrollment(home)
+    if (broken === 'missing identity') fs.unlinkSync(remote.identityPath)
+    if (broken === 'invalid identity') fs.writeFileSync(remote.identityPath, 'null')
+    if (broken === 'wrong destination') remote.config.sinks.central.config.url = 'https://other.invalid'
+    if (broken === 'unsafe destination') remote.config.sinks.central.config.url = 'http://example.invalid'
+    if (broken === 'missing org') {
+      remote.identity.jwt = 'header.e30.signature'
+      fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+    }
+    if (broken === 'ambiguous sinks') Object.assign(remote.config.sinks, { other: remote.config.sinks.central })
+    // A bare `#`/`?` suffix parses and leaves `hash`/`search` empty, so it
+    // survives a truthiness check while making the POST target the server root.
+    for (const [kind, suffix] of [['fragment destination', '#'], ['query destination', '?']])
+      if (broken === kind) {
+        remote.config.sinks.central.config.url = 'https://example.invalid' + suffix
+        remote.identity.central_url = 'https://example.invalid' + suffix
+        fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+      }
+    fs.writeFileSync(remote.configPath, broken === 'invalid config' ? '{bad' : JSON.stringify(remote.config))
+    assert.equal(effectivePolicy(productRoot({ HYP_HOME: home })).mode, 'off')
+  })
+}
 
 // Local mode is a preview queue, not a network permission.
 test('local collection queues copies but never contacts a destination', async (t) => {
