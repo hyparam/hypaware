@@ -27,7 +27,10 @@
       { "name": "github", "summary": "Poll session-observed repositories by default, or all visible repositories when configured" }
     ],
     "commands": [
-      { "name": "github", "summary": "GitHub capture" },
+      { "name": "github", "summary": "GitHub capture and authentication" },
+      { "name": "github login", "summary": "Sign in with a GitHub device code" },
+      { "name": "github logout", "summary": "Remove local GitHub OAuth tokens" },
+      { "name": "github status", "summary": "Verify GitHub authentication and show its source" },
       { "name": "github backfill", "summary": "Pull full history into github_events" },
       { "name": "github sync", "summary": "Run one poll tick now" }
     ]

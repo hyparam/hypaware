@@ -1,6 +1,6 @@
 // @ts-check
 
-import { captureRepos } from './capture.js'
+import { authorizeBackfill, captureRepos } from './capture.js'
 import { readCursors, writeCursors } from './cursors.js'
 import { DATASET_NAME, GITHUB_EVENTS_COLUMNS, githubEventsTablePath } from './dataset.js'
 import { getClient } from './runtime.js'
@@ -64,9 +64,15 @@ export async function runCaptureTick(runtime, opts) {
  */
 async function captureTick(runtime, opts) {
   const cursors = readCursors(runtime.stateDir)
+  // @ref LLP 0409#one-time-imports [implements]: durable authorization precedes network work, even for repos the budget cannot visit yet
+  if (opts.mode === 'backfill' && opts.only?.length) {
+    authorizeBackfill(cursors, opts.only, runtime.config)
+    writeCursors(runtime.stateDir, cursors)
+  }
   const client = getClient(runtime)
   /** @type {string[] | undefined} */
   let observedRepos = opts.observedRepos
+  if (opts.mode === 'backfill' && opts.only?.length) observedRepos = []
   if (observedRepos === undefined && runtime.config.inventory === 'session_repos') {
     try {
       observedRepos = await runtime.observedRepos.list()

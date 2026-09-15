@@ -7,6 +7,17 @@ import test from 'node:test'
 import { createGithubClient } from '../../hypaware-core/plugins-workspace/github/src/github_client.js'
 import { silentLog } from './github-fake-client.js'
 
+test('API redirects are refused and malformed response bodies never appear in errors', async () => {
+  const client = createGithubClient({ tokenEnv: 'GITHUB_TOKEN', env: { GITHUB_TOKEN: 'secret' }, log: silentLog,
+    async fetchImpl(_url, init) {
+      assert.equal(init?.redirect, 'error')
+      assert.ok(init?.signal instanceof AbortSignal)
+      return new Response('sensitive-upstream-content')
+    },
+  })
+  await assert.rejects(client.listViewerRepos(), /response was unreadable or timed out/)
+})
+
 /** @import { HypError } from '../../hypaware-core/plugins-workspace/github/src/types.d.ts' */
 
 test('GitHub client prefers the configured env token', async () => {

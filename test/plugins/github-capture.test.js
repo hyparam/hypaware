@@ -187,21 +187,26 @@ test('only-filter restricts to the named repo within the configured selection', 
   assert.equal(rows[0].repo, 'o/a')
 })
 
-test('only-filter never expands beyond the active inventory', async () => {
+test('explicit backfill imports a repository outside the active inventory once', async () => {
   const calls = []
   const client = fakeClient({
     calls,
     repos: { 'o/outside': { issues: [{ number: 1 }] } },
   })
-  const { rows, result } = await capture({
+  const { rows, result, cursors } = await capture({
     config: cfg(),
     client,
     observedRepos: ['o/observed'],
     only: ['o/outside'],
   })
-  assert.equal(result.repos, 0)
-  assert.equal(rows.length, 0)
-  assert.ok(!calls.some((call) => call.includes('o/outside')))
+  assert.equal(result.repos, 1)
+  assert.equal(rows.length, 1)
+  assert.ok(calls.some((call) => call.includes('o/outside')))
+  assert.equal(cursors.repos['o/outside'].one_time_import, undefined)
+  calls.length = 0
+  const polled = await captureRepos({ config: cfg(), client, cursors, mode: 'poll', log: silentLog, observedRepos: [], append: async () => assert.fail('completed import must not poll') })
+  assert.equal(polled.repos, 0)
+  assert.deepEqual(calls, [])
 })
 
 test('a failed append does not advance past rows that never landed', async () => {

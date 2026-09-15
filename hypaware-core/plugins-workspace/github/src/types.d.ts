@@ -205,6 +205,30 @@ export interface GithubRuntime {
   captureRequestLimit?: number
 }
 
+export interface GithubOAuthOptions {
+  fetchImpl?: typeof fetch
+  signal?: AbortSignal
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+}
+
+export interface GithubOAuthTokens {
+  access_token: string
+  expires_at?: number
+  refresh_token?: string
+  refresh_expires_at?: number
+}
+
+export interface GithubAuthRecord {
+  generation: string
+  status: 'pending' | 'logged_out' | 'active'
+  account?: { login: string; id: number }
+  access_token?: string
+  expires_at?: number
+  refresh_token?: string
+  refresh_expires_at?: number
+}
+
 export interface LocalObservedRepoState {
   schema_version: 1
   repos: string[]
@@ -248,6 +272,8 @@ export interface ObservedRepoRevalidationState {
  * poller resumes past history rather than re-fetching it.
  */
 export interface RepoCursor {
+  /** Explicit one-time import authorization, removed on completion or exclusion. */
+  one_time_import?: true
   since?: { issues?: string; commits?: string; comments?: string; pulls?: string }
   /**
    * Event ids sitting exactly ON the matching `since` watermark. GitHub's
