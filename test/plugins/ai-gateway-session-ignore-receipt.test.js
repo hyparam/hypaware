@@ -456,6 +456,12 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // in the first paragraph after the fence reds on `follows`. It is no wider
   // than what the paragraph count it replaces already let through.
   //
+  // That `follows` red has two causes, so it names both: the receipt and the
+  // condition merged into one paragraph, and the receipt paragraph mentioning
+  // the phrase in passing without rerouting anything. Only the first is the
+  // receipt losing its own paragraph, so a message naming only that one sends
+  // an editor who did the second looking for a blank line that is still there.
+  //
   // The search is unbounded the other way too: move the condition down into the
   // fallback paragraph and the slice widens over it, then reds on that
   // paragraph's own `script` as though the routing prose had named it. That
@@ -469,7 +475,7 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   const PARAGRAPH = /\n\s*\n/g
   let follows = 0
   for (let m = PARAGRAPH.exec(afterFence); m && m.index < licensed; m = PARAGRAPH.exec(afterFence)) follows = m.index
-  assert.ok(follows > 0, 'and must still read the receipt in a paragraph of its own between the answer and that condition')
+  assert.ok(follows > 0, 'and the first `command not found` below the answer must sit below the receipt in a paragraph of its own: this one is in the first paragraph after the answer, either because the blank line below the receipt is gone or because the receipt paragraph names the phrase in passing')
   const routing = rest.slice(0, close + 3 + follows)
   const trailing = afterFence.slice(0, follows)
   // The one sentence this slice is licensed to write about the fallback, in the
