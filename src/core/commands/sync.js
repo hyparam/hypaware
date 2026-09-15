@@ -535,8 +535,8 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
   // Same reason the ordinary plan logs its own elapsed time: if this ever
   // feels hung, the log should say whether the count was why.
   //
-  // `destinations` counts the capable ones only, since they are what the rows
-  // and the elapsed time cover, so the line also says how many it left out
+  // The counts are over the capable destinations only, since they are what the
+  // rows and the elapsed time cover, so the line also says how many it left out
   // rather than narrowing in silence.
   const previewRows = [...previews.values()]
   // `max`, not `sum`: every capable destination replays the same retained
