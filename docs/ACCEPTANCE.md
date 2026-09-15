@@ -2030,6 +2030,94 @@ rewind revision history, deleted data recovery or canonical usage.
 
 ---
 
+## `github_local_device_login`
+
+**What it proves:** the distributed public Client ID supports GitHub device
+login, account verification, private credential persistence, and (when issued)
+real rotating refresh tokens. It also proves logout stops local OAuth use.
+This uses the candidate CLI in a disposable home and does not prove installed
+daemon lifecycle or GitHub organization authorization policies.
+
+Run from the candidate checkout. Create a unique sandbox root and enable just
+the graph and GitHub plugins in its config. No daemon is required. For example:
+
+```sh
+oauth_test_root=$(mktemp -d "${TMPDIR:-/tmp}/hyp-github-oauth.XXXXXX")
+scripts/sandbox/hyp-sandbox --root "$oauth_test_root" info
+cat > "$oauth_test_root/home/.hyp/hypaware-config.json" <<'JSON'
+{"version":2,"plugins":[{"name":"@hypaware/context-graph"},{"name":"@hypaware/github"}]}
+JSON
+env -u HYP_CONFIG -u GITHUB_TOKEN -u GH_TOKEN scripts/sandbox/hyp-sandbox --root "$oauth_test_root" hyp github login --no-browser
+```
+
+1. Open the printed GitHub URL, enter the displayed user code, check the
+   account and app name, and authorize it. `repo` includes write permissions
+   even though this collector only reads. The CLI must identify the account.
+   Device Flow disabled must produce an actionable app-settings error.
+2. Run `github status` through the same sandbox command prefix. It must say
+   `local OAuth (active)` and verify the same account. Verify the plugin's
+   `auth/` directory is mode 0700 and `credentials.json` is mode 0600. Inspect
+   field presence only, never print access or refresh tokens into a report.
+3. If the grant includes a refresh token, set only its stored `expires_at` to
+   `1` in this disposable credential file, then run `github status` again.
+   The real refresh request must succeed without a client secret, retain the
+   account, and persist the rotated tokens. Compare values inside a script
+   and print only whether they changed. If no refresh token was issued,
+   record refresh as untested and check the app's token-expiration setting.
+4. Run `github logout`, then `github status`. Status must fail with re-login
+   instructions, even if `gh` is installed. The credential file must retain
+   only a logged-out selection with no tokens. Repeating login permits a new
+   explicitly verified account; cancelling it cannot reactivate the old one.
+5. Record candidate revision, date, verified login, permission modes, whether
+   refresh was issued and rotated, and logout result. Revoke the test grant
+   at <https://github.com/settings/applications> if it is no longer needed.
+
+The hermetic `github_local_capture` smoke separately proves that these
+credentials feed structural capture and automatic projection, and that a
+one-time import completes without subscribing its repository. A real capture
+probe can use `github backfill owner/repo` through the same sandbox prefix,
+with a small repository the operator explicitly selects.
+
+### Observed on 2026-09-15
+
+Candidate: `codex/local-github-oauth` working tree based on
+`7f3d24cffebfcf98c87a1269ca66c2a75b7241ad`, using the repository sandbox on
+macOS. Real device authorization and `/user` verification passed as
+`philcunliffe` (GitHub id `1517531`). Directory/file modes were `0700`/`0600`.
+GitHub issued expiring access and refresh tokens. Forcing local access expiry
+then running `github status` rotated both tokens, renewed expiry, and preserved
+the account. Logout removed both token fields; subsequent status exited 1 with
+re-login instructions and the explicit `local OAuth (logged_out)` source.
+That disposable-home run did not exercise installed-daemon behavior or real
+repository capture.
+
+The same candidate was then packed and installed globally as version `1.34.0`
+on this Mac. The existing GitHub configuration's retired `repos` and `orgs`
+keys were replaced with `inventory: "session_repos"`, preserving exclusions
+and the token environment setting. The installed daemon was restarted before
+login. Real device authorization in the normal home passed as `philcunliffe`;
+`hyp github status` verified `local OAuth (active)`. Credential directory/file
+modes remained `0700`/`0600`.
+
+With the daemon's GitHub source idle, `hyp github sync` exited 0 and captured
+1,989 events across one repository before reaching its bounded-work limit.
+Local `github_events` counts increased from 219,586 to 221,575. Issue
+`hyparam/hypaware#1747`, created after daemon startup, appeared in both
+`github_events` and the `Issue` graph nodes without a separate projection
+command. The graph identity check used `--include-local-only` because the
+local query policy withholds graph content without per-row provenance.
+
+`hyp status --json` remained healthy with gateway PID `76848` and processing
+PID `76852`, with no processing restart. The install remains logged in.
+The automatic tick at `2026-09-15T20:58:34.976Z` picked up OAuth without a
+restart, visited five of eight session-derived repositories, and wrote another
+2,238 events. It also reported `GitHub API request failed or timed out`, so this
+proves credential pickup and partial capture, not an error-free full inventory
+pass. The daemon retained bounded backlog and scheduled a retry for
+`2026-09-15T21:17:31.478Z`. Existing central export settings still apply.
+
+---
+
 ## Other candidates
 
 `CLAUDE.md` lists further acceptance candidates that have no written

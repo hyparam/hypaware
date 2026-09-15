@@ -22,6 +22,17 @@ import { commitKey, repoKey, str } from './keys.js'
 // @ref LLP 0361#budget [implements]: one fixed request allowance bounds the whole repository-capture tick
 export const CAPTURE_REQUEST_LIMIT = 400
 
+/** @param {CursorState} cursors @param {string[]} repos @param {GithubConfig} config */
+export function authorizeBackfill(cursors, repos, config) {
+  const ignored = new Set(config.ignore.map((repo) => repo.toLowerCase()))
+  for (const requested of repos) {
+    const repo = repoKey(requested)
+    if (!repo || ignored.has(repo)) continue
+    if (cursors.repos[repo]?.work?.mode !== 'backfill') cursors.repos[repo] = { work: { mode: 'backfill', phase: 'issues' } }
+    cursors.repos[repo].one_time_import = true
+  }
+}
+
 /**
  * Resolve the repository set to capture. `session_repos` consumes only the
  * export-eligible local session evidence supplied by the caller. `all_visible`
@@ -91,7 +102,19 @@ export async function resolveRepos(config, client, log, observedRepos) {
  *   remaining (LLP 0361#budget).
  */
 export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos, requestLimit = CAPTURE_REQUEST_LIMIT }) {
-  let repos = await resolveRepos(config, client, log, observedRepos)
+  if (mode === 'backfill' && only?.length) authorizeBackfill(cursors, only, config)
+  const ignored = new Set(config.ignore.map((repo) => repo.toLowerCase()))
+  // @ref LLP 0409#one-time-imports [implements]: unfinished explicit imports join this tick only; exclusions cancel eligibility
+  const imports = []
+  for (const [repo, cursor] of Object.entries(cursors.repos)) {
+    if (!cursor.one_time_import) continue
+    if (ignored.has(repo)) {
+      delete cursor.one_time_import
+      delete cursor.work
+    } else imports.push(repo)
+  }
+  const inventory = mode === 'backfill' && only?.length ? [] : await resolveRepos(config, client, log, observedRepos)
+  let repos = [...new Set([...inventory, ...imports])].sort()
   // A positional `hyp github backfill owner/repo` narrows this one invocation.
   // The round-robin continuation is a property of the WHOLE inventory, so a
   // narrowed run must not publish a `next_repo` drawn from its subset: doing so
@@ -131,7 +154,7 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
         client,
         repo,
         cursor,
-        requestedMode: mode,
+        requestedMode: cursor.one_time_import ? 'backfill' : mode,
         budget,
         append: async (rows) => {
           await append(rows)
@@ -139,6 +162,7 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
         },
       })
       if (!complete) pending = true
+      else delete cursor.one_time_import
     } catch (err) {
       // A failed repo leaves durable work behind, but a failure is NOT bounded
       // backlog: `pending` drives the source's cadence, and treating an error

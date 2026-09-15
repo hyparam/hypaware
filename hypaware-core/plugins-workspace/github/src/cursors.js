@@ -79,6 +79,7 @@ function readRepoCursor(value) {
   const v = /** @type {Record<string, unknown>} */ (value)
   /** @type {RepoCursor} */
   const cursor = {}
+  if (v.one_time_import === true) cursor.one_time_import = true
   if (v.since && typeof v.since === 'object') {
     const s = /** @type {Record<string, unknown>} */ (v.since)
     /** @type {NonNullable<RepoCursor['since']>} */
