@@ -716,26 +716,26 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
   // can't know pre-auth whether the server will mint a gateway credential.
   // @ref LLP 0063#d3 [implements]: default-on enrollment; the pre-auth notice is the consent surface, never a y/n prompt
   // Compact (the wizard's join lane, LLP 0135 #join) keeps the notice, its
-  // placement, its conditional phrasing, and all three consequences D3
-  // enumerates, and drops only the line breaks: one line, still before the
-  // browser. The hedge is not shortenable - the client still cannot know
-  // pre-auth whether a gateway will be minted, so a flat "signing in forwards
-  // your logs" is false against a forwarding-off org. Neither is the org-config
-  // clause: applying org config is what attaches clients and backfills the
-  // history already on disk, and no reader infers that from "forwards captured
-  // logs". This notice is the whole consent surface, so a consequence dropped
-  // here is one the user is never told before they authenticate.
+  // placement, and its conditional phrasing, and drops only the line breaks:
+  // one line, still before the browser. The hedge is not shortenable - the
+  // client still cannot know pre-auth whether a gateway will be minted, so a
+  // flat "signing in sends your logs" is false against a forwarding-off org.
+  // The notice names two consequences in plain words: logs go to the team
+  // server, and a background service is installed. D3's third consequence
+  // (org config that can attach clients and backfill local history) is left
+  // out on purpose: it confused new users more than it informed them, and the
+  // wizard's later steps show what gets recorded before anything is written.
   // The '--no-forward' sentence is the one thing left out: the wizard's lane
   // runs a bare login (LLP 0134 #no-token-join) and cannot pass the flag, and
   // the fork already offered the no-forwarding pathway as a choice.
   if (!alreadyEnrolled && !noForward) {
     if (compact) {
-      ctx.stderr.write('note: if your org has enabled forwarding, signing in enrolls this machine: it forwards captured logs to the server, applies org config (which can attach clients and backfill existing local history), and installs a background service (Ctrl-C to cancel)\n')
+      ctx.stderr.write('If your org shares logs, signing in connects this machine to your team: your recorded sessions are sent to the team server and a background service is installed. Ctrl-C to cancel.\n')
     } else {
-      ctx.stderr.write('note: if your org has enabled forwarding, signing in will enroll this machine:\n')
-      ctx.stderr.write('  it forwards captured logs to the server, applies org config (which can attach\n')
-      ctx.stderr.write('  clients and backfill existing local history), and installs a background service.\n')
-      ctx.stderr.write("  re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
+      ctx.stderr.write('If your org shares logs, signing in connects this machine to your team:\n')
+      ctx.stderr.write('  your recorded sessions are sent to the team server and a background\n')
+      ctx.stderr.write('  service is installed.\n')
+      ctx.stderr.write("  Re-run with --no-forward to sign in for queries only, or Ctrl-C to cancel.\n")
     }
   }
 
