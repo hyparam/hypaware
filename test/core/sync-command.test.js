@@ -537,6 +537,42 @@ test('--history quotes the rows once when two destinations can replay', async ()
   assert.deepEqual(two.replayed, [{ source: 'claude' }])
 })
 
+// The history preview counts only the destinations that can replay. A blob
+// destination is named in the plan but leaves no trace on the log line, so the
+// omitted count is the only thing there that says the narrowing happened.
+test('the history preview counts the destinations that cannot replay', async () => {
+  const hypHome = await makeHome('history-unsupported-count')
+  const { ctx } = makeCtx({
+    hypHome,
+    sinks: [
+      fakeHistorySink('central', { url: 'https://hypaware.example.com' }),
+      fakeSink('parquet', { dir: '/home/u/exports' }),
+    ],
+    tty: true,
+  })
+
+  /** @type {any[]} */
+  const records = []
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { records.push(...batch) } }],
+  })
+  logs.setGlobalLoggerProvider(provider)
+  try {
+    await runSync(['--history', 'claude', '--dry-run'], ctx)
+  } finally {
+    await provider.shutdown()
+    // Restore the no-provider seam every later test in this file runs on.
+    logs.setGlobalLoggerProvider(/** @type {any} */ (null))
+  }
+
+  const preview = records.find((record) => record.body === 'sync.history_preview')
+  assert.ok(preview, 'the preview must report what it counted')
+  assert.equal(preview.attributes.destinations, 1, 'the counts cover the replay-capable destination only')
+  assert.equal(preview.attributes.hyp_unsupported_destinations, 1, 'the destination that cannot replay must be countable')
+  await fs.rm(hypHome, { recursive: true, force: true })
+})
+
 // An empty `--history=` value is falsy, so without an explicit guard the flag
 // vanishes and the run silently becomes an ordinary all-destination sync that
 // also ends the first-sync review window.

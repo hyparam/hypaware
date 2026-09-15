@@ -304,6 +304,10 @@ export async function runSync(argv, ctx) {
       [Attr.OPERATION]: 'sync.first_sync_hold_released',
       hyp_deadline: new Date(deadline).toISOString(),
       hyp_released_early_ms: deadline - Date.now(),
+      // Unfiltered, unlike the two preview lines, which count what they
+      // previewed. A scoped run was refused above, so this is every
+      // destination the machine has, and clearing the marker unblocks all of
+      // them, including any the plan did not print.
       destinations: destinations.length,
       off_machine_destinations: destinations.filter((d) => d.offMachine === true).length,
     })
@@ -530,6 +534,10 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
   // capable destination, and it sits between the keystroke and the prompt.
   // Same reason the ordinary plan logs its own elapsed time: if this ever
   // feels hung, the log should say whether the count was why.
+  //
+  // The counts are over the capable destinations only, since they are what the
+  // rows and the elapsed time cover, so the line also says how many it left out
+  // rather than narrowing in silence.
   const previewRows = [...previews.values()]
   // `max`, not `sum`: every capable destination replays the same retained
   // history, so adding their counts would quote double the rows a two-sink
@@ -542,6 +550,7 @@ async function runHistorySync({ source, handles, destinations, stateDir, deadlin
     hyp_elapsed_ms: Date.now() - previewStartedAt,
     hyp_sink_source: source,
     destinations: previews.size,
+    hyp_unsupported_destinations: destinations.length - previews.size,
     hyp_pending_rows: totalRows,
     hyp_withheld_rows: totalWithheld,
   })
