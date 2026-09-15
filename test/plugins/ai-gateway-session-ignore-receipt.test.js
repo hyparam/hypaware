@@ -440,8 +440,21 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // whichever paragraph carries it.
   //
   // The condition, rather than a paragraph count, is what keeps that paragraph
-  // editable: split or reflow it and both halves still sit at or below the
-  // condition. A count would red the half that kept the word `fallback`.
+  // editable: reflow it, or split it after the condition, and both halves still
+  // sit at or below the condition, where a count would red the half that kept
+  // the word `fallback`. Split it the other way round and the half left holding
+  // "sends you to the fallback" above the condition reds - correctly, by this
+  // slice's own rule, because that is a pointer to the fallback written above
+  // the sentence that licenses it.
+  //
+  // Keying on content rather than on a count has its own residual, measured:
+  // this reads the FIRST `command not found` below the answer, so a reroute
+  // that names the condition on its way past ("treat it like `command not
+  // found` and drop to the script below") moves the boundary above itself and
+  // escapes. That is the one narrowing here that is silent: the phrase going
+  // missing entirely reds on the assertion just below, and the phrase landing
+  // in the first paragraph after the fence reds on `follows`. It is no wider
+  // than what the paragraph count it replaces already let through.
   const afterFence = rest.slice(close + 3)
   const licensed = afterFence.indexOf('command not found')
   assert.ok(licensed > 0, 'Step 1 must still license the fallback on `command not found`, below the answer')
