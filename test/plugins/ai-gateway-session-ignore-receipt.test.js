@@ -510,7 +510,7 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   assert.doesNotMatch(
     routing.replace(LICENSED_REFUSAL, ''),
     /\bscripts?\b|\b(?:fall(?:s|ing|en)?|fell)[\s-]*backs?\b|\bshell[\s-]*blocks?\b|\bcontrol[\s_-]*routes?\b|\bpost(?:s|ed|ing)?[\s-]+to\b/i,
-    'nothing else in this block may name the gateway-only script, or reach for the verb that means it, whatever sentence carries it'
+    'nothing else in this block may name the gateway-only script, or reach for the verb that means it, whatever sentence carries it: this file uses `control route` and `post to` of the licensed verb as well, so accurate prose about what the re-run reaches reds here too and belongs in the paragraphs either side of this slice'
   )
   assert.doesNotMatch(
     routing,
