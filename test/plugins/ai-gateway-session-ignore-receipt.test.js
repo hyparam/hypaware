@@ -455,6 +455,14 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // missing entirely reds on the assertion just below, and the phrase landing
   // in the first paragraph after the fence reds on `follows`. It is no wider
   // than what the paragraph count it replaces already let through.
+  //
+  // The search is unbounded the other way too: move the condition down into the
+  // fallback paragraph and the slice widens over it, then reds on that
+  // paragraph's own `script` as though the routing prose had named it. That
+  // direction is loud rather than silent, but the message misdescribes it.
+  // Bounding the search to where the routing prose ends fixes the diagnosis and
+  // closes the narrowing with it, and is a change to the slice mechanism rather
+  // than to what issue #1685 asked for (issue #1731).
   const afterFence = rest.slice(close + 3)
   const licensed = afterFence.indexOf('command not found')
   assert.ok(licensed > 0, 'Step 1 must still license the fallback on `command not found`, below the answer')
