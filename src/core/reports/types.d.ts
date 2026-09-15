@@ -11,6 +11,8 @@ export interface RenderOptions {
    * every report in the tree, so it suits a caller rendering one report at a time (the
    * server renders each job into a single-report scratch tree). Omit for a local tree,
    * where each slug's own leading date is its generation date.
+   *
+   * Must be a bare `YYYY-MM-DD`; any other value is ignored and the slug decides.
    */
   generatedOn?: string
 }

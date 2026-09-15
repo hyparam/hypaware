@@ -36,6 +36,20 @@ test('docLabel prefers an explicit generation date over the slug\'s', () => {
   assert.equal(docLabel('usage-review', '2026-09-15'), 'Internal report · generated 2026-09-15 from HypAware data')
 })
 
+test('docLabel ignores a generation date that is not a bare YYYY-MM-DD', () => {
+  // The masthead slot is interpolated into HTML unescaped, and the label is only safe
+  // there because it has a fixed shape. A caller handing over a timestamp rather than
+  // the documented YYYY-MM-DD must not get it rendered verbatim, and markup must not
+  // reach the page at all; the slug decides instead.
+  assert.equal(
+    docLabel('2026-08-02-usage-review', '2026-09-15T08:12:00.000Z'),
+    'Internal report · generated 2026-08-02 from HypAware data',
+  )
+  assert.equal(docLabel('usage-review', '2026-09-15T08:12:00.000Z'), 'Internal report · generated from HypAware data')
+  assert.equal(docLabel('usage-review', '</span><img src=x onerror=alert(1)>'), 'Internal report · generated from HypAware data')
+  assert.equal(docLabel('2026-08-02-usage-review', ''), 'Internal report · generated 2026-08-02 from HypAware data')
+})
+
 test('pageTitle takes the first heading, trimmed, else the fallback', () => {
   assert.equal(pageTitle('# Team AI Usage Review\n\nBody.\n', 'fallback'), 'Team AI Usage Review')
   // Trailing spaces on the heading line must not reach the rendered <title>.

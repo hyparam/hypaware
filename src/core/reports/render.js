@@ -112,11 +112,16 @@ export function pageTitle(markdown, fallback) {
  * passes the date explicitly. An undated slug with no date given gets the generic
  * wording.
  *
+ * Only a well-formed `YYYY-MM-DD` is taken; anything else (a full ISO timestamp, an
+ * empty string) is ignored and the slug decides. That keeps the label a fixed shape,
+ * so a caller's value cannot reach the masthead's unescaped slot as markup.
+ *
  * @param {string} slug
  * @param {string} [generatedOn] YYYY-MM-DD; wins over the slug's date when given
  */
 export function docLabel(slug, generatedOn) {
-  const date = generatedOn ?? (/^\d{4}-\d{2}-\d{2}-/.test(slug) ? slug.slice(0, 10) : undefined)
+  const given = /^\d{4}-\d{2}-\d{2}$/.test(generatedOn ?? '') ? generatedOn : undefined
+  const date = given ?? (/^\d{4}-\d{2}-\d{2}-/.test(slug) ? slug.slice(0, 10) : undefined)
   return date
     ? `Internal report · generated ${date} from HypAware data`
     : 'Internal report · generated from HypAware data'
