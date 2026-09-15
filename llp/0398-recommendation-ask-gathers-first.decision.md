@@ -274,23 +274,32 @@ three file reads and the writing.
 The statement that finds the triggers is the one of the five that carries
 no `LIMIT`, and the `group by` is its ceiling rather than an omission. It
 returns a row a session a candidate line, so it is bounded by the distinct
-sessions of a rolling 30-day window over at most eight lines, never by
+sessions of a rolling 30-day window over at most `CANDIDATES` lines, the
+five `prepareFirstAskEvidence` slices to before it asks, never by
 messages: measured through the engine over two thousand such sessions,
-five times the typings returned the same two thousand rows while the same
-predicate without the aggregate returned ten thousand. A `LIMIT` would
-not bound what the engine materializes either, because the streaming
-aggregate builds every group before it yields the first row: over three
-thousand sessions, `limit 500` measured the same 4.2 s and 210 MB peak as
-no limit and saved 0.7 MB of the heap still held. What a group costs is
-about 300 bytes, and the scan is what the window sizes: at a fixed
-135,000-row scan, 8 groups against 3,000 held 0.9 MB against 1.8 MB and
-took the same 4.0 s. The one form that sizes a sort buffer,
-`order by at desc limit N`, measured no cheaper than either, because the
-groups are all built before anything is sorted, and it would take the
-newest sessions overall: the starvation the per-line share exists to
-avoid, paid for a bound that is not there. So four
-statements say their bound in SQL and the fifth says it in its shape, and
-the sample is what the answer is built from either way.
+one of them typing a second candidate line, five times the typings
+returned the same 2,001 rows while the same predicate without the
+aggregate returned 10,001. A `LIMIT` would not bound the scan or the
+groups, because the streaming aggregate builds every group before it
+yields the first row: over three thousand sessions, `limit 500` measured
+the same 4.2 s and 210 MB peak as no limit. What a bare `limit` does
+bound is the returned array alone, the 0.7 MB of held heap it saved
+there, and that array grows with the window's sessions the way the groups
+do: at fifty thousand it is the difference between finishing and
+exhausting a 96 MB heap. That is the honest shape of the bound, and it is
+a rolling window rather than a constant, but fifty thousand sessions in
+thirty days is not a shape one machine's history reaches, and buying the
+margin would cost an arbitrary set of sessions off an unordered stream.
+What a group costs is about 300 bytes, and the scan is what the window
+sizes: at a fixed 135,000-row scan, 8 groups against 3,000 held 0.9 MB
+against 1.8 MB and took the same 4.0 s. The one form that sizes a sort
+buffer, `order by at desc limit N`, is worse than either, because the
+groups are all built before anything is sorted and their sort entries are
+held on top: it exhausts that same 96 MB heap where the bare `limit`
+finishes, and it would take the newest sessions overall, the starvation
+the per-line share exists to avoid, paid for a bound that is not there.
+So four statements say their bound in SQL and the fifth says it in its
+shape, and the sample is what the answer is built from either way.
 
 The floor can be wrong for a machine. It is one exported object,
 `RECORD_FLOOR`, and `candidates.md` prints the record size it was judged
