@@ -126,6 +126,73 @@ test('settleBatch dispatches to the enricher and dedupes the upgraded row agains
   }
 })
 
+test('enricher upgrades a fallback row whose transcript lives in a Desktop 3p sandbox tree', async () => {
+  const env = await stageEnv()
+  try {
+    // Claude Code running inside Claude Desktop writes its transcript into the
+    // per-session sandbox home under the 3p container, never into the shared
+    // `~/.claude/projects` tree settlement scans by default.
+    await writeDesktop3pTranscript(env, 'sess-3p', [
+      jsonlRow({
+        sessionId: 'sess-3p', uuid: 'u-desktop', parentUuid: 'u-prompt', type: 'assistant',
+        message: { id: 'msg_d', role: 'assistant', content: [{ type: 'text', text: 'desktop answer' }] },
+        timestamp: '2026-09-07T18:56:17.632Z',
+      }),
+    ])
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    const row = fallbackRow({
+      session_id: 'sess-3p',
+      role: 'assistant',
+      content_text: 'desktop answer',
+      match_key: matchKey('assistant', [{ type: 'text', text: 'desktop answer' }]),
+    })
+
+    const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
+
+    assert.notEqual(out, row, 'the 3p-sandbox transcript line must upgrade the fallback row')
+    assert.equal(out.message_id, 'u-desktop')
+    assert.equal(out.part_id, 'u-desktop#0', 'upgraded part_id is what collapses onto the sweep row')
+    assert.equal(out.parent_uuid, 'u-prompt')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('settleBatch collapses an attached-Desktop wire row onto the sweep uuid row it duplicates', async () => {
+  const env = await stageEnv()
+  try {
+    // The production shape of issue #1747: the wire lane wrote a 16-hex hash
+    // row for a turn whose transcript sits under the Desktop 3p container, and
+    // the transcript sweep already committed the uuid copy of that same turn.
+    await writeDesktop3pTranscript(env, 'sess-3p-dup', [
+      jsonlRow({
+        sessionId: 'sess-3p-dup', uuid: 'u-3p-dup', parentUuid: null, type: 'assistant',
+        message: { id: 'm', role: 'assistant', content: [{ type: 'text', text: 'counted twice' }] },
+        timestamp: '2026-09-07T18:56:17.632Z',
+      }),
+    ])
+    const state = createGatewayState()
+    const api = createAiGatewayApi(state)
+    api.registerSettlementEnricher(createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile }))
+    const registration = aiGatewayDatasetRegistration(state)
+
+    const ctx = settleCtx({
+      discoverCachePartitions: async () => [{ path: '/p', rowCount: 1 }],
+      readRows: async function* () { yield { part_id: 'u-3p-dup#0', message_id: 'u-3p-dup', part_index: 0 } },
+    })
+
+    const fb = fallbackRow({
+      session_id: 'sess-3p-dup', role: 'assistant', content_text: 'counted twice',
+      match_key: matchKey('assistant', [{ type: 'text', text: 'counted twice' }]),
+    })
+    const out = await /** @type {any} */ (registration).settleBatch([fb], ctx)
+    assert.equal(out.length, 0, 'the Desktop wire copy collapses instead of double-counting the turn')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // --- helpers ---------------------------------------------------------
 
 // @ref LLP 0030#decision: the settlement enricher groups fallback rows by
@@ -181,6 +248,24 @@ async function stageEnv() {
 /** @param {{ homeDir: string }} env @param {string} sessionId @param {string[]} lines */
 async function writeTranscript(env, sessionId, lines) {
   const dir = path.join(env.homeDir, '.claude', 'projects', 'repo')
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(path.join(dir, `${sessionId}.jsonl`), lines.join('\n') + '\n', 'utf8')
+}
+
+/**
+ * Stage a transcript in the Desktop 3p container's per-session sandbox home,
+ * the sibling-container layout from LLP 0133#attribution. Deliberately NOT
+ * under `<homeDir>/.claude/projects`: an attached Desktop writes nothing
+ * there, which is the case this file's 3p tests exist for.
+ *
+ * @param {{ homeDir: string }} env @param {string} sessionId @param {string[]} lines
+ */
+async function writeDesktop3pTranscript(env, sessionId, lines) {
+  const dir = path.join(
+    env.homeDir, 'Library', 'Application Support', 'Claude-3p',
+    'local-agent-mode-sessions', '423c4275', '00000000', 'local_abc123',
+    '.claude', 'projects', 'sandbox-outputs'
+  )
   await fs.mkdir(dir, { recursive: true })
   await fs.writeFile(path.join(dir, `${sessionId}.jsonl`), lines.join('\n') + '\n', 'utf8')
 }
