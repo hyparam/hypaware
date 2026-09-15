@@ -232,11 +232,18 @@ export async function runSync(argv, ctx) {
   // The elapsed time is the point of this line as much as the counts are: the
   // preview sits between the user's keystroke and the prompt, so if `hyp sync`
   // ever feels hung again the log says whether the count was the reason.
+  //
+  // The counts are over the displayed destinations, so they agree with the
+  // plan printed below. On a sharing machine the hidden file copy still
+  // exports, so the line says how many destinations it left out rather than
+  // narrowing in silence. It spends none of the elapsed time above: the count
+  // is handed the displayed handles only.
   log.info('sync.pending_preview', {
     [Attr.COMPONENT]: 'cmd-sync',
     [Attr.OPERATION]: 'sync.pending_preview',
     hyp_elapsed_ms: Date.now() - previewStartedAt,
     destinations: volumes.size,
+    hyp_hidden_destinations: destinations.length - displayedDestinations.length,
     hyp_pending_rows: sum(volumes, (v) => v.rows),
     hyp_withheld_rows: sum(volumes, (v) => v.withheldRows),
     hyp_exact_counts: [...volumes.values()].filter((v) => v.status === 'counted').length,
