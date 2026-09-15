@@ -461,7 +461,9 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // (`script`, `fall back` / `fallback`, `shell block`), while a bare forward
   // reference ("state the id as below") names a direction and no destination.
   // Enumerating sentences instead let a reroute worded any other way through
-  // (issue #1686).
+  // (issue #1686). The inflected, hyphenated and line-wrapped spellings of
+  // those names are carried too, so the guard does not turn on which form of
+  // the file's own verb an editor happened to reach for.
   //
   // Only the licensed phrase verbatim is stripped, so what this enforces is
   // narrower than "no reroute": the block may name that destination once, in
@@ -469,9 +471,19 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // That is deliberate. The reasons not to drop are already written in the
   // paragraphs on either side of this slice, so rationale that trips this
   // belongs there rather than being a reason to loosen it.
+  //
+  // What this knowingly does NOT catch: a reroute that names the destination in
+  // words this file never uses for it ("run the bash block below", "the recipe
+  // at the end of this step", "post to the control route yourself"). Closing
+  // those needs `block` or `below`, and both are ordinary forward references
+  // here: forbidding `\bbelow\b` reds "state the id as below" on the opener
+  // line, which is the measured reason #1686 rejected that candidate. So this
+  // is a drift guard over the file's own vocabulary for the fallback, not a
+  // proof that the refusal cannot be rerouted. Read a green as "no edit reached
+  // for the words this file uses for that destination", nothing wider.
   assert.doesNotMatch(
     routing.replace(/do \*{0,2}not\*{0,2} drop to the script below/g, ''),
-    /\bscripts?\b|\bfall[ -]?backs?\b|\bshell block\b/i,
+    /\bscripts?\b|\bfall(?:s|ing)?[\s-]?backs?\b|\bshell[\s-]?blocks?\b/i,
     'nothing else in this block may name the gateway-only script, whatever sentence carries it'
   )
   assert.doesNotMatch(
