@@ -338,11 +338,11 @@ export async function run({ harness, expect }) {
   // excluded-from-default set never reaches the skip loop). Bumps
   // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST without joining
   // this flow's config: currently format-jsonl, s3, format-iceberg,
-  // context-graph, ai-gateway-graph, hermes, and opencode (7).
+  // context-graph, ai-gateway-graph, hermes, opencode, and cursor (8).
   expect.that(
-    'traces: at least one config-profile boot reports plugins_skipped=7',
+    'traces: at least one config-profile boot reports plugins_skipped=8',
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_skipped),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 7)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === 8)
   )
 
   const activateSpans = traces.filter((/** @type {any} */ t) => t.name === 'plugin.activate')
@@ -376,6 +376,11 @@ export async function run({ harness, expect }) {
   )
   const skippedPlugins = new Set(
     skippedLogs.map((/** @type {any} */ l) => l.attributes?.hyp_plugin).filter(Boolean)
+  )
+  expect.that(
+    'logs: cursor emitted a plugin.skipped log with hyp_reason=not_configured',
+    skippedPlugins.has('@hypaware/cursor'),
+    (v) => v === true
   )
   expect.that(
     'logs: format-jsonl emitted a plugin.skipped log with hyp_reason=not_configured',

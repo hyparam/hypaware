@@ -484,14 +484,14 @@ export async function run({ harness, expect }) {
     const startSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.start'
     )
-    // 9 bundled picker rows: claude, codex, opencode, claude-desktop,
+    // 10 bundled picker rows: claude, codex, cursor, opencode, claude-desktop,
     // openclaw, hermes, raw-anthropic, raw-openai, otel.
     expect.that(
-      'traces: wizard.pick.start span emitted with sources_available=9',
+      'traces: wizard.pick.start span emitted with sources_available=10',
       startSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_available === 9
+        v.sources_available === 10
     )
 
     const writeSpans = traces.filter(
