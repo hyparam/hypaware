@@ -170,8 +170,13 @@ resolver is invented. Tab completion and cloud continuation are excluded.
 
 The hook handler remains a standard-library Node process with 1 MiB input,
 two attempts and a 2.5-second deadline. The receiver admits four bodies and
-serializes writes. File-observation writers and directory-policy memos rotate
-every 1,024 callbacks. Native identity strings are bounded at 256 characters.
+serializes its own writes on a queue the recovery lane does not share: a hook
+answered from behind a whole recovery pass is a callback the handler has
+already abandoned at 800 ms. The two lanes write disjoint identities through
+separate writers, and the scheduled sweep already appends beside the listener,
+so storage dedupe orders them, not a shared chain. File-observation writers and
+directory-policy memos rotate every 1,024 callbacks. Native identity strings are
+bounded at 256 characters.
 
 Recovery queues at most 64 session/workspace entries, processes at most 16 per
 pass, has one timer, and stops on source shutdown. Each graph is limited to
@@ -183,9 +188,33 @@ fingerprints retain at most 1,000 entries; live fingerprints retain 64.
 No durable offset, polling loop, persistent raw spool or lifetime content cache
 is added. SQLite connections close before asynchronous writes.
 
+Native parsing is synchronous, and a per-graph limit bounds its CPU rather than
+the daemon's latency: a graph at the ceiling measured 109-144 ms of straight-line
+work, and a pass runs sixteen of them, so decoding on the event loop stalled the
+hook receiver, the OTEL listener and the gateway together. The decode therefore
+runs on a worker thread, in the shape LLP 0264 #lifecycle already uses for
+sidecar builds. One worker serves one backfill run, or a run of recovery passes
+that never leaves the queue empty, and is closed with it, so an idle daemon
+holds no decode thread and no graph-sized heap. It is not one worker per pass:
+hooks arrive throughout an agent run, so the queue refills every debounce and
+most passes only re-answer `unchanged` from the fingerprint. Spawning an isolate
+for each measured 29.8 ms of CPU against 0.20 ms inline, which at the one-second
+debounce is about three points of a core burned for as long as the run lasts.
+Holding the worker across those passes costs 13.5 MiB while the queue is busy
+and does not grow with the number of passes.
+Nothing about the reader changes; the SQLite handle and its read transaction move
+with it, so Cursor's store is never held open across a pause. Yielding between
+blobs would have been the alternative and was rejected for that reason.
+
+The projected snapshot crosses the thread boundary by structured clone. That
+costs a transient second copy bounded by the same 32 MiB per graph: a graph whose
+bytes are all projected measured a peak RSS of 91 MiB against 46 MiB inline,
+while the main thread blocked 2-7 ms rather than the whole decode. Worker startup
+is ~27 ms per pass, amortized over up to sixteen sessions.
+
 CPU and memory review found bounded queues, graph allocation and identity maps.
-Native parsing is synchronous and may pause the daemon within the per-graph
-limits; shared dedupe still costs work proportional to relevant committed data
-and waiting spool size. Process startup, large-session latency, catalog-cap
-coverage and sustained heap behavior remain acceptance measurements. These
-bounds are not a claim of measured production throughput.
+Shared dedupe still costs work proportional to relevant committed data and
+waiting spool size. Process startup, real-store recovery-pass latency, catalog-cap
+coverage and sustained heap behavior remain acceptance measurements
+(`docs/ACCEPTANCE.md`, cursor step 9). These bounds are not a claim of measured
+production throughput.

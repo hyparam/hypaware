@@ -2012,9 +2012,16 @@ Record exact editor/CLI versions, OS, config paths and hook settings.
    disable Claude's own lane. Record whether Cursor exports that variable to
    terminals it launches.
 9. Measure hook latency, idle CPU, heap over more than 1,024 callbacks, queue
-   saturation, large graphs and waiting-spool growth. Confirm bounded retries,
-   clean shutdown and no raw payload spool. Billed token usage must remain
-   absent; context occupancy and hook counts are not billing semantics.
+   saturation, large graphs and waiting-spool growth. Hook latency must hold
+   through a recovery pass over the largest real stores on the machine, which
+   is the measurement no fixture supplies: the decode runs on a worker thread
+   (LLP 0399 #resources), so also confirm one thread appears while recovery has
+   queued work, that it is not respawned per pass during a live agent run, that
+   it is gone once the queue drains, and that peak RSS during a pass stays
+   bounded. Confirm
+   bounded retries, clean shutdown and no raw payload spool. Billed token usage
+   must remain absent; context occupancy and hook counts are not billing
+   semantics.
 10. Unload and detach. Owned hooks disappear; unrelated or edited hooks remain.
     Record editor, interactive CLI and headless CLI as pass/fail/blocked.
 

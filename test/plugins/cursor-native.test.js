@@ -4,9 +4,10 @@ import test from 'node:test'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { cursorNativeFixture, wire } from '../../hypaware-core/smoke/lib/cursor_native_fixture.js'
+import { cursorNativeFixture, growToMaximalGraph, wire } from '../../hypaware-core/smoke/lib/cursor_native_fixture.js'
 import { cursorFields, cursorStorePaths, findCursorSession, listCursorSessions, readCursorSession } from '../../hypaware-core/plugins-workspace/cursor/src/native.js'
 import { createCursorBackfillProvider, cursorAdmission } from '../../hypaware-core/plugins-workspace/cursor/src/recovery.js'
+import { createCursorDecoder } from '../../hypaware-core/plugins-workspace/cursor/src/native_decoder.js'
 
 /** @param {'cli' | 'editor'} [frontend] */
 async function fixture(frontend = 'cli') {
@@ -201,4 +202,31 @@ test('historical windows select messages inside recently updated sessions and wi
     delete ctx.until
     assert.equal((await collect())[0].messages.length, 8)
   } finally { await f.cleanup() }
+})
+
+test('the decoder returns the reader own result off the event loop, and a dead worker fails one read instead of hanging', async () => {
+  const f = await fixture()
+  const decoder = createCursorDecoder()
+  try {
+    growToMaximalGraph(f)
+    let ticks = 0
+    const sampler = setInterval(() => { ticks++ }, 1)
+    const snapshot = await decoder.read(f.session)
+    clearInterval(sampler)
+    assert.ok(ticks > 5, `the decode occupied the event loop for its whole duration (${ticks} turns)`)
+    assert.deepEqual(snapshot, readCursorSession(f.session))
+    assert.equal((await decoder.read(f.session, snapshot.root)).unchanged, true)
+
+    // A refused graph keeps the reader's fixed code: a raw SQLite message can
+    // carry private paths or row data, and the caller logs whatever arrives.
+    f.db.prepare('UPDATE blobs SET data=? WHERE id=?').run(Buffer.from('corruption'), f.steps[0].toString('hex'))
+    await assert.rejects(decoder.read(f.session), /^Error: native_blob_hash$/)
+
+    // Terminating mid-read must reject that read. A promise nothing settles
+    // would wedge the recovery chain for the daemon's lifetime.
+    const inflight = decoder.read(f.session)
+    await decoder.close()
+    await assert.rejects(inflight, /native_read_failed/)
+    await assert.rejects(decoder.read(f.session), /native_read_failed/)
+  } finally { await decoder.close(); await f.cleanup() }
 })

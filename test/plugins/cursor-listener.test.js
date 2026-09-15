@@ -7,7 +7,7 @@ import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import test from 'node:test'
-import { cursorNativeFixture } from '../../hypaware-core/smoke/lib/cursor_native_fixture.js'
+import { cursorNativeFixture, growToMaximalGraph } from '../../hypaware-core/smoke/lib/cursor_native_fixture.js'
 import { createCursorBackfillProvider } from '../../hypaware-core/plugins-workspace/cursor/src/recovery.js'
 import { createStartCursorSource } from '../../hypaware-core/plugins-workspace/cursor/src/listener.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
@@ -36,11 +36,14 @@ async function fixture(deps = {}) {
   }
   const readOptions = { editorDb: path.join(root, 'native/state.vscdb'), cliRoot: path.join(root, 'native/chats') }
   const start = createStartCursorSource({ localOnlyListPath: policyPath, ignoredSessions, readOptions, ...deps })
-  const ctx = /** @type {any} */ ({ config: { listen_port: 0 }, storage, log: { info() {}, warn() {}, error() {} } })
+  /** @type {string[]} */
+  const events = []
+  const ctx = /** @type {any} */ ({ config: { listen_port: 0 }, storage,
+    log: { info(msg) { events.push(msg) }, warn(msg) { events.push(msg) }, error(msg) { events.push(msg) } } })
   let source = await start(ctx)
   let endpoint = `http://127.0.0.1:${(await source.status?.())?.details?.listen_port}`
   return {
-    root, policyPath, rows, storage, ignoredSessions, readOptions, get source() { return source }, get endpoint() { return endpoint },
+    root, policyPath, rows, storage, ignoredSessions, readOptions, events, get source() { return source }, get endpoint() { return endpoint },
     post: (body) => fetch(`${endpoint}/hook`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
     async restart() {
       await source.stop()
@@ -326,4 +329,113 @@ test('pending recovery is bounded, cancelled on stop, and rechecks session ignor
     assert.equal(details?.recovery_queue_drops, 6)
   } finally { await bounded.cleanup() }
   assert.equal((await bounded.source.status?.())?.details?.pending_recovery, 0)
+})
+
+test('a hook callback is answered within its timeout while a maximal-size graph recovery holds the daemon', async () => {
+  const f = await fixture({ recoveryDelayMs: 25 })
+  const native = await cursorNativeFixture(f.readOptions.cliRoot, f.root)
+  // Park the recovery lane on its first write, so the pass is still in
+  // progress when the callback arrives. Hook observations are `system` rows;
+  // every native conversation row is a user, assistant or tool row.
+  const append = f.storage.appendRows
+  let open = () => {}
+  const gate = new Promise((resolve) => { open = () => resolve(undefined) })
+  let parkedAt = 0
+  f.storage.appendRows = async (...args) => {
+    if (!parkedAt && args[2].some((row) => row.role !== 'system')) {
+      parkedAt = performance.now()
+      await gate
+    }
+    return append(...args)
+  }
+  try {
+    growToMaximalGraph(native)
+    // An inline decode samples here as one gap the width of the whole read.
+    let gap = 0
+    let last = performance.now()
+    const sampler = setInterval(() => { gap = Math.max(gap, performance.now() - last); last = performance.now() }, 5)
+    const armed = performance.now()
+    await f.post(envelope(f.root, { conversation_id: native.session.id, hook_event_name: 'sessionEnd' }))
+    await waitFor(() => parkedAt > 0)
+    clearInterval(sampler)
+    const window = parkedAt - armed
+
+    // hook.mjs destroys its request at 800 ms and gives up after two attempts,
+    // so a callback answered any later prints an unavailable notice into the
+    // editor for a row that lands anyway.
+    const probe = f.post(envelope(f.root))
+    const outcome = await Promise.race([
+      probe.then((response) => `answered_${response.status}`),
+      new Promise((resolve) => setTimeout(() => resolve('timed_out'), 800)),
+    ])
+    open()
+    assert.equal(outcome, 'answered_200', 'a hook callback must not queue behind a recovery pass')
+    assert.ok(window > 50, `the fixture must be heavy enough to measure (pass window ${window.toFixed(0)}ms)`)
+    // Scale-free: an inline decode is nearly the whole window, so a faster or
+    // slower machine moves both numbers together.
+    assert.ok(gap < window / 3, `recovery blocked the event loop for ${gap.toFixed(0)}ms of a ${window.toFixed(0)}ms pass`)
+    await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
+    assert.equal(f.rows.filter((row) => row.role !== 'system').length, 8)
+  } finally { open(); native.close(); await f.cleanup() }
+})
+
+test('stop drains both recovery and receiver lanes while a maximal graph is mid-decode', async () => {
+  const f = await fixture({ recoveryDelayMs: 25 })
+  const native = await cursorNativeFixture(f.readOptions.cliRoot, f.root)
+  let stopped = false
+  try {
+    growToMaximalGraph(native)
+    await f.post(envelope(f.root, { conversation_id: native.session.id, hook_event_name: 'sessionEnd' }))
+    // Land inside the decode: the debounce is 25 ms and the read is far longer.
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await f.source.stop()
+    stopped = true
+    const settled = f.rows.length
+    const status = /** @type {any} */ (await f.source.status?.())
+    const details = status.details
+    assert.equal(details.pending_recovery, 0)
+    // The graph was mid-decode, so stop must have terminated it rather than
+    // waited it out. Without the terminate the read completes and records
+    // one native_read; this is what pins `stop` closing the live decoder.
+    assert.equal(details.native_reads, 0, 'stop waited out the decode instead of terminating it')
+    // A stop is not a capture failure: the final status line must not report
+    // the same error_kind a corrupt graph produces.
+    assert.equal(details.native_failures, 0)
+    assert.equal(status.lastError, undefined)
+    // A terminated decode must not re-arm the queue stop just cleared, and no
+    // write may land after stop resolved.
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    assert.equal(f.rows.length, settled)
+    assert.equal((await f.source.status?.())?.details?.pending_recovery, 0)
+    assert.equal(process.getActiveResourcesInfo().includes('Worker'), false, 'stop left a decode thread alive')
+  } finally {
+    native.close()
+    if (!stopped) await f.source.stop()
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
+})
+
+test('back-to-back recovery passes share one decode thread, released once the source goes quiet', async () => {
+  const f = await fixture({ recoveryDelayMs: 10, decoderIdleMs: 120 })
+  const native = await cursorNativeFixture(f.readOptions.cliRoot, f.root)
+  const spawns = () => f.events.filter((event) => event === 'cursor.decoder.started').length
+  try {
+    // Hooks arrive throughout an agent run, so passes are back to back over a
+    // graph the fingerprint answers `unchanged`. An isolate per pass costs
+    // two orders of magnitude more than that answer.
+    const hook = () => f.post(envelope(f.root, { conversation_id: native.session.id, hook_event_name: 'postToolUse' }))
+    await hook()
+    await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
+    assert.equal(spawns(), 1)
+    for (let i = 0; i < 20; i++) {
+      await hook()
+      await waitFor(async () => (await f.source.status?.())?.details?.pending_recovery === 0)
+    }
+    assert.equal(spawns(), 1, 'a decode thread was respawned for a pass the fingerprint already answered')
+    // A daemon between agent runs still holds no decode thread: the release
+    // fires once passes stop, and the next pass spawns a fresh one.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await hook()
+    await waitFor(() => spawns() === 2)
+  } finally { native.close(); await f.cleanup() }
 })
