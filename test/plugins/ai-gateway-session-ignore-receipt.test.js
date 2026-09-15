@@ -455,10 +455,16 @@ test('the claude privacy skill answers an ambiguous id with the stated-id re-run
   // to it in this block is a reroute whichever sentence carries it, so every
   // instance of the licensed phrase is dropped before the block is held to
   // that: restating the refusal is stronger prose, not a second route.
+  //
+  // The destination is pinned, not the sentence: a reroute has to name where it
+  // sends the reader, and this file names that one destination three ways,
+  // while a bare forward reference ("state the id as below") names a direction
+  // and no destination. Enumerating sentences instead let a reroute worded any
+  // other way through (issue #1686).
   assert.doesNotMatch(
     routing.replace(/do \*{0,2}not\*{0,2} drop to the script below/g, ''),
-    /drop to the script|fall back to the script|use the script below/,
-    'nothing else in this block may send the ambiguous case to the gateway-only script'
+    /\bscripts?\b|\bfallbacks?\b|\bshell block\b/i,
+    'nothing else in this block may name the gateway-only script, whatever sentence carries it'
   )
   assert.doesNotMatch(
     routing,
