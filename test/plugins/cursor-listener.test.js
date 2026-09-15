@@ -7,7 +7,7 @@ import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import test from 'node:test'
-import { cursorNativeFixture } from '../../hypaware-core/smoke/lib/cursor_native_fixture.js'
+import { cursorNativeFixture, growToMaximalGraph } from '../../hypaware-core/smoke/lib/cursor_native_fixture.js'
 import { createCursorBackfillProvider } from '../../hypaware-core/plugins-workspace/cursor/src/recovery.js'
 import { createStartCursorSource } from '../../hypaware-core/plugins-workspace/cursor/src/listener.js'
 import { createQueryStorageService } from '../../src/core/cache/storage.js'
@@ -326,4 +326,78 @@ test('pending recovery is bounded, cancelled on stop, and rechecks session ignor
     assert.equal(details?.recovery_queue_drops, 6)
   } finally { await bounded.cleanup() }
   assert.equal((await bounded.source.status?.())?.details?.pending_recovery, 0)
+})
+
+test('a hook callback is answered within its timeout while a maximal-size graph recovery holds the daemon', async () => {
+  const f = await fixture({ recoveryDelayMs: 25 })
+  const native = await cursorNativeFixture(f.readOptions.cliRoot, f.root)
+  // Park the recovery lane on its first write, so the pass is still in
+  // progress when the callback arrives. Hook observations are `system` rows;
+  // every native conversation row is a user, assistant or tool row.
+  const append = f.storage.appendRows
+  let open = () => {}
+  const gate = new Promise((resolve) => { open = () => resolve(undefined) })
+  let parkedAt = 0
+  f.storage.appendRows = async (...args) => {
+    if (!parkedAt && args[2].some((row) => row.role !== 'system')) {
+      parkedAt = performance.now()
+      await gate
+    }
+    return append(...args)
+  }
+  try {
+    growToMaximalGraph(native)
+    // An inline decode samples here as one gap the width of the whole read.
+    let gap = 0
+    let last = performance.now()
+    const sampler = setInterval(() => { gap = Math.max(gap, performance.now() - last); last = performance.now() }, 5)
+    const armed = performance.now()
+    await f.post(envelope(f.root, { conversation_id: native.session.id, hook_event_name: 'sessionEnd' }))
+    await waitFor(() => parkedAt > 0)
+    clearInterval(sampler)
+    const window = parkedAt - armed
+
+    // hook.mjs destroys its request at 800 ms and gives up after two attempts,
+    // so a callback answered any later prints an unavailable notice into the
+    // editor for a row that lands anyway.
+    const probe = f.post(envelope(f.root))
+    const outcome = await Promise.race([
+      probe.then((response) => `answered_${response.status}`),
+      new Promise((resolve) => setTimeout(() => resolve('timed_out'), 800)),
+    ])
+    open()
+    assert.equal(outcome, 'answered_200', 'a hook callback must not queue behind a recovery pass')
+    assert.ok(window > 50, `the fixture must be heavy enough to measure (pass window ${window.toFixed(0)}ms)`)
+    // Scale-free: an inline decode is nearly the whole window, so a faster or
+    // slower machine moves both numbers together.
+    assert.ok(gap < window / 3, `recovery blocked the event loop for ${gap.toFixed(0)}ms of a ${window.toFixed(0)}ms pass`)
+    await waitFor(async () => (await f.source.status?.())?.details?.native_reads === 1)
+    assert.equal(f.rows.filter((row) => row.role !== 'system').length, 8)
+  } finally { open(); native.close(); await f.cleanup() }
+})
+
+test('stop drains both recovery and receiver lanes while a maximal graph is mid-decode', async () => {
+  const f = await fixture({ recoveryDelayMs: 25 })
+  const native = await cursorNativeFixture(f.readOptions.cliRoot, f.root)
+  let stopped = false
+  try {
+    growToMaximalGraph(native)
+    await f.post(envelope(f.root, { conversation_id: native.session.id, hook_event_name: 'sessionEnd' }))
+    // Land inside the decode: the debounce is 25 ms and the read is far longer.
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await f.source.stop()
+    stopped = true
+    const settled = f.rows.length
+    assert.equal((await f.source.status?.())?.details?.pending_recovery, 0)
+    // A terminated decode must not re-arm the queue stop just cleared, and no
+    // write may land after stop resolved.
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    assert.equal(f.rows.length, settled)
+    assert.equal((await f.source.status?.())?.details?.pending_recovery, 0)
+    assert.equal(process.getActiveResourcesInfo().includes('Worker'), false, 'stop left a decode thread alive')
+  } finally {
+    native.close()
+    if (!stopped) await f.source.stop()
+    await fs.rm(f.root, { recursive: true, force: true })
+  }
 })

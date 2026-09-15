@@ -20,6 +20,24 @@ export function wire(...fields) {
   }))
 }
 
+/** Grow a fixture's graph to the reader's per-graph ceiling: 4,096 blob reads
+ * and 32 MiB cumulative bytes, every blob sha256-checked and JSON-parsed. One
+ * transaction, because the fixture's per-insert autocommit costs seconds here.
+ * @param {Awaited<ReturnType<typeof cursorNativeFixture>>} fixture
+ * @param {{ blobs?: number, bytes?: number }} [size]
+ */
+export function growToMaximalGraph(fixture, { blobs = 4000, bytes = 8000 } = {}) {
+  fixture.db.exec('BEGIN')
+  const extra = []
+  for (let i = 0; i < blobs; i++) {
+    const text = String(i).padStart(8, '0') + 'x'.repeat(bytes)
+    extra.push(fixture.put(Buffer.from(JSON.stringify({ role: 'assistant', content: [{ type: 'text', text }] }))))
+  }
+  const turn = fixture.put(wire([1, wire([1, fixture.user], ...fixture.steps.map((ref) => [2, ref]), [3, 'native-generation'])]))
+  fixture.writeRoot(wire(...[...fixture.refs, ...extra].map((ref) => [1, ref]), [8, turn]))
+  fixture.db.exec('COMMIT')
+}
+
 /** @param {string} root @param {string} cwd @param {'cli' | 'editor'} [frontend] @param {{ id?: string, text?: string }} [options] */
 export async function cursorNativeFixture(root, cwd, frontend = 'cli', options = {}) {
   const id = options.id ?? randomUUID()

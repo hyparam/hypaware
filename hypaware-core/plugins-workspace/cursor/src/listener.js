@@ -13,7 +13,8 @@ import { createProjectedExchangeWriter } from '../../ai-gateway/src/exchange_wri
 import { CURSOR_EVENTS } from './attach.js'
 import { cursorListenPort } from './config.js'
 import { cursorCwd, projectCursorHook } from './projector.js'
-import { findCursorSession, readCursorSession, safeError, CursorReadError } from './native.js'
+import { findCursorSession, safeError, CursorReadError } from './native.js'
+import { createCursorDecoder } from './native_decoder.js'
 import { cursorAdmission } from './recovery.js'
 
 /** @import { CursorReadOptions } from '../../../../hypaware-core/plugins-workspace/cursor/src/types.js' */
@@ -34,6 +35,13 @@ export function createStartCursorSource(deps = {}) {
     let lastEventAt
     let lastError
     let serial = Promise.resolve()
+    // A recovery pass keeps its own chain. Sharing the receiver's queued one
+    // put every hook response behind the whole pass, so a callback the hook
+    // process had already abandoned at 800 ms was answered seconds later.
+    // The two lanes write disjoint identities through separate writers, and
+    // the scheduled sweep already appends beside this listener, so storage
+    // dedupe is what orders them, not this chain.
+    let recoverySerial = Promise.resolve()
     let writer = createProjectedExchangeWriter({ storage: ctx.storage })
     let writtenCallbacks = 0
     const pending = new Map()
@@ -42,6 +50,8 @@ export function createStartCursorSource(deps = {}) {
     let stopped = false
     let recovering = false
     let recoveryTimer
+    /** @type {ReturnType<typeof createCursorDecoder> | undefined} */
+    let decoder
     const recoveryCounts = { native_reads: 0, native_failures: 0, recovery_queue_drops: 0 }
     const readOptions = { env: ctx.env, ...deps.readOptions }
     const armRecovery = () => {
@@ -49,7 +59,11 @@ export function createStartCursorSource(deps = {}) {
       recoveryTimer = setTimeout(() => {
         recoveryTimer = undefined
         recovering = true
-        const work = serial.then(async () => {
+        // One decoder serves the whole pass and is closed with it: an idle
+        // daemon then holds no decode thread and no graph-sized heap.
+        const pass = createCursorDecoder()
+        decoder = pass
+        const work = recoverySerial.then(async () => {
           const batch = [...pending.entries()].slice(0, 16)
           for (const [key, item] of batch) {
             if (stopped) break
@@ -66,7 +80,7 @@ export function createStartCursorSource(deps = {}) {
               if (!session) throw new CursorReadError('native_session_unavailable')
               const [nativeCwd, hookCwd] = await Promise.all([realpath(session.cwd), realpath(item.cwd)])
               if (nativeCwd !== hookCwd || !admission.session(session)) continue
-              const snapshot = readCursorSession(session, completedRoots.get(key))
+              const snapshot = await pass.read(session, completedRoots.get(key))
               if (snapshot.unchanged) continue
               let complete = true
               // Bound the shared writer's identity state per recovery pass.
@@ -93,11 +107,16 @@ export function createStartCursorSource(deps = {}) {
               recoveryCounts.native_failures++
               lastError = safeError(err).message
               ctx.log.warn('cursor.recovery.incomplete', { [Attr.OPERATION]: 'recovery.read', error_kind: lastError, status: 'incomplete' })
-              if (item.attempt < 2 && !pending.has(key) && pending.size < 64) pending.set(key, { ...item, attempt: item.attempt + 1 })
+              // A stop terminates the decoder mid-graph, and that rejection
+              // must not re-arm work the cleared queue just cancelled.
+              if (!stopped && item.attempt < 2 && !pending.has(key) && pending.size < 64) pending.set(key, { ...item, attempt: item.attempt + 1 })
             } finally { if (claimed) activeRecoveries.delete(item.id) }
           }
+        }).finally(async () => {
+          if (decoder === pass) decoder = undefined
+          await pass.close()
         })
-        serial = work.catch(() => {})
+        recoverySerial = work.catch(() => {})
         void work.finally(() => { recovering = false; armRecovery() }).catch(() => {})
       }, deps.recoveryDelayMs ?? 1000)
       recoveryTimer.unref()
@@ -298,7 +317,11 @@ export function createStartCursorSource(deps = {}) {
           server.close((err) => err ? reject(err) : resolve(undefined))
           server.closeAllConnections()
         })
-        await serial
+        // Terminating the live decoder rejects the graph it holds, so a stop
+        // arriving mid-decode drains in worker-teardown time instead of
+        // waiting out the rest of a 32 MiB read. Both lanes are then awaited.
+        await decoder?.close()
+        await Promise.allSettled([serial, recoverySerial])
       },
     }
   }
