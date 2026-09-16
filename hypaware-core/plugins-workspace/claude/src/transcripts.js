@@ -343,17 +343,26 @@ export function loadAgentMeta(opts) {
   ) {
     /** @type {Set<string>} */
     const seen = new Set()
-    if (opts.projectsDir) collectSessionAgentMeta([opts.projectsDir], opts.sessionId, meta, seen)
+    let located = opts.projectsDir
+      ? collectSessionAgentMeta([opts.projectsDir], opts.sessionId, meta, seen)
+      : false
     // An attached Desktop runs each conversation in a sandbox home inside its
     // own container, so a session the scan above cannot find is not missing,
     // just somewhere `projectsDir` does not reach. Ordered and guarded like
     // `loadTranscript`'s matching leg, sharing its TTL-cached root discovery
-    // and its one forced re-sweep: a sandbox home appears exactly when its
-    // session starts, so a cached list can be one short.
+    // and its one forced re-sweep.
     if (meta.size === 0 && opts.homeDir) {
       const { dirs, cached } = desktop3pDirsCache.get(opts.homeDir)
-      collectSessionAgentMeta(dirs, opts.sessionId, meta, seen)
-      if (meta.size === 0 && cached) {
+      if (collectSessionAgentMeta(dirs, opts.sessionId, meta, seen)) located = true
+      // A sandbox home appears exactly when its session starts, so a cached
+      // list can be one short: re-sweep once, uncached, when the session was
+      // in none of the dirs scanned. It is the session being nowhere, not the
+      // map being empty, that says the list may be stale. An empty map is the
+      // standing state of a located session whose sidecar is simply not
+      // written, and an attached Desktop's hook-written path never resolves on
+      // the host, so re-sweeping on the map would put a whole-container walk
+      // on every one of that conversation's exchanges.
+      if (meta.size === 0 && cached && !located) {
         const refreshed = desktop3pDirsCache.get(opts.homeDir, { refresh: true })
         collectSessionAgentMeta(refreshed.dirs, opts.sessionId, meta, seen)
       }
@@ -374,10 +383,15 @@ export function loadAgentMeta(opts) {
  * @param {string} sessionId
  * @param {Map<string, { tool_use_id: string }>} meta
  * @param {Set<string>} seen
+ * @returns {boolean} whether the session was found at all, sidecar or not:
+ *   what tells a caller its dir list was complete, the way a non-empty
+ *   `entries` tells `loadTranscript`'s
  */
 function collectSessionAgentMeta(projectsDirs, sessionId, meta, seen) {
+  let located = false
   for (const projectsDir of projectsDirs) {
     for (const filePath of walkJsonlFiles(projectsDir, sessionId)) {
+      located = true
       // Sidecars live in the session file's sibling `<sessionId>/` directory,
       // and beside a subagent transcript already inside it (all the scan
       // yields when the session file itself is gone). The scan yields one
@@ -389,9 +403,15 @@ function collectSessionAgentMeta(projectsDirs, sessionId, meta, seen) {
       if (seen.has(dir)) continue
       seen.add(dir)
       collectAgentMeta(dir, meta)
-      if (meta.size > 0) return
+      if (meta.size > 0) return true
     }
+    // A session lives in exactly one dir, so the dir that held it answers for
+    // it even with no sidecar in it: walking on would both cost the rest of
+    // the container and let another dir under the same session id answer
+    // instead. The same stop `readSessionFromDirs` makes on its first match.
+    if (located) return true
   }
+  return located
 }
 
 /**
