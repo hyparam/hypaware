@@ -190,9 +190,10 @@ function collectNestedProjectsDirs(dir, depth, out) {
  *    session-context state file), read THAT file plus the subagent
  *    files under its sibling session directory. Cheap and direct,
  *    no projects-wide walk.
- *  - Otherwise scan `<projectsDir>/**\/<sessionId>.jsonl` (which also
- *    descends into `<sessionId>/` directories for subagent files) and
- *    concatenate matching files.
+ *  - With no `transcriptPath`, or when reading it yielded nothing (a
+ *    stale or dead path), scan `<projectsDir>/**\/<sessionId>.jsonl`
+ *    (which also descends into `<sessionId>/` directories for subagent
+ *    files) and concatenate matching files.
  *  - When that scan finds nothing and `homeDir` is provided, scan the
  *    Desktop 3p sandbox trees ({@link findDesktop3pProjectsDirs}):
  *    an attached Desktop writes its transcripts there, not under
@@ -227,7 +228,13 @@ export async function loadTranscript(opts, readFile = readTranscriptFile) {
     for (const filePath of walkJsonlFiles(sessionDir, undefined)) {
       await readFile(filePath, entries)
     }
-  } else {
+  }
+  // A hook-written `transcript_path` can be stale or dead (the file is gone,
+  // or was never written where it said), and a read of nothing must not end
+  // the lookup: the session would hold gateway-fallback identity for good. A
+  // direct read that yielded entries never reaches here, so the fast path
+  // stays one file read.
+  if (entries.length === 0) {
     for (const filePath of walkJsonlFiles(opts.projectsDir, opts.sessionId)) {
       await readFile(filePath, entries)
     }
@@ -298,10 +305,14 @@ export function* walkTranscriptRoots(roots) {
  * nor the wire exchange. Returns a map keyed by the agent id parsed from
  * each filename.
  *
- * Resolution mirrors `loadTranscript`: a `transcriptPath` scans just that
- * session's directory (cheap: the live path); otherwise `projectsDir`
- * is scanned recursively (the backfill path). Best-effort: a missing
- * directory or an unparseable sidecar is skipped, never thrown.
+ * A `transcriptPath` scans just that session's directory (cheap: the
+ * live path); otherwise `projectsDir` is scanned recursively (the
+ * backfill path). This no longer mirrors `loadTranscript`, which falls
+ * through to the session-id scan when a stale `transcriptPath` reads
+ * empty: the sidecar lookup stays rooted at the named path, so a
+ * session whose transcript identity that fall-through recovered still
+ * carries no `spawned_by_tool_use_id`. Best-effort: a missing directory
+ * or an unparseable sidecar is skipped, never thrown.
  *
  * @param {{ transcriptPath?: string, projectsDir?: string }} opts
  * @returns {Map<string, { tool_use_id: string }>}

@@ -7,7 +7,8 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { createClaudeSettlementEnricher } from '../../hypaware-core/plugins-workspace/claude/src/settle.js'
-import { matchKey } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
+import { loadTranscript, loadTranscriptFile, matchKey } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
+import { appendSessionContext } from '../../hypaware-core/plugins-workspace/claude/src/session_context.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
 
@@ -224,6 +225,109 @@ test('a session group with no match_key row never resolves a transcript', async 
   }
 })
 
+
+// A session-context record's `transcript_path` is written by the hook and can
+// go stale: the file is gone, or was never written where the hook said. The
+// direct read then yields nothing, and nothing must not end the lookup, or
+// every fallback row in the session keeps its gateway hash id.
+test('enricher falls through to the session scan when a stale transcript_path reads empty', async () => {
+  const env = await stageEnv()
+  try {
+    // The real transcript for the session is where the normal lookup finds it.
+    await writeTranscript(env, 'sess-stale', [
+      jsonlRow({
+        sessionId: 'sess-stale', uuid: 'u-recovered', parentUuid: 'u-prompt', type: 'assistant',
+        message: { id: 'msg_r', role: 'assistant', content: [{ type: 'text', text: 'recovered answer' }] },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+    // ...but the hook recorded a path that no longer exists.
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-stale',
+      transcript_path: path.join(env.homeDir, 'gone', 'sess-stale.jsonl'),
+      git_branch: undefined,
+      cwd: '/work/repo',
+      ts: '2026-05-22T10:00:00.000Z',
+    })
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    const row = fallbackRow({
+      session_id: 'sess-stale', role: 'assistant', content_text: 'recovered answer',
+      match_key: matchKey('assistant', [{ type: 'text', text: 'recovered answer' }]),
+    })
+
+    const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
+
+    assert.equal(out.message_id, 'u-recovered', 'a dead transcript_path degrades to the session-id lookup')
+    assert.equal(out.part_id, 'u-recovered#0')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The other half: a `transcript_path` that does read stays the direct, cheap
+// read. A projects-wide walk per exchange is what that path exists to avoid,
+// and a walk would also let a same-session file elsewhere in the tree
+// overwrite the content-key match.
+test('a valid transcript_path still takes the direct read with no projects-wide walk', async () => {
+  const env = await stageEnv()
+  try {
+    const hookedDir = path.join(env.homeDir, 'hooked')
+    await fs.mkdir(hookedDir, { recursive: true })
+    const transcriptPath = path.join(hookedDir, 'sess-direct.jsonl')
+    await fs.writeFile(transcriptPath, jsonlRow({
+      sessionId: 'sess-direct', uuid: 'u-direct', parentUuid: null, type: 'assistant',
+      message: { id: 'msg_d', role: 'assistant', content: [{ type: 'text', text: 'direct answer' }] },
+      timestamp: '2026-05-22T10:00:01.000Z',
+    }) + '\n', 'utf8')
+    // Same session id, same content, LATER timestamp: were the scan to run,
+    // this line would win the content-key index and the row would carry
+    // u-decoy.
+    await writeTranscript(env, 'sess-direct', [
+      jsonlRow({
+        sessionId: 'sess-direct', uuid: 'u-decoy', parentUuid: null, type: 'assistant',
+        message: { id: 'msg_x', role: 'assistant', content: [{ type: 'text', text: 'direct answer' }] },
+        timestamp: '2026-05-22T10:00:09.000Z',
+      }),
+    ])
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-direct',
+      transcript_path: transcriptPath,
+      git_branch: undefined,
+      cwd: '/work/repo',
+      ts: '2026-05-22T10:00:00.000Z',
+    })
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    const row = fallbackRow({
+      session_id: 'sess-direct', role: 'assistant', content_text: 'direct answer',
+      match_key: matchKey('assistant', [{ type: 'text', text: 'direct answer' }]),
+    })
+
+    const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
+    assert.equal(out.message_id, 'u-direct', 'the hook-named file is the one that settles the row')
+
+    // And the resolver reads that file alone: no walk of the projects tree.
+    /** @type {string[]} */
+    const reads = []
+    const entries = await loadTranscript(
+      {
+        projectsDir: path.join(env.homeDir, '.claude', 'projects'),
+        sessionId: 'sess-direct',
+        transcriptPath,
+        homeDir: env.homeDir,
+      },
+      async (filePath, collected) => {
+        reads.push(filePath)
+        for (const entry of await loadTranscriptFile(filePath)) collected.push(entry)
+      }
+    )
+    assert.deepEqual(reads, [transcriptPath], 'only the hook-named file is read')
+    assert.equal(entries.length, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
 
 // --- helpers ---------------------------------------------------------
 
