@@ -736,6 +736,18 @@ test('loadAgentMeta alone spends the walk its own get() made', async () => {
     }))
     assert.equal(meta.result.size, 0)
     assert.equal(meta.sweeps, 1, 'the walk its get() made is the walk it spends')
+
+    // Spending it means settling the miss, which is what this loader gating
+    // on its own `cached` alone would skip: the next pass inside the TTL is
+    // served that same list and must not walk the container over again.
+    const again = await countSweeps(async () => loadAgentMeta({
+      transcriptPath: path.join(homeDir, 'unresolvable', 'sess-never.jsonl'),
+      projectsDir,
+      sessionId: 'sess-never',
+      homeDir,
+    }))
+    assert.equal(again.result.size, 0)
+    assert.equal(again.sweeps, 0, 'and the settled miss keeps the next pass free')
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }

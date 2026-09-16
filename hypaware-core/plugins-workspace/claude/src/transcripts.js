@@ -173,10 +173,16 @@ export function createDesktop3pDirsCache(opts) {
    * match cannot grow the memo with uptime. An evicted session costs one
    * more sweep, never a wrong answer.
    *
+   * The `!cached` arm reaches here without the memo check the forced walk
+   * makes, and a TTL rollover re-settles every session the memo still
+   * holds, so a session already remembered against this list must cost no
+   * other one its place.
+   *
    * @param {Desktop3pDirsEntry} entry
    * @param {string} sessionId
    */
   function remember(entry, sessionId) {
+    if (entry.swept.has(sessionId)) return
     if (entry.swept.size >= DESKTOP_3P_SWEPT_SESSIONS_MAX) {
       entry.swept.delete(/** @type {string} */ (entry.swept.values().next().value))
     }
