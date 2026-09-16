@@ -871,7 +871,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target and pairs it with its lookup
     // @ref LLP 0387#adjacency [constrained-by]: the compact branch is also the deadline line's half of R1a - drop the name or the lookup here and the compact privacy block below has neither
     if (compact) {
-      ctx.stdout.write(`✓ Forwarding to the '${name}' server (run 'hyp remote list' to see its URL)\n`)
+      ctx.stdout.write(`✓ Logs will sync to the '${name}' server (hyp remote list shows its URL)\n`)
     } else {
       ctx.stdout.write(`forwarding logs to the '${name}' server\n`)
       ctx.stdout.write("  (run 'hyp remote list' to see its URL)\n")
@@ -898,7 +898,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // @ref LLP 0407#dropped: the backfill statement is no longer made on the attended close
     // @ref LLP 0387#adjacency [implements]: compact meets R1a as a pair - the forwarding line directly above carries the server name and the 'hyp remote list' lookup for both lines
     if (holdDeadline !== null && compact) {
-      ctx.stderr.write(`✓ First sync no later than ${formatFirstSyncDeadline(holdDeadline)}; nothing has been uploaded yet\n`)
+      ctx.stderr.write(`✓ Nothing uploads until you say so, or ${formatFirstSyncDeadline(holdDeadline)} at the latest\n`)
     } else if (holdDeadline !== null) {
       ctx.stderr.write(firstSyncHoldMessage(holdDeadline, name))
     }
@@ -936,7 +936,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
       ? await withSpinner({ stdout: ctx.stdout, env: ctx.env, label: 'Attaching clients...' }, wait)
       : await wait()
     if (attached.length > 0) {
-      ctx.stdout.write(compact ? `✓ Capturing ${attached.join(', ')}\n` : `capturing ${attached.join(', ')}\n`)
+      ctx.stdout.write(compact ? `✓ Recording ${attached.join(', ')}\n` : `capturing ${attached.join(', ')}\n`)
     } else {
       ctx.stdout.write("no clients attached yet - check 'hyp status', or run 'hyp client attach <client>' to capture\n")
     }

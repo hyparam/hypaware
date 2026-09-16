@@ -343,18 +343,22 @@ test('compact login (the wizard join lane) prints one line per event and no priv
     'the pre-auth notice keeps its hedge and both consequences, as one line'
   )
   assert.match(text, /✓ Signed in to 'prod' as org /)
-  assert.match(text, /✓ Forwarding to the 'prod' server \(run 'hyp remote list' to see its URL\)/)
-  assert.match(text, /✓ First sync no later than .+; nothing has been uploaded yet/)
+  // Plain words (LLP 0407): the sync line still names the server by its
+  // configured name and the command that maps it to a URL (LLP 0100 R1a),
+  // and the deadline line still gives the hold's deadline and the fact
+  // that nothing has been sent.
+  assert.match(text, /✓ Logs will sync to the 'prod' server \(hyp remote list shows its URL\)/)
+  assert.match(text, /✓ Nothing uploads until you say so, or .+ at the latest/)
   // Compact drops the privacy block, so the deadline line is the second half of
   // the R1a pair: it names no server itself and reads as being about this target
   // only while it sits directly under the forwarding line. The pair spans stdout
   // and stderr, so adjacency is only visible in the interleaved capture.
   // @ref LLP 0100#requirements [tests]: R1a - the compact pair holds only while the two lines stay consecutive
-  const forwardingAt = lines.findIndex((line) => line.startsWith("✓ Forwarding to the 'prod' server"))
+  const forwardingAt = lines.findIndex((line) => line.startsWith("✓ Logs will sync to the 'prod' server"))
   assert.notEqual(forwardingAt, -1, 'the compact forwarding line is written')
   assert.match(
     lines[forwardingAt + 1] ?? '',
-    /^✓ First sync no later than .+; nothing has been uploaded yet$/,
+    /^✓ Nothing uploads until you say so, or .+ at the latest$/,
     'the deadline line comes next, with no other write between it and the forwarding line'
   )
   // The send-now offer (LLP 0203) runs only on an attended, uncancelled close,
