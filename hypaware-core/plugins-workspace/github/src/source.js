@@ -1,6 +1,7 @@
 // @ts-check
 
 import { parseInterval } from './config.js'
+import { authorizedImports, readCursors } from './cursors.js'
 import { requireGithubRuntime } from './runtime.js'
 import { runCaptureTick } from './tick.js'
 
@@ -34,6 +35,8 @@ export async function startGithubSource() {
   let lastInventoryRepos = 0
   let rowsWritten = 0
   let backlogPending = false
+  /** @type {Set<string>} */
+  let seenImports = new Set()
   /** @type {string | undefined} */
   let lastError
   let generation = 0
@@ -45,7 +48,9 @@ export async function startGithubSource() {
     try {
       const result = await runCaptureTick(runtime, { mode: 'poll' })
       rowsWritten += result.events
-      backlogPending = result.pending
+      // A tick's own `pending` is blind to work another process staged while
+      // it ran, so the sidecar gets the first word.
+      backlogPending = stagedImportPending() || result.pending
       // What the last tick reached, not the inventory: an exhausted budget can
       // stop a tick partway through it (LLP 0361#budget). The inventory it was
       // drawn from is published beside it, so a low count reads as the budget
@@ -74,6 +79,44 @@ export async function startGithubSource() {
         duration_ms: Date.now() - started,
       })
     }
+  }
+
+  /**
+   * Whether the cursor sidecar gained a one-time-import authorization this
+   * source has not scheduled for yet. `hyp github backfill` commits one before
+   * any network work and a tick's closing write adopts one that landed
+   * mid-tick, both after that tick's `pending` was computed, so without this
+   * read the daemon waits a full poll interval for work the command reported
+   * as resuming on the next tick.
+   *
+   * Authorizations rather than bare `work` continuations: an authorization
+   * joins a later tick's repository set whatever the inventory holds and is
+   * retired when it completes or is excluded, while nothing prunes a
+   * continuation whose repository has left the inventory (LLP 0360#cursoring),
+   * so counting those reports backlog no tick can retire.
+   *
+   * New ones rather than every one: an authorization already carried through a
+   * tick had its say through that tick's `pending` or `errors`, and a failure
+   * retries on the ordinary cadence, so re-counting it would pin a daily source
+   * at the backlog cadence for as long as one repository keeps failing. Keeping
+   * that snapshot honest is why this runs on every tick, not only on a tick
+   * that reported nothing pending.
+   *
+   * @returns {boolean}
+   */
+  // @ref LLP 0361#cadence [implements]: durable work reaches the backlog cadence without pinning the source to it
+  // @ref LLP 0360#cadence [constrained-by]: a repository that keeps failing retries on the ordinary cadence
+  function stagedImportPending() {
+    const staged = authorizedImports(readCursors(runtime.stateDir))
+    let fresh = false
+    for (const repo of staged) {
+      if (!seenImports.has(repo)) {
+        fresh = true
+        break
+      }
+    }
+    seenImports = staged
+    return fresh
   }
 
   /** @param {number} delayMs @param {number} ownGeneration */
