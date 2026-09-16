@@ -247,9 +247,8 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
           span.setAttribute('budget_ms', budgetMs)
           span.setAttribute('missing_sections', missingSections(rows).join(','))
         }
-        // `footer: false` because the closing line below is this run's single
-        // pointer: setup should teach one command, not two dim lines naming
-        // the same one.
+        // `footer: false` because the block ends on its last section: the
+        // first look prints no pointer line at all, dim or otherwise.
         stdout.write(renderOverview({
           ...rows,
           title: FIRST_LOOK_TITLE,
