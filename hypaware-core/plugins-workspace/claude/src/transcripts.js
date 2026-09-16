@@ -348,10 +348,16 @@ export function loadAgentMeta(opts) {
       : false
     // An attached Desktop runs each conversation in a sandbox home inside its
     // own container, so a session the scan above cannot find is not missing,
-    // just somewhere `projectsDir` does not reach. Ordered and guarded like
-    // `loadTranscript`'s matching leg, sharing its TTL-cached root discovery
-    // and its one forced re-sweep.
-    if (meta.size === 0 && opts.homeDir) {
+    // just somewhere `projectsDir` does not reach. It is the session being
+    // unfound that says so, not the map being empty: a session the scan
+    // located owns its sidecars whether or not it has written any yet, so
+    // gating on the map would sweep the container on every spawn under such a
+    // session, at a cost that grows with the conversations the container
+    // holds, and would let the container answer for a session the projects
+    // tree already found. Ordered and guarded like `loadTranscript`'s
+    // matching leg, sharing its TTL-cached root discovery and its one forced
+    // re-sweep.
+    if (meta.size === 0 && !located && opts.homeDir) {
       const { dirs, cached } = desktop3pDirsCache.get(opts.homeDir)
       if (collectSessionAgentMeta(dirs, opts.sessionId, meta, seen)) located = true
       // A sandbox home appears exactly when its session starts, so a cached

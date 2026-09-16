@@ -850,16 +850,19 @@ test('a located session does not force an uncached container re-sweep', async ()
     )
     assert.equal(loadAgentMeta(opts).size, 0, 'the home holding the session answers for it')
 
-    // The projects scan locating the session settles it just as well: a
-    // session lives in exactly one tree, so no container sweep is stale for
-    // it. This is the CLI shape of the same standing state, a subagent whose
-    // sidecar is not written yet under a session directory not created yet.
+    // The projects scan locating the session settles it outright: a session
+    // lives in exactly one tree, so the container is neither swept for it nor
+    // allowed to answer for it. This is the CLI shape of the same standing
+    // state, a subagent whose sidecar is not written yet under a session
+    // directory not created yet, and on a host with Desktop attached it is
+    // every such spawn. The decoy sits in the sandbox home the first sweep
+    // already cached, so only not sweeping at all keeps it out.
     await fs.mkdir(path.join(projectsDir, 'repo-a'), { recursive: true })
     await fs.writeFile(path.join(projectsDir, 'repo-a', 'sess-cli.jsonl'), '', 'utf8')
     const cli = { ...opts, transcriptPath: path.join(homeDir, 'gone', 'sess-cli.jsonl'), sessionId: 'sess-cli' }
     assert.equal(loadAgentMeta(cli).size, 0)
-    await stageSidecar(desktop3pSandboxDir(homeDir, 'latest111'), 'sess-cli', 'toolu_cli_decoy')
-    assert.equal(loadAgentMeta(cli).size, 0, 'the projects tree holds it: the container cannot be stale for it')
+    await stageSidecar(desktop3pSandboxDir(homeDir), 'sess-cli', 'toolu_cli_decoy')
+    assert.equal(loadAgentMeta(cli).size, 0, 'the projects tree holds it: the container does not answer for it')
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }
