@@ -132,6 +132,10 @@ export async function run({ harness, expect }) {
     '@hypaware/claude',
     '@hypaware/codex',
     '@hypaware/format-parquet',
+    // The seeded config is deliberately a legacy one that never named grep:
+    // the boot migration adds it, so this flow also covers the upgrade
+    // reaching `hyp plugin list`.
+    '@hypaware/grep',
     '@hypaware/local-fs',
     '@hypaware/openclaw',
     '@hypaware/otel',
@@ -330,19 +334,20 @@ export async function run({ harness, expect }) {
     (/** @type {any} */ s) => s.attributes?.boot_profile === 'config'
   )
   expect.that(
-    'traces: at least one config-profile boot reports plugins_activated=7',
+    'traces: at least one config-profile boot reports plugins_activated=8',
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_activated),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 7)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === 8)
   )
   // Skipped = allowlist plugins this flow's config does not name (the
   // excluded-from-default set never reaches the skip loop). Bumps
   // whenever a plugin joins V1_BUNDLED_PLUGIN_ALLOWLIST without joining
   // this flow's config: currently format-jsonl, s3, format-iceberg,
-  // context-graph, ai-gateway-graph, hermes, opencode, cursor, and grep (9).
+  // context-graph, ai-gateway-graph, hermes, opencode, and cursor (8). Grep
+  // is not among them: the boot migration puts it in this flow's config.
   expect.that(
-    'traces: at least one config-profile boot reports plugins_skipped=9',
+    'traces: at least one config-profile boot reports plugins_skipped=8',
     configBoots.map((/** @type {any} */ s) => s.attributes?.plugins_skipped),
-    (rows) => Array.isArray(rows) && rows.some((n) => n === 9)
+    (rows) => Array.isArray(rows) && rows.some((n) => n === 8)
   )
 
   const activateSpans = traces.filter((/** @type {any} */ t) => t.name === 'plugin.activate')
