@@ -25,7 +25,7 @@ import { positionals } from './remote_commands.js'
 import { isTty } from './stdio.js'
 import { PromptCancelledError, select } from './tui/index.js'
 import { isPromptBackError } from './tui/runtime.js'
-import { buildWalkthroughClientDescriptorMap } from './walkthrough.js'
+import { buildWalkthroughClientDescriptorMap, resolveHypHome } from './walkthrough.js'
 import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
 import { askableClients, attachHint } from '../commands/ask.js'
 
@@ -586,9 +586,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
   }
   // Under HYP_HOME for the reason the ask's evidence is (LLP 0398
   // #run-directory): every parent of the file is then the person's own.
-  const homeDir = ctx.env.HOME || os.homedir()
-  const hypHome = ctx.env.HYP_HOME || path.join(homeDir, '.hyp')
-  const dir = path.join(hypHome, 'recommendations')
+  const dir = path.join(resolveHypHome(ctx.env), 'recommendations')
   const file = path.join(dir, `${recommendation.id}.${page.ext}`)
   try {
     await fs.mkdir(dir, { recursive: true, mode: 0o700 })

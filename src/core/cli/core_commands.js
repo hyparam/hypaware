@@ -776,7 +776,7 @@ function buildCoreCommands(registry) {
         'a static HTML site and takes no --remote and no credential.\n' +
         '\n' +
         'The rest talk to the server. Reports are server-hosted (there is no\n' +
-        'local reports plane), so publish/list/get/delete each take --remote\n' +
+        'local reports plane), so publish/list/get/fix/delete each take --remote\n' +
         '<target> and default to the default remote target, the same resolution\n' +
         'as bare --remote on queries. Reads use your login session; publish and\n' +
         'delete need the publisher role (or an operator-minted publish token\n' +
