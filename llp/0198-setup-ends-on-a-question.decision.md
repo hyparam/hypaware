@@ -239,9 +239,9 @@ copy-paste failure this decision exists to remove, merely deferred by one
 screen. `hyp ask` renders the same list against the same probe and starts
 the chosen client, and `hyp ask "<question>"` skips the menu entirely,
 which is the shape a user reaches for once they know what they want.
-Every other closing surface already names a durable entry point (the
-first look prints "See this again anytime: hyp query overview"); this is
-the one for the questions.
+Every closing surface has its durable entry point (the first look's is
+`hyp query overview`, documented in the CLI reference rather than
+printed); this is the one for the questions.
 
 ## Consequences {#consequences}
 
