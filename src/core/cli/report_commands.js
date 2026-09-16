@@ -22,10 +22,17 @@ import {
 } from '../remote/credentials.js'
 import { describeRefreshError, NO_FETCH_MESSAGE } from '../remote/identity_client.js'
 import { positionals } from './remote_commands.js'
+import { isTty } from './stdio.js'
+import { PromptCancelledError, select } from './tui/index.js'
+import { isPromptBackError } from './tui/runtime.js'
+import { buildWalkthroughClientDescriptorMap } from './walkthrough.js'
+import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
+import { askableClients, attachHint } from '../commands/ask.js'
 
 /**
  * @import { Stats } from 'node:fs'
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { FirstAskLauncher } from '../../../src/core/cli/wizard/types.js'
  */
 
 const execFileAsync = promisify(execFile)
@@ -284,6 +291,21 @@ export async function runReportList(argv, ctx) {
   for (const r of reports) {
     const title = typeof r.title === 'string' && r.title ? `\t${r.title}` : ''
     ctx.stdout.write(`  ${r.publishedAt}\t${r.kind}/${r.period}\t${r.id}\t${r.bytes} bytes${title}\n`)
+    // The server mints one id per `recommendation-<slug>` page and lists them
+    // on the record, in page order, so a report's recommendations read
+    // beneath it without fetching the report; the id is the token a caller
+    // copies, the page is what `hyp report get` takes. A server that reads
+    // the page's opening at publish adds its title and thesis (server LLP
+    // 0416); an older server, or a report that predates that, lists the id
+    // and page alone. A record with no recommendation pages carries no
+    // field, so a report with none prints nothing extra.
+    const recommendations = Array.isArray(r.recommendations) ? r.recommendations : []
+    for (const c of recommendations) {
+      if (typeof c?.id !== 'string' || typeof c?.page !== 'string') continue
+      const title = typeof c.title === 'string' && c.title ? `\t${c.title}` : ''
+      ctx.stdout.write(`      ${c.id}\t${c.page}${title}\n`)
+      if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`          ${c.summary}\n`)
+    }
   }
   return 0
 }
@@ -348,6 +370,285 @@ export async function runReportGet(argv, ctx) {
   // rather than corrupt bytes through a string round-trip.
   /** @type {{ write(chunk: string | Buffer): unknown }} */ (ctx.stdout).write(bytes)
   return 0
+}
+
+/** The shape of a server-minted recommendation id: `rec-` and 16 hex characters. */
+const RECOMMENDATION_ID_RE = /^rec-[0-9a-f]{16}$/
+
+/**
+ * `hyp report fix [id]`: start an attached client on one of a report's
+ * recommendations, in the directory the command was typed in.
+ *
+ * The id is the server's (`rec-` and sixteen hex characters, minted at
+ * publish and listed by `hyp report list`), so a bare id is enough to
+ * resolve the report and the page: the resolve route answers with both.
+ * With no id on a terminal, the recent listing becomes a picker, one row
+ * per recommendation across the reports it names; piped, the id is
+ * required. The page is fetched and written under `HYP_HOME`, and the
+ * client is told to read it there and implement it here: the fix applies
+ * to a repository, so unlike the recommendation ask this session starts
+ * where it was typed, not in a folder HypAware owns.
+ *
+ * `deps` are the process-touching seams (status probe, PATH probe, spawn,
+ * prompt), injected by tests; the defaults are the real ones `hyp ask` uses.
+ *
+ * @ref LLP 0407#id-is-the-handle [implements]: the server-minted id is the only argument; everything else is resolved from it
+ * @ref LLP 0407#run-where-typed [implements]: the fix is to a repository, so the client starts in the caller's directory
+ * @param {string[]} argv
+ * @param {CommandRunContext} ctx
+ * @param {{
+ *   collectStatus?: Parameters<typeof askableClients>[1] extends { collectStatus?: infer T } | undefined ? T : never,
+ *   resolveLaunchers?: typeof resolveLaunchers,
+ *   launchClient?: typeof launchClient,
+ *   select?: typeof select,
+ * }} [deps]
+ * @returns {Promise<number>}
+ */
+export async function runReportFix(argv, ctx, deps = {}) {
+  const gate = parseCoreCommandArgv('report fix', argv, ctx)
+  if (!gate.ok) return gate.code
+  const resolved = resolveReportsTarget(gate.params, ctx, 'report fix')
+  if ('error' in resolved) {
+    ctx.stderr.write(`${resolved.error}\n`)
+    return 2
+  }
+  // `HYP_NO_TUI` is the same veto the prompt runtime honours; reading it
+  // here keeps a deliberate no-TUI run reported as one that cannot prompt.
+  const interactive = isTty(ctx.stdout) && isTty(ctx.stdin) && ctx.env.HYP_NO_TUI !== '1'
+  const ask = deps.select ?? select
+  const io = {
+    ...(ctx.stdin ? { stdin: ctx.stdin } : {}),
+    stdout: /** @type {NodeJS.WritableStream} */ (/** @type {unknown} */ (ctx.stdout)),
+    env: ctx.env,
+  }
+
+  /** @param {(token: string) => Promise<Response>} send */
+  const request = (send) => reportsRequest({ ctx, ...resolved, write: false, cmd: 'report fix' }, send)
+
+  // 1. Which recommendation: the id given, else one picked from the listing.
+  /** @type {{ id: string, page: string, title?: string }} */
+  let recommendation
+  /** @type {{ id: string, kind: string, period: string, title?: string }} */
+  let report
+  const id = gate.params.id !== undefined ? String(gate.params.id).trim() : ''
+  if (id) {
+    // Grammar first, as the server does: an id that could never have been
+    // minted is refused without a round trip.
+    if (!RECOMMENDATION_ID_RE.test(id)) {
+      ctx.stderr.write(`hyp report fix: '${id}' is not a recommendation id - take one from 'hyp report list' (they look like rec-0123456789abcdef)\n`)
+      return 2
+    }
+    const url = new URL(`${resolved.endpoint}/_recommendations/${encodeURIComponent(id)}`)
+    applyOrgParam(gate.params, url)
+    const outcome = await request((token) => fetch(url, { headers: { authorization: `Bearer ${token}` } }))
+    if (!outcome.ok) {
+      ctx.stderr.write(`hyp report fix: ${outcome.error}\n`)
+      return outcome.exitCode
+    }
+    if (outcome.response.status === 404) {
+      ctx.stderr.write(`hyp report fix: no recommendation '${id}' in this org - list them with 'hyp report list'\n`)
+      return 1
+    }
+    if (outcome.response.status !== 200) {
+      ctx.stderr.write(`hyp report fix: ${await describeErrorResponse(outcome.response)}\n`)
+      return 1
+    }
+    const parsed = /** @type {any} */ (await outcome.response.json().catch(() => null))
+    if (typeof parsed?.recommendation?.page !== 'string' || typeof parsed?.report?.id !== 'string') {
+      ctx.stderr.write(`hyp report fix: '${resolved.target}' answered without the recommendation's report - is the server up to date?\n`)
+      return 1
+    }
+    recommendation = { id, page: parsed.recommendation.page, ...(typeof parsed.recommendation.title === 'string' ? { title: parsed.recommendation.title } : {}) }
+    report = parsed.report
+  } else {
+    if (!interactive) {
+      ctx.stderr.write("usage: hyp report fix <id> [--org <org>] [--remote <target>]\n  the id comes from 'hyp report list'; run on a terminal to pick one from a list instead\n")
+      return 2
+    }
+    const url = new URL(resolved.endpoint)
+    for (const flag of ['kind', 'period', 'limit']) {
+      const value = gate.params[flag]
+      if (value !== undefined) url.searchParams.set(flag, String(value))
+    }
+    applyOrgParam(gate.params, url)
+    const outcome = await request((token) => fetch(url, { headers: { authorization: `Bearer ${token}` } }))
+    if (!outcome.ok) {
+      ctx.stderr.write(`hyp report fix: ${outcome.error}\n`)
+      return outcome.exitCode
+    }
+    if (outcome.response.status !== 200) {
+      ctx.stderr.write(`hyp report fix: ${await describeErrorResponse(outcome.response)}\n`)
+      return 1
+    }
+    const parsed = /** @type {any} */ (await outcome.response.json().catch(() => null))
+    const reports = Array.isArray(parsed?.reports) ? parsed.reports : []
+    /** @type {Array<{ value: string, label: string, summary: string }>} */
+    const options = []
+    /** @type {Map<string, { recommendation: { id: string, page: string, title?: string }, report: any }>} */
+    const byId = new Map()
+    for (const r of reports) {
+      const list = Array.isArray(r?.recommendations) ? r.recommendations : []
+      for (const c of list) {
+        if (typeof c?.id !== 'string' || typeof c?.page !== 'string') continue
+        byId.set(c.id, { recommendation: { id: c.id, page: c.page, ...(typeof c.title === 'string' ? { title: c.title } : {}) }, report: r })
+        // Labelled by the page's own title when the server read one, else
+        // by the slug read as words; described by the thesis's first
+        // sentence, which names the problem, else by where the row came from.
+        const label = typeof c.title === 'string' && c.title ? c.title : recommendationLabel(c.page)
+        const reportTitle = typeof r.title === 'string' && r.title ? `  ${r.title}` : ''
+        const summary = typeof c.summary === 'string' && c.summary ? firstSentence(c.summary) : `${c.id}  ${r.kind}/${r.period}${reportTitle}`
+        options.push({ value: c.id, label, summary })
+      }
+    }
+    if (options.length === 0) {
+      ctx.stdout.write("no recommendations to fix - the listed reports carry none, or none are published yet ('hyp report list')\n")
+      return 0
+    }
+    /** @type {string | number} */
+    let picked
+    try {
+      picked = await ask({ box: true, title: 'Which recommendation should be fixed?', options, ...io })
+    } catch (err) {
+      if (err instanceof PromptCancelledError || isPromptBackError(err) || (err instanceof Error && err.name === 'PromptCancelledError')) {
+        ctx.stdout.write('Nothing started.\n')
+        return 0
+      }
+      throw err
+    }
+    const hit = byId.get(String(picked))
+    if (!hit) return 0
+    recommendation = hit.recommendation
+    report = hit.report
+  }
+
+  // 2. Which client: attached and on PATH, asked only when that is ambiguous.
+  const clients = await askableClients(ctx, deps.collectStatus ? { collectStatus: deps.collectStatus } : {})
+  const descriptors = await buildWalkthroughClientDescriptorMap()
+  const launchers = await (deps.resolveLaunchers ?? resolveLaunchers)({ clients, descriptors, env: ctx.env })
+  if (launchers.length === 0) {
+    ctx.stderr.write('hyp report fix: no attached client can be started here.\n')
+    ctx.stderr.write(`  ${attachHint(descriptors)}\n`)
+    return 1
+  }
+  /** @type {FirstAskLauncher | undefined} */
+  let launcher = launchers[0]
+  if (launchers.length > 1 && interactive) {
+    try {
+      const client = await ask({
+        box: true,
+        title: 'Which client should make the change?',
+        options: launchers.map((l) => ({ value: l.client, label: l.label })),
+        ...io,
+      })
+      launcher = launchers.find((l) => l.client === client)
+    } catch (err) {
+      if (err instanceof PromptCancelledError || isPromptBackError(err) || (err instanceof Error && err.name === 'PromptCancelledError')) {
+        launcher = undefined
+      } else {
+        throw err
+      }
+    }
+    if (!launcher) {
+      ctx.stdout.write('Nothing started.\n')
+      return 0
+    }
+  }
+
+  // 3. The page, written where the client can read it. Markdown first (the
+  // form the report generator writes and a model reads best), HTML when a
+  // report was published without it.
+  const base = `${resolved.endpoint}/${encodeURIComponent(report.kind)}/${encodeURIComponent(report.period)}/${encodeURIComponent(report.id)}/${encodeURIComponent(recommendation.page)}`
+  /** @type {{ bytes: Buffer, ext: string } | undefined} */
+  let page
+  for (const ext of ['md', 'html']) {
+    const url = new URL(`${base}.${ext}`)
+    applyOrgParam(gate.params, url)
+    const outcome = await request((token) => fetch(url, { headers: { authorization: `Bearer ${token}` } }))
+    if (!outcome.ok) {
+      ctx.stderr.write(`hyp report fix: ${outcome.error}\n`)
+      return outcome.exitCode
+    }
+    if (outcome.response.status === 404) continue
+    if (outcome.response.status !== 200) {
+      ctx.stderr.write(`hyp report fix: ${await describeErrorResponse(outcome.response)}\n`)
+      return 1
+    }
+    page = { bytes: Buffer.from(await outcome.response.arrayBuffer()), ext }
+    break
+  }
+  if (!page) {
+    ctx.stderr.write(`hyp report fix: the report no longer carries '${recommendation.page}' - list what it has with 'hyp report get ${report.kind} ${report.period} ${report.id}'\n`)
+    return 1
+  }
+  // Under HYP_HOME for the reason the ask's evidence is (LLP 0398
+  // #run-directory): every parent of the file is then the person's own.
+  const homeDir = ctx.env.HOME || os.homedir()
+  const hypHome = ctx.env.HYP_HOME || path.join(homeDir, '.hyp')
+  const dir = path.join(hypHome, 'recommendations')
+  const file = path.join(dir, `${recommendation.id}.${page.ext}`)
+  try {
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 })
+    await fs.writeFile(file, page.bytes, { mode: 0o600 })
+  } catch (err) {
+    ctx.stderr.write(`hyp report fix: could not save the recommendation: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
+  }
+
+  // 4. The launch, in the directory the command was typed in.
+  const title = pageTitle(page.bytes.toString('utf8')) ?? recommendation.title ?? recommendationLabel(recommendation.page)
+  const where = `${report.kind}/${report.period}${typeof report.title === 'string' && report.title ? `, "${report.title}"` : ''}`
+  const prompt =
+    `Read the file \`${file}\`. It is one recommendation from a HypAware usage report (${where}): "${title}". ` +
+    'Implement it in this repository: make the change it describes, verify it the way this repository verifies changes, ' +
+    'and summarise what you changed. If it does not apply to this repository, say why instead of forcing it.'
+  ctx.stdout.write(`\nStarting ${launcher.label} on "${title}"...\n\n`)
+  const result = await (deps.launchClient ?? launchClient)({ launcher, prompt, cwd: ctx.cwd, env: ctx.env })
+  if (!result.ok) {
+    ctx.stderr.write(`hyp report fix: could not start ${launcher.bin}: ${result.error ?? 'spawn failed'}\n`)
+    return 1
+  }
+  return 0
+}
+
+/**
+ * A recommendation page stem as a picker label: `recommendation-batch-the-retries`
+ * reads as `batch the retries`. The pre-rename `change-` prefix is the same
+ * page under its old name.
+ *
+ * @param {string} page
+ * @returns {string}
+ */
+function recommendationLabel(page) {
+  return page.replace(/^(recommendation|change)-/, '').replaceAll('-', ' ')
+}
+
+/**
+ * The first sentence of a thesis, for a picker row that has one line. The
+ * house style's thesis is two sentences, problem then fix, and the problem
+ * is the half that tells the rows apart.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function firstSentence(text) {
+  const m = /^(.+?[.!?])(?:\s|$)/.exec(text)
+  return m ? m[1] : text
+}
+
+/**
+ * The page's own title: its first Markdown `#` heading, or the first `<h1>`
+ * of an HTML page. Undefined when neither is present, so the caller falls
+ * back to the stem.
+ *
+ * @param {string} text
+ * @returns {string | undefined}
+ */
+function pageTitle(text) {
+  const md = text.match(/^#\s+(.+?)\s*$/m)
+  if (md) return md[1].replaceAll('`', '')
+  const html = text.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)
+  if (html) return html[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() || undefined
+  return undefined
 }
 
 /**

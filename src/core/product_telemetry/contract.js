@@ -124,6 +124,7 @@ export const COMMANDS = Object.freeze([
   'remote remove',
   'report',
   'report delete',
+  'report fix',
   'report get',
   'report list',
   'report publish',

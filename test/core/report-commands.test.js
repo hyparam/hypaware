@@ -15,10 +15,12 @@ import zlib from 'node:zlib'
 import { deriveReportsEndpoint } from '../../src/core/remote/credentials.js'
 import {
   runReportDelete,
+  runReportFix,
   runReportGet,
   runReportList,
   runReportPublish,
 } from '../../src/core/cli/report_commands.js'
+import { PromptCancelledError } from '../../src/core/cli/tui/index.js'
 
 /* ---------- endpoint derivation ---------- */
 
@@ -279,6 +281,35 @@ test('list forwards a dash-leading filter value instead of dropping it', async (
   assert.equal(calls[0].url.searchParams.get('limit'), '-5')
 })
 
+test('list prints each report\'s recommendations, by id and page, under its line', async (t) => {
+  stubServer(t, () => ({
+    status: 200,
+    json: { reports: [
+      {
+        id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z',
+        recommendations: [
+          // A server that reads the page's opening at publish (server LLP 0416).
+          { id: 'rec-0123456789abcdef', page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.' },
+          // A report that predates that, or a page with no heading: id and page alone.
+          { id: 'rec-fedcba9876543210', page: 'recommendation-tenant-check' },
+        ],
+      },
+      { id: 'rpt-a', kind: 'usage-review', period: '2026-W28', bytes: 900, publishedAt: '2026-07-13T10:00:00.000Z' },
+    ] },
+  }))
+  const { ctx, out } = ctxWith()
+  const code = await runReportList([], ctx)
+  assert.equal(code, 0)
+  const lines = out.join('').split('\n').filter(Boolean)
+  assert.deepEqual(lines, [
+    '  2026-07-20T10:00:00.000Z\tusage-review/2026-W29\trpt-b\t1200 bytes\tWeekly',
+    '      rec-0123456789abcdef\trecommendation-batch-the-retries\tBatch the retries',
+    '          Every retry is its own call. One queue fixes it.',
+    '      rec-fedcba9876543210\trecommendation-tenant-check',
+    '  2026-07-13T10:00:00.000Z\tusage-review/2026-W28\trpt-a\t900 bytes',
+  ])
+})
+
 test('list --json prints the raw records', async (t) => {
   const reports = [{ id: 'rpt-a', kind: 'k', period: 'p', bytes: 1, publishedAt: 'x' }]
   stubServer(t, () => ({ status: 200, json: { reports } }))
@@ -390,6 +421,216 @@ test('get reports an unknown report from the server error body', async (t) => {
   const code = await runReportGet(['k', 'p', 'rpt-x'], ctx)
   assert.equal(code, 1)
   assert.match(err.join(''), /HTTP 404: unknown_report/)
+})
+
+/* ---------- fix ---------- */
+
+// `hyp report fix` launches through the seams `hyp ask` uses (status probe,
+// PATH probe, spawn, prompt), so the tests inject all four and check what
+// reaches them: which id was resolved, which page was fetched, where it was
+// saved, and what the client was started with.
+// @ref LLP 0407#id-is-the-handle [tests]: a bare id resolves to its report and page with nothing else in hand
+
+const REC = 'rec-0123456789abcdef'
+const REPORT = { id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z' }
+const PAGE = '# Batch the retries\n\nEvery retry is its own call.\n'
+
+/**
+ * A reports plane holding one report with one recommendation. `md` false
+ * publishes the page as HTML only; `opening` lists the page's title and
+ * thesis on the record, as a server that reads them at publish does.
+ *
+ * @param {TestContext} t
+ * @param {{ md?: boolean, opening?: boolean }} [opts]
+ */
+function stubFixServer(t, { md = true, opening = false } = {}) {
+  const listed = opening
+    ? { id: REC, page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.' }
+    : { id: REC, page: 'recommendation-batch-the-retries' }
+  return stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === '/v1/reports') return { status: 200, json: { reports: [{ ...REPORT, recommendations: [listed] }] } }
+    if (p === `/v1/reports/_recommendations/${REC}`) return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries' }, report: REPORT } }
+    if (p.startsWith('/v1/reports/_recommendations/')) return { status: 404, json: { error: 'unknown_recommendation' } }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md') {
+      return md ? { status: 200, body: new TextEncoder().encode(PAGE) } : { status: 404, json: { error: 'not_found' } }
+    }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.html') {
+      return { status: 200, body: new TextEncoder().encode('<h1>Batch the <em>retries</em></h1>') }
+    }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+}
+
+/**
+ * The injected seams: one attached client, a recording spawn, and a scripted prompt.
+ * @param {{ launchers?: any[], pick?: (spec: any) => Promise<string | number> }} [opts]
+ */
+function fixDeps({ launchers = [{ client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] }], pick = async () => { throw new Error('unexpected prompt') } } = {}) {
+  /** @type {any[]} */ const launches = []
+  /** @type {any[]} */ const prompts = []
+  return {
+    launches,
+    prompts,
+    deps: /** @type {any} */ ({
+      collectStatus: async () => ({ clients: [{ name: 'claude', attached: true }, { name: 'codex', attached: true }] }),
+      resolveLaunchers: async () => launchers,
+      launchClient: async (/** @type {any} */ args) => { launches.push(args); return { ok: true, code: 0 } },
+      select: async (/** @type {any} */ spec) => { prompts.push(spec); return pick(spec) },
+    }),
+  }
+}
+
+test('fix <id> resolves the id, saves the page under HYP_HOME, and starts the client here on it', async (t) => {
+  const { calls } = stubFixServer(t)
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const { ctx, out } = ctxWith({ HYP_HOME: hypHome })
+  ctx.cwd = '/work/repo'
+  const { deps, launches } = fixDeps()
+  const code = await runReportFix([REC], ctx, deps)
+  assert.equal(code, 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    `/v1/reports/_recommendations/${REC}`,
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md',
+  ])
+  const saved = path.join(hypHome, 'recommendations', `${REC}.md`)
+  assert.equal(await fs.readFile(saved, 'utf8'), PAGE)
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].cwd, '/work/repo')
+  assert.equal(launches[0].launcher.client, 'claude')
+  assert.match(launches[0].prompt, new RegExp('`' + saved.replaceAll('\\\\', '\\\\\\\\') + '`'))
+  assert.match(launches[0].prompt, /"Batch the retries"/)
+  assert.match(launches[0].prompt, /usage-review\/2026-W29, "Weekly"/)
+  assert.match(out.join(''), /Starting Claude Code on "Batch the retries"/)
+})
+
+test('fix falls back to the HTML page when the report has no Markdown one', async (t) => {
+  stubFixServer(t, { md: false })
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const { ctx } = ctxWith({ HYP_HOME: hypHome })
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.match(launches[0].prompt, new RegExp(`${REC}\\.html`))
+  assert.match(launches[0].prompt, /"Batch the retries"/)
+})
+
+test('fix with an unknown id exits 1 and points at the listing, before any launch', async (t) => {
+  stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix(['rec-ffffffffffffffff'], ctx, deps), 1)
+  assert.match(err.join(''), /no recommendation 'rec-ffffffffffffffff' in this org - list them with 'hyp report list'/)
+  assert.equal(launches.length, 0)
+})
+
+test('fix refuses a token that is not a recommendation id without a round trip', async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportFix(['rpt-b'], ctx, fixDeps().deps), 2)
+  assert.match(err.join(''), /'rpt-b' is not a recommendation id/)
+  assert.equal(calls.length, 0)
+})
+
+test('fix with no id and no terminal is a usage error', async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportFix([], ctx, fixDeps().deps), 2)
+  assert.match(err.join(''), /usage: hyp report fix <id>/)
+  assert.equal(calls.length, 0)
+})
+
+test('fix with no id on a terminal offers the listed recommendations and starts the picked one', async (t) => {
+  const { calls } = stubFixServer(t)
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const { ctx } = ctxWith({ HYP_HOME: hypHome })
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
+  assert.equal(await runReportFix(['--kind', 'usage-review'], ctx, deps), 0)
+  assert.equal(calls[0].url.pathname, '/v1/reports')
+  assert.equal(calls[0].url.searchParams.get('kind'), 'usage-review')
+  assert.equal(prompts.length, 1)
+  assert.deepEqual(prompts[0].options, [{ value: REC, label: 'batch the retries', summary: `${REC}  usage-review/2026-W29  Weekly` }])
+  assert.equal(launches.length, 1)
+  assert.match(launches[0].prompt, /"Batch the retries"/)
+})
+
+test('fix labels the picker by the page title and the thesis\'s first sentence when the server sends them', async (t) => {
+  stubFixServer(t, { opening: true })
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const { ctx } = ctxWith({ HYP_HOME: hypHome })
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.deepEqual(prompts[0].options, [{ value: REC, label: 'Batch the retries', summary: 'Every retry is its own call.' }])
+  assert.equal(launches.length, 1)
+})
+
+test('fix: a cancelled pick starts nothing and succeeds', async (t) => {
+  stubFixServer(t)
+  const { ctx, out } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches } = fixDeps({ pick: async () => { throw new PromptCancelledError() } })
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.match(out.join(''), /Nothing started/)
+  assert.equal(launches.length, 0)
+})
+
+test('fix asks which client only when more than one could start, and only on a terminal', async (t) => {
+  stubFixServer(t)
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const two = [
+    { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] },
+    { client: 'codex', label: 'Codex', bin: 'codex', binPath: '/bin/codex', args: ['{prompt}'] },
+  ]
+  // Piped with an id: no prompt is possible, the first launcher is taken.
+  {
+    const { ctx } = ctxWith({ HYP_HOME: hypHome })
+    const { deps, launches, prompts } = fixDeps({ launchers: two })
+    assert.equal(await runReportFix([REC], ctx, deps), 0)
+    assert.equal(prompts.length, 0)
+    assert.equal(launches[0].launcher.client, 'claude')
+  }
+  // On a terminal the client is asked for, and the answer is honoured.
+  {
+    const { ctx } = ctxWith({ HYP_HOME: hypHome })
+    ctx.stdin.isTTY = true
+    ctx.stdout.isTTY = true
+    const { deps, launches, prompts } = fixDeps({ launchers: two, pick: async () => 'codex' })
+    assert.equal(await runReportFix([REC], ctx, deps), 0)
+    assert.equal(prompts.length, 1)
+    assert.match(prompts[0].title, /Which client/)
+    assert.equal(launches[0].launcher.client, 'codex')
+  }
+})
+
+test('fix with nothing launchable exits 1 with a runnable attach hint, before fetching the page', async (t) => {
+  const { calls } = stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  const { deps, launches } = fixDeps({ launchers: [] })
+  assert.equal(await runReportFix([REC], ctx, deps), 1)
+  assert.match(err.join(''), /no attached client can be started here/)
+  assert.match(err.join(''), /hyp client attach claude/)
+  assert.equal(launches.length, 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [`/v1/reports/_recommendations/${REC}`])
+})
+
+test('fix reports a spawn failure as exit 1', async (t) => {
+  stubFixServer(t)
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const { ctx, err } = ctxWith({ HYP_HOME: hypHome })
+  const { deps } = fixDeps()
+  deps.launchClient = async () => ({ ok: false, error: 'ENOENT' })
+  assert.equal(await runReportFix([REC], ctx, deps), 1)
+  assert.match(err.join(''), /could not start claude: ENOENT/)
 })
 
 /* ---------- delete ---------- */

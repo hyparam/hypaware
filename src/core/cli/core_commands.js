@@ -2,7 +2,7 @@
 
 import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
-import { runReportDelete, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
+import { runReportDelete, runReportFix, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
@@ -825,6 +825,22 @@ function buildCoreCommands(registry) {
       summary: "Fetch a report's entry document (or one artifact) to stdout or --output",
       usage: coreUsage('report get'),
       run: runReportGet,
+    },
+    {
+      name: 'report fix',
+      summary: "Start an attached AI client on one of a report's recommendations, here",
+      usage: coreUsage('report fix'),
+      help: [
+        "The id is a recommendation's, as 'hyp report list' prints under each",
+        'report (rec-0123456789abcdef). HypAware fetches that recommendation page,',
+        'saves it under $HYP_HOME/recommendations, and starts an attached client',
+        'in the current directory with instructions to read the page and make the',
+        'change here. With no id on a terminal, pick one from the recent reports',
+        '(--kind, --period and --limit narrow which). If more than one attached',
+        'client could be started, it asks which. The client takes over the',
+        'terminal; nothing is pre-authorised.',
+      ].join('\n'),
+      run: runReportFix,
     },
     {
       name: 'report delete',

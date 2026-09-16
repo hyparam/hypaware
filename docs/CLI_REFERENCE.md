@@ -341,7 +341,19 @@ hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <pub
 ```
 
 Lists the newest reports visible to the selected organization. An empty list
-succeeds.
+succeeds. Each report's recommendations follow its line, one per line, as the
+server-minted id, the `recommendation-<slug>` page the id names, and the page's
+title, with its thesis on the line below. The page is the artifact path
+`hyp report get` takes. A server that does not read the page's opening at
+publish, or a report published before it did, lists the id and page alone.
+`--json` prints the records whole, `recommendations` included.
+
+```text
+  2026-08-24T09:00:00.000Z	usage-review/2026-W34	REPORT_ID	48213 bytes	Usage review
+      rec-0123456789abcdef	recommendation-batch-the-retries	Batch the retries
+          Every retry is its own call, 506 times a month. One queue fixes it.
+      rec-fedcba9876543210	recommendation-tenant-check
+```
 
 ```sh
 hyp report list --kind usage-review --limit 10 --json
@@ -361,6 +373,31 @@ hyp report get usage-review 2026-W34 REPORT_ID --output ./usage-review.html
 ```
 
 Replace `REPORT_ID` with the ID from `hyp report list`.
+
+### `hyp report fix`
+
+```text
+hyp report fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <org>] [--remote <target>]
+```
+
+Starts an attached AI client on one recommendation, in the current directory.
+The id is the one `hyp report list` prints under each report. HypAware
+resolves it to its report, fetches the recommendation page, saves it under
+`$HYP_HOME/recommendations/`, and starts the client with instructions to read
+the page and make the change in the current repository. The client takes over
+the terminal and nothing is pre-authorised.
+
+With no id on a terminal, the recent reports become a picker, one row per
+recommendation, labelled by the page's title and described by its thesis when
+the server lists them, else by the page name; `--kind`, `--period` and
+`--limit` narrow which reports it draws from. Without a terminal the id is required. If more than one attached
+client could be started, it asks which. A declined pick succeeds. An unknown
+id, no launchable client, or a process-start failure returns `1`.
+
+```sh
+hyp report fix rec-0123456789abcdef
+hyp report fix --kind usage-review
+```
 
 ### `hyp report delete`
 
