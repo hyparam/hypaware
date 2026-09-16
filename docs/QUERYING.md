@@ -25,6 +25,10 @@ inspect their schema before writing SQL.
 
 ## Find a conversation
 
+The bundled `@hypaware/grep` plugin provides direct scans over recorded
+messages. New capture configurations include it; in an existing config, add
+`{"name":"@hypaware/grep"}` to `plugins[]`.
+
 ```sh
 hyp query grep "connection refused" --limit 20
 hyp query grep "daemon" --from 2026-09-01 --to 2026-09-07 --format json

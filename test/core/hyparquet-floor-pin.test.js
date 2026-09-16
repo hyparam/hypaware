@@ -142,42 +142,9 @@ test('the root hyparquet pin is exact and at or above the floor', () => {
   }
 })
 
-test('hypgrep is a plain dependency, held at the floor by an override', () => {
-  // LLP 0264 #dependency: the client both builds and reads indexes, so hypgrep
-  // is a root dependency rather than an optional one.
-  assert.ok(dependencies.hypgrep,
-    'LLP 0264 #dependency: hypgrep belongs in `dependencies`')
-  assert.match(dependencies.hypgrep, /^\d+\.\d+\.\d+$/,
-    'hypgrep is pinned exactly, in the idiom of every other dependency here')
-  // The override was the whole of the adoption while hypgrep 0.5.1 declared
-  // hyparquet 1.27.1: without the entry npm resolved that older copy privately
-  // under `node_modules/hypgrep`. It is the whole of the adoption again: 0.5.2
-  // declares 1.30.0, which the 1.30.1 root pin no longer satisfies, so without
-  // the entry npm nests a private 1.30.0 under `node_modules/hypgrep` and the
-  // read path runs on two hyparquets. It restated the declaration only while
-  // the root pin sat exactly on 1.30.0, which is how little it takes: the
-  // header above says why the roles swap, and a patch bump swapped them. A
-  // hypgrep that declares below the pin resolves onto the hoisted copy with
-  // the entry in place and nests a private one without it, and that regression
-  // is silent. Asserted straight off the manifest so a dropped or
-  // misspelled entry reddens on a checkout with nothing installed, not only
-  // where the resolved half below can run. It names the root pin rather than
-  // the floor so the copy it forces is the one already hoisted, not a second
-  // correct one.
-  assert.ok(pinsRoot(overrides.hypgrep?.hyparquet, 'hyparquet', ROOT_PINS),
-    'LLP 0222 #hyparquet-floor: the hypgrep override holds hyparquet at the root pin, ' +
-    `and it names ${overrides.hypgrep?.hyparquet}`)
-  assert.ok(pinsRoot(overrides.hypgrep?.['hyparquet-writer'], 'hyparquet-writer', ROOT_PINS),
-    'the hypgrep override holds hyparquet-writer at the root pin, ' +
-    `and it names ${overrides.hypgrep?.['hyparquet-writer']}`)
-  // Index writes ride the existing optionalDependency exactly as the cache
-  // write path does. Pinning the writer inside an override must not promote it
-  // to a hard root dependency: an install with `--omit=optional` still has to
-  // boot and read.
-  assert.equal(dependencies['hyparquet-writer'], undefined,
-    'hyparquet-writer is an optionalDependency; the overrides pin must not promote it')
-  assert.ok(optionalDependencies['hyparquet-writer'],
-    'hyparquet-writer stays in optionalDependencies')
+test('local search has no hypgrep runtime dependency or override', () => {
+  assert.equal(dependencies.hypgrep, undefined)
+  assert.equal(overrides.hypgrep, undefined)
 })
 
 // The floor above is correctness. This pair is hygiene, and it is here because

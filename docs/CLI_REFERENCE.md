@@ -189,6 +189,10 @@ failures return `1`.
 hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
+Provided by the bundled `@hypaware/grep` plugin. New `hyp init` capture
+configurations include it; existing configurations add
+`{"name":"@hypaware/grep"}` to `plugins[]`.
+
 Searches recorded `ai_gateway_messages` text without SQL. The pattern is a
 case-insensitive substring by default, or a regular expression with `--regex`.
 Hits arrive newest first, one row per matched column, each carrying
@@ -202,10 +206,9 @@ Only these columns are searched: `content_text`, `tool_name`, `session_id`,
 hits is not evidence the text is absent from `system_text`, `tools`,
 `tool_args`, `attributes`, or `raw_frame`; read those with `hyp query sql`.
 
-Data files the daemon has indexed at maintenance are served through hypgrep
-sidecar indexes and the rest are scanned, so coverage affects speed and never
-correctness.
-`hyp cache status` prints the index coverage. Local-only rows are withheld with
+Local search scans the cache directly without building or reading indexes.
+Narrow the date range on large histories to reduce scan work. Remote servers
+retain their own hypgrep indexes. Local-only rows are withheld with
 a count on stderr, exactly as in SQL, and `--include-local-only` is the same
 informed-consent override. `--remote TARGET` runs the same search on a server,
 which enforces its own visibility: `--regex` is operator-only there, and

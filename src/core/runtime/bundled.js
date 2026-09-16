@@ -25,6 +25,7 @@ import { loadManifests } from '../manifest.js'
  */
 export const V1_BUNDLED_PLUGIN_ALLOWLIST = new Set(/** @type {PluginName[]} */ ([
   '@hypaware/ai-gateway',
+  '@hypaware/grep',
   '@hypaware/otel',
   '@hypaware/claude',
   '@hypaware/codex',

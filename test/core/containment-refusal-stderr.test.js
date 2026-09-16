@@ -188,41 +188,17 @@ test('the sweep\'s refusal of a symlinked component reaches process stderr', asy
       [{ id: 1, session_id: 's-1' }]
     )
     const generation = path.join(cacheRoot, 'datasets', 'ai_gateway_messages', 'source=claude', 'table')
-    // Planted at `data/`, which is a component BOTH passes open: the
-    // unreferenced sweep joins `metadata/` and `data/` onto the generation,
-    // and the index-scratch sweep lists `data/`. An earlier spelling of this
-    // test planted at `metadata/`, which stopped being a component the scratch
-    // sweep asks about when LLP 0331#guard-travels-with-the-delete moved that
-    // pass's guard inside the pass and narrowed it to the two directories the
-    // pass actually walks. That loosening is deliberate, and the property this
-    // test exists for is unchanged by it: what is pinned is that each refusing
-    // pass says so on stderr, so the plant has to be somewhere both of them
-    // refuse.
     await fs.rm(path.join(generation, 'data'), { recursive: true, force: true })
     await fs.symlink(path.join(outside, 'data'), path.join(generation, 'data'), 'dir')
 
     const stderr = await captureProcessStderr(async () => {
       await maintainCache({ cacheRoot })
     })
-    // Asserted per `operation`, not on the `error_kind` alone. Two passes walk
-    // this same component on one tick for this dataset - the unreferenced-set
-    // sweep and, because `ai_gateway_messages` is the grep-indexed dataset, the
-    // index-scratch sweep - and both report through the one
-    // `reportPlantedSweepPath`, so both lines carry the same
-    // `sweep_path_is_symlink`. A bare match on the kind is satisfied by either
-    // line, which means it stays green if one pass loses its guard entirely
-    // while the other keeps reporting. The `operation` attribute is the only
-    // field on the line that tells the two passes apart, so it is what the
-    // assertion reads.
     const refusals = stderr.split('\n').filter((line) => line.includes('sweep_path_is_symlink'))
     const operations = refusals.map((line) => /"hyp_operation":"([^"]+)"/.exec(line)?.[1])
     assert.ok(
       operations.includes('cache.sweep_unreferenced'),
       'the unreferenced-set sweep names its own refusal, somewhere visible'
-    )
-    assert.ok(
-      operations.includes('maintenance.grep_index'),
-      'and so does the index-scratch sweep, which walks the same component'
     )
   } finally {
     await fs.rm(root, { recursive: true, force: true })

@@ -684,31 +684,6 @@ test('and still reclaims it in a cache reached through a symlinked ancestor', as
   }
 })
 
-// The pass the cursor gate does NOT stand in front of. The grep-index scratch
-// sweep resolves its generation through `readCursorSync`, the lenient reader,
-// so a cursor the gate rejected still yields a default generation name there -
-// and this cursor does not even have to be edited, only corrupt.
-test('the index-scratch sweep does not unlink through a symlinked generation either', async () => {
-  const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
-  try {
-    const dir = partitionDir(cacheRoot)
-    await fs.mkdir(path.join(outside, 'data'), { recursive: true })
-    const scratch = path.join(outside, 'data', 'part-0.index.parquet.tmp')
-    await fs.writeFile(scratch, 'someone else\'s abandoned scratch')
-    await fs.utimes(scratch, STALE, STALE)
-    // Unreadable, so the lenient reader synthesizes epoch 0 and the epoch
-    // layout names `epoch=0` as the live generation.
-    await fs.writeFile(path.join(dir, 'cursor.json'), '{ not json')
-    await fs.symlink(outside, path.join(dir, 'epoch=0'), 'dir')
-
-    await maintainCache({ cacheRoot })
-
-    assert.equal(await pathExists(scratch), true, 'a scratch-shaped name outside the cache is not the cache to reclaim')
-  } finally {
-    await fs.rm(root, { recursive: true, force: true })
-  }
-})
-
 // The same class of door reached without any cursor at all. `_hypaware_spool`
 // is a fixed name inside the partition, `readdir` follows a symlinked
 // directory, and the flush removes every file it drains by path. LLP 0326
