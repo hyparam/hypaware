@@ -645,7 +645,7 @@ test('runWizardPick: a cancelled prompt returns the deterministic cancel result'
   assert.equal(result.cancelled, true)
   assert.equal(result.exitCode, 130)
   assert.equal(result.configPath, '')
-  assert.match(stderr.text(), /hyp setup: cancelled/)
+  assert.match(stderr.text(), /Setup cancelled./)
 })
 
 // --- clientsPicked derivation (LLP 0180) ---

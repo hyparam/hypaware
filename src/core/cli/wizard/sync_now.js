@@ -196,13 +196,24 @@ async function readHold(opts) {
  * @param {number} deadline
  */
 function writeHeldStatement(opts, deadline) {
-  opts.stdout.write(
-    '\nNothing has been uploaded yet: nothing leaves this machine before\n' +
-    `${formatFirstSyncDeadline(deadline)}. That first sync includes your imported history,\n` +
-    'and `hyp status` shows the countdown.\n' +
-    'To send it sooner, run `hyp sync`: it shows what would leave and asks first.\n' +
-    'To review or exclude anything before then, run the hypaware-privacy skill\n' +
-    'in Claude or Codex.\n'
+  opts.stdout.write(heldStatement(deadline))
+}
+
+/**
+ * The hold, in plain words (LLP 0407): the deadline, the verb that sends
+ * sooner, and where to exclude things first. Shared with the wizard's
+ * own privacy narration so every path that skips the upload prompt says
+ * the same thing the prompt would have.
+ *
+ * @param {number} deadline
+ * @returns {string}
+ */
+export function heldStatement(deadline) {
+  return (
+    '\nNothing has been uploaded yet. Your logs upload by\n' +
+    `${formatFirstSyncDeadline(deadline)}, or sooner if you run \`hyp sync\`.\n` +
+    'To exclude anything first, configure privacy settings with `hyp privacy`,\n' +
+    'or the hypaware-privacy skill in Claude or Codex.\n'
   )
 }
 

@@ -267,8 +267,8 @@ test('interactive onboarding maps cancelled backfill consent to the cancel exit 
   assert.equal(result.finale?.cancelled, true)
   assert.deepEqual(result.finale?.backfill, [])
   assert.deepEqual(result.finale?.daemonRestart, { skipped: false, dryRun: true, ok: true })
-  assert.match(stderr.text(), /hyp setup: cancelled/)
-  assert.match(stdout.text(), /backfill: skipped \(cancelled\)/)
+  assert.match(stderr.text(), /Setup cancelled./)
+  assert.match(stdout.text(), /Import skipped\./)
   assert.match(stdout.text(), /\(dry-run\) Would restart the daemon/)
 })
 
@@ -590,7 +590,7 @@ test('cancelling consent skips sweep-backed providers too', async () => {
   // sweep-backed or not.
   assert.equal(result.exitCode, WALKTHROUGH_CANCEL_EXIT_CODE)
   assert.equal(backfill.calls.length, 0)
-  assert.match(stdout.text(), /backfill: skipped \(cancelled\)/)
+  assert.match(stdout.text(), /Import skipped\./)
 })
 
 // The backfill consent is the run's last consent question and the only

@@ -2251,7 +2251,7 @@ async function runFinaleBackfill(args) {
       // takes the sweep-backed providers down with it; a decline skips
       // only what was actually asked.
       if (cancelled) {
-        stdout.write('backfill: skipped (cancelled)\n')
+        stdout.write('Import skipped.\n')
         return
       }
       // The one thing that outlives a run whose surface died inside the
@@ -2772,7 +2772,7 @@ async function cancelledResult(opts) {
  */
 function writeCancelledNotice(stderr) {
   try {
-    stderr.write('hyp setup: cancelled\n')
+    stderr.write('Setup cancelled.\n')
   } catch {
     // best-effort: stderr might be closed during cleanup
   }

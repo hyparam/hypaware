@@ -227,7 +227,7 @@ export async function runWizardSyncScope(opts) {
   } catch (err) {
     if (!isPromptCancelledError(err)) throw err
     try {
-      opts.stderr.write('hyp setup: cancelled\n')
+      opts.stderr.write('Setup cancelled.\n')
     } catch {
       // best-effort: stderr might be closed during cleanup
     }
