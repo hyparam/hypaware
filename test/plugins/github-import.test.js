@@ -6,7 +6,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { runCaptureTick } from '../../hypaware-core/plugins-workspace/github/src/tick.js'
-import { readCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
+import { authorizeBackfill } from '../../hypaware-core/plugins-workspace/github/src/capture.js'
+import { authorizedImports, readCursors, writeCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
 import { fakeClient, silentLog } from './github-fake-client.js'
 
 /** @import { TestContext } from 'node:test' */
@@ -186,4 +187,35 @@ test('a one-time import that outlived a refused continuation survives a backfill
   assert.deepEqual(recovered.errors, [])
   assert.equal(recovered.events, 1, 'the import still runs once the refusal is fixed, with no re-authorization')
   assert.equal(readCursors(f.stateDir).repos['o/one'].one_time_import, undefined, 'and retires on completion')
+})
+
+test('an authorization written under a tick in flight survives the closing write', async (t) => {
+  const f = fixture(t)
+  f.runtime.captureRequestLimit = 400
+  f.evidence.push('o/one')
+  const client = f.runtime.clientFactory?.()
+  assert.ok(client)
+  const issues = client.listIssuesPage
+  let interleaved = false
+  client.listIssuesPage = async (owner, repo, ...rest) => {
+    if (!interleaved) {
+      interleaved = true
+      // `hyp github backfill o/two` landing while the daemon tick holds its
+      // snapshot: the command commits the authorization before any network
+      // work of its own, exactly as `captureTick` does.
+      const cli = readCursors(f.stateDir)
+      const known = authorizedImports(cli)
+      authorizeBackfill(cli, ['o/two'], f.runtime.config)
+      await writeCursors(f.stateDir, cli, known)
+    }
+    return issues(owner, repo, ...rest)
+  }
+  f.runtime.clientFactory = () => client
+  assert.deepEqual((await runCaptureTick(f.runtime, { mode: 'poll' })).errors, [])
+  const adopted = readCursors(f.stateDir).repos['o/two']
+  assert.equal(adopted?.one_time_import, true, 'the closing write adopts the authorization it never read')
+  assert.equal(adopted?.work?.mode, 'backfill', 'and the full-history work descriptor that came with it')
+  const resumed = await runCaptureTick({ ...f.runtime, projectionNeeded: undefined }, { mode: 'poll' })
+  assert.deepEqual(resumed.errors, [])
+  assert.ok(f.rows.some((row) => String(row.event_id) === 'issue:o/two#2'), 'so the promised import does resume')
 })
