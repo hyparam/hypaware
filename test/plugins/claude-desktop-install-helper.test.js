@@ -230,7 +230,11 @@ function managerRoot(dir, lockfile) {
  * `/usr/local/bin`, so on a machine carrying both, the shim is what a `$PATH`
  * walk meets first and the durable install is what it meets second.
  *
- * @param {{ installedBin?: boolean | 'shim' | 'mjs', shimAhead?: boolean }} [opts]
+ * `'link'` makes that second `hypaware` what those managers actually install:
+ * not a second copy but a symlink into the global root the entry script is
+ * already in, so the two spellings are one file.
+ *
+ * @param {{ installedBin?: boolean | 'shim' | 'mjs', shimAhead?: boolean | 'link' }} [opts]
  */
 function npxRig(opts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-bin-'))
@@ -284,7 +288,10 @@ function npxRig(opts = {}) {
 
   const shimDir = path.join(root, 'pnpm-ish')
   const shimBin = path.join(shimDir, 'hypaware')
-  if (opts.shimAhead) writeExecutable(shimBin)
+  if (opts.shimAhead === 'link') {
+    fs.mkdirSync(shimDir, { recursive: true })
+    fs.symlinkSync(pnpmGlobalCliPath, shimBin)
+  } else if (opts.shimAhead) writeExecutable(shimBin)
 
   return {
     stateDir: root,
@@ -453,6 +460,27 @@ test('a repointed wrapper reports the swap and names the override', async (t) =>
   // On stdout beside the path it just reported, because nothing here is going
   // to rot: this command's stderr means the recorded path will stop existing.
   assert.equal(err, '')
+})
+
+// The other half again, for the spelling case the string compare got wrong.
+// A pnpm or yarn global root carries the manifest that makes it read ephemeral
+// (issue #1625), so it comes down the walk, and the name that walk finds is a
+// link into that same root. One install, two spellings: nothing was swapped
+// and there is nothing to disclose.
+test('one install reached by two spellings reports no swap', async (t) => {
+  const rig = npxRig({ installedBin: true, shimAhead: 'link' })
+  t.after(() => rig.cleanup())
+
+  const resolved = resolveHypBin(rig.env, rig.pnpmGlobalCliPath)
+
+  // Still the durable name rather than the versioned directory behind it: the
+  // resolution is for the verdict, not for what gets baked into the wrapper.
+  assert.equal(resolved.binPath, rig.shimBin)
+  assert.equal(
+    resolved.repointedFrom,
+    undefined,
+    `one install reported as a swap off ${resolved.repointedFrom}`,
+  )
 })
 
 test('a wrapper recorded as it stands reports no swap', async (t) => {

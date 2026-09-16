@@ -201,6 +201,37 @@ test('an unchanged recorded path reports no swap', async (t) => {
   }
 })
 
+// The spelling case the string compare got wrong. A pnpm or yarn global root
+// carries the manifest that makes it read ephemeral (issue #1625), so it comes
+// down the walk like a project tree does, and what the walk finds on `$PATH`
+// is a link into that same root. One install under two names is not a swap,
+// and saying it is tells an operator their one CLI may be two versions of
+// itself.
+test('one install reached by two spellings reports no swap', async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-hook-bin-'))
+  t.after(() => fsp.rm(root, { recursive: true, force: true }))
+
+  const globalRoot = path.join(root, 'pnpm', 'global', '5')
+  await fsp.mkdir(globalRoot, { recursive: true })
+  await fsp.writeFile(path.join(globalRoot, 'package.json'), '{"name":"g"}\n')
+  const entry = path.join(globalRoot, 'node_modules', 'hypaware', 'bin', 'hypaware.js')
+  await writeExecutable(entry)
+  const shimDir = path.join(root, 'pnpm')
+  const shimBin = path.join(shimDir, 'hypaware')
+  await fsp.symlink(entry, shimBin)
+
+  const resolved = resolveHookBinPath({ HOME: root, PATH: shimDir }, entry)
+
+  // Still the name `$PATH` spells, not the tree behind it: the resolution
+  // decides the verdict and never what gets recorded.
+  assert.equal(resolved.binPath, shimBin)
+  assert.equal(
+    resolved.repointedFrom,
+    undefined,
+    `one install reported as a swap off ${resolved.repointedFrom}`,
+  )
+})
+
 test('with no CLI installed the project-local path is returned, flagged ephemeral', async (t) => {
   const r = await rig({ installedBin: false })
   t.after(() => r.cleanup())

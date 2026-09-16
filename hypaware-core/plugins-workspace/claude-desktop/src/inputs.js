@@ -15,7 +15,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 
-import { findInstalledHypawareBin, isEphemeralBinPath } from '../../../../src/core/cli/global_install.js'
+import { findInstalledHypawareBin, isEphemeralBinPath, isSameBinFile } from '../../../../src/core/cli/global_install.js'
 
 import { DEFAULT_BUNDLE_ID, DEFAULT_MODELS, resolveGatewayBaseUrl } from './profile.js'
 
@@ -89,7 +89,7 @@ export function resolveHypBin(env = process.env, entry = process.argv[1]) {
   return {
     binPath: installed,
     ephemeral: false,
-    ...(installed === running ? {} : { repointedFrom: running }),
+    ...(isSameBinFile(installed, running) ? {} : { repointedFrom: running }),
   }
 }
 

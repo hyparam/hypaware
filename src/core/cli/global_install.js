@@ -1,7 +1,7 @@
 // @ts-check
 
 import { spawn } from 'node:child_process'
-import { accessSync, constants as fsConstants, statSync } from 'node:fs'
+import { accessSync, constants as fsConstants, realpathSync, statSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -276,8 +276,44 @@ export function describeEphemeralBinPath(binPath, effect, env = process.env) {
  */
 export function describeRepointedBinPath(binPath, entryPath, subject) {
   return `${subject} records ${binPath}, not the ${entryPath} that ran this command, `
-    + 'because that copy sits in a tree npm removes; the two can be different versions. '
+    + 'because that copy sits in a tree that gets removed; the two can be different versions. '
     + 'Set HYPAWARE_BIN to pin the copy you mean'
+}
+
+/**
+ * Whether two spellings name one file, for a caller deciding whether the walk
+ * actually moved.
+ *
+ * The two sides arrive spelled differently on purpose: the walk answers with
+ * `$PATH`'s own spelling, which for a global install is usually a symlink into
+ * the package tree, while the entrypoint reaches these callers resolved. A
+ * plain string compare therefore reads one install as two copies, and the
+ * install it reads that way is exactly the one that gets here: a pnpm or yarn
+ * global root carries the manifest that makes {@link isEphemeralBinPath} send
+ * it down the walk in the first place (issue #1625). Reported as a swap, that
+ * operator is told their one CLI may be two versions of itself.
+ *
+ * For the verdict only. Which spelling gets recorded stays the caller's
+ * decision, and stays the durable name rather than the versioned directory it
+ * currently points at.
+ *
+ * A spelling that will not resolve (gone, or the stat refused) falls back to
+ * itself, which is the conservative answer here: two names the filesystem
+ * cannot confirm are one file stay reported as the swap they look like.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function isSameBinFile(a, b) {
+  const real = (/** @type {string} */ p) => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return path.resolve(p)
+    }
+  }
+  return real(a) === real(b)
 }
 
 /**

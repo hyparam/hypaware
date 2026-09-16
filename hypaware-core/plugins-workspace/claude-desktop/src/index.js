@@ -319,6 +319,15 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
       cmdCtx.stdout.write(
         describeRepointedBinPath(hypBin.binPath, hypBin.repointedFrom, 'the wrapper') + '\n',
       )
+      // Recorded for the reason the ephemeral arm above records its own
+      // choice: the line is read once, the wrapper outlives the session, and
+      // a credential fetch that starts failing on a version the baked copy
+      // predates reports nothing on this machine.
+      getLogger('plugin.claude-desktop').warn('client.install_helper.repointed_hyp_bin', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        bin_path: hypBin.binPath,
+        repointed_from: hypBin.repointedFrom,
+      })
     }
     return 0
   } catch (err) {

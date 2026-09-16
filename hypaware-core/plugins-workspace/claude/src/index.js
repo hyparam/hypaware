@@ -12,7 +12,7 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
-import { describeEphemeralBinPath, describeRepointedBinPath, findInstalledHypawareBin, isEphemeralBinPath } from '../../../../src/core/cli/global_install.js'
+import { describeEphemeralBinPath, describeRepointedBinPath, findInstalledHypawareBin, isEphemeralBinPath, isSameBinFile } from '../../../../src/core/cli/global_install.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
 import { resolveClaudeCodeVersion } from './claude_version.js'
@@ -333,6 +333,17 @@ export async function activate(ctx) {
               warnings.push(
                 describeRepointedBinPath(hookBin.binPath, hookBin.repointedFrom, 'the managed hook')
               )
+              // The warning above is read once, by whoever attached; the skew
+              // it discloses is met later as a subcommand exiting 0, with the
+              // attach long gone. Recorded for the same reason the ephemeral
+              // arm records its own choice: so the machine can be asked
+              // afterwards which copy the hook was pointed at, and off what.
+              logger.warn('client.attach.repointed_hook_bin', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                bin_path: hookBin.binPath,
+                repointed_from: hookBin.repointedFrom,
+              })
             }
 
             // A prior proxy marker makes this attach a migration. The settings
@@ -583,7 +594,7 @@ export function resolveHookBinPath(env, cliBinPath = CLI_BIN_PATH) {
   return {
     binPath: installed,
     ephemeral: false,
-    ...(installed === cliBinPath ? {} : { repointedFrom: cliBinPath }),
+    ...(isSameBinFile(installed, cliBinPath) ? {} : { repointedFrom: cliBinPath }),
   }
 }
 
