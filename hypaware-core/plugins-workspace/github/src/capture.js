@@ -145,7 +145,12 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
     visited += 1
     let cursor = cursors.repos[repo] ?? (cursors.repos[repo] = {})
     if (mode === 'backfill' && cursor.work?.mode !== 'backfill') {
-      cursor = {}
+      // Restarting the history is not retiring the authorization: an import runs
+      // until it completes or is excluded (LLP 0409), and a refused continuation
+      // clears `work` while deliberately keeping `one_time_import`. A plain `{}`
+      // would drop that surviving marker with none of the `import_retired`
+      // reporting the terminal-status path gives it.
+      cursor = cursor.one_time_import ? { one_time_import: true } : {}
       cursors.repos[repo] = cursor
     }
     let repoEvents = 0

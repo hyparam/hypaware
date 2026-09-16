@@ -155,3 +155,35 @@ test('a terminal answer retires a one-time import; a transient failure keeps it'
   assert.deepEqual(reauthorized.errors, [], 're-running backfill re-authorizes a retired import')
   assert.equal(f.rows.length, 2)
 })
+
+test('a one-time import that outlived a refused continuation survives a backfill-mode cursor reset', async (t) => {
+  const f = fixture(t)
+  f.runtime.captureRequestLimit = 400
+  const client = f.runtime.clientFactory?.()
+  assert.ok(client)
+  const issues = client.listIssuesPage
+  let refuse = true
+  client.listIssuesPage = async (...args) => {
+    if (!refuse) return issues(...args)
+    throw Object.assign(new Error('GitHub continuation URL refused: it does not address the configured API base (origin https://evil.test)'), { hypErrorKind: 'github_foreign_origin' })
+  }
+  f.runtime.clientFactory = () => client
+
+  const refused = await runCaptureTick(f.runtime, { mode: 'backfill', only: ['o/one'] })
+  assert.equal(refused.errors.length, 1)
+  const afterRefusal = readCursors(f.stateDir).repos['o/one']
+  assert.equal(afterRefusal.work, undefined, 'the refusal clears the poisoned work')
+  assert.equal(afterRefusal.one_time_import, true, 'but a refusal is not terminal, so the import stays authorized')
+
+  // A bare `hyp github backfill` now reaches the repository through the import
+  // list, and the backfill-mode reset fires because `work` is gone.
+  const reset = await runCaptureTick(f.runtime, { mode: 'backfill' })
+  assert.equal(reset.errors.length, 1)
+  assert.equal(readCursors(f.stateDir).repos['o/one'].one_time_import, true, 'the reset does not silently drop the surviving authorization')
+
+  refuse = false
+  const recovered = await runCaptureTick(f.runtime, { mode: 'poll' })
+  assert.deepEqual(recovered.errors, [])
+  assert.equal(recovered.events, 1, 'the import still runs once the refusal is fixed, with no re-authorization')
+  assert.equal(readCursors(f.stateDir).repos['o/one'].one_time_import, undefined, 'and retires on completion')
+})
