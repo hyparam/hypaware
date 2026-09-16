@@ -25,6 +25,12 @@ Non-interactive and dry-run setup never ask or log in. A config that already
 includes a local GitHub selection is not re-authorized by this offer. A team's
 central activation does not stand in for this machine's login.
 
+The accept option names the access the login will request: the `repo` scope,
+which reaches private repositories and which GitHub grants with write. LLP 0409
+already makes `hyp github login` disclose that, but the login runs only after
+this yes, so the widest fact about the grant has to precede the answer rather
+than follow it.
+
 ## Activation {#activation}
 
 Yes composes the existing `@hypaware/github` plugin and its context-graph

@@ -27,7 +27,7 @@ export async function offerWizardGithub(opts) {
       const answer = await confirm({
         title: 'Would you like to collect GitHub information from your AI sessions so HypAware can query repositories, pull requests, and more?',
         options: [
-          { value: 'yes', label: 'Yes, connect GitHub', summary: 'Opens GitHub in your browser to sign in and enable collection.' },
+          { value: 'yes', label: 'Yes, connect GitHub', summary: 'Opens GitHub in your browser to sign in. GitHub asks for repo access, including private repositories; HypAware only reads.' },
           { value: 'no', label: 'Not now' },
         ],
         default: 'yes',
