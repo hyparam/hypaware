@@ -3,6 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { withFileLock } from '../../../../src/core/util/file_lock.js'
 
 /**
  * Per-repo capture cursors, persisted as a single sidecar JSON under the
@@ -45,15 +46,61 @@ export function readCursors(stateDir) {
 }
 
 /**
- * @param {string} stateDir
+ * Repos carrying a one-time-import authorization. A caller passes the set it
+ * read back to {@link writeCursors}, which is what distinguishes an
+ * authorization that arrived while it worked from one it has since completed
+ * or retired itself.
+ *
  * @param {CursorState} state
+ * @returns {Set<string>}
  */
-export function writeCursors(stateDir, state) {
+export function authorizedImports(state) {
+  /** @type {Set<string>} */
+  const repos = new Set()
+  for (const [repo, cursor] of Object.entries(state.repos)) {
+    if (cursor.one_time_import === true) repos.add(repo)
+  }
+  return repos
+}
+
+/**
+ * Commit the sidecar, adopting under the lock any one-time-import
+ * authorization that landed while the caller worked.
+ *
+ * The file is rewritten whole, so overlapping writers lose each other's edits,
+ * and a capture tick can span `CAPTURE_REQUEST_LIMIT` requests.
+ * `hyp github backfill` commits its authorization before any network work
+ * precisely so it is durable; without the read-back a tick already in flight
+ * closes over it with a stale snapshot, and nothing resumes an import the
+ * command has already reported as bounded work remaining.
+ *
+ * A repo carrying an authorization absent from `known` is adopted whole,
+ * because authorizing resets that repo's cursor to fetch full history: keeping
+ * this caller's advanced cursor would leave a marker that polls rather than
+ * imports. A repo in `known` is this caller's own to complete or retire, so
+ * its state wins and a finished import is not resurrected. Cursor advancement
+ * outside that window still follows the last writer, as before.
+ *
+ * @ref LLP 0409#one-time-imports [implements]: an authorization written before the network work survives a tick already in flight
+ *
+ * @param {string} stateDir
+ * @param {CursorState} state  mutated in place by an adoption, so the caller's snapshot matches disk
+ * @param {Set<string>} [known] authorizations the caller read before it worked
+ * @returns {Promise<void>}
+ */
+export async function writeCursors(stateDir, state, known) {
   fs.mkdirSync(stateDir, { recursive: true })
   const file = path.join(stateDir, STATE_FILE)
-  const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8')
-  fs.renameSync(tmp, file)
+  await withFileLock(`${file}.lock`, async () => {
+    if (known) {
+      for (const [repo, cursor] of Object.entries(readCursors(stateDir).repos)) {
+        if (cursor.one_time_import === true && !known.has(repo)) state.repos[repo] = cursor
+      }
+    }
+    const tmp = `${file}.tmp-${process.pid}-${randomUUID()}`
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8')
+    fs.renameSync(tmp, file)
+  })
 }
 
 /**
