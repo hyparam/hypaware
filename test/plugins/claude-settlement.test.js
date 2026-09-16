@@ -1,6 +1,7 @@
 // @ts-check
 
 import assert from 'node:assert/strict'
+import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -329,6 +330,181 @@ test('a valid transcript_path still takes the direct read with no projects-wide 
   }
 })
 
+// Issue #1794. `spawned_by_tool_use_id` is the one sidechain attribute the
+// live projector can miss and nothing else recovers: the sidecar
+// `agent-<id>.meta.json` is written by the CLI a moment after the exchange
+// finalizes, so a subagent's opening exchange projects without it. Transcript
+// identity re-settles here, and once the settled row is committed under its
+// native `part_id` the backfill lane's copy (which does carry the attribute)
+// is skipped by the materializer's pre-write `part_id` dedupe - so the
+// attribute is lost for good unless settlement re-derives it.
+test('settlement stamps spawned_by_tool_use_id from a sidecar written after projection', async () => {
+  const env = await stageEnv()
+  try {
+    const transcriptPath = await writeTranscript(env, 'sess-spawn', [
+      jsonlRow({
+        sessionId: 'sess-spawn', uuid: 'u-sub', parentUuid: null, agentId: 'ag1', isSidechain: true,
+        type: 'assistant',
+        message: { id: 'msg_s', role: 'assistant', content: [{ type: 'text', text: 'subagent answer' }] },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+    // The sidecar lands after the live projection did, which is why the row
+    // below carries no `claude.spawned_by_tool_use_id`.
+    await writeAgentMeta(env, 'sess-spawn', 'ag1', 'toolu_parent')
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-spawn',
+      transcript_path: transcriptPath,
+      git_branch: undefined,
+      cwd: '/work/repo',
+      ts: '2026-05-22T10:00:00.000Z',
+    })
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    const row = fallbackRow({
+      session_id: 'sess-spawn', role: 'assistant', agent_id: 'ag1', content_text: 'subagent answer',
+      match_key: matchKey('assistant', [{ type: 'text', text: 'subagent answer' }]),
+    })
+
+    const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
+
+    assert.equal(out.message_id, 'u-sub', 'identity still settles')
+    const attrs = /** @type {any} */ (out.attributes)
+    assert.equal(attrs?.claude?.spawned_by_tool_use_id, 'toolu_parent')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The production shape of issue #1794: an attached Desktop runs each
+// conversation in its own sandbox home, so the hook-recorded `transcript_path`
+// never resolves on the host and the sidecar lives beside the sandboxed
+// transcript. The provenance must settle wherever the identity settled.
+test('settlement stamps spawned_by_tool_use_id from a Desktop 3p sandbox sidecar', async () => {
+  const env = await stageEnv()
+  try {
+    await writeDesktop3pTranscript(env, 'sess-3p-spawn', [
+      jsonlRow({
+        sessionId: 'sess-3p-spawn', uuid: 'u-3p-sub', parentUuid: null, agentId: 'ag9', isSidechain: true,
+        type: 'assistant',
+        message: { id: 'msg_3p', role: 'assistant', content: [{ type: 'text', text: 'sandboxed answer' }] },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+    await writeDesktop3pAgentMeta(env, 'sess-3p-spawn', 'ag9', 'toolu_3p_parent')
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-3p-spawn',
+      // The path the in-container hook reported: meaningless on the host.
+      transcript_path: path.join(env.homeDir, 'sandbox', 'sess-3p-spawn.jsonl'),
+      git_branch: undefined,
+      cwd: '/work/repo',
+      ts: '2026-05-22T10:00:00.000Z',
+    })
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    const row = fallbackRow({
+      session_id: 'sess-3p-spawn', role: 'assistant', agent_id: 'ag9', content_text: 'sandboxed answer',
+      match_key: matchKey('assistant', [{ type: 'text', text: 'sandboxed answer' }]),
+    })
+
+    const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
+
+    assert.equal(out.message_id, 'u-3p-sub', 'identity still settles from the sandbox tree')
+    assert.equal(/** @type {any} */ (out.attributes)?.claude?.spawned_by_tool_use_id, 'toolu_3p_parent')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// A row that already carries the attribute (the live projector won the race)
+// keeps the value it was projected with, never the sidecar's.
+test('settlement leaves an already-stamped spawned_by_tool_use_id alone', async () => {
+  const env = await stageEnv()
+  try {
+    const transcriptPath = await writeTranscript(env, 'sess-kept', [
+      jsonlRow({
+        sessionId: 'sess-kept', uuid: 'u-kept', parentUuid: null, agentId: 'ag1', isSidechain: true,
+        type: 'assistant',
+        message: { id: 'msg_k', role: 'assistant', content: [{ type: 'text', text: 'kept answer' }] },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+    await writeAgentMeta(env, 'sess-kept', 'ag1', 'toolu_sidecar')
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-kept',
+      transcript_path: transcriptPath,
+      git_branch: undefined,
+      cwd: '/work/repo',
+      ts: '2026-05-22T10:00:00.000Z',
+    })
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
+
+    const row = fallbackRow({
+      session_id: 'sess-kept', role: 'assistant', agent_id: 'ag1', content_text: 'kept answer',
+      match_key: matchKey('assistant', [{ type: 'text', text: 'kept answer' }]),
+    })
+    row.attributes = {
+      gateway: { identity_source: 'gateway_fallback' },
+      claude: { match_key: row.attributes.claude.match_key, spawned_by_tool_use_id: 'toolu_live' },
+    }
+
+    const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
+    assert.equal(/** @type {any} */ (out.attributes)?.claude?.spawned_by_tool_use_id, 'toolu_live')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The cost guard. A settle batch with no sidechain row must read no sidecar
+// directory: `@hypaware/claude` is default-bundled and this pass also runs as
+// the hourly maintenance re-settle over committed fallback rows, most of which
+// are main-loop traffic that will never match.
+test('settlement reads no sidecar directory for a batch with no sidechain row', async () => {
+  const env = await stageEnv()
+  try {
+    const transcriptPath = await writeTranscript(env, 'sess-main', [
+      jsonlRow({
+        sessionId: 'sess-main', uuid: 'u-main', parentUuid: null, type: 'assistant',
+        message: { id: 'msg_m', role: 'assistant', content: [{ type: 'text', text: 'main answer' }] },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+    await writeAgentMeta(env, 'sess-main', 'ag1', 'toolu_unused')
+    await appendSessionContext(env.stateFile, {
+      session_id: 'sess-main',
+      transcript_path: transcriptPath,
+      git_branch: undefined,
+      cwd: '/work/repo',
+      ts: '2026-05-22T10:00:00.000Z',
+    })
+    const enricher = createClaudeSettlementEnricher({ homeDir: env.homeDir, stateFile: env.stateFile })
+    const row = fallbackRow({
+      session_id: 'sess-main', role: 'assistant', content_text: 'main answer',
+      match_key: matchKey('assistant', [{ type: 'text', text: 'main answer' }]),
+    })
+
+    // Parsing a sidecar is the one file read only an agent-meta lookup makes:
+    // the transcript resolver walks the same directories for subagent JSONL
+    // but never opens a `.meta.json`.
+    const real = fsSync.readFileSync
+    let sidecarReads = 0
+    try {
+      // @ts-expect-error instrumented for the duration of the settle call
+      fsSync.readFileSync = (file, opts) => {
+        if (String(file).endsWith('.meta.json')) sidecarReads += 1
+        return real(file, opts)
+      }
+      const [out] = /** @type {any[]} */ (await enricher.settle([row], settleCtx()))
+      assert.equal(out.message_id, 'u-main')
+    } finally {
+      fsSync.readFileSync = real
+    }
+    assert.equal(sidecarReads, 0, 'no agent-meta lookup for a batch with no sidechain row')
+  } finally {
+    await env.cleanup()
+  }
+})
+
 // --- helpers ---------------------------------------------------------
 
 // @ref LLP 0030#decision: the settlement enricher groups fallback rows by
@@ -381,11 +557,41 @@ async function stageEnv() {
   }
 }
 
-/** @param {{ homeDir: string }} env @param {string} sessionId @param {string[]} lines */
+/**
+ * @param {{ homeDir: string }} env @param {string} sessionId @param {string[]} lines
+ * @returns {Promise<string>} the transcript path, the value the hook records
+ */
 async function writeTranscript(env, sessionId, lines) {
   const dir = path.join(env.homeDir, '.claude', 'projects', 'repo')
   await fs.mkdir(dir, { recursive: true })
-  await fs.writeFile(path.join(dir, `${sessionId}.jsonl`), lines.join('\n') + '\n', 'utf8')
+  const filePath = path.join(dir, `${sessionId}.jsonl`)
+  await fs.writeFile(filePath, lines.join('\n') + '\n', 'utf8')
+  return filePath
+}
+
+/**
+ * Write the subagent sidecar Claude Code drops beside a session's transcript:
+ * `<transcriptDir>/<sessionId>/subagents/agent-<agentId>.meta.json`.
+ *
+ * @param {{ homeDir: string }} env @param {string} sessionId @param {string} agentId @param {string} toolUseId
+ */
+async function writeAgentMeta(env, sessionId, agentId, toolUseId) {
+  const dir = path.join(env.homeDir, '.claude', 'projects', 'repo', sessionId, 'subagents')
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(path.join(dir, `agent-${agentId}.meta.json`), JSON.stringify({ toolUseId }), 'utf8')
+}
+
+/**
+ * The sidecar mirror of {@link writeDesktop3pTranscript}: an in-container
+ * subagent's `agent-<id>.meta.json` sits beside its sandboxed transcript, not
+ * under `<homeDir>/.claude/projects`.
+ *
+ * @param {{ homeDir: string }} env @param {string} sessionId @param {string} agentId @param {string} toolUseId
+ */
+async function writeDesktop3pAgentMeta(env, sessionId, agentId, toolUseId) {
+  const dir = path.join(desktop3pProjectsDir(env), sessionId, 'subagents')
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(path.join(dir, `agent-${agentId}.meta.json`), JSON.stringify({ toolUseId }), 'utf8')
 }
 
 /**
@@ -397,13 +603,18 @@ async function writeTranscript(env, sessionId, lines) {
  * @param {{ homeDir: string }} env @param {string} sessionId @param {string[]} lines
  */
 async function writeDesktop3pTranscript(env, sessionId, lines) {
-  const dir = path.join(
+  const dir = desktop3pProjectsDir(env)
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(path.join(dir, `${sessionId}.jsonl`), lines.join('\n') + '\n', 'utf8')
+}
+
+/** @param {{ homeDir: string }} env */
+function desktop3pProjectsDir(env) {
+  return path.join(
     env.homeDir, 'Library', 'Application Support', 'Claude-3p',
     'local-agent-mode-sessions', '423c4275', '00000000', 'local_abc123',
     '.claude', 'projects', 'sandbox-outputs'
   )
-  await fs.mkdir(dir, { recursive: true })
-  await fs.writeFile(path.join(dir, `${sessionId}.jsonl`), lines.join('\n') + '\n', 'utf8')
 }
 
 /** @param {Record<string, unknown>} obj */

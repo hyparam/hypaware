@@ -226,10 +226,11 @@ export function createDesktop3pDirsCache(opts) {
      * can miss before the CLI inside the sandbox has written anything, and
      * that spends the session's sweep. It waits for the first sweep another
      * session forces, or for the TTL, whichever comes first, so the bound
-     * is one TTL. Transcript identity re-settles later and is unharmed;
-     * `loadAgentMeta`'s `spawned_by_tool_use_id` is stamped only live, so a
-     * sidechain exchange inside that window keeps it from the backfill lane
-     * rather than from here.
+     * is one TTL. Transcript identity re-settles later and is unharmed, and
+     * so does `loadAgentMeta`'s `spawned_by_tool_use_id`: settlement calls
+     * this loader too (issue #1794), so a sidechain exchange inside that
+     * window recovers its provenance on the same pass that recovers its
+     * identity.
      *
      * @param {string} homeDir
      * @param {string} sessionId
