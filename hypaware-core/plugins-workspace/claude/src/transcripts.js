@@ -307,20 +307,20 @@ export function* walkTranscriptRoots(roots) {
  *
  * A `transcriptPath` roots the walk at just that session's directory
  * (cheap: the live path). When that directory is not there at all the
- * path is stale, and a `sessionId` scan of `projectsDir` recovers the
- * session's real directory the way `loadTranscript` does, so a row whose
- * transcript identity that fall-through recovered also carries its
- * `spawned_by_tool_use_id`. A named directory that does exist ends the
- * lookup even when it holds no sidecar: that is a session whose sidecar
- * is simply not written, and the scan cannot find one for it either, so
- * it must not pay a projects-wide walk per exchange. The mirror stops
- * short of `loadTranscript` in one place: that also sweeps the Desktop 3p
- * sandbox roots on a miss, and this does not. With no `transcriptPath` at
- * all, `projectsDir` is scanned recursively for every session's sidecars
- * (the backfill path). Best-effort: a missing directory or an
- * unparseable sidecar is skipped, never thrown.
+ * path is stale, and the same two fallbacks `loadTranscript` uses recover
+ * the session's real directory: a `sessionId` scan of `projectsDir`, then
+ * a sweep of the Desktop 3p sandbox roots under `homeDir`, where an
+ * attached Desktop's sessions live instead of under `~/.claude/projects`.
+ * A row whose transcript identity either fallback recovered therefore also
+ * carries its `spawned_by_tool_use_id`. A named directory that does exist
+ * ends the lookup even when it holds no sidecar: that is a session whose
+ * sidecar is simply not written, and neither fallback can find one for it
+ * either, so it must not pay a projects-wide walk per exchange. With no
+ * `transcriptPath` at all, `projectsDir` is scanned recursively for every
+ * session's sidecars (the backfill path). Best-effort: a missing
+ * directory or an unparseable sidecar is skipped, never thrown.
  *
- * @param {{ transcriptPath?: string, projectsDir?: string, sessionId?: string }} opts
+ * @param {{ transcriptPath?: string, projectsDir?: string, sessionId?: string, homeDir?: string }} opts
  * @returns {Map<string, { tool_use_id: string }>}
  */
 export function loadAgentMeta(opts) {
@@ -331,35 +331,93 @@ export function loadAgentMeta(opts) {
     : opts.projectsDir
   if (rootDir) collectAgentMeta(rootDir, meta)
   // Only a `transcriptPath` whose session directory is not there at all is
-  // stale: fall through to the session-id scan `loadTranscript` uses, whose
+  // stale: fall through to the session-id scans `loadTranscript` uses, whose
   // session directory is where the sidecars are. An empty map alone is not
   // the signal. A live session that has simply written no sidecar yet is the
   // common sidechain case, and gating on the map would make every one of its
   // exchanges walk the whole projects tree, a cost that grows with the user's
   // history.
   if (
-    meta.size === 0 && opts.transcriptPath && opts.projectsDir && opts.sessionId &&
+    meta.size === 0 && opts.transcriptPath && opts.sessionId &&
     rootDir && !fs.existsSync(rootDir)
   ) {
     /** @type {Set<string>} */
     const seen = new Set()
-    for (const filePath of walkJsonlFiles(opts.projectsDir, opts.sessionId)) {
+    let located = opts.projectsDir
+      ? collectSessionAgentMeta([opts.projectsDir], opts.sessionId, meta, seen)
+      : false
+    // An attached Desktop runs each conversation in a sandbox home inside its
+    // own container, so a session the scan above cannot find is not missing,
+    // just somewhere `projectsDir` does not reach. It is the session being
+    // unfound that says so, not the map being empty: a session the scan
+    // located owns its sidecars whether or not it has written any yet, so
+    // gating on the map would sweep the container on every spawn under such a
+    // session, at a cost that grows with the conversations the container
+    // holds, and would let the container answer for a session the projects
+    // tree already found. Ordered and guarded like `loadTranscript`'s
+    // matching leg, sharing its TTL-cached root discovery and its one forced
+    // re-sweep.
+    if (meta.size === 0 && !located && opts.homeDir) {
+      const { dirs, cached } = desktop3pDirsCache.get(opts.homeDir)
+      if (collectSessionAgentMeta(dirs, opts.sessionId, meta, seen)) located = true
+      // A sandbox home appears exactly when its session starts, so a cached
+      // list can be one short: re-sweep once, uncached, when the session was
+      // in none of the dirs scanned. It is the session being nowhere, not the
+      // map being empty, that says the list may be stale. An empty map is the
+      // standing state of a located session whose sidecar is simply not
+      // written, and an attached Desktop's hook-written path never resolves on
+      // the host, so re-sweeping on the map would put a whole-container walk
+      // on every one of that conversation's exchanges.
+      if (meta.size === 0 && cached && !located) {
+        const refreshed = desktop3pDirsCache.get(opts.homeDir, { refresh: true })
+        collectSessionAgentMeta(refreshed.dirs, opts.sessionId, meta, seen)
+      }
+    }
+  }
+  return meta
+}
+
+/**
+ * Parse the sidecars of `<sessionId>`'s session directory under each projects
+ * dir into `meta`, stopping at the first dir that yields one (a session lives
+ * in exactly one directory). The sidecar mirror of {@link readSessionFromDirs}:
+ * the same session-id scan, resolved to directories rather than read as
+ * transcripts. `seen` carries across calls so a directory two legs both reach
+ * is walked once.
+ *
+ * @param {string[]} projectsDirs
+ * @param {string} sessionId
+ * @param {Map<string, { tool_use_id: string }>} meta
+ * @param {Set<string>} seen
+ * @returns {boolean} whether the session was found at all, sidecar or not:
+ *   what tells a caller its dir list was complete, the way a non-empty
+ *   `entries` tells `loadTranscript`'s
+ */
+function collectSessionAgentMeta(projectsDirs, sessionId, meta, seen) {
+  let located = false
+  for (const projectsDir of projectsDirs) {
+    for (const filePath of walkJsonlFiles(projectsDir, sessionId)) {
+      located = true
       // Sidecars live in the session file's sibling `<sessionId>/` directory,
       // and beside a subagent transcript already inside it (all the scan
       // yields when the session file itself is gone). The scan yields one
       // file per subagent, so those resolve to the same directory: walk and
       // parse each one once.
-      const dir = path.basename(filePath, '.jsonl') === opts.sessionId
-        ? path.join(path.dirname(filePath), opts.sessionId)
+      const dir = path.basename(filePath, '.jsonl') === sessionId
+        ? path.join(path.dirname(filePath), sessionId)
         : path.dirname(filePath)
       if (seen.has(dir)) continue
       seen.add(dir)
       collectAgentMeta(dir, meta)
-      // A session lives in exactly one directory.
-      if (meta.size > 0) break
+      if (meta.size > 0) return true
     }
+    // A session lives in exactly one dir, so the dir that held it answers for
+    // it even with no sidecar in it: walking on would both cost the rest of
+    // the container and let another dir under the same session id answer
+    // instead. The same stop `readSessionFromDirs` makes on its first match.
+    if (located) return true
   }
-  return meta
+  return located
 }
 
 /**
