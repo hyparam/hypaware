@@ -575,17 +575,22 @@ test('fix does not offer a listed recommendation whose id is not one, so no page
   // The picked id becomes the saved page's filename, so a listing that names
   // a row with a path rather than an id would write the page wherever that
   // path leads. Such a row is not a recommendation this verb can act on.
+  // The escape target is a directory this test owns: a fixed shared path
+  // would leak the artifact on failure and poison every later run.
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-outside-'))
+  t.after(() => fs.rm(outside, { recursive: true, force: true }))
+  const hostileId = path.relative(path.join(hypHome, 'recommendations'), path.join(outside, 'escape'))
   stubServer(t, (method, url) => {
     if (url.pathname === '/v1/reports') {
       return { status: 200, json: { reports: [{
         ...REPORT,
-        recommendations: [{ id: '../../../../../../../../tmp/hyp-fix-escape', page: 'recommendation-x' }],
+        recommendations: [{ id: hostileId, page: 'recommendation-x' }],
       }] } }
     }
     return { status: 200, body: new TextEncoder().encode(PAGE) }
   })
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
-  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
   const { ctx, out } = ctxWith({ HYP_HOME: hypHome })
   ctx.stdin.isTTY = true
   ctx.stdout.isTTY = true
@@ -594,7 +599,7 @@ test('fix does not offer a listed recommendation whose id is not one, so no page
   assert.match(out.join(''), /no recommendations to fix/)
   assert.equal(prompts.length, 0)
   assert.equal(launches.length, 0)
-  await assert.rejects(fs.access('/tmp/hyp-fix-escape.md'))
+  await assert.rejects(fs.access(path.join(outside, 'escape.md')))
 })
 
 test('fix: a cancelled pick starts nothing and succeeds', async (t) => {
