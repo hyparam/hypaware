@@ -249,6 +249,12 @@ export interface TranscriptFileState {
  */
 export interface Desktop3pDirsEntry {
   atMs: number
+  /**
+   * Whether this sweep replaced a different dir list: a container in
+   * motion, whose miss keeps its forced walk in reserve. False for a
+   * first sweep, which replaced no list.
+   */
+  moved: boolean
   dirs: string[]
   swept: Set<string>
 }
