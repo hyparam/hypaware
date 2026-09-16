@@ -518,7 +518,7 @@ export interface RunWizardPickOptions {
   /**
    * Central-layer-locked source ids from the join phase (LLP 0129
    * #join-before-picker). Each renders checked and disabled with the
-   * `· managed by your fleet` label suffix, and is filtered out of the
+   * `· set by your team` label suffix, and is filtered out of the
    * returned `sourcesPicked` so composition never re-adds a source the
    * central layer already owns.
    */

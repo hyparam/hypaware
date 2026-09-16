@@ -69,7 +69,7 @@ keypress per screen.
    first time. This is a standing preference; `hyp privacy folders`
    changes it later.
 
-<img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed tools locked on as managed by your fleet and a detected tool pre-checked.">
+<img src="images/wizard-pick.png" alt="The 'what do you want to collect' checklist, with team-managed tools locked on as set by your team and a detected tool pre-checked.">
 
 <!--
   Screenshots need re-shooting on a real terminal: issue #1146 tracks it.

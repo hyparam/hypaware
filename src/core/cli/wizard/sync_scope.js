@@ -154,7 +154,7 @@ export async function runWizardSyncScope(opts) {
     // A hidden pick standing beside the org rows breaks the exhaustive
     // reading of the fleet sentence: the carried row (LLP 0202
     // #carry-through) is in `sources`, composes into the *local* layer, and
-    // syncs, so "everything you picked is managed by your fleet" hands the
+    // syncs, so "everything you picked is set by your team" hands the
     // fleet an owner's claim over capture it does not own. The org rows get
     // a sentence scoped to themselves, and the machine's own capture gets
     // the line the no-locked branch already uses - a fact, never a name.
@@ -176,7 +176,7 @@ export async function runWizardSyncScope(opts) {
       }
       return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
     }
-    opts.stdout.write('Everything you picked is managed by your fleet and always syncs.\n')
+    opts.stdout.write('Everything you picked is set by your team and always syncs.\n')
     for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
     // A statement, not a screen: `noQuestion` is what tells the lane after
     // this one that there is nothing here to step back *to* (LLP 0191

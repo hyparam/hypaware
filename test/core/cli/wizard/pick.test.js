@@ -283,7 +283,7 @@ test('runWizardPick: autoAccept takes the default rows and prints what it accept
   }))
   const out = stdout.text()
   assert.match(out, /HypAware will record:/)
-  assert.match(out, /· managed by your fleet/, 'the locked row is named on the fast path too')
+  assert.match(out, /· set by your team/, 'the locked row is named on the fast path too')
   assert.match(out, /codex/i)
   assert.deepEqual(result.sourcesPicked, ['codex'])
   assert.deepEqual(result.clientsPicked, ['claude', 'codex'])
@@ -402,7 +402,7 @@ test('runWizardPick: a locked row renders checked, disabled, and fleet-labeled',
   const claudeRow = state.question.options.find((/** @type {any} */ o) => o.value === 'claude')
   assert.equal(claudeRow.checked, true)
   assert.equal(claudeRow.disabled, true)
-  assert.match(claudeRow.label, /managed by your fleet/)
+  assert.match(claudeRow.label, /set by your team/)
 })
 
 test('runWizardPick: a locked source is filtered out of the returned picks and composition', async () => {
@@ -493,7 +493,7 @@ test('runWizardPick: a managed machine no longer labels non-locked rows "stays o
   const rows = state.question.options
   // The locked row keeps the fleet label.
   const claudeRow = rows.find((/** @type {any} */ o) => o.value === 'claude')
-  assert.match(claudeRow.label, /managed by your fleet/)
+  assert.match(claudeRow.label, /set by your team/)
   // No row carries the retired suffix; a detected row keeps its own label.
   const codexRow = rows.find((/** @type {any} */ o) => o.value === 'codex')
   assert.match(codexRow.label, /detected/)
@@ -1033,9 +1033,12 @@ test('defaultOverwriteConfirmFactory: the prompt says the config is regenerated 
   })
   await confirm('/home/tester/.hyp/hypaware-config.json')
   // "Overwrite it?" reads as "keep adjusting my picks"; the file is rewritten
-  // from the picks, and the prompt has to say so before the y/N.
-  assert.match(asked.text(), /rewritten from your picks/i)
-  assert.match(asked.text(), /carried over/i)
+  // from the picks, and the prompt has to say so before the y/N, along with
+  // the two facts that make a yes safe: other settings survive, and a backup
+  // is taken first.
+  assert.match(asked.text(), /rewrites your HypAware config/i)
+  assert.match(asked.text(), /other settings are kept/i)
+  assert.match(asked.text(), /backup is saved/i)
 })
 
 // The confirm is the end of the happy path, after every question was

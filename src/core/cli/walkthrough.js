@@ -237,17 +237,14 @@ function legacyNumberedPromptFactory(opts) {
  * destroyed either way: the caller backs the file up before replacing
  * it, and the carried-over list below names what the rewrite keeps.
  *
- * The question says the file is *rewritten from the picks*, not merely
+ * The question says the file is *rewritten* from the choices, not merely
  * "overwritten": the write is a whole-file regeneration, and a user whose
  * mental model is "I am adjusting checkboxes" needs to know that before
- * the y/N. It also names what survives the regeneration, so the answer is
- * a decision about the picks rather than a bet on how much is lost.
- *
- * That is three facts, and as one paragraph they arrived as a wall of text
- * with the actual question buried at the end of it. So it is laid out
- * instead: the path on its own line, the consequence and the carried-over
- * list indented under it, and `Continue?` alone on the last line where a
- * reader's eye lands. Same facts, same order, scannable.
+ * the y/N. It also says the other settings survive and a backup is taken,
+ * in plain words rather than as a list of config sections (LLP 0407): the
+ * answer is a decision about the choices, not a bet on how much is lost.
+ * The path is not printed here; the backup line that follows a yes names
+ * it.
  *
  * A stdin that ends without a line (a terminal that dropped, a scripted
  * run whose input runs out before the commit point) is read through
@@ -265,17 +262,14 @@ function legacyNumberedPromptFactory(opts) {
 export function defaultOverwriteConfirmFactory(opts) {
   const input = /** @type {NodeJS.ReadableStream} */ (opts.stdin ?? process.stdin)
   const output = /** @type {NodeJS.WritableStream} */ (opts.stdout)
-  return async function (targetPath) {
+  return async function (_targetPath) {
     const rl = readline.createInterface({ input, output, terminal: false })
     const askLine = queuedLineAsker(rl, input, output)
     try {
       const answer = await askLine(
         '\n' +
-        `This config will be rewritten from your picks:\n` +
-        `  ${targetPath}\n` +
-        '\n' +
-        '  Carried over: retention window, export destinations, hand-edited\n' +
-        '  settings, and plugins the picker does not manage. A backup is kept.\n' +
+        'Saving rewrites your HypAware config from these choices.\n' +
+        'Other settings are kept and a backup is saved first.\n' +
         '\n' +
         'Continue? [Y/n]: '
       )

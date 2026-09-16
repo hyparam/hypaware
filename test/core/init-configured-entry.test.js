@@ -57,7 +57,7 @@ test('renderConfigSummary: a local install reads as set up, not fleet-managed', 
   const text = stdout.text()
 
   assert.match(text, /HypAware is already configured\./)
-  assert.doesNotMatch(text, /managed by your fleet/)
+  assert.doesNotMatch(text, /set by your team/)
   assert.doesNotMatch(text, /locked here/)
   assert.match(text, /Collecting:\s+Claude\n/)
   assert.doesNotMatch(text, /Saving to:/)
@@ -87,7 +87,7 @@ test('renderConfigSummary: a fleet-managed install marks each client synced vs l
   const text = stdout.text()
 
   assert.match(text, /HypAware is already configured\./)
-  assert.doesNotMatch(text, /managed by your fleet/)
+  assert.doesNotMatch(text, /set by your team/)
   assert.doesNotMatch(text, /locked here/)
   assert.match(text, /Collecting:\s+Claude \(synced\), Codex \(synced\), OpenClaw \(local only\)/)
   assert.doesNotMatch(text, /Saving to:/)

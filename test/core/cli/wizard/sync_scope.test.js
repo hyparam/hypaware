@@ -263,7 +263,7 @@ test('locked sources lead the menu as read-only fleet-suffixed rows', async () =
   assert.equal(lockedRow.value, 'claude')
   assert.equal(lockedRow.checked, true)
   assert.equal(lockedRow.disabled, true)
-  assert.match(lockedRow.label, /managed by your fleet/)
+  assert.match(lockedRow.label, /set by your team/)
   assert.deepEqual(result, { optedOut: [] })
 })
 
@@ -306,7 +306,7 @@ test('zero candidates with org rows: prints the position and the fleet line, pro
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
   assert.equal(prompted, false)
   assert.match(stdout.text(), /Step 3 of 4 · Choose what syncs/)
-  assert.match(stdout.text(), /managed by your fleet and always syncs/)
+  assert.match(stdout.text(), /set by your team and always syncs/)
   assert.equal(await readClientSyncEntries({ stateDir: stateDir }), null, 'no store write on the no-question path')
 })
 
@@ -480,7 +480,7 @@ test('a stale opt-out for a hidden locked row does not soften the fleet sentence
 // The fifth no-question fact, and the residual LLP 0276 left open: a visible
 // org row and a hidden carried pick standing at the same time. The fleet row
 // is real, so the screen still names it - but the carried row composes into
-// the *local* layer, so "everything you picked is managed by your fleet"
+// the *local* layer, so "everything you picked is set by your team"
 // would hand the fleet an owner's claim over capture it does not own.
 // @ref LLP 0281#visible-org-row [tests]:
 test('zero visible candidates with an org row and a hidden picked row: the fleet sentence covers only its own rows', async () => {
@@ -506,7 +506,7 @@ test('zero visible candidates with an org row and a hidden picked row: the fleet
   assert.match(stdout.text(), /capture claude/)
   // The claim that broke: the hidden pick is not the fleet's, so nothing may
   // say the fleet manages everything picked.
-  assert.doesNotMatch(stdout.text(), /Everything you picked is managed by your fleet/)
+  assert.doesNotMatch(stdout.text(), /Everything you picked is set by your team/)
   // And the hidden pick is disclosed as a fact without being named.
   assert.match(stdout.text(), /Capture already set up on this machine also syncs to your server\./)
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is still never named')
@@ -529,7 +529,7 @@ test('zero visible candidates with an org row and no hidden pick: keeps the exha
     prompt: async () => [],
   }))
 
-  assert.match(stdout.text(), /Everything you picked is managed by your fleet and always syncs\./)
+  assert.match(stdout.text(), /Everything you picked is set by your team and always syncs\./)
   assert.doesNotMatch(stdout.text(), /also syncs to your server/)
 })
 
@@ -558,7 +558,7 @@ test('zero visible candidates with an org row and a hidden pick already opted ou
   // The store answered the shipping question, so the export promise goes.
   assert.doesNotMatch(stdout.text(), /also syncs to your server/)
   // It did not answer the ownership question, so this one may not come back.
-  assert.doesNotMatch(stdout.text(), /Everything you picked is managed by your fleet/)
+  assert.doesNotMatch(stdout.text(), /Everything you picked is set by your team/)
   assert.match(stdout.text(), /Your fleet manages these and they always sync:/)
   assert.match(stdout.text(), /capture claude/)
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')

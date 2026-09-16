@@ -61,14 +61,14 @@ test('multiselect: a disabled row renders its label and checkbox', () => {
     kind: 'multiselect',
     title: 'pick',
     options: [
-      { value: 'locked', label: 'Claude · managed by your fleet', checked: true, disabled: true },
+      { value: 'locked', label: 'Claude · set by your team', checked: true, disabled: true },
       { value: 'b', label: 'B', checked: false },
     ],
     cursor: 0,
     status: 'active',
   }
   const lines = render(state, { color: false }).split('\n')
-  assert.ok(lines.some((l) => l.includes('[x] Claude · managed by your fleet')))
+  assert.ok(lines.some((l) => l.includes('[x] Claude · set by your team')))
 })
 
 test('multiselect: a disabled row under the cursor renders dim, not the cyan cursor color', () => {
@@ -279,7 +279,7 @@ test('render: items render verbatim between the title and the hint', () => {
   const state = {
     kind: 'select',
     title: 'HypAware will record:',
-    items: ['  Claude Code', '  OpenClaw · managed by your fleet'],
+    items: ['  Claude Code', '  OpenClaw · set by your team'],
     options: [{ value: 'accept', label: 'Record all' }],
     cursor: 0,
     status: 'active',
@@ -287,7 +287,7 @@ test('render: items render verbatim between the title and the hint', () => {
   const lines = render(state, { color: false }).split('\n')
   assert.equal(lines[0], 'HypAware will record:')
   assert.equal(lines[1], '  Claude Code')
-  assert.equal(lines[2], '  OpenClaw · managed by your fleet')
+  assert.equal(lines[2], '  OpenClaw · set by your team')
   assert.match(lines[3], /enter pick/)
 })
 
