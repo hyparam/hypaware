@@ -45,7 +45,7 @@ export const ORG_CONFIG_WAIT_MS = 60000
  *   the status says `'daemon_incomplete'` so the wizard can name the one
  *   thing that is missing instead of the sign-in that is not.
  *
- * @ref LLP 0134#login-lane [implements]: the fork's shared-collection row ("Collect shared agent logs") wraps the `hyp remote login` lane; the wizard adds narration and the locked-row computation, not a second enrollment path.
+ * @ref LLP 0134#login-lane [implements]: the fork's shared-collection row ("Sync to the cloud") wraps the `hyp remote login` lane; the wizard adds narration and the locked-row computation, not a second enrollment path.
  *
  * @param {RunWizardJoinOptions} opts
  * @returns {Promise<WizardJoinResult>}

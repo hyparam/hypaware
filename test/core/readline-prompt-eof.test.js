@@ -15,7 +15,7 @@
 // a hang rather than a wrong value and an unraced assertion would never
 // run at all.
 //
-// @ref LLP 0190#eof-everywhere [tests]: a spent stdin lands on the prompt's stated default rather than waiting on an answer that can never come
+// @ref LLP 0190#eof-everywhere [tests]: a spent stdin settles the prompt rather than waiting on an answer that can never come; what it settles to is the prompt's stated default, except where LLP 0299 #eof-declines has it decline
 // @ref LLP 0410#eof-quits [tests]: quit stays the fork's answer when the terminal stops answering, even though sync is the printed default
 
 import test from 'node:test'
