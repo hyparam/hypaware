@@ -402,6 +402,7 @@ test('an authorization another process staged puts the next tick on the backlog 
   await source.stop()
 
   assert.equal(readCursors(stateDir).repos['o/r']?.one_time_import, true, 'the authorization is durable on disk')
+  assert.ok(details.next_tick_at, 'the tick never settled, so there is no scheduling decision to read')
   assert.equal(details.backlog_pending, true, 'staged work another process wrote is backlog the daemon knows about')
   const delayMs = Date.parse(/** @type {string} */ (details.next_tick_at)) - Date.parse(/** @type {string} */ (details.last_tick_at))
   assert.ok(Math.abs(delayMs - BACKLOG_RETRY_MS) < 30_000, `next tick scheduled in ${delayMs}ms, not the backlog cadence`)

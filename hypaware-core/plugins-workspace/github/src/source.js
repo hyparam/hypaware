@@ -105,6 +105,7 @@ export async function startGithubSource() {
    * @returns {boolean}
    */
   // @ref LLP 0361#cadence [implements]: durable work reaches the backlog cadence without pinning the source to it
+  // @ref LLP 0360#cadence [constrained-by]: a repository that keeps failing retries on the ordinary cadence
   function stagedImportPending() {
     const staged = authorizedImports(readCursors(runtime.stateDir))
     let fresh = false
