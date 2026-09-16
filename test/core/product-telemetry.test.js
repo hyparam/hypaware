@@ -411,7 +411,7 @@ for (const enrolled of [true, false]) {
         env,
         stdout: { write() {} },
         stderr: { write: (/** @type {string} */ text) => { errors += text } }
-      })))
+      })), { code: 'EACCES' })
     } finally {
       // Restore before any assertion can fail: a mode-500 root also defeats
       // the temp-home cleanup this test registered.
