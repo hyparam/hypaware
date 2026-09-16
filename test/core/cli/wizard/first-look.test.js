@@ -74,8 +74,8 @@ test('runWizardFirstLook: writes the two setup sections, names the fuller comman
   assert.ok(!text.includes('Bash'))
   // A section that was never requested is never called unfinished.
   assert.ok(!text.includes('did not finish'))
-  // One pointer line, and it says the full block is bigger than this one.
-  assert.match(text, /See more anytime: hyp query overview \(adds repos and tools; --sql shows the queries\)/)
+  // No pointer line: the block ends on its last section.
+  assert.ok(!text.includes('See more anytime'))
   assert.ok(!text.includes('The SQL behind these'))
 })
 

@@ -88,7 +88,7 @@ test('runWizardSuggestSkill: yes runs `hyp ask` as a child that inherits the ter
     spawnFn: child.fn,
   })
   assert.deepEqual(result, { asked: true, launched: true })
-  assert.equal(question.title, 'Would you like HypAware to suggest a skill?')
+  assert.equal(question.title, 'Suggest a new skill?')
   assert.equal(question.default, 'yes')
   // The default acts, so a spent stdin must decline (LLP 0299 #eof-declines).
   assert.equal(question.eofValue, 'no')

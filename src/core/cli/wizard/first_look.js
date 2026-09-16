@@ -274,11 +274,6 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
               : '\nStopped here to keep setup moving.\n'
           )
         }
-        // The block is re-runnable, and the full one is *bigger* than what
-        // setup just printed: naming the two sections it adds is what stops
-        // the trim from reading as all there is. One durable entry point,
-        // stated as an upgrade rather than a repeat.
-        stdout.write(`\nSee more anytime: hyp query overview (adds repos and tools; --sql shows the queries)\n`)
         return {
           shown: true,
           providerRows: rows.providerRows.length,

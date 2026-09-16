@@ -1487,7 +1487,7 @@ test('runInitWizard: a yes to the skill offer runs `hyp ask` on this terminal', 
     },
   })
   await runInitWizard(opts)
-  assert.match(opts._suggestQuestion.title, /suggest a skill\?/)
+  assert.match(opts._suggestQuestion.title, /Suggest a new skill\?/)
   assert.equal(opts._suggestQuestion.eofValue, 'no')
   assert.equal(opts._askSpawn.cmd, process.execPath)
   assert.equal(opts._askSpawn.args.at(-1), 'ask')

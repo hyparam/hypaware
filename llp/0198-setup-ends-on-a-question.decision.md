@@ -177,10 +177,10 @@ Two consequences the trim must not get wrong:
   holds only the partial result, and the plan has to have travelled on
   it. Without this the trim would make setup claim repos and tools "did
   not finish" on every single run.
-- **The pointer line states an upgrade, not a repeat.** "See more
-  anytime: `hyp query overview` (adds repos and tools)" - because a
-  trimmed block under a line that says "see this again" teaches the user
-  that what they just saw is all there is.
+- **No pointer line.** The block ends on its last section. `hyp query
+  overview` is documented in the CLI reference and named when the block
+  has nothing to show; a trailer under every first look was one more
+  line between the user and setup's closing question.
 
 The trim only pays off because the planner charges for the sections it
 will actually run: `rowsAffordable` divides the budget by the requested
