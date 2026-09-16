@@ -23,10 +23,12 @@ one random installation identity. `organization` requires exactly one configured
 central sink with an already enrolled gateway and an HTTPS URL (loopback HTTP is
 allowed for fixtures). Both enabling operations create new consent generations
 and remove earlier pending copies. `off` removes pending copies; it does not erase
-records already accepted by the receiver. Requests already accepted remotely
-cannot be recalled. A running daemon needs a restart to begin collection after
-opt-in; it notices disable/enrollment changes within 30 seconds. Every send checks
-the effective binding before POST. Status is also discoverable from `hyp status`.
+records already accepted by the receiver. A failed `off` exits nonzero and, when
+collection is still in force, says that product telemetry remains enabled.
+Requests already accepted remotely cannot be recalled. A running daemon needs a
+restart to begin collection after opt-in; it notices disable/enrollment changes
+within 30 seconds. Every send checks the effective binding before POST. Status is
+also discoverable from `hyp status`.
 
 `preview` prints the exact serialized next queued batch, or `null` if none exists.
 Status includes the effective destination, collection policy, queue bytes/batches,
