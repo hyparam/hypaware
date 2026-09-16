@@ -392,6 +392,30 @@ test('automatic reporting honors off, local and malformed saved preferences', as
   assert.equal(effectivePolicy(root).mode, 'off')
 })
 
+// A failed opt-out must name what it left running, and only when collection
+// really survived it.
+for (const enrolled of [true, false]) {
+  test(`an opt-out whose preference write fails reports collection ${enrolled ? 'is still enabled' : 'is off'}`, async (t) => {
+    const home = temp(t)
+    const env = { HYP_HOME: home }
+    const root = productRoot(env)
+    if (enrolled) remoteEnrollment(home)
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 })
+    assert.equal(productStatus(env).collection, enrolled ? 'organization' : 'off')
+    fs.chmodSync(root, 0o500)
+    let errors = ''
+    await assert.rejects(runTelemetry(['off'], /** @type {any} */ ({
+      env,
+      stdout: { write() {} },
+      stderr: { write: (/** @type {string} */ text) => { errors += text } }
+    })))
+    fs.chmodSync(root, 0o700)
+    assert.equal(fs.existsSync(path.join(root, 'policy.json')), false)
+    assert.equal(productStatus(env).collection, enrolled ? 'organization' : 'off')
+    assert.equal(/product telemetry remains enabled/.test(errors), enrolled, errors)
+  })
+}
+
 test('automatic bindings survive refresh and stop on leave or an organization change', async (t) => {
   const home = temp(t)
   const root = productRoot({ HYP_HOME: home })

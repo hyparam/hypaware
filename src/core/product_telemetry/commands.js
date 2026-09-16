@@ -40,7 +40,17 @@ export async function runTelemetry(argv, ctx) {
     return 0
   }
   if (action === 'off' && argv.length === 1) {
-    writePolicy(root, 'off')
+    try {
+      writePolicy(root, 'off')
+    } catch (error) {
+      // An enrolled machine keeps collecting until the preference lands, so
+      // an opt-out that never reached disk must say what it left running.
+      if (effectivePolicy(root).mode !== 'off')
+        ctx.stderr.write(
+          'hyp telemetry: product telemetry remains enabled - the preference was not saved; resolve the error and opt out again\n'
+        )
+      throw error
+    }
     queue.prune(null)
   } else if (
     action === 'enable' &&
