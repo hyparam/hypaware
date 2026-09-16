@@ -9,6 +9,7 @@ import test from 'node:test'
 
 import { createClaudeBackfillProvider } from '../../hypaware-core/plugins-workspace/claude/src/backfill.js'
 import {
+  DESKTOP_3P_SWEPT_SESSIONS_MAX,
   claudeDesktop3pSessionRoots,
   createDesktop3pDirsCache,
   findDesktop3pProjectsDirs,
@@ -748,6 +749,36 @@ test('loadAgentMeta alone spends the walk its own get() made', async () => {
     }))
     assert.equal(again.result.size, 0)
     assert.equal(again.sweeps, 0, 'and the settled miss keeps the next pass free')
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
+// The `!cached` arm reaches `remember` for every session a TTL rollover
+// re-settles, and the memo already holds those sessions. At the cap, an
+// unguarded re-add deleted the oldest peer first and then added a member
+// already present, so one innocent session lost its slot (and one walk)
+// per rollover. The invariant: remembering a session the memo already
+// holds changes nothing. Built on a fresh cache filled to exactly the cap
+// through the arm under test, so the oldest member is `sess-0` by
+// construction and no assertion depends on a boundary survivor index.
+test('re-remembering a memoised session at the cap evicts no peer', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-cap-'))
+  try {
+    await fs.mkdir(siblingSandboxProjectsDir(homeDir), { recursive: true })
+    const cache = createDesktop3pDirsCache({ ttlMs: 1000, now: () => 0 })
+    cache.get(homeDir)
+    for (let i = 0; i < DESKTOP_3P_SWEPT_SESSIONS_MAX; i++) cache.refreshFor(homeDir, `sess-${i}`, false)
+    assert.equal(cache.refreshFor(homeDir, 'sess-0', true), null, 'the memo sits exactly at the cap with the oldest still held')
+
+    // A rollover re-settles a session the memo already holds.
+    cache.refreshFor(homeDir, 'sess-512', false)
+    assert.equal(cache.refreshFor(homeDir, 'sess-0', true), null, 'a present member re-added costs no peer its slot')
+
+    // A genuinely new session at the cap still takes the oldest slot, so
+    // the guard did not unbound the memo or reorder eviction.
+    cache.refreshFor(homeDir, 'sess-new', false)
+    assert.ok(cache.refreshFor(homeDir, 'sess-0', true), 'a genuinely new session evicts oldest-first as before')
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }

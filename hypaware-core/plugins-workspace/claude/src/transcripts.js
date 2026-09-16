@@ -124,7 +124,7 @@ const DESKTOP_3P_DIRS_TTL_MS = 30_000
  * wire-only reminders), so it is capped rather than left to grow with
  * uptime.
  */
-const DESKTOP_3P_SWEPT_SESSIONS_MAX = 1024
+export const DESKTOP_3P_SWEPT_SESSIONS_MAX = 1024
 
 /**
  * TTL cache over {@link findDesktop3pProjectsDirs}, keyed by home dir.
