@@ -28,6 +28,7 @@ import { isPromptBackError } from './tui/runtime.js'
 import { buildWalkthroughClientDescriptorMap, resolveHypHome } from './walkthrough.js'
 import { launchClient, resolveLaunchers } from './wizard/first_ask.js'
 import { askableClients, attachHint } from '../commands/ask.js'
+import { escapeForDisplay } from '../util/json_util.js'
 
 /**
  * @import { Stats } from 'node:fs'
@@ -36,6 +37,19 @@ import { askableClients, attachHint } from '../commands/ask.js'
  */
 
 const execFileAsync = promisify(execFile)
+
+/**
+ * Reports-plane text on its way to a person's terminal. Every field the
+ * server sends is remote-authored, and an ESC or `\r` in a title could
+ * repaint the listing line that pairs a title with the id a reader pastes
+ * into `hyp report fix`. Machine renders (`--json`, the client's prompt)
+ * stay byte-exact.
+ *
+ * @ref LLP 0225#decision [constrained-by]: remote text is escaped where a person reads it, never where a program does
+ * @param {unknown} value
+ * @returns {string}
+ */
+const esc = (value) => escapeForDisplay(String(value))
 
 /**
  * Core `report` commands: the member-facing client of the server's org-scoped
@@ -289,8 +303,8 @@ export async function runReportList(argv, ctx) {
     return 0
   }
   for (const r of reports) {
-    const title = typeof r.title === 'string' && r.title ? `\t${r.title}` : ''
-    ctx.stdout.write(`  ${r.publishedAt}\t${r.kind}/${r.period}\t${r.id}\t${r.bytes} bytes${title}\n`)
+    const title = typeof r.title === 'string' && r.title ? `\t${esc(r.title)}` : ''
+    ctx.stdout.write(`  ${esc(r.publishedAt)}\t${esc(r.kind)}/${esc(r.period)}\t${esc(r.id)}\t${esc(r.bytes)} bytes${title}\n`)
     // The server mints one id per `recommendation-<slug>` page and lists them
     // on the record, in page order, so a report's recommendations read
     // beneath it without fetching the report; the id is the token a caller
@@ -302,9 +316,9 @@ export async function runReportList(argv, ctx) {
     const recommendations = Array.isArray(r.recommendations) ? r.recommendations : []
     for (const c of recommendations) {
       if (typeof c?.id !== 'string' || typeof c?.page !== 'string') continue
-      const title = typeof c.title === 'string' && c.title ? `\t${c.title}` : ''
-      ctx.stdout.write(`      ${c.id}\t${c.page}${title}\n`)
-      if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`          ${c.summary}\n`)
+      const title = typeof c.title === 'string' && c.title ? `\t${esc(c.title)}` : ''
+      ctx.stdout.write(`      ${esc(c.id)}\t${esc(c.page)}${title}\n`)
+      if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`          ${esc(c.summary)}\n`)
     }
   }
   return 0
@@ -501,7 +515,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
         const label = typeof c.title === 'string' && c.title ? c.title : recommendationLabel(c.page)
         const reportTitle = typeof r.title === 'string' && r.title ? `  ${r.title}` : ''
         const summary = typeof c.summary === 'string' && c.summary ? firstSentence(c.summary) : `${c.id}  ${r.kind}/${r.period}${reportTitle}`
-        options.push({ value: c.id, label, summary })
+        options.push({ value: c.id, label: esc(label), summary: esc(summary) })
       }
     }
     if (options.length === 0) {
@@ -581,7 +595,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
     break
   }
   if (!page) {
-    ctx.stderr.write(`hyp report fix: the report no longer carries '${recommendation.page}' - list what it has with 'hyp report get ${report.kind} ${report.period} ${report.id}'\n`)
+    ctx.stderr.write(`hyp report fix: the report no longer carries '${esc(recommendation.page)}' - list what it has with 'hyp report get ${esc(report.kind)} ${esc(report.period)} ${esc(report.id)}'\n`)
     return 1
   }
   // Under HYP_HOME for the reason the ask's evidence is (LLP 0398
@@ -603,7 +617,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
     `Read the file \`${file}\`. It is one recommendation from a HypAware usage report (${where}): "${title}". ` +
     'Implement it in this repository: make the change it describes, verify it the way this repository verifies changes, ' +
     'and summarise what you changed. If it does not apply to this repository, say why instead of forcing it.'
-  ctx.stdout.write(`\nStarting ${launcher.label} on "${title}"...\n\n`)
+  ctx.stdout.write(`\nStarting ${launcher.label} on "${esc(title)}"...\n\n`)
   const result = await (deps.launchClient ?? launchClient)({ launcher, prompt, cwd: ctx.cwd, env: ctx.env })
   if (!result.ok) {
     ctx.stderr.write(`hyp report fix: could not start ${launcher.bin}: ${result.error ?? 'spawn failed'}\n`)

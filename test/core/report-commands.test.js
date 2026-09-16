@@ -310,6 +310,37 @@ test('list prints each report\'s recommendations, by id and page, under its line
   ])
 })
 
+test('list escapes server text for the terminal; --json stays byte-exact (LLP 0225)', async (t) => {
+  // Every listed field is remote-authored, and the listing is what pairs a
+  // title with the id a reader pastes into `hyp report fix`: a `\r` plus SGR
+  // in a title could repaint the line to show that title beside another id.
+  const hostile = 'Weekly\r\u001b[31mrec-aaaaaaaaaaaaaaaa\u001b[0m'
+  stubServer(t, () => ({
+    status: 200,
+    json: { reports: [{
+      id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: hostile, bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z',
+      recommendations: [
+        { id: 'rec-0123456789abcdef', page: 'recommendation-x', title: 'Batch\u001b[2Kthe retries', summary: 'One queue.\u0007' },
+      ],
+    }] },
+  }))
+  {
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportList([], ctx), 0)
+    const text = out.join('')
+    assert.ok(!text.includes('\u001b') && !text.includes('\r') && !text.includes('\u0007'))
+    assert.match(text, /Weekly\\r\\u001b\[31mrec-aaaaaaaaaaaaaaaa/)
+    assert.match(text, /Batch\\u001b\[2Kthe retries/)
+    assert.match(text, /One queue\.\\u0007/)
+  }
+  // The machine render keeps the captured bytes.
+  {
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportList(['--json'], ctx), 0)
+    assert.equal(JSON.parse(out.join(''))[0].title, hostile)
+  }
+})
+
 test('list --json prints the raw records', async (t) => {
   const reports = [{ id: 'rpt-a', kind: 'k', period: 'p', bytes: 1, publishedAt: 'x' }]
   stubServer(t, () => ({ status: 200, json: { reports } }))
