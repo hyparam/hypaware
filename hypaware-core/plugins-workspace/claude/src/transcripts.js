@@ -190,9 +190,10 @@ function collectNestedProjectsDirs(dir, depth, out) {
  *    session-context state file), read THAT file plus the subagent
  *    files under its sibling session directory. Cheap and direct,
  *    no projects-wide walk.
- *  - Otherwise scan `<projectsDir>/**\/<sessionId>.jsonl` (which also
- *    descends into `<sessionId>/` directories for subagent files) and
- *    concatenate matching files.
+ *  - With no `transcriptPath`, or when reading it yielded nothing (a
+ *    stale or dead path), scan `<projectsDir>/**\/<sessionId>.jsonl`
+ *    (which also descends into `<sessionId>/` directories for subagent
+ *    files) and concatenate matching files.
  *  - When that scan finds nothing and `homeDir` is provided, scan the
  *    Desktop 3p sandbox trees ({@link findDesktop3pProjectsDirs}):
  *    an attached Desktop writes its transcripts there, not under
@@ -227,7 +228,13 @@ export async function loadTranscript(opts, readFile = readTranscriptFile) {
     for (const filePath of walkJsonlFiles(sessionDir, undefined)) {
       await readFile(filePath, entries)
     }
-  } else {
+  }
+  // A hook-written `transcript_path` can be stale or dead (the file is gone,
+  // or was never written where it said), and a read of nothing must not end
+  // the lookup: the session would hold gateway-fallback identity for good. A
+  // direct read that yielded entries never reaches here, so the fast path
+  // stays one file read.
+  if (entries.length === 0) {
     for (const filePath of walkJsonlFiles(opts.projectsDir, opts.sessionId)) {
       await readFile(filePath, entries)
     }
