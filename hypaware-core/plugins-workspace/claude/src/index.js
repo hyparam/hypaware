@@ -12,7 +12,7 @@ import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { defaultConfigPath } from '../../../../src/core/config/schema.js'
 import { localOnlyListPath } from '../../../../src/core/usage-policy/index.js'
 import { removeLaunchdEnv } from '../../../../src/core/daemon/launchd_env.js'
-import { describeEphemeralBinPath, findInstalledHypawareBin, isEphemeralBinPath } from '../../../../src/core/cli/global_install.js'
+import { describeEphemeralBinPath, describeRepointedBinPath, findInstalledHypawareBin, isEphemeralBinPath, isSameBinFile } from '../../../../src/core/cli/global_install.js'
 import { CLAUDE_CONFIG_SECTION, validateClaudeConfig } from './config.js'
 import { MODE_OTEL, MODE_PROXY, attach, defaultSettingsPath, preflightOtelAttach } from './settings.js'
 import { resolveClaudeCodeVersion } from './claude_version.js'
@@ -326,6 +326,24 @@ export async function activate(ctx) {
                 hyp_client: CLIENT_NAME,
                 bin_path: hookBin.binPath,
               })
+            } else if (hookBin.repointedFrom !== undefined) {
+              // The walk's other outcome, and the one nothing else reports: a
+              // pinned project dependency traded for some other copy, on a
+              // path flagged durable because it is.
+              warnings.push(
+                describeRepointedBinPath(hookBin.binPath, hookBin.repointedFrom, 'the managed hook')
+              )
+              // The warning above is read once, by whoever attached; the skew
+              // it discloses is met later as a subcommand exiting 0, with the
+              // attach long gone. Recorded for the same reason the ephemeral
+              // arm records its own choice: so the machine can be asked
+              // afterwards which copy the hook was pointed at, and off what.
+              logger.warn('client.attach.repointed_hook_bin', {
+                hyp_plugin: PLUGIN_NAME,
+                hyp_client: CLIENT_NAME,
+                bin_path: hookBin.binPath,
+                repointed_from: hookBin.repointedFrom,
+              })
             }
 
             // A prior proxy marker makes this attach a migration. The settings
@@ -549,7 +567,9 @@ export async function activate(ctx) {
  * and still runs, months later, from a working directory nobody has chosen
  * yet, and the recorded command is `cwd` and `git_branch` capture rather than
  * any version-pinned surface. An operator who does mean a particular copy says
- * so with `HYPAWARE_BIN`.
+ * so with `HYPAWARE_BIN`. `repointedFrom` carries the entrypoint the walk
+ * moved off, so the caller can disclose the swap instead of leaving it to be
+ * met later as a subcommand exiting 0 and doing nothing (issue #1623).
  *
  * With nothing installed, the ephemeral path still captures until npm removes
  * it, so it is written and flagged `ephemeral` rather than refused.
@@ -563,15 +583,19 @@ export async function activate(ctx) {
  *
  * @param {NodeJS.ProcessEnv} env
  * @param {string} [cliBinPath]
- * @returns {{ binPath: string, ephemeral: boolean }}
+ * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string }}
  */
 export function resolveHookBinPath(env, cliBinPath = CLI_BIN_PATH) {
   const explicit = firstNonEmpty(env.HYPAWARE_BIN, env.HYP_BIN)
   if (explicit) return { binPath: path.resolve(explicit), ephemeral: false }
   if (!isEphemeralBinPath(cliBinPath, env)) return { binPath: cliBinPath, ephemeral: false }
   const installed = findInstalledHypawareBin(env)
-  if (installed !== undefined) return { binPath: installed, ephemeral: false }
-  return { binPath: cliBinPath, ephemeral: true }
+  if (installed === undefined) return { binPath: cliBinPath, ephemeral: true }
+  return {
+    binPath: installed,
+    ephemeral: false,
+    ...(isSameBinFile(installed, cliBinPath) ? {} : { repointedFrom: cliBinPath }),
+  }
 }
 
 /**

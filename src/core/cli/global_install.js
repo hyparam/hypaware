@@ -1,7 +1,7 @@
 // @ts-check
 
 import { spawn } from 'node:child_process'
-import { accessSync, constants as fsConstants, statSync } from 'node:fs'
+import { accessSync, constants as fsConstants, realpathSync, statSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -250,6 +250,70 @@ export function describeEphemeralBinPath(binPath, effect, env = process.env) {
   }
   return `inside a node_modules tree; ${effect} without warning once that tree is removed, `
     + "as an npm ci or a branch switch removes a project's node_modules"
+}
+
+/**
+ * The other half of that verdict, for the case where the `$PATH` walk did find
+ * something: the path recorded is not the copy that ran the command.
+ *
+ * Recording the entrypoint instead is the defect the walk exists to fix, so the
+ * swap is right and stays. What it is not is free: {@link findInstalledHypawareBin}
+ * compares no versions, so a team that pinned `hypaware` as a project
+ * dependency silently gets whatever older global copy is installed, flagged
+ * durable, and a subcommand that copy predates then fails at exit 0 - the same
+ * silence, one step along. Hence a notice naming both copies and the override
+ * that settles it, which is the only thing the operator can do about it.
+ *
+ * One function because both callers (`@hypaware/claude`'s managed hook,
+ * `@hypaware/claude-desktop`'s credential wrapper) are wording one verdict,
+ * for the same reason {@link describeEphemeralBinPath} words the other one.
+ *
+ * @param {string} binPath the durable copy that was recorded
+ * @param {string} entryPath the entrypoint that ran the command
+ * @param {string} subject what did the recording, as a noun phrase: it is
+ *   spliced in front of "records ...", so "the managed hook", not "hook"
+ * @returns {string}
+ */
+export function describeRepointedBinPath(binPath, entryPath, subject) {
+  return `${subject} records ${binPath}, not the ${entryPath} that ran this command, `
+    + 'because that copy sits in a tree that gets removed; the two can be different versions. '
+    + 'Set HYPAWARE_BIN to pin the copy you mean'
+}
+
+/**
+ * Whether two spellings name one file, for a caller deciding whether the walk
+ * actually moved.
+ *
+ * The two sides arrive spelled differently on purpose: the walk answers with
+ * `$PATH`'s own spelling, which for a global install is usually a symlink into
+ * the package tree, while the entrypoint reaches these callers resolved. A
+ * plain string compare therefore reads one install as two copies, and the
+ * install it reads that way is exactly the one that gets here: a pnpm or yarn
+ * global root carries the manifest that makes {@link isEphemeralBinPath} send
+ * it down the walk in the first place (issue #1625). Reported as a swap, that
+ * operator is told their one CLI may be two versions of itself.
+ *
+ * For the verdict only. Which spelling gets recorded stays the caller's
+ * decision, and stays the durable name rather than the versioned directory it
+ * currently points at.
+ *
+ * A spelling that will not resolve (gone, or the stat refused) falls back to
+ * itself, which is the conservative answer here: two names the filesystem
+ * cannot confirm are one file stay reported as the swap they look like.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function isSameBinFile(a, b) {
+  const real = (/** @type {string} */ p) => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return path.resolve(p)
+    }
+  }
+  return real(a) === real(b)
 }
 
 /**

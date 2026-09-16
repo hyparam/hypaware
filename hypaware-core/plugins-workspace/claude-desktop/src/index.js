@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { describeEphemeralBinPath } from '../../../../src/core/cli/global_install.js'
+import { describeEphemeralBinPath, describeRepointedBinPath } from '../../../../src/core/cli/global_install.js'
 import { Attr, getLogger } from '../../../../src/core/observability/index.js'
 
 import { CLAUDE_DESKTOP_CONFIG_SECTION, validateClaudeDesktopConfig } from './config.js'
@@ -310,6 +310,23 @@ async function runInstallHelper(argv, cmdCtx, sectionConfig, credential, stateDi
       getLogger('plugin.claude-desktop').warn('client.install_helper.ephemeral_hyp_bin', {
         [Attr.PLUGIN]: PLUGIN_NAME,
         bin_path: hypBin.binPath,
+      })
+    } else if (hypBin.repointedFrom !== undefined) {
+      // The walk's other outcome, and the one nothing else reports: a pinned
+      // project dependency traded for some other copy. On stdout beside the
+      // path just reported, not on stderr, which here means the recorded path
+      // is going to stop existing.
+      cmdCtx.stdout.write(
+        describeRepointedBinPath(hypBin.binPath, hypBin.repointedFrom, 'the wrapper') + '\n',
+      )
+      // Recorded for the reason the ephemeral arm above records its own
+      // choice: the line is read once, the wrapper outlives the session, and
+      // a credential fetch that starts failing on a version the baked copy
+      // predates reports nothing on this machine.
+      getLogger('plugin.claude-desktop').warn('client.install_helper.repointed_hyp_bin', {
+        [Attr.PLUGIN]: PLUGIN_NAME,
+        bin_path: hypBin.binPath,
+        repointed_from: hypBin.repointedFrom,
       })
     }
     return 0

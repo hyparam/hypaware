@@ -230,7 +230,11 @@ function managerRoot(dir, lockfile) {
  * `/usr/local/bin`, so on a machine carrying both, the shim is what a `$PATH`
  * walk meets first and the durable install is what it meets second.
  *
- * @param {{ installedBin?: boolean | 'shim' | 'mjs', shimAhead?: boolean }} [opts]
+ * `'link'` makes that second `hypaware` what those managers actually install:
+ * not a second copy but a symlink into the global root the entry script is
+ * already in, so the two spellings are one file.
+ *
+ * @param {{ installedBin?: boolean | 'shim' | 'mjs', shimAhead?: boolean | 'link' }} [opts]
  */
 function npxRig(opts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-bin-'))
@@ -284,7 +288,10 @@ function npxRig(opts = {}) {
 
   const shimDir = path.join(root, 'pnpm-ish')
   const shimBin = path.join(shimDir, 'hypaware')
-  if (opts.shimAhead) writeExecutable(shimBin)
+  if (opts.shimAhead === 'link') {
+    fs.mkdirSync(shimDir, { recursive: true })
+    fs.symlinkSync(pnpmGlobalCliPath, shimBin)
+  } else if (opts.shimAhead) writeExecutable(shimBin)
 
   return {
     stateDir: root,
@@ -429,6 +436,65 @@ test('the wrapper records the installed CLI, not a project-local node_modules pa
   assert.ok(body.includes(rig.globalBin), `wrapper does not run the installed CLI: ${body}`)
   assert.ok(!body.includes(rig.projectCliPath), `wrapper was pinned to the project tree: ${body}`)
   assert.equal(err, '', 'a durable path is not worth warning about')
+})
+
+// Issue #1623. The walk compares no versions, so a project that deliberately
+// pins `hypaware` has its wrapper written against whatever older global copy
+// is installed. Baking the pinned copy instead is the defect the test above
+// exists to prevent, so what the swap owes the operator is a notice and not a
+// different answer: both paths, and `HYPAWARE_BIN` as the way to pin one.
+test('a repointed wrapper reports the swap and names the override', async (t) => {
+  const rig = npxRig({ installedBin: true })
+
+  const { code, out, err, body } = await runInstallHelperWithEntry(t, rig, rig.projectCliPath)
+
+  assert.equal(code, 0)
+  assert.ok(body.includes(rig.globalBin), `wrapper does not run the installed CLI: ${body}`)
+  const notice = out.split('\n').find((line) => line.includes('HYPAWARE_BIN'))
+  assert.ok(notice, `no repoint notice on stdout: ${out}`)
+  assert.ok(notice.includes(rig.globalBin), `notice omits the recorded path: ${notice}`)
+  assert.ok(
+    notice.includes(fs.realpathSync(rig.projectCliPath)),
+    `notice omits the entry script that ran: ${notice}`,
+  )
+  // On stdout beside the path it just reported, because nothing here is going
+  // to rot: this command's stderr means the recorded path will stop existing.
+  assert.equal(err, '')
+})
+
+// The other half again, for the spelling case the string compare got wrong.
+// A pnpm or yarn global root carries the manifest that makes it read ephemeral
+// (issue #1625), so it comes down the walk, and the name that walk finds is a
+// link into that same root. One install, two spellings: nothing was swapped
+// and there is nothing to disclose.
+test('one install reached by two spellings reports no swap', async (t) => {
+  const rig = npxRig({ installedBin: true, shimAhead: 'link' })
+  t.after(() => rig.cleanup())
+
+  const resolved = resolveHypBin(rig.env, rig.pnpmGlobalCliPath)
+
+  // Still the durable name rather than the versioned directory behind it: the
+  // resolution is for the verdict, not for what gets baked into the wrapper.
+  assert.equal(resolved.binPath, rig.shimBin)
+  assert.equal(
+    resolved.repointedFrom,
+    undefined,
+    `one install reported as a swap off ${resolved.repointedFrom}`,
+  )
+})
+
+test('a wrapper recorded as it stands reports no swap', async (t) => {
+  // The other half of the contract. An ordinary durable entry script is never
+  // repointed, so there is nothing to disclose and a notice would be noise.
+  const rig = npxRig({ installedBin: true })
+  const durable = path.join(rig.stateDir, 'opt', 'hypaware', 'bin', 'hypaware.js')
+  writeExecutable(durable)
+
+  const { code, out, err } = await runInstallHelperWithEntry(t, rig, durable)
+
+  assert.equal(code, 0)
+  assert.doesNotMatch(out, /HYPAWARE_BIN/, out)
+  assert.equal(err, '')
 })
 
 test('with no CLI installed the project-local wrapper says what will break it', async (t) => {
