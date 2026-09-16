@@ -29,6 +29,41 @@ test('docLabel states the slug\'s date, else the generic wording', () => {
   assert.equal(docLabel('usage-review'), 'Internal report · generated from HypAware data')
 })
 
+test('docLabel prefers an explicit generation date over the slug\'s', () => {
+  // A served report is slugged by the period it covers, so its leading date is the
+  // period's first day, not the day it was generated; the caller states the real one.
+  assert.equal(docLabel('2026-09-04-to-2026-09-13-usage-review', '2026-09-15'), 'Internal report · generated 2026-09-15 from HypAware data')
+  assert.equal(docLabel('usage-review', '2026-09-15'), 'Internal report · generated 2026-09-15 from HypAware data')
+})
+
+test('docLabel ignores a generation date that is not a bare YYYY-MM-DD', () => {
+  // The masthead slot is interpolated into HTML unescaped, and the label is only safe
+  // there because it has a fixed shape. A caller handing over a timestamp rather than
+  // the documented YYYY-MM-DD must not get it rendered verbatim, and markup must not
+  // reach the page at all; the slug decides instead.
+  assert.equal(
+    docLabel('2026-08-02-usage-review', '2026-09-15T08:12:00.000Z'),
+    'Internal report · generated 2026-08-02 from HypAware data',
+  )
+  assert.equal(docLabel('usage-review', '2026-09-15T08:12:00.000Z'), 'Internal report · generated from HypAware data')
+  assert.equal(docLabel('usage-review', '</span><img src=x onerror=alert(1)>'), 'Internal report · generated from HypAware data')
+  // Both anchors carry weight. A timestamp starts with a valid date, so it pins the
+  // trailing anchor; this value ends with one, so it pins the leading anchor. Without
+  // it, a suffix match would smuggle the markup prefix through whole.
+  assert.equal(docLabel('usage-review', '<img src=x onerror=alert(1)>2026-09-15'), 'Internal report · generated from HypAware data')
+  // The anchors must stay single-line anchors. With the `m` flag they would match a
+  // first line and hand back the whole string, so a date with markup on a second line
+  // would reach the slot entire.
+  assert.equal(
+    docLabel('2026-08-02-usage-review', '2026-09-15\n<img src=x onerror=alert(1)>'),
+    'Internal report · generated 2026-08-02 from HypAware data',
+  )
+  // The character class must stay digits. A looser one (`.`, `\S`) still fits the
+  // ten-character frame, so markup shaped like a date would clear the anchors.
+  assert.equal(docLabel('usage-review', '<i>x-yz-ab'), 'Internal report · generated from HypAware data')
+  assert.equal(docLabel('2026-08-02-usage-review', ''), 'Internal report · generated 2026-08-02 from HypAware data')
+})
+
 test('pageTitle takes the first heading, trimmed, else the fallback', () => {
   assert.equal(pageTitle('# Team AI Usage Review\n\nBody.\n', 'fallback'), 'Team AI Usage Review')
   // Trailing spaces on the heading line must not reach the rendered <title>.
@@ -106,6 +141,36 @@ test('renderReports builds every report and no stale output', () => {
   fs.rmSync(path.join(dir, `${OTHER}.md`))
   renderReports({ dir })
   assert.ok(!fs.existsSync(path.join(dir, 'html', OTHER)), 'a deleted report must leave no stale HTML')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('renderReports stamps an explicit generation date on every page of the tree', () => {
+  const dir = fixtureTree()
+  renderReports({ dir, generatedOn: '2026-09-15' })
+
+  for (const file of [path.join(dir, 'html', SLUG, 'index.html'), path.join(dir, 'html', SLUG, 'trends.html')]) {
+    const html = fs.readFileSync(file, 'utf8')
+    assert.match(html, /generated 2026-09-15 from HypAware data/, `${path.basename(file)} must carry the given date`)
+    assert.doesNotMatch(html, /generated 2026-08-02 /, `${path.basename(file)} must not fall back to the slug's date`)
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('renderReports never puts an unvalidated generation date on a built page', () => {
+  // The guard belongs on the render path, not only inside docLabel: a label built any
+  // other way in buildReport would reach the masthead's unescaped slot with the
+  // caller's string intact. Assert the built HTML, so moving or bypassing the guard
+  // fails here and not only in the helper's own test.
+  const dir = fixtureTree()
+  renderReports({ dir, generatedOn: '</span><img src=x onerror=alert(1)>' })
+
+  for (const file of [path.join(dir, 'html', SLUG, 'index.html'), path.join(dir, 'html', SLUG, 'trends.html')]) {
+    const html = fs.readFileSync(file, 'utf8')
+    assert.doesNotMatch(html, /onerror=/, `${path.basename(file)} must carry no markup from the caller's date`)
+    assert.match(html, /generated 2026-08-02 from HypAware data/, `${path.basename(file)} must fall back to the slug's date`)
+  }
 
   fs.rmSync(dir, { recursive: true, force: true })
 })

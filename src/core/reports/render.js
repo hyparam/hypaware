@@ -102,14 +102,28 @@ export function pageTitle(markdown, fallback) {
 }
 
 /**
- * The masthead doc label. A dated slug states its date, so a reader can tell a generated
- * static report from the HypAware app.
+ * The masthead doc label. A generated report states the day it was generated, so a
+ * reader can tell a static report from the HypAware app.
+ *
+ * The date comes from the caller when it knows it (`generatedOn`), else from the slug:
+ * local reports are slugged `YYYY-MM-DD-<name>` by run date, so the slug's leading date
+ * is the generation date there. A caller whose slugs carry some other date (a served
+ * report is slugged by the period it covers, whose first day is not when it was made)
+ * passes the date explicitly. An undated slug with no date given gets the generic
+ * wording.
+ *
+ * Only a well-formed `YYYY-MM-DD` is taken; anything else (a full ISO timestamp, an
+ * empty string) is ignored and the slug decides. That keeps the label a fixed shape,
+ * so a caller's value cannot reach the masthead's unescaped slot as markup.
  *
  * @param {string} slug
+ * @param {string} [generatedOn] YYYY-MM-DD; wins over the slug's date when given
  */
-export function docLabel(slug) {
-  return /^\d{4}-\d{2}-\d{2}-/.test(slug)
-    ? `Internal report · generated ${slug.slice(0, 10)} from HypAware data`
+export function docLabel(slug, generatedOn) {
+  const given = /^\d{4}-\d{2}-\d{2}$/.test(generatedOn ?? '') ? generatedOn : undefined
+  const date = given ?? (/^\d{4}-\d{2}-\d{2}-/.test(slug) ? slug.slice(0, 10) : undefined)
+  return date
+    ? `Internal report · generated ${date} from HypAware data`
     : 'Internal report · generated from HypAware data'
 }
 
@@ -457,7 +471,7 @@ export function renderReports(options) {
 
   const slugs = discoverReports(dir)
   for (const slug of slugs) {
-    buildReport(dir, htmlDir, slug)
+    buildReport(dir, htmlDir, slug, options.generatedOn)
   }
 
   // @ref LLP 0196#the-inversion [implements]: the landing page is derived output, so it
@@ -523,8 +537,8 @@ const THEME_STUB = `/* Your theme. This file is yours: HypAware creates it once 
 */
 `
 
-/** @param {string} dir @param {string} htmlDir @param {string} slug */
-function buildReport(dir, htmlDir, slug) {
+/** @param {string} dir @param {string} htmlDir @param {string} slug @param {string} [generatedOn] */
+function buildReport(dir, htmlDir, slug, generatedOn) {
   const out = path.join(htmlDir, slug)
   fs.mkdirSync(path.join(out, 'assets'), { recursive: true })
   for (const asset of PAGE_ASSETS) {
@@ -534,7 +548,7 @@ function buildReport(dir, htmlDir, slug) {
   fs.copyFileSync(path.join(dir, 'assets', 'theme.css'), path.join(out, 'assets', 'theme.css'))
   fs.writeFileSync(path.join(out, '.nojekyll'), '')
 
-  const label = docLabel(slug)
+  const label = docLabel(slug, generatedOn)
   const source = fs.readFileSync(path.join(dir, `${slug}.md`), 'utf8')
   const sections = discoverSections(dir, slug)
 
