@@ -2,14 +2,17 @@
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
 import { createClaudeBackfillProvider } from '../../hypaware-core/plugins-workspace/claude/src/backfill.js'
 import {
+  claudeDesktop3pSessionRoots,
   createDesktop3pDirsCache,
   findDesktop3pProjectsDirs,
+  loadAgentMeta,
   loadTranscript,
 } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
 
@@ -43,11 +46,14 @@ function nestedSandboxProjectsDir(homeDir) {
   )
 }
 
-/** First-party layout observed on Desktop app 1.40609.1. */
-function firstPartySandboxProjectsDir(homeDir) {
+/**
+ * First-party layout observed on Desktop app 1.40609.1. The sandbox id
+ * varies so a test can stage the home a later conversation adds.
+ */
+function firstPartySandboxProjectsDir(homeDir, sandboxId = 'ghi789') {
   return path.join(
     homeDir, 'Library', 'Application Support', 'Claude',
-    'local-agent-mode-sessions', '99990000', '00000000', 'local_ghi789',
+    'local-agent-mode-sessions', '99990000', '00000000', `local_${sandboxId}`,
     '.claude', 'projects', 'sandbox-outputs'
   )
 }
@@ -442,10 +448,10 @@ test('createDesktop3pDirsCache serves cached roots within the TTL and re-sweeps 
     assert.equal(second.cached, true)
     assert.deepEqual(second.dirs, [path.dirname(sibling)])
 
-    // A forced refresh, and any get after the TTL, sweep fresh.
-    const refreshed = cache.get(homeDir, { refresh: true })
-    assert.equal(refreshed.cached, false)
-    assert.deepEqual(refreshed.dirs.sort(), [path.dirname(sibling), path.dirname(nested)].sort())
+    // A forced re-sweep for a session none of the cached dirs held, and any
+    // get after the TTL, sweep fresh.
+    const refreshed = cache.refreshFor(homeDir, 'sess-missing')
+    assert.deepEqual([...refreshed ?? []].sort(), [path.dirname(sibling), path.dirname(nested)].sort())
     nowMs = 2000
     assert.equal(cache.get(homeDir).cached, false)
   } finally {
@@ -471,6 +477,94 @@ test('loadTranscript finds a sandbox home created after the root cache was prime
     await writeTranscriptAt(nestedSandboxProjectsDir(homeDir), 'sess-b', desktop3pRows('sess-b'))
     const second = await loadTranscript({ projectsDir, sessionId: 'sess-b', homeDir })
     assert.equal(second.length, 2, 'refresh-on-miss finds the new sandbox home')
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Count the container discoveries a body performs. Every
+ * `findDesktop3pProjectsDirs` sweep reads each of the three session roots
+ * exactly once, so a readdir of a path named for a root is the sweep's
+ * signature, whether or not that root exists.
+ *
+ * @template T
+ * @param {() => Promise<T>} body
+ * @returns {Promise<{ result: T, sweeps: number }>}
+ */
+async function countSweeps(body) {
+  const real = fsSync.readdirSync
+  let rootReads = 0
+  // @ts-expect-error instrumented for the duration of the body
+  fsSync.readdirSync = (dir, opts) => {
+    if (String(dir).endsWith('local-agent-mode-sessions')) rootReads += 1
+    return real(dir, opts)
+  }
+  try {
+    const result = await body()
+    return { result, sweeps: rootReads / claudeDesktop3pSessionRoots('/x').length }
+  } finally {
+    fsSync.readdirSync = real
+  }
+}
+
+// Issue #1758. A session that will never match (SDK/headless traffic with no
+// transcript, a harness aux exchange, a wire-only reminder) misses inside the
+// cached root list, and the forced re-sweep re-stamped the cache's `atMs`, so
+// the miss never settled into the TTL: every settle pass re-walked the whole
+// container, and twice per exchange once `loadAgentMeta` grew the same leg.
+// One sweep per session per container list is the bound, and a sandbox home
+// that appears after the list was cached is still found on the settle that
+// asks for it.
+test('a never-matching session sweeps the container once, not once per settle', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-3p-resweep-'))
+  try {
+    const projectsDir = path.join(homeDir, '.claude', 'projects')
+    await fs.mkdir(projectsDir, { recursive: true })
+    await writeTranscriptAt(siblingSandboxProjectsDir(homeDir), 'sess-a', desktop3pRows('sess-a'))
+    await writeTranscriptAt(nestedSandboxProjectsDir(homeDir), 'sess-b', desktop3pRows('sess-b'))
+    await writeTranscriptAt(firstPartySandboxProjectsDir(homeDir), 'sess-c', desktop3pRows('sess-c'))
+
+    // What one settle pass of an exchange does: both loaders resolve the same
+    // session, each through the shared root cache.
+    const settle = async (/** @type {string} */ sessionId) => {
+      const entries = await loadTranscript({ projectsDir, sessionId, homeDir })
+      const meta = loadAgentMeta({
+        transcriptPath: path.join(homeDir, 'unresolvable', `${sessionId}.jsonl`),
+        projectsDir,
+        sessionId,
+        homeDir,
+      })
+      return { entries, meta }
+    }
+
+    // Primes the module-level root cache for this home.
+    assert.equal((await loadTranscript({ projectsDir, sessionId: 'sess-a', homeDir })).length, 2)
+
+    const first = await countSweeps(() => settle('sess-never'))
+    const second = await countSweeps(() => settle('sess-never'))
+    assert.equal(first.result.entries.length, 0)
+    assert.equal(second.result.entries.length, 0)
+    assert.ok(
+      first.sweeps + second.sweeps <= 1,
+      `two settles of one never-matching session force at most one container sweep, got ${first.sweeps + second.sweeps}`
+    )
+    assert.equal(second.sweeps, 0, 'the established miss costs no sweep at all')
+
+    // A new conversation starts: its sandbox home appears after the cached
+    // list was swept, and it is still found and upgraded, transcript and
+    // sidecar both. The memo is per session, not a container-wide stop.
+    const lateDir = firstPartySandboxProjectsDir(homeDir, 'late0000')
+    await writeTranscriptAt(lateDir, 'sess-late', desktop3pRows('sess-late'))
+    await fs.mkdir(path.join(lateDir, 'sess-late', 'subagents'), { recursive: true })
+    await fs.writeFile(
+      path.join(lateDir, 'sess-late', 'subagents', 'agent-sa1.meta.json'),
+      JSON.stringify({ toolUseId: 'toolu_late' }),
+      'utf8'
+    )
+    const late = await countSweeps(() => settle('sess-late'))
+    assert.equal(late.result.entries.length, 2, 'the new sandbox home is found')
+    assert.equal(late.result.meta.get('sa1')?.tool_use_id, 'toolu_late', 'and its sidecar with it')
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }
