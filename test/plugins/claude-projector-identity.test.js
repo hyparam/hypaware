@@ -8,6 +8,7 @@ import test from 'node:test'
 
 import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
+import { loadAgentMeta } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
 
 /**
  * End-to-end identity tests for the Claude exchange projector. Each
@@ -614,6 +615,46 @@ test('a valid transcript_path reads only its own session directory of sidecars',
     )
   } finally {
     await env.cleanup()
+  }
+})
+
+// The fall-through is for a `transcript_path` that points nowhere, not for
+// every empty result. A live session that has simply written no sidecar yet
+// is the common sidechain shape: gating on the empty map alone made each of
+// its exchanges walk the whole projects tree, a cost that grows with the
+// user's history. The same session id under a second repo directory is the
+// stand-in for that walk here (a real session lives in one directory): only
+// the stale path may reach it.
+test('an existing session directory ends the sidecar lookup; only a stale path scans projectsDir', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-agent-meta-'))
+  try {
+    const projectsDir = path.join(dir, 'projects')
+    // The named session directory is real, and holds no sidecar.
+    await fs.mkdir(path.join(projectsDir, 'repo-a', 'sess-x', 'subagents'), { recursive: true })
+    await fs.writeFile(path.join(projectsDir, 'repo-a', 'sess-x.jsonl'), '', 'utf8')
+    await fs.mkdir(path.join(projectsDir, 'repo-b', 'sess-x', 'subagents'), { recursive: true })
+    await fs.writeFile(path.join(projectsDir, 'repo-b', 'sess-x.jsonl'), '', 'utf8')
+    await fs.writeFile(
+      path.join(projectsDir, 'repo-b', 'sess-x', 'subagents', 'agent-sa1.meta.json'),
+      JSON.stringify({ toolUseId: 'toolu_scanned' }),
+      'utf8'
+    )
+
+    const named = loadAgentMeta({
+      transcriptPath: path.join(projectsDir, 'repo-a', 'sess-x.jsonl'),
+      projectsDir,
+      sessionId: 'sess-x',
+    })
+    assert.equal(named.size, 0, 'a session directory that exists is not a stale path')
+
+    const stale = loadAgentMeta({
+      transcriptPath: path.join(dir, 'gone', 'sess-x.jsonl'),
+      projectsDir,
+      sessionId: 'sess-x',
+    })
+    assert.equal(stale.get('sa1')?.tool_use_id, 'toolu_scanned')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
   }
 })
 
