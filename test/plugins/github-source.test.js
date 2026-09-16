@@ -24,6 +24,19 @@ test('source runs shortly after boot and reports structured completion-relative 
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
   /** @type {Array<{ name: string, attrs: Record<string, unknown> }>} */
   const logs = []
+  const cadenceMs = 10
+  // Hold the tick open for several cadences, so a schedule taken from the tick's
+  // start would land measurably earlier than one taken from its completion. The
+  // hold is a lower bound: a slower machine only holds longer, and every
+  // assertion below reads the timestamps the tick itself reported.
+  const holdMs = cadenceMs * 5
+  /** @type {() => void} */
+  let noteTickStarted = () => {}
+  const tickStarted = new Promise((resolve) => { noteTickStarted = () => resolve(undefined) })
+  /** @type {() => void} */
+  let noteTickCompleted = () => {}
+  const tickCompleted = new Promise((resolve) => { noteTickCompleted = () => resolve(undefined) })
+  let completedAt = 0
 
   setGithubRuntime(/** @type {any} */ ({
     stateDir,
@@ -31,33 +44,81 @@ test('source runs shortly after boot and reports structured completion-relative 
     config: {
       ignore: [],
       token_env: 'GITHUB_TOKEN',
-      poll_interval: '10ms',
+      poll_interval: `${cadenceMs}ms`,
       inventory: 'session_repos',
     },
-    observedRepos: { async list() { return [] } },
+    observedRepos: {
+      async list() {
+        await new Promise((resolve) => setTimeout(resolve, holdMs))
+        return []
+      },
+    },
     clientFactory: () => fakeClient({}),
     storage: {
       cacheTablePath() { return '/cache/github_events' },
       async appendRows() { throw new Error('empty inventory must not append') },
     },
     log: {
-      info(name, attrs) { logs.push({ name, attrs }) },
+      info(name, attrs) {
+        logs.push({ name, attrs })
+        if (name === 'github.poll_tick_started') noteTickStarted()
+        if (name === 'github.poll_tick_completed') {
+          completedAt = Date.now()
+          noteTickCompleted()
+        }
+      },
       error(name, attrs) { logs.push({ name, attrs }) },
     },
   }))
 
+  // The source unrefs its own timers, so nothing else keeps the event loop alive
+  // while the test waits on a tick. This interval does; its period is a
+  // keep-alive, never a deadline the sampling races.
+  const keepAlive = setInterval(() => {}, 1000)
+  t.after(() => clearInterval(keepAlive))
+
   const source = await startGithubSource()
-  await new Promise((resolve) => setTimeout(resolve, 35))
   assert.ok(source.status)
+
+  // A tick in flight reports no next tick: the schedule is taken when the tick
+  // completes, so until then there is nothing to report.
+  await tickStarted
+  const duringTick = await source.status()
+  assert.equal(duringTick.details?.in_flight, true)
+  assert.equal(duringTick.details?.next_tick_at, null)
+
+  await tickCompleted
+  // The reschedule runs in the tick promise's `finally` and the next tick is a
+  // timer, so `setImmediate` lands after every pending microtask and before the
+  // next timers phase. That samples the gap between two ticks by event-loop
+  // phase rather than on a wall-clock margin.
+  await new Promise((resolve) => setImmediate(resolve))
+  const sampledAt = Date.now()
   const status = await source.status()
   await source.stop()
 
   assert.ok(logs.some((entry) => entry.name === 'github.poll_tick_started'))
   assert.ok(logs.some((entry) => entry.name === 'github.poll_tick_completed'))
   assert.equal(status.state, 'ready')
-  assert.equal(status.details?.cadence, '10ms')
+  assert.equal(status.details?.cadence, `${cadenceMs}ms`)
   assert.equal(status.details?.inventory, 'session_repos')
+  assert.equal(status.details?.in_flight, false)
   assert.equal(typeof status.details?.next_tick_at, 'string')
+
+  const startedAt = Date.parse(String(status.details?.last_tick_at))
+  const nextTickAt = Date.parse(String(status.details?.next_tick_at))
+  const heldMs = completedAt - startedAt
+  assert.ok(heldMs >= cadenceMs * 2, `the tick ran ${heldMs}ms, long enough to tell the two schedules apart`)
+  // Completion-relative: one cadence after the tick finished, which for a tick
+  // held this long is well past one cadence after it started. Both bounds are
+  // exact rather than tolerant, since the schedule was taken between the
+  // completion and the sample: one cadence after each of those two instants
+  // brackets it however slow the machine running this is.
+  assert.ok(nextTickAt >= completedAt + cadenceMs,
+    `next tick is ${nextTickAt - completedAt}ms after completion, expected at least ${cadenceMs}ms`)
+  assert.ok(nextTickAt <= sampledAt + cadenceMs,
+    `next tick is ${nextTickAt - sampledAt}ms after the sample, expected at most ${cadenceMs}ms`)
+
   assert.ok(logs.every((entry) => !JSON.stringify(entry).includes('GITHUB_TOKEN')))
   assert.ok(logs.some((entry) => entry.name === 'github.poll_tick_completed'
     && entry.attrs.operation === 'poll'
