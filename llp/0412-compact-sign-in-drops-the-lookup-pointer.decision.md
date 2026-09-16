@@ -39,9 +39,10 @@ spec stop pointing in opposite directions.
 Compact lane only. The wide lane is untouched: `hyp remote login` outside
 the wizard still prints the lookup on its own line under the forwarding
 line, and its privacy block still names `hyp remote list`, exactly as
-LLP 0100 R1a requires of it. `hyp sync`'s plan output and the connected-
-elsewhere error path keep their own lookup strings. Only the compact
-sign-in line changed.
+LLP 0100 R1a requires of it. `hyp sync`'s plan output keeps its own lookup
+string, and the connected-elsewhere error paths keep their bare origins
+(R1a binds the success surfaces only). Only the compact sign-in line
+changed.
 
 ## Consequence {#consequence}
 
