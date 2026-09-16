@@ -8,6 +8,7 @@ import test from 'node:test'
 
 import { loadClientConfigLayers } from '../../src/core/config/grep_migration.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
+import { configRecordsPickAnswer } from '../../src/core/config/schema.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../../src/core/runtime/boot.js'
 import { createMcpServer } from '../../src/core/mcp/server.js'
 import { withFileLock } from '../../src/core/util/file_lock.js'
@@ -113,6 +114,19 @@ test('missing and malformed layers are not replaced', async (t) => {
   await fs.writeFile(f.centralConfigPath, '{broken')
   await f.migrate()
   assert.deepEqual(JSON.parse(await fs.readFile(f.configPath, 'utf8')).plugins, [])
+})
+
+test('an answer-less config keeps search without gaining a pick answer', async (t) => {
+  const f = await fixture(t)
+  // `hyp remote add` before the first `hyp init` (LLP 0277): no `plugins` key.
+  const original = { version: 2, query: { remotes: { org: { url: 'https://example.com' } } } }
+  await f.local(original)
+  const before = await fs.readFile(f.configPath, 'utf8')
+  const boot = await bootKernel({ hypHome: f.hypHome, env: f.env })
+  assert.equal(boot.runtime.verbs.getByTool('grep_search')?.plugin, grep.name)
+  assert.equal(await fs.readFile(f.configPath, 'utf8'), before)
+  assert.equal(configRecordsPickAnswer(JSON.parse(await fs.readFile(f.configPath, 'utf8'))), false)
+  assert.equal((await fs.readdir(f.hypHome)).some((name) => name.includes('.bak-')), false)
 })
 
 test('concurrent migrations produce one entry and one backup', async (t) => {

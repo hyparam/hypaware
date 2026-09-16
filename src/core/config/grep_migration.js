@@ -5,7 +5,7 @@ import fs from 'node:fs/promises'
 import { getLogger } from '../observability/index.js'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { withFileLock } from '../util/file_lock.js'
-import { loadConfigFile, prepareLocalConfigWrite } from './schema.js'
+import { configRecordsPickAnswer, loadConfigFile, prepareLocalConfigWrite } from './schema.js'
 
 /**
  * @import { LoadConfigResult } from '../../../src/core/config/types.js'
@@ -28,6 +28,12 @@ export async function loadClientConfigLayers({ configPath, centralConfigPath, mi
   })
   let layers = await read()
   if (!migrateGrep || !configPath || !needsGrep(layers)) return layers
+  // A local layer with no `plugins` array records no pick answer, and writing
+  // one would forge an answer nobody gave: onboarding would then open with every
+  // detected client unchecked, and status would call the machine a returning one.
+  // Search still works; it just costs the two list checks again next boot.
+  // @ref LLP 0277#answer-less [constrained-by]: the migration must not turn an answer-less config into a recorded pick answer
+  if (layers.local?.ok && !configRecordsPickAnswer(layers.local.config)) return withGrep(layers, configPath)
 
   try {
     return await withFileLock(`${configPath}.grep-migration.lock`, async () => {
