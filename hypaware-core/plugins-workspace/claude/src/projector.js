@@ -363,8 +363,15 @@ export function createClaudeExchangeProjector(opts) {
         // `agent-<id>.meta.json` sidecar Claude writes next to the
         // subagent transcript. Stamp its `toolUseId` so a subagent's
         // rows point back at the parent-thread Agent/Task tool_call_id.
+        // The session id and projects dir come along so a stale
+        // `transcript_path` falls through to the session scan that recovered
+        // this row's transcript identity.
         const spawnedByToolUseId = sessionContextRecord?.transcript_path
-          ? loadAgentMeta({ transcriptPath: sessionContextRecord.transcript_path }).get(agentId)?.tool_use_id
+          ? loadAgentMeta({
+            transcriptPath: sessionContextRecord.transcript_path,
+            projectsDir,
+            sessionId,
+          }).get(agentId)?.tool_use_id
           : undefined
         if (spawnedByToolUseId) {
           projection.attributes = mergeAttrs(projection.attributes, {

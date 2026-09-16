@@ -472,6 +472,151 @@ test('subagent exchange stamps spawned_by_tool_use_id from the meta sidecar', as
   }
 })
 
+// A hook-written `transcript_path` can go stale: the file is gone, or was
+// never written where the hook said. `loadTranscript` recovers the session by
+// scanning `projectsDir` for the session id; the sidecar lookup must recover
+// with it, or a row whose transcript identity was recovered still points at no
+// parent tool call.
+test('a stale transcript_path still recovers spawned_by_tool_use_id from the session scan', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-stale-spawn', [
+      jsonlRow({
+        sessionId: 'sess-stale-spawn',
+        uuid: 'u-main',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'main prompt' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+    ])
+    await writeSubagentTranscript(env, 'sess-stale-spawn', 'agent-sa1.jsonl', [
+      jsonlRow({
+        sessionId: 'sess-stale-spawn',
+        agentId: 'sa1',
+        isSidechain: true,
+        uuid: 'u-side',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'side prompt' },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+    await fs.writeFile(
+      path.join(env.homeDir, '.claude', 'projects', 'some-repo', 'sess-stale-spawn', 'subagents', 'agent-sa1.meta.json'),
+      JSON.stringify({ agentType: 'Explore', description: 'do a thing', toolUseId: 'toolu_recovered' }),
+      'utf8'
+    )
+    // ...but the hook recorded a path that no longer exists, so both the
+    // direct transcript read and the sidecar walk rooted at it find nothing.
+    await fs.writeFile(
+      env.stateFile,
+      JSON.stringify({
+        session_id: 'sess-stale-spawn',
+        transcript_path: path.join(env.homeDir, 'gone', 'sess-stale-spawn.jsonl'),
+        ts: '2026-05-22T09:59:00.000Z',
+      }) + '\n',
+      'utf8'
+    )
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-stale-spawn' }) },
+        messages: [{ role: 'user', content: 'side prompt' }],
+      },
+      requestHeaders: { 'x-claude-code-agent-id': 'sa1' },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].agent_id, 'sa1')
+    assert.equal(rows[0].is_sidechain, true)
+    // Transcript identity was recovered by the session scan...
+    assert.equal(rows[0].message_id, 'u-side')
+    // ...and so was the sidecar the scan's session directory holds.
+    assert.equal(
+      /** @type {any} */ (rows[0].attributes).claude.spawned_by_tool_use_id,
+      'toolu_recovered'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The other half: a `transcript_path` whose sidecar walk does find something
+// stays rooted at that session directory. A decoy sidecar for the same agent
+// id elsewhere in the projects tree is what a projects-wide walk would pick
+// up, and it must not be read.
+test('a valid transcript_path reads only its own session directory of sidecars', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-direct-spawn', [
+      jsonlRow({
+        sessionId: 'sess-direct-spawn',
+        uuid: 'u-main',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'main prompt' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+    ])
+    await writeSubagentTranscript(env, 'sess-direct-spawn', 'agent-sa1.jsonl', [
+      jsonlRow({
+        sessionId: 'sess-direct-spawn',
+        agentId: 'sa1',
+        isSidechain: true,
+        uuid: 'u-side',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'side prompt' },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+    await fs.writeFile(
+      path.join(env.homeDir, '.claude', 'projects', 'some-repo', 'sess-direct-spawn', 'subagents', 'agent-sa1.meta.json'),
+      JSON.stringify({ toolUseId: 'toolu_named' }),
+      'utf8'
+    )
+    // Same agent id, another session's directory: reachable only by a walk of
+    // the whole projects tree.
+    const decoyDir = path.join(env.homeDir, '.claude', 'projects', 'other-repo', 'sess-other', 'subagents')
+    await fs.mkdir(decoyDir, { recursive: true })
+    await fs.writeFile(
+      path.join(decoyDir, 'agent-sa1.meta.json'),
+      JSON.stringify({ toolUseId: 'toolu_decoy' }),
+      'utf8'
+    )
+    await fs.writeFile(
+      env.stateFile,
+      JSON.stringify({
+        session_id: 'sess-direct-spawn',
+        transcript_path: path.join(env.homeDir, '.claude', 'projects', 'some-repo', 'sess-direct-spawn.jsonl'),
+        ts: '2026-05-22T09:59:00.000Z',
+      }) + '\n',
+      'utf8'
+    )
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-direct-spawn' }) },
+        messages: [{ role: 'user', content: 'side prompt' }],
+      },
+      requestHeaders: { 'x-claude-code-agent-id': 'sa1' },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 1)
+    assert.equal(
+      /** @type {any} */ (rows[0].attributes).claude.spawned_by_tool_use_id,
+      'toolu_named'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
 test('cache_control on wire blocks and caller on transcript blocks do not break matching', async () => {
   const env = await stageClaudeEnv()
   try {

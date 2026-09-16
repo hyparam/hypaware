@@ -305,16 +305,17 @@ export function* walkTranscriptRoots(roots) {
  * nor the wire exchange. Returns a map keyed by the agent id parsed from
  * each filename.
  *
- * A `transcriptPath` scans just that session's directory (cheap: the
- * live path); otherwise `projectsDir` is scanned recursively (the
- * backfill path). This no longer mirrors `loadTranscript`, which falls
- * through to the session-id scan when a stale `transcriptPath` reads
- * empty: the sidecar lookup stays rooted at the named path, so a
- * session whose transcript identity that fall-through recovered still
- * carries no `spawned_by_tool_use_id`. Best-effort: a missing directory
- * or an unparseable sidecar is skipped, never thrown.
+ * Resolution mirrors `loadTranscript`: a `transcriptPath` roots the walk
+ * at just that session's directory (cheap: the live path), and when that
+ * yields no sidecars (a stale or dead path) a `sessionId` scan of
+ * `projectsDir` recovers the session's real directory, so a row whose
+ * transcript identity the same fall-through recovered also carries its
+ * `spawned_by_tool_use_id`. With no `transcriptPath` at all,
+ * `projectsDir` is scanned recursively for every session's sidecars (the
+ * backfill path). Best-effort: a missing directory or an unparseable
+ * sidecar is skipped, never thrown.
  *
- * @param {{ transcriptPath?: string, projectsDir?: string }} opts
+ * @param {{ transcriptPath?: string, projectsDir?: string, sessionId?: string }} opts
  * @returns {Map<string, { tool_use_id: string }>}
  */
 export function loadAgentMeta(opts) {
@@ -323,7 +324,37 @@ export function loadAgentMeta(opts) {
   const rootDir = opts.transcriptPath
     ? path.join(path.dirname(opts.transcriptPath), path.basename(opts.transcriptPath, '.jsonl'))
     : opts.projectsDir
-  if (!rootDir) return meta
+  if (rootDir) collectAgentMeta(rootDir, meta)
+  // A walk rooted at the named path that found sidecars never reaches here:
+  // the fast path stays one directory. A dead `transcriptPath` falls through
+  // to the session-id scan `loadTranscript` uses, whose session directory is
+  // where the sidecars are.
+  if (meta.size === 0 && opts.transcriptPath && opts.projectsDir && opts.sessionId) {
+    for (const filePath of walkJsonlFiles(opts.projectsDir, opts.sessionId)) {
+      // Sidecars live in the session file's sibling `<sessionId>/` directory,
+      // and beside a subagent transcript already inside it (all the scan
+      // yields when the session file itself is gone).
+      collectAgentMeta(
+        path.basename(filePath, '.jsonl') === opts.sessionId
+          ? path.join(path.dirname(filePath), opts.sessionId)
+          : path.dirname(filePath),
+        meta
+      )
+      // A session lives in exactly one directory.
+      if (meta.size > 0) break
+    }
+  }
+  return meta
+}
+
+/**
+ * Parse every agent-meta sidecar under `rootDir` into `meta`, keyed by
+ * agent id. Best-effort: an unreadable or unparseable sidecar is skipped.
+ *
+ * @param {string} rootDir
+ * @param {Map<string, { tool_use_id: string }>} meta
+ */
+function collectAgentMeta(rootDir, meta) {
   for (const { agentId, filePath } of walkAgentMetaFiles(rootDir)) {
     let parsed
     try { parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) } catch { continue }
@@ -331,7 +362,6 @@ export function loadAgentMeta(opts) {
     const toolUseId = stringValue(parsed.toolUseId)
     if (toolUseId) meta.set(agentId, { tool_use_id: toolUseId })
   }
-  return meta
 }
 
 /**
