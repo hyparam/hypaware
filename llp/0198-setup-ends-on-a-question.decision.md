@@ -177,10 +177,10 @@ Two consequences the trim must not get wrong:
   holds only the partial result, and the plan has to have travelled on
   it. Without this the trim would make setup claim repos and tools "did
   not finish" on every single run.
-- **The pointer line states an upgrade, not a repeat.** "See more
-  anytime: `hyp query overview` (adds repos and tools)" - because a
-  trimmed block under a line that says "see this again" teaches the user
-  that what they just saw is all there is.
+- **No pointer line.** The block ends on its last section. `hyp query
+  overview` is documented in the CLI reference and named when the block
+  has nothing to show; a trailer under every first look was one more
+  line between the user and setup's closing question.
 
 The trim only pays off because the planner charges for the sections it
 will actually run: `rowsAffordable` divides the budget by the requested
@@ -239,9 +239,9 @@ copy-paste failure this decision exists to remove, merely deferred by one
 screen. `hyp ask` renders the same list against the same probe and starts
 the chosen client, and `hyp ask "<question>"` skips the menu entirely,
 which is the shape a user reaches for once they know what they want.
-Every other closing surface already names a durable entry point (the
-first look prints "See this again anytime: hyp query overview"); this is
-the one for the questions.
+Every closing surface has its durable entry point (the first look's is
+`hyp query overview`, documented in the CLI reference rather than
+printed); this is the one for the questions.
 
 ## Consequences {#consequences}
 

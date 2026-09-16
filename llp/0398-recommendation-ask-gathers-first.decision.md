@@ -230,7 +230,7 @@ skips everything and starts straight on what was typed.
 have rooted a session in whatever directory `hyp init` was run from. With
 #run-directory that reason is gone: the client starts in the run
 directory wherever the ask was typed. So setup's last screen is now a
-question, "Would you like HypAware to suggest a skill?", and a yes runs
+question, "Suggest a new skill?", and a yes runs
 `hyp ask` as a child on the same terminal, the way LLP 0203 runs `hyp
 sync`. A no, a cancelled prompt, or a run that cannot prompt ends on one
 line naming the verb; an empty cache ends on the note that capture starts
