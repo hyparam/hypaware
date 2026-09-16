@@ -62,7 +62,7 @@ export function createDelivery(
         outbox.noteDrop()
         return
       }
-      const destination = effective.policy.url.replace(/\/$/, '')
+      const destination = effective.policy.url.replace(/\/+$/, '')
       const target = destination + '/v1/telemetry'
       const attempt = Math.min(16, (previous.attempt ?? 0) + 1)
       /** @param {string} state @param {number} [delay] */
