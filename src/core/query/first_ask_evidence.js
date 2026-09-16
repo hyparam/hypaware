@@ -110,26 +110,37 @@ const TRIGGER_SESSIONS = 40
 const TRIGGER_SESSIONS_TOTAL = 80
 
 /**
- * The row budget either session list is given for each session it names.
- * Twice the procedure window, because both statements read past what the
- * window is: a session that typed two candidate lines is anchored at the
- * earlier one, and the ending is the first substantial reply after the
- * window, so the replies inside it are read and dropped.
+ * The row budget either session list is given for each trigger it has a
+ * procedure to read. Twice the procedure window, because both statements
+ * read past what the window is: a session is anchored at its earliest
+ * trigger, and the ending is the first substantial reply after the window,
+ * so the replies inside it are read and dropped.
  *
- * Sessions, not triggers: a session that typed two candidate lines is
- * anchored once and budgeted once, so it can need more than its share.
- * Raising the budget to the trigger count would buy that back, at the
- * sort-buffer cost `TRIGGER_SESSIONS_TOTAL` exists to bound.
+ * Triggers, not sessions: a session that typed two candidate lines is
+ * anchored once but has two procedures inside its window, and one
+ * session's rows do not cover both of them plus the work between, so the
+ * later line's window falls off the end of the `limit` and its steps come
+ * back empty. The unit is free to choose because the sample is already
+ * sized in it: `sampleTriggers` bounds the sample at
+ * `TRIGGER_SESSIONS_TOTAL` trigger rows, so either statement's `limit`
+ * has the same ceiling of `TRIGGER_SESSIONS_TOTAL * ROWS_PER_TRIGGER` rows
+ * whichever unit it counts, and a sample whose triggers fall in distinct
+ * sessions, the ordinary one, reaches that ceiling either way. The anchor
+ * disjunction is one term a session still, so a multi-line session spends
+ * sort buffer alone, under a ceiling that was already paid for.
  *
  * The statement's `limit` is the sum of the budgets, not a ceiling applied
  * to each session on its own. This engine cannot say the latter without a
  * partitioned window function, which buffers its whole input and would
  * undo the bound, while `order by ... limit` sorts in a buffer the limit
- * itself sizes. So a session holding more than its share spends another's,
- * and `sessionsWithCalls` counts the sessions whose calls actually came
- * back rather than the sessions that were asked for.
+ * itself sizes. So a session holding more than its share spends another's
+ * (hypaware #1717), and `sessionsWithCalls` counts the sessions whose
+ * calls actually came back rather than the sessions that were asked for.
+ * It is the same limitation that leaves the rows between a session's
+ * anchor and its later triggers bought rather than skipped: a window per
+ * trigger needs a row cap per partition, which is that function again.
  */
-const ROWS_PER_SESSION = CALLS_AFTER * 2
+const ROWS_PER_TRIGGER = CALLS_AFTER * 2
 
 /**
  * Where the skill goes when the caller names no client. Claude Code's
@@ -213,7 +224,7 @@ function placeable(at) {
  * anyway, because `and` short-circuits: a row from an unnamed session is
  * rejected by the set test and never walks the disjunction.
  *
- * @param {{ id: string, at: number }[]} anchors
+ * @param {{ id: string, at: number, triggers: number }[]} anchors
  */
 function afterTrigger(anchors) {
   const ids = anchors.map((a) => sqlString(a.id)).join(', ')
@@ -222,17 +233,30 @@ function afterTrigger(anchors) {
 }
 
 /**
+ * The row budget a list statement is given: `ROWS_PER_TRIGGER` for every
+ * trigger the sample holds, not for every session it names.
+ *
+ * @param {{ triggers: number }[]} anchors
+ * @returns {number}
+ */
+function rowBudget(anchors) {
+  let triggers = 0
+  for (const a of anchors) triggers += a.triggers
+  return triggers * ROWS_PER_TRIGGER
+}
+
+/**
  * The statements, keyed by step. All bounded: aggregates, or lists over a
  * sampled set of sessions, each read from its trigger onwards and given a
- * budget of `ROWS_PER_SESSION` rows.
+ * budget of `ROWS_PER_TRIGGER` rows for every trigger it holds.
  *
  * @param {string} from
  * @returns {{
  *   record: string,
  *   lines: string,
  *   triggers: (lines: string[]) => string,
- *   calls: (anchors: { id: string, at: number }[]) => string,
- *   replies: (anchors: { id: string, at: number }[]) => string,
+ *   calls: (anchors: { id: string, at: number, triggers: number }[]) => string,
+ *   replies: (anchors: { id: string, at: number, triggers: number }[]) => string,
  * }}
  */
 export function evidenceSql(from) {
@@ -250,8 +274,8 @@ export function evidenceSql(from) {
     // to avoid.
     // @ref LLP 0398#consequences [constrained-by]: a row a session a candidate line is the bound; a LIMIT bounds only what comes back and would pick a different sample
     triggers: (lines) => `select session_id, lower(substr(content_text, 1, 42)) as line, min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example from ai_gateway_messages where date >= '${from}' and ${human} and length(content_text) between 12 and 160 and lower(substr(content_text, 1, 42)) in (${lines.map(sqlString).join(', ')}) group by 1, 2`,
-    calls: (anchors) => `select session_id, message_created_at as at, tool_name, substr(cast(tool_args as varchar), 1, 160) as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${anchors.length * ROWS_PER_SESSION}`,
-    replies: (anchors) => `select session_id, message_created_at as at, substr(content_text, 1, 500) as text from ai_gateway_messages where date >= '${from}' and role = 'assistant' and part_type = 'text' and length(content_text) > 200 and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${anchors.length * ROWS_PER_SESSION}`,
+    calls: (anchors) => `select session_id, message_created_at as at, tool_name, substr(cast(tool_args as varchar), 1, 160) as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${rowBudget(anchors)}`,
+    replies: (anchors) => `select session_id, message_created_at as at, substr(content_text, 1, 500) as text from ai_gateway_messages where date >= '${from}' and role = 'assistant' and part_type = 'text' and length(content_text) > 200 and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${rowBudget(anchors)}`,
   }
 }
 
@@ -349,31 +373,39 @@ export function sampleTriggers(triggers, perLine = TRIGGER_SESSIONS) {
 }
 
 /**
- * One anchor per session in a sampled trigger list: the session's id and
- * the earliest instant it typed any candidate line. Earliest, because a
- * session that typed two of them needs both procedures readable, and the
- * statements read forward from the anchor.
+ * One anchor per session in a sampled trigger list: the session's id, the
+ * earliest instant it typed any candidate line, and how many of them it
+ * typed. Earliest, because a session that typed two of them needs both
+ * procedures readable, and the statements read forward from the anchor.
+ * The count, because that is what the anchor costs to read: a session
+ * holding two triggers has two procedures inside one window, and the
+ * budget is spent per trigger.
  *
  * A session whose trigger instant does not parse is dropped rather than
  * read unanchored. `buildCandidates` compares every call against it, and
  * `NaN` compares false in both directions, so such a session contributes
- * no procedure however many of its rows are fetched.
+ * no procedure however many of its rows are fetched, and an unplaceable
+ * trigger of an anchored session is not counted for the same reason.
  *
  * @param {Record<string, unknown>[]} triggers
- * @returns {{ id: string, at: number }[]}
+ * @returns {{ id: string, at: number, triggers: number }[]}
  */
 export function sessionAnchors(triggers) {
-  /** @type {Map<string, number>} */
-  const earliest = new Map()
+  /** @type {Map<string, { at: number, triggers: number }>} */
+  const anchors = new Map()
   for (const t of triggers) {
     const id = String(t.session_id ?? '')
     if (!id) continue
     const at = instant(t.at)
     if (!placeable(at)) continue
-    const seen = earliest.get(id)
-    if (seen === undefined || at < seen) earliest.set(id, at)
+    const seen = anchors.get(id)
+    if (seen === undefined) anchors.set(id, { at, triggers: 1 })
+    else {
+      seen.triggers += 1
+      if (at < seen.at) seen.at = at
+    }
   }
-  return [...earliest].map(([id, at]) => ({ id, at }))
+  return [...anchors].map(([id, a]) => ({ id, at: a.at, triggers: a.triggers }))
 }
 
 /** A command head that is a step of a procedure, not a read. */

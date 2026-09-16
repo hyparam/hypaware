@@ -256,7 +256,11 @@ sessions that typed a candidate line are however many they are, so the
 two statements that list rows per session read a newest-first sample of
 them, 40 a line and 80 in all, each session from its own trigger onwards
 rather than from its first row, under one row budget of twice the
-procedure window per session named. The total matters as much as the
+procedure window per trigger read. Per trigger and not per session
+because the sample is bounded in triggers: a session that typed two
+candidate lines is anchored once but has two procedures inside its
+window, and 80 triggers cost the same 4,800 rows whether they fall in 80
+sessions or in 40. The total matters as much as the
 per-line cap: both statements cost a pass over every named session for
 each row they scan, so five lines in disjoint sessions would name 200 and
 run slower than the unbounded statement this replaces. One line still
