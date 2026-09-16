@@ -8,6 +8,7 @@ import test from 'node:test'
 
 import { createAiGatewayMessageProjector } from '../../hypaware-core/plugins-workspace/ai-gateway/src/message_projector.js'
 import { createClaudeExchangeProjector } from '../../hypaware-core/plugins-workspace/claude/src/projector.js'
+import { loadAgentMeta } from '../../hypaware-core/plugins-workspace/claude/src/transcripts.js'
 
 /**
  * End-to-end identity tests for the Claude exchange projector. Each
@@ -469,6 +470,191 @@ test('subagent exchange stamps spawned_by_tool_use_id from the meta sidecar', as
     )
   } finally {
     await env.cleanup()
+  }
+})
+
+// A hook-written `transcript_path` can go stale: the file is gone, or was
+// never written where the hook said. `loadTranscript` recovers the session by
+// scanning `projectsDir` for the session id; the sidecar lookup must recover
+// with it, or a row whose transcript identity was recovered still points at no
+// parent tool call.
+test('a stale transcript_path still recovers spawned_by_tool_use_id from the session scan', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-stale-spawn', [
+      jsonlRow({
+        sessionId: 'sess-stale-spawn',
+        uuid: 'u-main',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'main prompt' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+    ])
+    await writeSubagentTranscript(env, 'sess-stale-spawn', 'agent-sa1.jsonl', [
+      jsonlRow({
+        sessionId: 'sess-stale-spawn',
+        agentId: 'sa1',
+        isSidechain: true,
+        uuid: 'u-side',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'side prompt' },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+    await fs.writeFile(
+      path.join(env.homeDir, '.claude', 'projects', 'some-repo', 'sess-stale-spawn', 'subagents', 'agent-sa1.meta.json'),
+      JSON.stringify({ agentType: 'Explore', description: 'do a thing', toolUseId: 'toolu_recovered' }),
+      'utf8'
+    )
+    // ...but the hook recorded a path that no longer exists, so both the
+    // direct transcript read and the sidecar walk rooted at it find nothing.
+    await fs.writeFile(
+      env.stateFile,
+      JSON.stringify({
+        session_id: 'sess-stale-spawn',
+        transcript_path: path.join(env.homeDir, 'gone', 'sess-stale-spawn.jsonl'),
+        ts: '2026-05-22T09:59:00.000Z',
+      }) + '\n',
+      'utf8'
+    )
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-stale-spawn' }) },
+        messages: [{ role: 'user', content: 'side prompt' }],
+      },
+      requestHeaders: { 'x-claude-code-agent-id': 'sa1' },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].agent_id, 'sa1')
+    assert.equal(rows[0].is_sidechain, true)
+    // Transcript identity was recovered by the session scan...
+    assert.equal(rows[0].message_id, 'u-side')
+    // ...and so was the sidecar the scan's session directory holds.
+    assert.equal(
+      /** @type {any} */ (rows[0].attributes).claude.spawned_by_tool_use_id,
+      'toolu_recovered'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The other half: a `transcript_path` whose sidecar walk does find something
+// stays rooted at that session directory. A decoy sidecar for the same agent
+// id elsewhere in the projects tree is what a projects-wide walk would pick
+// up, and it must not be read.
+test('a valid transcript_path reads only its own session directory of sidecars', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    await writeTranscript(env, 'sess-direct-spawn', [
+      jsonlRow({
+        sessionId: 'sess-direct-spawn',
+        uuid: 'u-main',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'main prompt' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }),
+    ])
+    await writeSubagentTranscript(env, 'sess-direct-spawn', 'agent-sa1.jsonl', [
+      jsonlRow({
+        sessionId: 'sess-direct-spawn',
+        agentId: 'sa1',
+        isSidechain: true,
+        uuid: 'u-side',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', content: 'side prompt' },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }),
+    ])
+    await fs.writeFile(
+      path.join(env.homeDir, '.claude', 'projects', 'some-repo', 'sess-direct-spawn', 'subagents', 'agent-sa1.meta.json'),
+      JSON.stringify({ toolUseId: 'toolu_named' }),
+      'utf8'
+    )
+    // Same agent id, another session's directory: reachable only by a walk of
+    // the whole projects tree.
+    const decoyDir = path.join(env.homeDir, '.claude', 'projects', 'other-repo', 'sess-other', 'subagents')
+    await fs.mkdir(decoyDir, { recursive: true })
+    await fs.writeFile(
+      path.join(decoyDir, 'agent-sa1.meta.json'),
+      JSON.stringify({ toolUseId: 'toolu_decoy' }),
+      'utf8'
+    )
+    await fs.writeFile(
+      env.stateFile,
+      JSON.stringify({
+        session_id: 'sess-direct-spawn',
+        transcript_path: path.join(env.homeDir, '.claude', 'projects', 'some-repo', 'sess-direct-spawn.jsonl'),
+        ts: '2026-05-22T09:59:00.000Z',
+      }) + '\n',
+      'utf8'
+    )
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-direct-spawn' }) },
+        messages: [{ role: 'user', content: 'side prompt' }],
+      },
+      requestHeaders: { 'x-claude-code-agent-id': 'sa1' },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 1)
+    assert.equal(
+      /** @type {any} */ (rows[0].attributes).claude.spawned_by_tool_use_id,
+      'toolu_named'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The fall-through is for a `transcript_path` that points nowhere, not for
+// every empty result. A live session that has simply written no sidecar yet
+// is the common sidechain shape: gating on the empty map alone made each of
+// its exchanges walk the whole projects tree, a cost that grows with the
+// user's history. The same session id under a second repo directory is the
+// stand-in for that walk here (a real session lives in one directory): only
+// the stale path may reach it.
+test('an existing session directory ends the sidecar lookup; only a stale path scans projectsDir', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-agent-meta-'))
+  try {
+    const projectsDir = path.join(dir, 'projects')
+    // The named session directory is real, and holds no sidecar.
+    await fs.mkdir(path.join(projectsDir, 'repo-a', 'sess-x', 'subagents'), { recursive: true })
+    await fs.writeFile(path.join(projectsDir, 'repo-a', 'sess-x.jsonl'), '', 'utf8')
+    await fs.mkdir(path.join(projectsDir, 'repo-b', 'sess-x', 'subagents'), { recursive: true })
+    await fs.writeFile(path.join(projectsDir, 'repo-b', 'sess-x.jsonl'), '', 'utf8')
+    await fs.writeFile(
+      path.join(projectsDir, 'repo-b', 'sess-x', 'subagents', 'agent-sa1.meta.json'),
+      JSON.stringify({ toolUseId: 'toolu_scanned' }),
+      'utf8'
+    )
+
+    const named = loadAgentMeta({
+      transcriptPath: path.join(projectsDir, 'repo-a', 'sess-x.jsonl'),
+      projectsDir,
+      sessionId: 'sess-x',
+    })
+    assert.equal(named.size, 0, 'a session directory that exists is not a stale path')
+
+    const stale = loadAgentMeta({
+      transcriptPath: path.join(dir, 'gone', 'sess-x.jsonl'),
+      projectsDir,
+      sessionId: 'sess-x',
+    })
+    assert.equal(stale.get('sa1')?.tool_use_id, 'toolu_scanned')
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
   }
 })
 

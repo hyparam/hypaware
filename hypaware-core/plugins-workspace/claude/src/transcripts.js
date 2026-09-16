@@ -305,16 +305,22 @@ export function* walkTranscriptRoots(roots) {
  * nor the wire exchange. Returns a map keyed by the agent id parsed from
  * each filename.
  *
- * A `transcriptPath` scans just that session's directory (cheap: the
- * live path); otherwise `projectsDir` is scanned recursively (the
- * backfill path). This no longer mirrors `loadTranscript`, which falls
- * through to the session-id scan when a stale `transcriptPath` reads
- * empty: the sidecar lookup stays rooted at the named path, so a
- * session whose transcript identity that fall-through recovered still
- * carries no `spawned_by_tool_use_id`. Best-effort: a missing directory
- * or an unparseable sidecar is skipped, never thrown.
+ * A `transcriptPath` roots the walk at just that session's directory
+ * (cheap: the live path). When that directory is not there at all the
+ * path is stale, and a `sessionId` scan of `projectsDir` recovers the
+ * session's real directory the way `loadTranscript` does, so a row whose
+ * transcript identity that fall-through recovered also carries its
+ * `spawned_by_tool_use_id`. A named directory that does exist ends the
+ * lookup even when it holds no sidecar: that is a session whose sidecar
+ * is simply not written, and the scan cannot find one for it either, so
+ * it must not pay a projects-wide walk per exchange. The mirror stops
+ * short of `loadTranscript` in one place: that also sweeps the Desktop 3p
+ * sandbox roots on a miss, and this does not. With no `transcriptPath` at
+ * all, `projectsDir` is scanned recursively for every session's sidecars
+ * (the backfill path). Best-effort: a missing directory or an
+ * unparseable sidecar is skipped, never thrown.
  *
- * @param {{ transcriptPath?: string, projectsDir?: string }} opts
+ * @param {{ transcriptPath?: string, projectsDir?: string, sessionId?: string }} opts
  * @returns {Map<string, { tool_use_id: string }>}
  */
 export function loadAgentMeta(opts) {
@@ -323,7 +329,47 @@ export function loadAgentMeta(opts) {
   const rootDir = opts.transcriptPath
     ? path.join(path.dirname(opts.transcriptPath), path.basename(opts.transcriptPath, '.jsonl'))
     : opts.projectsDir
-  if (!rootDir) return meta
+  if (rootDir) collectAgentMeta(rootDir, meta)
+  // Only a `transcriptPath` whose session directory is not there at all is
+  // stale: fall through to the session-id scan `loadTranscript` uses, whose
+  // session directory is where the sidecars are. An empty map alone is not
+  // the signal. A live session that has simply written no sidecar yet is the
+  // common sidechain case, and gating on the map would make every one of its
+  // exchanges walk the whole projects tree, a cost that grows with the user's
+  // history.
+  if (
+    meta.size === 0 && opts.transcriptPath && opts.projectsDir && opts.sessionId &&
+    rootDir && !fs.existsSync(rootDir)
+  ) {
+    /** @type {Set<string>} */
+    const seen = new Set()
+    for (const filePath of walkJsonlFiles(opts.projectsDir, opts.sessionId)) {
+      // Sidecars live in the session file's sibling `<sessionId>/` directory,
+      // and beside a subagent transcript already inside it (all the scan
+      // yields when the session file itself is gone). The scan yields one
+      // file per subagent, so those resolve to the same directory: walk and
+      // parse each one once.
+      const dir = path.basename(filePath, '.jsonl') === opts.sessionId
+        ? path.join(path.dirname(filePath), opts.sessionId)
+        : path.dirname(filePath)
+      if (seen.has(dir)) continue
+      seen.add(dir)
+      collectAgentMeta(dir, meta)
+      // A session lives in exactly one directory.
+      if (meta.size > 0) break
+    }
+  }
+  return meta
+}
+
+/**
+ * Parse every agent-meta sidecar under `rootDir` into `meta`, keyed by
+ * agent id. Best-effort: an unreadable or unparseable sidecar is skipped.
+ *
+ * @param {string} rootDir
+ * @param {Map<string, { tool_use_id: string }>} meta
+ */
+function collectAgentMeta(rootDir, meta) {
   for (const { agentId, filePath } of walkAgentMetaFiles(rootDir)) {
     let parsed
     try { parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) } catch { continue }
@@ -331,7 +377,6 @@ export function loadAgentMeta(opts) {
     const toolUseId = stringValue(parsed.toolUseId)
     if (toolUseId) meta.set(agentId, { tool_use_id: toolUseId })
   }
-  return meta
 }
 
 /**
