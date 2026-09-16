@@ -27,6 +27,7 @@ import {
 
 /**
  * @import { AsyncDataSource } from 'squirreling/src/types.js'
+ * @import { SqlPrimitive } from 'squirreling/src/ast.js'
  */
 
 // The recommendation ask (LLP 0398): the one signal, the files the client
@@ -41,7 +42,7 @@ test('windowStart: thirty days back, as a UTC date', () => {
 test('evidenceSql: every statement excludes the duplicate OTEL lane; user text is human turns only', () => {
   // @ref LLP 0398#human-turns [tests]: the duplicate lane never counts, and injected user text is not a person
   const sql = evidenceSql('2026-08-08')
-  const stmts = [sql.record, sql.lines, sql.triggers(['x']), sql.calls([{ id: 'a', at: 0 }]), sql.replies([{ id: 'a', at: 0 }])]
+  const stmts = [sql.record, sql.lines, sql.triggers(['x']), sql.calls([{ id: 'a', at: 0, triggers: 1 }]), sql.replies([{ id: 'a', at: 0, triggers: 1 }])]
   for (const stmt of stmts) assert.ok(stmt.includes("conversation_source <> 'claude_code'"))
   for (const stmt of [sql.lines, sql.triggers(['x'])]) {
     assert.ok(stmt.includes("user_type in ('external', 'user')"), 'Codex human turns count, guardian reviews do not')
@@ -243,7 +244,7 @@ test('evidenceSql: the duplicate-lane exclusion is null-safe', () => {
   // is NULL, which fails a WHERE. A row with no source label is not a
   // duplicate of anything, so it belongs in the record.
   const sql = evidenceSql('2026-08-08')
-  for (const stmt of [sql.record, sql.lines, sql.triggers(['x']), sql.calls([{ id: 's1', at: 0 }]), sql.replies([{ id: 's1', at: 0 }])]) {
+  for (const stmt of [sql.record, sql.lines, sql.triggers(['x']), sql.calls([{ id: 's1', at: 0, triggers: 1 }]), sql.replies([{ id: 's1', at: 0, triggers: 1 }])]) {
     assert.ok(stmt.includes("(conversation_source is null or conversation_source <> 'claude_code')"), 'a null source is kept')
   }
 })
@@ -357,9 +358,9 @@ test('a trigger instant that cannot be written into SQL costs its own session, n
   const sample = sampleTriggers(triggers)
   assert.deepEqual(sample.map((t) => t.session_id), ['s2'], 'the unplaceable trigger never takes a slot in the sample')
   const anchors = sessionAnchors(sample)
-  assert.deepEqual(anchors, [{ id: 's2', at: good.getTime() }])
+  assert.deepEqual(anchors, [{ id: 's2', at: good.getTime(), triggers: 1 }])
   assert.ok(evidenceSql('2026-08-08').calls(anchors).includes("timestamp '2026-08-10T09:00:00.000Z'"), 'the statement is still built, from the session that can be placed')
-  assert.deepEqual(sessionAnchors(triggers), [{ id: 's2', at: good.getTime() }], 'and the guard holds if the sample is bypassed')
+  assert.deepEqual(sessionAnchors(triggers), [{ id: 's2', at: good.getTime(), triggers: 1 }], 'and the guard holds if the sample is bypassed')
 })
 
 test('an unplaceable trigger does not displace a recent one through a NaN comparator', () => {
@@ -393,7 +394,7 @@ test('sessionAnchors takes the earliest trigger a session has, and drops one it 
     { session_id: 's2', line: 'ship it', at: 'not a time' },
     { session_id: '', line: 'ship it', at: early },
   ])
-  assert.deepEqual(anchors, [{ id: 's1', at: early.getTime() }])
+  assert.deepEqual(anchors, [{ id: 's1', at: early.getTime(), triggers: 2 }], 'and the two lines it typed are two procedures to read, which is what the budget is spent in')
 })
 
 test('the engine reads each session from its trigger, and stops the statement at its budget', async () => {
@@ -437,7 +438,7 @@ test('the engine reads each session from its trigger, and stops the statement at
   }
   const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
   const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
-  const anchors = [0, 1, 2].map((session) => ({ id: `s${session}`, at: at(session, 70).getTime() }))
+  const anchors = [0, 1, 2].map((session) => ({ id: `s${session}`, at: at(session, 70).getTime(), triggers: 1 }))
   const result = await executeQuerySql({ query: evidenceSql('2026-08-08').calls(anchors), registry, storage })
 
   const perSession = new Map()
@@ -543,4 +544,96 @@ test('the trigger statement is bounded by the sessions of a window, not by what 
   const sample = sampleTriggers(often.rows)
   assert.equal(sample.length, 80, 'the sample takes eighty however many sessions typed a candidate line')
   assert.equal(sessionAnchors(sample).length, 80)
+})
+
+test('a session that typed two candidate lines is budgeted for both of them', async () => {
+  // @ref LLP 0398#consequences [tests]: the budget is spent in the unit the sample is sized in
+  // hypaware #1714: a session is anchored once, at the earlier of the two
+  // lines it typed, so one session's budget has to cover both procedures
+  // and the work between them or the later window falls off the end of the
+  // `limit`. Through the same `executeQuerySql` the gather runs on, over
+  // the ordinary shape: the line is typed, the agent works, and the person
+  // types the second line later in the same session.
+  const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'tool_name', 'tool_args', 'content_text']
+  const textA = 'commit on the right branch and open a pr'
+  const textB = 'run the release checklist for this repo'
+  const base = Date.UTC(2026, 7, 10, 1, 0, 0)
+  /** @type {Record<string, SqlPrimitive>[]} */
+  const rows = []
+  const at = () => new Date(base + rows.length * 60_000)
+  /** @param {string} text */
+  const typed = (text) => rows.push({ date: '2026-08-10', session_id: 's0', role: 'user', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: 'external', message_created_at: at(), tool_name: null, tool_args: null, content_text: text })
+  /** @param {string} command @param {number} n */
+  const ran = (command, n) => {
+    for (let i = 0; i < n; i += 1) rows.push({ date: '2026-08-10', session_id: 's0', role: 'assistant', part_type: 'tool_call', conversation_source: null, is_sidechain: false, user_type: null, message_created_at: at(), tool_name: 'Bash', tool_args: `{"command":"${command}"}`, content_text: null })
+  }
+  typed(textA)
+  ran('git commit -m wip', 30)
+  // The work after the first line's procedure: rows between the anchor and
+  // the second trigger, which the budget is spent on before the second
+  // window is reached.
+  ran('ls -la', 30)
+  typed(textB)
+  ran('npm test --silent', 30)
+
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns,
+    numRows: rows.length,
+    scan(options) {
+      const rowColumns = options?.columns ?? columns
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *rows() {
+          for (const row of rows) yield asyncRow(row, rowColumns)
+        },
+      }
+    },
+  }
+  const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
+  const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
+  const sql = evidenceSql('2026-08-08')
+  const lines = [textA, textB].map((t) => t.slice(0, 42).toLowerCase())
+  const triggers = sampleTriggers((await executeQuerySql({ query: sql.triggers(lines), registry, storage })).rows)
+  const anchors = sessionAnchors(triggers)
+  assert.equal(anchors.length, 1, 'one session, anchored once: the disjunction still costs one pass a scanned row')
+  assert.ok(sql.calls(anchors).endsWith('limit 120'), 'two triggers, two budgets: the session is given what it was asked for')
+
+  const calls = (await executeQuerySql({ query: sql.calls(anchors), registry, storage })).rows
+  const candidates = buildCandidates({ lines: lines.map((line) => ({ line, sessions: 1, days: 1, typed: 1 })), triggers, calls, replies: [] })
+  assert.deepEqual(
+    candidates.map((c) => [c.line, c.sessionsWithCalls, c.steps.map((s) => s.command)]),
+    [[lines[0], 1, ['git commit -m']], [lines[1], 1, ['npm test --silent']]],
+    'both lines the session typed have their procedure read, not only the earlier one',
+  )
+})
+
+test('the trigger budget costs no more at the ceiling than the session budget did', () => {
+  // The budget may change unit but not size. `sampleTriggers` bounds the
+  // sample in triggers, so either statement's `limit` has the same ceiling
+  // of TRIGGER_SESSIONS_TOTAL * 60 = 4,800 rows whichever unit it counts,
+  // and eighty triggers in eighty sessions, the ordinary sample, is what
+  // reaches it.
+  const at = (i) => new Date(Date.UTC(2026, 7, 10) + i * 60_000)
+  /** @type {Record<string, unknown>[]} */
+  const disjoint = []
+  /** @type {Record<string, unknown>[]} */
+  const shared = []
+  for (let i = 0; i < 100; i += 1) {
+    for (let line = 0; line < 2; line += 1) {
+      disjoint.push({ session_id: `d${String(line * 100 + i).padStart(3, '0')}`, line: `line ${line}`, at: at(i), date: '2026-08-10', example: `line ${line}` })
+      shared.push({ session_id: `s${String(i).padStart(3, '0')}`, line: `line ${line}`, at: at(i * 2 + line), date: '2026-08-10', example: `line ${line}` })
+    }
+  }
+  const sql = evidenceSql('2026-08-08')
+  const one = sessionAnchors(sampleTriggers(disjoint))
+  const two = sessionAnchors(sampleTriggers(shared))
+  assert.equal(one.length, 80, 'eighty sessions of one trigger each')
+  assert.equal(two.length, 40, 'forty sessions of two triggers each: the same eighty triggers')
+  for (const anchors of [one, two]) {
+    for (const stmt of [sql.calls(anchors), sql.replies(anchors)]) {
+      assert.ok(stmt.endsWith('limit 4800'), 'the same 4,800 rows either way, which is the bound the sample sizes')
+    }
+  }
 })
