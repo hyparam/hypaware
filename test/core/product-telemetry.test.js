@@ -525,6 +525,23 @@ for (const [shape, url, target] of /** @type {[string, string, string|null][]} *
   })
 }
 
+// The refusal must name the actual reason: `hyp join` persists the url as
+// typed, so a destination that merely spells itself differently from its parse
+// must not be accused of credentials, a query or a fragment it never carried.
+test('a refused destination is described by its actual defect', (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const remote = remoteEnrollment(home)
+  assert.throws(
+    () => writePolicy(root, 'organization', { url: 'https://example.invalid/receiver?', identityPath: remote.identityPath }),
+    /no credentials, query or fragment/
+  )
+  assert.throws(
+    () => writePolicy(root, 'organization', { url: 'https://Example.Invalid/receiver', identityPath: remote.identityPath }),
+    /the way the URL parser normalizes it/
+  )
+})
+
 // Local mode is a preview queue, not a network permission.
 test('local collection queues copies but never contacts a destination', async (t) => {
   const root = temp(t)

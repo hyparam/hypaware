@@ -193,11 +193,18 @@ export function writePolicy(root, mode, { url, identityPath } = {}) {
   if (mode === 'organization') {
     const identity = identityPath ? readSmallJson(identityPath) : null
     // The destination is reported on its own: an operator who typed a query
-    // or fragment cannot act on an identity complaint. The url stays out of the
-    // message because a rejected one can carry credentials.
-    if (typeof url !== 'string' || safeDestination(url) !== url.replace(/\/+$/, ''))
+    // or fragment cannot act on an identity complaint. The url stays out of
+    // both messages because a rejected one can carry credentials.
+    if (typeof url !== 'string' || !safeDestination(url))
       throw new Error(
         'Organization reporting requires an enrolled HTTPS destination with no credentials, query or fragment'
+      )
+    // A parseable url can still spell itself differently from its parse (an
+    // uppercase host, a default port, a backslash), and `hyp join` persists the
+    // url as typed, so this refusal must not be blamed on credentials.
+    if (safeDestination(url) !== url.replace(/\/+$/, ''))
+      throw new Error(
+        'Organization reporting requires the destination written the way the URL parser normalizes it, for example a lowercase host and no default port'
       )
     if (
       !identity ||
