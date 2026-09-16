@@ -46,7 +46,9 @@ const NODE_MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
  * the wrapper needs of the path it bakes is that it still exists and still
  * runs when Desktop next asks for a credential, and the command it runs is a
  * credential fetch rather than any version-pinned surface; an operator who
- * does mean a particular copy says so with `HYPAWARE_BIN`.
+ * does mean a particular copy says so with `HYPAWARE_BIN`. `repointedFrom`
+ * carries the entry script the walk moved off, so the caller can disclose the
+ * swap instead of baking it where nothing can see it (issue #1623).
  *
  * With nothing installed the ephemeral path is still written, flagged
  * `ephemeral` rather than refused: a wrapper that works until npm removes that
@@ -63,7 +65,7 @@ const NODE_MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
  *
  * @param {NodeJS.ProcessEnv} [env]
  * @param {string} [entry]
- * @returns {{ binPath: string, ephemeral: boolean }}
+ * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string }}
  */
 export function resolveHypBin(env = process.env, entry = process.argv[1]) {
   const explicit = [env.HYPAWARE_BIN, env.HYP_BIN]
@@ -83,8 +85,12 @@ export function resolveHypBin(env = process.env, entry = process.argv[1]) {
   // walk, to decide whether to take it (`runsUnderNode`) or carry on past it;
   // only the name that comes back is left unresolved.
   const installed = findInstalledHypawareBin(env, process.platform, runsUnderNode)
-  if (installed !== undefined) return { binPath: installed, ephemeral: false }
-  return { binPath: running, ephemeral: true }
+  if (installed === undefined) return { binPath: running, ephemeral: true }
+  return {
+    binPath: installed,
+    ephemeral: false,
+    ...(installed === running ? {} : { repointedFrom: running }),
+  }
 }
 
 /**

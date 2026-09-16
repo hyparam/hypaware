@@ -24,7 +24,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { resolveHookBinPath } from '../../hypaware-core/plugins-workspace/claude/src/index.js'
-import { isNpxBinPath } from '../../src/core/cli/global_install.js'
+import { describeRepointedBinPath, isNpxBinPath } from '../../src/core/cli/global_install.js'
 
 /** @param {string} file */
 async function writeExecutable(file) {
@@ -94,7 +94,11 @@ test('an npx entrypoint resolves to the installed CLI, not the npx cache path', 
     false,
     `managed hook was pinned to the npx cache: ${resolved.binPath}`
   )
-  assert.deepEqual(resolved, { binPath: r.globalBin, ephemeral: false })
+  assert.deepEqual(resolved, {
+    binPath: r.globalBin,
+    ephemeral: false,
+    repointedFrom: r.npxCliPath,
+  })
 })
 
 test('with no CLI installed the npx path is still returned, flagged ephemeral', async (t) => {
@@ -134,7 +138,67 @@ test('a project-local entrypoint resolves to the installed CLI, not the project 
 
   const resolved = resolveHookBinPath(r.env, r.projectCliPath)
 
-  assert.deepEqual(resolved, { binPath: r.globalBin, ephemeral: false })
+  assert.deepEqual(resolved, {
+    binPath: r.globalBin,
+    ephemeral: false,
+    repointedFrom: r.projectCliPath,
+  })
+})
+
+// Issue #1623. The walk compares no versions, so a team that deliberately pins
+// `hypaware` as a project dependency has its hook recorded against whatever
+// older global copy is installed, flagged durable, and nothing said. Recording
+// the pinned copy instead is the defect the test above exists to prevent (it
+// dies on the next `npm ci`, at exit 0), so what the swap owes the operator is
+// a notice and not a different answer: both paths, and `HYPAWARE_BIN` as the
+// way to pin one. Asserted through the resolver rather than the attach command
+// for the reason the rest of this file is: the entrypoint is the only seam
+// that decides it, and attach supplies the running package's own.
+test('a repointed hook reports the swap and names the override', async (t) => {
+  const r = await rig({ installedBin: true })
+  t.after(() => r.cleanup())
+
+  const resolved = resolveHookBinPath(r.env, r.projectCliPath)
+  assert.equal(resolved.repointedFrom, r.projectCliPath)
+
+  // Exactly the line `hyp client attach claude` pushes onto its warnings.
+  const notice = describeRepointedBinPath(
+    resolved.binPath,
+    /** @type {string} */ (resolved.repointedFrom),
+    'the managed hook',
+  )
+  assert.ok(notice.includes(r.globalBin), `notice omits the recorded path: ${notice}`)
+  assert.ok(notice.includes(r.projectCliPath), `notice omits the entrypoint: ${notice}`)
+  assert.ok(notice.includes('HYPAWARE_BIN'), `notice omits the override: ${notice}`)
+  assert.ok(!notice.includes('\n'), `notice is not one line: ${notice}`)
+})
+
+// The other half of the contract: a recorded path that is the one that ran has
+// nothing to disclose, and a notice there would be about nothing. The
+// `deepEqual`s elsewhere in this file already refuse the extra key; this says
+// why in one place.
+test('an unchanged recorded path reports no swap', async (t) => {
+  const installed = await rig({ installedBin: true })
+  t.after(() => installed.cleanup())
+  const bare = await rig({ installedBin: false })
+  t.after(() => bare.cleanup())
+
+  const clone = path.join(installed.env.HOME, 'src', 'hypaware', 'bin', 'hypaware.js')
+  const unchanged = [
+    // A durable entrypoint: never repointed at all.
+    resolveHookBinPath(installed.env, clone),
+    // An explicit override: the operator already said which copy they mean.
+    resolveHookBinPath(
+      { ...installed.env, HYPAWARE_BIN: clone },
+      installed.projectCliPath,
+    ),
+    // Nothing installed: the ephemeral path is recorded as it stands, and its
+    // own warning is about what deletes it rather than about a swap.
+    resolveHookBinPath(bare.env, bare.projectCliPath),
+  ]
+  for (const resolved of unchanged) {
+    assert.equal(resolved.repointedFrom, undefined, `reported a swap: ${resolved.binPath}`)
+  }
 })
 
 test('with no CLI installed the project-local path is returned, flagged ephemeral', async (t) => {

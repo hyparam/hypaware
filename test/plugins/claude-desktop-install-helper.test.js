@@ -431,6 +431,44 @@ test('the wrapper records the installed CLI, not a project-local node_modules pa
   assert.equal(err, '', 'a durable path is not worth warning about')
 })
 
+// Issue #1623. The walk compares no versions, so a project that deliberately
+// pins `hypaware` has its wrapper written against whatever older global copy
+// is installed. Baking the pinned copy instead is the defect the test above
+// exists to prevent, so what the swap owes the operator is a notice and not a
+// different answer: both paths, and `HYPAWARE_BIN` as the way to pin one.
+test('a repointed wrapper reports the swap and names the override', async (t) => {
+  const rig = npxRig({ installedBin: true })
+
+  const { code, out, err, body } = await runInstallHelperWithEntry(t, rig, rig.projectCliPath)
+
+  assert.equal(code, 0)
+  assert.ok(body.includes(rig.globalBin), `wrapper does not run the installed CLI: ${body}`)
+  const notice = out.split('\n').find((line) => line.includes('HYPAWARE_BIN'))
+  assert.ok(notice, `no repoint notice on stdout: ${out}`)
+  assert.ok(notice.includes(rig.globalBin), `notice omits the recorded path: ${notice}`)
+  assert.ok(
+    notice.includes(fs.realpathSync(rig.projectCliPath)),
+    `notice omits the entry script that ran: ${notice}`,
+  )
+  // On stdout beside the path it just reported, because nothing here is going
+  // to rot: this command's stderr means the recorded path will stop existing.
+  assert.equal(err, '')
+})
+
+test('a wrapper recorded as it stands reports no swap', async (t) => {
+  // The other half of the contract. An ordinary durable entry script is never
+  // repointed, so there is nothing to disclose and a notice would be noise.
+  const rig = npxRig({ installedBin: true })
+  const durable = path.join(rig.stateDir, 'opt', 'hypaware', 'bin', 'hypaware.js')
+  writeExecutable(durable)
+
+  const { code, out, err } = await runInstallHelperWithEntry(t, rig, durable)
+
+  assert.equal(code, 0)
+  assert.doesNotMatch(out, /HYPAWARE_BIN/, out)
+  assert.equal(err, '')
+})
+
 test('with no CLI installed the project-local wrapper says what will break it', async (t) => {
   const rig = npxRig({ installedBin: false })
 

@@ -253,6 +253,34 @@ export function describeEphemeralBinPath(binPath, effect, env = process.env) {
 }
 
 /**
+ * The other half of that verdict, for the case where the `$PATH` walk did find
+ * something: the path recorded is not the copy that ran the command.
+ *
+ * Recording the entrypoint instead is the defect the walk exists to fix, so the
+ * swap is right and stays. What it is not is free: {@link findInstalledHypawareBin}
+ * compares no versions, so a team that pinned `hypaware` as a project
+ * dependency silently gets whatever older global copy is installed, flagged
+ * durable, and a subcommand that copy predates then fails at exit 0 - the same
+ * silence, one step along. Hence a notice naming both copies and the override
+ * that settles it, which is the only thing the operator can do about it.
+ *
+ * One function because both callers (`@hypaware/claude`'s managed hook,
+ * `@hypaware/claude-desktop`'s credential wrapper) are wording one verdict,
+ * for the same reason {@link describeEphemeralBinPath} words the other one.
+ *
+ * @param {string} binPath the durable copy that was recorded
+ * @param {string} entryPath the entrypoint that ran the command
+ * @param {string} subject what did the recording, as a noun phrase: it is
+ *   spliced in front of "records ...", so "the managed hook", not "hook"
+ * @returns {string}
+ */
+export function describeRepointedBinPath(binPath, entryPath, subject) {
+  return `${subject} records ${binPath}, not the ${entryPath} that ran this command, `
+    + 'because that copy sits in a tree npm removes; the two can be different versions. '
+    + 'Set HYPAWARE_BIN to pin the copy you mean'
+}
+
+/**
  * The absolute path of an already-installed HypAware CLI, or `undefined`.
  *
  * The read-only counterpart to `ensureDurableBin`, for a caller that must
