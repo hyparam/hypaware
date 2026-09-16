@@ -1,4 +1,4 @@
-# LLP 0411: The compact sign-in line drops the lookup pointer
+# LLP 0412: The compact sign-in line drops the lookup pointer
 
 **Type:** Decision
 **Status:** Accepted

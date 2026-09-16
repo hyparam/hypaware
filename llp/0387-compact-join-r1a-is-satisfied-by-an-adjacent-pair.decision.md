@@ -11,7 +11,7 @@
 the server and to name `hyp remote list`. This decision records how the
 compact lane, whose privacy block is one line that does neither on its own,
 meets that requirement)
-**Extended-by:** [LLP 0411](./0411-compact-sign-in-drops-the-lookup-pointer.decision.md)
+**Extended-by:** [LLP 0412](./0412-compact-sign-in-drops-the-lookup-pointer.decision.md)
 (#compact-lookup-dropped: the compact forwarding line no longer carries the
 `hyp remote list` lookup, so the pair satisfies R1a's name and no-URL
 clauses but not its lookup clause)

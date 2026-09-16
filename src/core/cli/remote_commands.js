@@ -868,11 +868,11 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // `effectiveDefaultRemote` on a bare login, so it is not always something
     // the user typed, and no other line in that lane recovers the URL. The
     // compact lane carries the name alone: the lookup pointer was dropped by
-    // maintainer decision (LLP 0411).
+    // maintainer decision (LLP 0412).
     // Revisit if the server root ever becomes a real landing page.
-    // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target by its configured name and prints no URL; the compact branch omits the lookup per LLP 0411, the long form below still carries it
-    // @ref LLP 0411#compact-lookup-dropped [implements]: the compact sign-in line names the server and nothing else - no URL, no lookup pointer
-    // @ref LLP 0387#adjacency [constrained-by]: the compact branch is also the deadline line's half of R1a - drop the name here and the compact privacy block below has none (the pair's lookup half is relaxed by LLP 0411)
+    // @ref LLP 0100#requirements [implements]: R1a - the forwarding line names the target by its configured name and prints no URL; the compact branch omits the lookup per LLP 0412, the long form below still carries it
+    // @ref LLP 0412#compact-lookup-dropped [implements]: the compact sign-in line names the server and nothing else - no URL, no lookup pointer
+    // @ref LLP 0387#adjacency [constrained-by]: the compact branch is also the deadline line's half of R1a - drop the name here and the compact privacy block below has none (the pair's lookup half is relaxed by LLP 0412)
     if (compact) {
       ctx.stdout.write(`✓ Logs will sync to the '${name}' server\n`)
     } else {
@@ -899,7 +899,7 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     // would be false on exactly the paths where it would matter.
     // @ref LLP 0100#requirements [constrained-by]: R1 - compact carries the deadline; the skill hint and the release verb land after it, from `hyp sync`'s plan on the attended close and from the wizard's narration on every path that skips the offer
     // @ref LLP 0407#dropped: the backfill statement is no longer made on the attended close
-    // @ref LLP 0387#adjacency [implements]: compact meets R1a's name and no-URL clauses as a pair - the forwarding line directly above carries the server name for both lines; the lookup half is relaxed by LLP 0411
+    // @ref LLP 0387#adjacency [implements]: compact meets R1a's name and no-URL clauses as a pair - the forwarding line directly above carries the server name for both lines; the lookup half is relaxed by LLP 0412
     if (holdDeadline !== null && compact) {
       ctx.stderr.write(`✓ Nothing uploads until you say so, or ${formatFirstSyncDeadline(holdDeadline)} at the latest\n`)
     } else if (holdDeadline !== null) {
