@@ -10,7 +10,7 @@ import { setGithubRuntime } from '../../hypaware-core/plugins-workspace/github/s
 import { BACKLOG_RETRY_MS, nextCaptureDelay, startGithubSource } from '../../hypaware-core/plugins-workspace/github/src/source.js'
 import { emptyGraph, fakeClient } from './github-fake-client.js'
 import { runCaptureTick } from '../../hypaware-core/plugins-workspace/github/src/tick.js'
-import { readCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
+import { readCursors, writeCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
 import { runGithubBackfill } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
 
 test('unfinished work resumes on the bounded backlog cadence', () => {
@@ -273,4 +273,58 @@ test('daemon stop waits for projection and status reports its failure', async (t
   const status = await source.status?.()
   assert.equal(status?.lastError, 'projection refused')
   assert.equal(status?.details?.last_success_at, null)
+})
+
+// @ref LLP 0409#one-time-imports [tests]: an authorization another process staged reaches the daemon's own cadence
+test('an authorization another process staged puts the next tick on the backlog cadence', async (t) => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-staged-backlog-'))
+  t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
+  const config = { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '10ms', inventory: 'session_repos' }
+  let staged = false
+
+  setGithubRuntime(/** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config,
+    observedRepos: {
+      async list() {
+        // `hyp github backfill o/r` commits its authorization after this tick
+        // read the sidecar, so the tick's own result cannot carry it and the
+        // closing write adopts it as durable work the daemon never attempted.
+        if (!staged) {
+          staged = true
+          await writeCursors(stateDir, /** @type {any} */ ({
+            schema_version: 1,
+            repos: { 'o/r': { one_time_import: true, work: { mode: 'backfill', phase: 'issues' } } },
+          }))
+        }
+        return []
+      },
+    },
+    clientFactory: () => fakeClient({}),
+    storage: {
+      cacheTablePath() { return '/cache/github_events' },
+      async appendRows() {},
+    },
+    log: { info() {}, error() {} },
+  }))
+
+  const source = await startGithubSource()
+  // The first delay was already scheduled off the 10ms interval, so widening
+  // the interval now leaves the next scheduling decision as the only thing
+  // that can tell the backlog cadence from a full poll interval.
+  config.poll_interval = '30m'
+  assert.ok(source.status)
+  /** @type {any} */
+  let details = {}
+  for (let i = 0; i < 200 && !(details.last_tick_at && details.next_tick_at && details.in_flight === false); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    details = (await source.status()).details ?? {}
+  }
+  await source.stop()
+
+  assert.equal(readCursors(stateDir).repos['o/r']?.one_time_import, true, 'the authorization is durable on disk')
+  assert.equal(details.backlog_pending, true, 'staged work another process wrote is backlog the daemon knows about')
+  const delayMs = Date.parse(/** @type {string} */ (details.next_tick_at)) - Date.parse(/** @type {string} */ (details.last_tick_at))
+  assert.ok(Math.abs(delayMs - BACKLOG_RETRY_MS) < 30_000, `next tick scheduled in ${delayMs}ms, not the backlog cadence`)
 })
