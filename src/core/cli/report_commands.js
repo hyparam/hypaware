@@ -392,8 +392,8 @@ const RECOMMENDATION_ID_RE = /^rec-[0-9a-f]{16}$/
  * `deps` are the process-touching seams (status probe, PATH probe, spawn,
  * prompt), injected by tests; the defaults are the real ones `hyp ask` uses.
  *
- * @ref LLP 0407#id-is-the-handle [implements]: the server-minted id is the only argument; everything else is resolved from it
- * @ref LLP 0407#run-where-typed [implements]: the fix is to a repository, so the client starts in the caller's directory
+ * @ref LLP 0414#id-is-the-handle [implements]: the server-minted id is the only argument; everything else is resolved from it
+ * @ref LLP 0414#run-where-typed [implements]: the fix is to a repository, so the client starts in the caller's directory
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @param {{

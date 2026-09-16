@@ -429,7 +429,7 @@ test('get reports an unknown report from the server error body', async (t) => {
 // PATH probe, spawn, prompt), so the tests inject all four and check what
 // reaches them: which id was resolved, which page was fetched, where it was
 // saved, and what the client was started with.
-// @ref LLP 0407#id-is-the-handle [tests]: a bare id resolves to its report and page with nothing else in hand
+// @ref LLP 0414#id-is-the-handle [tests]: a bare id resolves to its report and page with nothing else in hand
 
 const REC = 'rec-0123456789abcdef'
 const REPORT = { id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z' }
