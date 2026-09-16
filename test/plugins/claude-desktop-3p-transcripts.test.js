@@ -454,6 +454,26 @@ test('createDesktop3pDirsCache serves cached roots within the TTL and re-sweeps 
     assert.deepEqual([...refreshed ?? []].sort(), [path.dirname(sibling), path.dirname(nested)].sort())
     nowMs = 2000
     assert.equal(cache.get(homeDir).cached, false)
+
+    // The forced sweep is spent per session per container list, so a home
+    // landing after its own session was memoised is not found at once. Both
+    // routes back are what bound that wait, and neither was pinned: another
+    // session's sweep sees the list change and drops the memo, and failing
+    // that the TTL re-sweeps. Without one of them a memoised session would
+    // never upgrade.
+    nowMs = 2001
+    assert.equal(cache.refreshFor(homeDir, 'sess-missing')?.length, 2)
+    assert.equal(cache.refreshFor(homeDir, 'sess-missing'), null, 'the established miss is spent')
+    await fs.mkdir(firstPartySandboxProjectsDir(homeDir, 'late0000'), { recursive: true })
+    assert.equal(cache.refreshFor(homeDir, 'sess-missing'), null, 'and stays spent against that list')
+    assert.equal(cache.refreshFor(homeDir, 'sess-other')?.length, 3, 'another session still sees the new home')
+    assert.equal(cache.refreshFor(homeDir, 'sess-missing')?.length, 3, 'whose sweep re-arms the memoised one')
+
+    // With no other session to force a sweep, the TTL is the backstop.
+    await fs.mkdir(firstPartySandboxProjectsDir(homeDir, 'late0001'), { recursive: true })
+    assert.equal(cache.refreshFor(homeDir, 'sess-missing'), null)
+    nowMs = 4000
+    assert.equal(cache.get(homeDir).dirs.length, 4, 'the TTL finds the late home unaided')
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }

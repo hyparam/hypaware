@@ -181,10 +181,21 @@ export function createDesktop3pDirsCache(opts) {
      * same directories to the same answer, and both loaders take this leg,
      * so an exchange that matches nothing paid for two of them.
      *
-     * A sandbox home appears when its session starts, so that session has
-     * not been swept for yet and still gets the walk that finds it, and
-     * that walk re-arms every session remembered against the older list. A
-     * walk that found the container still moving settles no miss at all.
+     * A sandbox home usually appears before the session it belongs to has
+     * ever missed, so that session is not memoised yet and still gets the
+     * walk that finds it, and that walk re-arms every session remembered
+     * against the older list. A walk that found the container still moving
+     * settles no miss at all.
+     *
+     * A home that lands after its own session already missed is the case
+     * this does not find at once: the first exchange of a new conversation
+     * can miss before the CLI inside the sandbox has written anything, and
+     * that spends the session's sweep. It waits for the first sweep another
+     * session forces, or for the TTL, whichever comes first, so the bound
+     * is one TTL. Transcript identity re-settles later and is unharmed;
+     * `loadAgentMeta`'s `spawned_by_tool_use_id` is stamped only live, so a
+     * sidechain exchange inside that window keeps it from the backfill lane
+     * rather than from here.
      *
      * @param {string} homeDir
      * @param {string} sessionId
