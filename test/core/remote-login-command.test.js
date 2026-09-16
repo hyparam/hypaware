@@ -344,10 +344,10 @@ test('compact login (the wizard join lane) prints one line per event and no priv
   )
   assert.match(text, /✓ Signed in to 'prod' as org /)
   // Plain words (LLP 0407): the sync line still names the server by its
-  // configured name and prints no URL (LLP 0100 R1a), and the deadline
-  // line still gives the hold's deadline and the fact that nothing has
-  // been sent.
-  assert.match(text, /✓ Logs will sync to the 'prod' server$/m)
+  // configured name, prints no URL, and keeps the lookup that maps the
+  // name back to one (LLP 0100 R1a), and the deadline line still gives
+  // the hold's deadline and the fact that nothing has been sent.
+  assert.match(text, /✓ Logs will sync to the 'prod' server \(run 'hyp remote list' to see its URL\)$/m)
   assert.match(text, /✓ Nothing uploads until you say so, or .+ at the latest/)
   // Compact drops the privacy block, so the deadline line is the second half of
   // the R1a pair: it names no server itself and reads as being about this target

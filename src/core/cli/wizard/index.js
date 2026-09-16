@@ -24,7 +24,7 @@ import { readObservabilityEnv } from '../../observability/env.js'
 import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
-import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
+import { readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
 import { readClientSyncEntries } from '../../usage-policy/index.js'
 import {
   LOCAL_INSTALL_RETENTION_DAYS,
