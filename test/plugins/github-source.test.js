@@ -37,6 +37,23 @@ test('source runs shortly after boot and reports structured completion-relative 
   let noteTickCompleted = () => {}
   const tickCompleted = new Promise((resolve) => { noteTickCompleted = () => resolve(undefined) })
   let completedAt = 0
+  // A backstop on the two waits below, never the margin the sampling reads: a
+  // passing run settles both in a few milliseconds. Without it a source that
+  // stops ticking wedges the runner instead of failing, because only the log
+  // callback can settle those promises and the keep-alive holds the loop open
+  // forever. It also keeps the `shortly after boot` half of this test's name
+  // honest: the first tick is due after `min(interval, 5 minutes)`, 10ms here,
+  // so a regression that defers it past this deadline reds.
+  const waitDeadlineMs = 1000
+  /** @param {Promise<unknown>} promise @param {string} what */
+  function withDeadline(promise, what) {
+    /** @type {ReturnType<typeof setTimeout>} */
+    let timer
+    const deadline = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} did not arrive within ${waitDeadlineMs}ms`)), waitDeadlineMs)
+    })
+    return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
+  }
 
   setGithubRuntime(/** @type {any} */ ({
     stateDir,
@@ -82,12 +99,12 @@ test('source runs shortly after boot and reports structured completion-relative 
 
   // A tick in flight reports no next tick: the schedule is taken when the tick
   // completes, so until then there is nothing to report.
-  await tickStarted
+  await withDeadline(tickStarted, 'github.poll_tick_started')
   const duringTick = await source.status()
   assert.equal(duringTick.details?.in_flight, true)
   assert.equal(duringTick.details?.next_tick_at, null)
 
-  await tickCompleted
+  await withDeadline(tickCompleted, 'github.poll_tick_completed')
   // The reschedule runs in the tick promise's `finally` and the next tick is a
   // timer, so `setImmediate` lands after every pending microtask and before the
   // next timers phase. That samples the gap between two ticks by event-loop
@@ -108,7 +125,7 @@ test('source runs shortly after boot and reports structured completion-relative 
   const startedAt = Date.parse(String(status.details?.last_tick_at))
   const nextTickAt = Date.parse(String(status.details?.next_tick_at))
   const heldMs = completedAt - startedAt
-  assert.ok(heldMs >= cadenceMs * 2, `the tick ran ${heldMs}ms, long enough to tell the two schedules apart`)
+  assert.ok(heldMs >= cadenceMs * 2, `the tick ran ${heldMs}ms, expected at least ${cadenceMs * 2}ms to tell the two schedules apart`)
   // Completion-relative: one cadence after the tick finished, which for a tick
   // held this long is well past one cadence after it started. Both bounds are
   // exact rather than tolerant, since the schedule was taken between the
