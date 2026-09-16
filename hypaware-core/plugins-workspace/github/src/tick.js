@@ -13,13 +13,22 @@ import { getClient } from './runtime.js'
 export const GRAPH_ERROR_REPO = '(graph)'
 
 /**
+ * The `repo` slot a cursor-persistence failure occupies in a tick's error list.
+ * Like {@link GRAPH_ERROR_REPO}, not a repository, so the counts a tick did
+ * produce can be reported beside the write that failed to record them.
+ */
+export const CURSOR_ERROR_REPO = '(cursors)'
+
+/**
  * Run one capture tick: read the per-repo cursors, capture every selected repo
  * (appending `github_events` rows through the kernel cache), then persist the
  * advanced cursors, then project GitHub rows. Shared by the daemon poll source
  * and the `sync`/`backfill` commands; only `mode` and the optional `only` differ.
  *
  * Cursors are persisted even when a repo errors mid-run, so progress is never
- * lost (the next tick resumes past what was captured).
+ * lost (the next tick resumes past what was captured), and a failure of that
+ * closing write is reported on `errors` under {@link CURSOR_ERROR_REPO} rather
+ * than thrown over the counts the tick already produced.
  *
  * @import { GithubRuntime } from './types.js'
  *
@@ -135,8 +144,36 @@ async function captureTick(runtime, opts) {
     runtime.projectionNeeded = true
   }
 
+  /**
+   * Commit the advanced cursors, reporting a failure rather than throwing it.
+   * The failure is real - the next tick re-reads the stale sidecar and
+   * re-fetches what this one captured - but throwing it from the closing write
+   * discards the counts the tick already produced: `source.js` never adds the
+   * events to `rowsWritten` and the commands print none of them. So it joins
+   * the tick's error list under a slot no repository can occupy, the way an
+   * unresolved inventory and a failed projection already do, and a caller's
+   * verdict still turns on a non-empty list.
+   *
+   * @returns {Promise<string | undefined>} the failure, when the write failed
+   */
+  async function persistCursors() {
+    try {
+      await writeCursors(runtime.stateDir, cursors, knownImports)
+      return undefined
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err)
+      runtime.log.error('github.cursor_write_failed', {
+        mode: opts.mode,
+        error,
+        error_kind: /** @type {{ hypErrorKind?: string }} */ (err)?.hypErrorKind ?? 'github_cursor_write_failed',
+      })
+      return error
+    }
+  }
+
+  let result
   try {
-    const result = await captureRepos({
+    result = await captureRepos({
       client,
       config: runtime.config,
       cursors,
@@ -147,19 +184,25 @@ async function captureTick(runtime, opts) {
       observedRepos,
       requestLimit: runtime.captureRequestLimit,
     })
-    const pending = result.pending || inventoryPending
-    runtime.log.info('github.capture_tick_completed', {
-      mode: opts.mode,
-      repos: result.repos,
-      repos_visited: result.visited,
-      events: result.events,
-      requests: result.requests,
-      pending,
-      inventory_pending: inventoryPending,
-      errors: result.errors.length,
-    })
-    return { ...result, pending }
-  } finally {
-    await writeCursors(runtime.stateDir, cursors, knownImports)
+  } catch (err) {
+    // The tick ended with no result to carry a report, so still commit whatever
+    // per-repo progress it did advance, but never let that write's own failure
+    // stand in for the error that actually ended the tick.
+    await persistCursors()
+    throw err
   }
+  const pending = result.pending || inventoryPending
+  const cursorError = await persistCursors()
+  if (cursorError !== undefined) result.errors.push({ repo: CURSOR_ERROR_REPO, error: cursorError })
+  runtime.log.info('github.capture_tick_completed', {
+    mode: opts.mode,
+    repos: result.repos,
+    repos_visited: result.visited,
+    events: result.events,
+    requests: result.requests,
+    pending,
+    inventory_pending: inventoryPending,
+    errors: result.errors.length,
+  })
+  return { ...result, pending }
 }

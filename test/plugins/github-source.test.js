@@ -8,10 +8,12 @@ import test from 'node:test'
 
 import { setGithubRuntime } from '../../hypaware-core/plugins-workspace/github/src/runtime.js'
 import { BACKLOG_RETRY_MS, nextCaptureDelay, startGithubSource } from '../../hypaware-core/plugins-workspace/github/src/source.js'
-import { emptyGraph, fakeClient } from './github-fake-client.js'
-import { runCaptureTick } from '../../hypaware-core/plugins-workspace/github/src/tick.js'
+import { emptyGraph, fakeClient, silentLog } from './github-fake-client.js'
+import { CURSOR_ERROR_REPO, runCaptureTick } from '../../hypaware-core/plugins-workspace/github/src/tick.js'
 import { readCursors } from '../../hypaware-core/plugins-workspace/github/src/cursors.js'
-import { runGithubBackfill } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
+import { runGithubBackfill, runGithubSync } from '../../hypaware-core/plugins-workspace/github/src/commands.js'
+
+/** @import { TestContext } from 'node:test' */
 
 test('unfinished work resumes on the bounded backlog cadence', () => {
   assert.equal(nextCaptureDelay(24 * 60 * 60_000, true), BACKLOG_RETRY_MS)
@@ -351,4 +353,82 @@ test('daemon stop waits for projection and status reports its failure', async (t
   const status = await source.status?.()
   assert.equal(status?.lastError, 'projection refused')
   assert.equal(status?.details?.last_success_at, null)
+})
+
+/**
+ * Point the plugin's state dir below a regular file, so every write to the
+ * cursor sidecar fails with ENOTDIR while the capture itself is untouched.
+ *
+ * @param {TestContext} t
+ * @returns {string}
+ */
+function unwritableStateDir(t) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-cursor-write-'))
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }))
+  const blocker = path.join(base, 'not-a-directory')
+  fs.writeFileSync(blocker, '')
+  return path.join(blocker, 'state')
+}
+
+test('a failing closing cursor write is reported without discarding the counts the tick captured', async (t) => {
+  const stateDir = unwritableStateDir(t)
+  const rows = []
+  /** @type {Array<{ name: string, attrs: Record<string, unknown> }>} */
+  const logs = []
+  const runtime = /** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
+    observedRepos: { async list() { return ['o/r'] } },
+    clientFactory: () => fakeClient({ repos: { 'o/r': { issues: [{ number: 1, created_at: '2026-09-08T00:00:00Z', state: 'open' }] } } }),
+    storage: {
+      cacheTablePath() { return '/cache/github_events' },
+      async appendRows(_path, _columns, batch) { rows.push(...batch) },
+    },
+    log: {
+      info(name, attrs) { logs.push({ name, attrs }) },
+      error(name, attrs) { logs.push({ name, attrs }) },
+    },
+  })
+
+  const result = await runCaptureTick(runtime, { mode: 'poll' })
+  assert.equal(result.events, 1, 'the row this tick appended is still counted')
+  assert.equal(rows.length, 1)
+  assert.equal(result.errors.length, 1)
+  assert.equal(result.errors[0].repo, CURSOR_ERROR_REPO)
+  assert.match(result.errors[0].error, /ENOTDIR/)
+  assert.ok(logs.some((entry) => entry.name === 'github.cursor_write_failed'
+    && entry.attrs.error_kind === 'github_cursor_write_failed'))
+
+  setGithubRuntime(runtime)
+  let stdout = ''
+  let stderr = ''
+  const code = await runGithubSync([], /** @type {any} */ ({
+    stdout: { write(text) { stdout += text } },
+    stderr: { write(text) { stderr += text } },
+  }))
+  assert.equal(code, 1, 'the persistence failure still fails the command')
+  assert.match(stdout, /github sync: 1 event\(s\) across 1 repo\(s\)/)
+  assert.match(stderr, /\(cursors\): .*ENOTDIR/)
+})
+
+test('a capture that throws keeps its own error, not the closing write failure', async (t) => {
+  const stateDir = unwritableStateDir(t)
+  const runtime = /** @type {any} */ ({
+    stateDir,
+    graph: emptyGraph,
+    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'all_visible' },
+    observedRepos: { async list() { return [] } },
+    clientFactory: () => ({
+      ...fakeClient({}),
+      async listViewerRepos() { throw new Error('inventory refused') },
+    }),
+    storage: {
+      cacheTablePath() { return '/cache/github_events' },
+      async appendRows() { throw new Error('nothing to append') },
+    },
+    log: silentLog,
+  })
+
+  await assert.rejects(runCaptureTick(runtime, { mode: 'poll' }), /inventory refused/)
 })
