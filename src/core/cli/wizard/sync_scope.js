@@ -140,7 +140,7 @@ export async function runWizardSyncScope(opts) {
     if ((opts.locked ?? []).length === 0) {
       if ((opts.lockedHidden ?? 0) > 0) {
         opts.stdout.write(
-          'You picked nothing to record, but capture your fleet manages directly still syncs to your server.\n'
+          'You picked nothing to record, but capture your team manages directly still syncs to your server.\n'
         )
       } else if (hiddenCandidateSyncs) {
         opts.stdout.write(
@@ -169,7 +169,7 @@ export async function runWizardSyncScope(opts) {
     // @ref LLP 0281#visible-org-row [implements]: a visible org row stops standing in for a hidden pick beside it, withheld or not
     // @ref LLP 0289#ask-the-store [implements]: the store answers whether the machine's own capture ships, not whether the fleet owns it
     if (hiddenCandidates.length > 0) {
-      opts.stdout.write('Your fleet manages these and they always sync:\n')
+      opts.stdout.write('Your team manages these and they always sync:\n')
       for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
       if (hiddenCandidateSyncs) {
         opts.stdout.write('Capture already set up on this machine also syncs to your server.\n')

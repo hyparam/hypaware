@@ -474,7 +474,7 @@ test('a stale opt-out for a hidden locked row does not soften the fleet sentence
   }))
 
   assert.deepEqual(result, { noQuestion: true, optedOut: [] })
-  assert.match(stdout.text(), /capture your fleet manages directly still syncs to your server/)
+  assert.match(stdout.text(), /capture your team manages directly still syncs to your server/)
 })
 
 // The fifth no-question fact, and the residual LLP 0276 left open: a visible
@@ -502,7 +502,7 @@ test('zero visible candidates with an org row and a hidden picked row: the fleet
   assert.equal(prompted, false)
   assert.match(stdout.text(), /Step 3 of 4 · Choose what syncs/)
   // The org row is still named, under a sentence scoped to it alone.
-  assert.match(stdout.text(), /Your fleet manages these and they always sync:/)
+  assert.match(stdout.text(), /Your team manages these and they always sync:/)
   assert.match(stdout.text(), /capture claude/)
   // The claim that broke: the hidden pick is not the fleet's, so nothing may
   // say the fleet manages everything picked.
@@ -559,7 +559,7 @@ test('zero visible candidates with an org row and a hidden pick already opted ou
   assert.doesNotMatch(stdout.text(), /also syncs to your server/)
   // It did not answer the ownership question, so this one may not come back.
   assert.doesNotMatch(stdout.text(), /Everything you picked is set by your team/)
-  assert.match(stdout.text(), /Your fleet manages these and they always sync:/)
+  assert.match(stdout.text(), /Your team manages these and they always sync:/)
   assert.match(stdout.text(), /capture claude/)
   assert.doesNotMatch(stdout.text(), /raw-anthropic|Anthropic API/, 'the withheld row is never named, opted out or not')
 })

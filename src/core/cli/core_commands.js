@@ -547,7 +547,7 @@ function buildCoreCommands(registry) {
         'this machine; `privacy client <name> sync` removes the opt-out for future',
         'rows. It then names `hyp sync --history <name>` when you deliberately',
         'want to upload retained history too. Clients',
-        'your fleet config carries always sync and cannot be opted out. With no',
+        'set by your team always sync and cannot be opted out. With no',
         'arguments, lists the opted-out clients.',
       ].join('\n'),
       run: runPolicyClient,
