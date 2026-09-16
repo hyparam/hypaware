@@ -32,7 +32,7 @@ import { canonicalJson, isPlainObject, sha256Hex, stringValue, stripVolatileBloc
 
 /**
  * @import { JsonObject, PluginName } from '../../../../hypaware-plugin-kernel-types.js'
- * @import { TranscriptEntry } from './types.js'
+ * @import { Desktop3pDirsEntry, TranscriptEntry } from './types.js'
  */
 
 /**
@@ -117,15 +117,26 @@ export function findDesktop3pProjectsDirs(homeDir) {
 const DESKTOP_3P_DIRS_TTL_MS = 30_000
 
 /**
+ * How many session ids one home remembers having spent a forced re-sweep
+ * on. The memo is dropped whenever the container changes, but a daemon that
+ * keeps running sees an unbounded stream of sessions that will never match
+ * (SDK and headless traffic with no transcript, harness aux exchanges,
+ * wire-only reminders), so it is capped rather than left to grow with
+ * uptime.
+ */
+const DESKTOP_3P_SWEPT_SESSIONS_MAX = 1024
+
+/**
  * TTL cache over {@link findDesktop3pProjectsDirs}, keyed by home dir.
  *
  * The live projector resolves the 3p roots on every primary-tree miss,
  * and for an attached Desktop every exchange is a primary miss by
  * construction, so the uncached sweep re-walked a container whose
  * per-session sandbox homes grow monotonically with conversations. The
- * cache bounds that to one sweep per TTL; callers that miss inside the
- * cached list can force a `refresh` so a sandbox home created after the
- * last sweep is still found (see `loadTranscript`).
+ * cache bounds that to one sweep per TTL; a caller whose session was in
+ * none of the cached dirs forces one more through {@link
+ * createDesktop3pDirsCache}'s `refreshFor`, so a sandbox home created
+ * after the last sweep is still found (see `loadTranscript`).
  *
  * `ttlMs` and `now` are injectable for tests only.
  *
@@ -134,23 +145,95 @@ const DESKTOP_3P_DIRS_TTL_MS = 30_000
 export function createDesktop3pDirsCache(opts) {
   const ttlMs = opts?.ttlMs ?? DESKTOP_3P_DIRS_TTL_MS
   const now = opts?.now ?? Date.now
-  /** @type {Map<string, { atMs: number, dirs: string[] }>} */
+  /** @type {Map<string, Desktop3pDirsEntry>} */
   const byHome = new Map()
+
+  /**
+   * @param {string} homeDir
+   * @param {Desktop3pDirsEntry} [hit]
+   * @returns {{ entry: Desktop3pDirsEntry, unchanged: boolean }}
+   */
+  function sweep(homeDir, hit) {
+    const dirs = findDesktop3pProjectsDirs(homeDir)
+    // A container that changed re-arms every session remembered against the
+    // list it replaced, which is what keeps a new sandbox home findable.
+    const unchanged = !!hit && sameDirs(hit.dirs, dirs)
+    const entry = { atMs: now(), dirs, swept: unchanged ? hit.swept : new Set() }
+    byHome.set(homeDir, entry)
+    return { entry, unchanged }
+  }
+
   return {
     /**
      * @param {string} homeDir
-     * @param {{ refresh?: boolean }} [get]
      * @returns {{ dirs: string[], cached: boolean }}
      */
-    get(homeDir, get) {
+    get(homeDir) {
       const atMs = now()
       const hit = byHome.get(homeDir)
-      if (!get?.refresh && hit && atMs - hit.atMs < ttlMs) return { dirs: hit.dirs, cached: true }
-      const dirs = findDesktop3pProjectsDirs(homeDir)
-      byHome.set(homeDir, { atMs, dirs })
-      return { dirs, cached: false }
+      if (hit && atMs - hit.atMs < ttlMs) return { dirs: hit.dirs, cached: true }
+      return { dirs: sweep(homeDir, hit).entry.dirs, cached: false }
+    },
+    /**
+     * The re-sweep a caller forces when its session was in none of the dirs
+     * the cached list named, spent at most once per session per container
+     * list: a second walk of a list this session already missed reads the
+     * same directories to the same answer, and both loaders take this leg,
+     * so an exchange that matches nothing paid for two of them.
+     *
+     * A sandbox home usually appears before the session it belongs to has
+     * ever missed, so that session is not memoised yet and still gets the
+     * walk that finds it, and that walk re-arms every session remembered
+     * against the older list. A walk that found the container still moving
+     * settles no miss at all.
+     *
+     * A home that lands after its own session already missed is the case
+     * this does not find at once: the first exchange of a new conversation
+     * can miss before the CLI inside the sandbox has written anything, and
+     * that spends the session's sweep. It waits for the first sweep another
+     * session forces, or for the TTL, whichever comes first, so the bound
+     * is one TTL. Transcript identity re-settles later and is unharmed;
+     * `loadAgentMeta`'s `spawned_by_tool_use_id` is stamped only live, so a
+     * sidechain exchange inside that window keeps it from the backfill lane
+     * rather than from here.
+     *
+     * @param {string} homeDir
+     * @param {string} sessionId
+     * @returns {string[] | null} freshly swept dirs, or null when this
+     *   session has already been swept for
+     */
+    refreshFor(homeDir, sessionId) {
+      const hit = byHome.get(homeDir)
+      if (hit?.swept.has(sessionId)) return null
+      const { entry, unchanged } = sweep(homeDir, hit)
+      if (unchanged) {
+        // Oldest out first, so a daemon streaming one-off sessions that
+        // never match cannot grow the memo with uptime. An evicted session
+        // costs one more sweep, never a wrong answer.
+        if (entry.swept.size >= DESKTOP_3P_SWEPT_SESSIONS_MAX) {
+          entry.swept.delete(/** @type {string} */ (entry.swept.values().next().value))
+        }
+        entry.swept.add(sessionId)
+      }
+      return entry.dirs
     },
   }
+}
+
+/**
+ * Whether two sweeps of the same container named the same dirs. The walk
+ * visits the roots in a fixed order, so element-wise is enough; a reordered
+ * listing reads as a change, which only costs a sweep.
+ *
+ * @param {string[]} a
+ * @param {string[]} b
+ */
+function sameDirs(a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
 }
 
 /** Shared instance for the live path; keyed by home dir, so one is enough. */
@@ -247,12 +330,12 @@ export async function loadTranscript(opts, readFile = readTranscriptFile) {
       const { dirs, cached } = desktop3pDirsCache.get(opts.homeDir)
       await readSessionFromDirs(dirs, opts.sessionId, entries, readFile)
       // A new sandbox home appears exactly when a session starts, so a
-      // cached list cannot contain the newest session's root. One forced
-      // re-sweep on a miss keeps the cache invisible to correctness: the
-      // cached path never finds less than the uncached walk did.
+      // cached list cannot contain the newest session's root: the session
+      // it appeared for gets one forced re-sweep to find it, spent once per
+      // session per container list (see `refreshFor`).
       if (entries.length === 0 && cached) {
-        const refreshed = desktop3pDirsCache.get(opts.homeDir, { refresh: true })
-        await readSessionFromDirs(refreshed.dirs, opts.sessionId, entries, readFile)
+        const refreshed = desktop3pDirsCache.refreshFor(opts.homeDir, opts.sessionId)
+        if (refreshed) await readSessionFromDirs(refreshed, opts.sessionId, entries, readFile)
       }
     }
   }
@@ -369,8 +452,8 @@ export function loadAgentMeta(opts) {
       // the host, so re-sweeping on the map would put a whole-container walk
       // on every one of that conversation's exchanges.
       if (meta.size === 0 && cached && !located) {
-        const refreshed = desktop3pDirsCache.get(opts.homeDir, { refresh: true })
-        collectSessionAgentMeta(refreshed.dirs, opts.sessionId, meta, seen)
+        const refreshed = desktop3pDirsCache.refreshFor(opts.homeDir, opts.sessionId)
+        if (refreshed) collectSessionAgentMeta(refreshed, opts.sessionId, meta, seen)
       }
     }
   }

@@ -242,6 +242,17 @@ export interface TranscriptFileState {
   chain: Promise<void>
 }
 
+/**
+ * One home dir's entry in the Desktop 3p root cache: the dirs the last
+ * sweep found, when it ran, and the sessions a forced re-sweep of that
+ * same list has already been spent on (`createDesktop3pDirsCache`).
+ */
+export interface Desktop3pDirsEntry {
+  atMs: number
+  dirs: string[]
+  swept: Set<string>
+}
+
 export interface ClaudeAttachOptions {
   /**
    * Gateway listener port. Written into `env.ANTHROPIC_BASE_URL` in
