@@ -305,10 +305,14 @@ export function* walkTranscriptRoots(roots) {
  * nor the wire exchange. Returns a map keyed by the agent id parsed from
  * each filename.
  *
- * Resolution mirrors `loadTranscript`: a `transcriptPath` scans just that
- * session's directory (cheap: the live path); otherwise `projectsDir`
- * is scanned recursively (the backfill path). Best-effort: a missing
- * directory or an unparseable sidecar is skipped, never thrown.
+ * A `transcriptPath` scans just that session's directory (cheap: the
+ * live path); otherwise `projectsDir` is scanned recursively (the
+ * backfill path). This no longer mirrors `loadTranscript`, which falls
+ * through to the session-id scan when a stale `transcriptPath` reads
+ * empty: the sidecar lookup stays rooted at the named path, so a
+ * session whose transcript identity that fall-through recovered still
+ * carries no `spawned_by_tool_use_id`. Best-effort: a missing directory
+ * or an unparseable sidecar is skipped, never thrown.
  *
  * @param {{ transcriptPath?: string, projectsDir?: string }} opts
  * @returns {Map<string, { tool_use_id: string }>}
