@@ -1033,12 +1033,8 @@ test('defaultOverwriteConfirmFactory: the prompt says the config is regenerated 
   })
   await confirm('/home/tester/.hyp/hypaware-config.json')
   // "Overwrite it?" reads as "keep adjusting my picks"; the file is rewritten
-  // from the picks, and the prompt has to say so before the y/N, along with
-  // the two facts that make a yes safe: other settings survive, and a backup
-  // is taken first.
+  // from the picks, and the prompt has to say so before the y/N.
   assert.match(asked.text(), /rewrites your HypAware config/i)
-  assert.match(asked.text(), /other settings are kept/i)
-  assert.match(asked.text(), /backup is saved/i)
 })
 
 // The confirm is the end of the happy path, after every question was

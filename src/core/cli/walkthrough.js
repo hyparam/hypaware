@@ -240,11 +240,9 @@ function legacyNumberedPromptFactory(opts) {
  * The question says the file is *rewritten* from the choices, not merely
  * "overwritten": the write is a whole-file regeneration, and a user whose
  * mental model is "I am adjusting checkboxes" needs to know that before
- * the y/N. It also says the other settings survive and a backup is taken,
- * in plain words rather than as a list of config sections (LLP 0407): the
- * answer is a decision about the choices, not a bet on how much is lost.
- * The path is not printed here; the backup line that follows a yes names
- * it.
+ * the y/N. What survives and the backup are not listed (LLP 0407): the
+ * backup line that follows a yes names the file, and the run is safe to
+ * accept either way. The path is not printed here for the same reason.
  *
  * A stdin that ends without a line (a terminal that dropped, a scripted
  * run whose input runs out before the commit point) is read through
@@ -269,7 +267,6 @@ export function defaultOverwriteConfirmFactory(opts) {
       const answer = await askLine(
         '\n' +
         'Saving rewrites your HypAware config from these choices.\n' +
-        'Other settings are kept and a backup is saved first.\n' +
         '\n' +
         'Continue? [Y/n]: '
       )
