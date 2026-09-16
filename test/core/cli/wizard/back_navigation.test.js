@@ -753,11 +753,11 @@ test('runInitWizard end-to-end: join, back to the fork, local, and one combined 
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-wizard-e2e-'))
   const env = { HOME: home, HYP_HOME: path.join(home, '.hyp'), HYP_NO_TUI: '1', NO_COLOR: '1' }
   const io = scriptedIo([
-    '1',    // fork: Collect shared agent logs
+    '1',    // fork: Sync to the cloud
     '2',    // express gate: Customize
     'b',    // pick menu: step back one screen - the express gate
     'b',    // express gate: step back one screen - the fork
-    '2',    // fork: Collect agent logs locally
+    '2',    // fork: Local only
     '2',    // disconnect?: No, stay connected
     '2',    // express gate (asked again on this pass): Customize
     '',     // pick menu: bare enter keeps the detected row checked (LLP 0274)

@@ -124,9 +124,10 @@ test('hyp init on a configured install fronts the picker with the summary menu',
 })
 
 // First run (no config): the gate falls through to the wizard's pathway
-// fork, whose bare-enter default is quit - `hyp init` on a fresh machine
-// never writes anything by accident (LLP 0129 #fork).
-test('hyp init first run presents the pathway fork; a bare enter quits untouched', async () => {
+// fork. A stdin that cannot answer quits there, so `hyp init` on a fresh
+// machine with nobody at the terminal never writes anything (LLP 0410
+// #eof-quits).
+test('hyp init first run presents the pathway fork; a spent stdin quits untouched', async () => {
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-first-run-fork-'))
 
   const stdout = /** @type {any} */ (makeBuf())
@@ -136,7 +137,7 @@ test('hyp init first run presents the pathway fork; a bare enter quits untouched
   const code = await dispatch(['init'], {
     stdout,
     stderr,
-    stdin: /** @type {any} */ (Readable.from(['\n'])),
+    stdin: /** @type {any} */ (Readable.from([])),
     env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '', HYP_NO_TUI: '1' },
   })
 
@@ -144,8 +145,8 @@ test('hyp init first run presents the pathway fork; a bare enter quits untouched
   // The first-run screen explains the product, then asks (LLP 0211).
   assert.match(stdout.text(), /HypAware records the sessions, logs, and telemetry/)
   assert.match(stdout.text(), /How do you want to collect agent logs\?/)
-  assert.match(stdout.text(), /1\) Collect shared agent logs/)
-  assert.match(stdout.text(), /2\) Collect agent logs locally/)
+  assert.match(stdout.text(), /1\) Sync to the cloud/)
+  assert.match(stdout.text(), /2\) Local only/)
   // Quit left no config behind.
   await assert.rejects(fs.access(path.join(hypHome, 'hypaware-config.json')))
 })

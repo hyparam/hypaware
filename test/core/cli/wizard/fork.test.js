@@ -62,20 +62,23 @@ function fixtureReport(over = {}) {
 
 // --- runWizardFork / buildForkOptions ---
 
-test('buildForkOptions: team, local, quit, in that order', () => {
+// Two rows and no quit row; sync leads and is the bare-enter default.
+// @ref LLP 0410#two-rows [tests]:
+test('buildForkOptions: team then local, no quit row', () => {
   const values = buildForkOptions().map((o) => o.value)
-  assert.deepEqual(values, ['team', 'local', 'quit'])
+  assert.deepEqual(values, ['team', 'local'])
 })
 
-test('runWizardFork: a bare enter takes the default (quit)', async () => {
+test('runWizardFork: a bare enter takes the default (sync)', async () => {
   const { opts, stdout } = ctxWithStdin('\n')
   const choice = await runWizardFork(opts)
-  assert.equal(choice, 'quit')
+  assert.equal(choice, 'team')
   // The intro line precedes the menu (LLP 0211 #explain-first).
   assert.match(stdout.text(), /HypAware records the sessions, logs, and telemetry/)
-  assert.match(stdout.text(), /1\) Collect shared agent logs/)
-  assert.match(stdout.text(), /2\) Collect agent logs locally/)
-  assert.match(stdout.text(), /3\) Quit/)
+  assert.match(stdout.text(), /1\) Sync to the cloud/)
+  assert.match(stdout.text(), /2\) Local only/)
+  assert.doesNotMatch(stdout.text(), /Quit/)
+  assert.match(stdout.text(), /Choose \[1-2, default 1\]: /)
   // Row summaries carry the guidance and the sign-in disclosure
   // (LLP 0211 #collect-labels), in the legacy renderer too.
   assert.match(stdout.text(), /follows you across machines and harnesses/)
