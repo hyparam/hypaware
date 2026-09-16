@@ -68,7 +68,7 @@ function syncMenuQuestion(/** @type {Record<string, unknown>} */ extra = {}) {
     pickType: 'clients',
     title: 'Choose what syncs. Unchecked sources stay on this machine.',
     options: [
-      { value: 'claude', label: 'capture claude · managed by your fleet', checked: true, disabled: true },
+      { value: 'claude', label: 'capture claude · set by your team', checked: true, disabled: true },
       { value: 'openclaw', label: 'capture openclaw', checked: true },
       { value: 'hermes', label: 'capture hermes' },
     ],
@@ -106,7 +106,7 @@ async function askLegacy(question, answer) {
 test('enterKeepsChecked: the fallback renders the checked state and a bare enter keeps it', async () => {
   const { picked, text } = await askLegacy(syncMenuQuestion({ enterKeepsChecked: true }), '\n')
 
-  assert.match(text, /1\) \[x\] capture claude · managed by your fleet \(locked\)/)
+  assert.match(text, /1\) \[x\] capture claude · set by your team \(locked\)/)
   assert.match(text, /2\) \[x\] capture openclaw/)
   assert.match(text, /3\) \[ \] capture hermes/)
   assert.match(text, /select \(e\.g\. 1,3, "all", "none", enter keeps \[x\], or b to go back\): /)

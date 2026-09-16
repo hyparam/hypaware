@@ -82,10 +82,8 @@ test('a non-interactive run is never asked, and never sends', async () => {
   // run, so the skip has to state the deadline, the way out, and the review
   // hint itself or the run ends without ever naming them.
   // @ref LLP 0188#never-silent [tests]: the un-askable path still names the release verb
-  assert.match(o.stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
-  assert.match(o.stdout.text(), /includes your imported history/)
-  assert.match(o.stdout.text(), /`hyp status` shows the countdown/)
-  assert.match(o.stdout.text(), /To send it sooner, run `hyp sync`/)
+  assert.match(o.stdout.text(), /Nothing has been uploaded yet\. Your logs upload by/)
+  assert.match(o.stdout.text(), /or sooner if you run `hyp sync`/)
   assert.match(o.stdout.text(), /hypaware-privacy/)
 })
 
@@ -115,10 +113,8 @@ for (const surfaces of [
     assert.deepEqual(result, { asked: false, reason: 'not-interactive' })
     // Everything the privacy narration would have said, because it stood
     // down for a question this run cannot be asked.
-    assert.match(stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
-    assert.match(stdout.text(), /includes your imported history/)
-    assert.match(stdout.text(), /`hyp status` shows the countdown/)
-    assert.match(stdout.text(), /To send it sooner, run `hyp sync`/)
+    assert.match(stdout.text(), /Nothing has been uploaded yet\. Your logs upload by/)
+    assert.match(stdout.text(), /or sooner if you run `hyp sync`/)
     assert.match(stdout.text(), /hypaware-privacy/)
   })
 }
@@ -150,7 +146,7 @@ test('an unforeseen throw states the hold rather than ending on nothing', async 
     readDeadline: async () => DEADLINE,
   })
   assert.deepEqual(result, { asked: false, reason: 'error' })
-  assert.match(stdout.text(), /Nothing has been uploaded yet: nothing leaves this machine before/)
+  assert.match(stdout.text(), /Nothing has been uploaded yet\. Your logs upload by/)
 })
 
 // @ref LLP 0203#child-process [tests]: reload through dispatch without the wizard's kernel

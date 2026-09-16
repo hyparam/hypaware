@@ -492,7 +492,7 @@ export async function runPolicyClient(argv, ctx) {
       return 0
     }
     if (provenance === 'central') {
-      ctx.stdout.write(`${name}: sync (managed by your fleet)\n`)
+      ctx.stdout.write(`${name}: sync (set by your team)\n`)
     } else if (optedOut.has(name)) {
       ctx.stdout.write(`${name}: local-only (${CLIENT_STORE_LABEL})\n`)
     } else {
@@ -503,7 +503,7 @@ export async function runPolicyClient(argv, ctx) {
 
   if (parsed.token === 'local-only') {
     if (provenance === 'central') {
-      ctx.stderr.write(`error: '${name}' is managed by your fleet and always syncs to your server\n`)
+      ctx.stderr.write(`error: '${name}' is set by your team and always syncs to your server\n`)
       return 1
     }
     const next = [...(entries ?? []), { source: name, class: /** @type {'local-only'} */ ('local-only') }]
@@ -523,7 +523,7 @@ export async function runPolicyClient(argv, ctx) {
 
   // token === 'sync': remove the opt-out, idempotent.
   if (!optedOut.has(name)) {
-    ctx.stdout.write(`${name}: sync${provenance === 'central' ? ' (managed by your fleet)' : ' (default, unchanged)'}\n`)
+    ctx.stdout.write(`${name}: sync${provenance === 'central' ? ' (set by your team)' : ' (default, unchanged)'}\n`)
     return 0
   }
   try {

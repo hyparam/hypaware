@@ -790,11 +790,11 @@ test('hyp policy client refuses to opt out a central-configured source (LLP 0188
 
     const res = await run('policy client', ['claude', 'local-only'], { cwd: root, hypHome })
     assert.equal(res.code, 1)
-    assert.match(res.stderr, /managed by your fleet and always syncs/)
+    assert.match(res.stderr, /set by your team and always syncs/)
     assert.equal(await readClientSyncEntries({ stateDir }), null, 'nothing was written')
 
     const show = await run('policy client', ['claude'], { cwd: root, hypHome })
-    assert.match(show.stdout, /claude: sync \(managed by your fleet\)/)
+    assert.match(show.stdout, /claude: sync \(set by your team\)/)
 
     // A non-central source on the same machine still opts out fine.
     const other = await run('policy client', ['openclaw', 'local-only'], { cwd: root, hypHome })

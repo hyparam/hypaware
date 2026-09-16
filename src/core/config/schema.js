@@ -98,7 +98,7 @@ export async function prepareLocalConfigWrite({ targetPath, force, confirmOverwr
   if (confirmOverwrite) {
     const confirmed = await confirmOverwrite(targetPath)
     if (!confirmed) {
-      return { proceed: false, message: `keeping existing config at ${targetPath}` }
+      return { proceed: false, message: 'nothing was changed; your existing config is kept' }
     }
   } else if (!force) {
     return {

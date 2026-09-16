@@ -24,7 +24,7 @@ import { readObservabilityEnv } from '../../observability/env.js'
 import { discoverBundledPlugins } from '../../runtime/bundled.js'
 import { buildPluginCatalog } from '../../plugin_catalog.js'
 import { collectHypAwareStatus } from '../../daemon/status.js'
-import { formatFirstSyncDeadline, readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
+import { readFirstSyncDeadline } from '../../usage-policy/first_sync_hold.js'
 import { readClientSyncEntries } from '../../usage-policy/index.js'
 import {
   LOCAL_INSTALL_RETENTION_DAYS,
@@ -44,7 +44,7 @@ import { runWizardSuggestSkill } from './suggest_skill.js'
 import { firstLookNoticeSink, firstLookRunnerFromCtx, runWizardFirstLook } from './first_look.js'
 import { computeCentralLockedSources, runWizardJoin } from './join.js'
 import { commitWizardPickedConfig, resolvePickSeeding, runWizardPick } from './pick.js'
-import { runWizardSyncNow } from './sync_now.js'
+import { heldStatement, runWizardSyncNow } from './sync_now.js'
 import { commitWizardSyncScope, runWizardSyncScope } from './sync_scope.js'
 import { runWizardFolderAsk } from './folder_ask.js'
 import { runWizardExpressGate } from './express.js'
@@ -423,7 +423,7 @@ async function runGuardedInitWizard(opts, guard) {
               // #consequences: a cancelled run still exits 130).
               // @ref LLP 0191#esc-back [implements]: ctrl+c cancels the run at the disconnect question rather than acting as a back-step
               if (joined) await narrateEnrolledAbort(opts)
-              opts.stderr.write('hyp setup: cancelled\n')
+              opts.stderr.write('Setup cancelled.\n')
               return { exitCode: 130, cancelled: true }
             }
             if (disconnect === 'disconnect') {
@@ -578,7 +578,7 @@ async function runGuardedInitWizard(opts, guard) {
           if (choice === 'back') continue atFork
           if (choice === 'cancelled') {
             if (joined) await narrateEnrolledAbort(opts)
-            opts.stderr.write('hyp setup: cancelled\n')
+            opts.stderr.write('Setup cancelled.\n')
             return { exitCode: 130, cancelled: true, ...(pathway ? { pathway } : {}) }
           }
           expressShown = true
@@ -905,7 +905,7 @@ async function runGuardedInitWizard(opts, guard) {
   const cancelled = finaleSummary?.cancelled === true
   if (cancelled) {
     try {
-      opts.stderr.write('hyp setup: cancelled\n')
+      opts.stderr.write('Setup cancelled.\n')
     } catch {
       // best-effort: stderr might be closed during cleanup
     }
@@ -1282,15 +1282,7 @@ async function narratePrivacyIfTeamPath(opts, { offerFollows = false } = {}) {
   }
   if (typeof deadline !== 'number') return null
   if (offerFollows) return deadline
-  opts.stdout.write(
-    '\n' +
-    'Nothing has been uploaded yet - nothing leaves this machine before\n' +
-    `${formatFirstSyncDeadline(deadline)}. That first sync includes your imported history.\n` +
-    'To review or exclude anything before then, run the hypaware-privacy\n' +
-    'skill in Claude or Codex. `hyp status` shows the countdown.\n' +
-    'To send it sooner, run `hyp sync`: it shows what would leave and asks\n' +
-    'before sending anything.\n'
-  )
+  opts.stdout.write(heldStatement(deadline))
   return deadline
 }
 
@@ -1313,8 +1305,8 @@ async function narrateEnrolledAbort(opts) {
   try {
     opts.stdout.write(
       '\n' +
-      'This machine is enrolled: its configured sources sync to your server by default.\n' +
-      "Keep any local-only with 'hyp privacy client <name> local-only'.\n"
+      'You are signed in, so what you record syncs to your team by default.\n' +
+      "To keep a client on this machine only: hyp privacy client <name> local-only\n"
     )
     await narratePrivacyIfTeamPath(opts)
   } catch {

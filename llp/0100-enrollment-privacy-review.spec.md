@@ -9,7 +9,10 @@
 (#adjacency: in the wizard's compact join lane the forwarding line and the
 one-line deadline block satisfy R1a together, the first carrying the server
 name and the `hyp remote list` lookup for the pair); LLP 0407 (#dropped: R1
-no longer requires the backfill statement on the upload prompt)
+no longer requires the backfill statement on the upload prompt);
+[LLP 0412](./0412-compact-sign-in-drops-the-lookup-pointer.decision.md)
+(#compact-lookup-dropped: R1a's lookup clause no longer binds the compact
+join lane, whose forwarding line carries the server name alone)
 **Related:** LLP 0049, LLP 0063, LLP 0066, LLP 0069, LLP 0070, LLP 0071, LLP 0093, LLP 0094, LLP 0101, LLP 0102, LLP 0103, LLP 0104, LLP 0105, LLP 0106, LLP 0107
 
 > When `hyp remote login` enrolls a machine, the first sync to the org server

@@ -388,7 +388,7 @@ test('an enrolled run whose stdout dies narrates the enrolled abort on the survi
   assert.equal(result.cancelled, true)
   // This run joined, so the fact that outlives it is attempted where a
   // `2>log` invocation could still catch it.
-  assert.match(stderr.text(), /This machine is enrolled/)
+  assert.match(stderr.text(), /syncs to your team by default/)
 })
 
 test('a dead stderr never cancels the run: warnings degrade, the wizard completes', async () => {

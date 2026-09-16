@@ -142,7 +142,7 @@ test('interactive init: declining the overwrite prompt aborts with the config in
   })
 
   assert.equal(result.exitCode, 1)
-  assert.match(stderr.text(), /keeping existing config/)
+  assert.match(stderr.text(), /existing config is kept/)
   // The existing config is untouched and no backup was written.
   const after = JSON.parse(await fs.readFile(configPath, 'utf8'))
   assert.deepEqual(after.plugins, EXISTING.plugins)

@@ -270,7 +270,7 @@ test('runInitWizard: cancelling the disconnect question ends the run without dis
   assert.equal(leaveRan, false, 'a cancel never disconnects')
   assert.equal(calls.filter((c) => c === 'fork').length, 1, 'the fork is not re-presented')
   assert.ok(!calls.includes('pick'), 'the cancel ended the run before any phase')
-  assert.match(stderr.text(), /hyp setup: cancelled/)
+  assert.match(stderr.text(), /Setup cancelled./)
 })
 
 test('runInitWizard: an unmanaged machine choosing local is never asked about disconnecting', async () => {
@@ -1120,7 +1120,7 @@ test('runInitWizard: a declined commit exits 1, runs nothing further, and narrat
   assert.ok(!calls.includes('configure'))
   assert.ok(!calls.includes('finale'))
   assert.equal(await fs.readFile(configPath, 'utf8'), '{"version":2,"plugins":["existing"]}\n', 'the existing config is untouched')
-  assert.match(stdout.text(), /This machine is enrolled/)
+  assert.match(stdout.text(), /syncs to your team by default/)
 })
 
 test('runInitWizard: a scripted pick result without configPending is never committed by the orchestrator', async () => {
@@ -1150,11 +1150,11 @@ test('runInitWizard: a team-path overwrite refusal narrates the enrolled state a
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 1)
   const text = stdout.text()
-  assert.match(text, /This machine is enrolled/)
+  assert.match(text, /syncs to your team by default/)
   assert.match(text, /hyp privacy client <name> local-only/)
   assert.match(text, /Nothing has been uploaded yet/)
   // No sync offer follows an abort, so the narration keeps the way out.
-  assert.match(text, /To send it sooner, run `hyp sync`/)
+  assert.match(text, /or sooner if you run `hyp sync`/)
 })
 
 test('runInitWizard: a team-path pick cancel narrates the enrolled state; no hold means no deadline claim', async () => {
@@ -1165,7 +1165,7 @@ test('runInitWizard: a team-path pick cancel narrates the enrolled state; no hol
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 130)
   const text = stdout.text()
-  assert.match(text, /This machine is enrolled/)
+  assert.match(text, /syncs to your team by default/)
   assert.doesNotMatch(text, /Nothing has been uploaded yet/)
 })
 
@@ -1176,7 +1176,7 @@ test('runInitWizard: a team-path sync-scope cancel narrates that default-sync st
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 130)
-  assert.match(stdout.text(), /This machine is enrolled/)
+  assert.match(stdout.text(), /syncs to your team by default/)
 })
 
 test('runInitWizard: a local-path abort stays quiet - nothing enrolled this run', async () => {
@@ -1185,7 +1185,7 @@ test('runInitWizard: a local-path abort stays quiet - nothing enrolled this run'
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 1)
-  assert.doesNotMatch(stdout.text(), /This machine is enrolled/)
+  assert.doesNotMatch(stdout.text(), /syncs to your team by default/)
 })
 
 test('runInitWizard: a cancelled finale returns 130 with the cancel notice', async () => {
@@ -1203,7 +1203,7 @@ test('runInitWizard: a cancelled finale returns 130 with the cancel notice', asy
   })
   const result = await runInitWizard(opts)
   assert.equal(result.exitCode, 130)
-  assert.match(stderr.text(), /hyp setup: cancelled/)
+  assert.match(stderr.text(), /Setup cancelled./)
 })
 
 // --- run summary + privacy narration ---
@@ -1618,9 +1618,9 @@ test('runInitWizard: team pathway with a live first-sync hold narrates the deadl
   const text = stdout.text()
   // No tty here, so the sync step cannot put the question and states the
   // hold itself: the deadline, the way out, and the review hint.
-  assert.match(text, /Nothing has been uploaded yet: nothing leaves this machine before/)
+  assert.match(text, /Nothing has been uploaded yet\. Your logs upload by/)
   assert.match(text, /hypaware-privacy/)
-  assert.match(text, /To send it sooner, run `hyp sync`/)
+  assert.match(text, /or sooner if you run `hyp sync`/)
 })
 
 test('runInitWizard: local pathway never narrates the first-sync hold', async () => {

@@ -140,7 +140,7 @@ export async function runWizardSyncScope(opts) {
     if ((opts.locked ?? []).length === 0) {
       if ((opts.lockedHidden ?? 0) > 0) {
         opts.stdout.write(
-          'You picked nothing to record, but capture your fleet manages directly still syncs to your server.\n'
+          'You picked nothing to record, but capture your team manages directly still syncs to your server.\n'
         )
       } else if (hiddenCandidateSyncs) {
         opts.stdout.write(
@@ -154,7 +154,7 @@ export async function runWizardSyncScope(opts) {
     // A hidden pick standing beside the org rows breaks the exhaustive
     // reading of the fleet sentence: the carried row (LLP 0202
     // #carry-through) is in `sources`, composes into the *local* layer, and
-    // syncs, so "everything you picked is managed by your fleet" hands the
+    // syncs, so "everything you picked is set by your team" hands the
     // fleet an owner's claim over capture it does not own. The org rows get
     // a sentence scoped to themselves, and the machine's own capture gets
     // the line the no-locked branch already uses - a fact, never a name.
@@ -169,14 +169,14 @@ export async function runWizardSyncScope(opts) {
     // @ref LLP 0281#visible-org-row [implements]: a visible org row stops standing in for a hidden pick beside it, withheld or not
     // @ref LLP 0289#ask-the-store [implements]: the store answers whether the machine's own capture ships, not whether the fleet owns it
     if (hiddenCandidates.length > 0) {
-      opts.stdout.write('Your fleet manages these and they always sync:\n')
+      opts.stdout.write('Your team manages these and they always sync:\n')
       for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
       if (hiddenCandidateSyncs) {
         opts.stdout.write('Capture already set up on this machine also syncs to your server.\n')
       }
       return await finishSpan({ noQuestion: true, optedOut: [] }, opts, { hidden_picks_syncing: hiddenCandidateSyncs })
     }
-    opts.stdout.write('Everything you picked is managed by your fleet and always syncs.\n')
+    opts.stdout.write('Everything you picked is set by your team and always syncs.\n')
     for (const d of opts.locked ?? []) opts.stdout.write(`  ${d.label}\n`)
     // A statement, not a screen: `noQuestion` is what tells the lane after
     // this one that there is nothing here to step back *to* (LLP 0191
@@ -227,7 +227,7 @@ export async function runWizardSyncScope(opts) {
   } catch (err) {
     if (!isPromptCancelledError(err)) throw err
     try {
-      opts.stderr.write('hyp setup: cancelled\n')
+      opts.stderr.write('Setup cancelled.\n')
     } catch {
       // best-effort: stderr might be closed during cleanup
     }

@@ -40,7 +40,7 @@ import {
  * silent state, using the LLP 0031 provenance vocabulary. Exported so the
  * sync-scope lane labels the same rows the same way.
  */
-export const LOCKED_LABEL_SUFFIX = ' · managed by your fleet'
+export const LOCKED_LABEL_SUFFIX = ' · set by your team'
 
 /**
  * Label suffix for a `needs_setup` row listed on the accept narration.
@@ -300,7 +300,7 @@ export function defaultRowLabels({ defaultRows, lockedSet }) {
  * A row's initial checked state is `locked.includes(id)`, then whatever the
  * local config on disk already collects, and only on a first run (no config
  * yet) `detected.has(id)`. A locked id renders `disabled: true` with the
- * `· managed by your fleet`
+ * `· set by your team`
  * suffix and is filtered out of the returned sources before composition: it
  * is already in the central layer, so composing it again into the local
  * layer would be the exact collision join-before-pick exists to avoid
@@ -687,7 +687,7 @@ async function promptPickSelection({ opts, ask, visibleList, descriptors, seed, 
 
 /**
  * Build one picker row's prompt option from its descriptor. A locked row
- * is checked and disabled with the `· managed by your fleet` suffix; a
+ * is checked and disabled with the `· set by your team` suffix; a
  * seeded row (from the config on a reconfigure, a prior confirmed
  * selection on a re-entry, or detection on a first run) is checked,
  * carrying the ` · detected` suffix only when detection put it there;
@@ -789,7 +789,7 @@ async function cancelledResult(opts) {
     { component: 'wizard' }
   )
   try {
-    opts.stderr.write('hyp setup: cancelled\n')
+    opts.stderr.write('Setup cancelled.\n')
   } catch {
     // best-effort: stderr might be closed during cleanup
   }

@@ -223,7 +223,7 @@ test('the sync lane auto-accepts by narrating the same split and writing the sam
   assert.deepEqual(result, { optedOut: ['openclaw'] }, 'a standing opt-out survives the fast path')
   const out = stdout.text()
   assert.match(out, /These will sync to your server:/)
-  assert.match(out, /capture claude · managed by your fleet/)
+  assert.match(out, /capture claude · set by your team/)
   assert.match(out, /capture hermes/)
   assert.match(out, /Staying local-only:/)
   assert.deepEqual(await readClientSyncEntries({ stateDir }), [

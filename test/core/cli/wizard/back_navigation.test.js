@@ -692,10 +692,10 @@ test('runInitWizard: ctrl+c at the disconnect question cancels the run instead o
   assert.equal(result.exitCode, 130)
   assert.equal(result.cancelled, true)
   assert.equal(forkCalls, 2, 'the fork ran once per pathway choice and never a third time')
-  assert.match(stderr.text(), /hyp setup: cancelled/)
+  assert.match(stderr.text(), /Setup cancelled./)
   // The enrollment the cancel cannot undo is still narrated (LLP 0190
   // #abort-narration), and nothing was disconnected.
-  assert.match(stdout.text(), /This machine is enrolled/)
+  assert.match(stdout.text(), /syncs to your team by default/)
   assert.equal(calls.filter((c) => c === 'syncScope').length, 0)
 })
 
