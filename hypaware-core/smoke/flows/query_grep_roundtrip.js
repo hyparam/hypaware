@@ -10,10 +10,9 @@ import {
 } from '../../../src/core/observability/index.js'
 import { createCommandRegistry } from '../../../src/core/registry/commands.js'
 import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
-import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
+import { bootKernel } from '../../../src/core/runtime/boot.js'
+import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
-import { discoverBundledPlugins } from '../../../src/core/runtime/bundled.js'
-import { activatePlugins } from '../../../src/core/runtime/loader.js'
 import { listLiveDataFiles } from '../../../src/core/cache/iceberg/store.js'
 import { urlToPath } from '../../../src/core/cache/iceberg/resolver.js'
 import { resolveIcebergDir } from '../../../src/core/cache/storage.js'
@@ -78,15 +77,20 @@ export async function run({ harness, expect }) {
   const cacheRoot = path.join(harness.stateDir, 'cache')
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
-  const kernel = createKernelRuntime({ commandRegistry: registry, cacheRoot })
-  const discovered = await discoverBundledPlugins()
-  const grepPlugin = discovered.loaded.find((entry) => entry.manifest.name === '@hypaware/grep')
-  if (!grepPlugin) throw new Error('grep plugin was not discovered')
-  const activation = await activatePlugins({
-    plugins: [grepPlugin], stateRoot: harness.stateDir, runId: harness.devRunId,
-    runtime: kernel, tmpRoot: harness.tmpDir,
+  const kernel = await step('upgrade_config', async () => {
+    const configPath = defaultConfigPath(harness.hypHome)
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+    const boot = await bootKernel({
+      hypHome: harness.hypHome, configPath, commandRegistry: registry,
+      cacheRoot, runId: harness.devRunId, env: process.env,
+    })
+    expect.that('upgrade: grep activates from an unchanged legacy plugin list',
+      boot.runtime.verbs.getByTool('grep_search')?.plugin, (v) => v === '@hypaware/grep')
+    const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    expect.that('upgrade: the grep entry is persisted', config.plugins,
+      (v) => v.length === 1 && v[0].name === '@hypaware/grep')
+    return boot.runtime
   })
-  expect.that('plugin: grep activated through its manifest', activation.results[0]?.ok, (v) => v === true)
 
   /**
    * Run one CLI invocation from a given caller directory.
@@ -234,6 +238,10 @@ export async function run({ harness, expect }) {
   // opened here would be dropped rather than recorded, and a smoke_step
   // that never reaches the trace is worse than none.
   {
+    const logs = await expect.logs()
+    expect.that('logs: the automatic config migration persisted once',
+      logs.filter((/** @type {any} */ row) => row.body === 'config.grep_migration' &&
+        row.attributes?.migration_status === 'persisted').length, (v) => v === 1)
     const traces = await expect.traces()
     const greps = traces.filter((/** @type {any} */ s) => s.name === 'query.grep_search')
     expect.that('spans: query.grep_search spans were recorded', greps.length, (v) => v >= 3)

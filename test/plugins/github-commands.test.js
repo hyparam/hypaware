@@ -63,7 +63,8 @@ test('auth command argument errors cannot perform a login or logout', async (t) 
 test('inactive GitHub login is discoverable without quietly enabling collection', async (t) => {
   const f = fixture(t)
   const configPath = path.join(f.stateDir, 'hypaware-config.json')
-  const config = JSON.stringify({ version: 2, plugins: [] })
+  // Keep the legacy grep migration out of this GitHub opt-in assertion.
+  const config = JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/grep' }] })
   fs.writeFileSync(configPath, config)
   const code = await dispatch(['github', 'login', '--no-browser'], {
     stdout: f.stdout, stderr: f.stderr,

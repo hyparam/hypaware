@@ -3,6 +3,7 @@
 **Type:** Decision
 **Status:** Active
 **Systems:** Config
+**Extended-by:** LLP 0415 (local grep compatibility migration during client boot)
 **Author:** Phil / Claude
 **Date:** 2026-06-16
 **Related:** LLP 0003, LLP 0004, LLP 0009, LLP 0010, LLP 0011, LLP 0013, LLP 0014, LLP 0017, LLP 0025; hypaware-server LLP 0009 (out of tree, design authority)

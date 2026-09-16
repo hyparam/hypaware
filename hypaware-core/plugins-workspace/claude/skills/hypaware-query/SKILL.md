@@ -48,7 +48,7 @@ The core query subcommands are `overview`, `schema`, and `sql`; active plugins a
 
 ## Full-text search: `hyp query grep`
 
-Provided by `@hypaware/grep`. If inactive, add `{"name":"@hypaware/grep"}` to `plugins[]` in the local config. New `hyp init` capture configurations include it automatically.
+Provided by `@hypaware/grep`, included in new capture configurations and enabled automatically when existing client configurations load. Explicit `enabled: false` entries in either config layer are preserved; check those if grep is unavailable.
 
 `hyp query grep "<pattern>"` searches recorded messages without SQL: case-insensitive substring by default, `--regex` for a pattern, scoped with `--session-id <id>` (and `--chain-id <id>`), `--from`/`--to` (YYYY-MM-DD), `--limit <n>` (default 50, ceiling 1000; a value above the ceiling clamps down to it, so `--limit 5000` returns up to 1000, while a value the flag cannot use at all, such as `0` or `2.5`, is a usage error). Hits arrive newest first, one row per matched column, each carrying `session_id`/`message_id`/`part_id` locators that pivot straight into `hyp query sql` or a narrower grep. `--remote <target>` runs the same search against a server, with two server-side exceptions: `--regex` is operator-only there, and `--include-local-only` is rejected outright (a server enforces its own visibility, never the caller's). Prefer it over `LIKE '%...%'` SQL for "which sessions mention X": it scans the searchable columns directly and returns bounded snippets and session locators.
 

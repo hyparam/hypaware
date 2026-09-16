@@ -7,6 +7,7 @@
 **Date:** 2026-09-16
 **Supersedes:** LLP 0264#decision, LLP 0264#verb, LLP 0264#lifecycle, LLP 0264#dependency (local implementation only); LLP 0314#decision and LLP 0353#registry (automatic core registration only)
 **Related:** LLP 0003, LLP 0005, LLP 0105, LLP 0302, LLP 0303, LLP 0304
+**Extended-by:** LLP 0415 (supersedes manual activation in #plugin)
 
 ## Direct local scans {#scans}
 

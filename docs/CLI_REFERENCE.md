@@ -190,8 +190,10 @@ hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from
 ```
 
 Provided by the bundled `@hypaware/grep` plugin. New `hyp init` capture
-configurations include it; existing configurations add
-`{"name":"@hypaware/grep"}` to `plugins[]`.
+configurations include it; existing client configurations gain it automatically
+on startup, preserving explicit `enabled: false` entries. The migration backs up
+the local config before writing. With a read-only config, search remains
+available for the current process and a warning reports that persistence failed.
 
 Searches recorded `ai_gateway_messages` text without SQL. The pattern is a
 case-insensitive substring by default, or a regular expression with `--regex`.
