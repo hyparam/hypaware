@@ -7,6 +7,7 @@ import {
   assignTranscriptIdentity,
   defaultClaudeProjectsDir,
   indexTranscriptEntries,
+  loadAgentMeta,
   withToolUseResult,
 } from './transcripts.js'
 import { sharedTranscriptLoader } from './transcript-cache.js'
@@ -48,6 +49,13 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
  * is the wrong one. A now-known cwd that resolves to `ignore` marks the row
  * for removal (the `USAGE_POLICY_DROP` sentinel at its position); otherwise
  * the row is enriched.
+ *
+ * A third pass re-derives a sidechain row's `claude.spawned_by_tool_use_id`
+ * (issue #1794): the `agent-<id>.meta.json` sidecar is written just after the
+ * exchange finalizes, so a subagent's opening exchange can project without it,
+ * and no later lane fills it in - the backfill materializer skips its own copy
+ * of a row whose native `part_id` this pass already committed.
+ *
  * @ref LLP 0085 [implements]: flush-time settlement may DROP a late-resolved
  * `ignore` row, not only upgrade identity - the capture-seam-or-settlement
  * enforcement of the `.hypignore` guarantee when cwd was unknown at capture.
@@ -152,6 +160,36 @@ export function createClaudeSettlementEnricher(opts) {
           }
         }
 
+        // Sidechain provenance, re-derived (issue #1794). The projector stamps
+        // `claude.spawned_by_tool_use_id` from the `agent-<id>.meta.json`
+        // sidecar, which the CLI writes a moment after the exchange finalizes,
+        // so a subagent's opening exchange can project without it. Nothing else
+        // recovers it: once this pass commits the row under its native
+        // `part_id`, the backfill materializer's pre-write `part_id` dedupe
+        // skips its own copy, the one that does carry the attribute.
+        //
+        // Gated so the lookup is paid only where it can pay off: a group needs
+        // a sidechain row that still lacks the attribute (`.some`
+        // short-circuits, and a main-loop row is rejected on its empty
+        // `agent_id` before its attributes are parsed), and a hook-recorded
+        // `transcript_path` to root the walk. That second guard is the
+        // projector's, and it keeps a session with no context record from
+        // turning the lookup into a projects-wide walk per settle pass.
+        /** @type {Map<string, { tool_use_id: string }> | undefined} */
+        let agentMeta
+        if (sessionRecord?.transcript_path && indices.some((i) => wantsSpawnedBy(rows[i]))) {
+          agentMeta = loadAgentMeta({
+            transcriptPath: sessionRecord.transcript_path,
+            projectsDir,
+            sessionId,
+            // @ref LLP 0133#attribution [implements]: the same 3p container
+            // roots the transcript load above reaches, sharing its TTL-cached
+            // root discovery, so an attached Desktop's subagent row settles its
+            // provenance where its identity settled.
+            homeDir: opts.homeDir,
+          })
+        }
+
         for (const i of indices) {
           let row = rows[i]
           // 1. Identity upgrade: only fallback rows carry a match_key, and only
@@ -167,7 +205,15 @@ export function createClaudeSettlementEnricher(opts) {
             }
           }
 
-          // 2. cwd late-resolution (issue #258). Independent of the transcript.
+          // 2. Sidechain provenance late-stamp. After the upgrade: that rebuilds
+          // `attributes` from the transcript match, so stamping first would be
+          // overwritten.
+          if (agentMeta && wantsSpawnedBy(row)) {
+            const toolUseId = agentMeta.get(stringValue(row.agent_id) ?? '')?.tool_use_id
+            if (toolUseId) row = stampSpawnedBy(row, toolUseId)
+          }
+
+          // 3. cwd late-resolution (issue #258). Independent of the transcript.
           // Select the context record by the row's OWN time, not the session's
           // latest: a session can change dirs, and these null-cwd rows are the
           // opening exchanges, so the newest record can carry a different cwd
@@ -434,13 +480,55 @@ function cleanAttributes(attributes) {
   return next
 }
 
-/** @param {unknown} attributes */
-function readMatchKey(attributes) {
+/**
+ * Whether a row is a sidechain row still missing its spawning tool call, the
+ * only shape the sidecar lookup can serve. Checks `agent_id` first: a main-loop
+ * row is rejected without parsing its attributes at all.
+ *
+ * @param {Record<string, unknown>} row
+ */
+function wantsSpawnedBy(row) {
+  if (!stringValue(row.agent_id)) return false
+  return readClaudeAttr(row.attributes, 'spawned_by_tool_use_id') === undefined
+}
+
+/**
+ * Copy of `row` carrying `claude.spawned_by_tool_use_id`, merged into whatever
+ * `attributes` already holds. Conservative like {@link upgradeRow}: an
+ * attributes column we could not parse into an object is left exactly as it
+ * was rather than replaced with a fresh object that would lose it.
+ *
+ * @param {Record<string, unknown>} row
+ * @param {string} toolUseId
+ * @returns {Record<string, unknown>}
+ */
+function stampSpawnedBy(row, toolUseId) {
+  const attributes = row.attributes
+  const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
+  if (attributes !== undefined && attributes !== null && !isPlainObject(parsed)) return row
+  const base = isPlainObject(parsed) ? parsed : {}
+  const claude = isPlainObject(base.claude) ? base.claude : {}
+  return { ...row, attributes: { ...base, claude: { ...claude, spawned_by_tool_use_id: toolUseId } } }
+}
+
+/**
+ * Read one string-valued key out of a row's `attributes.claude`, accepting the
+ * column as an object or as the JSON string a spooled row can carry.
+ *
+ * @param {unknown} attributes
+ * @param {string} key
+ */
+function readClaudeAttr(attributes, key) {
   const parsed = typeof attributes === 'string' ? safeParseJson(attributes) : attributes
   if (!isPlainObject(parsed)) return undefined
   const claude = parsed.claude
   if (!isPlainObject(claude)) return undefined
-  return stringValue(claude.match_key)
+  return stringValue(claude[key])
+}
+
+/** @param {unknown} attributes */
+function readMatchKey(attributes) {
+  return readClaudeAttr(attributes, 'match_key')
 }
 
 /**
