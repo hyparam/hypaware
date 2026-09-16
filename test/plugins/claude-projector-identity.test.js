@@ -868,6 +868,40 @@ test('a located session does not force an uncached container re-sweep', async ()
   }
 })
 
+// The re-sweep gate, pinned on the only population that still reaches it. The
+// sweep leg enclosing it now stops at a session the projects scan found, so a
+// session found in the container is what is left, and for that session an empty
+// map is the standing state: re-sweeping on it would put an uncached
+// whole-container walk on every exchange of the conversation.
+test('a Desktop session found in the cached root list forces no re-sweep', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-agent-meta-cached-'))
+  try {
+    const projectsDir = path.join(homeDir, '.claude', 'projects')
+    await fs.mkdir(projectsDir, { recursive: true })
+    // The session sits in the legacy `Claude-3p` container, which
+    // `claudeDesktop3pSessionRoots` names after the first-party `Claude` one, so
+    // a decoy under `Claude` is swept before it and only not re-sweeping at all
+    // keeps it out.
+    const sessionHome = desktop3pSandboxDir(homeDir, 'ghi789', 'Claude-3p')
+    await fs.mkdir(path.join(sessionHome, 'sess-cached', 'subagents'), { recursive: true })
+    await fs.writeFile(path.join(sessionHome, 'sess-cached.jsonl'), '', 'utf8')
+    const opts = {
+      transcriptPath: path.join(homeDir, 'unresolvable', 'sess-cached.jsonl'),
+      projectsDir,
+      sessionId: 'sess-cached',
+      homeDir,
+    }
+    // Sweeps the container once and caches the root list.
+    assert.equal(loadAgentMeta(opts).size, 0)
+    // A decoy in a sandbox home created after that list was cached, under the
+    // root swept first: only an uncached re-sweep reaches it.
+    await stageSidecar(desktop3pSandboxDir(homeDir, 'first000'), 'sess-cached', 'toolu_resweep_decoy')
+    assert.equal(loadAgentMeta(opts).size, 0, 'the session was located: the cached list was complete')
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
 test('cache_control on wire blocks and caller on transcript blocks do not break matching', async () => {
   const env = await stageClaudeEnv()
   try {
