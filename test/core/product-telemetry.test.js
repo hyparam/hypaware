@@ -473,6 +473,75 @@ for (const broken of ['missing identity', 'invalid identity', 'wrong destination
   })
 }
 
+// The raw destination becomes the POST target's prefix, so shapes a parse alone
+// accepts still move `/v1/telemetry` off the path: a bare `?`/`#` turns the
+// receiver path into a query or fragment, and a doubled trailing slash survives
+// a single-slash strip.
+for (const [shape, url, target] of /** @type {[string, string, string|null][]} */ ([
+  ['a fragment after a path', 'https://example.invalid/receiver#', null],
+  ['a query after a path', 'https://example.invalid/receiver?', null],
+  ['a doubled trailing slash', 'https://example.invalid//', 'https://example.invalid/v1/telemetry']
+])) {
+  test(`${shape} ${target ? 'normalizes to one receiver path' : 'is not a usable destination'}`, async (t) => {
+    const home = temp(t)
+    const root = productRoot({ HYP_HOME: home })
+    const remote = remoteEnrollment(home)
+    remote.config.sinks.central.config.url = url
+    remote.identity.central_url = url
+    fs.writeFileSync(remote.configPath, JSON.stringify(remote.config))
+    fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
+    // Enrollment derives this destination with no opt-in, so the automatic and
+    // explicit paths must reach the same verdict, and a refusal must say which
+    // half of the opt-in it rejected.
+    assert.equal(effectivePolicy(root).mode, target ? 'organization' : 'off')
+    if (!target) {
+      assert.throws(
+        () => writePolicy(root, 'organization', { url, identityPath: remote.identityPath }),
+        /destination/
+      )
+      return
+    }
+    const explicit = writePolicy(root, 'organization', { url, identityPath: remote.identityPath })
+    assert.equal(explicit.mode, 'organization')
+    createOutbox(root, { now: () => NOW }).append(batch(), /** @type {string} */ (explicit.binding))
+    const seen = []
+    let unauthorized = true
+    const fetchFn = /** @type {typeof fetch} */ (async (requested, init) => {
+      seen.push(requested)
+      if (String(requested).endsWith('/v1/identity/refresh'))
+        return new Response(JSON.stringify({ jwt: remote.identity.jwt }), { status: 200 })
+      if (unauthorized) {
+        unauthorized = false
+        return new Response(null, { status: 401 })
+      }
+      return init?.method === 'POST'
+        ? new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+        : capability()
+    })
+    await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+    // Both routes carry the receiver path, and the 401 refresh inherits it.
+    assert.deepEqual(seen, [target, 'https://example.invalid/v1/identity/refresh', target, target])
+    assert.equal(createOutbox(root, { now: () => NOW }).entries().length, 0)
+  })
+}
+
+// The refusal must name the actual reason: `hyp join` persists the url as
+// typed, so a destination that merely spells itself differently from its parse
+// must not be accused of credentials, a query or a fragment it never carried.
+test('a refused destination is described by its actual defect', (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const remote = remoteEnrollment(home)
+  assert.throws(
+    () => writePolicy(root, 'organization', { url: 'https://example.invalid/receiver?', identityPath: remote.identityPath }),
+    /no credentials, query or fragment/
+  )
+  assert.throws(
+    () => writePolicy(root, 'organization', { url: 'https://Example.Invalid/receiver', identityPath: remote.identityPath }),
+    /the way the URL parser normalizes it/
+  )
+})
+
 // Local mode is a preview queue, not a network permission.
 test('local collection queues copies but never contacts a destination', async (t) => {
   const root = temp(t)

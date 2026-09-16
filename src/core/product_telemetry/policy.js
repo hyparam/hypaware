@@ -25,6 +25,9 @@ export function safeDestination(url) {
   try {
     const u = new URL(url)
     if (u.username || u.password || u.search || u.hash) return null
+    // The raw string, not the parse, becomes the POST target's prefix, and a
+    // bare `?`/`#` leaves `search`/`hash` empty for the check above to miss.
+    if (url.includes('?') || url.includes('#')) return null
     if (
       u.protocol !== 'https:' &&
       !(
@@ -33,7 +36,7 @@ export function safeDestination(url) {
       )
     )
       return null
-    return u.toString().replace(/\/$/, '')
+    return u.toString().replace(/\/+$/, '')
   } catch {
     return null
   }
@@ -145,10 +148,9 @@ function enrolledPolicy(root) {
   const sink = sinks[0].config
   const url = sink?.url
   // Same strictness as the explicit opt-in: a merely parseable url is not
-  // enough, because the raw string becomes the POST target. An empty `#`/`?`
-  // suffix survives `safeDestination`'s truthiness but would send the batch to
-  // the server root with the receiver path as a fragment.
-  if (typeof url !== 'string' || safeDestination(url) !== url.replace(/\/$/, ''))
+  // enough, because the raw string becomes the POST target. Trailing slashes
+  // are stripped the way delivery strips them, so both sides mean one place.
+  if (typeof url !== 'string' || safeDestination(url) !== url.replace(/\/+$/, ''))
     return null
   const identityPath = sink?.identity?.persisted_path ??
     path.join(stateRoot, 'plugins', '@hypaware/central', 'identity.json')
@@ -190,15 +192,27 @@ export function writePolicy(root, mode, { url, identityPath } = {}) {
   }
   if (mode === 'organization') {
     const identity = identityPath ? readSmallJson(identityPath) : null
+    // The destination is reported on its own: an operator who typed a query
+    // or fragment cannot act on an identity complaint. The url stays out of
+    // both messages because a rejected one can carry credentials.
+    if (typeof url !== 'string' || !safeDestination(url))
+      throw new Error(
+        'Organization reporting requires an enrolled HTTPS destination with no credentials, query or fragment'
+      )
+    // A parseable url can still spell itself differently from its parse (an
+    // uppercase host, a default port, a backslash), and `hyp join` persists the
+    // url as typed, so this refusal must not be blamed on credentials.
+    if (safeDestination(url) !== url.replace(/\/+$/, ''))
+      throw new Error(
+        'Organization reporting requires the destination written the way the URL parser normalizes it, for example a lowercase host and no default port'
+      )
     if (
-      !url ||
-      safeDestination(url) !== url.replace(/\/$/, '') ||
       !identity ||
       identity.central_url !== url ||
       typeof identity.jwt !== 'string'
     )
       throw new Error(
-        'Organization reporting requires an existing enrolled HTTPS destination and gateway identity'
+        'Organization reporting requires an existing enrolled gateway identity'
       )
     let claims
     try {
