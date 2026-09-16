@@ -26,8 +26,10 @@ const FORK_INTRO =
  * The wizard's top-level pathway fork.
  *
  * Sync to the cloud or keep everything local, with sync as the default
- * on a bare enter. There is no quit row: escape, ctrl+c, or a stdin that
- * cannot answer still quits, and the wizard writes nothing on that path.
+ * on a bare enter. There is no quit row: ctrl+c, or a stdin that cannot
+ * answer, still quits, and the wizard writes nothing on that path. So
+ * does escape on a first run; under `allowBack` it steps back to the
+ * returning gate instead (LLP 0191, and the catch below).
  * Every machine reaches this prompt, enrolled or not (LLP 0182): a
  * managed machine's Reconfigure comes through here too, carrying its org
  * rows in as a locked set.

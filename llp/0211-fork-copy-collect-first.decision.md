@@ -75,6 +75,14 @@ the summaries. Row *values*, the quit default on a bare enter, and
 LLP 0129's pathway consequences are unchanged: recommending shared
 means leading with it and saying why, never preselecting it.
 
+> **Extended-by: [LLP 0410](./0410-fork-two-rows-sync-default.decision.md).**
+> The `quit` row above is withdrawn and the two remaining rows are
+> relabelled "Sync to the cloud" and "Local only", with the local row's
+> summary saying "switch to sync" instead of "switch to shared". Sync
+> becomes the bare-enter default, so the "never preselecting it" clause
+> no longer holds. The rest stands: sync still leads, and both renderers
+> still carry the row summaries.
+
 ## Consequences
 
 - The returning gate's menu keeps its bare labels; the reversal is
