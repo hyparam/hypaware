@@ -8,6 +8,7 @@ import path from 'node:path'
 import { temporaryDirectory } from '../../../helpers/temp_dir.js'
 import { firstLookHadRows, runInitWizard } from '../../../../src/core/cli/wizard/index.js'
 import { DurableBinRequiredError } from '../../../../src/core/cli/global_install.js'
+import { PromptCancelledError } from '../../../../src/core/cli/tui/runtime.js'
 import { writeFirstSyncHoldMarker } from '../../../../src/core/usage-policy/first_sync_hold.js'
 import { clientSyncListPath, readClientSyncEntries, writeClientSyncEntries } from '../../../../src/core/usage-policy/client_sync.js'
 import { runWizardSyncScope } from '../../../../src/core/cli/wizard/sync_scope.js'
@@ -33,6 +34,105 @@ function makeBuf() {
 
 async function tmpHome() {
   return temporaryDirectory('hypaware-wizard-index-')
+}
+
+for (const pathway of ['local', 'team']) {
+  test(`GitHub opt-in on ${pathway} connects after the finale and upload offer`, async () => {
+    const home = await tmpHome()
+    const configPath = path.join(home, '.hyp', 'hypaware-config.json')
+    let loggedIn = false
+    const order = []
+    if (pathway === 'team') await writeFirstSyncHoldMarker({ stateDir: path.join(home, '.hyp', 'hypaware') })
+    const { opts } = wizardOpts(home, {
+      fork: async () => pathway,
+      catalog: detectableCatalog(),
+      detect: async () => new Set(['claude']),
+      express: async () => 'defaults',
+      pick: async () => pickResult({ configPending: true, configPath }),
+      syncNow: { dispatchFn: async () => { order.push('upload'); return 0 } },
+      github: { confirm: async () => { order.push('github'); return 'yes' } },
+      ctx: { commands: { run: async (name, args) => {
+        const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
+        assert.deepEqual(config.plugins.map((p) => p.name), ['@hypaware/context-graph', '@hypaware/github'])
+        assert.equal(name, 'github login')
+        assert.deepEqual(args, [])
+        order.push('login')
+        loggedIn = true
+        return 0
+      } } },
+      configure: async () => {
+        assert.equal(loggedIn, false)
+        order.push('configure')
+        return { results: [] }
+      },
+    })
+    const result = await runInitWizard(opts)
+    assert.equal(result.exitCode, 0)
+    assert.equal(loggedIn, true)
+    assert.deepEqual(order, pathway === 'team'
+      ? ['configure', 'upload', 'github', 'login']
+      : ['configure', 'github', 'login'])
+  })
+}
+
+test('declining GitHub writes no GitHub activation and starts no login', async () => {
+  const home = await tmpHome()
+  const { opts } = wizardOpts(home, {
+    github: { confirm: async () => 'no' },
+    ctx: { commands: { run: async () => assert.fail('decline started login') } },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 0)
+  assert.deepEqual(result.config?.plugins, [])
+})
+
+test('GitHub login waits for config overwrite consent', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, 'config.json')
+  await fs.writeFile(configPath, '{"version":2,"plugins":[]}\n')
+  const { opts } = wizardOpts(home, {
+    pick: async () => pickResult({ configPending: true, configPath }),
+    confirmOverwrite: async () => false,
+    github: { confirm: async () => 'yes' },
+    ctx: { commands: { run: async () => assert.fail('refused write started login') } },
+  })
+  const result = await runInitWizard(opts)
+  assert.equal(result.exitCode, 1)
+  assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins, [])
+})
+
+test('already configured GitHub does not repeat the offer or login', async () => {
+  const home = await tmpHome()
+  const { opts } = wizardOpts(home, {
+    pick: async () => pickResult({ config: { version: 2, plugins: [{ name: '@hypaware/github' }] } }),
+    github: { confirm: async () => assert.fail('configured GitHub re-asked') },
+    ctx: { commands: { run: async () => assert.fail('configured GitHub re-authenticated') } },
+  })
+  assert.equal((await runInitWizard(opts)).exitCode, 0)
+})
+
+test('cancelling the closing GitHub offer preserves completed setup', async () => {
+  const home = await tmpHome()
+  const configPath = path.join(home, 'config.json')
+  const { opts } = wizardOpts(home, {
+    pick: async () => pickResult({ configPending: true, configPath }),
+    github: { confirm: async () => { throw new PromptCancelledError() } },
+  })
+  assert.equal((await runInitWizard(opts)).exitCode, 0)
+  assert.deepEqual(JSON.parse(await fs.readFile(configPath, 'utf8')).plugins, [])
+})
+
+for (const skipped of ['unattended', 'dry-run']) {
+  test(`${skipped} setup skips GitHub consent and login`, async () => {
+    const { opts } = wizardOpts(await tmpHome(), {
+      ...(skipped === 'unattended'
+        ? { picks: { sources: ['claude'], exportChoice: 'keep-local', retentionDays: 30 } }
+        : { finale: { dryRun: true } }),
+      github: { confirm: async () => assert.fail('skipped run asked') },
+      ctx: { commands: { run: async () => assert.fail('skipped run logged in') } },
+    })
+    assert.equal((await runInitWizard(opts)).exitCode, 0)
+  })
 }
 
 /**
@@ -1536,8 +1636,8 @@ test('runInitWizard: an enrolled run runs `hyp sync` as its one first-sync quest
   // @ref LLP 0203#no-new-consent [tests]: the informed prompt is the only prompt on the attended path
   assert.doesNotMatch(text, /Nothing has been uploaded yet/)
   assert.doesNotMatch(text, /Send your recorded history/)
-  assert.ok(text.indexOf('First look') < text.indexOf('Last step: upload your logs.'))
-  assert.ok(text.indexOf('Last step: upload your logs.') < text.indexOf('Run `hyp ask` any time'))
+  assert.ok(text.indexOf('First look') < text.indexOf('Upload your logs.'))
+  assert.ok(text.indexOf('Upload your logs.') < text.indexOf('Run `hyp ask` any time'))
   // A run that ends on the wait still leaves the deadline and the release
   // verb on screen.
   assert.match(text, /Nothing was sent\. Your history stays on this machine until /)

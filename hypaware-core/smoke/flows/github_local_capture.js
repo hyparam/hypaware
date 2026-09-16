@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import { Attr, installObservability } from '../../../src/core/observability/index.js'
 import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
+import { runInitWizard } from '../../../src/core/cli/wizard/index.js'
 import { createCommandRegistry } from '../../../src/core/registry/commands.js'
 import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
 import { activatePlugins } from '../../../src/core/runtime/loader.js'
@@ -50,6 +51,30 @@ export async function run({ harness, expect }) {
   const workspace = path.resolve(import.meta.dirname, '..', '..', 'plugins-workspace')
   const tmpRoot = path.join(harness.tmpDir, 'plugin-temp')
   await fs.mkdir(tmpRoot, { recursive: true })
+
+  await step('onboarding_github', async () => {
+    const configPath = path.join(harness.tmpDir, 'onboarding.json')
+    let loginRan = false
+    const output = { write() {} }
+    const result = await runInitWizard({
+      stdout: output, stderr: output,
+      env: { ...process.env, HYP_CONFIG: configPath },
+      capabilities: kernel.capabilities,
+      gate: async () => /** @type {any} */ ({ action: 'first-run' }),
+      fork: async () => 'local',
+      detect: async () => new Set(),
+      prompt: async () => ['raw-openai'],
+      github: { confirm: async () => 'yes' },
+      ctx: /** @type {any} */ ({ commands: { run: async (name, argv) => {
+        const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
+        expect.that('onboarding: GitHub enabled before login', config.plugins, (plugins) => plugins.some((p) => p.name === '@hypaware/github'))
+        expect.that('onboarding: existing browser login invoked', { name, argv }, (call) => call.name === 'github login' && call.argv.length === 0)
+        loginRan = true
+        return 0
+      } } }),
+    })
+    expect.that('onboarding: opt-in completes', result.exitCode, (code) => code === 0 && loginRan)
+  })
 
   await step('activate', async () => {
     const { loaded } = await loadManifests([
@@ -204,6 +229,10 @@ export async function run({ harness, expect }) {
 
   await obs.shutdown()
   const traces = await expect.traces()
+  for (const [name, status] of [['wizard.github.offer', 'accepted'], ['wizard.github.login', 'ok']]) {
+    expect.that(`telemetry: ${name} outcome`, traces,
+      (rows) => rows.some((row) => row.name === name && row.attributes?.status === status))
+  }
   expect.that(
     'telemetry: cache.append recorded the github_events write',
     traces,

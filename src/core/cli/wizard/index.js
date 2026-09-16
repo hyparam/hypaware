@@ -51,6 +51,7 @@ import { runWizardExpressGate } from './express.js'
 import { runConfigurePhase } from './configure.js'
 import { guardWizardOutput } from './output_guard.js'
 import { wizardStepProgress } from './steps.js'
+import { offerWizardGithub, connectWizardGithub } from './github.js'
 
 /**
  * The `hyp init` wizard orchestrator: the fork -> join -> pick ->
@@ -1007,6 +1008,26 @@ async function runGuardedInitWizard(opts, guard) {
       ...(opts.stdin ? { stdin: opts.stdin } : {}),
       ...(opts.syncNow ?? {}),
     })
+  }
+
+  // @ref LLP 0411#offer [implements]: GitHub follows the upload offer and precedes the skill offer
+  const githubConfigured = (picked.config.plugins ?? [])
+    .some((plugin) => plugin.name === '@hypaware/github')
+  if (interactive && !cancelled && opts.finale?.dryRun !== true && !githubConfigured
+    && (await guard.checkpoint())) {
+    const answer = await offerWizardGithub({
+      stdout: opts.stdout, stderr: opts.stderr, stdin: opts.stdin, env: opts.env,
+      interactive: true,
+      ...opts.github,
+    })
+    if (answer === 'yes' && (await guard.checkpoint())) {
+      const config = await connectWizardGithub({
+        stdout: opts.stdout, stderr: opts.stderr, ctx: opts.ctx,
+        configPath: picked.configPath,
+        restartDaemon: finaleSummary?.daemonRestart.ok === true,
+      })
+      if (config) picked.config = config
+    }
   }
 
   // The closing offer comes last, after whichever of the narration and the

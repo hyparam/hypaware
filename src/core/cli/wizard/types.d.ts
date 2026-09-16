@@ -772,6 +772,15 @@ export interface WizardOutputGuard {
   detach(): void
 }
 
+export interface RunWizardGithubOptions {
+  stdout: WizardOutputSink
+  stderr: WizardOutputSink
+  stdin?: NodeJS.ReadableStream
+  env: NodeJS.ProcessEnv
+  interactive: boolean
+  confirm?: AsyncConfirmSelectPrompt
+}
+
 /**
  * Options for `runInitWizard`, the fork -> join -> pick -> configure ->
  * privacy -> finale orchestrator (LLP 0135 #orchestration). Non-interactive
@@ -850,6 +859,8 @@ export interface RunInitWizardOptions {
    * the spawn seam. Production callers pass none.
    */
   suggestSkill?: Partial<RunWizardSuggestSkillOptions>
+  /** GitHub offer seam for tests. Login uses ctx.commands.run. */
+  github?: Pick<RunWizardGithubOptions, 'confirm'>
   /** Phase overrides (tests). */
   gate?: (opts: EvaluateReturningGateOptions) => Promise<ReturningGateResult>
   fork?: (opts: RunWizardForkOptions) => Promise<WizardForkChoice>
