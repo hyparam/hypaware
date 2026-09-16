@@ -658,6 +658,148 @@ test('an existing session directory ends the sidecar lookup; only a stale path s
   }
 })
 
+// An attached Claude Desktop does not write into `~/.claude/projects`: it runs
+// each conversation in a sandbox home inside its own container, so a stale
+// `transcript_path` leaves the projects scan nothing to find. `loadTranscript`
+// sweeps the sandbox roots on that miss and recovers transcript identity; the
+// sidecar lookup must sweep them with it, or the recovered row still points at
+// no parent tool call.
+test('a stale Desktop transcript_path recovers spawned_by_tool_use_id from the 3p sandbox root', async () => {
+  const env = await stageClaudeEnv()
+  try {
+    const sandboxDir = desktop3pSandboxDir(env.homeDir)
+    await fs.mkdir(path.join(sandboxDir, 'sess-3p-spawn', 'subagents'), { recursive: true })
+    await fs.writeFile(
+      path.join(sandboxDir, 'sess-3p-spawn.jsonl'),
+      jsonlRow({
+        sessionId: 'sess-3p-spawn',
+        uuid: 'u-main',
+        parentUuid: null,
+        type: 'user',
+        entrypoint: 'local-agent',
+        message: { role: 'user', content: 'main prompt' },
+        timestamp: '2026-05-22T10:00:00.000Z',
+      }) + '\n',
+      'utf8'
+    )
+    await fs.writeFile(
+      path.join(sandboxDir, 'sess-3p-spawn', 'subagents', 'agent-sa1.jsonl'),
+      jsonlRow({
+        sessionId: 'sess-3p-spawn',
+        agentId: 'sa1',
+        isSidechain: true,
+        uuid: 'u-side',
+        parentUuid: null,
+        type: 'user',
+        entrypoint: 'local-agent',
+        message: { role: 'user', content: 'side prompt' },
+        timestamp: '2026-05-22T10:00:01.000Z',
+      }) + '\n',
+      'utf8'
+    )
+    await fs.writeFile(
+      path.join(sandboxDir, 'sess-3p-spawn', 'subagents', 'agent-sa1.meta.json'),
+      JSON.stringify({ agentType: 'Explore', toolUseId: 'toolu_3p_recovered' }),
+      'utf8'
+    )
+    // The hook recorded a path that is not there, and the shared projects tree
+    // holds nothing for this session at all.
+    await fs.writeFile(
+      env.stateFile,
+      JSON.stringify({
+        session_id: 'sess-3p-spawn',
+        transcript_path: path.join(env.homeDir, 'gone', 'sess-3p-spawn.jsonl'),
+        ts: '2026-05-22T09:59:00.000Z',
+      }) + '\n',
+      'utf8'
+    )
+
+    const rows = await projectViaGateway(env, {
+      reqBody: {
+        model: 'claude-3-opus',
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-3p-spawn' }) },
+        messages: [{ role: 'user', content: 'side prompt' }],
+      },
+      requestHeaders: { 'x-claude-code-agent-id': 'sa1' },
+      responseBody: undefined,
+    })
+
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].agent_id, 'sa1')
+    assert.equal(rows[0].is_sidechain, true)
+    // Transcript identity came from the sandbox root...
+    assert.equal(rows[0].message_id, 'u-side')
+    // ...and so must the sidecar in the same recovered directory.
+    assert.equal(
+      /** @type {any} */ (rows[0].attributes).claude.spawned_by_tool_use_id,
+      'toolu_3p_recovered'
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// The cost pin for both fallbacks, and their order. A live session whose
+// sidecar is simply not written yet is the common sidechain shape, and it must
+// end at its own (existing) session directory: neither the projects-wide walk
+// nor the container sweep may run for it. Both decoys carry the SAME session id
+// as the live session, the only shape that exercises the gate at all:
+// `walkJsonlFiles` filters on the session id, so a decoy under any other id is
+// invisible to the scans whether they run or not.
+test('a live session with no sidecar yet scans neither projectsDir nor the 3p roots', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-agent-meta-3p-'))
+  try {
+    const projectsDir = path.join(homeDir, '.claude', 'projects')
+    // The named session directory is real and holds no sidecar: live, mid-spawn.
+    await fs.mkdir(path.join(projectsDir, 'repo-a', 'sess-live', 'subagents'), { recursive: true })
+    await fs.writeFile(path.join(projectsDir, 'repo-a', 'sess-live.jsonl'), '', 'utf8')
+    // Decoy reachable only by a walk of the whole projects tree.
+    await stageSidecar(path.join(projectsDir, 'repo-b'), 'sess-live', 'toolu_projects_decoy')
+    // Decoy reachable only by the Desktop container sweep.
+    await stageSidecar(desktop3pSandboxDir(homeDir), 'sess-live', 'toolu_3p_decoy')
+
+    const live = loadAgentMeta({
+      transcriptPath: path.join(projectsDir, 'repo-a', 'sess-live.jsonl'),
+      projectsDir,
+      sessionId: 'sess-live',
+      homeDir,
+    })
+    assert.equal(live.size, 0, 'an existing session directory ends the lookup before either fallback')
+
+    // Same tree, stale path: both fallbacks are now in play, and the projects
+    // scan is the one that answers, because the container sweep comes last.
+    const stale = loadAgentMeta({
+      transcriptPath: path.join(homeDir, 'gone', 'sess-live.jsonl'),
+      projectsDir,
+      sessionId: 'sess-live',
+      homeDir,
+    })
+    assert.equal(stale.get('sa1')?.tool_use_id, 'toolu_projects_decoy')
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
+test('the 3p sidecar sweep answers when projectsDir holds nothing, and only with a homeDir', async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-agent-meta-3p-only-'))
+  try {
+    const projectsDir = path.join(homeDir, '.claude', 'projects')
+    await fs.mkdir(projectsDir, { recursive: true })
+    await stageSidecar(desktop3pSandboxDir(homeDir), 'sess-3p-only', 'toolu_3p_only')
+    const staleOpts = {
+      transcriptPath: path.join(homeDir, 'gone', 'sess-3p-only.jsonl'),
+      projectsDir,
+      sessionId: 'sess-3p-only',
+    }
+
+    assert.equal(loadAgentMeta({ ...staleOpts, homeDir }).get('sa1')?.tool_use_id, 'toolu_3p_only')
+    // No `homeDir`, no sweep: the container is out of reach by construction.
+    assert.equal(loadAgentMeta(staleOpts).size, 0)
+  } finally {
+    await fs.rm(homeDir, { recursive: true, force: true })
+  }
+})
+
 test('cache_control on wire blocks and caller on transcript blocks do not break matching', async () => {
   const env = await stageClaudeEnv()
   try {
@@ -1333,6 +1475,41 @@ async function writeSubagentTranscript(env, sessionId, agentFileName, lines) {
   await fs.writeFile(
     path.join(subagentsDir, agentFileName),
     lines.join('\n') + '\n',
+    'utf8'
+  )
+}
+
+/**
+ * The per-conversation directory of a first-party Desktop sandbox home (app
+ * 1.40609.1), one level below the nested `.claude/projects` tree that
+ * `claudeDesktop3pSessionRoots` reaches: staging here is what an attached
+ * Desktop looks like on disk.
+ *
+ * @param {string} homeDir
+ */
+function desktop3pSandboxDir(homeDir) {
+  return path.join(
+    homeDir, 'Library', 'Application Support', 'Claude',
+    'local-agent-mode-sessions', '99990000', '00000000', 'local_ghi789',
+    '.claude', 'projects', 'sandbox-outputs'
+  )
+}
+
+/**
+ * A session with one subagent sidecar and nothing else, under `repoDir`. The
+ * transcript files are empty: the scans only need a `<sessionId>.jsonl` to
+ * resolve the session's directory.
+ *
+ * @param {string} repoDir
+ * @param {string} sessionId
+ * @param {string} toolUseId
+ */
+async function stageSidecar(repoDir, sessionId, toolUseId) {
+  await fs.mkdir(path.join(repoDir, sessionId, 'subagents'), { recursive: true })
+  await fs.writeFile(path.join(repoDir, `${sessionId}.jsonl`), '', 'utf8')
+  await fs.writeFile(
+    path.join(repoDir, sessionId, 'subagents', 'agent-sa1.meta.json'),
+    JSON.stringify({ toolUseId }),
     'utf8'
   )
 }
