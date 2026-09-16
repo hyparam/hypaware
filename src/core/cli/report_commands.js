@@ -489,7 +489,11 @@ export async function runReportFix(argv, ctx, deps = {}) {
     for (const r of reports) {
       const list = Array.isArray(r?.recommendations) ? r.recommendations : []
       for (const c of list) {
-        if (typeof c?.id !== 'string' || typeof c?.page !== 'string') continue
+        // Held to the same grammar as an id typed on the command line, and
+        // for a sharper reason: a picked id becomes the filename the page is
+        // saved under, so a listed id that is not one would resolve a path
+        // of the server's choosing rather than a name under `HYP_HOME`.
+        if (typeof c?.id !== 'string' || !RECOMMENDATION_ID_RE.test(c.id) || typeof c?.page !== 'string') continue
         byId.set(c.id, { recommendation: { id: c.id, page: c.page, ...(typeof c.title === 'string' ? { title: c.title } : {}) }, report: r })
         // Labelled by the page's own title when the server read one, else
         // by the slug read as words; described by the thesis's first

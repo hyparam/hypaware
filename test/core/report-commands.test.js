@@ -571,6 +571,32 @@ test('fix labels the picker by the page title and the thesis\'s first sentence w
   assert.equal(launches.length, 1)
 })
 
+test('fix does not offer a listed recommendation whose id is not one, so no page is saved outside HYP_HOME', async (t) => {
+  // The picked id becomes the saved page's filename, so a listing that names
+  // a row with a path rather than an id would write the page wherever that
+  // path leads. Such a row is not a recommendation this verb can act on.
+  stubServer(t, (method, url) => {
+    if (url.pathname === '/v1/reports') {
+      return { status: 200, json: { reports: [{
+        ...REPORT,
+        recommendations: [{ id: '../../../../../../../../tmp/hyp-fix-escape', page: 'recommendation-x' }],
+      }] } }
+    }
+    return { status: 200, body: new TextEncoder().encode(PAGE) }
+  })
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const { ctx, out } = ctxWith({ HYP_HOME: hypHome })
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.match(out.join(''), /no recommendations to fix/)
+  assert.equal(prompts.length, 0)
+  assert.equal(launches.length, 0)
+  await assert.rejects(fs.access('/tmp/hyp-fix-escape.md'))
+})
+
 test('fix: a cancelled pick starts nothing and succeeds', async (t) => {
   stubFixServer(t)
   const { ctx, out } = ctxWith()
