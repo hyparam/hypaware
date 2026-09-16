@@ -22,6 +22,17 @@ import { commitKey, repoKey, str } from './keys.js'
 // @ref LLP 0361#budget [implements]: one fixed request allowance bounds the whole repository-capture tick
 export const CAPTURE_REQUEST_LIMIT = 400
 
+/** @param {CursorState} cursors @param {string[]} repos @param {GithubConfig} config */
+export function authorizeBackfill(cursors, repos, config) {
+  const ignored = new Set(config.ignore.map((repo) => repo.toLowerCase()))
+  for (const requested of repos) {
+    const repo = repoKey(requested)
+    if (!repo || ignored.has(repo)) continue
+    if (cursors.repos[repo]?.work?.mode !== 'backfill') cursors.repos[repo] = { work: { mode: 'backfill', phase: 'issues' } }
+    cursors.repos[repo].one_time_import = true
+  }
+}
+
 /**
  * Resolve the repository set to capture. `session_repos` consumes only the
  * export-eligible local session evidence supplied by the caller. `all_visible`
@@ -91,7 +102,19 @@ export async function resolveRepos(config, client, log, observedRepos) {
  *   remaining (LLP 0361#budget).
  */
 export async function captureRepos({ client, config, cursors, append, log, mode, only, observedRepos, requestLimit = CAPTURE_REQUEST_LIMIT }) {
-  let repos = await resolveRepos(config, client, log, observedRepos)
+  if (mode === 'backfill' && only?.length) authorizeBackfill(cursors, only, config)
+  const ignored = new Set(config.ignore.map((repo) => repo.toLowerCase()))
+  // @ref LLP 0409#one-time-imports [implements]: unfinished explicit imports join this tick only; exclusions cancel eligibility
+  const imports = []
+  for (const [repo, cursor] of Object.entries(cursors.repos)) {
+    if (!cursor.one_time_import) continue
+    if (ignored.has(repo)) {
+      delete cursor.one_time_import
+      delete cursor.work
+    } else imports.push(repo)
+  }
+  const inventory = mode === 'backfill' && only?.length ? [] : await resolveRepos(config, client, log, observedRepos)
+  let repos = [...new Set([...inventory, ...imports])].sort()
   // A positional `hyp github backfill owner/repo` narrows this one invocation.
   // The round-robin continuation is a property of the WHOLE inventory, so a
   // narrowed run must not publish a `next_repo` drawn from its subset: doing so
@@ -131,7 +154,7 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
         client,
         repo,
         cursor,
-        requestedMode: mode,
+        requestedMode: cursor.one_time_import ? 'backfill' : mode,
         budget,
         append: async (rows) => {
           await append(rows)
@@ -139,6 +162,7 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
         },
       })
       if (!complete) pending = true
+      else delete cursor.one_time_import
     } catch (err) {
       // A failed repo leaves durable work behind, but a failure is NOT bounded
       // backlog: `pending` drives the source's cadence, and treating an error
@@ -161,11 +185,27 @@ export async function captureRepos({ client, config, cursors, append, log, mode,
       // means here (LLP 0360#cursoring).
       const cleared = kind === 'github_foreign_origin' && cursor.work !== undefined
       if (cleared) delete cursor.work
+      // An answer that is terminal for the repository itself - unknown or
+      // inaccessible (404), gone (410), or moved (301, since redirects are
+      // never followed on a credential-bearing request) - retires a one-time
+      // import: the marker would otherwise re-enter every later tick and a
+      // typo'd `hyp github backfill` retries forever (LLP 0409#one-time-imports
+      // makes imports durable, not permanent). 403 is deliberately not
+      // terminal, because GitHub also answers rate limiting with it, and a
+      // throttled tick must not cancel an authorized import. Re-running
+      // `hyp github backfill owner/repo` re-authorizes after the cause is fixed.
+      const status = /** @type {{ status?: number }} */ (err)?.status
+      const retired = cursor.one_time_import === true && (status === 301 || status === 404 || status === 410)
+      if (retired) {
+        delete cursor.one_time_import
+        delete cursor.work
+      }
       log.error('github.repo_capture_failed', {
         repo,
         error: message,
         ...(kind ? { error_kind: kind } : {}),
         ...(cleared ? { work_cleared: true } : {}),
+        ...(retired ? { import_retired: true } : {}),
       })
     }
     events += repoEvents

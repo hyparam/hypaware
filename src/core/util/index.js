@@ -31,3 +31,5 @@ export {
   stringValue,
   stripVolatileBlockFields,
 } from './json_util.js'
+export { withFileLock } from './file_lock.js'
+export { openBrowser } from './open_browser.js'

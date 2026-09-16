@@ -561,7 +561,7 @@ test('a failed session_repos inventory read keeps an unfinished revalidation on 
   )
 })
 
-test('hyp github backfill reports the inventory failure without contradicting it', async (t) => {
+test('unnamed hyp github backfill reports the inventory failure without contradicting it', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backfill-cli-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
   setGithubRuntime(failingInventoryRuntime(stateDir, new Error('cache partition unreadable')))
@@ -572,7 +572,7 @@ test('hyp github backfill reports the inventory failure without contradicting it
     stderr: { write(/** @type {string} */ s) { err += s } },
   })
 
-  const code = await runGithubBackfill(['acme/widgets'], ctx)
+  const code = await runGithubBackfill([], ctx)
 
   assert.equal(code, 1, 'an unresolved inventory is a failed backfill')
   assert.match(err, /! \(inventory\): cache partition unreadable/, 'the real cause is reported')
@@ -589,16 +589,16 @@ test('hyp github backfill reports the inventory failure without contradicting it
 })
 
 // @ref LLP 0392#retry [tests]: a failed projection shares the tick's error list, so it must not be read as the capture verdict
-test('a failed projection does not swallow the inventory-miss reason for a named repository', async (t) => {
+test('a failed projection does not swallow the exclusion reason for a named repository', async (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypaware-github-backfill-miss-'))
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }))
-  // The inventory resolves fine and simply does not hold the named repository,
+  // The explicit exclusion prevents importing the named repository,
   // which is the one thing the operator needs told. Automatic projection puts
   // its own failure in the same error list (LLP 0392#retry), and that list is
   // what the guard reads.
   setGithubRuntime(/** @type {any} */ ({
     stateDir,
-    config: { ignore: [], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
+    config: { ignore: ['acme/widgets'], token_env: 'GITHUB_TOKEN', poll_interval: '24h', inventory: 'session_repos' },
     observedRepos: { async list() { return [] } },
     clientFactory: () => fakeClient({}),
     storage: { cacheTablePath() { return '/cache/github_events' } },
@@ -617,7 +617,7 @@ test('a failed projection does not swallow the inventory-miss reason for a named
   assert.match(err, /! \(graph\): graph storage unavailable/, 'the projection failure is still reported')
   assert.match(
     err,
-    /none of \[acme\/widgets\] are in the active repository inventory/,
+    /none of \[acme\/widgets\] are eligible; check repository exclusions/,
     'and it does not stand in for a capture error the tick never had',
   )
 })
