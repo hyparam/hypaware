@@ -34,8 +34,8 @@ export function createCapabilityRegistry() {
    * (issue #1559). Checked here rather than filtered in any one consumer,
    * which would leave the registry holding the value for the next reader.
    *
-   * A TypeError, which is what every sibling registry on the activation
-   * context raises for a non-string key (`SourceRegistry.register`,
+   * Refused with a TypeError, which is what every sibling registry on the
+   * activation context raises for a non-string key (`SourceRegistry.register`,
    * `SinkRegistry.register`, `BackfillRegistry.register`,
    * `CommandRegistry.register`). The loader catches a throw out of
    * `activate()` and marks that one plugin failed, so the refusal costs the

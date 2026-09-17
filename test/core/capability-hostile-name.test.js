@@ -209,3 +209,54 @@ test('a manifest declaring an empty capability name resolves instead of failing 
     'the empty name reached the capability listing'
   )
 })
+
+test('an empty capability version never reaches capabilities.list()', async () => {
+  // The other half of the version guard. An empty version is not "unversioned":
+  // `matchesSemverRange('', undefined)` answers `true` before it reads the
+  // version at all, so a require with no range resolved this registration
+  // outright, exactly as the object version above did.
+  const { boot, hypHome, listed } = await bootWith('emptyversion', [
+    'export async function activate(ctx) {',
+    "  ctx.provideCapability('hypaware.hostile-version', '', {})",
+    '}',
+    '',
+  ].join('\n'))
+  try {
+    assert.deepEqual(listed.map((c) => c.name), ['hypaware.neighbour'])
+    assert.equal(
+      boot.runtime.capabilities.has('hypaware.hostile-version'),
+      false,
+      'an empty-versioned registration is still resolvable by a require with no range'
+    )
+    const hostile = activationOf(boot.activations, HOSTILE)
+    assert.equal(hostile.ok, false)
+    assert.match(String(hostile.message), /version must be a non-empty string/)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
+test('a manifest declaring an empty capability version resolves instead of failing the boot', async () => {
+  // The version half of the same skip. `isStringMap` holds the values of
+  // `provides.capabilities` to strings but not to non-empty ones, so a
+  // manifest that validates can declare `''` here too, and the refusal above
+  // would take the whole boot with it rather than the declaration.
+  /** @type {any[]} */
+  const manifests = [
+    {
+      schema_version: 1, name: 'a', version: '1.0.0', hypaware_api: '^1.0.0',
+      runtime: 'node', entrypoint: './i.js',
+      provides: { capabilities: { 'cap.unversioned': '', 'cap.real': '1.0.0' } },
+    },
+  ]
+
+  const resolution = await resolveDependencies(manifests)
+
+  assert.deepEqual(resolution.order, ['a'], 'a malformed declaration eliminated a plugin')
+  assert.deepEqual(resolution.unsatisfied, [])
+  assert.deepEqual(
+    resolution.registry.list().map((c) => c.name),
+    ['cap.real'],
+    'the empty version reached the capability listing'
+  )
+})
