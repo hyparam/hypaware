@@ -1165,6 +1165,11 @@ for (const [label, thrown, expected] of /** @type {[string, string, RegExp][]} *
   ['an object whose toString throws', `{ toString() { throw new Error('boom from err toString') } }`, /unprintable object/],
   ['an object whose Symbol.toPrimitive throws', `{ [Symbol.toPrimitive]() { throw new Error('boom from toPrimitive') } }`, /unprintable object/],
   ['a symbol', `Symbol('hostile')`, /Symbol\(hostile\)/],
+  // `instanceof` walks `[[GetPrototypeOf]]`, which is a `Proxy` trap, so the
+  // type test itself threw on these until it moved inside the guard.
+  ['a revoked Proxy', `(() => { const r = Proxy.revocable({}, {}); r.revoke(); return r.proxy })()`, /unprintable object/],
+  ['a Proxy whose getPrototypeOf trap throws', `new Proxy({}, { getPrototypeOf() { throw new Error('gpo trap') } })`, /object Object/],
+  ['a Proxy over an Error whose getPrototypeOf trap throws', `new Proxy(new Error('gpo over error'), { getPrototypeOf() { throw new Error('gpo trap') } })`, /gpo over error/],
 ])) {
   test(`activate that throws ${label} is still reported as activate_threw`, async () => {
     const root = await fixture({
@@ -1233,8 +1238,61 @@ export async function activate() {
   assert.match(finding.message, /boom with an unreadable stack/)
 })
 
+// An empty-string `stack` is a string, but reporting it would render the
+// header and nothing else. It falls to `message`, as master's truthiness
+// test did.
+test('an Error with an empty-string stack still reports its message', async () => {
+  const root = await fixture({
+    manifest: baseManifest(),
+    index: `
+export async function activate() {
+  const err = new Error('the message an empty stack falls back to')
+  err.stack = ''
+  throw err
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  const finding = report.diagnostics.find((d) => d.kind === 'activate_threw')
+  assert.ok(finding)
+  assert.match(finding.message, /the message an empty stack falls back to/)
+})
+
+// A truthy non-string `stack` made master throw `err.stack.split is not a
+// function` out of the catch; the type guard degrades it to the message.
+test('an Error with a numeric stack still reports its message', async () => {
+  const root = await fixture({
+    manifest: baseManifest(),
+    index: `
+export async function activate() {
+  const err = new Error('the message a numeric stack falls back to')
+  Object.defineProperty(err, 'stack', { value: 42, configurable: true })
+  throw err
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  const finding = report.diagnostics.find((d) => d.kind === 'activate_threw')
+  assert.ok(finding)
+  assert.match(finding.message, /the message a numeric stack falls back to/)
+})
+
 // The common cases are unchanged by the guard: a plain `Error` still reports
 // the head of its stack, and a thrown string still reports itself.
+test('an ordinary thrown Error reports the head of its stack', async () => {
+  const root = await fixture({
+    manifest: baseManifest(),
+    index: `export async function activate() { throw new Error('ordinary boom') }\n`,
+  })
+  const report = await diagnosePlugin(root)
+  const finding = report.diagnostics.find((d) => d.kind === 'activate_threw')
+  assert.ok(finding)
+  assert.match(finding.message, /Error: ordinary boom/)
+  assert.match(finding.message, /src\/index\.js/)
+  // header line plus the first three stack lines, nothing more
+  assert.equal(finding.message.split('\n').length, 4)
+})
+
 test('an ordinary thrown string is reported verbatim', async () => {
   const root = await fixture({
     manifest: baseManifest(),
