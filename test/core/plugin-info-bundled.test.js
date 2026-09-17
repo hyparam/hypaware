@@ -469,3 +469,43 @@ test('plugin info does not deny a name whose bundled manifest this build does no
     )
   }, { unknownName: '@hypaware/mystery' })
 })
+
+// The two shortfalls can hold at once, and then only one of them answers the
+// name asked after. A manifest that parsed under an unrecognized name is known
+// exactly, so it is said back even while some other directory sits in `failed`;
+// reverse the order and the operator gets the hedge about a name discovery
+// could have named. Nothing else pins that precedence: the sibling test above
+// clears `failed` on purpose to prove the message's source (issue #1843).
+test('plugin info answers the unrecognized name even when another directory is unread', async () => {
+  await withStagedWorkspace(async ({ workspaceDir, badDir, unknownDir, hypHome }) => {
+    // `badDir` keeps its staged state: no manifest, so it is in `failed` and
+    // `unread` is set for the whole run below.
+    const ctx = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@hypaware/mystery'], ctx, { workspaceDir }), 1)
+    const lines = ctx.stderr.text().split('\n')
+    assert.equal(
+      lines[0],
+      "hyp plugin info: no plugin named '@hypaware/mystery' is installed, and the manifest this"
+        + ' package bundles under that name is one this build does not recognize'
+    )
+    assert.equal(
+      lines[1],
+      `  the bundled plugin directory ${unknownDir} declares '@hypaware/mystery', a name in`
+        + " neither this build's bundled plugin allowlist nor its excluded set, so nothing activates it"
+    )
+    // The hedge is available and still loses: it cannot name this plugin.
+    assert.equal(ctx.stderr.text().includes('could not all be read'), false)
+
+    // And it is the hedge that answers the name only the unread directory
+    // could have held, which is the half that keeps both routes honest.
+    const hedged = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@hypaware/claude'], hedged, { workspaceDir }), 1)
+    const hedgedLines = hedged.stderr.text().split('\n')
+    assert.equal(
+      hedgedLines[0],
+      "hyp plugin info: no plugin named '@hypaware/claude' is installed, and the plugins bundled"
+        + ' with this package could not all be read, so whether this package ships one is unknown'
+    )
+    assert.equal(hedgedLines[1], `  the bundled plugin directory ${badDir} did not yield a usable manifest`)
+  }, { unknownName: '@hypaware/mystery' })
+})
