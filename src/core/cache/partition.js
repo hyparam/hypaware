@@ -945,26 +945,6 @@ export function resolvePartitionDate(row) {
 }
 
 /**
- * Derive the partition segments for a row by inspecting its data for
- * client and date fields.  Falls back to `['all']` when neither
- * dimension is resolvable, preserving backwards compatibility with
- * datasets that carry no partition-relevant columns.
- *
- * @param {Record<string, unknown>} row
- * @returns {string[]}
- */
-export function resolvePartitionSegments(row) {
-  const client = resolveClientName(row)
-  const date = resolvePartitionDate(row)
-  if (client === 'unknown' && !date) return ['all']
-  /** @type {string[]} */
-  const segments = []
-  segments.push(`client=${client}`)
-  if (date) segments.push(`date=${date}`)
-  return segments
-}
-
-/**
  * Sanitize a value for use as a filesystem path segment.
  * Replaces path separators, control characters, and reserved names with
  * safe alternatives.
