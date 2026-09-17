@@ -7,6 +7,7 @@
 **Date:** 2026-09-07
 **Extends:** LLP 0198 (#first-ask: one suggested question is answered from evidence HypAware gathers; #onboarding-list: that one question starts the client in a HypAware-owned directory rather than the caller's, so setup offers to run it instead of printing it)
 **Related:** LLP 0198 (#no-preauth: the launched session is still not pre-authorized), LLP 0140 (the server's report transcript, the same "recorded runs are evidence" stance), LLP 0359 (bounded scheduled work; the gather is bounded the same way)
+**Extended-by:** LLP 0414 (#run-where-typed: `hyp report fix` reuses the launch seams but starts in the caller's directory, since a fix is to a repository)
 
 > Extends [LLP 0198](./0198-setup-ends-on-a-question.decision.md). The
 > question list, the launch mechanics, and the empty-cache framing are

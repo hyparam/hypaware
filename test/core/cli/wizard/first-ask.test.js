@@ -172,6 +172,21 @@ test('launchClient: an explicit cwd is honoured, so the low-level seam stays par
   assert.deepEqual(spawner.calls[0].args, [FIRST.prompt])
 })
 
+test('launchClient: a prompt is substituted literally, not read as a replacement pattern', () => {
+  // `hyp report fix` builds its prompt from a fetched page's title, so the
+  // prompt is no longer always a constant this file wrote.
+  // @ref LLP 0198#real-launch [tests]: what the spawn carries is the prompt itself
+  const spawner = recordingSpawn()
+  const prompt = 'Batch $& the $` retries $$ now'
+  launchClient({
+    launcher: { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/usr/local/bin/claude', args: ['run', '--prompt', '{prompt}'] },
+    prompt,
+    env: {},
+    spawnFn: spawner.fn,
+  })
+  assert.deepEqual(spawner.calls[0].args, ['run', '--prompt', prompt])
+})
+
 test('runWizardFirstAsk: every `{prompt}` slot in a manifest arg template is filled', async () => {
   const spawner = recordingSpawn()
   const result = await runWizardFirstAsk({
