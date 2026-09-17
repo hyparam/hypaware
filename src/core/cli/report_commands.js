@@ -345,7 +345,10 @@ export async function runReportGet(argv, ctx) {
   const gate = parseCoreCommandArgv('report get', argv, ctx)
   if (!gate.ok) return gate.code
   const [kind, period, id, ...fileSegments] = positionals(argv, VALUE_FLAGS)
-  if (kind && RECOMMENDATION_ID_RE.test(kind)) {
+  // A kind may legally be spelled like a recommendation id (KIND_RE admits
+  // it), so the full <kind> <period> <id> form stays a report read; only a
+  // lone id, or an id with one stray positional, is taken as a recommendation.
+  if (kind && RECOMMENDATION_ID_RE.test(kind) && id === undefined) {
     if (period !== undefined) {
       ctx.stderr.write(`hyp report get: '${kind}' is a recommendation id and takes no other positional\n`)
       return 2
@@ -830,7 +833,11 @@ function citationsAppendix(recommendation, ext) {
     lines.push('### Basis', '', 'The queries the report ran to reach this recommendation, verbatim. They ran on the server over the whole org; `hyp query sql` on this machine sees only its own recordings, so counts will differ but the shape of the check is the same.', '')
     for (const q of basis) {
       if (q.agent) lines.push(`Run by ${q.agent}:`, '')
-      lines.push('```sql', q.query.trim(), '```', '')
+      // A fence longer than any backtick run in the query, so a query that
+      // carries a ``` line of its own cannot close the block early.
+      const query = q.query.trim()
+      const fence = '`'.repeat(Math.max(3, ...(query.match(/`+/g) ?? []).map((run) => run.length + 1)))
+      lines.push(`${fence}sql`, query, fence, '')
     }
   }
   const text = lines.join('\n')

@@ -633,6 +633,26 @@ test('get <rec-id> refuses extra positionals and reports an unknown id like fix 
   }
 })
 
+test('get <kind> <period> <id> stays a report read when the kind is spelled like a recommendation id', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 200, body: new TextEncoder().encode('<h1>r</h1>') }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC, '2026-W29', 'rpt-b'], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [`/v1/reports/${REC}/2026-W29/rpt-b/`])
+  assert.equal(out.join(''), '<h1>r</h1>')
+})
+
+test('get <rec-id> fences a basis query longer than any backtick run inside it', async (t) => {
+  const query = 'SELECT 1 /*\n```\n*/'
+  stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === `/v1/reports/_recommendations/${REC}`) return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', basis: [{ agent: '', query }] }, report: REPORT } }
+    return { status: 200, body: new TextEncoder().encode(PAGE) }
+  })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  assert.ok(out.join('').includes(`\n\`\`\`\`sql\n${query}\n\`\`\`\`\n`), 'a four-backtick fence holds the three-backtick line')
+})
+
 test('fix with an unknown id exits 1 and points at the listing, before any launch', async (t) => {
   stubFixServer(t)
   const { ctx, err } = ctxWith()
