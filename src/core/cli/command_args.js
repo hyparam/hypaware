@@ -237,7 +237,7 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'report get': {
-    usage: 'hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]',
+    usage: 'hyp report get <kind> <period> <id> [path] | <rec-id> [--output <file>] [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
