@@ -25,6 +25,28 @@ export function createCapabilityRegistry() {
   const instruments = getKernelInstruments()
 
   /**
+   * Record a capability under a name and version this registry checked.
+   *
+   * Both are plugin-written: `ctx.provideCapability` forwards a plugin's
+   * arguments here untouched, and `list()` republishes them as the `string`
+   * fields of `CapabilityRegistration`, so anything unchecked here reaches
+   * every consumer of the listing under a field its type says it cannot be
+   * (issue #1559). Checked here rather than filtered in any one consumer,
+   * which would leave the registry holding the value for the next reader.
+   *
+   * A TypeError, which is what every sibling registry on the activation
+   * context raises for a non-string key (`SourceRegistry.register`,
+   * `SinkRegistry.register`, `BackfillRegistry.register`,
+   * `CommandRegistry.register`). The loader catches a throw out of
+   * `activate()` and marks that one plugin failed, so the refusal costs the
+   * offender its activation and no one else theirs.
+   *
+   * `version` is held to non-empty string and no further: it feeds
+   * `matchesSemverRange`, which already answers `false` for any string it
+   * cannot parse, and the manifest validator admits any string under
+   * `provides.capabilities`, which `dep_graph` provides from, so demanding
+   * semver here would refuse manifests that validate.
+   *
    * @template T
    * @param {string} provider
    * @param {string} name
@@ -32,6 +54,12 @@ export function createCapabilityRegistry() {
    * @param {T} value
    */
   function provide(provider, name, version, value) {
+    if (typeof name !== 'string' || name.length === 0) {
+      throw new TypeError('CapabilityRegistry.provide: name must be a non-empty string')
+    }
+    if (typeof version !== 'string' || version.length === 0) {
+      throw new TypeError(`CapabilityRegistry.provide: '${name}' version must be a non-empty string`)
+    }
     registrations.push({ provider, name, version, value })
     instruments.capabilitiesProvided.add(1, { [Attr.CAPABILITY]: name })
     log.info('cap.provide', {
