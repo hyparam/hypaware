@@ -762,16 +762,24 @@ export async function runPluginDoctor(argv, ctx) {
  * provided, used to resolve a plugin's `requires.capabilities` against
  * their declared semver ranges (not just by name).
  *
+ * Entries without a usable identity are skipped: `isStringMap` (manifest.js)
+ * checks values and never keys, so a manifest declaring `{"": "1.0.0"}` or
+ * `{"cap.real": ""}` loads and reaches here verbatim. Neither identifies a
+ * capability a `requires.capabilities` range could resolve against, and the
+ * doctor seeds this map one `CapabilityRegistry.provide` call per entry, so
+ * one malformed neighbour manifest would otherwise reach that seeding on
+ * behalf of every plugin being diagnosed (hyparam/hypaware#1860).
+ *
  * @param {Map<PluginName, PluginMetadata>} knownPlugins
  * @returns {Map<string, string[]>}
  */
-function capabilitiesFromMetadata(knownPlugins) {
+export function capabilitiesFromMetadata(knownPlugins) {
   /** @type {Map<string, string[]>} */
   const caps = new Map()
   for (const meta of knownPlugins.values()) {
     if (!meta.provides) continue
     for (const [name, version] of Object.entries(meta.provides)) {
-      if (typeof version !== 'string') continue
+      if (typeof version !== 'string' || name === '' || version === '') continue
       const versions = caps.get(name)
       if (versions) versions.push(version)
       else caps.set(name, [version])
