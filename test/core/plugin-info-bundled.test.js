@@ -288,34 +288,58 @@ async function makeUnreadable(dir) {
 }
 
 /**
- * Stage a bundled workspace holding one loadable plugin and one directory the
- * caller is about to make unreadable, then run `fn` against it. Restores the
- * mode before removing the tree so a failed assertion cannot leave an
- * undeletable directory behind for the next run.
+ * A manifest `validateManifest` accepts, under whatever name the caller wants.
  *
- * @param {(dirs: { workspaceDir: string, badDir: string, hypHome: string }) => Promise<void>} fn
+ * @param {string} dir
+ * @param {string} name
  */
-async function withStagedWorkspace(fn) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-plugin-info-unread-'))
-  const workspaceDir = path.join(root, 'plugins-workspace')
-  const goodDir = path.join(workspaceDir, 'ai-gateway')
-  const badDir = path.join(workspaceDir, 'claude')
-  const hypHome = path.join(root, 'home')
-  await fs.mkdir(goodDir, { recursive: true })
-  await fs.mkdir(badDir, { recursive: true })
-  await fs.writeFile(
-    path.join(goodDir, 'hypaware.plugin.json'),
+function writeManifest(dir, name) {
+  return fs.writeFile(
+    path.join(dir, 'hypaware.plugin.json'),
     JSON.stringify({
       schema_version: 1,
-      name: '@hypaware/ai-gateway',
+      name,
       version: '9.9.9',
       hypaware_api: '^1.0.0',
       runtime: 'node',
       entrypoint: './index.js',
     })
   )
+}
+
+/**
+ * Stage a bundled workspace holding one loadable plugin and one directory the
+ * caller is about to make unreadable, then run `fn` against it. Restores the
+ * mode before removing the tree so a failed assertion cannot leave an
+ * undeletable directory behind for the next run.
+ *
+ * `badDir` is staged with no manifest at all, which is a state in its own right:
+ * `src/core/manifest.js` routes the missing file to the same `manifest_invalid`
+ * failure a corrupt one gets, so a caller that never chmods still reaches the
+ * `failed` bucket, and reaches it as root (issue #1842).
+ *
+ * @param {(dirs: { workspaceDir: string, badDir: string, unknownDir: string, hypHome: string }) => Promise<void>} fn
+ * @param {{ unknownName?: string }} [opts] With `unknownName`, stage a third
+ *   directory whose valid manifest declares that name. A name in neither the
+ *   allowlist nor the exclude set routes to `unknown`, which is the state
+ *   `plugin info` used to flatly deny (issue #1843).
+ */
+async function withStagedWorkspace(fn, opts = {}) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-plugin-info-unread-'))
+  const workspaceDir = path.join(root, 'plugins-workspace')
+  const goodDir = path.join(workspaceDir, 'ai-gateway')
+  const badDir = path.join(workspaceDir, 'claude')
+  const unknownDir = path.join(workspaceDir, 'mystery')
+  const hypHome = path.join(root, 'home')
+  await fs.mkdir(goodDir, { recursive: true })
+  await fs.mkdir(badDir, { recursive: true })
+  await writeManifest(goodDir, '@hypaware/ai-gateway')
+  if (opts.unknownName) {
+    await fs.mkdir(unknownDir, { recursive: true })
+    await writeManifest(unknownDir, opts.unknownName)
+  }
   try {
-    await fn({ workspaceDir, badDir, hypHome })
+    await fn({ workspaceDir, badDir, unknownDir, hypHome })
   } finally {
     await fs.chmod(workspaceDir, 0o755).catch(() => {})
     await fs.chmod(badDir, 0o755).catch(() => {})
@@ -342,7 +366,7 @@ test('plugin info does not deny a bundled name when a plugin directory would not
         + ' with this package could not all be read, so whether this package ships one is unknown'
     )
     // The operator gets the directory to go and look at, not just a hedge.
-    assert.equal(lines[1], `  the bundled plugin directory ${badDir} holds a manifest that would not load`)
+    assert.equal(lines[1], `  the bundled plugin directory ${badDir} did not yield a usable manifest`)
     // The claim the fix exists to remove.
     assert.equal(ctx.stderr.text().includes('or bundled with this package'), false)
 
@@ -378,17 +402,7 @@ test('plugin info does not deny a bundled name when the workspace will not enume
 test('plugin info keeps the flat miss message when discovery saw the whole workspace', async () => {
   await withStagedWorkspace(async ({ workspaceDir, badDir, hypHome }) => {
     // Give the second directory a manifest too, so nothing is in `failed`.
-    await fs.writeFile(
-      path.join(badDir, 'hypaware.plugin.json'),
-      JSON.stringify({
-        schema_version: 1,
-        name: '@hypaware/claude',
-        version: '9.9.9',
-        hypaware_api: '^1.0.0',
-        runtime: 'node',
-        entrypoint: './index.js',
-      })
-    )
+    await writeManifest(badDir, '@hypaware/claude')
     const ctx = makeInfoCtx(hypHome)
     assert.equal(await runPluginInfo(['@nope/nothing'], ctx, { workspaceDir }), 1)
     assert.equal(
@@ -396,4 +410,102 @@ test('plugin info keeps the flat miss message when discovery saw the whole works
       "hyp plugin info: no plugin named '@nope/nothing' is installed or bundled with this package\n"
     )
   })
+})
+
+// A directory that holds nothing reaches `failed` exactly like one holding a
+// corrupt manifest, because `src/core/manifest.js` maps the missing file to
+// `manifest_invalid` too. The old reason line asserted the directory holds a
+// manifest, which is false for this half, and no chmod is involved so this runs
+// as root (issue #1842).
+test('plugin info reason line does not claim a manifest in a directory that holds none', async () => {
+  await withStagedWorkspace(async ({ workspaceDir, badDir, hypHome }) => {
+    const ctx = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@hypaware/claude'], ctx, { workspaceDir }), 1)
+    const lines = ctx.stderr.text().split('\n')
+    assert.equal(
+      lines[0],
+      "hyp plugin info: no plugin named '@hypaware/claude' is installed, and the plugins bundled"
+        + ' with this package could not all be read, so whether this package ships one is unknown'
+    )
+    assert.equal(lines[1], `  the bundled plugin directory ${badDir} did not yield a usable manifest`)
+    // The claim the fix exists to remove: nothing is in that directory.
+    assert.equal(ctx.stderr.text().includes('holds a manifest'), false)
+    assert.equal(ctx.stderr.text().includes('or bundled with this package'), false)
+  })
+})
+
+// The third route short of the package, and the one the flat denial survived
+// on: a valid manifest under a name in neither the allowlist nor the exclude
+// set. No permissions involved, so the staged workspace runs anywhere (issue
+// #1843).
+test('plugin info does not deny a name whose bundled manifest this build does not recognize', async () => {
+  await withStagedWorkspace(async ({ workspaceDir, badDir, unknownDir, hypHome }) => {
+    // Nothing in `failed`, so the answer below cannot be coming from the hedge.
+    await writeManifest(badDir, '@hypaware/claude')
+    const ctx = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@hypaware/mystery'], ctx, { workspaceDir }), 1)
+    assert.equal(ctx.stdout.text(), '')
+    const lines = ctx.stderr.text().split('\n')
+    assert.equal(
+      lines[0],
+      "hyp plugin info: no plugin named '@hypaware/mystery' is installed, and the manifest this"
+        + ' package bundles under that name is one this build does not recognize'
+    )
+    // The operator gets the directory to go and look at, and why it is inert.
+    assert.equal(
+      lines[1],
+      `  the bundled plugin directory ${unknownDir} declares '@hypaware/mystery', a name in`
+        + " neither this build's bundled plugin allowlist nor its excluded set, so nothing activates it"
+    )
+    // The claim the fix exists to remove.
+    assert.equal(ctx.stderr.text().includes('or bundled with this package'), false)
+    // And it is this name that is answered, not every name: a name the whole
+    // workspace really lacks still gets the flat claim, which is true there.
+    const missCtx = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@nope/nothing'], missCtx, { workspaceDir }), 1)
+    assert.equal(
+      missCtx.stderr.text(),
+      "hyp plugin info: no plugin named '@nope/nothing' is installed or bundled with this package\n"
+    )
+  }, { unknownName: '@hypaware/mystery' })
+})
+
+// The two shortfalls can hold at once, and then only one of them answers the
+// name asked after. A manifest that parsed under an unrecognized name is known
+// exactly, so it is said back even while some other directory sits in `failed`;
+// reverse the order and the operator gets the hedge about a name discovery
+// could have named. Nothing else pins that precedence: the sibling test above
+// clears `failed` on purpose to prove the message's source (issue #1843).
+test('plugin info answers the unrecognized name even when another directory is unread', async () => {
+  await withStagedWorkspace(async ({ workspaceDir, badDir, unknownDir, hypHome }) => {
+    // `badDir` keeps its staged state: no manifest, so it is in `failed` and
+    // `unread` is set for the whole run below.
+    const ctx = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@hypaware/mystery'], ctx, { workspaceDir }), 1)
+    const lines = ctx.stderr.text().split('\n')
+    assert.equal(
+      lines[0],
+      "hyp plugin info: no plugin named '@hypaware/mystery' is installed, and the manifest this"
+        + ' package bundles under that name is one this build does not recognize'
+    )
+    assert.equal(
+      lines[1],
+      `  the bundled plugin directory ${unknownDir} declares '@hypaware/mystery', a name in`
+        + " neither this build's bundled plugin allowlist nor its excluded set, so nothing activates it"
+    )
+    // The hedge is available and still loses: it cannot name this plugin.
+    assert.equal(ctx.stderr.text().includes('could not all be read'), false)
+
+    // And it is the hedge that answers the name only the unread directory
+    // could have held, which is the half that keeps both routes honest.
+    const hedged = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@hypaware/claude'], hedged, { workspaceDir }), 1)
+    const hedgedLines = hedged.stderr.text().split('\n')
+    assert.equal(
+      hedgedLines[0],
+      "hyp plugin info: no plugin named '@hypaware/claude' is installed, and the plugins bundled"
+        + ' with this package could not all be read, so whether this package ships one is unknown'
+    )
+    assert.equal(hedgedLines[1], `  the bundled plugin directory ${badDir} did not yield a usable manifest`)
+  }, { unknownName: '@hypaware/mystery' })
 })
