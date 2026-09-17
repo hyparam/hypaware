@@ -139,14 +139,15 @@ test('plugin list names a bundled plugin this boot did not activate, in both out
 
 // The listing's claim is bounded to this CLI process. The daemon boots
 // separately and a plugin can fail in either one alone, so the output must not
-// read as a verdict on the daemon. The pointer is narrow on purpose: `hyp
-// status` builds its `failedPlugins` from the daemon's `activations`
-// (`recordFailedPlugins`), so it names the throwing-`activate()` route and
-// nothing else. A plugin the dep graph eliminated lands in this section and
-// `hyp status` prints it as active under `overall: healthy` (issue #1580), so a
-// pointer at "the daemon's plugin failures" at large would send an operator to
-// a surface that contradicts this one. Executed both ways against a real
-// foreground daemon before this line was written.
+// read as a verdict on the daemon. The pointer is as wide as `hyp status`
+// actually is and no wider: `recordFailedPlugins` builds the daemon's
+// `failedPlugins` from both its `activations` and its `unsatisfiedRequirements`,
+// so a throwing `activate()` and a plugin the dep graph eliminated for an
+// unsatisfied `requires` both get a diagnostic there (issue #1580). The two
+// shortfalls that stop at this listing - a manifest that would not load, named
+// by directory rather than by plugin name (issue #1576), and a plugin the boot
+// profile withheld - stay out of the sentence, so a pointer at "the daemon's
+// plugin failures" at large would still promise more than `hyp status` answers.
 test('plugin list scopes its failure claim to this boot and points at hyp status for the daemon', async () => {
   const hypHome = await makeHome('hyp-plugin-list-failed-scope-')
   try {
@@ -154,7 +155,7 @@ test('plugin list scopes its failure claim to this boot and points at hyp status
     assert.equal(await runPluginList([], ctx), 0)
     const text = ctx.stdout.text()
     assert.match(text, /this boot did not activate/)
-    assert.match(text, line("  The daemon boots separately; hyp status names a plugin whose activate() threw in a running one."))
+    assert.match(text, line("  The daemon boots separately; hyp status names a plugin whose activate() threw in a running one, or one its dependency resolver eliminated."))
     // Not a claim about plugin failures at large, which `hyp status` does not make.
     assert.equal(text.includes("own plugin failures"), false)
   } finally {

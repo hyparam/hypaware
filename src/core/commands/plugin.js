@@ -439,19 +439,24 @@ export async function runPluginList(argv, ctx) {
     // named) nor why, since four different shortfalls land in this one list. The
     // closing line says which boot is missing from the answer: this CLI process
     // is not the daemon, and a plugin can fail in either one alone.
-    // It names the one thing `hyp status` actually reports, and not "plugin
-    // failures" at large: the daemon's `failedPlugins` is built from its
-    // `activations` (`recordFailedPlugins`), which only the throwing-`activate()`
-    // route ever reaches. A plugin the dep graph eliminated for an unsatisfied
-    // `requires` lands in this section and is reported by `hyp status` as active
-    // under `overall: healthy`, so a wider pointer would send an operator to a
-    // surface that contradicts this one (issue #1580).
+    // It names the two things `hyp status` actually reports, and not "plugin
+    // failures" at large: the daemon's `failedPlugins` is built by
+    // `recordFailedPlugins` from both its `activations` and its
+    // `unsatisfiedRequirements`, so a throwing `activate()` and a plugin the dep
+    // graph eliminated for an unsatisfied `requires` each reach it, each get a
+    // diagnostic of their own, and each degrade `overall` (issue #1580). The
+    // other two shortfalls in this list stop here: a manifest that would not
+    // load is named by its directory rather than by a plugin name and reaches
+    // neither surface (issue #1576), and a plugin the boot profile withheld is
+    // no shortfall in the daemon at all. So the pointer is still not "the
+    // daemon's plugin failures" at large, which would promise a surface that
+    // answers for those two.
     ctx.stdout.write('Plugins this boot did not activate:\n')
     for (const name of [...unavailable].sort()) {
       const { version, source } = unavailableCopy(name)
       ctx.stdout.write(`  ${name}@${version}  (${source})\n`)
     }
-    ctx.stdout.write('  The daemon boots separately; hyp status names a plugin whose activate() threw in a running one.\n')
+    ctx.stdout.write('  The daemon boots separately; hyp status names a plugin whose activate() threw in a running one, or one its dependency resolver eliminated.\n')
   }
   return 0
 }
