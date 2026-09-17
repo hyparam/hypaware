@@ -338,9 +338,10 @@ test('a plugin whose activate() throws is reported on the surfaces a shipped ins
     // And the repair is the record that keeps it whole past the clamp, not a
     // plugin listing. `hyp plugin list` does name a plugin that came up short
     // (issue #1570), but for its own CLI boot rather than for the daemon this
-    // diagnostic reads, and what it names is the name and version this message
-    // already carries, never the reason it does not. Both log files are named
-    // because either process can be the one that could not activate.
+    // diagnostic reads, and what it adds over this message is the version and
+    // which copy boot selected, never the reason the operator is missing.
+    // Both log files are named because either process can be the one that
+    // could not activate.
     assert.equal(diag.repair.length, 2)
     assert.match(diag.repair[0], /^grep -s plugin_activate_failed /)
     for (const logFile of [
