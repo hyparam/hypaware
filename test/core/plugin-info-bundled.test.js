@@ -18,6 +18,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
+import { runPluginInfo } from '../../src/core/commands/plugin.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -235,4 +236,164 @@ test('plugin info has no --json form and says so', async () => {
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
   }
+})
+
+// Discovery that degraded, rather than a name that is genuinely unknown. The
+// miss message used to assert what the package contains, and discovery cannot
+// support that claim: it degrades to a short map (a workspace that will not
+// enumerate throws and is caught, a plugin directory whose manifest will not
+// load routes to `failed`), so a bundled name missing from the map is not
+// evidence the package lacks it (issue #1600).
+//
+// These drive the command function rather than the CLI, because the CLI cannot
+// reach the thrown half: `bootKernel` runs the same discovery first and dies on
+// it. The `failed` half does reach a booted CLI, and both arrive here through
+// the same seam, so one fixture shape covers both.
+
+/**
+ * A minimal `CommandRunContext`: the argv parse and the state-dir resolution
+ * are all `runPluginInfo` reads before it answers.
+ *
+ * @param {string} hypHome
+ */
+function makeInfoCtx(hypHome) {
+  return /** @type {any} */ ({
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    stdout: makeStreamBuf(),
+    stderr: makeStreamBuf(),
+  })
+}
+
+function makeStreamBuf() {
+  let value = ''
+  return { write(/** @type {string} */ chunk) { value += String(chunk); return true }, text() { return value } }
+}
+
+/**
+ * Drop every permission bit on `dir` and report whether that actually made it
+ * unreadable. Running as root defeats the mode bits, and a filesystem may too,
+ * so the caller skips rather than asserting something the machine cannot stage.
+ *
+ * @param {string} dir
+ * @returns {Promise<boolean>}
+ */
+async function makeUnreadable(dir) {
+  await fs.chmod(dir, 0o000)
+  try {
+    await fs.readdir(dir)
+    return false
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Stage a bundled workspace holding one loadable plugin and one directory the
+ * caller is about to make unreadable, then run `fn` against it. Restores the
+ * mode before removing the tree so a failed assertion cannot leave an
+ * undeletable directory behind for the next run.
+ *
+ * @param {(dirs: { workspaceDir: string, badDir: string, hypHome: string }) => Promise<void>} fn
+ */
+async function withStagedWorkspace(fn) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-plugin-info-unread-'))
+  const workspaceDir = path.join(root, 'plugins-workspace')
+  const goodDir = path.join(workspaceDir, 'ai-gateway')
+  const badDir = path.join(workspaceDir, 'claude')
+  const hypHome = path.join(root, 'home')
+  await fs.mkdir(goodDir, { recursive: true })
+  await fs.mkdir(badDir, { recursive: true })
+  await fs.writeFile(
+    path.join(goodDir, 'hypaware.plugin.json'),
+    JSON.stringify({
+      schema_version: 1,
+      name: '@hypaware/ai-gateway',
+      version: '9.9.9',
+      hypaware_api: '^1.0.0',
+      runtime: 'node',
+      entrypoint: './index.js',
+    })
+  )
+  try {
+    await fn({ workspaceDir, badDir, hypHome })
+  } finally {
+    await fs.chmod(workspaceDir, 0o755).catch(() => {})
+    await fs.chmod(badDir, 0o755).catch(() => {})
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}
+
+// The reachable half. The workspace enumerates, so boot survives and the
+// command runs; one bundled plugin's directory does not, so its name is in no
+// map and the old wording denied the package ships it.
+test('plugin info does not deny a bundled name when a plugin directory would not load', async (t) => {
+  await withStagedWorkspace(async ({ workspaceDir, badDir, hypHome }) => {
+    if (!await makeUnreadable(badDir)) {
+      t.skip('cannot stage an unreadable directory here (running as root?)')
+      return
+    }
+    const ctx = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@hypaware/claude'], ctx, { workspaceDir }), 1)
+    assert.equal(ctx.stdout.text(), '')
+    const lines = ctx.stderr.text().split('\n')
+    assert.equal(
+      lines[0],
+      "hyp plugin info: no plugin named '@hypaware/claude' is installed, and the plugins bundled"
+        + ' with this package could not all be read, so whether this package ships one is unknown'
+    )
+    // The operator gets the directory to go and look at, not just a hedge.
+    assert.equal(lines[1], `  the bundled plugin directory ${badDir} holds a manifest that would not load`)
+    // The claim the fix exists to remove.
+    assert.equal(ctx.stderr.text().includes('or bundled with this package'), false)
+
+    // Discovery was partial, not dead: the sibling that did load still answers,
+    // so the hedge above is driven by the degrade and not applied blanket.
+    const okCtx = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@hypaware/ai-gateway'], okCtx, { workspaceDir }), 0)
+    assert.match(okCtx.stdout.text(), /^@hypaware\/ai-gateway@9\.9\.9$/m)
+  })
+})
+
+// The half the CLI cannot reach on its own, kept because it is the one the
+// acceptance condition names: the workspace directory itself is unreadable, so
+// discovery throws and the caught degrade is total.
+test('plugin info does not deny a bundled name when the workspace will not enumerate', async (t) => {
+  await withStagedWorkspace(async ({ workspaceDir, hypHome }) => {
+    if (!await makeUnreadable(workspaceDir)) {
+      t.skip('cannot stage an unreadable directory here (running as root?)')
+      return
+    }
+    const ctx = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@hypaware/claude'], ctx, { workspaceDir }), 1)
+    const lines = ctx.stderr.text().split('\n')
+    assert.match(lines[0], /^hyp plugin info: no plugin named '@hypaware\/claude' is installed, and the plugins bundled with this package could not all be read/)
+    assert.match(lines[1], /^ {2}the bundled plugins directory could not be read: .*EACCES/)
+    assert.equal(ctx.stderr.text().includes('or bundled with this package'), false)
+  })
+})
+
+// The hedge is not the new default: a workspace this process can read in full
+// still gets the flat claim, which is true there and is what the existing
+// CLI-level unknown-name test asserts against the shipped workspace.
+test('plugin info keeps the flat miss message when discovery saw the whole workspace', async () => {
+  await withStagedWorkspace(async ({ workspaceDir, badDir, hypHome }) => {
+    // Give the second directory a manifest too, so nothing is in `failed`.
+    await fs.writeFile(
+      path.join(badDir, 'hypaware.plugin.json'),
+      JSON.stringify({
+        schema_version: 1,
+        name: '@hypaware/claude',
+        version: '9.9.9',
+        hypaware_api: '^1.0.0',
+        runtime: 'node',
+        entrypoint: './index.js',
+      })
+    )
+    const ctx = makeInfoCtx(hypHome)
+    assert.equal(await runPluginInfo(['@nope/nothing'], ctx, { workspaceDir }), 1)
+    assert.equal(
+      ctx.stderr.text(),
+      "hyp plugin info: no plugin named '@nope/nothing' is installed or bundled with this package\n"
+    )
+  })
 })

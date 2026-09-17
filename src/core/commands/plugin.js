@@ -222,19 +222,40 @@ function parsePluginInstallArgs(argv) {
  * under every profile, and so a bundled plugin this boot did not get can still
  * be named with its version and root directory: it never became an
  * `ActivePlugin` and a bundled plugin is not in the lock, so nothing else here
- * knows either fact. Discovery failure degrades to empty (no marks, and
- * `plugin info` reads as if the name were unknown), never throws: neither a
- * listing nor a lookup is the place to fail. A bundled plugin whose manifest
- * will not load is absent here too, having no name to be keyed by (issue #1576).
+ * knows either fact. Discovery failure still degrades to a short map and never
+ * throws (neither a listing nor a lookup is the place to fail), but it no
+ * longer degrades *silently*: `unread` says the map is not the whole package,
+ * so a caller that would otherwise state what the package contains can hedge
+ * instead (issue #1600). `plugin list` ignores it and marks only what it can
+ * see, which is what a listing of the present tense means.
  *
- * @returns {Promise<Map<string, LoadedManifest>>}
+ * Two ways the map can fall short of the package, and `unread` names both. The
+ * workspace will not enumerate, which throws here. Or a bundled plugin's
+ * manifest will not load, which does not throw and is the reachable one: boot
+ * runs this same discovery first and dies on a throw, while an unloadable
+ * manifest routes to `failed` and leaves a booted CLI holding a map short of a
+ * name it cannot even report as missing, having no name to be keyed by
+ * (issue #1576).
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.workspaceDir] Override the bundled workspace location.
+ * @returns {Promise<{ manifests: Map<string, LoadedManifest>, unread: string | null }>}
  */
-async function discoverBundledManifests() {
+async function discoverBundledManifests(opts = {}) {
   try {
-    const bundled = await discoverBundledPlugins()
-    return new Map([...bundled.loaded, ...bundled.excluded].map((m) => [m.manifest.name, m]))
-  } catch {
-    return new Map()
+    const bundled = await discoverBundledPlugins(opts)
+    const manifests = new Map([...bundled.loaded, ...bundled.excluded].map((m) => [m.manifest.name, m]))
+    if (bundled.failed.length === 0) return { manifests, unread: null }
+    const first = bundled.failed[0].rootDir
+    return {
+      manifests,
+      unread: bundled.failed.length === 1
+        ? `the bundled plugin directory ${first} holds a manifest that would not load`
+        : `${bundled.failed.length} bundled plugin directories hold a manifest that would not load, including ${first}`,
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return { manifests: new Map(), unread: `the bundled plugins directory could not be read: ${message}` }
   }
 }
 
@@ -249,7 +270,7 @@ export async function runPluginList(argv, ctx) {
   const stateDir = pluginStateDir(ctx)
   const installed = await listInstalledPlugins(stateDir)
   const active = ctx.plugins ?? []
-  const bundledManifests = await discoverBundledManifests()
+  const bundledManifests = (await discoverBundledManifests()).manifests
   const installedByName = new Map(installed.map((e) => [e.name, e]))
   const activeByName = new Map(active.map((p) => [p.name, p]))
 
@@ -391,8 +412,12 @@ export async function runPluginList(argv, ctx) {
 /**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ workspaceDir?: string }} [opts] Override the bundled workspace
+ *   location. The command registry never passes it: it is here so a test can
+ *   put a workspace this process cannot read behind the lookup, which is the
+ *   only way to reach the hedged miss message below (issue #1600).
  */
-export async function runPluginInfo(argv, ctx) {
+export async function runPluginInfo(argv, ctx, opts = {}) {
   const parsed = parseCoreCommandArgv('plugin info', argv, ctx)
   if (!parsed.ok) return parsed.code
   const name = String(parsed.params.plugin)
@@ -403,9 +428,23 @@ export async function runPluginInfo(argv, ctx) {
   // every bundled name read as `is not installed` whatever its state (issue
   // #1578). Same discovery as the listing, so the two cannot disagree about
   // what the package ships.
-  const bundled = (await discoverBundledManifests()).get(name)
+  const discovered = await discoverBundledManifests(opts)
+  const bundled = discovered.manifests.get(name)
   if (!entry) {
     if (!bundled) {
+      // Absent from the map is not the same fact as absent from the package,
+      // so the flat claim is only honest when discovery saw the whole
+      // workspace. An operator running this against a broken install is owed
+      // the difference between "this name is unknown" and "I could not look"
+      // (issue #1600).
+      if (discovered.unread) {
+        ctx.stderr.write(
+          `hyp plugin info: no plugin named '${name}' is installed, and the plugins bundled with`
+            + ' this package could not all be read, so whether this package ships one is unknown\n'
+        )
+        ctx.stderr.write(`  ${discovered.unread}\n`)
+        return 1
+      }
       ctx.stderr.write(
         `hyp plugin info: no plugin named '${name}' is installed or bundled with this package\n`
       )
