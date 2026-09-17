@@ -54,7 +54,9 @@ const STUB_PROVIDER = '@doctor/stub-provider'
  * Run the doctor only on plugin code you trust, same as installing it.
  *
  * Import or activation failures are captured (never thrown) so the
- * doctor can report them alongside the static checks.
+ * doctor can report them alongside the static checks, whatever the
+ * plugin threw: `describe`, which both catches render the value
+ * through, is total (hyparam/hypaware#1558).
  *
  * Note: the entrypoint is loaded with dynamic `import()`, which caches
  * by resolved URL. Each CLI invocation is a fresh process so this never
@@ -1083,11 +1085,51 @@ function emptySnapshot() {
   }
 }
 
-/** @param {unknown} err */
+/**
+ * The thrown value, rendered for the report.
+ *
+ * Total by construction: it is called from inside the two catches that make
+ * good on the containment `dryRunActivate` promises, so a throw here is not a
+ * worse message, it is the whole `hyp plugin doctor` run lost to the plugin it
+ * was diagnosing (hyparam/hypaware#1558). The value is the plugin's and so is
+ * every way of reading it: `String()` throws `TypeError` on a value with no
+ * `Object.prototype` (`throw Object.create(null)`) and rethrows whatever a
+ * hostile `toString` throws, `stack` and `message` are own accessors that
+ * throw just as easily on a genuine `Error`, and even `instanceof` walks
+ * `[[GetPrototypeOf]]`, which is a `Proxy` trap: a revoked `Proxy`, or one
+ * whose `getPrototypeOf` handler throws, makes the type test itself throw.
+ *
+ * So every read of the value, the `instanceof` included, runs inside a `try`
+ * and none has to succeed: an ordinary `Error` renders as the first three
+ * stack lines and an ordinary string as itself, an unreadable, non-string,
+ * or empty `stack` falls to `message` and then to the coercion (which
+ * renders a genuine `Error` as `name: message`), and a value that will not
+ * describe itself at all is named by its `typeof`, the one read that
+ * consults no prototype, runs no accessor and no trap, and so cannot throw.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
 function describe(err) {
-  if (err instanceof Error) {
-    const head = err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : err.message
-    return head
+  try {
+    if (err instanceof Error) {
+      const stack = err.stack
+      if (typeof stack === 'string' && stack !== '') return stack.split('\n').slice(0, 3).join('\n')
+      const message = err.message
+      if (typeof message === 'string') return message
+    }
+  } catch {
+    // Not the end of it: the coercion below renders a genuine `Error` as
+    // `name: message`, so it still gets its turn before the fallback, and a
+    // `Proxy` over a real `Error` whose `getPrototypeOf` trap throws still
+    // comes out as `name: message` there.
   }
-  return String(err)
+  try {
+    return String(err)
+  } catch {
+    // `typeof` consults no prototype and runs no accessor, so it answers for
+    // a prototype-less object and a `Symbol` alike. Naming the kind is little,
+    // but it is a report, where the throw left the operator none at all.
+    return `[unprintable ${typeof err} thrown: describing it threw too]`
+  }
 }
