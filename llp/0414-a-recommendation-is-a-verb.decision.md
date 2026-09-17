@@ -30,7 +30,7 @@ and on `PATH`, how to start one on a prompt with the terminal inherited,
 which client to ask for when two could start, and what a launch failure is
 ([LLP 0198](./0198-setup-ends-on-a-question.decision.md)). What it lacks is
 a handle for a recommendation. The server supplied one in LLP 0402: a
-`rec-` id derived from the report id and the page stem, listed on every
+`hyprec-` id (server LLP 0432; `rec-` before it) derived from the report id and the page stem, listed on every
 record, resolvable bare through `GET /v1/reports/_recommendations/<id>`
 to the report and the page that carry it.
 
@@ -160,6 +160,6 @@ printing records whole.
   both verbs.
 - Nothing accumulates on disk: the recommendation is read from the server
   each time, by the launched session and by an open one alike.
-- The `hypaware-reference` skill gains the hand-off: a `rec-` id named in a
-  session maps to `hyp report get <rec-id>`, and the skill says not to run
+- The `hypaware-reference` skill gains the hand-off: a `hyprec-` id named in
+  a session maps to `hyp report get <id>`, and the skill says not to run
   `fix` from inside a session, since it would start a second client.

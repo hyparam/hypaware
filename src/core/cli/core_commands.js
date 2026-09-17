@@ -825,7 +825,7 @@ function buildCoreCommands(registry) {
       summary: "Fetch a report's entry document (or one artifact) to stdout or --output",
       usage: coreUsage('report get'),
       help: [
-        "Given a recommendation id instead (rec-0123456789abcdef, as 'hyp report",
+        "Given a recommendation id instead (hyprec-0123456789abcdef, as 'hyp report",
         "list' prints under each report), fetches that recommendation's page",
         'with the evidence it cites and the queries the report ran to reach it',
         'appended. This is the read to make when asked to fix a recommendation',
@@ -839,7 +839,7 @@ function buildCoreCommands(registry) {
       usage: coreUsage('report fix'),
       help: [
         "The id is a recommendation's, as 'hyp report list' prints under each",
-        'report (rec-0123456789abcdef). HypAware checks the recommendation still',
+        'report (hyprec-0123456789abcdef). HypAware checks the recommendation still',
         'exists and starts an attached client in the current directory with',
         "instructions to read it through 'hyp report get <id>' and make the",
         'change here; nothing is written to disk. With no id on a terminal, pick',

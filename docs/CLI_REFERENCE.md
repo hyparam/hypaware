@@ -355,9 +355,9 @@ publish, or a report published before it did, lists the id and page alone.
 
 ```text
   2026-08-24T09:00:00.000Z	usage-review/2026-W34	REPORT_ID	48213 bytes	Usage review
-      rec-0123456789abcdef	recommendation-batch-the-retries	Batch the retries
+      hyprec-0123456789abcdef	recommendation-batch-the-retries	Batch the retries
           Every retry is its own call, 506 times a month. One queue fixes it.
-      rec-fedcba9876543210	recommendation-tenant-check
+      hyprec-fedcba9876543210	recommendation-tenant-check
 ```
 
 ```sh
@@ -380,7 +380,7 @@ hyp report get usage-review 2026-W34 REPORT_ID --output ./usage-review.html
 
 Replace `REPORT_ID` with the ID from `hyp report list`.
 
-Given a recommendation id instead (`rec-` and sixteen hex characters, the id
+Given a recommendation id instead (`hyprec-` and sixteen hex characters, the id
 `hyp report list` prints under each report), it resolves the id to its report
 and page and prints that page (Markdown, or HTML when the report was published
 without it) with a `Citations from the report record` tail: the turns the page
@@ -389,7 +389,7 @@ reach the recommendation, verbatim in `sql` blocks. This is the read to make
 from inside an AI client session when asked to fix a recommendation by id.
 
 ```sh
-hyp report get rec-0123456789abcdef
+hyp report get hyprec-0123456789abcdef
 ```
 
 ### `hyp report fix`
@@ -417,7 +417,7 @@ client could be started, it asks which. A declined pick succeeds. An unknown
 id, no launchable client, or a process-start failure returns `1`.
 
 ```sh
-hyp report fix rec-0123456789abcdef
+hyp report fix hyprec-0123456789abcdef
 hyp report fix --kind usage-review
 ```
 

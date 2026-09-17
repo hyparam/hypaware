@@ -289,9 +289,9 @@ test('list prints each report\'s recommendations, by id and page, under its line
         id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z',
         recommendations: [
           // A server that reads the page's opening at publish (server LLP 0416).
-          { id: 'rec-0123456789abcdef', page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.' },
+          { id: 'hyprec-0123456789abcdef', page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.' },
           // A report that predates that, or a page with no heading: id and page alone.
-          { id: 'rec-fedcba9876543210', page: 'recommendation-tenant-check' },
+          { id: 'hyprec-fedcba9876543210', page: 'recommendation-tenant-check' },
         ],
       },
       { id: 'rpt-a', kind: 'usage-review', period: '2026-W28', bytes: 900, publishedAt: '2026-07-13T10:00:00.000Z' },
@@ -303,9 +303,9 @@ test('list prints each report\'s recommendations, by id and page, under its line
   const lines = out.join('').split('\n').filter(Boolean)
   assert.deepEqual(lines, [
     '  2026-07-20T10:00:00.000Z\tusage-review/2026-W29\trpt-b\t1200 bytes\tWeekly',
-    '      rec-0123456789abcdef\trecommendation-batch-the-retries\tBatch the retries',
+    '      hyprec-0123456789abcdef\trecommendation-batch-the-retries\tBatch the retries',
     '          Every retry is its own call. One queue fixes it.',
-    '      rec-fedcba9876543210\trecommendation-tenant-check',
+    '      hyprec-fedcba9876543210\trecommendation-tenant-check',
     '  2026-07-13T10:00:00.000Z\tusage-review/2026-W28\trpt-a\t900 bytes',
   ])
 })
@@ -320,7 +320,7 @@ test('list escapes server text for the terminal; --json stays byte-exact (LLP 02
     json: { reports: [{
       id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: hostile, bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z',
       recommendations: [
-        { id: 'rec-0123456789abcdef', page: 'recommendation-x', title: 'Batch\u001b[2Kthe retries', summary: 'One queue.\u0007' },
+        { id: 'hyprec-0123456789abcdef', page: 'recommendation-x', title: 'Batch\u001b[2Kthe retries', summary: 'One queue.\u0007' },
       ],
     }] },
   }))
@@ -462,7 +462,7 @@ test('get reports an unknown report from the server error body', async (t) => {
 // client was started with.
 // @ref LLP 0414#id-is-the-handle [tests]: a bare id resolves to its report and page with nothing else in hand
 
-const REC = 'rec-0123456789abcdef'
+const REC = 'hyprec-0123456789abcdef'
 const REPORT = { id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z' }
 const PAGE = '# Batch the retries\n\nEvery retry is its own call.\n'
 
@@ -628,8 +628,8 @@ test('get <rec-id> refuses extra positionals and reports an unknown id like fix 
   }
   {
     const { ctx, err } = ctxWith()
-    assert.equal(await runReportGet(['rec-ffffffffffffffff'], ctx), 1)
-    assert.match(err.join(''), /hyp report get: no recommendation 'rec-ffffffffffffffff' in this org/)
+    assert.equal(await runReportGet(['hyprec-ffffffffffffffff'], ctx), 1)
+    assert.match(err.join(''), /hyp report get: no recommendation 'hyprec-ffffffffffffffff' in this org/)
   }
 })
 
@@ -657,8 +657,8 @@ test('fix with an unknown id exits 1 and points at the listing, before any launc
   stubFixServer(t)
   const { ctx, err } = ctxWith()
   const { deps, launches } = fixDeps()
-  assert.equal(await runReportFix(['rec-ffffffffffffffff'], ctx, deps), 1)
-  assert.match(err.join(''), /no recommendation 'rec-ffffffffffffffff' in this org - list them with 'hyp report list'/)
+  assert.equal(await runReportFix(['hyprec-ffffffffffffffff'], ctx, deps), 1)
+  assert.match(err.join(''), /no recommendation 'hyprec-ffffffffffffffff' in this org - list them with 'hyp report list'/)
   assert.equal(launches.length, 0)
 })
 
@@ -668,6 +668,47 @@ test('fix refuses a token that is not a recommendation id without a round trip',
   assert.equal(await runReportFix(['rpt-b'], ctx, fixDeps().deps), 2)
   assert.match(err.join(''), /'rpt-b' is not a recommendation id/)
   assert.equal(calls.length, 0)
+})
+
+test('get and fix still admit the pre-rename rec- form and pass it to the server as typed; the picker admits a listed one', async (t) => {
+  // Server LLP 0432 renamed the prefix to hyprec-; an older server lists
+  // rec- ids and a token copied before the rename is still rec-. The CLI
+  // never rewrites an id, so the server (which reads both) sees what the
+  // user held.
+  const OLD = 'rec-0123456789abcdef'
+  const { calls } = stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === '/v1/reports') return { status: 200, json: { reports: [{ ...REPORT, recommendations: [{ id: OLD, page: 'recommendation-batch-the-retries' }] }] } }
+    if (p === `/v1/reports/_recommendations/${OLD}`) return { status: 200, json: { recommendation: { id: OLD, page: 'recommendation-batch-the-retries' }, report: REPORT } }
+    if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md') return { status: 200, body: new TextEncoder().encode(PAGE) }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+  {
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportGet([OLD], ctx), 0)
+    assert.equal(out.join(''), PAGE)
+    assert.equal(calls[0].url.pathname, `/v1/reports/_recommendations/${OLD}`)
+  }
+  {
+    const { ctx } = ctxWith()
+    const { deps, launches } = fixDeps()
+    assert.equal(await runReportFix([OLD], ctx, deps), 0)
+    assert.match(launches[0].prompt, new RegExp('`hyp report get ' + OLD + '`'))
+  }
+  {
+    const { ctx } = ctxWith()
+    ctx.stdin.isTTY = true
+    ctx.stdout.isTTY = true
+    const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
+    assert.equal(await runReportFix([], ctx, deps), 0)
+    assert.deepEqual(prompts[1].options, [{ value: OLD, label: 'batch the retries', summary: OLD }])
+    assert.equal(launches.length, 1)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportFix(['xrec-0123456789abcdef'], ctx, fixDeps().deps), 2)
+    assert.match(err.join(''), /is not a recommendation id .*hyprec-0123456789abcdef/)
+  }
 })
 
 test('fix with no id and no terminal is a usage error', async (t) => {
@@ -712,7 +753,7 @@ test('fix labels the recommendation rows by the page title and the thesis\'s fir
 test('fix lists reports in the order the server returns them, skips one with nothing to fix, and back returns to the report list', async (t) => {
   const older = { id: 'rpt-a', kind: 'usage-review', period: '2026-W28', bytes: 900, publishedAt: '2026-07-13T10:00:00.000Z' }
   const empty = { id: 'rpt-c', kind: 'usage-review', period: '2026-W30', title: 'Nothing here', bytes: 100, publishedAt: '2026-07-27T10:00:00.000Z', recommendations: [] }
-  const OLD_REC = 'rec-fedcba9876543210'
+  const OLD_REC = 'hyprec-fedcba9876543210'
   stubServer(t, (method, url) => {
     const p = url.pathname
     if (p === '/v1/reports') {
@@ -752,7 +793,7 @@ test('fix does not offer a listed recommendation whose id is not one, so nothing
   // a listing that names a row with shell text rather than an id would put
   // that text on a command line. Such a row is not a recommendation this
   // verb can act on.
-  const hostileId = 'rec-x; rm -rf ~'
+  const hostileId = 'hyprec-x; rm -rf ~'
   stubServer(t, (method, url) => {
     if (url.pathname === '/v1/reports') {
       return { status: 200, json: { reports: [{
