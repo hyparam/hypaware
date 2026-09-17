@@ -82,6 +82,42 @@ export function warningsRecordBootFailure(warnings) {
 }
 
 /**
+ * How `dep_graph` words the one `plugin_missing` detail that names a plugin
+ * nothing on this host supplies, with `recordFailedPlugins`'s kind prefix in
+ * front of it.
+ */
+const MISSING_PLUGIN_MESSAGE_PREFIX = 'plugin_missing: requires plugin '
+
+/**
+ * The dependency a `requires_unsatisfied` snapshot entry's `message` names as
+ * absent, or `undefined` when it names no plugin.
+ *
+ * Read back out of the composed string rather than carried as a field of its
+ * own, because `FailedPluginSnapshot` is serialized into `status.json` and
+ * read by whichever CLI is installed when the operator looks: a new field is
+ * absent from every snapshot an already-running daemon wrote, so the reader
+ * needs this path regardless. It sits beside the `<kind>: <detail>`
+ * composition below so the two cannot drift apart unnoticed.
+ *
+ * Only the absent-manifest wording is read. The resolver's other
+ * `plugin_missing` detail is a version mismatch (`<name>@<version> does not
+ * satisfy <range>`), where the dependency is present and enabling nothing
+ * repairs it, and `cap_missing` names a capability rather than a plugin;
+ * both fall through to `undefined` deliberately.
+ *
+ * @param {string} message
+ * @returns {string | undefined}
+ */
+export function requiredPluginFromMessage(message) {
+  if (!message.startsWith(MISSING_PLUGIN_MESSAGE_PREFIX)) return undefined
+  const spec = message.slice(MISSING_PLUGIN_MESSAGE_PREFIX.length)
+  // A scoped plugin name carries an `@` of its own and a semver range carries
+  // none, so the last one is always the separator.
+  const at = spec.lastIndexOf('@')
+  return at > 0 ? spec.slice(0, at) : undefined
+}
+
+/**
  * Record the plugins a boot could not activate on the daemon's own file log,
  * and return them in the shape the status snapshot carries.
  *
