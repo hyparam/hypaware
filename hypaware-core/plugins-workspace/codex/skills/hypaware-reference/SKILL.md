@@ -1,6 +1,6 @@
 ---
 name: hypaware-reference
-description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a central server, and what is local-only versus opt-in, including how to stop recording the current session. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go" - and to opt this conversation out of recording: "don't record this", "ignore this session", "pause logging", "resume recording" (these map to `hyp session ignore` / `unignore`). Also use when asked to act on a HypAware report recommendation - "fix hypaware recommendation rec-…", "implement rec-…", "what does rec-… say" - which maps to `hyp report get <rec-id>`. For querying recorded data, including graph and co-occurrence questions, use hypaware-query.
+description: Explain what HypAware is, what it captures, how its data flows, config and paths, joining a central server, and what is local-only versus opt-in, including how to stop recording the current session. Use for product orientation - "what is HypAware", "what can it capture", "how do I detach codex", "how do I join a server", "where does my data go" - and to opt this conversation out of recording: "don't record this", "ignore this session", "pause logging", "resume recording" (these map to `hyp session ignore` / `unignore`). Also use whenever a request names a token of the form `hyprec-` followed by sixteen hex characters (for example `hyprec-0123456789abcdef`): that is a HypAware report recommendation id, and "fix hyprec-…", "implement hyprec-…", "what does hyprec-… say" map to `hyp report get <hyprec-id>`, even when HypAware is not mentioned. For querying recorded data, including graph and co-occurrence questions, use hypaware-query.
 user-invocable: false
 ---
 
@@ -107,8 +107,9 @@ curated HypAware registry.
 - "Is it working?" or diagnose a problem - `hyp status` (add `--json` for the
   stable shape).
 - Act on a report recommendation - a published usage report ranks its
-  recommendations and the server mints an id for each (`rec-` and sixteen hex
-  characters). When the user names one, run `hyp report get <rec-id>` and read
+  recommendations and the server mints an id for each (`hyprec-` and sixteen
+  hex characters; a server older than mid-September 2026 spelled it `rec-`,
+  and both forms work). When the user names one, run `hyp report get <id>` and read
   its output: the recommendation page as the report author wrote it (the
   change, its ready-to-apply artifact, its cost and the case against it),
   followed by a `Citations from the report record` tail listing the recorded
@@ -118,7 +119,7 @@ curated HypAware registry.
   The queries ran on the server over the whole org; re-run them with
   `hyp query sql` to check the finding against this machine's recordings,
   expecting smaller counts. `hyp report list` prints the ids under each report
-  when the user has none. `hyp report fix <rec-id>` is the shell-side form of
+  when the user has none. `hyp report fix <id>` is the shell-side form of
   the same thing: it starts a fresh client on the recommendation, so do not
   run it from inside a session.
 
