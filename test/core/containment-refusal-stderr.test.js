@@ -1203,6 +1203,36 @@ function refuseWritesToStream(writer) {
   return () => closeSync(writable)
 }
 
+/**
+ * The window the test below pins: resolves once the stream has destroyed
+ * itself, and before the 'error' event that destroy queues.
+ *
+ * Hooking the call is the only point that is inside the window by
+ * construction. Node sets `destroyed` synchronously inside `destroy(err)` and
+ * emits 'error' only after the descriptor's own close has come back off the
+ * threadpool, so this resolves a whole close round trip ahead of the event.
+ * No event can stand in for it: 'error' is the far edge of the window and
+ * 'close' is past it. Nor can a budget of setImmediate turns, which tracks
+ * nothing about a destroy sitting behind the threadpool: under whole-suite
+ * load the turns are spent in a few milliseconds and the wait gives up on a
+ * stream that is still live (hyparam/hypaware#1579).
+ *
+ * @param {any} writer a JsonlWriter whose stream is open
+ * @returns {Promise<void>} resolves inside the destroy-to-'error' window
+ */
+function destroyWindowOf(writer) {
+  const stream = writer.stream
+  const destroy = stream.destroy
+  return new Promise((resolve) => {
+    stream.destroy = function (...args) {
+      delete stream.destroy
+      const result = destroy.apply(stream, args)
+      resolve()
+      return result
+    }
+  })
+}
+
 // The in-tree half of the close-failure gap. LLP 0335#close-failures could
 // name the report but not demonstrate it on anything this repo ships:
 // `JsonlWriter.close` resolved from `stream.end`'s callback without reading
@@ -1394,13 +1424,10 @@ test('a JSONL close that lands after destroy but before the error event is still
     writer.writeBatch([{ note: 'a record the disk keeps' }])
     await new Promise((resolve) => { writer.stream.once('open', resolve) })
     release = refuseWritesToStream(writer)
-    writer.writeBatch([{ note: 'the record that goes nowhere' }])
     // Wait for the destroy, not for the event: this is the window.
-    let spins = 0
-    while (!writer.stream.destroyed && spins < 1000) {
-      await new Promise((resolve) => { setImmediate(resolve) })
-      spins++
-    }
+    const destroyed = destroyWindowOf(writer)
+    writer.writeBatch([{ note: 'the record that goes nowhere' }])
+    await destroyed
     assert.equal(writer.stream.destroyed, true, 'the stream destroyed itself')
     assert.equal(writer.streamError, null, 'and the error event has not arrived yet')
 
