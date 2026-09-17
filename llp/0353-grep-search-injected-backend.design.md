@@ -7,6 +7,7 @@
 **Related:** LLP 0314, LLP 0264, LLP 0105, LLP 0302, LLP 0303, LLP 0034;
 hypaware-server LLP 0129, LLP 0178, LLP 0184 (out of tree, the consuming
 host)
+**Extended-by:** [LLP 0413](./0413-local-grep-direct-scans.rfc.md) (local scan-only plugin ownership; shared server contracts retained)
 
 > Technical design for LLP 0314: `VerbOperationContext` gains an optional
 > `search` backend and `queryGrepVerb` uses it when the host supplies one,

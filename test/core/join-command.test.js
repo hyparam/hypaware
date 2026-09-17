@@ -82,13 +82,15 @@ test('join writes the central seed (mode 0600) and skips daemon install with --n
 
 test('join never touches an existing local config (#111 regression)', async () => {
   const { hypHome, opts } = await makeDispatchOpts()
-  // A working local install: ai-gateway + client wiring the user owns.
+  // An upgraded local install: ai-gateway + client wiring the user owns.
+  // Legacy boot migration is covered by grep-config-migration.test.js.
   const localPath = path.join(hypHome, 'hypaware-config.json')
   const localConfig = {
     version: 2,
     plugins: [
       { name: '@hypaware/ai-gateway', config: { listen: '127.0.0.1:8787' } },
       { name: '@hypaware/claude', config: { proxy: '@hypaware/ai-gateway' } },
+      { name: '@hypaware/grep' },
     ],
   }
   await fs.writeFile(localPath, JSON.stringify(localConfig, null, 2) + '\n')

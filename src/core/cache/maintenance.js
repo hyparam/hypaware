@@ -25,8 +25,7 @@ import { columnsFromIcebergSchema } from './iceberg/schema.js'
 import { appendRowsToTable, currentPartitionSpec, currentSchema, listLiveDataFiles, scanRowsFromTable, sortColumnsFromMetadata, tableExists } from './iceberg/store.js'
 import { partitionSpecForDeclaration, partitionSpecMigrationDue, sortColumnsForDeclaration } from '../iceberg/partition-spec.js'
 import { openStreamingAppend } from './iceberg/stream_append.js'
-import { buildSidecarsForTable, sweepIndexScratch } from '../search/sidecar_build.js'
-import { GREP_DATASET, sidecarPathFor } from '../search/searchable_columns.js'
+import { sidecarPathFor } from '../search/searchable_columns.js'
 import { isPlainObject } from '../util/json_util.js'
 
 /**
@@ -179,27 +178,6 @@ export function inPlaceRoundCap(cfg) {
 const METADATA_VERSIONS_KEPT = 20
 
 /**
- * The most of one maintenance tick's budget the grep sidecar build may
- * spend on any one partition. Indexing is seconds of CPU per file and the
- * pass runs inside the per-partition loop, so without a share of its own it
- * would spend the tick's whole remaining tail on the first grep partition
- * and starve every partition behind it. LLP 0199's neediest-first walk puts
- * the busiest partition first, which is exactly the one with the most to
- * index, so the tail is what it would take.
- *
- * The deadline this makes is ABSOLUTE and measured from the tick's start
- * (`startMs + budgetMs * share`), not from each partition's own arrival, so
- * it is one window near the front of the tick rather than an allowance
- * handed out per partition. A grep partition the walk reaches after that
- * window has closed still indexes its first missing file (the
- * always-attempt-one guarantee in `buildSidecarsForTable`) and defers the
- * rest to a later tick; the loop's own budget break above is what bounds
- * the total. Reading this as a per-partition allowance would be reading a
- * larger bound than the code holds, in the safe direction.
- */
-const GREP_INDEX_TICK_SHARE = 0.25
-
-/**
  * @param {Partial<MaintenanceConfig> | undefined} config
  * @returns {MaintenanceConfig}
  */
@@ -335,117 +313,6 @@ export async function maintainCache(opts) {
       report.errorKind = errorKindOf(err)
       report.errorMessage = err instanceof Error ? err.message : String(err)
       totalFailed++
-    }
-    // The grep sidecar build. Compaction is where a generation's files are
-    // minted, so a rewrite that just committed always leaves work here, but
-    // gating on that alone strands a partition already at the compaction
-    // floor: it never rewrites, so its files never get indexed, every grep
-    // brute-scans them forever, and `hyp query status` advises a compaction
-    // that will not run (hyparam/hypaware#984 review). Coverage is the
-    // honest gate instead, and it is cheap: one `readdir` of the live data
-    // directory, the same cost profile as the file counters beside it, and
-    // it reads zero-work whenever every file already has its sidecar. A
-    // committed data file never changes its rows, so indexing one the
-    // compactor has not touched is as valid as indexing one it just wrote;
-    // what compaction buys is that the index is built once over merged
-    // files rather than repeatedly over the fragments it will replace,
-    // which is a cost argument, not a correctness one.
-    //
-    // Isolated from the partition's own verdict: an index that cannot be
-    // built costs speed, never the tick, and never correctness (the scan
-    // tier serves whatever has no sidecar). Bounded by the tick's own
-    // deadline for the same reason the walk above is, and resumable across
-    // ticks because sidecar existence is the marker.
-    // @ref LLP 0264#lifecycle [constrained-by]: sidecar existence is the idempotency marker and an unindexed file is brute-scanned; both are what let this run on coverage
-    // @ref LLP 0302#build-site [implements]: the build pass runs on missing coverage under the tick budget, not only behind a committed compaction
-    if (!opts.dryRun && !report.failed && part.dataset === GREP_DATASET) {
-      try {
-        const cursorAfter = readCursorSync(part.path)
-        const liveDir = path.join(part.path, generationLayout(cursorAfter).liveDir)
-        // Before the coverage gate, and outside it. A build killed between
-        // its write and its rename leaves the sidecar unpublished, so the
-        // NEXT tick rebuilds it and coverage goes complete again - inside
-        // the sweep's own grace window, and therefore before the abandoned
-        // scratch is old enough to reclaim. Behind the gate the sweep would
-        // then never run again for that generation and the leak would last
-        // its whole life, which is the opposite of what the grace window is
-        // for. Costs one `readdir` of a directory `countIndexCoverage` reads
-        // anyway.
-        // @ref LLP 0304#scratch-sweep-site [implements]: the sweep is not gated on missing coverage, because a republished sidecar is what hides the scratch
-        //
-        // Behind the same path discipline as the unreferenced sweep: this
-        // pass also lists `<generation>/data` and unlinks by path. It needs
-        // the guard more, not less, because `liveDir` here is resolved
-        // through the LENIENT reader: a cursor the gate rejected still
-        // yields a default generation name at this line, so the cursor gate
-        // upstream is not standing in front of it.
-        //
-        // The check is no longer written here. It lives inside
-        // {@link sweepIndexScratch}, which is the code that unlinks, so a
-        // second caller cannot acquire the deletion without the guard that
-        // bounds it - and so the components asked about are the two the pass
-        // actually walks rather than the three this call site happened to
-        // name.
-        // @ref LLP 0331#guard-travels-with-the-delete [constrained-by]: the containment property belongs to the pass that deletes, not to whoever calls it.
-        sweepIndexScratch(liveDir)
-        const coverage = countIndexCoverage(liveDir)
-        if (coverage.indexed < coverage.indexable) {
-          await withSpan(
-            'maintenance.grep_index',
-            {
-              [Attr.COMPONENT]: 'cache',
-              [Attr.OPERATION]: 'maintenance.grep_index',
-              [Attr.DATASET]: part.dataset,
-              status: 'ok',
-            },
-            async (span) => {
-              // A SHARE of the tick, never its tail. Handing the pass the
-              // tick's own deadline let it run until the tick was spent,
-              // and the partition walk is neediest-first, so the busiest
-              // grep partition comes first, arrives at a freshly compacted
-              // generation with zero coverage, and spends the rest of the
-              // tick indexing it. Every partition behind it - the other
-              // sources, and logs/traces/metrics - then got no snapshot
-              // expiry and no compaction, that tick and every tick after,
-              // because the busy partition keeps taking writes. Nothing
-              // else in the loop has that shape: compaction is gated on a
-              // due verdict, so a healthy partition costs nearly nothing.
-              //
-              // A fraction bounds the damage without stalling coverage:
-              // the pass still always attempts its first missing file (see
-              // `buildSidecarsForTable`), so a partition indexes at least
-              // one file per tick even on an already-spent budget, and an
-              // absent `budgetMs` is `Infinity`, which makes the deadline
-              // unreachable rather than needing a second shape.
-              // @ref LLP 0199#neediest-first [constrained-by]: the walk postpones the healthiest partitions, so per-partition work appended to the loop must not be able to consume the tick
-              // @ref LLP 0303#build-share [implements]: a share of the tick per partition, never its tail
-              const built = await buildSidecarsForTable({
-                tableDir: liveDir,
-                deadlineMs: startMs + budgetMs * GREP_INDEX_TICK_SHARE,
-              })
-              report.sidecarsBuilt = built.built
-              // `failed` only: `quarantined` counts files SKIPPED without a
-              // build, so folding them in made a partition holding one
-              // poisoned file report a fresh failure on every later tick
-              // when nothing was attempted at all.
-              report.sidecarsFailed = built.failed
-              report.sidecarsQuarantined = built.quarantined
-              report.sidecarsDeferred = built.deferred
-              span.setAttribute('sidecars_built', built.built)
-              span.setAttribute('sidecars_present', built.present)
-              span.setAttribute('sidecars_failed', built.failed)
-              span.setAttribute('sidecars_quarantined', built.quarantined)
-              span.setAttribute('sidecars_deferred', built.deferred)
-            },
-            { component: 'cache' }
-          )
-        }
-      } catch (err) {
-        // Index absence is served by the scan tier, so a build-pass throw
-        // is a warning on the report, never a failed partition.
-        report.sidecarsFailed = (report.sidecarsFailed ?? 0) + 1
-        report.sidecarError = err instanceof Error ? err.message : String(err)
-      }
     }
     reports.push(report)
     if (!report.failed) maintained++
@@ -1022,15 +889,6 @@ export async function cacheStatus({ cacheRoot }) {
       status.layout = 'source-table'
     } else {
       status.layout = cursor.epoch > 0 || cursor.rowCount > 0 ? 'epoch' : undefined
-    }
-    // Grep-index coverage, for the one dataset that carries sidecars: how
-    // many of the partition's data files a search serves through an index
-    // rather than a brute scan. Reported so "grep is slow on deep history"
-    // is diagnosable from `hyp query status` instead of from tracing.
-    if (part.dataset === GREP_DATASET) {
-      const coverage = countIndexCoverage(liveDir)
-      status.indexedFileCount = coverage.indexed
-      status.indexableFileCount = coverage.indexable
     }
     statusPartitions.push(status)
   }
@@ -2859,41 +2717,6 @@ function countDataFiles(tableDir) {
       .length
   } catch {
     return 0
-  }
-}
-
-/**
- * How many of the table's data files have a grep sidecar beside them, and
- * how many could. A pure directory scan (no metadata load), matching the
- * cost profile of the other status counters. The pairing rule is not
- * restated here: `sidecarPathFor` owns the naming contract the build pass
- * publishes under and the grep service probes, so a second copy of it would
- * let this counter drift into reporting coverage that does not exist.
- *
- * The denominator is measured here rather than taken from `countDataFiles`,
- * which counts position-delete files too (icebird writes them into the same
- * `data/` directory as `<uuid>-deletes.parquet`). No sidecar is ever built
- * beside a delete file, so borrowing that count would make any partition
- * purged since its last compaction report permanently incomplete coverage,
- * and advise a compaction that cannot close the gap.
- *
- * @param {string} tableDir
- * @returns {{ indexed: number, indexable: number }}
- */
-function countIndexCoverage(tableDir) {
-  const dataDir = path.join(tableDir, 'data')
-  const coverage = { indexed: 0, indexable: 0 }
-  try {
-    const names = new Set(fs.readdirSync(dataDir))
-    for (const name of names) {
-      if (!name.endsWith('.parquet')) continue
-      if (name.endsWith('.index.parquet') || name.endsWith('-deletes.parquet')) continue
-      coverage.indexable += 1
-      if (names.has(sidecarPathFor(name))) coverage.indexed += 1
-    }
-    return coverage
-  } catch {
-    return { indexed: 0, indexable: 0 }
   }
 }
 

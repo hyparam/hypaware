@@ -187,7 +187,8 @@ test('leave never edits the local layer, and says so when a local central sink e
   const localPath = path.join(home, 'hypaware-config.json')
   const localConfig = {
     version: 2,
-    plugins: [{ name: '@hypaware/central' }],
+    // An upgraded config isolates leave from the separately tested migration.
+    plugins: [{ name: '@hypaware/central' }, { name: '@hypaware/grep' }],
     sinks: {
       central: {
         plugin: '@hypaware/central',

@@ -5,8 +5,7 @@ import { Worker } from 'node:worker_threads'
 import { CursorReadError } from './native.js'
 
 /**
- * The main-thread handle on the Cursor native decode, on the worker-thread
- * shape `src/core/search/index_worker.js` already carries.
+ * The main-thread handle on the Cursor native decode worker.
  *
  * `readCursorSession` is straight-line CPU and synchronous IO over a graph
  * bounded at 32 MiB and 4,096 blobs. Run inline it stops the daemon outright,
@@ -29,8 +28,6 @@ import { CursorReadError } from './native.js'
  *
  * @ref LLP 0399#resources [implements]: the native decode runs on a worker
  *   thread, so a bounded graph bounds CPU rather than daemon latency
- * @ref LLP 0264#lifecycle: the same worker handle shape the grep sidecar
- *   build already uses to keep maintenance off the daemon loop
  *
  * @param {{ log?: { info(msg: string, fields?: object): void } }} [args]
  */

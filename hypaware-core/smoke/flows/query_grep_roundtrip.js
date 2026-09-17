@@ -10,8 +10,12 @@ import {
 } from '../../../src/core/observability/index.js'
 import { createCommandRegistry } from '../../../src/core/registry/commands.js'
 import { registerCoreCommands } from '../../../src/core/cli/core_commands.js'
-import { createKernelRuntime } from '../../../src/core/runtime/activation.js'
+import { bootKernel } from '../../../src/core/runtime/boot.js'
+import { defaultConfigPath } from '../../../src/core/config/schema.js'
 import { dispatch } from '../../../src/core/cli/dispatch.js'
+import { listLiveDataFiles } from '../../../src/core/cache/iceberg/store.js'
+import { urlToPath } from '../../../src/core/cache/iceberg/resolver.js'
+import { resolveIcebergDir } from '../../../src/core/cache/storage.js'
 import { maintainCache } from '../../../src/core/cache/maintenance.js'
 
 /**
@@ -35,24 +39,9 @@ const COLUMNS = [
 ]
 
 /**
- * Hermetic end-to-end smoke for `hyp query grep` (LLP 0264 / LLP 0265 T7),
- * driving the REAL CLI dispatch -> verb -> grep service path through both
- * tiers and both privacy gates:
- *
- * 1. scan tier: a fresh, uncompacted cache answers a grep with zero
- *    sidecars anywhere (proved from the `query.grep_search` span).
- * 2. `hyp purge --session` then removes one seeded session and grep can
- *    no longer surface it (position deletes honored on a raw file walk).
- * 3. a forced `maintainCache` compacts and builds sidecars (the pass is
- *    called directly, not through `hyp cache maintain`, because the step
- *    asserts on the sidecar counters in its report); the same
- *    grep now answers from the indexed tier (span: indexed>0, scanned=0),
- *    identically, still without the purged row (the sidecar is newer than
- *    the purge here, but the stale-sidecar case is pinned in unit tests).
- * 4. `hyp query status` reports the index coverage line.
- * 5. LLP 0105: a local-only row's hit is withheld from a synced caller
- *    (count on stderr, never content), visible from the local-only cwd
- *    itself, and restored by `--include-local-only`.
+ * Hermetic CLI -> plugin verb -> direct scan smoke. Verifies identical
+ * results before/after compaction, purge filtering, local-only visibility,
+ * absence of generated indexes, and content-free search telemetry.
  *
  * @param {{ harness: any, expect: any }} args
  */
@@ -88,7 +77,20 @@ export async function run({ harness, expect }) {
   const cacheRoot = path.join(harness.stateDir, 'cache')
   const registry = createCommandRegistry()
   registerCoreCommands(registry)
-  const kernel = createKernelRuntime({ commandRegistry: registry, cacheRoot })
+  const kernel = await step('upgrade_config', async () => {
+    const configPath = defaultConfigPath(harness.hypHome)
+    await fs.writeFile(configPath, JSON.stringify({ version: 2, plugins: [] }))
+    const boot = await bootKernel({
+      hypHome: harness.hypHome, configPath, commandRegistry: registry,
+      cacheRoot, runId: harness.devRunId, env: process.env,
+    })
+    expect.that('upgrade: grep activates from an unchanged legacy plugin list',
+      boot.runtime.verbs.getByTool('grep_search')?.plugin, (v) => v === '@hypaware/grep')
+    const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    expect.that('upgrade: the grep entry is persisted', config.plugins,
+      (v) => v.length === 1 && v[0].name === '@hypaware/grep')
+    return boot.runtime
+  })
 
   /**
    * Run one CLI invocation from a given caller directory.
@@ -179,34 +181,36 @@ export async function run({ harness, expect }) {
       rows.map((row) => row.session_id).sort(), (v) => JSON.stringify(v) === JSON.stringify(['sess-new', 'sess-old']))
   })
 
-  // ----- smoke_step: maintain_builds_sidecars -----
-  await step('maintain_builds_sidecars', async () => {
+  // ----- smoke_step: maintain_without_indexes -----
+  await step('maintain_without_indexes', async () => {
     const report = await maintainCache({ cacheRoot, force: true })
     const partition = report.partitions.find((p) => p.dataset === DATASET)
     expect.that('maintain: the gateway partition compacted', partition?.compacted, (v) => v === true)
-    expect.that('maintain: the rewrite queued sidecar builds',
-      partition?.sidecarsBuilt ?? 0, (v) => v >= 1)
-    expect.that('maintain: no sidecar build failed', partition?.sidecarsFailed ?? 0, (v) => v === 0)
+    const parts = await kernel.storage.discoverCachePartitions({ datasets: [DATASET] })
+    for (const part of parts) {
+      for (const file of await listLiveDataFiles(resolveIcebergDir(part.path))) {
+        const index = urlToPath(file.filePath).replace(/\.parquet$/, '.index.parquet')
+        const exists = await fs.access(index).then(() => true, () => false)
+        expect.that('maintain: no index was built', exists, (v) => v === false)
+      }
+    }
   })
 
-  // ----- smoke_step: status_reports_coverage -----
-  await step('status_reports_coverage', async () => {
+  // ----- smoke_step: status_without_indexes -----
+  await step('status_without_indexes', async () => {
     const r = await cli(['query', 'status'], cleanCwd)
     expect.that('status: hyp query status exited 0', r.code, (v) => v === 0)
-    expect.that('status: the grep index coverage line is present',
-      r.stdout, (v) => /grep index: \d+ of \d+ data files indexed/.test(v))
-    const m = r.stdout.match(/grep index: (\d+) of (\d+) data files indexed/)
-    expect.that('status: every data file is indexed after the forced maintain',
-      m, (v) => v !== null && v[1] === v[2] && Number(v[1]) >= 1)
+    expect.that('status: no index coverage is advertised',
+      r.stdout.includes('grep index:'), (v) => v === false)
   })
 
-  // ----- smoke_step: grep_indexed_tier (same answer, served by sidecars) -----
-  await step('grep_indexed_tier', async () => {
+  // ----- smoke_step: grep_after_compaction (same answer, still scanned) -----
+  await step('grep_after_compaction', async () => {
     const r = await cli(['query', 'grep', needle, '--format', 'json'], cleanCwd)
-    expect.that('indexed: hyp query grep exited 0', r.code, (v) => v === 0)
+    expect.that('compacted: hyp query grep exited 0', r.code, (v) => v === 0)
     /** @type {any[]} */
     const rows = JSON.parse(r.stdout)
-    expect.that('indexed: the two visible sessions still hit, purged still absent',
+    expect.that('compacted: the two visible sessions still hit, purged still absent',
       rows.map((row) => row.session_id).sort(), (v) => JSON.stringify(v) === JSON.stringify(['sess-new', 'sess-old']))
   })
 
@@ -234,15 +238,21 @@ export async function run({ harness, expect }) {
   // opened here would be dropped rather than recorded, and a smoke_step
   // that never reaches the trace is worse than none.
   {
+    const logs = await expect.logs()
+    expect.that('logs: the automatic config migration persisted once',
+      logs.filter((/** @type {any} */ row) => row.body === 'config.grep_migration' &&
+        row.attributes?.migration_status === 'persisted').length, (v) => v === 1)
     const traces = await expect.traces()
     const greps = traces.filter((/** @type {any} */ s) => s.name === 'query.grep_search')
     expect.that('spans: query.grep_search spans were recorded', greps.length, (v) => v >= 3)
     expect.that('spans: an early search ran wholly on the scan tier',
       greps, (v) => v.some((/** @type {any} */ s) =>
         Number(s.attributes?.indexed_file_count) === 0 && Number(s.attributes?.scanned_file_count) >= 1))
-    expect.that('spans: a post-maintenance search ran wholly on the indexed tier',
-      greps, (v) => v.some((/** @type {any} */ s) =>
-        Number(s.attributes?.indexed_file_count) >= 1 && Number(s.attributes?.scanned_file_count) === 0))
+    expect.that('spans: every search used scans without indexes',
+      greps, (v) => v.every((/** @type {any} */ s) =>
+        Number(s.attributes?.indexed_file_count) === 0 && Number(s.attributes?.scanned_file_count) >= 1))
+    expect.that('spans: maintenance never ran index work',
+      traces.some((/** @type {any} */ s) => s.name === 'maintenance.grep_index'), (v) => v === false)
     expect.that('spans: no span carries the query text, only its shape',
       greps, (v) => v.every((/** @type {any} */ s) =>
         !JSON.stringify(s.attributes ?? {}).includes(needle) && s.attributes?.query_length !== undefined))

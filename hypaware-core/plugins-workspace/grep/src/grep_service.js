@@ -1,85 +1,37 @@
 // @ts-check
 
-import { asyncBufferFromFile, cachedAsyncBuffer, parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
-import { parquetFind, queryIndex } from 'hypgrep'
+import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
 
-import { createLocalIcebergIO, urlToPath } from '../cache/iceberg/resolver.js'
-import { listLiveDataFiles } from '../cache/iceberg/store.js'
-import { datasetForTablePath } from '../cache/paths.js'
-import { discoverSpoolTables } from '../cache/spool.js'
-import { resolveIcebergDir } from '../cache/storage.js'
-import { Attr, getLogger, withSpan } from '../observability/index.js'
-import { settlePendingCacheForQuery } from '../query/sql.js'
+import { urlToPath } from '../../../../src/core/cache/iceberg/resolver.js'
+import { listLiveDataFiles } from '../../../../src/core/cache/iceberg/store.js'
+import { datasetForTablePath } from '../../../../src/core/cache/paths.js'
+import { discoverSpoolTables } from '../../../../src/core/cache/spool.js'
+import { resolveIcebergDir } from '../../../../src/core/cache/storage.js'
+import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
+import { settlePendingCacheForQuery } from '../../../../src/core/query/sql.js'
 import {
   callerSeesEverything,
   cwdWithheldFromCaller,
   defaultQueryVisibilityResolver,
   resolveCallerClass,
-} from '../query/visibility.js'
-import { LocalOnlyListUnreadableError } from '../usage-policy/local_only.js'
-import { cellText, compileMatcher, GrepQueryError, makeSnippet, MAX_MATCH_COLUMNS } from './matcher.js'
-import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS, sidecarPathFor } from './searchable_columns.js'
+} from '../../../../src/core/query/visibility.js'
+import { cellText, compileMatcher, GrepQueryError, makeSnippet, MAX_MATCH_COLUMNS } from '../../../../src/core/search/matcher.js'
+import { GREP_DATASET, SCAN_COLUMNS, SEARCHABLE_COLUMNS } from '../../../../src/core/search/searchable_columns.js'
 
 /**
- * The local grep-search service: the client half of LLP 0264, mirroring the
- * server's `src/search/grep-search.js` tier for tier. One walk over the
- * cache's live data files, newest message-day first; a file with a hypgrep
- * sidecar is searched through `parquetFind` (the index proposes candidate
- * blocks, the shared matcher confirms), a file without one is brute-scanned.
- * Both tiers read under the narrow `SCAN_COLUMNS` projection, so the index
- * changes which rows are decoded and never how wide. Files are processed
- * strictly sequentially and each is read one ROW GROUP at a time, over a
- * file-handle-backed `AsyncBuffer` that fetches only the byte ranges the
- * projection needs. Both halves are load-bearing: the row-group split
- * bounds the DECODED rows, and the handle-backed buffer bounds the RAW
- * bytes. A whole-file resident reader could not do the second (it would
- * leave a 128 MiB `target_file_bytes` data file resident behind a walk
- * that reads it a row group at a time, and would block the loop for the
- * read).
+ * Direct local scans over the cache's live files, newest message-day first.
+ * Read only SCAN_COLUMNS, one row group at a time through range reads.
+ * Keep at most twice the hit budget before trimming in result order.
+ * Position deletes and the local-only visibility predicate apply to every
+ * row, including files left beside indexes built by an older installation.
  *
- * That makes the SCAN tier's bound one row group, decoded and raw. The
- * INDEXED tier's is looser, and it is hypgrep's to set rather than this
- * module's: `parquetFind` wraps whatever buffer it is handed in
- * hyparquet's `cachedAsyncBuffer`, which memoizes every slice for the life
- * of one file's search. Its raw residency is therefore the UNION of the
- * candidate ranges it read, which approaches the projected bytes of the
- * whole file for a query the index cannot prune (a literal shorter than
- * hypgrep's n-gram length prunes to nothing at all). The handle-backed
- * buffer is still strictly better there than the whole-file resident
- * reader it replaced; it just does not make that tier's bound a row group,
- * and claiming it did would be a bound no call path holds. Either way the
- * bound is PER FILE: the walk is sequential and nothing survives a file
- * but the trimmed hit buffer.
+ * @ref LLP 0413#scans [implements]: local searches never read or build indexes
+ * @ref LLP 0264#visibility [implements]: the local scan preserves the caller's visibility
  *
- * No sidecar anywhere (the tree before T6 of LLP 0265 runs) means every
- * file takes the scan tier: slower, never wrong.
- *
- * Unlike the server there is no cross-tier day exclusion: a client row lives
- * in exactly one data file, and each file is served by exactly one tier, so
- * a row cannot be counted twice by construction.
- *
- * Two client-side row gates the server does not have:
- *
- * - **Purge.** A raw file read does not apply Iceberg position deletes, so
- *   every tier filters rows through the file's committed delete positions
- *   (`listLiveDataFiles`); a purged row can neither match nor surface, even
- *   when a stale sidecar still proposes it (LLP 0104).
- * - **Visibility.** Every surfaced row passes the LLP 0105 lattice check via
- *   the same `cwdWithheldFromCaller` predicate the SQL read path applies.
- *   The check runs AFTER the match predicate, so `localOnly.withheldRows`
- *   counts hits the caller was not allowed to see - the number the verb
- *   renders as actionable guidance - and an out-of-rank row consumes no
- *   result budget.
- *
- * @ref LLP 0264#decision [implements]: the client mirror of the server's two-tier grep, cache scan beside sidecar-indexed files
- * @ref LLP 0264#visibility [implements]: the local scan enforces LLP 0105 with the caller's cwd; --remote inherits the server's own gate instead
- * @ref LLP 0304#indexed-tier-residency [constrained-by]: hypgrep caches the slices it reads, so the indexed tier's raw bound is the candidate ranges, not one row group
- *
- * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { GrepSearchHit, GrepSearchMatcher, GrepSearchParams, GrepSearchResult } from '../../../src/core/search/types.js'
- * @import { LocalOnlyVisibilityReport, RefreshMode } from '../../../src/core/query/types.js'
- * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
- * @import { AsyncBuffer, FileMetaData } from 'hyparquet'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { GrepSearchHit, GrepSearchMatcher, GrepSearchParams, GrepSearchResult } from '../../../../src/core/search/types.js'
+ * @import { LocalOnlyVisibilityReport, RefreshMode } from '../../../../src/core/query/types.js'
+ * @import { UsagePolicyResolver } from '../../../../src/core/usage-policy/types.js'
  */
 
 const DATASET = GREP_DATASET
@@ -107,8 +59,8 @@ const UNKNOWN_DAY_SORT_KEY = '￿'
  * client seam: the storage service for discovery and spool freshness, the
  * LLP 0105 caller identity, and the abort signal. The result extends the
  * shared `GrepSearchResult` with the local-only visibility report, the
- * freshness messages the spool debounce produced, and per-tier file counts
- * so surfaces (and smokes) can prove which path served the answer.
+ * freshness messages and scan counts. indexedFiles stays zero for callers
+ * that consume the existing local result shape.
  *
  * @param {GrepSearchParams & {
  *   storage: ExtendedQueryStorageService,
@@ -255,7 +207,6 @@ export async function executeGrepSearch(args) {
         return ad < bd ? 1 : -1
       })
 
-      const { resolver: io } = await createLocalIcebergIO()
       /** @type {GrepSearchHit[]} */
       const hits = []
       /**
@@ -268,7 +219,6 @@ export async function executeGrepSearch(args) {
        * search, which is the one place it must not.
        */
       let interrupted = false
-      let indexedFiles = 0
       let scannedFiles = 0
 
       /**
@@ -281,11 +231,6 @@ export async function executeGrepSearch(args) {
        * the limit promises. Trimming is amortized (it runs once the buffer
        * has doubled), so the walk still costs a bounded number of hits
        * rather than one per match in the cache.
-       *
-       * The same trim runs over the indexed tier's per-file buffer below,
-       * for the same reason: a buffer that grew with the file rather than
-       * with the budget would give up the memory bound this walk promises,
-       * and cutting it in walk order would reintroduce the bug.
        *
        * @param {GrepSearchHit[]} list
        */
@@ -300,251 +245,8 @@ export async function executeGrepSearch(args) {
         if (hits.length >= budget * 2) trimHits()
       }
 
-      /**
-       * Ask the sidecar whether this file can hold a match at all, before
-       * anything opens the source. Returns the sidecar footer alongside, so
-       * the answer costs one index-footer parse rather than two.
-       *
-       * `parquetFind` runs the same `queryIndex` internally and takes no way
-       * to be handed the result, so a file that DOES have candidate blocks
-       * decodes its posting bitsets twice. That is CPU over ranges the
-       * memoized sidecar buffer already holds, no second read, and it is
-       * what buys a PRUNED file a source it never opens.
-       *
-       * Only a definite "no blocks" shortcuts. Every other outcome, a
-       * failure included, falls through to the path below, so an unreadable
-       * or poisoned sidecar still degrades exactly where it did before, with
-       * the same warning naming both files. This function therefore cannot
-       * change an answer; it can only decline to read.
-       *
-       * @param {Awaited<ReturnType<typeof io.reader>>} indexFile
-       * @returns {Promise<{ empty: boolean, indexMetadata: FileMetaData | undefined }>}
-       */
-      const pruneWithIndex = async (indexFile) => {
-        try {
-          signal?.throwIfAborted()
-          const indexMetadata = await parquetMetadataAsync(indexFile)
-          const pruned = await queryIndex({ query: matcher.hypQuery, indexFile, indexMetadata })
-          // `undefined` is an empty query, not an empty result: it means the
-          // index was never consulted, so it is not a prune.
-          return { empty: pruned?.blocks.length === 0, indexMetadata }
-        } catch (err) {
-          if (isAbort(err, signal)) throw err
-          return { empty: false, indexMetadata: undefined }
-        }
-      }
-
-      /**
-       * Search one file through its sidecar. Returns false when the index
-       * proved unusable, which hands that one file to the scan tier below.
-       *
-       * The existence probe only rules out a missing sidecar. A sidecar
-       * that exists but cannot be read (a half-written index from a killed
-       * build, a truncation from a full disk, a format the installed
-       * hypgrep refuses) throws from inside `parquetFind`, where the footer
-       * is parsed and the version checked. Left uncaught, one poisoned
-       * sidecar fails every grep over the whole cache, including the
-       * partitions the walk never reached, which would make index state a
-       * correctness input; LLP 0264 #lifecycle says it never is, so a
-       * poisoned file is brute-scanned exactly like an unindexed one.
-       *
-       * The attempt therefore runs into a local buffer and commits only
-       * once the index tier finished. A sidecar can tear mid-read (an
-       * external writer; the build's own publish is atomic), and rows
-       * already pushed to the shared buffer could not be taken back, so
-       * committing as it went would leave the choice between double-counting
-       * them on the rescan and failing the whole query. Buffering makes
-       * degrading the file a decision this function can still take at any
-       * point in the read.
-       *
-       * An abort is the one failure that commits the buffer instead of
-       * discarding it: it ends the walk rather than degrading the file, so
-       * there is no rescan to double-count against and the rows the index
-       * already produced belong in the partial answer.
-       *
-       * @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file
-       * @param {Awaited<ReturnType<typeof io.reader>>} indexFile
-       * @param {FileMetaData | undefined} indexMetadata the sidecar footer
-       *   `pruneWithIndex` already parsed, so `parquetFind` does not parse it
-       *   a second time
-       * @param {string} sidecarUrl
-       * @param {AsyncBuffer} sourceFile
-       * @param {FileMetaData} sourceMetadata
-       * @param {string[]} scanColumns
-       * @returns {Promise<boolean>}
-       */
-      const searchIndexed = async (file, indexFile, indexMetadata, sidecarUrl, sourceFile, sourceMetadata, scanColumns) => {
-        /** @type {GrepSearchHit[]} */
-        const found = []
-        let withheldHere = 0
-        try {
-          // No `limit` is passed down, and the generator below is drained
-          // rather than broken out of at the budget. Two separate reasons,
-          // both correctness: a purged or withheld row is filtered AFTER
-          // parquetFind accepts it, so a passed-down limit would count rows
-          // this walk then discards and under-return; and rows inside one
-          // file arrive in WRITE order, not date order, so stopping at the
-          // budget would keep that file's oldest matches rather than its
-          // newest. `found` is trimmed in sort order instead, which is what
-          // actually bounds the memory here.
-          // `columns` rides through `parquetFind` into its own
-          // `parquetReadObjects` call, so the same narrow projection bounds
-          // BOTH tiers. Without it the indexed tier decodes every column of
-          // every candidate range, `system_text` and `raw_frame` included,
-          // and a candidate range is a whole coalesced run of blocks capped
-          // only at row-group boundaries: an indexed file could decode more
-          // bytes than the brute scan reads for the same file, which is the
-          // one cost this tier exists to remove (LLP 0264 #shared, and the
-          // 90.8% measurement `SCAN_COLUMNS` cites). Safe because every
-          // reader downstream of here - `accept`, the `withheld` predicate's
-          // `cwd`, and `toHit`'s locators - names only columns inside the
-          // projection. `scanColumns` intersects that shared projection with
-          // this file's physical schema because hyparquet >= 1.29 rejects an
-          // absent projected name.
-          const rows = parquetFind({
-            query: matcher.hypQuery,
-            url: file.filePath,
-            indexFile,
-            indexMetadata,
-            // The SOURCE data file is handle-backed, so a candidate range
-            // fetches the byte ranges its row group needs rather than coming
-            // out of a whole-file resident buffer. hypgrep then wraps it in
-            // its own
-            // `cachedAsyncBuffer`, which holds every slice for the life of
-            // this generator, so the residency here is the union of the
-            // candidate ranges and NOT one row group: strictly less than
-            // the whole file a resident reader would have held, and not
-            // the same bound the scan tier below gets. The sidecar is
-            // memoized once, up front, in `searchFile`.
-            // @ref LLP 0303#memory-bound [implements]: the source is opened per slice rather than read whole
-            // @ref LLP 0304#indexed-tier-residency [constrained-by]: hypgrep memoizes the slices, so this tier's raw bound is the candidate ranges
-            sourceFile,
-            sourceMetadata,
-            columns: scanColumns,
-            rowFilter: accept,
-            signal,
-          })
-          for await (const row of rows) {
-            if (file.deletedPositions?.has(BigInt(/** @type {number} */ (row.__index__)))) continue
-            if (withheld?.(row)) {
-              withheldHere += 1
-              continue
-            }
-            found.push(toHit(row, matcher))
-            if (found.length >= budget * 2) trimBuffer(found)
-          }
-        } catch (err) {
-          if (isAbort(err, signal)) {
-            // Commit before the abort propagates. A deadline lands INSIDE a
-            // file, not between files (hypgrep checks the signal at every
-            // coalesced range boundary), and a newest-first walk makes the
-            // interrupted file the newest one the caller most wants, so
-            // discarding the buffer would answer zero for exactly that file
-            // and lose its withheld-row count out of the report. Safe
-            // precisely because an abort ends the walk: this file is never
-            // rescanned, so no row can be counted twice. It still does not
-            // count as indexed, because it was not served whole.
-            for (const hit of found) hits.push(hit)
-            localOnly.withheldRows += withheldHere
-            throw err
-          }
-          // A corrupt machine-local list is the other failure this block can
-          // see, because the `withheld` predicate runs inside the loop above:
-          // `resolver.resolve` throws `LocalOnlyListUnreadableError`, which
-          // the SQL wrapper and `cwdWithheldFromCaller` both let propagate so
-          // the read fails loudly rather than resolving to "nothing withheld"
-          // (LLP 0080 #fail-safe). Degrading it here would blame a sidecar
-          // that is fine, advise deleting it, re-read every candidate file
-          // from scratch on the scan tier, and only then raise the identical
-          // error. Index state is never a correctness input; this is not
-          // index state.
-          if (err instanceof LocalOnlyListUnreadableError) throw err
-          // Both files are named, because the read that failed spans both:
-          // `parquetFind` reads the source data file alongside the sidecar
-          // and runs the row filter per row, so a torn source parquet reaches
-          // this line too and then fails the rescan below. Deleting the
-          // sidecar is the usual remedy and this warning is its only notice
-          // (nothing rebuilds one in place), but the line must not claim to
-          // have proved which file is at fault.
-          getLogger('query').warn('grep_search.indexed_read_failed', {
-            [Attr.COMPONENT]: 'query',
-            [Attr.OPERATION]: 'query.grep_search',
-            sidecar_file: urlToPath(sidecarUrl),
-            data_file: urlToPath(file.filePath),
-            error_message: err instanceof Error ? err.message : String(err),
-          })
-          return false
-        }
-        indexedFiles += 1
-        localOnly.withheldRows += withheldHere
-        // Appended, not spread: `limit` is validated as a positive safe
-        // integer but is not bounded above, so one file may fill a buffer of
-        // millions, and a spread of that many arguments is an argument-count
-        // overflow, not a push.
-        for (const hit of found) hits.push(hit)
-        if (hits.length >= budget * 2) trimHits()
-        return true
-      }
-
       /** @param {{ filePath: string, deletedPositions: Set<bigint> | undefined }} file */
       const searchFile = async (file) => {
-        // Sidecar existence IS the index marker, no ledger (LLP 0264
-        // #lifecycle): probe the filesystem, then degrade this one file to
-        // the scan tier if the read races a delete. Results stay exact
-        // either way; only the wall clock changes.
-        const sidecarUrl = sidecarPathFor(file.filePath)
-        /** @type {Awaited<ReturnType<typeof io.reader>> | null} */
-        let indexFile = null
-        try {
-          // No `existsSync` probe ahead of this: a missing sidecar throws
-          // ENOENT from the open, which is the same degrade this catch
-          // already performs for every other reader failure, so the probe
-          // only added a synchronous stat per data file to an otherwise
-          // fully async walk. Degrading on ANY failure, not only the delete
-          // race, is the rule: an unreadable sidecar is an unindexed file,
-          // and an unindexed file is the scan tier's problem, never the
-          // caller's error.
-          //
-          // The sidecar is read through the same range reader as the
-          // source now, so it is memoized here ONCE for the life of this
-          // file's search. `queryIndex` reads it in many small random
-          // ranges, and `parquetFind` runs the same `queryIndex` again over
-          // the buffer it is handed (wrapping it in its own cache, which is
-          // a no-op over this one), so without this wrap every posting
-          // range and the footer went to disk twice per file.
-          indexFile = cachedAsyncBuffer(await io.reader(sidecarUrl))
-        } catch (err) {
-          if (isAbort(err, signal)) throw err
-          indexFile = null
-        }
-        // The sidecar decides before the source is touched. hyparquet >= 1.29
-        // rejects a projected column a file does not carry, so `scanColumns`
-        // below has to be intersected with THIS file's physical schema, and
-        // that needs its footer: which is how opening the source ended up
-        // ahead of the index in the first place. For a file the index prunes
-        // to nothing that footer read is pure waste, and it is not a cheap
-        // waste - `parquetMetadataAsync` slices the last 512 KiB of a file
-        // that turned out to have no candidate rows at all. Pruning to
-        // nothing is the COMMON case for the selective query this tier exists
-        // to make fast, so the projection is computed only once a candidate
-        // block has survived.
-        //
-        // It also keeps those files out of the ENOENT window: a compaction or
-        // a purge that unlinks a data file mid-walk cannot fail a query that
-        // never needed to read it.
-        /** @type {FileMetaData | undefined} */
-        let indexMetadata
-        if (indexFile) {
-          const pruned = await pruneWithIndex(indexFile)
-          if (pruned.empty) {
-            // Counted for the same reason `searchIndexed` counts: the index
-            // served this file WHOLE, and answering "no rows here" out of the
-            // sidecar alone is the tier working, not degrading.
-            indexedFiles += 1
-            return
-          }
-          indexMetadata = pruned.indexMetadata
-        }
         const sourceFile = await asyncBufferFromFile(urlToPath(file.filePath))
         // One ROW GROUP at a time, not the whole file. A compacted data
         // file runs to `target_file_bytes` (128 MiB by default) and the
@@ -573,17 +275,8 @@ export async function executeGrepSearch(args) {
         // A single-row-group file therefore reads exactly as it did.
         const metadata = await parquetMetadataAsync(sourceFile)
         const physicalColumns = new Set(parquetSchema(metadata).children.map((child) => child.element.name))
-        // @ref LLP 0264#shared [constrained-by]: both tiers keep the shared narrow projection across physical schema drift
+        // @ref LLP 0264#shared [constrained-by]: the scan keeps the shared narrow projection across physical schema drift
         const scanColumns = SCAN_COLUMNS.filter((column) => physicalColumns.has(column))
-        if (indexFile && await searchIndexed(
-          file,
-          indexFile,
-          indexMetadata,
-          sidecarUrl,
-          sourceFile,
-          metadata,
-          scanColumns
-        )) return
         let groupStart = 0
         for (const group of metadata.row_groups) {
           const groupRows = Number(group.num_rows)
@@ -612,13 +305,6 @@ export async function executeGrepSearch(args) {
           }
           groupStart += groupRows
         }
-        // Counted here, not before the read, so the two tier counters mean
-        // the same thing: `indexedFiles` counts a file the indexed tier
-        // served WHOLE (its abort path commits its buffer without
-        // counting), and an abort mid-scan throws out of the loop above
-        // before this line. A counter that included interrupted files on
-        // one tier and not the other made the pair unusable for exactly
-        // the comparison it exists for.
         scannedFiles += 1
       }
 
@@ -657,7 +343,7 @@ export async function executeGrepSearch(args) {
       if (truncated) hits.length = limit
 
       span.setAttribute('file_count', files.length)
-      span.setAttribute('indexed_file_count', indexedFiles)
+      span.setAttribute('indexed_file_count', 0)
       span.setAttribute('scanned_file_count', scannedFiles)
       span.setAttribute('hit_count', hits.length)
       span.setAttribute('truncated', truncated)
@@ -689,7 +375,7 @@ export async function executeGrepSearch(args) {
         exhausted: !interrupted,
         localOnly,
         freshnessMessages,
-        indexedFiles,
+        indexedFiles: 0,
         scannedFiles,
       }
     },
@@ -738,7 +424,11 @@ function toHit(row, matcher) {
   for (const column of SEARCHABLE_COLUMNS) {
     const text = cellText(row[column])
     if (text === '' || !matcher.test(text)) continue
-    matches.push({ column, snippet: makeSnippet(text, matcher) })
+    // V8 slices can keep the entire message alive behind a short snippet.
+    // Copy only the bounded window; UTF-16 preserves every JS code unit,
+    // including lone surrogates that a UTF-8 round trip would replace.
+    const snippet = Buffer.from(makeSnippet(text, matcher), 'utf16le').toString('utf16le')
+    matches.push({ column, snippet })
     if (matches.length >= MAX_MATCH_COLUMNS) break
   }
   return {
