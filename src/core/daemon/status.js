@@ -1719,13 +1719,24 @@ export async function collectHypAwareStatus(opts = {}) {
         + `(${sanitizeLabel(entry.errorKind) ?? 'activate_failed'}): `
         + reason
         + runningTail,
-      // Not `hyp plugin list`: it prints the plugins *this* CLI boot activated
-      // plus the install lock, so the plugin that just failed is either missing
-      // from the output entirely (a bundled adapter, the likeliest subject) or
-      // sits under "Installed plugins" with nothing marking it as broken. The
-      // reason above is clamped to a sentence and the commonest real one is a
-      // module-resolution error longer than that, so the first repair is the
-      // record that kept it whole.
+      // Not `hyp plugin list`, which since issue #1570 does name a plugin that
+      // came up short - but for its own CLI boot: `ctx.failedPlugins` is that
+      // process's `unavailablePlugins`, while this diagnostic is raised only
+      // off a live daemon's snapshot. The two part company where it costs
+      // most: the daemon boots under launchd/systemd with its own
+      // environment, so a plugin that fails only there activates normally in
+      // this process, and the listing would print it active while this line
+      // says it failed. (A plugin the gateway's storage proxy defeats would
+      // diverge the same way, if one called a withheld method at activate.)
+      // That is consistent with `runPluginList` closing its own section by
+      // sending the operator back here rather than the reverse. What the
+      // listing supplies that this message does not is the version and which
+      // copy boot selected; what it never supplies is the reason, the thing
+      // the operator is missing. That reason is clamped to a sentence here
+      // and the commonest real one is a module-resolution error longer than
+      // that, so the first repair is the record that kept it whole. A
+      // listing would in any case be a read that changes nothing
+      // (LLP 0139#repair-must-be-runnable, as generalised by LLP 0195).
       repair: [activationLogGrep, 'hyp daemon restart'],
     })
   }
