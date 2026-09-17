@@ -44,7 +44,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
-import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, warningsRecordBootFailure } from './boot_failure.js'
+import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, requiredPluginFromMessage, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -1682,21 +1682,23 @@ export async function collectHypAwareStatus(opts = {}) {
         // repair is the config edit that supplies it or withdraws the request.
         // Only a restart re-resolves: the daemon reads `requires` at boot.
         //
-        // Withdrawing the request is an edit only the layer owning the entry
-        // can make: `configPath` is the local file, and the merge drops a
-        // local `plugins[]` entry whose name collides with a central one, so
-        // "remove '<name>'" for a central-owned plugin names an edit the next
-        // boot discards (issue #1598). Dropped rather than re-pointed at the
-        // central document, which is server-owned and overwritten by the next
-        // pull: there is no edit to offer there. The half that still works is
-        // kept for both layers, because the missing dependency is by
-        // definition a different name and a local entry enabling it survives
-        // the merge.
+        // Which layer can make either edit is the whole question, because the
+        // merge drops a local `plugins[]` entry whose name collides with a
+        // central one - whichever of the two names it is. Withdrawing the
+        // request edits the eliminated plugin's entry, so "remove '<name>'"
+        // is inert for a central-owned plugin (issue #1598); supplying the
+        // dependency edits the *dependency's* entry, so "enable what the
+        // reason names" is inert when that name is the central-owned one
+        // (issue #1826). A dependency named differently from the eliminated
+        // plugin cannot collide with *its* entry, which says nothing about a
+        // central entry of the dependency's own name.
         repair: [
-          centralPluginNames.has(name)
-            ? `enable what the reason names in ${configPath}`
-              + ` - '${name}' is enabled by the central config, so removing it from the local file changes nothing`
-            : `enable what the reason names, or remove '${name}', in ${configPath}`,
+          requiresUnsatisfiedConfigRepair({
+            plugin: name,
+            dependency: requiredPluginFromMessage(reason),
+            centralPluginNames,
+            configPath,
+          }),
           'hyp daemon restart  # requires are resolved at boot',
         ],
       })
@@ -3806,6 +3808,48 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
     }
   }
   return count
+}
+
+/**
+ * The config edit that repairs a `plugin_requires_unsatisfied` diagnostic,
+ * routed to the layer that can actually make it.
+ *
+ * `mergeConfigLayers` drops a local `plugins[]` entry whose name collides
+ * with a central one, so each half of the edit belongs to whoever owns the
+ * name that half touches: withdrawing the request touches the eliminated
+ * plugin's entry, supplying the dependency touches the dependency's. A half
+ * whose name the central layer owns gives way to a step that does change
+ * something, and the local file is named as the place that would not.
+ *
+ * `dependency` is `undefined` for every reason that names no missing plugin
+ * (a version mismatch, a capability require), and those keep the original
+ * wording: the reason still names what is missing and the local file is still
+ * where the operator's own entry lives.
+ *
+ * @param {object} args
+ * @param {string} args.plugin The plugin the resolver eliminated.
+ * @param {string | undefined} args.dependency The missing plugin its reason named.
+ * @param {Set<string>} args.centralPluginNames Names the central layer owns.
+ * @param {string} args.configPath The local config file.
+ * @returns {string}
+ * @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair has to be a step that changes something, so an edit the next merge discards is not one
+ */
+function requiresUnsatisfiedConfigRepair({ plugin, dependency, centralPluginNames, configPath }) {
+  const pluginIsCentral = centralPluginNames.has(plugin)
+  if (dependency === undefined || !centralPluginNames.has(dependency)) {
+    return pluginIsCentral
+      ? `enable what the reason names in ${configPath}`
+        + ` - '${plugin}' is enabled by the central config, so removing it from the local file changes nothing`
+      : `enable what the reason names, or remove '${plugin}', in ${configPath}`
+  }
+  // The dependency is central-owned, so a local entry adding it is dropped at
+  // merge. What still changes something: installing it here (the central layer
+  // already asks for it), or the fleet edit that stops asking.
+  return pluginIsCentral
+    ? `install '${dependency}' on this host, or enable it in the central config`
+      + ` - the central config names both '${plugin}' and '${dependency}', so no edit to ${configPath} survives the merge`
+    : `remove '${plugin}' from ${configPath}, or install '${dependency}' on this host`
+      + ` - '${dependency}' is named by the central config, so enabling it in the local file changes nothing`
 }
 
 /**

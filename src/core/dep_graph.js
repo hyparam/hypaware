@@ -46,6 +46,11 @@ export async function resolveDependencies(manifests, opts = {}) {
         const reqPlugins = m.requires?.plugins ?? {}
         for (const [depName, range] of Object.entries(reqPlugins)) {
           if (!byName.has(depName)) {
+            // This detail is the only place `depName` reaches `hyp status`,
+            // which parses it back out (`requiredPluginFromMessage` in
+            // `daemon/boot_failure.js`) to route the repair to the config
+            // layer owning the name. Reword it and that repair silently
+            // falls back to naming the local file.
             recordReject(eliminated, unsatisfied, m.name, 'plugin_missing', `requires plugin ${depName}@${range}`)
             log.error('dep_graph.reject', {
               [Attr.PLUGIN]: m.name,
