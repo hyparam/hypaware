@@ -2,7 +2,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { executePlan, readBatchColumn, selectedRowCount, valueAt } from 'squirreling'
+import { executePlan, readBatchColumn, selectBatch, selectedRowCount, valueAt } from 'squirreling'
 
 import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet'
 import {
@@ -677,7 +677,7 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
 }
 
 /**
- * Materialize only the current batch into row objects at the consumer boundary.
+ * Materialize a bounded physical window into row objects at the consumer boundary.
  * Let the SQL engine schedule predicate columns, apply residual filters, and
  * compose selections before reading output vectors. This preserves its equality
  * semantics across types without allocating an AsyncRow per candidate row.
@@ -698,13 +698,27 @@ async function* scanResolvedRows(source, columns, where) {
     if (result.batches) {
       const indices = columns.map((name) => result.columns.indexOf(name))
       for await (const batch of result.batches()) {
-        const vectors = await Promise.all(indices.map((columnIndex) => readBatchColumn({ batch, columnIndex })))
         const count = selectedRowCount(batch.selection)
-        for (let i = 0; i < count; i++) {
-          /** @type {Record<string, unknown>} */
-          const row = {}
-          for (let j = 0; j < columns.length; j++) row[columns[j]] = valueAt(vectors[j], i)
-          yield row
+        for (let start = 0; start < count;) {
+          // A Parquet group can encode thousands of repeated tool definitions
+          // in a few KB, but decoding its VARIANT values expands them to GB.
+          // Limit the physical span, not just the number of selected rows:
+          // Icebird reads the covering range of a sparse selection too.
+          let end = Math.min(count, start + 256)
+          if (batch.selection.type === 'indices') {
+            const selected = batch.selection.indices
+            end = start + 1
+            while (end < count && selected[end] >= selected[start] && selected[end] - selected[start] < 256) end++
+          }
+          const window = selectBatch(batch, { type: 'range', start, end, length: count })
+          const vectors = await Promise.all(indices.map((columnIndex) => readBatchColumn({ batch: window, columnIndex })))
+          for (let i = 0; i < end - start; i++) {
+            /** @type {Record<string, unknown>} */
+            const row = {}
+            for (let j = 0; j < columns.length; j++) row[columns[j]] = valueAt(vectors[j], i)
+            yield row
+          }
+          start = end
         }
       }
     } else {
