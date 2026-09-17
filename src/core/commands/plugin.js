@@ -235,8 +235,8 @@ function parsePluginInstallArgs(argv) {
  * not evidence a name is absent from the package, only that discovery did not
  * produce it, and a route found later joins the list without unsettling the
  * entries already on it. Counting them instead got this block wrong twice
- * (issues #1841 and #1843), so the count is gone rather than corrected again
- * (issue #1846).
+ * (PRs #1841 and #1845, each correcting the number and keeping the form), so
+ * the count is gone rather than corrected again (issue #1846).
  *
  * - The workspace will not enumerate for a reason other than ENOENT, such as a
  *   permission error or a path that is not a directory. `discoverBundledPlugins`
@@ -254,9 +254,9 @@ function parsePluginInstallArgs(argv) {
  *   (issue #1843).
  * - The workspace directory does not exist. `discoverBundledPlugins` in
  *   `src/core/runtime/bundled.js` maps ENOENT to all-empty buckets and returns
- *   without throwing, so `npx hypaware --help` works from any directory, and
- *   `bootKernel` in `src/core/runtime/boot.js` reads the all-empty result and
- *   carries on. A fully booted CLI therefore arrives here with an empty map and
+ *   without throwing (the reason that file gives for the branch is keeping
+ *   `npx hypaware --help` working from any directory), and `bootKernel` in
+ *   `src/core/runtime/boot.js` reads the all-empty result and carries on. A fully booted CLI therefore arrives here with an empty map and
  *   gives the flat denial for every name the package ships. The "boot dies on a
  *   throw" reasoning above does not reach this one: ENOENT is the readdir
  *   failure deliberately made not to throw. A workspace that exists and
@@ -268,8 +268,9 @@ function parsePluginInstallArgs(argv) {
  *   follows by a different mechanism.
  *
  * `unread` needs something actually unreadable and no name left to answer with,
- * so the last two do not set it: the empty buckets they leave are
- * indistinguishable here from a workspace that read clean.
+ * so the missing-workspace and non-directory routes do not set it: the empty
+ * buckets they leave are indistinguishable here from a workspace that read
+ * clean.
  *
  * The reason strings say a directory "did not yield a usable manifest" rather
  * than that it holds one: `src/core/manifest.js` maps a missing
