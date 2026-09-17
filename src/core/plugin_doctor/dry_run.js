@@ -239,11 +239,14 @@ function snapshotRegistry(runtime, commandRegistry, refused) {
       'sink',
       // Keyed by plugin and name together, so both halves have to be right.
       // `plugin` is taken off the registry's own wrapper rather than re-read
-      // off the contribution, which is the best this side can do: `register`
-      // builds the key from one read of `contribution.plugin` and the wrapper
-      // from the next one, so the two can differ under a drifting accessor
-      // (hyparam/hypaware#1553). A pair that misses is refused, which
-      // under-reports a real sink rather than reporting a false name.
+      // off the contribution, and that is exact: `register` reads
+      // `contribution.plugin` once and builds the key and the wrapper from
+      // that one read (hyparam/hypaware#1553, closed by #1561). `name` has no
+      // wrapper field to take, so it is read off the stored contribution here,
+      // later than the read the key was built from, and a drifting accessor
+      // can still answer with a name this registry never keyed. A pair that
+      // misses is refused, which under-reports a real sink rather than
+      // reporting a false name.
       (entry, name) => sinks.getContribution(entry.plugin, name),
       (entry) => entry.contribution
     ),
