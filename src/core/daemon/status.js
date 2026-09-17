@@ -1681,8 +1681,22 @@ export async function collectHypAwareStatus(opts = {}) {
         // The reason is the resolver's own and names what is missing, so the
         // repair is the config edit that supplies it or withdraws the request.
         // Only a restart re-resolves: the daemon reads `requires` at boot.
+        //
+        // Withdrawing the request is an edit only the layer owning the entry
+        // can make: `configPath` is the local file, and the merge drops a
+        // local `plugins[]` entry whose name collides with a central one, so
+        // "remove '<name>'" for a central-owned plugin names an edit the next
+        // boot discards (issue #1598). Dropped rather than re-pointed at the
+        // central document, which is server-owned and overwritten by the next
+        // pull: there is no edit to offer there. The half that still works is
+        // kept for both layers, because the missing dependency is by
+        // definition a different name and a local entry enabling it survives
+        // the merge.
         repair: [
-          `enable what the reason names, or remove '${name}', in ${configPath}`,
+          centralPluginNames.has(name)
+            ? `enable what the reason names in ${configPath}`
+              + ` - '${name}' is enabled by the central config, so removing it from the local file changes nothing`
+            : `enable what the reason names, or remove '${name}', in ${configPath}`,
           'hyp daemon restart  # requires are resolved at boot',
         ],
       })
@@ -1870,9 +1884,18 @@ export async function collectHypAwareStatus(opts = {}) {
       // satisfies the one check that does look. A repair line that sends the
       // user to a command which affirms the broken config is worse than no
       // repair line, so point at the file and the two required keys instead.
+      //
+      // Which file is the question the eliminated-plugin repair above answers
+      // (issue #1598): upstreams are the gateway plugin's own config slice, so
+      // they live in whichever layer owns its `plugins[]` entry. When that is
+      // the central layer the local entry carrying them is dropped at merge,
+      // and an edit to it is exactly the inert repair this @ref forbids.
       // @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair has to be a step that changes something, so the inert validate command gives way to the edit that fixes it
       repair: [
-        `add the missing 'name' / 'base_url' to each upstream in ${configPath} ('hyp config validate' does not check upstream shape)`,
+        centralPluginNames.has(GATEWAY_PLUGIN_NAME)
+          ? `add the missing 'name' / 'base_url' to each upstream in the central config's '${GATEWAY_PLUGIN_NAME}' entry`
+            + ` - a local entry for it is dropped at merge, so editing ${configPath} changes nothing`
+          : `add the missing 'name' / 'base_url' to each upstream in ${configPath} ('hyp config validate' does not check upstream shape)`,
         `hyp daemon restart  # the daemon reads the file only at boot`,
       ],
     })

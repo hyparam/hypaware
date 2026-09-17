@@ -12,6 +12,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 import { REQUIRES_UNSATISFIED_ERROR_KIND, recordFailedPlugins } from '../../src/core/daemon/boot_failure.js'
+import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { writePidFile } from '../../src/core/daemon/pid.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
 
 // Issue #1580. `recordFailedPlugins` walked `bootKernel`'s `activations` only,
 // and three of the four doors into `unavailablePlugins` never produce an
@@ -536,4 +539,101 @@ test('recordFailedPlugins does not let a throw claim the resolver door', () => {
     { name: '@acme/liar', errorKind: 'activate_failed', message: 'db locked' },
   ])
   assert.deepEqual(entries.map((e) => e.event), ['daemon.plugin_activate_failed'])
+})
+
+// Issue #1598. On an enrolled machine the effective config is the central
+// layer merged over the local one, and `mergeConfigLayers` silently drops a
+// local `plugins[]` entry whose name collides with a central one
+// (`collides_with_central`). The repair above names the *local* file, so on
+// such a host "remove '<name>'" is an edit the next boot discards whenever the
+// central layer is what asked for the plugin.
+//
+// Driven off a written snapshot rather than a third daemon boot: which layer
+// enabled the plugin is a property of the config on disk, and the daemon runs
+// above already prove the snapshot this collector reads is the one a real boot
+// writes.
+
+/**
+ * A live daemon's own snapshot naming one eliminated plugin, over the two
+ * config layers `collectHypAwareStatus` merges. `centralPlugins` omitted is a
+ * host that never joined: no central layer at all.
+ *
+ * @param {{ hypHome: string, eliminated: string, localPlugins: string[], centralPlugins?: string[] }} args
+ * @returns {Promise<any>}
+ */
+async function collectOverLayers({ hypHome, eliminated, localPlugins, centralPlugins }) {
+  const stateRoot = path.join(hypHome, 'hypaware')
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(hypHome, 'hypaware-config.json'), JSON.stringify({
+    version: 2,
+    plugins: localPlugins.map((name) => ({ name })),
+  }) + '\n')
+  if (centralPlugins) {
+    const seedPath = centralSeedPath(stateRoot)
+    await fs.mkdir(path.dirname(seedPath), { recursive: true })
+    await fs.writeFile(seedPath, JSON.stringify({
+      version: 2,
+      plugins: centralPlugins.map((name) => ({ name })),
+    }) + '\n')
+  }
+  writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'healthy',
+    pid: process.pid,
+    healthyAt: new Date().toISOString(),
+    uptimeMs: 0,
+    sources: [],
+    sinks: [],
+    failedPlugins: [{
+      name: eliminated,
+      errorKind: REQUIRES_UNSATISFIED_ERROR_KIND,
+      message: `plugin_missing: requires plugin ${MISSING_DEPENDENCY}@^1.0.0`,
+    }],
+  }))
+  const report = await collectHypAwareStatus({
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    platform: 'linux',
+    homeDir: hypHome,
+    isLaunchAgentInstalled: () => false,
+  })
+  return report.diagnostics.find((/** @type {any} */ d) => d.kind === 'plugin_requires_unsatisfied')
+}
+
+test('the repair for a central-owned plugin does not tell the operator to edit the local file', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-requires-central-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const diag = await collectOverLayers({
+    hypHome,
+    eliminated: '@acme/needy',
+    // The collision the merge drops: the local entry for the eliminated
+    // plugin is discarded, the central one is what boots.
+    localPlugins: ['@acme/needy'],
+    centralPlugins: ['@acme/needy'],
+  })
+  assert.ok(diag, 'the elimination is still reported on an enrolled host')
+  const localConfigPath = path.join(hypHome, 'hypaware-config.json')
+  assert.deepEqual(diag.repair, [
+    `enable what the reason names in ${localConfigPath}`
+      + " - '@acme/needy' is enabled by the central config, so removing it from the local file changes nothing",
+    'hyp daemon restart  # requires are resolved at boot',
+  ])
+})
+
+test('the repair on an enrolled host still offers to remove a local-owned plugin', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-requires-local-owned-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // Enrolled, but the eliminated plugin is the operator's own addition: the
+  // central layer names a different plugin, nothing collides, and the local
+  // entry is exactly what the next boot reads.
+  const diag = await collectOverLayers({
+    hypHome,
+    eliminated: '@acme/needy',
+    localPlugins: ['@acme/needy'],
+    centralPlugins: ['@acme/quiet'],
+  })
+  assert.ok(diag, 'the elimination is reported')
+  assert.deepEqual(diag.repair, [
+    `enable what the reason names, or remove '@acme/needy', in ${path.join(hypHome, 'hypaware-config.json')}`,
+    'hyp daemon restart  # requires are resolved at boot',
+  ])
 })
