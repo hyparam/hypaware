@@ -143,11 +143,12 @@ test('plugin list names a bundled plugin this boot did not activate, in both out
 // actually is and no wider: `recordFailedPlugins` builds the daemon's
 // `failedPlugins` from both its `activations` and its `unsatisfiedRequirements`,
 // so a throwing `activate()` and a plugin the dep graph eliminated for an
-// unsatisfied `requires` both get a diagnostic there (issue #1580). The two
-// shortfalls that stop at this listing - a manifest that would not load, named
-// by directory rather than by plugin name (issue #1576), and a plugin the boot
-// profile withheld - stay out of the sentence, so a pointer at "the daemon's
-// plugin failures" at large would still promise more than `hyp status` answers.
+// unsatisfied `requires` both get a diagnostic there (issue #1580). A plugin
+// the boot profile withheld stops at this listing and is no shortfall in the
+// daemon at all, so a pointer at "the daemon's plugin failures" at large would
+// still promise more than `hyp status` answers. A manifest that would not load
+// is named by directory rather than by plugin name and reaches neither this
+// listing nor `hyp status` (issue #1576).
 test('plugin list scopes its failure claim to this boot and points at hyp status for the daemon', async () => {
   const hypHome = await makeHome('hyp-plugin-list-failed-scope-')
   try {

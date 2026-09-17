@@ -444,13 +444,14 @@ export async function runPluginList(argv, ctx) {
     // `recordFailedPlugins` from both its `activations` and its
     // `unsatisfiedRequirements`, so a throwing `activate()` and a plugin the dep
     // graph eliminated for an unsatisfied `requires` each reach it, each get a
-    // diagnostic of their own, and each degrade `overall` (issue #1580). The
-    // other two shortfalls in this list stop here: a manifest that would not
-    // load is named by its directory rather than by a plugin name and reaches
-    // neither surface (issue #1576), and a plugin the boot profile withheld is
-    // no shortfall in the daemon at all. So the pointer is still not "the
-    // daemon's plugin failures" at large, which would promise a surface that
-    // answers for those two.
+    // diagnostic of their own, and each degrade `overall` (issue #1580). A
+    // plugin the boot profile withheld stops at this listing, because it is no
+    // shortfall in the daemon at all, so a pointer at "the daemon's plugin
+    // failures" at large would promise an answer `hyp status` does not give. A
+    // manifest that would not load reaches neither surface: it lands in
+    // `unavailablePlugins` as a directory rather than a plugin name, so the
+    // name bound above keeps it out of this listing entirely, and `hyp status`
+    // has no plugin name to report it under (issue #1576).
     ctx.stdout.write('Plugins this boot did not activate:\n')
     for (const name of [...unavailable].sort()) {
       const { version, source } = unavailableCopy(name)
