@@ -223,12 +223,15 @@ export async function askableClients(ctx, { collectStatus = collectHypAwareStatu
  * alternatives, so the sentence stays one line however many adapters
  * declare a `launch` block.
  *
+ * Shared with `hyp report fix`, which launches through the same seams and
+ * fails the same way.
+ *
  * @ref LLP 0139#repair-must-be-runnable [implements]: the repair we print is a command that runs
  * @ref LLP 0198#split [constrained-by]: the launchable set is whatever declares `contributes.client.launch`
  * @param {Map<string, ClientDescriptor>} descriptors
  * @returns {string}
  */
-function attachHint(descriptors) {
+export function attachHint(descriptors) {
   const launchable = [...descriptors.values()].filter((d) => d.launch).map((d) => d.name).sort()
   if (launchable.length === 0) {
     return 'Attach a client with `hyp client attach`, and make sure its CLI is on your PATH.'

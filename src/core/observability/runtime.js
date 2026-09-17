@@ -613,11 +613,24 @@ export function reportTelemetryFailure({ channel, source, key = source, error, r
  * be convertible to a string: `String(Object.create(null))` is a `TypeError`,
  * and one thrown from here would escape the guard that called us.
  *
+ * Total by structure, not by assertion: every read sits inside a `try`, the
+ * `instanceof` included, because it walks `[[GetPrototypeOf]]` and so runs a
+ * `Proxy` trap, and `message` is an own accessor a genuine `Error` can have
+ * redefined. They are two `try`s so a type test that traps still leaves the
+ * coercion its turn (which renders a genuine `Error` as `name: message`), and
+ * the last fallback consults the value not at all. Catches that render a value
+ * some other code threw share this rather than repeating the bare
+ * `err instanceof Error ? err.message : String(err)` idiom, which is itself a
+ * throw in exactly those catches (hyparam/hypaware#1558, #1857).
+ *
  * @param {unknown} error
+ * @returns {string}
  */
-function describeThrown(error) {
+export function describeThrown(error) {
   try {
     if (error instanceof Error && typeof error.message === 'string') return error.message
+  } catch { /* the type test or the accessor threw; the coercion still gets its turn */ }
+  try {
     return String(error)
   } catch {
     return 'a value that cannot be described'
