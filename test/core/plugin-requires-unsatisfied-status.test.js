@@ -558,7 +558,7 @@ test('recordFailedPlugins does not let a throw claim the resolver door', () => {
  * config layers `collectHypAwareStatus` merges. `centralPlugins` omitted is a
  * host that never joined: no central layer at all.
  *
- * @param {{ hypHome: string, eliminated: string, localPlugins: string[], centralPlugins?: string[], reason?: string }} args
+ * @param {{ hypHome: string, eliminated: string, localPlugins: string[], centralPlugins?: (string | { name: string, enabled?: boolean })[], reason?: string }} args
  * @returns {Promise<any>}
  */
 async function collectOverLayers({ hypHome, eliminated, localPlugins, centralPlugins, reason }) {
@@ -573,7 +573,7 @@ async function collectOverLayers({ hypHome, eliminated, localPlugins, centralPlu
     await fs.mkdir(path.dirname(seedPath), { recursive: true })
     await fs.writeFile(seedPath, JSON.stringify({
       version: 2,
-      plugins: centralPlugins.map((name) => ({ name })),
+      plugins: centralPlugins.map((entry) => (typeof entry === 'string' ? { name: entry } : entry)),
     }) + '\n')
   }
   writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
@@ -688,6 +688,51 @@ test('the repair names the central layer when it owns both the plugin and its mi
       + ` - the central config names both '@acme/needy' and '${MISSING_DEPENDENCY}', so no edit to ${localConfigPath} survives the merge`,
     'hyp daemon restart  # requires are resolved at boot',
   ])
+})
+
+// Issue #1833. One rung further down: the central layer can name the missing
+// dependency and still withhold it, because `enabled: false` on a `plugins[]`
+// entry is a selection skip at boot. The name is central-owned either way - the
+// merge drops a colliding local entry by name regardless of enablement - so the
+// local enable stays inert, but "install it on this host" can be a no-op too,
+// when the dependency is already installed and the central layer is what holds
+// it back. The edit that changes something there is the central enable.
+
+test('the repair names the central enable when the central config disables the missing dependency', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-requires-dep-central-off-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // The eliminated plugin is the operator's own, so withdrawing the request is
+  // a local edit that runs; the dependency is central-owned but disabled there.
+  const diag = await collectOverLayers({
+    hypHome,
+    eliminated: '@acme/needy',
+    localPlugins: ['@acme/needy'],
+    centralPlugins: [{ name: MISSING_DEPENDENCY, enabled: false }],
+  })
+  assert.ok(diag, 'the elimination is still reported on an enrolled host')
+  const localConfigPath = path.join(hypHome, 'hypaware-config.json')
+  assert.deepEqual(diag.repair, [
+    `remove '@acme/needy' from ${localConfigPath}, or enable '${MISSING_DEPENDENCY}' in the central config and install it on this host`
+      + ` - '${MISSING_DEPENDENCY}' is named by the central config but disabled there, so enabling it in the local file changes nothing`,
+    'hyp daemon restart  # requires are resolved at boot',
+  ])
+  const repairText = diag.repair.join('\n')
+  // (a) the edit that actually changes something is named.
+  assert.ok(
+    repairText.includes(`enable '${MISSING_DEPENDENCY}' in the central config`),
+    `the central enable must be named: ${JSON.stringify(diag.repair)}`
+  )
+  // (b) the inert local enable #1826 removed must not come back: a local entry
+  // for the dependency collides by name even when the central entry is off.
+  assert.ok(
+    !repairText.includes('enable what the reason names'),
+    `the inert local enable must not be offered: ${JSON.stringify(diag.repair)}`
+  )
+  // (c) LLP 0139#repair-must-be-runnable: a step that runs unconditionally.
+  assert.ok(
+    repairText.includes(`remove '@acme/needy' from ${localConfigPath}`),
+    `the unconditional local removal must survive: ${JSON.stringify(diag.repair)}`
+  )
 })
 
 // The dependency name is read back out of the snapshot's composed `message`,

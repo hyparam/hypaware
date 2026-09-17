@@ -1114,6 +1114,13 @@ export async function collectHypAwareStatus(opts = {}) {
   })
   const config = (centralConfig || localConfig) ? merged.effective : null
   const centralPluginNames = new Set((centralConfig?.plugins ?? []).map((p) => p.name))
+  // A second fact about the same names, not a filter over them:
+  // `mergeConfigLayers` drops a colliding local entry by name whatever its
+  // enablement, so narrowing `centralPluginNames` would make status disagree
+  // with the merge it reports.
+  const centralDisabledPluginNames = new Set(
+    (centralConfig?.plugins ?? []).filter((p) => p.enabled === false).map((p) => p.name)
+  )
   const centralSinkNames = new Set(Object.keys(centralConfig?.sinks ?? {}))
   /** @type {HypAwareStatusReport['layered']} */
   const layered = hasCentral
@@ -1697,6 +1704,7 @@ export async function collectHypAwareStatus(opts = {}) {
             plugin: name,
             dependency: requiredPluginFromMessage(reason),
             centralPluginNames,
+            centralDisabledPluginNames,
             configPath,
           }),
           'hyp daemon restart  # requires are resolved at boot',
@@ -3821,6 +3829,11 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
  * whose name the central layer owns gives way to a step that does change
  * something, and the local file is named as the place that would not.
  *
+ * A central name carrying `enabled: false` is central-owned by that same rule,
+ * so the local enable stays inert - but installing the dependency here repairs
+ * nothing either when it is already installed and the central layer is what
+ * withholds it, so that sub-case names the central enable as well.
+ *
  * `dependency` is `undefined` for every reason that names no missing plugin
  * (a version mismatch, a capability require), and those keep the original
  * wording: the reason still names what is missing and the local file is still
@@ -3830,11 +3843,12 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
  * @param {string} args.plugin The plugin the resolver eliminated.
  * @param {string | undefined} args.dependency The missing plugin its reason named.
  * @param {Set<string>} args.centralPluginNames Names the central layer owns.
+ * @param {Set<string>} args.centralDisabledPluginNames The subset of those the central layer withholds (`enabled: false`).
  * @param {string} args.configPath The local config file.
  * @returns {string}
  * @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair has to be a step that changes something, so an edit the next merge discards is not one
  */
-function requiresUnsatisfiedConfigRepair({ plugin, dependency, centralPluginNames, configPath }) {
+function requiresUnsatisfiedConfigRepair({ plugin, dependency, centralPluginNames, centralDisabledPluginNames, configPath }) {
   const pluginIsCentral = centralPluginNames.has(plugin)
   if (dependency === undefined || !centralPluginNames.has(dependency)) {
     return pluginIsCentral
@@ -3848,8 +3862,11 @@ function requiresUnsatisfiedConfigRepair({ plugin, dependency, centralPluginName
   return pluginIsCentral
     ? `install '${dependency}' on this host, or enable it in the central config`
       + ` - the central config names both '${plugin}' and '${dependency}', so no edit to ${configPath} survives the merge`
-    : `remove '${plugin}' from ${configPath}, or install '${dependency}' on this host`
-      + ` - '${dependency}' is named by the central config, so enabling it in the local file changes nothing`
+    : centralDisabledPluginNames.has(dependency)
+      ? `remove '${plugin}' from ${configPath}, or enable '${dependency}' in the central config and install it on this host`
+        + ` - '${dependency}' is named by the central config but disabled there, so enabling it in the local file changes nothing`
+      : `remove '${plugin}' from ${configPath}, or install '${dependency}' on this host`
+        + ` - '${dependency}' is named by the central config, so enabling it in the local file changes nothing`
 }
 
 /**
