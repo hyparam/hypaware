@@ -116,8 +116,10 @@ export function defaultBundledWorkspaceDir() {
  *                  manifests feed the plugin catalog so datasets,
  *                  client descriptors, and capability metadata remain
  *                  visible to config validation and the walkthrough.
- *  - `unknownDirs` - directories that hold a parseable manifest under
- *                    a name the kernel doesn't recognise as bundled.
+ *  - `unknown` - manifests that parsed under a name the kernel doesn't
+ *                recognize as bundled. The whole manifest, not just the
+ *                directory: the name it declares is the only thing that can
+ *                answer a caller asking after that name (issue #1843).
  *
  * Missing workspace directories return an empty result rather than
  * throwing so `npx hypaware --help` works from any directory.
@@ -142,7 +144,7 @@ export async function discoverBundledPlugins(opts = {}) {
       .map((d) => path.join(workspaceDir, d.name))
   } catch (err) {
     if (err && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') {
-      return { loaded: [], failed: [], excluded: [], unknownDirs: [] }
+      return { loaded: [], failed: [], excluded: [], unknown: [] }
     }
     throw err
   }
@@ -153,8 +155,8 @@ export async function discoverBundledPlugins(opts = {}) {
   const loaded = []
   /** @type {LoadedManifest[]} */
   const excluded = []
-  /** @type {string[]} */
-  const unknownDirs = []
+  /** @type {LoadedManifest[]} */
+  const unknown = []
   for (const entry of all.loaded) {
     const name = /** @type {PluginName} */ (entry.manifest.name)
     if (allowlist.has(name)) {
@@ -162,9 +164,9 @@ export async function discoverBundledPlugins(opts = {}) {
     } else if (excludeSet.has(name)) {
       excluded.push(entry)
     } else {
-      unknownDirs.push(entry.rootDir)
+      unknown.push(entry)
     }
   }
 
-  return { loaded, failed: all.failed, excluded, unknownDirs }
+  return { loaded, failed: all.failed, excluded, unknown }
 }

@@ -229,33 +229,51 @@ function parsePluginInstallArgs(argv) {
  * instead (issue #1600). `plugin list` ignores it and marks only what it can
  * see, which is what a listing of the present tense means.
  *
- * Two ways the map can fall short of the package, and `unread` names both. The
- * workspace will not enumerate, which throws here. Or a bundled plugin's
- * manifest will not load, which does not throw and is the reachable one: boot
- * runs this same discovery first and dies on a throw, while an unloadable
- * manifest routes to `failed` and leaves a booted CLI holding a map short of a
- * name it cannot even report as missing, having no name to be keyed by
- * (issue #1576).
+ * Three routes take the map short of the package, and they do not answer the
+ * same way. The workspace will not enumerate, which throws here. Or a bundled
+ * plugin's manifest will not load, which does not throw and is the reachable
+ * one: boot runs this same discovery first and dies on a throw, while an
+ * unloadable manifest routes to `failed` and leaves a booted CLI holding a map
+ * short of a name it cannot even report as missing, having no name to be keyed
+ * by (issue #1576). `unread` names those two and only those two, because
+ * neither leaves a name to answer with. The third does: a manifest that parses
+ * under a name in neither the allowlist nor the exclude set routes to
+ * `unknown`, and comes back as `unrecognized` keyed by the name it declares.
+ * Hedging it would claim the bundled plugins could not all be read when every
+ * one of them was, and a name on none of the three routes really is absent from
+ * the package, so the flat claim stays honest beside it (issue #1843).
+ *
+ * The reason strings say a directory "did not yield a usable manifest" rather
+ * than that it holds one: `src/core/manifest.js` maps a missing
+ * `hypaware.plugin.json` to the same `manifest_invalid` failure as a corrupt
+ * one, so the `failed` bucket cannot tell which it was and the line must be
+ * true of both (issue #1842).
  *
  * @param {object} [opts]
  * @param {string} [opts.workspaceDir] Override the bundled workspace location.
- * @returns {Promise<{ manifests: Map<string, LoadedManifest>, unread: string | null }>}
+ * @returns {Promise<{ manifests: Map<string, LoadedManifest>, unrecognized: Map<string, LoadedManifest>, unread: string | null }>}
  */
 async function discoverBundledManifests(opts = {}) {
   try {
     const bundled = await discoverBundledPlugins(opts)
     const manifests = new Map([...bundled.loaded, ...bundled.excluded].map((m) => [m.manifest.name, m]))
-    if (bundled.failed.length === 0) return { manifests, unread: null }
+    const unrecognized = new Map(bundled.unknown.map((m) => [m.manifest.name, m]))
+    if (bundled.failed.length === 0) return { manifests, unrecognized, unread: null }
     const first = bundled.failed[0].rootDir
     return {
       manifests,
+      unrecognized,
       unread: bundled.failed.length === 1
-        ? `the bundled plugin directory ${first} holds a manifest that would not load`
-        : `${bundled.failed.length} bundled plugin directories hold a manifest that would not load, including ${first}`,
+        ? `the bundled plugin directory ${first} did not yield a usable manifest`
+        : `${bundled.failed.length} bundled plugin directories did not yield a usable manifest, including ${first}`,
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    return { manifests: new Map(), unread: `the bundled plugins directory could not be read: ${message}` }
+    return {
+      manifests: new Map(),
+      unrecognized: new Map(),
+      unread: `the bundled plugins directory could not be read: ${message}`,
+    }
   }
 }
 
@@ -437,6 +455,24 @@ export async function runPluginInfo(argv, ctx, opts = {}) {
       // workspace. An operator running this against a broken install is owed
       // the difference between "this name is unknown" and "I could not look"
       // (issue #1600).
+      //
+      // A manifest this build does not recognize is a third state, and not a
+      // read failure: it parsed, so the name is known exactly and gets said
+      // back rather than hedged. Checked before `unread` because it answers
+      // *this* name, where the hedge only says the map is short somewhere
+      // (issue #1843).
+      const unrecognized = discovered.unrecognized.get(name)
+      if (unrecognized) {
+        ctx.stderr.write(
+          `hyp plugin info: no plugin named '${name}' is installed, and the manifest this package`
+            + ' bundles under that name is one this build does not recognize\n'
+        )
+        ctx.stderr.write(
+          `  the bundled plugin directory ${unrecognized.rootDir} declares '${name}', a name in`
+            + " neither this build's bundled plugin allowlist nor its excluded set, so nothing activates it\n"
+        )
+        return 1
+      }
       if (discovered.unread) {
         ctx.stderr.write(
           `hyp plugin info: no plugin named '${name}' is installed, and the plugins bundled with`

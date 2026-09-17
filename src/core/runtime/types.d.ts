@@ -152,8 +152,8 @@ export interface DiscoverBundledResult {
   failed: FailedManifest[]
   /** Loadable but excluded from V1 default surface. */
   excluded: LoadedManifest[]
-  /** Directories with manifests not in the allowlist or excluded set. */
-  unknownDirs: string[]
+  /** Manifests that parsed under a name in neither the allowlist nor the excluded set. */
+  unknown: LoadedManifest[]
 }
 
 export interface DiscoverInstalledResult {
