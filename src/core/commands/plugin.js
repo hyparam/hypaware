@@ -229,19 +229,47 @@ function parsePluginInstallArgs(argv) {
  * instead (issue #1600). `plugin list` ignores it and marks only what it can
  * see, which is what a listing of the present tense means.
  *
- * Three routes take the map short of the package, and they do not answer the
- * same way. The workspace will not enumerate, which throws here. Or a bundled
- * plugin's manifest will not load, which does not throw and is the reachable
- * one: boot runs this same discovery first and dies on a throw, while an
- * unloadable manifest routes to `failed` and leaves a booted CLI holding a map
- * short of a name it cannot even report as missing, having no name to be keyed
- * by (issue #1576). `unread` names those two and only those two, because
- * neither leaves a name to answer with. The third does: a manifest that parses
- * under a name in neither the allowlist nor the exclude set routes to
- * `unknown`, and comes back as `unrecognized` keyed by the name it declares.
- * Hedging it would claim the bundled plugins could not all be read when every
- * one of them was, and a name on none of the three routes really is absent from
- * the package, so the flat claim stays honest beside it (issue #1843).
+ * The map can fall short of the package, and the routes there do not answer the
+ * same way. What follows is a list of the ones known to this code, not a census
+ * of what exists: the flat "installed or bundled with this package" denial is
+ * not evidence a name is absent from the package, only that discovery did not
+ * produce it, and a route found later joins the list without unsettling the
+ * entries already on it. Counting them instead got this block wrong twice
+ * (issues #1841 and #1843), so the count is gone rather than corrected again
+ * (issue #1846).
+ *
+ * - The workspace will not enumerate for a reason other than ENOENT, such as a
+ *   permission error or a path that is not a directory. `discoverBundledPlugins`
+ *   rethrows, the catch below turns it into `unread`, and the caller hedges.
+ *   Hard to reach from a booted CLI, since boot runs this same discovery first
+ *   and dies on the same throw.
+ * - A bundled plugin's manifest will not load. It routes to `failed` and does
+ *   not throw, so boot survives it and a booted CLI holds a map short of a name
+ *   it cannot even report as missing, having no name to be keyed by (issue
+ *   #1576). `unread` carries it, keyed by the directory.
+ * - A manifest parses under a name in neither the allowlist nor the exclude set.
+ *   It routes to `unknown` and comes back as `unrecognized` keyed by the name it
+ *   declares, which is why it is answered rather than hedged: hedging would
+ *   claim the bundled plugins could not all be read when every one of them was
+ *   (issue #1843).
+ * - The workspace directory does not exist. `discoverBundledPlugins` in
+ *   `src/core/runtime/bundled.js` maps ENOENT to all-empty buckets and returns
+ *   without throwing, so `npx hypaware --help` works from any directory, and
+ *   `bootKernel` in `src/core/runtime/boot.js` reads the all-empty result and
+ *   carries on. A fully booted CLI therefore arrives here with an empty map and
+ *   gives the flat denial for every name the package ships. The "boot dies on a
+ *   throw" reasoning above does not reach this one: ENOENT is the readdir
+ *   failure deliberately made not to throw. A workspace that exists and
+ *   enumerates to nothing lands in the same place.
+ * - A plugin directory that readdir does not report as a directory. The
+ *   `withFileTypes` filter is lstat-shaped, so a symlink pointing at a real
+ *   plugin directory is dropped before `loadManifests` sees it, leaving no entry
+ *   in `loaded`, `failed`, `excluded` or `unknown`, and the same flat denial
+ *   follows by a different mechanism.
+ *
+ * `unread` needs something actually unreadable and no name left to answer with,
+ * so the last two do not set it: the empty buckets they leave are
+ * indistinguishable here from a workspace that read clean.
  *
  * The reason strings say a directory "did not yield a usable manifest" rather
  * than that it holds one: `src/core/manifest.js` maps a missing
