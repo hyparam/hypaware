@@ -1153,3 +1153,96 @@ export async function activate(ctx) {
   const report = await diagnosePlugin(root)
   assert.equal(report.ok, true, JSON.stringify(report.diagnostics))
 })
+
+// `describe` renders the thrown value from inside the two catches that make
+// good on the doctor's containment promise, so a throw of its own is not a
+// worse message: it escapes `dryRunActivate` and `diagnosePlugin` and takes
+// the whole run down, reporting nothing about the plugin the operator ran the
+// doctor on (hyparam/hypaware#1558). Every case below rejected the
+// `diagnosePlugin` call outright before the guard.
+for (const [label, thrown, expected] of /** @type {[string, string, RegExp][]} */ ([
+  ['an object with no prototype', 'Object.create(null)', /unprintable object/],
+  ['an object whose toString throws', `{ toString() { throw new Error('boom from err toString') } }`, /unprintable object/],
+  ['an object whose Symbol.toPrimitive throws', `{ [Symbol.toPrimitive]() { throw new Error('boom from toPrimitive') } }`, /unprintable object/],
+  ['a symbol', `Symbol('hostile')`, /Symbol\(hostile\)/],
+])) {
+  test(`activate that throws ${label} is still reported as activate_threw`, async () => {
+    const root = await fixture({
+      manifest: baseManifest(),
+      index: `export async function activate() { throw ${thrown} }\n`,
+    })
+    const report = await diagnosePlugin(root)
+    assert.equal(report.ok, false)
+    const finding = report.diagnostics.find((d) => d.kind === 'activate_threw')
+    assert.ok(finding)
+    assert.match(finding.message, expected)
+  })
+}
+
+// The same escape on the import half: a module whose top-level code throws
+// such a value never reaches `activate()` at all.
+test('an entrypoint that throws an undescribable value is still reported as entrypoint_import_failed', async () => {
+  const root = await fixture({
+    manifest: baseManifest(),
+    index: `throw Object.create(null)\nexport async function activate() {}\n`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, false)
+  const finding = report.diagnostics.find((d) => d.kind === 'entrypoint_import_failed')
+  assert.ok(finding)
+  assert.match(finding.message, /unprintable object/)
+})
+
+// Being a genuine `Error` is no protection: `stack` and `message` are own
+// accessors like any other, and throw just as easily as a hostile `toString`.
+test('an Error whose stack and message accessors throw is still reported as activate_threw', async () => {
+  const root = await fixture({
+    manifest: baseManifest(),
+    index: `
+export async function activate() {
+  const err = new Error('unreadable')
+  Object.defineProperty(err, 'stack', { get() { throw new Error('stack accessor') } })
+  Object.defineProperty(err, 'message', { get() { throw new Error('message accessor') } })
+  throw err
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  assert.equal(report.ok, false)
+  const finding = report.diagnostics.find((d) => d.kind === 'activate_threw')
+  assert.ok(finding)
+  assert.match(finding.message, /unprintable object/)
+})
+
+// An `Error` that only loses its `stack` still describes itself: the report
+// degrades to what is readable rather than to the fallback.
+test('an Error whose stack accessor throws still reports its message', async () => {
+  const root = await fixture({
+    manifest: baseManifest(),
+    index: `
+export async function activate() {
+  const err = new Error('boom with an unreadable stack')
+  Object.defineProperty(err, 'stack', { get() { throw new Error('stack accessor') } })
+  throw err
+}
+`,
+  })
+  const report = await diagnosePlugin(root)
+  const finding = report.diagnostics.find((d) => d.kind === 'activate_threw')
+  assert.ok(finding)
+  assert.match(finding.message, /boom with an unreadable stack/)
+})
+
+// The common cases are unchanged by the guard: a plain `Error` still reports
+// the head of its stack, and a thrown string still reports itself.
+test('an ordinary thrown string is reported verbatim', async () => {
+  const root = await fixture({
+    manifest: baseManifest(),
+    index: `export async function activate() { throw 'plain string boom' }\n`,
+  })
+  const report = await diagnosePlugin(root)
+  const finding = report.diagnostics.find((d) => d.kind === 'activate_threw')
+  assert.ok(finding)
+  assert.match(finding.message, /plain string boom/)
+  assert.ok(!finding.message.includes('unprintable'))
+})
