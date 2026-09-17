@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 
 import {
   Attr,
+  describeThrown,
   getKernelInstruments,
   getLogger,
   withSpan,
@@ -106,10 +107,9 @@ export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpR
 
       results.push({ ok: true, plugin: activePlugin })
     } catch (err) {
-      const errorKind = /** @type {string} */ (
-        (err && /** @type {{hypErrorKind?: string}} */ (err).hypErrorKind) || 'activate_failed'
-      )
-      const message = err instanceof Error ? err.message : String(err)
+      // Both reads are of a value a plugin threw, so neither is done bare.
+      const errorKind = activationErrorKind(err)
+      const message = describeThrown(err)
       loaderLog.error('plugin.activate_failed', {
         [Attr.PLUGIN]: manifest.name,
         [Attr.ERROR_KIND]: errorKind,
@@ -120,6 +120,25 @@ export async function activatePlugins({ plugins, stateRoot, runId, runtime, tmpR
   }
 
   return { runtime: kernel, results }
+}
+
+/**
+ * The `error_kind` a failed activation carries, or the default.
+ *
+ * `newActivationError` sets `hypErrorKind`, but the value in hand came out of
+ * a plugin's `activate()` and every property of it is the plugin's to define:
+ * on a revoked `Proxy` the read alone throws, out of the catch that exists so
+ * one bad plugin does not take down the boot (hyparam/hypaware#1857).
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function activationErrorKind(err) {
+  try {
+    const kind = /** @type {{ hypErrorKind?: string }} */ (err).hypErrorKind
+    if (kind) return kind
+  } catch { /* no such property, or an accessor that threw */ }
+  return 'activate_failed'
 }
 
 /**
