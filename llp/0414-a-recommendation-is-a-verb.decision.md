@@ -5,14 +5,15 @@
 **Systems:** CLI, Reports
 **Author:** Brendan / Claude
 **Date:** 2026-09-14
-**Extends:** LLP 0155 (#core-group: the `report` group gains a fifth server-facing member, `fix`, riding the same target and credential resolution), LLP 0398 (#run-directory: the launch mechanics of `hyp ask` are reused; the working directory rule gets its other half)
+**Extends:** LLP 0155 (#core-group: the `report` group gains a fifth server-facing member, `fix`, riding the same target and credential resolution), LLP 0398 (#run-directory: the launch mechanics of `hyp ask` are reused; the working directory rule gets its other half), LLP 0419 in the server corpus (#record: the evidence and basis lists on the record become the tail of the printed brief)
 **Related:** LLP 0198 (#real-launch, #path-probe, #no-preauth: the launch is real, the client must be attached, the session is not pre-authorised), LLP 0402 in the server corpus (the id this verb takes, and the resolve route it calls)
 
 > A published report ranks its recommendations and gives each a page. The
 > server now mints an id per page and lists them on the record. This
 > decision makes the id a thing to act on: `hyp report list` prints it under
-> each report, and `hyp report fix <id>` starts an attached client on that
-> one recommendation, in the repository the fix is for.
+> each report, `hyp report get <id>` prints that one recommendation with its
+> citations, and `hyp report fix <id>` starts an attached client on it, in
+> the repository the fix is for, by telling the client to make that read.
 
 ## Context {#context}
 
@@ -47,31 +48,63 @@ it, so a report id or a page name given by mistake is refused with the
 shape an id has rather than answered as unknown.
 
 <a id="listing-is-the-picker"></a>**With no id, the listing is the
-picker.** On a terminal, `hyp report fix` fetches the same listing
-`hyp report list` shows and offers one row per recommendation across it,
-labelled by the page's own title and described by the first sentence of
-its thesis when the server lists them (server LLP 0416 reads both from the
-page at publish), else by the page stem read as words and by id, report
-kind and period, and title. The list filters (`--kind`, `--period`, `--limit`)
-narrow which reports the rows come from. A piped run with no id is a usage
-error naming the listing, not a guess. No second listing shape is
-introduced: the picker reads the `recommendations` field the record
-already carries, so a report published before the field existed appears
-with the ids the server backfills for it.
+picker, in two steps.** On a terminal, `hyp report fix` fetches the same
+listing `hyp report list` shows and first offers the reports, newest first
+as the listing orders them, each named by its title (or its kind and
+period), with its publish date, kind and period, and how many
+recommendations it carries; then the picked report's recommendations, one
+row each, labelled by the page's own title and described by the first
+sentence of its thesis when the server lists them (server LLP 0416 reads
+both from the page at publish), else by the page stem read as words and by
+id. Escape on the second list returns to the first with the cursor on the
+report just left. Two steps rather than one flat list because a report's
+recommendations are ranked against each other and not against another
+report's, so a list across reports would rank nothing, and because the
+report is what a person remembers ("last week's") before any
+recommendation on it. A report with nothing to fix is not offered. The
+list filters (`--kind`, `--period`, `--limit`) narrow which reports are
+offered. A piped run with no id is a usage error naming the listing, not a
+guess. No second listing shape is introduced: the picker reads the
+`recommendations` field the record already carries, so a report published
+before the field existed appears with the ids the server backfills for it.
 
-<a id="page-is-the-brief"></a>**The page is the brief, saved under
-`HYP_HOME`.** The recommendation page is fetched as Markdown, or as HTML
-when a report was published without the Markdown form, and written to
-`<HYP_HOME>/recommendations/<id>.<ext>`. The client is told to read that
-file and implement what it describes here. The page is the whole
-recommendation as the report author wrote it, evidence, artifact, and
-caveats, which is exactly what LLP 0162 put there and nowhere else; a
-prompt that restated it would be a second, worse copy. The file lives
-under `HYP_HOME` for the reason LLP 0398 gave for the ask's evidence:
-every parent of it is then the person's own. It is named by id rather
-than by report and page so a second `fix` on the same recommendation
-overwrites the same file, and the folder never grows past one file per
-distinct recommendation.
+<a id="page-is-the-brief"></a>**The page is the brief, and it is read by
+id.** `hyp report get <rec-id>` is the one read of a recommendation: it
+resolves the id as `fix` does, fetches the page as Markdown, or as HTML
+when a report was published without the Markdown form, and prints it with
+the record's citations under it. The page is the whole recommendation as
+the report author wrote it, evidence, artifact, and caveats, which is
+exactly what server LLP 0162 put there and nowhere else; a prompt that
+restated it would be a second, worse copy. The citations are the two lists
+server LLP 0419 attached to each recommendation on the record: `evidence`,
+the one to three turns the page cites as `evidence:N`, numbered to match,
+and `basis`, the queries the job ran to reach it, verbatim, "for the agent:
+the population the claim was measured over, reproducible against the same
+store". Without them a client reads the report author's conclusion and has
+no way to check the finding or to say whether the pattern is still
+happening, which the prompt asks it to judge. The tail says the counts will
+differ: the job measured the org's store, a local `hyp query sql` sees this
+machine's cache. A record from an older server, or an uploaded report,
+carries neither list and yields the page alone.
+
+`fix` tells the client to run that command rather than handing it a file.
+An earlier revision fetched the page and wrote it to
+`<HYP_HOME>/recommendations/<id>.md`, copying the mechanics of `hyp ask`;
+but the reasons LLP 0398 had for a folder (a six-kilobyte prompt, evidence
+files, a hook test that writes beside them) do not hold for a two-sentence
+prompt, and the copy served only the session `fix` started. A session that
+is already open and is asked to fix an id has to reach the recommendation
+on its own, through the CLI, and it should make the same read the launched
+session makes, so that there is one way to see a recommendation and one
+piece of skill text that teaches it. The cost is one permission prompt in
+the launched client, for the read itself, which LLP 0198 #no-preauth
+leaves to the client to ask for; `fix` still resolves the id and fetches
+the page before launching, so an unknown id or an unreachable server fails
+at the shell with a clear error rather than inside the session, and the
+launch line has the page's title. The `--org` and `--remote` flags ride
+into the command the prompt names so the client resolves the same target;
+the credential reaches it through the inherited environment, as every
+`hyp` call a client makes already relies on. Nothing is written to disk.
 
 <a id="run-where-typed"></a>**The client starts where the command was
 typed.** LLP 0398 moved the recommendation ask into a folder HypAware
@@ -79,9 +112,8 @@ owns because that session is about HypAware's own data and belongs to no
 project. A fix is the opposite case: it is a change to a repository, and
 the repository is wherever the person ran the command, the same rule
 LLP 0198 chose at the launch boundary and LLP 0398 kept for a free-form
-question. The brief is reached by absolute path from the prompt, which
-LLP 0398 avoided for its own case because that prompt was six kilobytes;
-here it is two sentences and the path is the point.
+question. The brief is reached by a command the prompt names, so the
+prompt stays two sentences wherever the client starts.
 
 <a id="same-seams"></a>**Same client rules as `hyp ask`.** Only an
 attached client is started, because a session nothing records would be a
@@ -126,6 +158,8 @@ printing records whole.
 - `attachHint` and the launch seams of `hyp ask` are shared rather than
   copied, so a new client adapter that declares a `launch` block reaches
   both verbs.
-- One file per distinct recommendation accumulates under
-  `<HYP_HOME>/recommendations/`, bounded by the org's report quota times
-  the recommendations per report, and overwritten on repeat.
+- Nothing accumulates on disk: the recommendation is read from the server
+  each time, by the launched session and by an open one alike.
+- The `hypaware-reference` skill gains the hand-off: a `rec-` id named in a
+  session maps to `hyp report get <rec-id>`, and the skill says not to run
+  `fix` from inside a session, since it would start a second client.

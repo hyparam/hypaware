@@ -20,7 +20,7 @@ import {
   runReportList,
   runReportPublish,
 } from '../../src/core/cli/report_commands.js'
-import { PromptCancelledError } from '../../src/core/cli/tui/index.js'
+import { PromptBackRequestedError, PromptCancelledError } from '../../src/core/cli/tui/index.js'
 
 /* ---------- endpoint derivation ---------- */
 
@@ -458,30 +458,47 @@ test('get reports an unknown report from the server error body', async (t) => {
 
 // `hyp report fix` launches through the seams `hyp ask` uses (status probe,
 // PATH probe, spawn, prompt), so the tests inject all four and check what
-// reaches them: which id was resolved, which page was fetched, where it was
-// saved, and what the client was started with.
+// reaches them: which id was resolved, which page was fetched, and what the
+// client was started with.
 // @ref LLP 0414#id-is-the-handle [tests]: a bare id resolves to its report and page with nothing else in hand
 
 const REC = 'rec-0123456789abcdef'
 const REPORT = { id: 'rpt-b', kind: 'usage-review', period: '2026-W29', title: 'Weekly', bytes: 1200, publishedAt: '2026-07-20T10:00:00.000Z' }
 const PAGE = '# Batch the retries\n\nEvery retry is its own call.\n'
 
+/** The citations a server attaches at publish (server LLP 0419), as the record lists them. */
+const CITED = {
+  evidence: [
+    { sessionId: 'sess-1', chainId: null, messageId: 'msg-1', toolCallId: null, day: '2026-07-14', note: 'three retries of one edit in a row' },
+    { sessionId: 'sess-2', chainId: 'agent-7', messageId: 'msg-9', toolCallId: 'call-3', day: '2026-07-15', note: 'the retried call itself' },
+  ],
+  basis: [
+    { agent: 'coordinator', query: "SELECT COUNT(*) FROM ai_gateway_messages WHERE tool_name = 'edit'" },
+    { agent: 'subagent-2', query: 'SELECT session_id FROM ai_gateway_messages LIMIT 5' },
+  ],
+}
+
 /**
  * A reports plane holding one report with one recommendation. `md` false
  * publishes the page as HTML only; `opening` lists the page's title and
- * thesis on the record, as a server that reads them at publish does.
+ * thesis on the record, as a server that reads them at publish does;
+ * `cited` attaches `CITED` to the entry on both the listing and the resolve
+ * route, as a server that verified them does.
  *
  * @param {TestContext} t
- * @param {{ md?: boolean, opening?: boolean }} [opts]
+ * @param {{ md?: boolean, opening?: boolean, cited?: boolean }} [opts]
  */
-function stubFixServer(t, { md = true, opening = false } = {}) {
-  const listed = opening
-    ? { id: REC, page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.' }
-    : { id: REC, page: 'recommendation-batch-the-retries' }
+function stubFixServer(t, { md = true, opening = false, cited = false } = {}) {
+  const listed = {
+    ...(opening
+      ? { id: REC, page: 'recommendation-batch-the-retries', title: 'Batch the retries', summary: 'Every retry is its own call. One queue fixes it.' }
+      : { id: REC, page: 'recommendation-batch-the-retries' }),
+    ...(cited ? CITED : {}),
+  }
   return stubServer(t, (method, url) => {
     const p = url.pathname
     if (p === '/v1/reports') return { status: 200, json: { reports: [{ ...REPORT, recommendations: [listed] }] } }
-    if (p === `/v1/reports/_recommendations/${REC}`) return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries' }, report: REPORT } }
+    if (p === `/v1/reports/_recommendations/${REC}`) return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries', ...(cited ? CITED : {}) }, report: REPORT } }
     if (p.startsWith('/v1/reports/_recommendations/')) return { status: 404, json: { error: 'unknown_recommendation' } }
     if (p === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md') {
       return md ? { status: 200, body: new TextEncoder().encode(PAGE) } : { status: 404, json: { error: 'not_found' } }
@@ -512,11 +529,9 @@ function fixDeps({ launchers = [{ client: 'claude', label: 'Claude Code', bin: '
   }
 }
 
-test('fix <id> resolves the id, saves the page under HYP_HOME, and starts the client here on it', async (t) => {
+test('fix <id> resolves the id, checks the page exists, and starts the client here with the read command', async (t) => {
   const { calls } = stubFixServer(t)
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
-  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
-  const { ctx, out } = ctxWith({ HYP_HOME: hypHome })
+  const { ctx, out } = ctxWith()
   ctx.cwd = '/work/repo'
   const { deps, launches } = fixDeps()
   const code = await runReportFix([REC], ctx, deps)
@@ -525,26 +540,97 @@ test('fix <id> resolves the id, saves the page under HYP_HOME, and starts the cl
     `/v1/reports/_recommendations/${REC}`,
     '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md',
   ])
-  const saved = path.join(hypHome, 'recommendations', `${REC}.md`)
-  assert.equal(await fs.readFile(saved, 'utf8'), PAGE)
   assert.equal(launches.length, 1)
   assert.equal(launches[0].cwd, '/work/repo')
   assert.equal(launches[0].launcher.client, 'claude')
-  assert.match(launches[0].prompt, new RegExp('`' + saved.replaceAll('\\\\', '\\\\\\\\') + '`'))
+  assert.match(launches[0].prompt, new RegExp('^Run `hyp report get ' + REC + '` and read its output\\.'))
   assert.match(launches[0].prompt, /"Batch the retries"/)
   assert.match(launches[0].prompt, /usage-review\/2026-W29, "Weekly"/)
+  assert.doesNotMatch(launches[0].prompt, /hyp query sql/, 'no basis, so no re-run hint')
   assert.match(out.join(''), /Starting Claude Code on "Batch the retries"/)
 })
 
-test('fix falls back to the HTML page when the report has no Markdown one', async (t) => {
-  stubFixServer(t, { md: false })
+// @ref LLP 0414#page-is-the-brief [tests]: nothing is written under HYP_HOME; the client is pointed at the same read a session makes on its own
+test('fix writes nothing to disk and carries the target flags into the read command', async (t) => {
+  stubFixServer(t, { cited: true })
   const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
   t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
   const { ctx } = ctxWith({ HYP_HOME: hypHome })
   const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC, '--org', 'acme', '--remote', 'prod'], ctx, deps), 0)
+  assert.deepEqual(await fs.readdir(hypHome), [])
+  assert.match(launches[0].prompt, new RegExp('^Run `hyp report get ' + REC + ' --org acme --remote prod` and read its output\\.'))
+  assert.match(launches[0].prompt, /Re-run the queries with `hyp query sql`/)
+})
+
+test('fix falls back to the HTML page when the report has no Markdown one', async (t) => {
+  const { calls } = stubFixServer(t, { md: false })
+  const { ctx } = ctxWith()
+  const { deps, launches } = fixDeps()
   assert.equal(await runReportFix([REC], ctx, deps), 0)
-  assert.match(launches[0].prompt, new RegExp(`${REC}\\.html`))
+  assert.equal(calls.at(-1)?.url.pathname, '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.html')
   assert.match(launches[0].prompt, /"Batch the retries"/)
+})
+
+// @ref LLP 0414#page-is-the-brief [tests]: `hyp report get <rec-id>` is the one read of a recommendation, citations under the page
+test('get <rec-id> prints the page with the record\'s evidence and basis under it', async (t) => {
+  const { calls } = stubFixServer(t, { cited: true })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    `/v1/reports/_recommendations/${REC}`,
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md',
+  ])
+  const printed = out.join('')
+  assert.ok(printed.startsWith(PAGE), 'the page comes first, unchanged')
+  const tail = printed.slice(PAGE.length)
+  assert.match(tail, /^\n---\n\n## Citations from the report record\n/)
+  assert.match(tail, /### Evidence\n[\s\S]*\n1\. three retries of one edit in a row \(session sess-1, message msg-1, 2026-07-14\)\n2\. the retried call itself \(session sess-2, chain agent-7, message msg-9, tool call call-3, 2026-07-15\)\n/)
+  assert.match(tail, /### Basis\n[\s\S]*Run by coordinator:\n\n```sql\nSELECT COUNT\(\*\) FROM ai_gateway_messages WHERE tool_name = 'edit'\n```\n/)
+  assert.match(tail, /Run by subagent-2:\n\n```sql\nSELECT session_id FROM ai_gateway_messages LIMIT 5\n```\n/)
+})
+
+test('get <rec-id> prints the bare page when the record carries no citations, and saves with --output', async (t) => {
+  stubFixServer(t)
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-get-'))
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  {
+    const { ctx, out } = ctxWith()
+    assert.equal(await runReportGet([REC], ctx), 0)
+    assert.equal(out.join(''), PAGE)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    const output = path.join(dir, 'rec.md')
+    assert.equal(await runReportGet([REC, '--output', output], ctx), 0)
+    assert.equal(await fs.readFile(output, 'utf8'), PAGE)
+    assert.match(err.join(''), /saved \d+ bytes to /)
+  }
+})
+
+test('get <rec-id> on an HTML-only page keeps the output HTML: the citations sit in one escaped <pre>', async (t) => {
+  stubFixServer(t, { md: false, cited: true })
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 0)
+  const printed = out.join('')
+  assert.ok(printed.startsWith('<h1>Batch the <em>retries</em></h1>\n<pre>'))
+  assert.match(printed, /## Citations from the report record/)
+  assert.match(printed, /<\/pre>\n$/)
+  assert.doesNotMatch(printed.slice(printed.indexOf('<pre>') + 5), /<(?!\/pre>)/, 'nothing inside the pre opens a tag')
+})
+
+test('get <rec-id> refuses extra positionals and reports an unknown id like fix does', async (t) => {
+  stubFixServer(t)
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportGet([REC, 'extra'], ctx), 2)
+    assert.match(err.join(''), /is a recommendation id and takes no other positional/)
+  }
+  {
+    const { ctx, err } = ctxWith()
+    assert.equal(await runReportGet(['rec-ffffffffffffffff'], ctx), 1)
+    assert.match(err.join(''), /hyp report get: no recommendation 'rec-ffffffffffffffff' in this org/)
+  }
 })
 
 test('fix with an unknown id exits 1 and points at the listing, before any launch', async (t) => {
@@ -572,47 +658,81 @@ test('fix with no id and no terminal is a usage error', async (t) => {
   assert.equal(calls.length, 0)
 })
 
-test('fix with no id on a terminal offers the listed recommendations and starts the picked one', async (t) => {
+// @ref LLP 0414#listing-is-the-picker [tests]: the reports first, newest as listed, then the picked report's recommendations
+test('fix with no id on a terminal asks which report, then which of its recommendations, and starts the picked one', async (t) => {
   const { calls } = stubFixServer(t)
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
-  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
-  const { ctx } = ctxWith({ HYP_HOME: hypHome })
+  const { ctx } = ctxWith()
   ctx.stdin.isTTY = true
   ctx.stdout.isTTY = true
   const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
   assert.equal(await runReportFix(['--kind', 'usage-review'], ctx, deps), 0)
   assert.equal(calls[0].url.pathname, '/v1/reports')
   assert.equal(calls[0].url.searchParams.get('kind'), 'usage-review')
-  assert.equal(prompts.length, 1)
-  assert.deepEqual(prompts[0].options, [{ value: REC, label: 'batch the retries', summary: `${REC}  usage-review/2026-W29  Weekly` }])
+  assert.equal(prompts.length, 2)
+  assert.equal(prompts[0].title, 'Which report?')
+  assert.deepEqual(prompts[0].options, [{ value: '0', label: 'Weekly', summary: '2026-07-20  usage-review/2026-W29  1 recommendation' }])
+  assert.equal(prompts[1].title, 'Which recommendation should be fixed?')
+  assert.equal(prompts[1].allowBack, true)
+  assert.deepEqual(prompts[1].options, [{ value: REC, label: 'batch the retries', summary: REC }])
   assert.equal(launches.length, 1)
   assert.match(launches[0].prompt, /"Batch the retries"/)
 })
 
-test('fix labels the picker by the page title and the thesis\'s first sentence when the server sends them', async (t) => {
+test('fix labels the recommendation rows by the page title and the thesis\'s first sentence when the server sends them', async (t) => {
   stubFixServer(t, { opening: true })
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
-  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
-  const { ctx } = ctxWith({ HYP_HOME: hypHome })
+  const { ctx } = ctxWith()
   ctx.stdin.isTTY = true
   ctx.stdout.isTTY = true
   const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
   assert.equal(await runReportFix([], ctx, deps), 0)
-  assert.deepEqual(prompts[0].options, [{ value: REC, label: 'Batch the retries', summary: 'Every retry is its own call.' }])
+  assert.deepEqual(prompts[1].options, [{ value: REC, label: 'Batch the retries', summary: 'Every retry is its own call.' }])
   assert.equal(launches.length, 1)
 })
 
-test('fix does not offer a listed recommendation whose id is not one, so no page is saved outside HYP_HOME', async (t) => {
-  // The picked id becomes the saved page's filename, so a listing that names
-  // a row with a path rather than an id would write the page wherever that
-  // path leads. Such a row is not a recommendation this verb can act on.
-  // The escape target is a directory this test owns: a fixed shared path
-  // would leak the artifact on failure and poison every later run.
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
-  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
-  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-outside-'))
-  t.after(() => fs.rm(outside, { recursive: true, force: true }))
-  const hostileId = path.relative(path.join(hypHome, 'recommendations'), path.join(outside, 'escape'))
+test('fix lists reports in the order the server returns them, skips one with nothing to fix, and back returns to the report list', async (t) => {
+  const older = { id: 'rpt-a', kind: 'usage-review', period: '2026-W28', bytes: 900, publishedAt: '2026-07-13T10:00:00.000Z' }
+  const empty = { id: 'rpt-c', kind: 'usage-review', period: '2026-W30', title: 'Nothing here', bytes: 100, publishedAt: '2026-07-27T10:00:00.000Z', recommendations: [] }
+  const OLD_REC = 'rec-fedcba9876543210'
+  stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === '/v1/reports') {
+      return { status: 200, json: { reports: [
+        empty,
+        { ...REPORT, recommendations: [{ id: REC, page: 'recommendation-batch-the-retries' }] },
+        { ...older, recommendations: [{ id: OLD_REC, page: 'recommendation-tenant-check', title: 'Tenant check' }] },
+      ] } }
+    }
+    if (p === '/v1/reports/usage-review/2026-W28/rpt-a/recommendation-tenant-check.md') return { status: 200, body: new TextEncoder().encode('# Tenant check\n') }
+    return { status: 404, json: { error: 'not_found' } }
+  })
+  const { ctx } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  // Pick the newest report, back out of its recommendations, pick the
+  // older report, then its one recommendation.
+  const script = [
+    (/** @type {any} */ spec) => spec.options[0].value,
+    () => { throw new PromptBackRequestedError() },
+    (/** @type {any} */ spec) => spec.options[1].value,
+    (/** @type {any} */ spec) => spec.options[0].value,
+  ]
+  const { deps, launches, prompts } = fixDeps({ pick: async (spec) => script.shift()?.(spec) })
+  assert.equal(await runReportFix([], ctx, deps), 0)
+  assert.deepEqual(prompts.map((p) => p.title), ['Which report?', 'Which recommendation should be fixed?', 'Which report?', 'Which recommendation should be fixed?'])
+  assert.deepEqual(prompts[0].options.map((/** @type {any} */ o) => o.label), ['Weekly', 'usage-review/2026-W28'], 'the empty report is not offered; an untitled one is named by kind and period')
+  assert.equal(prompts[2].default, '0', 'the cursor returns to the report that was backed out of')
+  assert.deepEqual(prompts[3].options, [{ value: OLD_REC, label: 'Tenant check', summary: OLD_REC }])
+  assert.equal(launches.length, 1)
+  assert.match(launches[0].prompt, new RegExp('`hyp report get ' + OLD_REC + '`'))
+  assert.match(launches[0].prompt, /usage-review\/2026-W28/)
+})
+
+test('fix does not offer a listed recommendation whose id is not one, so nothing of the server\'s choosing reaches the launch command', async (t) => {
+  // The picked id is pasted into the command the client is told to run, so
+  // a listing that names a row with shell text rather than an id would put
+  // that text on a command line. Such a row is not a recommendation this
+  // verb can act on.
+  const hostileId = 'rec-x; rm -rf ~'
   stubServer(t, (method, url) => {
     if (url.pathname === '/v1/reports') {
       return { status: 200, json: { reports: [{
@@ -622,7 +742,7 @@ test('fix does not offer a listed recommendation whose id is not one, so no page
     }
     return { status: 200, body: new TextEncoder().encode(PAGE) }
   })
-  const { ctx, out } = ctxWith({ HYP_HOME: hypHome })
+  const { ctx, out } = ctxWith()
   ctx.stdin.isTTY = true
   ctx.stdout.isTTY = true
   const { deps, launches, prompts } = fixDeps({ pick: async (/** @type {any} */ spec) => spec.options[0].value })
@@ -630,7 +750,6 @@ test('fix does not offer a listed recommendation whose id is not one, so no page
   assert.match(out.join(''), /no recommendations to fix/)
   assert.equal(prompts.length, 0)
   assert.equal(launches.length, 0)
-  await assert.rejects(fs.access(path.join(outside, 'escape.md')))
 })
 
 test('fix: a cancelled pick starts nothing and succeeds', async (t) => {
@@ -646,15 +765,13 @@ test('fix: a cancelled pick starts nothing and succeeds', async (t) => {
 
 test('fix asks which client only when more than one could start, and only on a terminal', async (t) => {
   stubFixServer(t)
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
-  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
   const two = [
     { client: 'claude', label: 'Claude Code', bin: 'claude', binPath: '/bin/claude', args: ['{prompt}'] },
     { client: 'codex', label: 'Codex', bin: 'codex', binPath: '/bin/codex', args: ['{prompt}'] },
   ]
   // Piped with an id: no prompt is possible, the first launcher is taken.
   {
-    const { ctx } = ctxWith({ HYP_HOME: hypHome })
+    const { ctx } = ctxWith()
     const { deps, launches, prompts } = fixDeps({ launchers: two })
     assert.equal(await runReportFix([REC], ctx, deps), 0)
     assert.equal(prompts.length, 0)
@@ -662,7 +779,7 @@ test('fix asks which client only when more than one could start, and only on a t
   }
   // On a terminal the client is asked for, and the answer is honoured.
   {
-    const { ctx } = ctxWith({ HYP_HOME: hypHome })
+    const { ctx } = ctxWith()
     ctx.stdin.isTTY = true
     ctx.stdout.isTTY = true
     const { deps, launches, prompts } = fixDeps({ launchers: two, pick: async () => 'codex' })
@@ -686,9 +803,7 @@ test('fix with nothing launchable exits 1 with a runnable attach hint, before fe
 
 test('fix reports a spawn failure as exit 1', async (t) => {
   stubFixServer(t)
-  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-fix-'))
-  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
-  const { ctx, err } = ctxWith({ HYP_HOME: hypHome })
+  const { ctx, err } = ctxWith()
   const { deps } = fixDeps()
   deps.launchClient = async () => ({ ok: false, error: 'ENOENT' })
   assert.equal(await runReportFix([REC], ctx, deps), 1)

@@ -514,3 +514,40 @@ export interface CoreCommandArgSpec {
   /** argv token aliases, e.g. `{ '-y': '--yes' }`. */
   aliases?: Record<string, string>
 }
+
+/**
+ * One turn a recommendation page cites, as the server records it (server
+ * LLP 0419#evidence): enough to find the message, never its content.
+ */
+export interface FixEvidence {
+  sessionId: string
+  /** A subagent's agent_id or a Codex thread's conversation_id; null for the main conversation. */
+  chainId: string | null
+  messageId: string
+  /** One tool call inside the message, when that is the cited thing; null otherwise. */
+  toolCallId: string | null
+  /** The message's UTC day. */
+  day: string
+  /** One line saying what the turn shows. */
+  note: string
+}
+
+/** One query the report ran to reach a recommendation (server LLP 0419#basis). */
+export interface FixBasisQuery {
+  /** `coordinator`, `coordinator-revision`, `subagent-<n>`, or empty when the record did not say. */
+  agent: string
+  query: string
+}
+
+/**
+ * A recommendation as `hyp report fix` carries it from the record to the
+ * saved brief: the page stem and title, and the citations the server
+ * attached at publish, empty when the record carries none.
+ */
+export interface FixRecommendation {
+  id: string
+  page: string
+  title?: string
+  evidence: FixEvidence[]
+  basis: FixBasisQuery[]
+}
