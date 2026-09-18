@@ -25,6 +25,7 @@ import process from 'node:process'
 
 import { resolveDependencies } from '../../src/core/dep_graph.js'
 import { bootKernel } from '../../src/core/runtime/boot.js'
+import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
 
 const HOSTILE = '@hypaware/local-fs'
 const NEIGHBOUR = '@hypaware/format-jsonl'
@@ -258,5 +259,82 @@ test('a manifest declaring an empty capability version resolves instead of faili
     resolution.registry.list().map((c) => c.name),
     ['cap.real'],
     'the empty version reached the capability listing'
+  )
+})
+
+/**
+ * Collect the log records emitted while `fn` runs, then put the global
+ * provider slot back the way the rest of this file expects it.
+ *
+ * @param {() => Promise<void>|void} fn
+ * @returns {Promise<any[]>}
+ */
+async function recordsFrom(fn) {
+  /** @type {any[]} */
+  const records = []
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { records.push(...batch) } }],
+  })
+  logs.setGlobalLoggerProvider(provider)
+  try {
+    await fn()
+  } finally {
+    await provider.shutdown()
+  }
+  return records
+}
+
+test('a skipped capability declaration names the plugin that wrote it', async () => {
+  // The skip costs someone else their activation: the consumer requiring the
+  // capability is eliminated and reported with `cap_missing`, while the
+  // provider whose manifest is malformed activates. Without a signal naming
+  // the provider, the report points an operator at the innocent plugin
+  // (issue #1870). Both halves of the skip, and the resolution output
+  // alongside the signal, because the signal has to be purely additive.
+  /** @type {any[]} */
+  const manifests = [
+    {
+      schema_version: 1, name: 'empty-version', version: '1.0.0', hypaware_api: '^1.0.0',
+      runtime: 'node', entrypoint: './i.js', provides: { capabilities: { 'cap.real': '' } },
+    },
+    {
+      schema_version: 1, name: 'empty-name', version: '1.0.0', hypaware_api: '^1.0.0',
+      runtime: 'node', entrypoint: './i.js', provides: { capabilities: { '': '1.0.0' } },
+    },
+    {
+      schema_version: 1, name: 'consumer', version: '1.0.0', hypaware_api: '^1.0.0',
+      runtime: 'node', entrypoint: './i.js', requires: { capabilities: { 'cap.real': '*' } },
+    },
+  ]
+
+  /** @type {any} */
+  let resolution = null
+  const records = await recordsFrom(async () => {
+    resolution = await resolveDependencies(manifests)
+  })
+
+  // Unchanged by the signal: the provider still activates, and the consumer is
+  // still the one the report names.
+  assert.deepEqual(resolution.order, ['empty-name', 'empty-version'])
+  assert.deepEqual(resolution.unsatisfied, [
+    { plugin: 'consumer', errorKind: 'cap_missing', detail: 'capability cap.real@*' },
+  ])
+
+  assert.deepEqual(
+    records
+      .filter((r) => r.body === 'dep_graph.capability_skipped')
+      .map((r) => ({
+        severity: r.severityText,
+        plugin: r.attributes.hyp_plugin,
+        capability: r.attributes.hyp_capability,
+        version: r.attributes.hyp_capability_version,
+        errorKind: r.attributes.error_kind,
+      })),
+    [
+      { severity: 'WARN', plugin: 'empty-version', capability: 'cap.real', version: '', errorKind: 'cap_malformed' },
+      { severity: 'WARN', plugin: 'empty-name', capability: '', version: '1.0.0', errorKind: 'cap_malformed' },
+    ],
+    'a skipped declaration left the operator with only the consumer to blame'
   )
 })
