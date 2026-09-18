@@ -75,7 +75,10 @@ not scan unrelated home directories or OpenClaw storage.
 packages/pi-extension is an independently packable Pi package. The same
 single-file extension is shipped with HypAware for managed-file attach, so the
 normal picker can work without invoking npm. Marker-owned detach touches only
-that managed file. Pi package installs remain Pi-owned. A process-local lease
+that managed file. The managed file sits under Pi's agent directory, which
+`PI_CODING_AGENT_DIR` relocates; Pi defines no `PI_HOME`, so the generic
+`$<CLIENT>_HOME` override the settings-path resolver applies elsewhere does not
+reach it. Pi package installs remain Pi-owned. A process-local lease
 prevents simultaneous package and managed-file instances from both recording.
 The package uses the default loopback endpoint unless explicitly overridden;
 managed attach embeds the configured endpoint. Disabling the HypAware Pi

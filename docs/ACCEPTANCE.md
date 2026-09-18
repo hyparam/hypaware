@@ -2118,9 +2118,12 @@ pass. The daemon retained bounded backlog and scheduled a retry for
 
 ---
 
-## `pi_capture`
+## `pi_tui_cli_capture`
 
 **Required when:** Pi extension, adapter, projection or recovery changes.
+Distinct from the hermetic `pi_capture` smoke, which step 1 runs: a fixture
+flow and this release gate must never be named the same thing in a release
+note.
 Record `pi --version`, HypAware version and package version. Use a disposable
 Pi config/session root and HypAware home; do not attach a personal install.
 
@@ -2155,6 +2158,8 @@ Pi config/session root and HypAware home; do not attach a personal install.
 **Pass condition:** real Pi behavior agrees with those checks. Record which
 modes/providers were actually exercised. A fixture-only run or isolated fake
 provider run does not establish the full real-client release gate.
+
+---
 
 ## Other candidates
 
