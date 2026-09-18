@@ -6,6 +6,7 @@
 // repo root.
 
 // Runtime value exports (mirror src/core/index.js).
+export { cachePurgeCleanupStatus } from './cache/purge-cleanup.js'
 export * from './observability/index.js'
 export {
   createConfigRegistry,

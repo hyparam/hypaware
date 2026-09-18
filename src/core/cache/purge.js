@@ -7,6 +7,7 @@ import { scopeGovernance } from '../usage-policy/matcher.js'
 import { discoverCachePartitions, readCursorSync, writeCursor, withPartitionMutationLock } from './partition.js'
 import { deleteMatchingRows, scanRowsFromTable } from './iceberg/store.js'
 import { resolveIcebergDir } from './storage.js'
+import { queueCacheCleanup } from './purge-cleanup.js'
 import { sessionGraphNodeId } from './session-purges.js'
 
 /**
@@ -46,14 +47,14 @@ import { sessionGraphNodeId } from './session-purges.js'
  * actually gave (LLP 0104 §spellings).
  *
  * @ref LLP 0104 [implements]: the destructive verb's cache-only row removal, keyed off targets not marking events
- * @param {{ cacheRoot: string, target: PurgeTarget, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
+ * @param {{ cacheRoot: string, target: PurgeTarget, onCleanupQueued?: (id: string) => Promise<void>, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
  *   `deps` injects the filesystem seam the subtree spelling predicate consults.
  *   No production caller passes it; it exists because whether two spellings of
  *   one name are one directory is a property of the *volume*, and a test host
  *   has only the one it is running on.
  * @returns {Promise<PurgeSummary>}
  */
-export async function purgeCache({ cacheRoot, target, deps }) {
+export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
   /** @type {Set<string>} */
   const purgedCwds = new Set()
   /** @type {{ rows: number, cwds: Set<string> }} */
@@ -63,6 +64,7 @@ export async function purgeCache({ cacheRoot, target, deps }) {
   const partitions = await discoverCachePartitions(cacheRoot)
   let rowsDeleted = 0
   let partitionsAffected = 0
+  const cacheCleanup = new Set()
 
   for (const part of partitions) {
     await withPartitionMutationLock(part.path, async () => {
@@ -73,9 +75,17 @@ export async function purgeCache({ cacheRoot, target, deps }) {
       const tables = new Set([tableDir])
       if (target.kind === 'session') {
         for (const entry of await fs.readdir(part.path, { withFileTypes: true })) {
-          if (entry.isDirectory() && /^epoch=\d+$/.test(entry.name)) tables.add(path.join(part.path, entry.name))
+          if (entry.isDirectory() && /^(?:epoch=\d+|table(?:-[a-zA-Z0-9-]+)?)$/.test(entry.name)) tables.add(path.join(part.path, entry.name))
         }
       }
+      let queued = false
+      const beforeDelete = target.kind === 'session' ? async () => {
+        if (queued) return
+        const id = await queueCacheCleanup(cacheRoot, part.path)
+        cacheCleanup.add(id)
+        await onCleanupQueued?.(id)
+        queued = true
+      } : undefined
       let affected = false
       for (const current of tables) {
         let names
@@ -87,7 +97,7 @@ export async function purgeCache({ cacheRoot, target, deps }) {
           if (current === tableDir && part.rowCount > 0) throw new Error('Purge found a populated partition without table metadata')
           continue
         }
-        const result = await deleteMatchingRows(current, predicate, { columns })
+        const result = await deleteMatchingRows(current, predicate, { columns, beforeDelete })
         if (result.rowsDeleted === 0) continue
         rowsDeleted += result.rowsDeleted
         affected = true
@@ -100,6 +110,7 @@ export async function purgeCache({ cacheRoot, target, deps }) {
   return {
     rowsDeleted,
     partitionsAffected,
+    ...(target.kind === 'session' ? { cacheCleanup: [...cacheCleanup] } : {}),
     purgedCwds: [...purgedCwds],
     retainedAliasRows: retainedAliases.rows,
     retainedAliasCwds: [...retainedAliases.cwds],

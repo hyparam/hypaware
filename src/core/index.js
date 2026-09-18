@@ -11,6 +11,7 @@ export { validateConfig, firstPartyPluginMetadata, mergeInstalledManifestsIntoKn
 export { buildPluginCatalog } from './plugin_catalog.js'
 export { deleteMatchingRowsAtUrl } from './cache/iceberg/store.js'
 export { purgeCache } from './cache/purge.js'
+export { cachePurgeCleanupStatus } from './cache/purge-cleanup.js'
 export { createSessionPurgeStore, filterPurgedSessions } from './cache/session-purges.js'
 // Iceberg partition-spec helpers: core surface consumed by the cache and the
 // @hypaware/format-iceberg export (LLP 0003 / LLP 0022#shared-core-helpers).

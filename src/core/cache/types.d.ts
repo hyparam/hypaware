@@ -63,7 +63,15 @@ export type PurgeTarget =
 // must not claim the filesystem adjudicated, and must not claim the spelling is
 // absent either: only the first reason is a verdict, and only the second is a
 // statement that the directory is gone.
+export interface CachePurgeCleanupJob {
+  version: number
+  partition: string
+  generations: string[]
+  requestedAt: number
+}
+
 export interface PurgeSummary {
+  cacheCleanup?: string[]
   rowsDeleted: number
   partitionsAffected: number
   purgedCwds: string[]

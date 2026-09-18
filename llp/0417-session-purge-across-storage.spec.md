@@ -133,7 +133,7 @@ destination rather than treating it as purged.
 The user selected Iceberg position deletes on 2026-09-18. Completion means
 logical removal from current table reads. Existing data files and historical
 snapshots can retain bytes until later compaction and snapshot cleanup; those
-maintenance operations are not part of this command.
+maintenance operations run asynchronously after the command, as described below.
 
 Pending spool rows must be dropped or drained through the deletion fence.
 Retries and re-imports must not restore the session. Unrelated rows sharing a
@@ -194,3 +194,43 @@ even for local-only purges. Historical snapshots and original files still
 require a separate, crash-safe reclamation implementation. The companion
 server's compactor now understands position deletes, but that rewrite alone
 is not physical erasure.
+
+
+## Automatic cache reclamation {#cache-reclamation}
+
+Session position deletes durably admit a per-partition cleanup journal before
+the first delete commit. It names the current and older managed table/epoch
+generations, with no session content. Admission failure prevents the delete
+commit; partial purges keep admitted work for maintenance and retry. Server
+receipts persist opaque job references at admission, including partial failures.
+
+The ordinary hourly cache maintenance loop treats a marked live generation as
+due even with one file, an unchanged compaction baseline, or a foreign sorted
+replace. It uses the existing streaming generation writer, applying position
+deletes and preserving every surviving row and ingest sequence. This path
+does not deduplicate or re-settle rows, so it needs no table-sized identity set.
+Writes use the partition mutation lock. Unique generation names allow retry
+after a partial output; after a cursor swap, the old journal no longer forces
+another rewrite of the new generation. Another purge marks the new generation.
+
+The retired-generation sweep reclaims the named directories, including data,
+all snapshots/metadata and sidecars. It preserves the existing cache reader
+safety model: at least 24 hours after admission and retirement, rather than
+archive-style active-reader leases. The shorter orphan grace never applies
+to these targets. Long-lived external readers beyond the retention window
+are not protected. Missing/corrupt cursors, invalid journals, unreadable
+metadata, explicit branch/tag pins and statistics sidefiles block reclamation;
+later maintenance retries. No fixed completion deadline is promised.
+
+Status verifies each named generation is absent before reporting completion.
+It certifies those cache generations, not all session copies. Historical-only
+copies in partitions with no matching live rows in any managed generation,
+unmanaged legacy tables, native transcripts and derived reports are outside
+this scope. Pre-upgrade position deletes without cleanup journals are not
+retroactively certified. Disabled maintenance postpones cleanup.
+
+Cost is one streaming full-generation rewrite per affected partition; this is
+more I/O than a subset merge but retires the entire snapshot history. Existing
+batch, row-group and open partition-writer memory bounds apply. Journals cap
+generation lists at 10000 and encoded size at 1 MiB. Ordinary maintenance
+continues to use its tick budget and failure isolation.

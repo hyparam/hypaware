@@ -184,7 +184,8 @@ export async function runPurge(argv, ctx) {
       retainedAliasCwds: retainedAliases,
       spoolFilesRemoved: swept.filesRemoved,
       ...(target.kind === 'session' ? { local: { status: localError ? 'incomplete' : 'completed',
-        containment: localError ? 'incomplete' : 'completed', physical_cleanup: { status: 'not_implemented' },
+        containment: localError ? 'incomplete' : 'completed', physical_cleanup: { status: summary.cacheCleanup?.length ? 'incomplete' : 'not_implemented' },
+        cache_cleanup: (summary.cacheCleanup ?? []).map(job_id => ({ job_id, scope: 'cache_generations', status: 'pending' })),
         retained: ['historical_snapshots', 'original_data_and_metadata_files', 'search_sidecars', 'derived_copies_without_session_lineage', 'native_transcripts_and_backups'],
         ...(localError ? { error: localError } : {}) } } : localError ? { local: { status: 'incomplete', error: localError } } : {}),
       ...(remotes.size ? { remotes: Object.fromEntries(remoteResults) } : {}),
@@ -205,6 +206,7 @@ export async function runPurge(argv, ctx) {
         `raw body file${swept.filesRemoved === 1 ? '' : 's'} deleted\n`
       )
     }
+    if (summary.cacheCleanup?.length) ctx.stdout.write('cache file cleanup queued for background maintenance after its retirement grace\n')
     for (const [name, result] of remoteResults) {
       if (result.status === 'completed') ctx.stdout.write(`remote session rows position-deleted on '${name}'; physical cleanup: ${result.physical_cleanup?.status ?? 'unverified'}\n`)
     }

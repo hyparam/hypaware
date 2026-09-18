@@ -349,23 +349,23 @@ const PURGE_DELETE_BATCH_SIZE = 5000
  * @ref LLP 0104 [implements]: cache-only row deletion via position-deletes; preserves part_id identity and the export watermark
  * @param {string} tablePath the Iceberg table directory
  * @param {(row: Record<string, unknown>) => boolean} predicate
- * @param {{ columns: string[] }} opts columns the predicate reads (intersected with the table schema)
+ * @param {{ columns: string[], beforeDelete?: () => Promise<void> }} opts columns the predicate reads (intersected with the table schema)
  * @returns {Promise<{ rowsDeleted: number, filesAffected: number, batchCount: number }>}
  */
 export async function deleteMatchingRows(tablePath, predicate, opts) {
   if (!tableExists(tablePath)) return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
-  return deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns: opts.columns })
+  return deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns: opts.columns, beforeDelete: opts.beforeDelete })
 }
 
 /**
  * The same position-delete path for local cache and BlobStore archives.
  * Unreadable metadata or data is a failed purge, never a zero-row success.
  * @ref LLP 0417#erasure [implements]: logical deletion uses Iceberg positions; physical reclamation is separate
- * @param {{ tableUrl: string, resolver: Resolver, lister: Lister, predicate: (row: Record<string, unknown>) => boolean, columns: string[] }} args
+ * @param {{ tableUrl: string, resolver: Resolver, lister: Lister, predicate: (row: Record<string, unknown>) => boolean, columns: string[], beforeDelete?: () => Promise<void> }} args
  */
-export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns }) {
+export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns, beforeDelete }) {
   const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) {
     return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
@@ -398,6 +398,7 @@ export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister,
       matched = true
       pending.push({ file_path: filePath, pos })
       if (pending.length === PURGE_DELETE_BATCH_SIZE) {
+        await beforeDelete?.()
         await icebergDelete({ catalog, tableUrl: url, deletes: pending })
         rowsDeleted += pending.length
         pending = []
@@ -407,6 +408,7 @@ export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister,
     if (matched) filesAffected++
   }
   if (pending.length > 0) {
+    await beforeDelete?.()
     await icebergDelete({ catalog, tableUrl: url, deletes: pending })
     rowsDeleted += pending.length
     batchCount++
