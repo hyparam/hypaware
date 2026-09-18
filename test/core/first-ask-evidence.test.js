@@ -146,11 +146,13 @@ test('commandHeads: a cd prefix is dropped and the head is the verb plus its sub
 
 /**
  * The SQL candidate key, mirrored in JS: what `sql.lines` returns for a
- * typing, so an engine-backed test can name the keys it expects.
+ * typing, so an engine-backed test can name the keys it expects. The
+ * folded class has to track `FOLD_TO_SPACE`, or a mirror that still
+ * erases every non-Latin letter will name keys the engine never returns.
  * @param {string} t
  */
 function keyOf(t) {
-  return t.toLowerCase().replace(/^((okay|ok|now|please|can you|could you|yes|also|then|and|so|next)[,\s]+)+/, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 36).trim()
+  return t.toLowerCase().replace(/^((okay|ok|now|please|can you|could you|yes|also|then|and|so|next)[,\s]+)+/, '').replace(/[^a-z0-9 \u0080-\u1fff\u2070-\uffff]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 36).trim()
 }
 
 /** Two sessions that typed the commit line and then ran the procedure. */
