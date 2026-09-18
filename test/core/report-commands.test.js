@@ -906,3 +906,85 @@ test('delete with --yes issues the DELETE and confirms', async (t) => {
   assert.equal(calls[0].url.pathname, '/v1/reports/k/p/rpt-1')
   assert.match(out.join(''), /deleted k\/p\/rpt-1/)
 })
+
+/* ---------- the listing's stem, the hints, and the title (issue #1817) ---------- */
+
+// @ref LLP 0414#list-shows-ids [tests]: the stem the listing prints is a path `hyp report get` takes
+test('get takes the page stem the listing prints, resolving it to the published page', async (t) => {
+  const { calls } = stubServer(t, (method, url) => (
+    url.pathname === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md'
+      ? { status: 200, body: new TextEncoder().encode(PAGE) }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-batch-the-retries'], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-batch-the-retries.md',
+  ])
+  assert.equal(out.join(''), PAGE)
+})
+
+test('get takes the stem of an HTML-only page too, and an exact path still wins without a probe', async (t) => {
+  const { calls } = stubServer(t, (method, url) => (
+    url.pathname.endsWith('.html') ? { status: 200, body: new TextEncoder().encode('<h1>r</h1>') } : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-tenant-check'], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-tenant-check',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-tenant-check.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-tenant-check.html',
+  ])
+  assert.equal(out.join(''), '<h1>r</h1>')
+})
+
+test('get does not probe page extensions for a path that names its own', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/chart.png'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.png'])
+  assert.match(err.join(''), /HTTP 404: not_found/)
+})
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: the repair a diagnostic names has to be a command that does what the sentence says
+test('the missing-page hint names a command that lists what the report carries', async (t) => {
+  stubServer(t, (method, url) => (
+    url.pathname === `/v1/reports/_recommendations/${REC}`
+      ? { status: 200, json: { recommendation: { id: REC, page: 'recommendation-gone' }, report: REPORT } }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 1)
+  const text = err.join('')
+  assert.match(text, /the report no longer carries 'recommendation-gone'/)
+  assert.match(text, /'hyp report list --kind usage-review --period 2026-W29'/)
+  assert.doesNotMatch(text, /hyp report get usage-review/, 'a report read lists nothing')
+})
+
+test('a resolve answer carrying a report id but no kind or period is a malformed answer, not a missing page', async (t) => {
+  const { calls } = stubServer(t, () => ({
+    status: 200,
+    json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries' }, report: { id: 'rpt-b' } },
+  }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet([REC], ctx), 1)
+  assert.equal(calls.length, 1, 'nothing is fetched from an undefined/undefined path')
+  assert.match(err.join(''), /answered without the recommendation's report/)
+  assert.doesNotMatch(err.join(''), /no longer carries/)
+})
+
+test('an HTML page takes its title from the <h1>, not from a \'# \' line inside a <pre>', async (t) => {
+  stubServer(t, (method, url) => {
+    const p = url.pathname
+    if (p === `/v1/reports/_recommendations/${REC}`) return { status: 200, json: { recommendation: { id: REC, page: 'recommendation-batch-the-retries' }, report: REPORT } }
+    if (p.endsWith('.md')) return { status: 404, json: { error: 'not_found' } }
+    return { status: 200, body: new TextEncoder().encode('<pre>\n# rm -rf /\n</pre>\n<h1>Batch the retries</h1>\n') }
+  })
+  const { ctx, out } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC], ctx, deps), 0)
+  assert.match(launches[0].prompt, /"Batch the retries"/)
+  assert.doesNotMatch(launches[0].prompt, /rm -rf/)
+  assert.match(out.join(''), /Starting Claude Code on "Batch the retries"/)
+})
