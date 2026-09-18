@@ -693,21 +693,25 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
 async function* scanResolvedRows(source, columns, where) {
-  if (source.schema && source.prepareScan && columns.every((name) => source.schema?.fields.some((field) => field.name === name))) {
+  if (source.schema && source.prepareScan) {
+    // @ref LLP 0417#performance [implements]: optional fence columns must not disable native scans
+    const physical = columns.filter(name => source.schema?.fields.some(field => field.name === name))
+    const missing = columns.filter(name => !physical.includes(name))
     // @ref LLP 0040#storage-api-extension [constrained-by]: seq/legacy policy is still checked at the row boundary
     const result = executePlan({
-      plan: { type: 'Scan', table: 'cache', hints: { columns, where } },
+      plan: { type: 'Scan', table: 'cache', hints: { columns: physical, where } },
       context: { tables: { cache: source } },
     })
     if (result.batches) {
-      const indices = columns.map((name) => result.columns.indexOf(name))
+      const indices = physical.map((name) => result.columns.indexOf(name))
       for await (const batch of result.batches()) {
         const vectors = await Promise.all(indices.map((columnIndex) => readBatchColumn({ batch, columnIndex })))
         const count = selectedRowCount(batch.selection)
         for (let i = 0; i < count; i++) {
           /** @type {Record<string, unknown>} */
           const row = {}
-          for (let j = 0; j < columns.length; j++) row[columns[j]] = valueAt(vectors[j], i)
+          for (let j = 0; j < physical.length; j++) row[physical[j]] = valueAt(vectors[j], i)
+          for (const name of missing) row[name] = undefined
           yield row
         }
       }

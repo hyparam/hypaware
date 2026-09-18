@@ -188,12 +188,11 @@ are preserved; exclusive File-node discovery and report provenance remain
 unimplemented and explicitly outside the completion guarantee.
 
 JSON results distinguish logical containment from physical cleanup locally
-and per remote. Local physical cleanup is `not_implemented`; absent physical
-status on older servers is `unverified`. The CLI prints the physical limitation
-even for local-only purges. Historical snapshots and original files still
-require a separate, crash-safe reclamation implementation. The companion
-server's compactor now understands position deletes, but that rewrite alone
-is not physical erasure.
+and per remote. Admitted cache cleanup is `incomplete` until maintenance
+reclaims the targeted generations; absent physical status on older servers
+is `unverified`. The CLI explains the retirement grace and uncovered copies
+even for local-only purges. Archive rewrite alone is not physical erasure;
+the companion server separately tracks snapshot expiration and reclamation.
 
 
 ## Automatic cache reclamation {#cache-reclamation}
@@ -264,3 +263,12 @@ retries too, since a previous failed attempt can have created them. A directory
 sync failure rejects admission even when the renamed file is already visible;
 callers must not commit deletion on that failed admission. This adds bounded
 filesystem work by path depth to durable writes, with no retained directory set.
+
+Streaming storage reads always retain session scope columns and refresh the
+fence every 1024 rows, including the first row after asynchronous scan setup.
+This also applies to spool inspection and incremental exports; dropped exports
+still advance their continuation. Local grep refreshes after each row-group
+read and rechecks its bounded accumulated hits before returning, including
+cancellation. Removing an accumulated hit marks the result non-exhaustive,
+since that hit may have displaced a surviving candidate. Already delivered
+stream rows remain subject to the documented batch-refresh boundary.

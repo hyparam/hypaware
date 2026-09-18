@@ -210,7 +210,7 @@ export async function runPurge(argv, ctx) {
     for (const [name, result] of remoteResults) {
       if (result.status === 'completed') ctx.stdout.write(`remote session rows position-deleted on '${name}'; physical cleanup: ${result.physical_cleanup?.status ?? 'unverified'}\n`)
     }
-    if (target.kind === 'session') ctx.stdout.write('local physical erasure is not implemented; historical files and snapshots remain\n')
+    if (target.kind === 'session') ctx.stdout.write('targeted cache cleanup runs in background maintenance after at least 24 hours of retirement; historical-only copies outside admitted generations and native transcripts are not covered\n')
     if (target.kind === 'session') ctx.stdout.write('copied content in generated reports and other derivatives is not included\n')
   }
 

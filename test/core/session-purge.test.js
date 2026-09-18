@@ -274,3 +274,45 @@ test('purge covers retired epochs and graph identifiers without deleting other o
   assert.deepEqual(nodes, [id, 'shared'])
   assert.equal((await purgeCache({ cacheRoot: storage.cacheRoot, target: { kind: 'session', id: 'delete', org: 'a' } })).rowsDeleted, 0)
 })
+
+// @ref LLP 0417#operation [tests]: all storage streams refresh across first and subsequent fences
+for (const existing of [false, true]) for (const method of ['rows', 'where', 'since', 'spool']) {
+  test(`streaming purge fence: ${method}, existing=${existing}`, async t => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-stream-'))
+    t.after(() => fs.rm(root, { recursive: true, force: true }))
+    const { storage } = fixture(root)
+    const table = storage.cacheTablePath('events', ['source=unknown'])
+    const marker = createSessionPurgeStore(storage.cacheRoot)
+    if (existing) marker.add('unrelated', 'a')
+    await storage.appendRows(table, columns, [
+      ...Array.from({ length: 1024 }, () => ({ session_id: 'keep', org: 'a', body: 'prefix' })),
+      ...Array.from({ length: 2050 }, () => ({ session_id: 'target', org: 'a', body: 'sensitive' })),
+      { session_id: 'target', org: 'b', body: 'foreign survivor' },
+    ])
+    if (method !== 'spool') await storage.flushAll({ force: true })
+    assert(storage.readRowsWhere)
+    const stream = (method === 'rows' ? storage.readRows(table, ['body'])
+      : method === 'where' ? storage.readRowsWhere(table, ['body'], {})
+        : method === 'since' ? storage.readRowsSince(table, { columns: ['body'] })
+          : storage.readSpooledRows('events', ['body']))[Symbol.asyncIterator]()
+    for (let i = 0; i < 1024; i++) assert.equal((await stream.next()).done, false)
+    marker.add('target', 'a')
+    const result = []
+    let dropped = 0
+    let lastSeq = 0n
+    for await (const item of { [Symbol.asyncIterator]: () => stream }) {
+      if (method === 'since') {
+        const entry = /** @type {any} */ (item)
+        assert(BigInt(entry.after.seq) >= lastSeq)
+        lastSeq = BigInt(entry.after.seq)
+        if (entry.dropped) dropped++
+        else result.push(entry.row)
+      } else result.push(item)
+    }
+    assert.deepEqual(result, [{ body: 'foreign survivor' }])
+    if (method === 'since') {
+      assert.equal(dropped, 2050)
+      assert(lastSeq > 0n, 'dropping rows must advance the export watermark')
+    }
+  })
+}

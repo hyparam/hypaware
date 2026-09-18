@@ -265,13 +265,16 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // `opts.since`: absent ⇒ byte-for-byte the pre-existing full scan, so every
     // current caller is untouched until it opts in. When set, the scan yields
     // only rows newer than the watermark (null-seq legacy rows always yielded).
+    // @ref LLP 0417#operation [implements]: scope survives the first fence; long streams refresh at bounded intervals
     async *readRows(tablePath, columns, opts) {
       sessionPurges.refresh()
       const since = opts?.since !== undefined ? continuationToSeq(opts.since) : undefined
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
-      const scanColumns = projected && sessionPurges.size ? [...new Set([...projected, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])] : projected
+      const scanColumns = projected ? [...new Set([...projected, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])] : projected
       const scanOpts = since !== undefined ? { since, includeLegacy: opts?.includeLegacy } : undefined
+      let scanned = 0
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, scanOpts)) {
+        if (scanned++ % 1024 === 0) sessionPurges.refresh()
         if (sessionPurges.has(row)) continue
         for (const f of INTERNAL_FIELDS) delete row[f]
         yield projected ? projectRow(row, projected) : row
@@ -284,8 +287,10 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     async *readRowsWhere(tablePath, columns, whereIn) {
       sessionPurges.refresh()
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
-      const scanColumns = projected && sessionPurges.size ? [...new Set([...projected, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])] : projected
+      const scanColumns = projected ? [...new Set([...projected, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])] : projected
+      let scanned = 0
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { whereIn })) {
+        if (scanned++ % 1024 === 0) sessionPurges.refresh()
         if (sessionPurges.has(row)) continue
         for (const f of INTERNAL_FIELDS) delete row[f]
         yield projected ? projectRow(row, projected) : row
@@ -349,7 +354,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         if (forceAttribution) scanColumns.push(/** @type {string} */ (attributionColumn))
         if (forceEntrypoint) scanColumns.push(/** @type {string} */ (entrypointColumn))
       }
-      if (scanColumns && sessionPurges.size) scanColumns = [...new Set([...scanColumns, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])]
+      if (scanColumns) scanColumns = [...new Set([...scanColumns, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])]
       // Running high-water of REAL (non-null) seqs seen so far, seeded with the
       // incoming watermark. `after` is this monotonic max, so a null-seq legacy
       // row never advances the watermark and progress never regresses even when
@@ -360,7 +365,9 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const droppedCwdHashes = new Set()
       let droppedSourceRowCount = 0
       let droppedUnattributedRowCount = 0
+      let scanned = 0
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { since, includeLegacy: opts.includeLegacy })) {
+        if (scanned++ % 1024 === 0) sessionPurges.refresh()
         const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
         if (seq !== null && seq > high) high = seq
         for (const f of INTERNAL_FIELDS) delete row[f]
@@ -606,9 +613,11 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       } catch {
         return
       }
+      let scanned = 0
       for (const tablePath of tables) {
         if (datasetForTablePath(cacheRoot, tablePath) !== dataset) continue
         for await (const row of spool.readSpooledRows(tablePath)) {
+          if (scanned++ % 1024 === 0) sessionPurges.refresh()
           if (sessionPurges.has(row)) continue
           for (const f of INTERNAL_FIELDS) delete row[f]
           yield columns ? projectRow(row, columns) : row

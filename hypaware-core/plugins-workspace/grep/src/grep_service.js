@@ -292,6 +292,7 @@ export async function executeGrepSearch(args) {
             rowStart: groupStart,
             rowEnd: groupStart + groupRows,
           })
+          purges.refresh()
           for (let i = 0; i < rows.length; i++) {
             if (i % ABORT_CHECK_ROWS === 0) signal?.throwIfAborted()
             // Delete positions are file-absolute, so the group's own
@@ -341,6 +342,14 @@ export async function executeGrepSearch(args) {
         interrupted = true
       }
 
+      // @ref LLP 0417#operation [implements]: undelivered hits must honor purges, even on cancellation
+      purges.refresh()
+      let kept = 0
+      for (const hit of hits) {
+        if (purges.has({ session_id: hit.sessionId })) interrupted = true
+        else hits[kept++] = hit
+      }
+      hits.length = kept
       trimHits()
       const truncated = hits.length > limit
       if (truncated) hits.length = limit
