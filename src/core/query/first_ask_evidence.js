@@ -166,6 +166,52 @@ const HUMAN_TURN = [
 ].join(' and ')
 
 /**
+ * Leading words a person prefixes a request with and does not think of
+ * as part of it. Dropped from the key so "okay commit on appropriate
+ * branch" and "commit on appropriate branch" count as one line.
+ */
+const LEADING_FILLERS = 'okay|ok|now|please|can you|could you|yes|also|then|and|so|next'
+
+/** Characters of the normalized line that make the key. */
+const KEY_CHARS = 36
+
+/**
+ * The key two typings are grouped by: case folded, leading fillers
+ * dropped, punctuation and whitespace runs folded to one space, the first
+ * `KEY_CHARS` characters. One SQL expression used by both the statement
+ * that finds the candidates and the one that finds their sessions, since a
+ * candidate found by one key and looked up by another has no triggers.
+ *
+ * Normalized rather than exact because a person does not retype a request
+ * verbatim. On this machine the raw 42-character prefix split "commit on
+ * appropriate branch and make a PR" from its "okay ..." variant into 4
+ * sessions on 2 days and 3 on 2, each under the cut, where this key reads
+ * 7 sessions on 3 days. The client never sees the key: `candidates.md`
+ * heads each candidate with a typing as the person wrote it.
+ *
+ * @ref LLP 0398#one-signal [implements]: the same line typed again is judged after normalizing, not verbatim
+ */
+const TRIGGER_KEY = `trim(substr(trim(regexp_replace(regexp_replace(regexp_replace(lower(content_text), '^((${LEADING_FILLERS})[,\\s]+)+', ''), '[^a-z0-9 ]+', ' '), '\\s+', ' ')), 1, ${KEY_CHARS}))`
+
+/**
+ * What counts as a typed line at all: one line of request length. A
+ * pasted block, a JSON or markdown fragment, or a quoted reply is not a
+ * request the person makes again. Tested on the raw text, because the key
+ * has already folded the newline and the leading bracket away, and on the
+ * trimmed text, because a pasted fragment arrives indented and an untrimmed
+ * opener guard reads a leading-space JSON line as a typed line.
+ */
+const TYPED_LINE = [
+  'length(content_text) between 12 and 160',
+  "content_text not like '%\n%'",
+  "trim(content_text) not like '{%'",
+  "trim(content_text) not like '\"%'",
+  "trim(content_text) not like '#%'",
+  "trim(content_text) not like '>%'",
+  "trim(content_text) not like '[%'",
+].join(' and ')
+
+/**
  * First day of the window, `days` calendar days before `now`, as
  * `YYYY-MM-DD` in UTC. Dates in the cache are UTC partition dates.
  *
@@ -263,7 +309,12 @@ export function evidenceSql(from) {
   const human = `role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and ${HUMAN_TURN}`
   return {
     record: `select count(*) as session_days, count(distinct session_id) as sessions from (select session_id, date from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2) s`,
-    lines: `select lower(substr(content_text, 1, 42)) as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and length(content_text) between 12 and 160 group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 order by sessions desc limit ${CANDIDATES + 3}`,
+    // `line <> ''` because a typing with no letter or digit in it
+    // normalizes to nothing, and every such typing groups together: a row
+    // of dashes, an emoji, and a request written in a non-Latin script all
+    // land on the empty key, pooling unrelated sessions into one candidate
+    // that then outranks the real ones.
+    lines: `select ${TRIGGER_KEY} as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 and line <> '' order by sessions desc limit ${CANDIDATES + 3}`,
     // The one statement here with no `limit`, because the `group by` is its
     // ceiling and a `limit` would not be one (hypaware #1715): the engine
     // builds every group before it yields a row, so a `limit` bounds only
@@ -273,7 +324,7 @@ export function evidenceSql(from) {
     // which is what `sampleTriggers` divides its total between the lines
     // to avoid.
     // @ref LLP 0398#consequences [constrained-by]: a row a session a candidate line is the bound; a LIMIT bounds only what comes back and would pick a different sample
-    triggers: (lines) => `select session_id, lower(substr(content_text, 1, 42)) as line, min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example from ai_gateway_messages where date >= '${from}' and ${human} and length(content_text) between 12 and 160 and lower(substr(content_text, 1, 42)) in (${lines.map(sqlString).join(', ')}) group by 1, 2`,
+    triggers: (lines) => `select session_id, ${TRIGGER_KEY} as line, min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} and ${TRIGGER_KEY} in (${lines.map(sqlString).join(', ')}) group by 1, 2`,
     calls: (anchors) => `select session_id, message_created_at as at, tool_name, substr(cast(tool_args as varchar), 1, 160) as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${rowBudget(anchors)}`,
     replies: (anchors) => `select session_id, message_created_at as at, substr(content_text, 1, 500) as text from ai_gateway_messages where date >= '${from}' and role = 'assistant' and part_type = 'text' and length(content_text) > 200 and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${rowBudget(anchors)}`,
   }
@@ -528,7 +579,10 @@ export function renderCandidates(record, candidates, enough) {
   ]
   if (!enough) return head.concat(['Nothing is typed often enough yet to recommend a skill.', '']).join('\n')
   const body = candidates.map((c, i) => [
-    `## ${i + 1}. "${c.line}"`,
+    // A typing as the person wrote it, not the key: the key is case folded
+    // and cut, and the skill's description has to open with the phrase as
+    // they type it.
+    `## ${i + 1}. "${c.example?.text ?? c.line}"`,
     `Typed ${c.typed} times in ${c.sessions} sessions on ${c.days} days.${c.example ? ` Example, ${c.example.date}: "${c.example.text}"` : ''}`,
     '',
     `Commands that ran in the ${CALLS_AFTER} tool calls after it (sessions that ran it, of the ${c.sessionsWithCalls} sampled sessions whose procedure was read):`,
@@ -695,12 +749,7 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
   say(`Looking through the last ${windowDays} days...`)
   const recordRow = (await runner.run(sql.record)).rows[0] ?? {}
   const record = { sessions: num(recordRow.sessions), sessionDays: num(recordRow.session_days) }
-  const lines = (await runner.run(sql.lines)).rows
-    .filter((r) => {
-      const line = String(r.line ?? '')
-      return !line.includes('\n') && !/^[{"<#>[]/.test(line.trim())
-    })
-    .slice(0, CANDIDATES)
+  const lines = (await runner.run(sql.lines)).rows.slice(0, CANDIDATES)
   /** @type {FirstAskCandidate[]} */
   let candidates = []
   if (lines.length > 0) {

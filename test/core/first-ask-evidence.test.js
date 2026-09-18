@@ -56,6 +56,71 @@ test('evidenceSql: every statement excludes the duplicate OTEL lane; user text i
   assert.ok(sql.triggers(["it's done"]).includes("'it''s done'"), 'a quote in a line is escaped')
 })
 
+test('evidenceSql: the candidate key is normalized, and the two statements share it', () => {
+  // @ref LLP 0398#one-signal [tests]: "okay commit on ..." and "Commit on ..." are one line
+  const sql = evidenceSql('2026-08-08')
+  const key = sql.lines.slice('select '.length, sql.lines.indexOf(' as line'))
+  assert.ok(key.startsWith('trim(substr(trim(regexp_replace('), 'the key is computed in SQL, not read raw')
+  assert.ok(key.includes('lower(content_text)'), 'case folded')
+  assert.ok(key.includes("'^((okay|ok|now|please|can you|could you|yes|also|then|and|so|next)[,\\s]+)+'"), 'leading fillers dropped, one or more')
+  assert.ok(key.includes("'[^a-z0-9 ]+', ' '"), 'punctuation folded to a space')
+  assert.ok(key.endsWith(', 1, 36))'), 'a bounded key, with no trailing space where the cut fell on one')
+  const trig = sql.triggers(['x'])
+  assert.ok(trig.includes(`${key} as line`), 'the sessions are found by the same key the candidate was')
+  assert.ok(trig.includes(`${key} in ('x')`), 'and looked up by it')
+  assert.ok(!sql.lines.includes('substr(content_text, 1, 42)') && !trig.includes('substr(content_text, 1, 42)'), 'the raw prefix key is gone')
+  // The guards the key would erase are tested on the raw text, in both,
+  // and on the trimmed text: a pasted fragment arrives indented.
+  for (const stmt of [sql.lines, trig]) {
+    assert.ok(stmt.includes("content_text not like '%\n%'"), 'a pasted block is not a typed line')
+    for (const c of ['{', '"', '#', '>', '[']) assert.ok(stmt.includes(`trim(content_text) not like '${c}%'`), `a line opening with ${c}, indented or not, is a fragment, not a request`)
+  }
+  assert.ok(sql.lines.includes("and line <> ''"), 'a typing that normalizes to nothing is not a candidate')
+})
+
+test('a typing with no letters is not a candidate, and an indented fragment is not a typed line', async () => {
+  // @ref LLP 0398#one-signal [tests]: the key groups typings of one request, not every typing it erases
+  // Through the same engine the gather runs on. Both shapes reached a
+  // candidate once the guards moved into SQL: the opener guards stopped
+  // trimming, and every typing with no letter or digit in it (a rule of
+  // dashes, an emoji, a request in a non-Latin script) shares the empty
+  // key, so unrelated sessions pool into one candidate that outranks the
+  // real ones.
+  const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
+  const typings = [
+    'commit on the right branch and open a PR',
+    '  {"tool": "Bash", "input": "npm test"}',
+    '--------------------------------------',
+    'закоммить на нужную ветку и открыть пиар',
+  ]
+  /** @type {Record<string, SqlPrimitive>[]} */
+  const rows = []
+  typings.forEach((text, t) => {
+    for (const day of [10, 11, 12]) {
+      rows.push({ date: `2026-08-${day}`, session_id: `s${t}-${day}`, role: 'user', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: 'external', message_created_at: new Date(Date.UTC(2026, 7, day, t)), content_text: text })
+    }
+  })
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns,
+    numRows: rows.length,
+    scan(options) {
+      const rowColumns = options?.columns ?? columns
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *rows() {
+          for (const row of rows) yield asyncRow(row, rowColumns)
+        },
+      }
+    },
+  }
+  const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
+  const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
+  const result = await executeQuerySql({ query: evidenceSql('2026-08-08').lines, registry, storage })
+  assert.deepEqual(result.rows.map((r) => r.line), ['commit on the right branch and open'], 'the one request is the one candidate')
+})
+
 test('commandHeads: a cd prefix is dropped and the head is the verb plus its subcommand', () => {
   const heads = commandHeads([
     { session_id: 's1', tool_name: 'Bash', args: '{"command":"cd /repo && git checkout -b topic"}' },
@@ -65,6 +130,15 @@ test('commandHeads: a cd prefix is dropped and the head is the verb plus its sub
   assert.deepEqual(heads.map((h) => h.head), ['Bash: git checkout -b', 'Bash: git checkout master', 'Read: types.d.ts'])
   assert.equal(heads[0].sessions, 1)
 })
+
+/**
+ * The SQL candidate key, mirrored in JS: what `sql.lines` returns for a
+ * typing, so an engine-backed test can name the keys it expects.
+ * @param {string} t
+ */
+function keyOf(t) {
+  return t.toLowerCase().replace(/^((okay|ok|now|please|can you|could you|yes|also|then|and|so|next)[,\s]+)+/, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 36).trim()
+}
 
 /** Two sessions that typed the commit line and then ran the procedure. */
 function commitRows() {
@@ -150,7 +224,7 @@ test('renderCandidates: a reader-ready page, or the not-enough sentence', () => 
   const cands = buildCandidates(commitRows())
   const page = renderCandidates({ sessions: 100, sessionDays: 120 }, cands, true)
   assert.ok(page.includes('Recorded: 100 sessions over 120 session-days.'))
-  assert.ok(page.includes('## 1. "commit on appropriate branch and make a pr"'))
+  assert.ok(page.includes('## 1. "commit on appropriate branch and make a PR"'), 'headed by a typing as written, not by the key')
   assert.ok(page.includes('- `git checkout -b` (2)'))
   assert.ok(page.includes('How one ended (2026-08-12): "Committed on topic'))
   const thin = renderCandidates({ sessions: 3, sessionDays: 3 }, cands, false)
@@ -480,7 +554,7 @@ test('the trigger statement is bounded by the sessions of a window, not by what 
   // Eight, which is over the five `prepareFirstAskEvidence` slices to: the
   // bound is asserted against more lines than the statement is ever given.
   const texts = Array.from({ length: 8 }, (_, i) => `commit on branch ${i} and open a pull request when green`)
-  const lines = texts.map((t) => t.slice(0, 42).toLowerCase())
+  const lines = texts.map(keyOf)
   const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
   const base = Date.UTC(2026, 7, 10)
 
@@ -555,8 +629,12 @@ test('a session that typed two candidate lines is budgeted for both of them', as
   // the ordinary shape: the line is typed, the agent works, and the person
   // types the second line later in the same session.
   const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'tool_name', 'tool_args', 'content_text']
-  const textA = 'commit on the right branch and open a pr'
+  // The first line is typed the way a person types it, filler, case and
+  // punctuation included: the key has to fold those or the engine finds
+  // no trigger for the candidate at all.
+  const textA = 'Okay, commit on the right branch and open a PR!'
   const textB = 'run the release checklist for this repo'
+  assert.equal(keyOf(textA), 'commit on the right branch and open', 'filler, case and punctuation are not part of the line')
   const base = Date.UTC(2026, 7, 10, 1, 0, 0)
   /** @type {Record<string, SqlPrimitive>[]} */
   const rows = []
@@ -594,7 +672,7 @@ test('a session that typed two candidate lines is budgeted for both of them', as
   const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
   const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
   const sql = evidenceSql('2026-08-08')
-  const lines = [textA, textB].map((t) => t.slice(0, 42).toLowerCase())
+  const lines = [textA, textB].map(keyOf)
   const triggers = sampleTriggers((await executeQuerySql({ query: sql.triggers(lines), registry, storage })).rows)
   const anchors = sessionAnchors(triggers)
   assert.equal(anchors.length, 1, 'one session, anchored once: the disjunction still costs one pass a scanned row')
