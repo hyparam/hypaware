@@ -658,7 +658,22 @@ test('fix with an unknown id exits 1 and points at the listing, before any launc
   const { ctx, err } = ctxWith()
   const { deps, launches } = fixDeps()
   assert.equal(await runReportFix(['hyprec-ffffffffffffffff'], ctx, deps), 1)
-  assert.match(err.join(''), /no recommendation 'hyprec-ffffffffffffffff' in this org - list them with 'hyp report list'/)
+  // The skew reading is conditional on the id being on that listing, so a
+  // genuinely bad id still reads as a bad id and not as an old server.
+  assert.match(err.join(''), /no recommendation 'hyprec-ffffffffffffffff' in this org - list them with 'hyp report list'; if it is on that listing,/)
+  assert.equal(launches.length, 0)
+})
+
+test('fix against a server predating the resolve route names the version skew, not just a bad id', async (t) => {
+  // A server without GET /v1/reports/_recommendations/<id> answers a listed
+  // id with the same 404 an unknown one gets.
+  stubServer(t, () => ({ status: 404, json: { error: 'not_found', detail: 'no route for GET /v1/reports/_recommendations/:id' } }))
+  const { ctx, err } = ctxWith()
+  const { deps, launches } = fixDeps()
+  assert.equal(await runReportFix([REC], ctx, deps), 1)
+  const message = err.join('')
+  assert.match(message, /cannot resolve recommendation ids/)
+  assert.match(message, /is the server up to date\?/)
   assert.equal(launches.length, 0)
 })
 
