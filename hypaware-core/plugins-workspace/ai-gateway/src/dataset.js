@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
 import { isUsagePolicyDrop } from '../../../../src/core/usage-policy/index.js'
-import { alignRows, canPushWhere, emptySource, normalizeScanColumn, unionSources, whereColumns } from 'hypaware/core/query'
+import { alignRows, canPushWhere, emptySource, scanColumnOrNulls, unionSources, whereColumns } from 'hypaware/core/query'
 import { AI_GATEWAY_MESSAGE_COLUMNS, aiGatewayRowsFromProjectedExchange } from './message_projector.js'
 import { isPlainObject, stringValue } from 'hypaware/core/util'
 
@@ -13,7 +13,6 @@ import { isPlainObject, stringValue } from 'hypaware/core/util'
  * @import { AiGatewayProjectedExchange, BackfillItem, BackfillMaterializeContext, BackfillMaterializerContribution, CachePartitionMeta, ColumnSpec, DatasetDataSourceContext, DatasetDiscoveryContext, DatasetRefreshResult, DatasetRegistration, DatasetSettleContext, QueryPartition, QueryStorageService, ScannableDataSource } from '../../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
  * @import { GatewayState } from './types.js'
- * @import { AsyncDataSource } from 'squirreling'
  */
 
 const PLUGIN_NAME = '@hypaware/ai-gateway'
@@ -198,42 +197,33 @@ function withSchemaColumns(source) {
     },
   }
   // Forward the column-stream hook so single-column aggregates stay on the
-  // engine's streaming fast path. A partition that physically lacks the
+  // engine's streaming fast path. A source that physically lacks the
   // requested column (the additive schema-drift case this wrapper exists
-  // for) surfaces its values as `undefined` holes in the chunk; normalize
-  // them to null so every partition's chunk reads the same way and an
-  // accumulator sees one representation across the merged stream. This is
-  // NOT the value the row path reads: `scan` above pads an absent cell with
-  // `undefined` (LLP 0241 §alignment), and 0241 deliberately left the
+  // for) is never asked for it: a parquet-backed source throws on a column
+  // it cannot find, so `scanColumnOrNulls` streams a null per row instead,
+  // and every partition's chunk reads the same way to an accumulator. This
+  // is NOT the value the row path reads: `scan` above pads an absent cell
+  // with `undefined` (LLP 0241 §alignment), and 0241 deliberately left the
   // null/undefined split between the two paths unsettled, so nothing may
   // branch on which one it got.
   //
   // A `where` naming a DECLARED-but-physically-absent column can't be
-  // handed to the source: this wrapper is the only layer that knows the
-  // column exists at all, and a parquet-backed source throws on a filter
-  // column it can't find. Strip the predicate (and the limit/offset that
+  // handed to the source either: this wrapper is the only layer that knows
+  // the column exists at all. Strip the predicate (and the limit/offset that
   // are only meaningful after it) and report `appliedWhere: false`; the
-  // engine then filters over the null-normalized values, where IS NULL
-  // and friends read the absent column correctly.
+  // engine then filters over the null stream, where IS NULL and friends
+  // read the absent column correctly.
   // @ref LLP 0055 [implements]: withSchemaColumns forwards scanColumn; a partition lacking the column yields nulls, never throws
   // @ref LLP 0098#wrapper-duties [implements]: a predicate naming a declared-but-absent column is stripped before it can reach a parquet filter
   if (typeof source.scanColumn === 'function') {
-    const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (source.scanColumn)
     wrapped.scanColumn = (options) => {
       const pushable = !options.where || canPushWhere(source, whereColumns(options.where))
       const subOptions = pushable ? options : { column: options.column, signal: options.signal }
-      const inner = normalizeScanColumn(scanColumn(subOptions), subOptions)
+      const inner = scanColumnOrNulls(source, subOptions)
       return {
         appliedWhere: pushable && inner.appliedWhere,
         appliedLimitOffset: pushable && inner.appliedLimitOffset,
-        async *chunks() {
-          for await (const chunk of inner.chunks()) {
-            for (let i = 0; i < chunk.length; i++) {
-              if (chunk[i] === undefined) /** @type {unknown[]} */ (chunk)[i] = null
-            }
-            yield chunk
-          }
-        },
+        chunks: inner.chunks,
       }
     }
   }
