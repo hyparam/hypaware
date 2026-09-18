@@ -716,7 +716,7 @@ async function resolveRecommendation({ ctx, gate, resolved, cmd }, id) {
     // same 404 an unknown id gets, and nothing in the response separates the
     // two, so both readings are named: the listing the id came from is what
     // tells them apart.
-    ctx.stderr.write(`hyp ${cmd}: no recommendation '${id}' in this org - list them with 'hyp report list'; if it is on that listing, '${resolved.target}' predates recommendation ids - is the server up to date?\n`)
+    ctx.stderr.write(`hyp ${cmd}: no recommendation '${id}' in this org - list them with 'hyp report list'; if it is on that listing, '${resolved.target}' cannot resolve recommendation ids - is the server up to date?\n`)
     return 1
   }
   if (outcome.response.status !== 200) {

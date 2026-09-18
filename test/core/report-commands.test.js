@@ -672,7 +672,7 @@ test('fix against a server predating the resolve route names the version skew, n
   const { deps, launches } = fixDeps()
   assert.equal(await runReportFix([REC], ctx, deps), 1)
   const message = err.join('')
-  assert.match(message, /predates recommendation ids/)
+  assert.match(message, /cannot resolve recommendation ids/)
   assert.match(message, /is the server up to date\?/)
   assert.equal(launches.length, 0)
 })
