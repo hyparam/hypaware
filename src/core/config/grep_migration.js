@@ -28,12 +28,12 @@ export async function loadClientConfigLayers({ configPath, centralConfigPath, mi
   })
   let layers = await read()
   if (!migrateGrep || !configPath || !needsGrep(layers)) return layers
-  // A local layer with no `plugins` array records no pick answer, and writing
-  // one would forge an answer nobody gave: onboarding would then open with every
-  // detected client unchecked, and status would call the machine a returning one.
-  // Search still works; it just costs the two list checks again next boot.
-  // @ref LLP 0277#answer-less [constrained-by]: the migration must not turn an answer-less config into a recorded pick answer
-  if (layers.local?.ok && !configRecordsPickAnswer(layers.local.config)) return withGrep(layers, configPath)
+  // Persisting here would forge a pick answer nobody gave: onboarding would
+  // then open with every detected client unchecked, and status would call the
+  // machine a returning one. Search still works; it just costs the two list
+  // checks again next boot.
+  // @ref LLP 0418#no-forged-answer [implements]: the compatibility entry stays in memory whenever writing it would record an answer
+  if (forgesPickAnswer(layers.local)) return withGrep(layers, configPath)
 
   try {
     return await withFileLock(`${configPath}.grep-migration.lock`, async () => {
@@ -44,35 +44,32 @@ export async function loadClientConfigLayers({ configPath, centralConfigPath, mi
       })
       layers = await read()
       if (!needsGrep(layers)) return layers
-      if (!stat && layers.local?.ok) {
+      // Re-checked under the lock: the local layer may have been removed or
+      // rewritten answer-less since the read above.
+      if (forgesPickAnswer(layers.local)) return withGrep(layers, configPath)
+      if (!stat) {
         throw Object.assign(new Error('config appeared during migration'), { code: 'CONCURRENT_EDIT' })
       }
       // A symlink may target a managed central slot. Preserve it and use the
       // compatibility entry in memory instead of replacing or following it.
-      if (stat?.isSymbolicLink() || (stat && !stat.isFile())) {
+      if (stat.isSymbolicLink() || !stat.isFile()) {
         throw Object.assign(new Error('config is not a regular file'), { code: 'CONFIG_NOT_REGULAR' })
       }
-      if (stat && centralConfigPath &&
+      if (centralConfigPath &&
           await fs.realpath(configPath) === await fs.realpath(centralConfigPath)) {
         throw Object.assign(new Error('config names the central layer'), { code: 'CONFIG_CENTRAL' })
       }
-      if (stat) await fs.access(configPath, fs.constants.W_OK)
+      await fs.access(configPath, fs.constants.W_OK)
       const upgraded = withGrep(layers, configPath)
       const guard = await prepareLocalConfigWrite({ targetPath: configPath, force: true })
       if (!guard.proceed) throw new Error('config backup refused')
       // Use the raw document so shape parsing cannot normalize unrelated
       // optional fields while adding the one entry.
-      const raw = stat ? JSON.parse(await fs.readFile(configPath, 'utf8')) : { version: 2 }
+      const raw = JSON.parse(await fs.readFile(configPath, 'utf8'))
       raw.plugins = [...(raw.plugins ?? []), { name: GREP }]
-      if (stat) {
-        await atomicWriteJson(configPath, raw, {
-          mode: stat.mode & 0o777, expectedMtimeMs: stat.mtimeMs,
-        })
-      } else {
-        // A central-only install needs a new additive local layer. Exclusive
-        // creation cannot overwrite a config written by init in the meantime.
-        await fs.writeFile(configPath, JSON.stringify(raw, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
-      }
+      await atomicWriteJson(configPath, raw, {
+        mode: stat.mode & 0o777, expectedMtimeMs: stat.mtimeMs,
+      })
       getLogger('config').info('config.grep_migration', {
         status: 'ok', migration_status: 'persisted', hyp_plugin: GREP, config_path: configPath,
         ...(guard.backupPath ? { backup_path: guard.backupPath } : {}),
@@ -90,6 +87,23 @@ export async function loadClientConfigLayers({ configPath, centralConfigPath, mi
       })
     return withGrep(layers, configPath)
   }
+}
+
+/**
+ * Whether persisting the compatibility entry would leave behind a local layer
+ * that records a pick answer the user never gave. Two shapes qualify: a local
+ * config with no `plugins` array, and no local config at all (the central-only
+ * lane, where the file the migration would create is `{ version, plugins }` and
+ * nothing else). Both seed onboarding from detection today, and a written
+ * `plugins` array is indistinguishable from a completed picker run.
+ *
+ * @ref LLP 0418#no-forged-answer [implements]: a missing local layer is answer-less in the same way an answer-less one is
+ * @ref LLP 0277#answer-less [constrained-by]: the `plugins` key is the pick-answer discriminator this predicate reuses
+ * @param {LoadConfigResult | null} local
+ * @returns {boolean}
+ */
+function forgesPickAnswer(local) {
+  return !local?.ok || !configRecordsPickAnswer(local.config)
 }
 
 /** @param {{ local: LoadConfigResult | null, central: LoadConfigResult | null }} layers */

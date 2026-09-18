@@ -7,6 +7,10 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { loadClientConfigLayers } from '../../src/core/config/grep_migration.js'
+import { runWizardPick } from '../../src/core/cli/wizard/pick.js'
+import { collectHypAwareStatus } from '../../src/core/daemon/status.js'
+import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
+import { buildPluginCatalog } from '../../src/core/plugin_catalog.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { configRecordsPickAnswer } from '../../src/core/config/schema.js'
 import { bootKernel, resolveLayeredConfigForDaemon } from '../../src/core/runtime/boot.js'
@@ -16,6 +20,31 @@ import { withFileLock } from '../../src/core/util/file_lock.js'
 /** @import { TestContext } from 'node:test' */
 
 const grep = { name: '@hypaware/grep' }
+
+/** The bundled catalog the picker renders its rows from. */
+async function realCatalog() {
+  const bundled = await discoverBundledPlugins()
+  return buildPluginCatalog([...bundled.loaded, ...bundled.excluded])
+}
+
+function makeBuf() {
+  return { write() { return true } }
+}
+
+/**
+ * Capture the question the picker asks and answer it with a fixed set of ids.
+ * @param {string[]} answer
+ */
+function capturingPrompt(answer) {
+  /** @type {{ question: any }} */
+  const state = { question: null }
+  /** @type {any} */
+  const prompt = async (/** @type {any} */ question) => {
+    state.question = question
+    return answer
+  }
+  return { prompt, state }
+}
 
 /** @param {TestContext} t */
 async function fixture(t) {
@@ -63,14 +92,53 @@ test('legacy client boot persists grep once, preserves config and exposes the MC
   assert.ok(response.result.tools.some((/** @type {any} */ tool) => tool.name === 'grep_search'))
 })
 
-test('central-only clients get an additive local entry; reload agrees and central bytes stay unchanged', async (t) => {
+// The local config this lane would have to create holds nothing but the
+// compatibility entry, and a `plugins` array is what every other reader takes
+// for a recorded pick answer, so the entry stays in memory here.
+// @ref LLP 0418#no-forged-answer [tests]: a central-only install gains search without gaining a local layer
+test('central-only clients get search in memory; reload agrees and no local config appears', async (t) => {
   const f = await fixture(t)
   await f.central({ version: 2, plugins: [] })
   const before = await fs.readFile(f.centralConfigPath, 'utf8')
   const resolved = await resolveLayeredConfigForDaemon(f)
   assert.deepEqual(resolved.effective?.plugins, [grep])
-  assert.deepEqual(JSON.parse(await fs.readFile(f.configPath, 'utf8')), { version: 2, plugins: [grep] })
+  await assert.rejects(fs.access(f.configPath), { code: 'ENOENT' }, 'no local layer is written')
   assert.equal(await fs.readFile(f.centralConfigPath, 'utf8'), before)
+})
+
+// The enrolled-but-never-picked window: the seed `hyp join` / an enrolling
+// `hyp remote login` writes names only the enrollment plugin, so the fleet has
+// not answered the pick question either, and nothing on the machine may claim
+// it did.
+// @ref LLP 0418#no-forged-answer [tests]: an enrolled machine that never picked still seeds onboarding from detection
+test('an enrolled machine that never picked keeps no pick answer and seeds init from detection', async (t) => {
+  const f = await fixture(t)
+  await f.central({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://example.invalid', identity: {} } } },
+  })
+
+  const resolved = await resolveLayeredConfigForDaemon(f)
+  assert.equal(resolved.effective?.plugins?.some((p) => p.name === grep.name), true, 'search is preserved')
+
+  const report = await collectHypAwareStatus({ env: f.env })
+  assert.equal(report.layered?.hasCentral, true, 'enrolled')
+  assert.equal(report.configRecordsAnswer, false, 'but nobody answered the pick question')
+
+  const catalog = await realCatalog()
+  const { prompt, state } = capturingPrompt(['claude', 'codex'])
+  const result = await runWizardPick(/** @type {any} */ ({
+    stdout: makeBuf(), stderr: makeBuf(), catalog, prompt,
+    env: { ...f.env, HOME: f.hypHome, HYP_NO_TUI: '1' },
+    detect: async () => new Set(['claude', 'codex']),
+    confirmOverwrite: async () => true,
+  }))
+  const checked = state.question.options
+    .filter((/** @type {any} */ o) => o.checked)
+    .map((/** @type {any} */ o) => o.value)
+  assert.deepEqual(checked.sort(), ['claude', 'codex'], 'detection seeds the first run')
+  assert.deepEqual([...result.sourcesPicked].sort(), ['claude', 'codex'])
 })
 
 test('existing enabled and disabled entries in either layer are untouched', async (t) => {
