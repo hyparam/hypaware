@@ -197,16 +197,18 @@ const TRIGGER_KEY = `trim(substr(trim(regexp_replace(regexp_replace(regexp_repla
  * What counts as a typed line at all: one line of request length. A
  * pasted block, a JSON or markdown fragment, or a quoted reply is not a
  * request the person makes again. Tested on the raw text, because the key
- * has already folded the newline and the leading bracket away.
+ * has already folded the newline and the leading bracket away, and on the
+ * trimmed text, because a pasted fragment arrives indented and an untrimmed
+ * opener guard reads a leading-space JSON line as a typed line.
  */
 const TYPED_LINE = [
   'length(content_text) between 12 and 160',
   "content_text not like '%\n%'",
-  "content_text not like '{%'",
-  "content_text not like '\"%'",
-  "content_text not like '#%'",
-  "content_text not like '>%'",
-  "content_text not like '[%'",
+  "trim(content_text) not like '{%'",
+  "trim(content_text) not like '\"%'",
+  "trim(content_text) not like '#%'",
+  "trim(content_text) not like '>%'",
+  "trim(content_text) not like '[%'",
 ].join(' and ')
 
 /**
@@ -307,7 +309,12 @@ export function evidenceSql(from) {
   const human = `role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and ${HUMAN_TURN}`
   return {
     record: `select count(*) as session_days, count(distinct session_id) as sessions from (select session_id, date from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2) s`,
-    lines: `select ${TRIGGER_KEY} as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 order by sessions desc limit ${CANDIDATES + 3}`,
+    // `line <> ''` because a typing with no letter or digit in it
+    // normalizes to nothing, and every such typing groups together: a row
+    // of dashes, an emoji, and a request written in a non-Latin script all
+    // land on the empty key, pooling unrelated sessions into one candidate
+    // that then outranks the real ones.
+    lines: `select ${TRIGGER_KEY} as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 and line <> '' order by sessions desc limit ${CANDIDATES + 3}`,
     // The one statement here with no `limit`, because the `group by` is its
     // ceiling and a `limit` would not be one (hypaware #1715): the engine
     // builds every group before it yields a row, so a `limit` bounds only

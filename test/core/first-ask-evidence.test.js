@@ -69,11 +69,56 @@ test('evidenceSql: the candidate key is normalized, and the two statements share
   assert.ok(trig.includes(`${key} as line`), 'the sessions are found by the same key the candidate was')
   assert.ok(trig.includes(`${key} in ('x')`), 'and looked up by it')
   assert.ok(!sql.lines.includes('substr(content_text, 1, 42)') && !trig.includes('substr(content_text, 1, 42)'), 'the raw prefix key is gone')
-  // The guards the key would erase are tested on the raw text, in both.
+  // The guards the key would erase are tested on the raw text, in both,
+  // and on the trimmed text: a pasted fragment arrives indented.
   for (const stmt of [sql.lines, trig]) {
     assert.ok(stmt.includes("content_text not like '%\n%'"), 'a pasted block is not a typed line')
-    for (const c of ['{', '"', '#', '>', '[']) assert.ok(stmt.includes(`content_text not like '${c}%'`), `a line opening with ${c} is a fragment, not a request`)
+    for (const c of ['{', '"', '#', '>', '[']) assert.ok(stmt.includes(`trim(content_text) not like '${c}%'`), `a line opening with ${c}, indented or not, is a fragment, not a request`)
   }
+  assert.ok(sql.lines.includes("and line <> ''"), 'a typing that normalizes to nothing is not a candidate')
+})
+
+test('a typing with no letters is not a candidate, and an indented fragment is not a typed line', async () => {
+  // @ref LLP 0398#one-signal [tests]: the key groups typings of one request, not every typing it erases
+  // Through the same engine the gather runs on. Both shapes reached a
+  // candidate once the guards moved into SQL: the opener guards stopped
+  // trimming, and every typing with no letter or digit in it (a rule of
+  // dashes, an emoji, a request in a non-Latin script) shares the empty
+  // key, so unrelated sessions pool into one candidate that outranks the
+  // real ones.
+  const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
+  const typings = [
+    'commit on the right branch and open a PR',
+    '  {"tool": "Bash", "input": "npm test"}',
+    '--------------------------------------',
+    'закоммить на нужную ветку и открыть пиар',
+  ]
+  /** @type {Record<string, SqlPrimitive>[]} */
+  const rows = []
+  typings.forEach((text, t) => {
+    for (const day of [10, 11, 12]) {
+      rows.push({ date: `2026-08-${day}`, session_id: `s${t}-${day}`, role: 'user', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: 'external', message_created_at: new Date(Date.UTC(2026, 7, day, t)), content_text: text })
+    }
+  })
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns,
+    numRows: rows.length,
+    scan(options) {
+      const rowColumns = options?.columns ?? columns
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *rows() {
+          for (const row of rows) yield asyncRow(row, rowColumns)
+        },
+      }
+    },
+  }
+  const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
+  const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
+  const result = await executeQuerySql({ query: evidenceSql('2026-08-08').lines, registry, storage })
+  assert.deepEqual(result.rows.map((r) => r.line), ['commit on the right branch and open'], 'the one request is the one candidate')
 })
 
 test('commandHeads: a cd prefix is dropped and the head is the verb plus its subcommand', () => {
