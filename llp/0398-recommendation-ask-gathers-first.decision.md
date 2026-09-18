@@ -81,6 +81,18 @@ reconstructed each time, and what a finished run reported. The skill's
 trigger is the line, its steps are the commands, and its report is the
 ending.
 
+Two typings are the same line when they agree after normalizing: case
+folded, a leading filler ("okay", "now", "please", "can you") dropped,
+punctuation and runs of whitespace folded to one space, then the first
+36 characters. A person does not retype a request verbatim. The exact
+42-character prefix this replaces split "commit on appropriate branch
+and make a PR" from "okay commit on appropriate branch and make a PR"
+into 4 sessions on 2 days and 3 on 2, each under the cut, on a machine
+where the normalized key reads 7 sessions on 3 days; the same machine's
+733 sessions went from two candidates, a resume and a check, to four.
+The key is the grouping, not the display: each candidate is headed by a
+typing as the person wrote it.
+
 A first version measured four signals (reopened sessions, a repeated
 line, a request that should go to a worker, a recurring mistake) and
 chose among them by a rule with floors. It was replaced for three
