@@ -3,6 +3,8 @@
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { cacheCleanupId, readCacheCleanup, CACHE_PURGE_GRACE_MS, isUncommittedCacheGeneration } from './purge-cleanup.js'
 
 import { parquetReadObjects } from 'hyparquet'
 import {
@@ -437,6 +439,9 @@ function generationLayout(cursor) {
 async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpiredCounter, compactionsCounter, rebaselinesCounter) {
   const layout = generationLayout(cursor)
   const liveDir = path.join(r.path, layout.liveDir)
+  const cleanup = await readCacheCleanup(opts.cacheRoot, cacheCleanupId(opts.cacheRoot, r.path))
+  // @ref LLP 0417#cache-reclamation [implements]: a durable purge outranks layout convergence
+  const purgeRewrite = cleanup?.generations.includes(layout.liveDir) ?? false
   // Not a bare return: a table whose metadata directory holds nothing but a
   // staged name is the one shape where `tableExists` answers no (a staging
   // name is not the `*.metadata.json` it looks for) AND there is still
@@ -504,7 +509,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
     // A due re-partition outranks the baseline gate and the recorded
     // verdict: both say "a rewrite would reproduce this layout", which is
     // exactly what the migration exists to change.
-    const compactionDue = opts.force || repartitionDue ||
+    const compactionDue = opts.force || purgeRewrite || repartitionDue ||
       ((grewSinceCompaction || verdictStale) && needsCompaction(liveDir, cfg, liveStats, layout.kind))
     // @ref LLP 0027#re-settle-sweep: a partition holding a committed
     // fallback row may carry a split twin pair the flush-time settle
@@ -567,7 +572,7 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
       // the sorted layout every night. An explicit --force still rewrites.
       // A due re-partition also outranks the recognition: a foreign sorted
       // replace under the OLD spec is still on the old spec.
-      if (!opts.force && !repartitionDue && foreignSortedReplace(tableInfo, cursor)) {
+      if (!opts.force && !purgeRewrite && !repartitionDue && foreignSortedReplace(tableInfo, cursor)) {
         // The counter proves a rebaseline happened at all, but it carries
         // only the dataset; tagging the enclosing maintenance.partition span
         // names the partition, so a trace query finds which day re-baselined
@@ -646,11 +651,31 @@ async function maintainGeneration(r, cursor, cfg, opts, settle, snapshotsExpired
             // A due re-partition must not merge in place: an in-place commit
             // keeps the table's recorded spec, which is the thing being
             // migrated away from (LLP 0311#migration).
-            if (!opts.force && !hasResettle && !repartitionDue && lockedLayout.kind === 'source-table') {
+            if (!opts.force && !purgeRewrite && !hasResettle && !repartitionDue && lockedLayout.kind === 'source-table') {
               const inPlace = await compactLiveFilesInPlace(r.path, lockedLiveDir, lockedCursor, cfg, settle)
               if (inPlace !== 'settle-required') return inPlace
             }
             const lockedTableInfo = await loadCompactionTableInfo(lockedLiveDir)
+            if (purgeRewrite) {
+              const latestCleanup = await readCacheCleanup(opts.cacheRoot, cacheCleanupId(opts.cacheRoot, r.path))
+              if (!latestCleanup?.generations.includes(lockedLayout.liveDir)) return null
+              if (!lockedTableInfo?.metadata) throw new Error('cache cleanup metadata unavailable')
+              assertUnpinnedCleanup(lockedTableInfo.metadata)
+              // A fresh source-table generation also handles an empty legacy
+              // epoch and retries without appending to a crashed partial output.
+              const nextName = `table-${Date.now()}-${randomUUID()}`
+              const cleanupLayout = { ...lockedLayout, commitEmpty: true, nextDirName: () => nextName,
+                cursorAfter: (nextDir, rows, outcome) => ({ ...lockedCursor,
+                  ...lockedLayout.cursorAfter(nextDir, rows, outcome), layout: /** @type {const} */ ('source-table'), tableDir: nextDir }) }
+              const rewritten = await compactGeneration(r.path, cleanupLayout, cfg, null, lockedTableInfo, undefined, false)
+              // Flush the atomic cursor publication before the old generation
+              // can become eligible for physical reclamation on a later tick.
+              const cursorFile = await fsPromises.open(path.join(r.path, 'cursor.json'), 'r')
+              try { await cursorFile.sync() } finally { await cursorFile.close() }
+              const directory = await fsPromises.open(r.path, 'r')
+              try { await directory.sync() } finally { await directory.close() }
+              return rewritten
+            }
             // Re-derive dueness from the metadata read under the lock, for
             // the same reason the cursor is re-read above: the pre-lock
             // check can be stale. `hyp query maintain` and the daemon tick
@@ -1226,9 +1251,10 @@ export function estimateRowBytes(row) {
  * @param {SettleContext | null} [settle]
  * @param {Awaited<ReturnType<typeof loadCompactionTableInfo>>} [tableInfo]  metadata bundle loaded by the caller; null falls back to schema inference
  * @param {ReturnType<typeof repartitionTargetLayout>} [targetLayout]  re-partition migration only: write the new generation under this layout instead of carrying the recorded one
+ * @param {boolean} [deduplicate] Purge rewrites preserve all surviving rows without a table-sized ID set.
  * @returns {Promise<{ newEpoch?: number, rowCount: number, dataFilesBefore: number, dataFiles: number, bytesWritten?: number } | null>}
  */
-async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, targetLayout) {
+async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, targetLayout, deduplicate = true) {
   const oldDir = path.join(partitionDir, layout.liveDir)
   if (!tableExists(oldDir)) return null
 
@@ -1298,8 +1324,8 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
   // the new generation.
   const emit = async (/** @type {Record<string, unknown>} */ row) => {
     const rowId = row._hyp_cache_row_id
-    if (typeof rowId === 'string' && seen.has(rowId)) return false
-    if (typeof rowId === 'string') seen.add(rowId)
+    if (deduplicate && typeof rowId === 'string' && seen.has(rowId)) return false
+    if (deduplicate && typeof rowId === 'string') seen.add(rowId)
     if (emittedPartIds) {
       const key = rowPartId(row)
       if (key !== undefined) emittedPartIds.add(key)
@@ -1421,6 +1447,12 @@ async function compactGeneration(partitionDir, layout, cfg, settle, tableInfo, t
     dataFiles: newDataFiles,
     bytesWritten: streamed?.bytesWritten ?? 0,
   }
+}
+
+/** @param {TableMetadata} metadata */
+function assertUnpinnedCleanup(metadata) {
+  if (Object.keys(metadata.refs ?? {}).some(name => name !== 'main')) throw new Error('cache cleanup blocked by snapshot references')
+  if (metadata.statistics?.length || metadata['partition-statistics']?.length) throw new Error('cache cleanup blocked by statistics sidefiles')
 }
 
 /* ----- In-place subset compaction (LLP 0310) -----
@@ -2596,7 +2628,7 @@ async function cleanRetiredEpochs(cacheRoot) {
   } catch {
     return
   }
-  await walkForRetired(root)
+  await walkForRetired(root, cacheRoot)
 }
 
 /**
@@ -2618,8 +2650,9 @@ async function cleanRetiredEpochs(cacheRoot) {
  * compaction's freshly created (not-yet-committed) dir safe.
  *
  * @param {string} dir
+ * @param {string} cacheRoot
  */
-async function walkForRetired(dir) {
+async function walkForRetired(dir, cacheRoot) {
   /** @type {Dirent[]} */
   let entries
   try {
@@ -2633,6 +2666,11 @@ async function walkForRetired(dir) {
   // real one. The orphan branch below only runs when liveDirName is known.
   const cursor = tryReadCursorSync(dir)
   const liveDirName = cursor ? liveGenerationDir(cursor) : null
+  // A corrupt journal fails this partition closed without stopping siblings.
+  let cleanup
+  if (path.resolve(dir) !== path.resolve(datasetsRoot(cacheRoot))) {
+    try { cleanup = await readCacheCleanup(cacheRoot, cacheCleanupId(cacheRoot, dir)) } catch { return }
+  }
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
@@ -2641,6 +2679,32 @@ async function walkForRetired(dir) {
       if (entry.name === liveDirName) continue
 
       const retiredMarker = path.join(full, '.retired')
+      if (cleanup?.generations.includes(entry.name)) {
+        // Purge retirement never falls through to the shorter orphan grace.
+        // Missing/corrupt cursors, pins and unreadable metadata block removal.
+        if (!liveDirName || Date.now() - cleanup.requestedAt < CACHE_PURGE_GRACE_MS) continue
+        try {
+          await withPartitionMutationLock(dir, async () => {
+            const latestCursor = tryReadCursorSync(dir)
+            const latestJob = await readCacheCleanup(cacheRoot, cacheCleanupId(cacheRoot, dir))
+            if (!latestCursor || liveGenerationDir(latestCursor) === entry.name || !latestJob ||
+              Date.now() - latestJob.requestedAt < CACHE_PURGE_GRACE_MS) return
+            let retiredAt
+            try { retiredAt = Date.parse(await fsPromises.readFile(retiredMarker, 'utf8')) } catch (error) {
+              if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error
+              retiredAt = (await fsPromises.stat(full)).mtimeMs
+            }
+            if (!Number.isFinite(retiredAt) || Date.now() - retiredAt < CACHE_PURGE_GRACE_MS) return
+            if (!await isUncommittedCacheGeneration(full)) {
+              const { resolver, lister } = await createLocalIcebergIO()
+              const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(full), resolver, lister })
+              assertUnpinnedCleanup(metadata)
+            }
+            await fsPromises.rm(full, { recursive: true, force: true })
+          })
+        } catch { /* Retain the journal and directory for the next tick. */ }
+        continue
+      }
       let removed = false
       try {
         const content = await fsPromises.readFile(retiredMarker, 'utf8')
@@ -2666,7 +2730,7 @@ async function walkForRetired(dir) {
         }
       }
     } else {
-      await walkForRetired(full)
+      await walkForRetired(full, cacheRoot)
     }
   }
 }

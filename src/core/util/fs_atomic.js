@@ -45,7 +45,9 @@ function tmpPathFor(filePath) {
  * over the target. Parent directories are created on demand unless
  * `mkdir: false` is passed (hot callers whose directory is already
  * guaranteed to exist skip the per-write `mkdir` syscall). The temp
- * file is removed on failure.
+ * file is removed on failure. With fsync, sync the file before rename and
+ * the containing directory and ancestors after publication. Ancestors are
+ * included on retries too: an earlier failed attempt may have created them.
  *
  * @param {string} filePath
  * @param {string | Uint8Array} data
@@ -99,6 +101,17 @@ export async function atomicWriteFile(filePath, data, options = {}) {
     }
     await fs.rename(tmpPath, filePath)
     renamed = true
+    if (fsync) {
+      // @ref LLP 0417#cache-reclamation [implements]: journal admission must survive before delete commits
+      let directory = path.resolve(path.dirname(filePath))
+      for (;;) {
+        const handle = await fs.open(directory, 'r')
+        try { await handle.sync() } finally { await handle.close() }
+        const parent = path.dirname(directory)
+        if (parent === directory) break
+        directory = parent
+      }
+    }
   } finally {
     if (!renamed) {
       try {

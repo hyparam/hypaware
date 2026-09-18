@@ -766,7 +766,9 @@ test('destructive commands keep their exact warnings', async () => {
 
   const purge = await run(['privacy', 'purge', '--help'])
   assert.equal(purge.code, 0)
-  assert.ok(purge.out.includes("Permanently deletes recorded rows from THIS machine's local cache."))
+  assert.ok(purge.out.includes("Position-deletes recorded rows from this machine's local cache."))
+  assert.ok(purge.out.includes('Remote deletion requires the session owner or an organization admin.'))
+  assert.ok(purge.out.includes('Physical files remain until compaction; copies in derived reports are not covered.'))
   assert.ok(purge.out.includes('Prompts on a TTY; pass --yes to delete non-interactively.'))
 
   const reportDelete = await run(['report', 'delete', '--help'])

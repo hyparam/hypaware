@@ -1,11 +1,14 @@
 // @ts-check
 
 import path from 'node:path'
+import fs from 'node:fs/promises'
 
 import { scopeGovernance } from '../usage-policy/matcher.js'
-import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
-import { deleteMatchingRows, scanRowsFromTable, tableExists } from './iceberg/store.js'
+import { discoverCachePartitions, readCursorSync, writeCursor, withPartitionMutationLock } from './partition.js'
+import { deleteMatchingRows, scanRowsFromTable } from './iceberg/store.js'
 import { resolveIcebergDir } from './storage.js'
+import { queueCacheCleanup, isUncommittedCacheGeneration } from './purge-cleanup.js'
+import { sessionGraphNodeId } from './session-purges.js'
 
 /**
  * @import { PurgeSummary, PurgeTarget } from '../../../src/core/cache/types.js'
@@ -14,8 +17,8 @@ import { resolveIcebergDir } from './storage.js'
 /**
  * Delete already-cached rows from the local query cache, cache-only: purge
  * never contacts a sink or the remote and never deletes exported copies
- * (LLP 0104 boundary, server-side deletion is out of scope, LLP 0069
- * §non-goals). The deletion mechanism is Iceberg position-deletes
+ * (LLP 0104's local primitive; LLP 0417 orchestrates server deletion
+ * separately). The deletion mechanism is Iceberg position-deletes
  * ({@link deleteMatchingRows}), which preserve surviving rows' `part_id`
  * identity and every sink's `_hyp_ingest_seq` watermark (see that function).
  *
@@ -44,14 +47,14 @@ import { resolveIcebergDir } from './storage.js'
  * actually gave (LLP 0104 §spellings).
  *
  * @ref LLP 0104 [implements]: the destructive verb's cache-only row removal, keyed off targets not marking events
- * @param {{ cacheRoot: string, target: PurgeTarget, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
+ * @param {{ cacheRoot: string, target: PurgeTarget, onCleanupQueued?: (id: string) => Promise<void>, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
  *   `deps` injects the filesystem seam the subtree spelling predicate consults.
  *   No production caller passes it; it exists because whether two spellings of
  *   one name are one directory is a property of the *volume*, and a test host
  *   has only the one it is running on.
  * @returns {Promise<PurgeSummary>}
  */
-export async function purgeCache({ cacheRoot, target, deps }) {
+export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
   /** @type {Set<string>} */
   const purgedCwds = new Set()
   /** @type {{ rows: number, cwds: Set<string> }} */
@@ -61,20 +64,54 @@ export async function purgeCache({ cacheRoot, target, deps }) {
   const partitions = await discoverCachePartitions(cacheRoot)
   let rowsDeleted = 0
   let partitionsAffected = 0
+  const cacheCleanup = new Set()
 
   for (const part of partitions) {
-    const tableDir = resolveIcebergDir(part.path)
-    if (!tableExists(tableDir)) continue
-    const result = await deleteMatchingRows(tableDir, predicate, { columns })
-    if (result.rowsDeleted === 0) continue
-    rowsDeleted += result.rowsDeleted
-    partitionsAffected++
-    await refreshCursorRowCount(part.path, tableDir)
+    await withPartitionMutationLock(part.path, async () => {
+      const tableDir = resolveIcebergDir(part.path)
+      // Retired epochs can still be read by a reader holding an older
+      // generation. Session purges cover them under the partition lock too.
+      // Physical files and historical snapshots require separate reclamation.
+      const tables = new Set([tableDir])
+      if (target.kind === 'session') {
+        for (const entry of await fs.readdir(part.path, { withFileTypes: true })) {
+          if (entry.isDirectory() && /^(?:epoch=\d+|table(?:-[a-zA-Z0-9-]+)?)$/.test(entry.name)) tables.add(path.join(part.path, entry.name))
+        }
+      }
+      let queued = false
+      const beforeDelete = target.kind === 'session' ? async () => {
+        if (queued) return
+        const id = await queueCacheCleanup(cacheRoot, part.path)
+        cacheCleanup.add(id)
+        await onCleanupQueued?.(id)
+        queued = true
+      } : undefined
+      let affected = false
+      for (const current of tables) {
+        if (current !== tableDir && await isUncommittedCacheGeneration(current)) continue
+        let names
+        try { names = await fs.readdir(path.join(current, 'metadata')) } catch (error) {
+          if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' && current === tableDir && part.rowCount === 0) continue
+          throw error
+        }
+        if (!names.some(name => name.endsWith('.metadata.json'))) {
+          if (current !== tableDir || part.rowCount > 0) throw new Error('Purge found a published generation without table metadata')
+          continue
+        }
+        const result = await deleteMatchingRows(current, predicate, { columns, beforeDelete })
+        if (result.rowsDeleted === 0) continue
+        rowsDeleted += result.rowsDeleted
+        affected = true
+        if (current === tableDir) await refreshCursorRowCount(part.path, tableDir)
+      }
+      if (affected) partitionsAffected++
+    })
   }
 
   return {
     rowsDeleted,
     partitionsAffected,
+    ...(target.kind === 'session' ? { cacheCleanup: [...cacheCleanup] } : {}),
     purgedCwds: [...purgedCwds],
     retainedAliasRows: retainedAliases.rows,
     retainedAliasCwds: [...retainedAliases.cwds],
@@ -148,10 +185,12 @@ function buildPredicate(target, purgedCwds, retainedAliases, deps) {
       }
     }
     case 'session': {
+      const nodeId = sessionGraphNodeId(target.id)
       return {
-        columns: ['session_id', 'cwd'],
+        columns: ['session_id', 'cwd', 'org', 'node_id', 'src_id', 'dst_id'],
         predicate: (row) => {
-          if (row.session_id == null || String(row.session_id) !== target.id) return false
+          if (row.session_id !== target.id && row.node_id !== nodeId && row.src_id !== nodeId && row.dst_id !== nodeId) return false
+          if (target.org !== undefined && (row.org ?? '') !== target.org) return false
           noteCwd(row)
           return true
         },
