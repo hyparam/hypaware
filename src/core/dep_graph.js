@@ -75,6 +75,15 @@ export async function resolveDependencies(manifests, opts = {}) {
         if (eliminated.has(m.name)) continue
         const provides = m.provides?.capabilities ?? {}
         for (const [capName, version] of Object.entries(provides)) {
+          // The manifest validator constrains `provides.capabilities` to a map
+          // of strings but not to non-empty ones, so a manifest it accepts can
+          // carry a pair `provide` refuses (issue #1559). `bootKernel` does not
+          // catch a throw from here, so that refusal would cost the whole boot
+          // rather than the plugin that wrote the declaration. A declaration
+          // naming no capability provides nothing to arbitrate over, so it is
+          // skipped: registering it made two plugins that each declared `''`
+          // clash with each other over the empty name.
+          if (capName === '' || version === '') continue
           registry.provide(m.name, capName, version, null)
         }
       }
