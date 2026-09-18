@@ -10,7 +10,7 @@
 un-projected bodies rather than cached rows; the target shapes, the
 confirmation gate, and the cache-only stance here are unchanged),
 [LLP 0417](./0417-session-purge-across-storage.spec.md) (session targets gain
-persistent replay exclusion and an explicit remote position-delete option)
+persistent replay exclusion and configured-remote position deletes by default)
 
 > Retroactive deletion arrives as its own destructive verb. `hyp purge`
 > removes already-cached rows by subtree, by session, by resolved-`ignore`

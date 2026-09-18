@@ -293,7 +293,9 @@ tests can correlate ingested rows with the run that produced them.
 
 ### POST `/v1/sessions/purge`
 
-Invoked by `hyp privacy purge --session ID --remote NAME`. Bearer credentials
+Invoked by `hyp privacy purge --session ID` for configured, signed-in, and
+enrolled servers by default. `--remote NAME` limits remote scope;
+`--local-only` opts out. Bearer credentials
 must belong to a live human refresh session with `report-publish` write
 scope. Upload gateway and standalone read credentials are refused. The
 server derives the organization from the credential and permits verified

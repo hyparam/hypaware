@@ -20,8 +20,12 @@ non-destructive operation. Existing directory and whole-cache purge targets
 must not silently acquire remote deletion behavior.
 
 The server implementation lives in the sibling `hypaware-server` repository.
-The command explicitly selects a configured remote with `--remote NAME` and
-uses its human login to call `POST /v1/sessions/purge`.
+Session purges include all configured remotes, signed-in built-in remotes,
+and enrolled central servers by default, using human login credentials to
+call `POST /v1/sessions/purge`. A shipped but unused built-in alone is not a
+configured destination. `--remote NAME` narrows remote scope to one server;
+`--local-only` explicitly opts out of remote purging. These flags are mutually
+exclusive and only apply to session targets.
 
 ## Previous behavior and gaps {#baseline}
 
@@ -74,7 +78,11 @@ The command must name the exact session and disclose local and remote scope
 before destructive confirmation. Reuse existing remote configuration and
 human login credentials. Do not invent a second server URL or credential
 setting. An offline client or an older server without the endpoint must not
-report remote completion.
+report remote completion. Missing credentials also count as incomplete,
+including an enrolled upload server without a matching human remote login.
+Attempt every selected remote even if an earlier one fails, return nonzero
+if any fails, and include a per-target result in JSON output. Remote calls
+run sequentially to bound in-flight requests and memory.
 
 Before deleting content, durably record the exclusion necessary to stop
 capture, replay, and re-upload. Reuse the local exclusion mechanism where it

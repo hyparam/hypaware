@@ -152,3 +152,80 @@ test('position deletes span commit batches and remain idempotent without hiding 
   assert.deepEqual(surviving, ['0', '6001'])
   assert.equal((await deleteMatchingRows(iceberg, predicate, { columns: ['session_id'] })).rowsDeleted, 0)
 })
+
+
+test('session purge automatically attempts every configured remote despite an earlier failure', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-default-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { ctx, output } = fixture(root)
+  ctx.config = /** @type {any} */ ({ query: { remotes: {
+    first: { url: 'https://first.test' }, second: { url: 'https://second.test' },
+  } } })
+  ctx.env.HYP_REMOTE_TOKEN_FIRST = 'test-token'
+  ctx.env.HYP_REMOTE_TOKEN_SECOND = 'test-token'
+  const calls = []
+  const oldFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = oldFetch })
+  globalThis.fetch = async url => {
+    calls.push(String(url))
+    return String(url).includes('first.test') ? new Response(null, { status: 503 }) :
+      Response.json({ status: 'completed', session_id: 'delete' })
+  }
+  assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], ctx), 1)
+  assert.deepEqual(calls, ['https://first.test/v1/sessions/purge', 'https://second.test/v1/sessions/purge'])
+  const receipt = JSON.parse(output())
+  assert.equal(receipt.remotes.first.status, 'incomplete')
+  assert.equal(receipt.remotes.second.status, 'completed')
+})
+
+test('local-only explicitly skips remotes and incompatible scope flags fail before purging', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-local-only-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { ctx } = fixture(root)
+  ctx.config = /** @type {any} */ ({ query: { remotes: { dev: { url: 'https://example.test' } } } })
+  const oldFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = oldFetch })
+  globalThis.fetch = async () => { assert.fail('local-only contacted a remote') }
+  assert.equal(await runPurge(['--session', 'delete', '--local-only', '--yes'], ctx), 0)
+  assert.equal(await runPurge(['--session', 'delete', '--local-only', '--remote', 'dev', '--yes'], ctx), 2)
+  assert.equal(await runPurge(['--all', '--local-only', '--yes'], ctx), 2)
+  assert.equal(await runPurge(['--all', '--yes'], ctx), 0)
+})
+
+test('an enrolled server without human credentials is incomplete, while explicit remote narrows scope', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-enrolled-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { ctx, output } = fixture(root)
+  ctx.config = /** @type {any} */ ({ sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://enrolled.test' } } } })
+  assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], ctx), 1)
+  assert.equal(JSON.parse(output()).remotes['sink:central'].status, 'incomplete')
+  ctx.config.query = { remotes: { dev: { url: 'https://example.test' } } }
+  ctx.env.HYP_REMOTE_TOKEN_DEV = 'test-token'
+  const oldFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = oldFetch })
+  let calls = 0
+  globalThis.fetch = async url => {
+    assert.equal(String(url), 'https://example.test/v1/sessions/purge')
+    calls++
+    return Response.json({ status: 'completed', session_id: 'delete' })
+  }
+  assert.equal(await runPurge(['--session', 'delete', '--remote', 'dev', '--yes'], ctx), 0)
+  assert.equal(calls, 1)
+})
+
+test('a signed-in built-in remote is included without adding it to config', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-builtin-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { ctx } = fixture(root)
+  ctx.env.HYP_REMOTE_TOKEN_HYPERPARAM = 'test-token'
+  const oldFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = oldFetch })
+  let calls = 0
+  globalThis.fetch = async url => {
+    assert.equal(String(url), 'https://hypaware.hyperparam.app/v1/sessions/purge')
+    calls++
+    return Response.json({ status: 'completed', session_id: 'delete' })
+  }
+  assert.equal(await runPurge(['--session', 'delete', '--yes'], ctx), 0)
+  assert.equal(calls, 1)
+})
