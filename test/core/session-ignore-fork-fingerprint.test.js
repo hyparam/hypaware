@@ -120,10 +120,15 @@ test('a fingerprint holds uuids only, bounded in count', () => {
     assert.equal(stored.length, FORK_FINGERPRINT_UUIDS)
     assert.deepEqual(stored, many.slice(0, FORK_FINGERPRINT_UUIDS))
 
-    // Anything that is not a bare token - a prompt, a path, whitespace - is
-    // dropped rather than written into the privacy store.
+    // Anything that is not a uuid - a prompt, a path, a short or structured
+    // token - is dropped rather than written into the privacy store. The last
+    // two matter beyond hygiene: a value that is not 122 bits of randomness
+    // would match every stored fingerprint at once, and the any-match rule
+    // reads a shared value as proof of a copied conversation.
     assert.equal(
-      writeSessionForkFingerprint(root, 'session-B', ['write me a poem about ducks', '', 'x']),
+      writeSessionForkFingerprint(root, 'session-B', [
+        'write me a poem about ducks', '', 'x', 'msg_01ABCDEFGH', 'session-start', '/Users/me/repo',
+      ]),
       false
     )
     assert.equal(fs.existsSync(path.join(root, 'session-ignores', fingerprintNameFor('session-B'))), false)

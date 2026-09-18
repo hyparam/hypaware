@@ -2188,9 +2188,13 @@ against a new Claude Code major, alongside `claude_otel_shape_check`.
     one prompt, and confirm `hyp session status` reports it NOT ignored and
     that its rows are being written. A guard that ignores sessions nobody
     opted out of destroys capture silently.
-12. `hyp session unignore $A`. Confirm both the marker and the
-    `.fingerprint.json` are gone, and that a fresh fork of `$A` is recorded
-    again.
+12. `hyp session unignore $A`, then `$B`, then `$C`. Every fork in a chain
+    carries the same leading uuids, so each auto-ignored fork has a
+    fingerprint of its own: unignoring only `$A` leaves `$B`'s fingerprint
+    still matching `$A`, and the guard re-adds `$A` on its next prompt. That
+    is a known limit (LLP 0419 #scope), not a failure of this run. Confirm
+    `session-ignores/` is then empty of both file kinds, and that a fresh fork
+    of `$A` is recorded again.
 
 **Pass condition:** steps 4 and 7 show shared uuids, steps 6 and 10 report
 `ignored: true`, steps 8 and 9 report 0 rows, step 11 records normally, and

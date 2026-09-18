@@ -13,7 +13,10 @@ import {
 import { readRolloutSessionMeta } from '../../../../src/core/codex/rollout_session_meta.js'
 import { configuredGatewayEndpoint } from '../../../../src/core/config/gateway_endpoint.js'
 import { SESSION_IGNORE_ROUTE } from '../../../../src/core/control/session_ignore.js'
-import { writeSessionForkFingerprint } from '../../../../src/core/control/session_ignore_store.js'
+import {
+  hasSessionIgnoreMarker,
+  writeSessionForkFingerprint,
+} from '../../../../src/core/control/session_ignore_store.js'
 import {
   resolveLiveControlRouteEndpointsFromStatus,
   resolveLiveGatewayEndpointFromStatus,
@@ -542,6 +545,13 @@ async function runMutation(argv, ctx, method, usage) {
  * A failure to store is never a failure to ignore: the marker is already
  * written and the exclusion stands.
  *
+ * A confirmed 200 is not on its own proof that a DURABLE exclusion exists:
+ * not every recorder that offers the control route persists one (the Cursor
+ * and OpenCode listeners hold theirs in a process-lifetime Set). A
+ * fingerprint with no marker beside it would be an exclusion nothing can
+ * remove and a fork guard that re-runs the opt-out on every prompt without
+ * ever settling, so the marker is what arms this, not the reply.
+ *
  * @ref LLP 0419#fingerprint [implements]: fingerprint at ignore time, from the
  * transcript path the session-context channel already records
  * @param {CommandRunContext} ctx
@@ -551,6 +561,7 @@ async function runMutation(argv, ctx, method, usage) {
 function recordForkFingerprint(ctx, sessionId) {
   try {
     const stateRoot = readObservabilityEnv(ctx.env).stateDir
+    if (!hasSessionIgnoreMarker(stateRoot, sessionId)) return false
     const transcript = claudeTranscriptPathForSession(stateRoot, sessionId)
     if (!transcript) return false
     return writeSessionForkFingerprint(stateRoot, sessionId, readTranscriptHeadUuids(transcript))

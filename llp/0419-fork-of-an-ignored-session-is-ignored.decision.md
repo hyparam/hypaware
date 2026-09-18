@@ -70,8 +70,16 @@ Consequences of the sibling shape, all deliberate:
   happens wherever the removal happens and not only on the CLI path.
 
 A fingerprint is line uuids. Nothing in this design stores, logs, or emits
-conversation text, and a value that is not a bare token is dropped rather than
-written.
+conversation text, and a value that is not a canonical uuid is dropped rather
+than written. That bound is the next section's premise rather than hygiene: a
+short or constant token in this set would match every stored fingerprint at
+once.
+
+A fingerprint is written only once the id marker is on disk. A confirmed 200 is
+not proof of a durable exclusion, because not every recorder that offers the
+control route persists one (the Cursor and OpenCode listeners hold theirs in a
+process-lifetime `Set`), and a fingerprint with no marker beside it would be an
+exclusion nothing can remove.
 
 ## Any one uuid, not all of them {#any-match}
 
@@ -152,6 +160,18 @@ ignore: the marker is already written and the exclusion stands.
   single-file today, and its match key has a container-versus-thread grain that
   no fixture on this machine can settle. It is deliberately left to its own
   change rather than landed unproven, and remains open.
+- **Unignoring one member of a fork family does not release the others.** Each
+  auto-ignored fork is given a fingerprint of its own on the way through, and
+  every fingerprint in a chain holds the same leading uuids. `unignore` removes
+  the pair belonging to the id it is given, so a sibling's surviving
+  fingerprint still matches and the guard re-adds the id on its next prompt.
+  Releasing a forked conversation therefore means unignoring every id in it,
+  and the verb does not yet name which those are. The direction is closed, not
+  open: the residue is over-exclusion, never a recorded conversation the user
+  opted out of. What `unignore` should mean for a conversation filed under
+  several ids is a question LLP 0403 did not settle either, and it is left to
+  its own change rather than decided in passing here.
+
 - **Other clients are unchanged.** OpenCode, Cursor and OpenClaw forks, where
   they exist, are outside this document.
 
@@ -170,9 +190,10 @@ anything of the fork is recorded.
 
 Real-client behavior is an acceptance concern: only a real
 `claude --fork-session` can establish that the copy still carries the parent's
-uuids and that the installed hook still receives `source: "fork"`. The
-`claude_otel_shape_check` procedure is the existing release gate against that
-kind of upstream drift.
+uuids and that the installed hook still receives `source: "fork"`. Both are
+written up as `claude_fork_session_optout` in `docs/ACCEPTANCE.md`, beside
+`claude_otel_shape_check`, which is the existing gate against the same kind of
+upstream drift on the same client.
 
 **CPU and memory.** Live capture is untouched: the drop is still an O(1) `Set`
 lookup over id markers, and a fingerprint never enters that set. The write side

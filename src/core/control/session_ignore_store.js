@@ -38,12 +38,19 @@ const FINGERPRINT_FILE = /^[a-f0-9]{64}\.fingerprint\.json$/
 const TMP_FILE = /^[a-f0-9]{64}(?:\.fingerprint)?\.json\.\d+\.[a-f0-9]+\.tmp$/
 
 /**
- * What may appear inside a fingerprint. Transcript uuids are v4 hex with
- * dashes; the bound is deliberately narrow so nothing resembling conversation
- * text can be written into the privacy store by a client whose transcript
- * format drifted. A line whose `uuid` fails this is simply not fingerprinted.
+ * What may appear inside a fingerprint: a canonical uuid, and nothing else.
+ *
+ * The bound is the any-match rule's premise, not a formatting taste. A shared
+ * value is read as proof of a copied conversation ONLY because the value is
+ * random; a short or constant token reaching this set would match every stored
+ * fingerprint at once and silently ignore every session on the machine, which
+ * is the one failure worse than the bug this closes. Any version digit is
+ * accepted, so a client that moves from v4 to v7 keeps its protection, and a
+ * `uuid` field that is not a uuid at all is simply not fingerprinted.
+ * @ref LLP 0419#any-match [constrained-by]: one shared value is not a
+ * coincidence only while the values are random
  */
-const FINGERPRINT_TOKEN = /^[A-Za-z0-9._:-]{8,128}$/
+const FINGERPRINT_TOKEN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
 // @ref LLP 0403#storage [implements]: independent markers persist opt-outs;
 // live membership checks remain ordinary Set lookups.
@@ -328,7 +335,12 @@ export function sessionForkFingerprintMatches(stateDir, uuids) {
     let stat
     try { stat = fs.lstatSync(file) } catch { return undefined }
     if (!stat.isFile() || stat.size > 64 * 1024) return undefined
-    const stored = parseFingerprint(fs.readFileSync(file, 'utf8'))
+    // A read error is per file, not per walk: another process removing an
+    // exclusion between this readdir and this read must not cost every
+    // fingerprint after it in the directory its turn to match.
+    let raw
+    try { raw = fs.readFileSync(file, 'utf8') } catch { return undefined }
+    const stored = parseFingerprint(raw)
     if (!stored) return undefined
     for (const value of stored) if (wanted.has(value)) return true
     return undefined

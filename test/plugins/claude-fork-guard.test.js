@@ -197,6 +197,27 @@ test('the ignore receipt says whether fork protection was armed', async () => {
   } finally { cleanup(env) }
 })
 
+test('a recorder that persists nothing arms nothing, and the receipt says so', async () => {
+  const env = stage()
+  try {
+    // The Cursor and OpenCode listeners answer this route over a plain Set, so
+    // `ignored: true` can come back with no marker on disk. A fingerprint
+    // written against that would be an exclusion nothing can remove, and the
+    // fork guard - which asks for the marker, not the reply - would re-spawn
+    // the opt-out on every prompt of that session without ever settling.
+    await withRecorder(env, async (harness) => {
+      writeTranscript(env, 'A', headOf('A'))
+      recordSessionContext(env, 'A')
+      assert.equal(await runSessionIgnore(['session-A', '--json'], harness.cliCtx), 0)
+      assert.equal(JSON.parse(harness.cliOut()).fork_protection, 'unconfirmed')
+      const stored = fs.existsSync(path.join(env.stateRoot, 'session-ignores'))
+        ? fs.readdirSync(path.join(env.stateRoot, 'session-ignores'))
+        : []
+      assert.deepEqual(stored, [], 'no marker, no fingerprint')
+    }, { durable: false })
+  } finally { cleanup(env) }
+})
+
 /* ------------------------------------------------------------------ */
 /* harness                                                             */
 /* ------------------------------------------------------------------ */
@@ -274,6 +295,10 @@ function recordSessionContext(env, tag) {
  * A live recorder: the shared control route over a real persistent store, plus
  * a CLI context pointed at it the way the gateway's pinned `listen` does.
  *
+ * `durable: false` is the other shape the route is served in: the Cursor and
+ * OpenCode listeners hold their drop set in a process-lifetime `Set`, so a
+ * confirmed 200 from one of those writes no marker to disk.
+ *
  * @param {ReturnType<typeof stage>} env
  * @param {(harness: {
  *   store: SessionIgnoreSet,
@@ -282,9 +307,12 @@ function recordSessionContext(env, tag) {
  *   resetCli: () => void,
  *   calls: string[],
  * }) => Promise<void>} fn
+ * @param {{ durable?: boolean }} [opts]
  */
-async function withRecorder(env, fn) {
-  const store = new SessionIgnoreSet(env.stateRoot)
+async function withRecorder(env, fn, opts = {}) {
+  const store = opts.durable === false
+    ? /** @type {any} */ (new Set())
+    : new SessionIgnoreSet(env.stateRoot)
   const handler = createControlHandler({ ignoredSessions: store })
   const server = http.createServer((req, res) => {
     handler(

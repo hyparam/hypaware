@@ -309,7 +309,10 @@ async function ignoreSessionViaCli(sessionId, ctx) {
   }
   await execFileAsync(
     process.execPath,
-    [entrypoint, 'session', 'ignore', sessionId, '--json'],
+    // `--json` first, then `--`: the id is client-supplied and an id opening
+    // with a dash would otherwise be read as an unknown flag and refused on
+    // every prompt for the life of the session.
+    [entrypoint, 'session', 'ignore', '--json', '--', sessionId],
     { env: ctx.env, timeout: FORK_IGNORE_TIMEOUT_MS, maxBuffer: 256 * 1024 }
   )
 }
