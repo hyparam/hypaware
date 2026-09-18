@@ -69,11 +69,15 @@ test('capabilitiesFromMetadata drops empty capability names and empty versions',
 
 test('a neighbour keeps its well-formed capabilities when one entry is malformed', () => {
   const catalog = buildPluginCatalog([
-    loaded('@test/mixed', { 'cap.kept': '2.0.0', '': '9.9.9', 'cap.dropped': '' }),
+    loaded('@test/mixed', { 'cap.kept': '2.0.0', '': '9.9.9', 'cap.dropped': '', 'cap.also-kept': '3.1.0' }),
+    loaded('@test/second-provider', { 'cap.kept': '2.5.0' }),
   ])
 
   const caps = capabilitiesFromMetadata(catalog.pluginMetadata)
 
-  assert.deepEqual([...caps.keys()], ['cap.kept'])
-  assert.deepEqual(caps.get('cap.kept'), ['2.0.0'])
+  // Every survivor, not just the first: a filter that stopped at one entry
+  // leaves 'cap.also-kept' unresolvable and hides the second provider's version.
+  assert.deepEqual([...caps.keys()], ['cap.kept', 'cap.also-kept'])
+  assert.deepEqual(caps.get('cap.kept'), ['2.0.0', '2.5.0'])
+  assert.deepEqual(caps.get('cap.also-kept'), ['3.1.0'])
 })
