@@ -92,3 +92,28 @@ export async function cachePurgeCleanupStatus(cacheRoot, id) {
   return { job_id: id, scope: 'cache_generations', status: remaining ? 'pending' : 'completed',
     stage: remaining ? (job.generations.includes(current) ? 'rewrite' : 'reclaim') : 'done', generations_remaining: remaining }
 }
+
+/**
+ * Only an unpublished generation may lack metadata. A retirement marker or
+ * version hint is evidence of publication, so missing metadata then fails closed.
+ * Caller checks this is not the live generation and owns the partition lock.
+ * @ref LLP 0417#cache-reclamation [implements]: interrupted output must not strand purge or retirement
+ * @param {string} directory
+ */
+export async function isUncommittedCacheGeneration(directory) {
+  for (const file of ['.retired', 'metadata/version-hint.text']) {
+    try {
+      await fs.lstat(path.join(directory, file))
+      return false
+    } catch (error) {
+      if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error
+    }
+  }
+  try {
+    const names = await fs.readdir(path.join(directory, 'metadata'))
+    return !names.some(name => name.endsWith('.metadata.json'))
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return true
+    throw error
+  }
+}

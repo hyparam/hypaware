@@ -7,7 +7,7 @@ import { scopeGovernance } from '../usage-policy/matcher.js'
 import { discoverCachePartitions, readCursorSync, writeCursor, withPartitionMutationLock } from './partition.js'
 import { deleteMatchingRows, scanRowsFromTable } from './iceberg/store.js'
 import { resolveIcebergDir } from './storage.js'
-import { queueCacheCleanup } from './purge-cleanup.js'
+import { queueCacheCleanup, isUncommittedCacheGeneration } from './purge-cleanup.js'
 import { sessionGraphNodeId } from './session-purges.js'
 
 /**
@@ -88,13 +88,14 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
       } : undefined
       let affected = false
       for (const current of tables) {
+        if (current !== tableDir && await isUncommittedCacheGeneration(current)) continue
         let names
         try { names = await fs.readdir(path.join(current, 'metadata')) } catch (error) {
           if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' && current === tableDir && part.rowCount === 0) continue
           throw error
         }
         if (!names.some(name => name.endsWith('.metadata.json'))) {
-          if (current === tableDir && part.rowCount > 0) throw new Error('Purge found a populated partition without table metadata')
+          if (current !== tableDir || part.rowCount > 0) throw new Error('Purge found a published generation without table metadata')
           continue
         }
         const result = await deleteMatchingRows(current, predicate, { columns, beforeDelete })

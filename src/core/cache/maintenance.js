@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { cacheCleanupId, readCacheCleanup, CACHE_PURGE_GRACE_MS } from './purge-cleanup.js'
+import { cacheCleanupId, readCacheCleanup, CACHE_PURGE_GRACE_MS, isUncommittedCacheGeneration } from './purge-cleanup.js'
 
 import { parquetReadObjects } from 'hyparquet'
 import {
@@ -2695,9 +2695,11 @@ async function walkForRetired(dir, cacheRoot) {
               retiredAt = (await fsPromises.stat(full)).mtimeMs
             }
             if (!Number.isFinite(retiredAt) || Date.now() - retiredAt < CACHE_PURGE_GRACE_MS) return
-            const { resolver, lister } = await createLocalIcebergIO()
-            const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(full), resolver, lister })
-            assertUnpinnedCleanup(metadata)
+            if (!await isUncommittedCacheGeneration(full)) {
+              const { resolver, lister } = await createLocalIcebergIO()
+              const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: tableUrlForDir(full), resolver, lister })
+              assertUnpinnedCleanup(metadata)
+            }
             await fsPromises.rm(full, { recursive: true, force: true })
           })
         } catch { /* Retain the journal and directory for the next tick. */ }

@@ -123,3 +123,36 @@ test('empty output, pinned snapshot retry, and admission failure stay honest', a
   await maintainCache({ cacheRoot })
   assert.equal((await cachePurgeCleanupStatus(cacheRoot, id)).status, 'completed')
 })
+
+
+test('unpublished generation does not strand purge or retirement', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-abandoned-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [{ session_id: 'target', org: 'a', body: 'target' }, { session_id: 'keep', org: 'a', body: 'neighbor' }])
+  await storage.flushTable(partition, { force: true })
+  const original = resolveIcebergDir(partition)
+  const abandoned = path.join(partition, 'table-interrupted')
+  await fs.mkdir(path.join(abandoned, 'data'), { recursive: true })
+  await fs.writeFile(path.join(abandoned, 'data', 'partial.parquet'), 'interrupted write')
+  const purged = await purgeCache({ cacheRoot, target: { kind: 'session', id: 'target', org: 'a' } })
+  assert.equal(purged.rowsDeleted, 1)
+  assert(purged.cacheCleanup?.length)
+  const id = purged.cacheCleanup[0]
+  await maintainCache({ cacheRoot })
+  await fs.stat(abandoned)
+  await age(cacheRoot, id, [original])
+  const old = new Date(Date.now() - CACHE_PURGE_GRACE_MS - 10000)
+  await fs.utimes(abandoned, old, old)
+  await maintainCache({ cacheRoot })
+  await assert.rejects(fs.stat(abandoned), { code: 'ENOENT' })
+  assert.equal((await cachePurgeCleanupStatus(cacheRoot, id)).status, 'completed')
+  assert.equal((await rows(resolveIcebergDir(partition)))[0].session_id, 'keep')
+  assert.equal((await purgeCache({ cacheRoot, target: { kind: 'session', id: 'target', org: 'a' } })).rowsDeleted, 0)
+
+  // A hint proves publication: missing metadata must not be treated as staging.
+  await fs.mkdir(path.join(abandoned, 'metadata'), { recursive: true })
+  await fs.writeFile(path.join(abandoned, 'metadata', 'version-hint.text'), '1')
+  await assert.rejects(purgeCache({ cacheRoot, target: { kind: 'session', id: 'keep', org: 'a' } }))
+})

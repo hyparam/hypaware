@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { readBatchColumn, selectedRowCount, selectBatch, valueAt } from 'squirreling'
 import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
 const graphIdentifiers = ['node_id', 'src_id', 'dst_id']
@@ -140,9 +141,9 @@ export function filterPurgedSessions(source, store) {
   const identifiers = ['session_id', ...graphIdentifiers].filter(name => source.columns.includes(name))
   if (identifiers.length === 0) return source
   const scopeColumns = [...identifiers, 'org']
-  return {
+  /** @type {ScannableDataSource} */
+  const wrapped = {
     columns: source.columns,
-    numRows: source.numRows,
     scan(options) {
       store.refresh()
       const requested = options?.columns ?? source.columns
@@ -161,6 +162,65 @@ export function filterPurgedSessions(source, store) {
       }
     },
   }
+  const schema = source.schema
+  const prepareScan = source.prepareScan?.bind(source)
+  if (schema && prepareScan) {
+    wrapped.schema = schema
+    // @ref LLP 0417#performance [implements]: fence native batches without materializing payload rows
+    wrapped.prepareScan = request => {
+      const demands = [...request.columns]
+      for (const field of schema.fields) {
+        if (scopeColumns.includes(field.name) && !demands.some(demand => demand.field === field.id)) {
+          demands.push({ field: field.id, phase: 0, purpose: 'filter', mode: 'required' })
+        }
+      }
+      const inner = prepareScan({ ...request, columns: demands, limit: undefined, offset: undefined })
+      const output = request.columns.map(demand => inner.schema.fields.findIndex(field => field.id === demand.field))
+      const scopes = inner.schema.fields.flatMap((field, index) => scopeColumns.includes(field.name) ? [{ name: field.name, index }] : [])
+      return {
+        schema: { fields: output.map(index => inner.schema.fields[index]) },
+        residual: { ...inner.residual, limit: request.limit, offset: request.offset },
+        properties: { ...inner.properties, exactRows: undefined },
+        async *batches(options = {}) {
+          for await (const batch of inner.batches(options)) {
+            options.signal?.throwIfAborted()
+            store.refresh()
+            const vectors = await Promise.all(scopes.map(({ index }) => readBatchColumn({ batch, columnIndex: index, signal: options.signal })))
+            const count = selectedRowCount(batch.selection)
+            const indices = new Uint32Array(count)
+            const scope = {}
+            let kept = 0
+            for (let row = 0; row < count; row++) {
+              for (let col = 0; col < scopes.length; col++) scope[scopes[col].name] = valueAt(vectors[col], row)
+              if (!store.has(scope)) indices[kept++] = row
+            }
+            if (!kept) continue
+            const selected = kept === count ? batch : selectBatch(batch, { type: 'indices', indices: indices.subarray(0, kept), length: count })
+            yield { selection: selected.selection, columns: output.map(columnIndex => ({
+              read: ({ selection, signal }) => readBatchColumn({ batch, columnIndex, selection, signal }),
+            })) }
+          }
+        },
+      }
+    }
+    const prepared = wrapped.prepareScan
+    wrapped.scanColumn = options => {
+      const field = schema.fields.find(field => field.name === options.column)
+      if (!field) throw new Error('Unknown scan column')
+      const scan = prepared({ columns: [{ field: field.id, phase: 0, purpose: 'output', mode: 'required' }], filter: options.where })
+      return {
+        appliedWhere: !scan.residual.filter,
+        appliedLimitOffset: false,
+        async *chunks() {
+          for await (const batch of scan.batches({ signal: options.signal })) {
+            const vector = await readBatchColumn({ batch, columnIndex: 0, signal: options.signal })
+            yield Array.from({ length: vector.length }, (_, index) => valueAt(vector, index))
+          }
+        },
+      }
+    }
+  }
+  return wrapped
 }
 
 /** @param {string} sessionId */

@@ -234,3 +234,16 @@ more I/O than a subset merge but retires the entire snapshot history. Existing
 batch, row-group and open partition-writer memory bounds apply. Journals cap
 generation lists at 10000 and encoded size at 1 MiB. Ordinary maintenance
 continues to use its tick budget and failure isolation.
+
+
+Review corrections: native prepared scans retain their batch path through the
+purge fence, selecting surviving row ordinals without decoding payload columns
+or allocating per-row objects. Exact cardinality is unknown while filtering;
+LIMIT and OFFSET remain residual until after the fence. Column scans use the
+same filtered batches. Temporary vectors and selections are bounded by the
+input batch; the row compatibility path remains available.
+
+An inactive generation without published metadata, a version hint, or a
+retirement marker is uncommitted output. Purge skips its row scan and the
+journaled retirement sweep can remove it after the usual 24-hour grace under
+the partition lock. Published-but-unreadable generations still fail closed.
