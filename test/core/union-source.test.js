@@ -622,6 +622,25 @@ test('unionSources scanColumn forwards where per partition and reports the merge
   assert.equal(seen[1].limit, undefined, 'limit never coexists with a forwarded where')
 })
 
+test('unionSources scanColumn streams a null per row for a partition lacking the column, never asking for it', async () => {
+  // icebird throws on a column its table schema never declared, and a
+  // partition written before an additive column (LLP 0032) is exactly that.
+  // The union stands a column the partition does carry in for the count, so
+  // limit/offset over the merged stream still see every row.
+  /** @type {{ column: string, where?: ExprNode, limit?: number, offset?: number }[]} */
+  const seen = []
+  const oldRows = [{ id: 'a1' }, { id: 'a2' }]
+  const newRows = [{ id: 'b1', v: 7 }]
+  const union = unionSources([
+    withFlaggedScanColumn(fakeSource(oldRows, []), oldRows, seen),
+    withFlaggedScanColumn(fakeSource(newRows, []), newRows, seen),
+  ])
+  const scanColumn = /** @type {NonNullable<AsyncDataSource['scanColumn']>} */ (union.scanColumn)
+  const { values } = await drainColumns(scanColumn({ column: 'v', offset: 1 }))
+  assert.deepEqual(values, [null, 7])
+  assert.deepEqual(seen.map((s) => s.column), ['id', 'v'], 'the old partition was asked for a column it carries')
+})
+
 test('unionSources scanColumn drops where for a partition lacking a predicate column and reports appliedWhere false', async () => {
   /** @type {{ column: string, where?: ExprNode, limit?: number, offset?: number }[]} */
   const seen = []
