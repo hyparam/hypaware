@@ -196,11 +196,24 @@ const KEY_CHARS = 36
 const FOLD_TO_SPACE = '[^a-z0-9 \\u0080-\\u1fff\\u2070-\\uffff]+'
 
 /**
+ * The half of a surrogate pair the cut can leave behind. `substr` here
+ * counts UTF-16 code units and the fold above keeps both halves of a
+ * pair, so an astral character sitting across `KEY_CHARS` is cut in two
+ * and its high half ends the key alone, which writing the key out as
+ * UTF-8 then renders as U+FFFD. Dropping the half is the repair: a key
+ * one character short groups the same typings, and the bound stays
+ * `KEY_CHARS` states. Anchored, because the cut is the only thing here
+ * that can split a pair.
+ */
+const LONE_SURROGATE_TAIL = '[\\ud800-\\udbff]$'
+
+/**
  * The key two typings are grouped by: case folded, leading fillers
  * dropped, punctuation and whitespace runs folded to one space, the first
- * `KEY_CHARS` characters. One SQL expression used by both the statement
- * that finds the candidates and the one that finds their sessions, since a
- * candidate found by one key and looked up by another has no triggers.
+ * `KEY_CHARS` characters, less a surrogate half the cut split off. One SQL
+ * expression used by both the statement that finds the candidates and the
+ * one that finds their sessions, since a candidate found by one key and
+ * looked up by another has no triggers.
  *
  * Normalized rather than exact because a person does not retype a request
  * verbatim. On this machine the raw 42-character prefix split "commit on
@@ -211,7 +224,7 @@ const FOLD_TO_SPACE = '[^a-z0-9 \\u0080-\\u1fff\\u2070-\\uffff]+'
  *
  * @ref LLP 0398#one-signal [implements]: the same line typed again is judged after normalizing, not verbatim
  */
-const TRIGGER_KEY = `trim(substr(trim(regexp_replace(regexp_replace(regexp_replace(lower(content_text), '^((${LEADING_FILLERS})[,\\s]+)+', ''), '${FOLD_TO_SPACE}', ' '), '\\s+', ' ')), 1, ${KEY_CHARS}))`
+const TRIGGER_KEY = `trim(regexp_replace(substr(trim(regexp_replace(regexp_replace(regexp_replace(lower(content_text), '^((${LEADING_FILLERS})[,\\s]+)+', ''), '${FOLD_TO_SPACE}', ' '), '\\s+', ' ')), 1, ${KEY_CHARS}), '${LONE_SURROGATE_TAIL}', ''))`
 
 /**
  * What counts as a typed line at all: one line of request length. A
