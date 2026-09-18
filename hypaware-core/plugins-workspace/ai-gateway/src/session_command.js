@@ -816,12 +816,15 @@ export function resolveGatewayEndpointForCli(ctx) {
  *
  * Order:
  *
- * 1. `CLAUDE_CODE_SESSION_ID`. For Claude the session IS the conversation
+ * 1. `PI_SESSION_ID`. Pi states its session id in the environment it gives
+ *    its shell tools, and for Pi the session IS the conversation, so a stated
+ *    id is already the drop key.
+ * 2. `CLAUDE_CODE_SESSION_ID`. For Claude the session IS the conversation
  *    (LLP 0066 §scope), so a stated id is already the drop key.
- * 2. `CODEX_THREAD_ID`, used as a **selector, not an answer**: it names the
+ * 3. `CODEX_THREAD_ID`, used as a **selector, not an answer**: it names the
  *    live thread, so it picks the rollout without the mtime liveness proxy, and
  *    the session container is then read out of that rollout's `session_meta`.
- * 3. Otherwise the rollout whose `payload.cwd` matches the invocation cwd
+ * 4. Otherwise the rollout whose `payload.cwd` matches the invocation cwd
  *    (`$CODEX_HOME/sessions/**\/rollout-<ts>-<uuid>.jsonl`), with the staleness
  *    bound below standing in for the liveness the environment would have given.
  *
@@ -863,7 +866,13 @@ export function resolveSessionIdForCli(args) {
   const codexThreadId = statedEnv(args.env[CODEX_THREAD_ENV])
   const piSessionId = statedEnv(args.env.PI_SESSION_ID)
   if (piSessionId && (claudeSessionId || codexThreadId)) {
-    return { ok: false, error: 'could not resolve a session id: more than one client states one for this invocation. Pass the intended session id explicitly: hyp session status <session-id>.' }
+    const stated = [`PI_SESSION_ID=${piSessionId}`]
+    if (claudeSessionId) stated.push(`CLAUDE_CODE_SESSION_ID=${claudeSessionId}`)
+    if (codexThreadId) stated.push(`${CODEX_THREAD_ENV}=${codexThreadId}`)
+    return {
+      ok: false,
+      error: `could not resolve a session id: more than one client states one for this invocation - ${stated.join(', ')}. Only one of them is the session this command is in, and picking either would act on the wrong one while reporting success. Pass the intended session id explicitly: hyp session status <session-id>.`,
+    }
   }
   if (piSessionId) return { ok: true, sessionId: piSessionId, source: 'pi_env' }
   if (claudeSessionId && codexThreadId) {
