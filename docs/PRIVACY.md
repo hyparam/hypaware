@@ -209,9 +209,13 @@ reports which state the session is in right now.
 
 Session exclusions are saved locally and survive recorder and daemon restarts
 until explicitly removed with `hyp session unignore`. A plain resume reuses
-the ID; a fork (`claude --fork-session`, `codex fork`) creates a new ID and
-needs its own exclusion. Existing in-memory exclusions must be reapplied once
-after upgrading; their old process state cannot be recovered.
+the ID; a fork creates a new one. A Claude fork (`claude --fork-session`,
+`/branch`) is excluded automatically: `hyp session ignore` records the leading
+line uuids of the session's transcript, and the managed hook recognises those
+same uuids in the forked copy and ignores its new ID before the first exchange
+(LLP 0419). A Codex fork (`codex fork`) still needs its own exclusion.
+Existing in-memory exclusions must be reapplied once after upgrading; their old
+process state cannot be recovered.
 
 Claude (including Desktop transcripts), Codex, and OpenCode backfill read the
 saved exclusions, including a manual import in a separate process. The state

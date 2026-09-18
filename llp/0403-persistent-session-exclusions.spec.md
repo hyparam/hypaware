@@ -6,6 +6,7 @@
 **Author:** Phil / Codex
 **Date:** 2026-09-11
 **Related:** LLP 0066, LLP 0067, LLP 0085, LLP 0256, LLP 0395
+**Extended-by:** [LLP 0419](./0419-fork-of-an-ignored-session-is-ignored.decision.md) (a fork of an ignored Claude session is closed automatically, so the fork sentence in #contract no longer describes the Claude lane)
 
 ## Requested behavior {#contract}
 
@@ -20,6 +21,13 @@ ID match, recorder discovery, membership-only receipt, and explicit unignore
 remain. Forks with a new session ID require another exclusion. Ignoring does
 not purge earlier rows, native transcripts, or exported copies. Unignoring
 makes the whole transcript eligible again.
+
+*Extended-by [LLP 0419](./0419-fork-of-an-ignored-session-is-ignored.decision.md):
+a fork no longer requires the user to take another exclusion on Claude. The
+managed hook recognises the copied transcript by the line uuids it carries
+unchanged and adds the fork's id through this same path before its first
+exchange. Everything else in this paragraph is unchanged, the no-purge rule
+included.*
 
 ## Private durable state {#storage}
 

@@ -6,9 +6,14 @@ import https from 'node:https'
 import os from 'node:os'
 import path from 'node:path'
 
+import {
+  claudeTranscriptPathForSession,
+  readTranscriptHeadUuids,
+} from '../../../../src/core/claude/transcript_fingerprint.js'
 import { readRolloutSessionMeta } from '../../../../src/core/codex/rollout_session_meta.js'
 import { configuredGatewayEndpoint } from '../../../../src/core/config/gateway_endpoint.js'
 import { SESSION_IGNORE_ROUTE } from '../../../../src/core/control/session_ignore.js'
+import { writeSessionForkFingerprint } from '../../../../src/core/control/session_ignore_store.js'
 import {
   resolveLiveControlRouteEndpointsFromStatus,
   resolveLiveGatewayEndpointFromStatus,
@@ -27,10 +32,34 @@ const FOLDER_GOVERNOR_NOTE = 'folder:  see `hyp privacy show` (this verb reports
 
 /**
  * The same lifetime note appears beside every confirmed read and write.
+ *
+ * Whether a fork escapes the opt-out is a per-session fact, not a property of
+ * the verb, so it is left to the two `FORK_*_NOTE` lines below rather than
+ * warned about here for every id alike.
  * @ref LLP 0403#contract [implements]: persistence replaces restart expiry.
+ * @ref LLP 0419#receipt [implements]: the fork claim is per session
  */
 const SESSION_IGNORE_NOTE =
-  'this opt-out survives daemon restarts until `hyp session unignore`; a fork (`claude --fork-session`, `codex fork`) mints a new session id it no longer covers. Re-check with `hyp session status`.'
+  'this opt-out survives daemon restarts until `hyp session unignore`. Re-check with `hyp session status`.'
+
+/**
+ * Printed beside a confirmed ignore whose fork fingerprint was stored: a
+ * forked copy of this conversation is recognised and excluded by the managed
+ * client hook before its first exchange.
+ * @ref LLP 0419#receipt [implements]
+ */
+const FORK_ARMED_NOTE =
+  'fork:    a fork of this session (`claude --fork-session`, `/branch`) is excluded automatically - the managed hook recognises the copied transcript and ignores the new session id before its first exchange.'
+
+/**
+ * Printed instead when nothing could be fingerprinted. Same fail-closed shape
+ * as every other unconfirmable answer this verb gives: it names what was NOT
+ * established rather than staying silent, because silence here reads as the
+ * armed case.
+ * @ref LLP 0419#receipt [implements]
+ */
+const FORK_UNCONFIRMED_NOTE =
+  'fork:    fork protection is UNCONFIRMED for this id - no client transcript is on record for it, so a fork would mint a new session id this opt-out does not cover. Re-check inside the fork with `hyp session status`.'
 
 /**
  * What a confirmed `ignored` establishes, printed next to it by the writer and
@@ -408,6 +437,13 @@ async function runMutation(argv, ctx, method, usage) {
   // beside it, so a consumer of the old fields loses nothing and a consumer
   // of the new field sees the whole write.
   const primary = confirmed[0]
+
+  // Store the fork fingerprint only after a recorder confirmed the write, so
+  // a fingerprint never outlives an exclusion that was never taken. A DELETE
+  // needs nothing here: each recorder's own `delete` removes the fingerprint
+  // beside the marker it removes.
+  const forkArmed = method === 'POST' ? recordForkFingerprint(ctx, resolvedId.sessionId) : undefined
+
   if (parsed.json) {
     ctx.stdout.write(
       JSON.stringify({
@@ -421,6 +457,12 @@ async function runMutation(argv, ctx, method, usage) {
         session_id_source: resolvedId.source,
         session_id_evidence: resolvedId.evidence ?? null,
         thread_id: resolvedId.threadId ?? null,
+        // The prose notes' machine-readable twin. A `--json` caller is as
+        // exposed to an unconfirmed fork as a human reader is, so hiding the
+        // answer in the prose branch would leave the automated path believing
+        // the armed case.
+        // @ref LLP 0419#receipt [implements]
+        fork_protection: forkArmed === undefined ? null : (forkArmed ? 'armed' : 'unconfirmed'),
         ignored: primary.ignored,
         total: primary.total,
         endpoint: primary.endpoint,
@@ -463,6 +505,7 @@ async function runMutation(argv, ctx, method, usage) {
   }
   if (primary.ignored) {
     ctx.stdout.write(`${SESSION_IGNORE_NOTE}\n`)
+    ctx.stdout.write(`${forkArmed ? FORK_ARMED_NOTE : FORK_UNCONFIRMED_NOTE}\n`)
     ctx.stdout.write(`${MEMBERSHIP_NOTE}\n`)
   }
   // The write verbs carry the same provenance caveats as the read: "ignored"
@@ -484,6 +527,36 @@ async function runMutation(argv, ctx, method, usage) {
   }
   ctx.stdout.write(`${FOLDER_GOVERNOR_NOTE}\n`)
   return allOk ? 0 : SESSION_EXIT_UNKNOWN
+}
+
+/**
+ * Record what a fork of this session will look like, so the managed client
+ * hook can recognise one: Claude rewrites `sessionId` on every line it copies
+ * but leaves each line's `uuid` alone, so the parent's leading uuids identify
+ * its forks.
+ *
+ * Returns whether a fingerprint was stored. `false` is the ordinary answer for
+ * every id with no Claude transcript on record - a Codex container, an id
+ * typed by hand, a Claude session whose managed hook never ran - and the
+ * caller says so out loud rather than implying protection it does not have.
+ * A failure to store is never a failure to ignore: the marker is already
+ * written and the exclusion stands.
+ *
+ * @ref LLP 0419#fingerprint [implements]: fingerprint at ignore time, from the
+ * transcript path the session-context channel already records
+ * @param {CommandRunContext} ctx
+ * @param {string} sessionId
+ * @returns {boolean}
+ */
+function recordForkFingerprint(ctx, sessionId) {
+  try {
+    const stateRoot = readObservabilityEnv(ctx.env).stateDir
+    const transcript = claudeTranscriptPathForSession(stateRoot, sessionId)
+    if (!transcript) return false
+    return writeSessionForkFingerprint(stateRoot, sessionId, readTranscriptHeadUuids(transcript))
+  } catch {
+    return false
+  }
 }
 
 /**
