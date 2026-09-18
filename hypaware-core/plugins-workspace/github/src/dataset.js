@@ -2,6 +2,7 @@
 
 import path from 'node:path'
 
+import { discoverCachePartitions } from '../../../../src/core/cache/partition.js'
 import { emptySource, unionSources } from 'hypaware/core/query'
 
 /**
@@ -62,17 +63,43 @@ export function githubEventsTablePath(storage) {
 }
 
 /**
- * Discover the single `github_events` partition (gascity's single-partition
- * shape - the cache is HypAware-managed, so discovery only surfaces the path).
+ * The kernel cache flush path commits spooled rows under `source=<client>`
+ * partitions (`github_events` carries no client identity and the plugin
+ * declares no `cachePartitioning`, so in practice `source=unknown`), *not*
+ * under the `PARTITION_LABEL` directory capture spools to. So the lone
+ * hardcoded `github_events/all` partition never surfaces committed data: the
+ * sink driver flushes the pending spool inside its own discovery pass, and the
+ * label it was handed holds nothing by the time the sink reads it (#1593).
+ * Discovery scans the on-disk `source=` partitions the same way every other
+ * cache-backed dataset does (cf. gascity, otel, ai-gateway). The
+ * `PARTITION_LABEL` spool path is still listed first so any pending rows there
+ * get flushed - by that driver pass, or during query settlement - before a
+ * reader reaches them.
  *
  * @param {DatasetDiscoveryContext} ctx
- * @returns {QueryPartition[]}
+ * @returns {Promise<QueryPartition[]>}
  */
-export function discoverParts(ctx) {
+export async function discoverParts(ctx) {
   const cacheDir = ctx.cacheDir ?? ''
   if (!cacheDir) return []
-  const tablePath = path.join(cacheDir, 'datasets', DATASET_NAME, PARTITION_LABEL)
-  return [{ dataset: DATASET_NAME, partition: { partition: PARTITION_LABEL }, tablePath }]
+
+  /** @type {QueryPartition[]} */
+  const partitions = []
+  /** @type {Set<string>} */
+  const seen = new Set()
+
+  const spoolPath = path.join(cacheDir, 'datasets', DATASET_NAME, PARTITION_LABEL)
+  partitions.push({ dataset: DATASET_NAME, partition: { partition: PARTITION_LABEL }, tablePath: spoolPath })
+  seen.add(spoolPath)
+
+  const discovered = await discoverCachePartitions(cacheDir, { datasets: [DATASET_NAME] })
+  for (const p of discovered) {
+    if (seen.has(p.path)) continue
+    seen.add(p.path)
+    partitions.push({ dataset: DATASET_NAME, partition: p.partition, tablePath: p.path })
+  }
+
+  return partitions
 }
 
 /**
@@ -91,11 +118,10 @@ export async function refreshPartition() {
  * `github_events` rows. Returns an empty source when nothing is materialized so
  * a query on a cold cache still succeeds.
  *
- * `discoverParts` hand-rolls the one `PARTITION_LABEL` path this source writes
- * to, which is enough on the happy path but is not the whole truth of what the
- * cache holds: it cannot see a partition the service materialized under any
- * other segment (a future source split, or a layout the service changes
- * underneath us). Re-discover through the service as well - the same path
+ * `discoverParts` already scans the committed partitions, but it ran before
+ * settlement: rows that were still spooled under `PARTITION_LABEL` then have
+ * since been flushed into a `source=` partition that did not exist when the
+ * list was built. Re-discover through the service here as well - the same path
  * `@hypaware/ai-gateway` and `@hypaware/gascity` take - and union whatever it
  * surfaces, so flushed events stay visible to queries and `graph project`.
  *
