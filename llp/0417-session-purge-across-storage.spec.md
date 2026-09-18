@@ -247,3 +247,20 @@ An inactive generation without published metadata, a version hint, or a
 retirement marker is uncommitted output. Purge skips its row scan and the
 journaled retirement sweep can remove it after the usual 24-hour grace under
 the partition lock. Published-but-unreadable generations still fail closed.
+
+
+Sources constructed before the first purge also retain the read fence. Native
+plans carry scope demands from construction, skip scope-vector reads and
+selection allocation while the store is empty, and refresh before each batch.
+Exact cardinality shortcuts are disabled for session-bearing sources even
+before the first purge; delayed COUNT plans must scan through the fence.
+Row-only plans refresh on iterator entry and every 1024 rows, while same-store
+fences are checked on each row. This keeps filesystem polling out of per-row
+hot paths. Previously returned query results are not revoked.
+
+Durable journal writes sync the temporary file before rename, then sync the
+containing directory and ancestors before returning. Ancestors are synced on
+retries too, since a previous failed attempt can have created them. A directory
+sync failure rejects admission even when the renamed file is already visible;
+callers must not commit deletion on that failed admission. This adds bounded
+filesystem work by path depth to durable writes, with no retained directory set.

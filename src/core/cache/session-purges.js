@@ -130,14 +130,13 @@ function sessionKey(sessionId, org) {
  * Fence reads of snapshots opened while a writer was finishing. Positional
  * deletion remains the persisted table mutation; this fence also ensures a
  * concurrent older process cannot re-expose a session after completion.
- * Keep the native prepared scan untouched for stores without purges.
+ * Sources remain fenced even when planned before the first purge.
  * @param {ScannableDataSource} source
  * @param {ReturnType<typeof createSessionPurgeStore>} store
  * @returns {ScannableDataSource}
  */
 export function filterPurgedSessions(source, store) {
   store.refresh()
-  if (store.size === 0) return source
   const identifiers = ['session_id', ...graphIdentifiers].filter(name => source.columns.includes(name))
   if (identifiers.length === 0) return source
   const scopeColumns = [...identifiers, 'org']
@@ -153,8 +152,19 @@ export function filterPurgedSessions(source, store) {
         appliedWhere: inner.appliedWhere,
         appliedLimitOffset: false,
         async *rows() {
+          store.refresh()
+          let sinceRefresh = 0
+          const scope = {}
           for await (const row of inner.rows()) {
-            const scope = {}
+            // Bound cross-process refresh cost on row-only providers.
+            if (++sinceRefresh === 1024) {
+              store.refresh()
+              sinceRefresh = 0
+            }
+            if (!store.size) {
+              yield row
+              continue
+            }
             for (const key of scopeColumns) scope[key] = row.resolved?.[key] ?? await row.cells?.[key]?.()
             if (!store.has(scope)) yield row
           }
@@ -185,6 +195,13 @@ export function filterPurgedSessions(source, store) {
           for await (const batch of inner.batches(options)) {
             options.signal?.throwIfAborted()
             store.refresh()
+            // Before the first purge, forward lazy payloads without reading
+            // scope vectors or allocating a row selection. Scope demands stay
+            // available if a fence arrives after this source was prepared.
+            if (!store.size) {
+              yield { selection: batch.selection, columns: output.map(index => batch.columns[index]) }
+              continue
+            }
             const vectors = await Promise.all(scopes.map(({ index }) => readBatchColumn({ batch, columnIndex: index, signal: options.signal })))
             const count = selectedRowCount(batch.selection)
             const indices = new Uint32Array(count)
