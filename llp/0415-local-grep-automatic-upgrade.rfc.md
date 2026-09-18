@@ -8,7 +8,7 @@
 **Supersedes:** LLP 0413#plugin (manual activation for existing clients only)
 **Extends:** LLP 0031#physical-layout (client boot may migrate the local layer)
 **Related:** LLP 0010, LLP 0413#server
-**Extended-by:** LLP 0418 (#migration: the central-only lane writes no local config)
+**Superseded-by:** LLP 0418 (#migration, in part: the central-only lane writes no local config, so there is no missing local file left to exclusively create)
 
 ## Migration {#migration}
 
@@ -28,10 +28,12 @@ precedence remains unchanged. With only a central config, write an additive
 local config. Central documents and explicit host/server boot selection remain
 untouched, preserving LLP 0413#server and the server-owned tool registration.
 
-> **Extended-by: [LLP 0418 §no-forged-answer](./0418-grep-migration-forges-no-pick-answer.decision.md#no-forged-answer).**
-> The additive local config named above is the one document that would record a
-> pick answer nobody gave, so the central-only lane keeps the compatibility
-> entry in memory instead of writing it.
+**Superseded-by: [LLP 0418 §no-forged-answer](./0418-grep-migration-forges-no-pick-answer.decision.md#no-forged-answer)**
+(2026-09-18), for the sentence above and for the exclusive-create clause in the
+paragraph below. The additive local config named above is the one document that
+would record a pick answer nobody gave, so the central-only lane keeps the
+compatibility entry in memory instead of writing it, and no local file is
+created at all. Everything else in this section stands.
 
 Reuse the local config backup guard, file lock, and atomic writer. Re-read under
 the lock, guard existing-file writes against concurrent edits, and exclusively

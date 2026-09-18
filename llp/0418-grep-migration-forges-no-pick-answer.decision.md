@@ -5,7 +5,7 @@
 **Systems:** Config, Onboarding, Plugins
 **Author:** Phil / Claude
 **Date:** 2026-09-18
-**Supersedes:** LLP 0415#migration ("With only a central config, write an additive local config")
+**Supersedes:** LLP 0415#migration, in part ("With only a central config, write an additive local config", and with it "exclusively create a missing local file")
 **Extends:** LLP 0277#answer-less (a missing local layer is answer-less in the same way an answer-less one is)
 **Related:** LLP 0011, LLP 0183, LLP 0281, LLP 0413
 
@@ -63,10 +63,11 @@ MCP surfaces are identical. The only cost is that the two linear plugin-list
 checks run again on the next boot, which LLP 0415 #verification already
 budgets for.
 
-Nothing else in LLP 0415 changes. An existing local config still gains the
-entry on disk with its backup, lock, permissions, and concurrent-edit guards
-intact; central precedence, symlink handling, explicit `enabled: false`, host
-profiles, and the read-only fallback are untouched.
+Nothing else in LLP 0415 changes except its instruction to exclusively create
+a missing local file, which loses the only lane it served. An existing local
+config still gains the entry on disk with its backup, lock, permissions, and
+concurrent-edit guards intact; central precedence, symlink handling, explicit
+`enabled: false`, host profiles, and the read-only fallback are untouched.
 
 ## Consequences {#consequences}
 
@@ -80,9 +81,16 @@ profiles, and the read-only fallback are untouched.
   back.
 - The `wx` exclusive-create branch is gone, and with it the race it guarded
   against. Under the lock a missing file now means one of two things, and
-  both are handled: the layer never existed (memory only), or it existed at
-  read time and records an answer, which means it was removed underneath the
-  migration (`CONCURRENT_EDIT`, memory only).
+  both are handled: the layer is absent or answer-less (memory only), or the
+  `lstat` found nothing while the re-read that follows it found a config
+  recording an answer, which means the file appeared underneath the migration
+  (`CONCURRENT_EDIT`, memory only).
+- A machine that already took the old lane keeps the config that lane forged.
+  The grep entry is on disk, so `needsGrep` is false and the migration never
+  looks at it again: `configRecordsPickAnswer` stays true there and the
+  LLP 0277 symptom persists until that machine runs `hyp init`. Healing that
+  population needs its own decision; this one only stops new machines from
+  joining it.
 - The central-only lane no longer emits `migration_status: persisted`. It is
   a normal boot with no config write, so it emits nothing; a genuine failure
   on the local-config lane still emits the `memory_only` warning.
