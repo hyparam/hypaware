@@ -185,7 +185,11 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         }
       }
       let totalBytes = 0
-      const opts = declaration ? { declaration } : undefined
+      const opts = { declaration, filterRows(/** @type {Record<string, unknown>[]} */ rows) {
+        const kept = survivingRows(rows)
+        droppedCount += rows.length - kept.length
+        return kept
+      } }
       for (const { segments, rows: groupRows } of groups.values()) {
         const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
         totalBytes += result.bytesWritten
@@ -587,7 +591,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           status: 'ok',
         },
         async (span) => {
-          const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, survivingRows(rows))
+          const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, survivingRows(rows), { filterRows: survivingRows })
           span.setAttribute('bytes_written', result.bytesWritten)
           span.setAttribute('appended', result.appended)
         },

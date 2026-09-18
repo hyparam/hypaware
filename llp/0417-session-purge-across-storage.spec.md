@@ -272,3 +272,31 @@ read and rechecks its bounded accumulated hits before returning, including
 cancellation. Removing an accumulated hit marks the result non-exhaustive,
 since that hit may have displaced a surviving candidate. Already delivered
 stream rows remain subject to the documented batch-refresh boundary.
+
+
+## Cross-process cache mutation guard {#cache-mutation-guard}
+
+Local CLI purges and daemon compaction share a filesystem guard around the
+existing partition mutation critical sections. A purge must resolve the live
+cursor and admit generations only while owning this guard; a rewrite holds it
+from its locked metadata read through destination publication. This extends
+LLP 0301's in-process cursor serialization to cooperating local processes.
+Storage appends recheck the session fence after acquiring the guard so buffered
+rows cannot land behind a completed purge.
+
+An atomic directory creation grants ownership. A single PID/nonce filename
+identifies the owner. Contention fails immediately for retry, with no polling
+or additional waiter queue. A live or unverifiable owner is never evicted by
+age. A dead owner is reclaimed by unlinking its exact filename, then removing
+the empty directory; a contender losing that unlink must stop. PID reuse may
+delay recovery but cannot permit concurrent writers. An empty or malformed
+lock fails closed; after stopping all writers an operator may remove such a
+lock left by an interrupted ownership publication or recovery. Updated writers
+must be restarted before relying on this protocol; old binaries do not honor
+it. The cache must be local to processes in the same PID namespace.
+
+The guard adds a bounded number of local metadata operations per partition
+mutation, no per-row I/O, no retained payloads, and no background heartbeat.
+Two-process tests must prove that a rewrite already holding old rows prevents
+a competing purge from reporting success, and that a successful retry admits
+the new generation and removes its sensitive bytes before cleanup completion.

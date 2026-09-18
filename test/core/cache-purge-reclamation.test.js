@@ -2,17 +2,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import sync from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import os from 'node:os'
 import { fileCatalog, icebergSetRef, loadLatestFileCatalogMetadata } from 'icebird'
 import { stringifyIcebergJson } from 'icebird/src/json.js'
 import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cache/storage.js'
+import { createSessionPurgeStore } from '../../src/core/cache/session-purges.js'
 import { purgeCache } from '../../src/core/cache/purge.js'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { cachePurgeCleanupStatus, CACHE_PURGE_GRACE_MS } from '../../src/core/cache/purge-cleanup.js'
 import { appendRowsToTable, deleteMatchingRows, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
-import { writeCursor } from '../../src/core/cache/partition.js'
+import { writeCursor, withPartitionMutationLock } from '../../src/core/cache/partition.js'
 
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
 const columns = /** @type {ColumnSpec[]} */ (['session_id', 'org', 'body'].map(name => ({ name, type: 'STRING', nullable: true })))
@@ -155,4 +158,115 @@ test('unpublished generation does not strand purge or retirement', async t => {
   await fs.mkdir(path.join(abandoned, 'metadata'), { recursive: true })
   await fs.writeFile(path.join(abandoned, 'metadata', 'version-hint.text'), '1')
   await assert.rejects(purgeCache({ cacheRoot, target: { kind: 'session', id: 'keep', org: 'a' } }))
+})
+
+// @ref LLP 0417#cache-mutation-guard [tests]: a separate CLI cannot certify an old snapshot's replacement
+test('cross-process purge refuses an active rewrite, then reclaims its output on retry', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-process-race-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [
+    { session_id: 'target', org: 'a', body: 'synthetic sensitive' },
+    { session_id: 'keep', org: 'a', body: 'neighbor' },
+  ])
+  await storage.flushAll({ force: true })
+  const original = resolveIcebergDir(partition)
+  const child = `
+    import { purgeCache } from ${JSON.stringify(new URL('../../src/core/cache/purge.js', import.meta.url).href)}
+    import { createSessionPurgeStore } from ${JSON.stringify(new URL('../../src/core/cache/session-purges.js', import.meta.url).href)}
+    const cacheRoot = process.argv[1]
+    createSessionPurgeStore(cacheRoot).add('target', 'a')
+    try {
+      const result = await purgeCache({ cacheRoot, target: { kind: 'session', id: 'target', org: 'a' } })
+      console.log(JSON.stringify({ status: 'completed', result }))
+    } catch (error) { console.log(JSON.stringify({ status: 'incomplete', error: error.message })) }
+  `
+  const runChild = () => JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', child, cacheRoot], { encoding: 'utf8', timeout: 10000 }))
+  const mkdir = sync.mkdirSync
+  let attempted = false
+  // Run the CLI while old rows are buffered, immediately before the first
+  // output directory exists. A journal taken here cannot name that output.
+  sync.mkdirSync = /** @type {typeof sync.mkdirSync} */ (function (directory, options) {
+    if (!attempted && String(directory).startsWith(`${partition}/table-`)) {
+      attempted = true
+      const result = runChild()
+      assert.equal(result.status, 'incomplete')
+      assert.match(result.error, /mutation busy/)
+    }
+    return mkdir(directory, options)
+  })
+  try { assert.equal((await maintainCache({ cacheRoot, force: true })).totalFailed, 0) }
+  finally { sync.mkdirSync = mkdir }
+  assert(attempted)
+  const rewritten = resolveIcebergDir(partition)
+  assert.notEqual(rewritten, original)
+  assert.equal((await rows(rewritten)).length, 2, 'the refused purge cannot claim those buffered bytes were removed')
+  const retried = runChild()
+  assert.equal(retried.status, 'completed')
+  const id = retried.result.cacheCleanup[0]
+  const job = JSON.parse(await fs.readFile(path.join(cacheRoot, '.purge-cleanup', `${id}.json`), 'utf8'))
+  assert(job.generations.includes(path.basename(rewritten)))
+  await maintainCache({ cacheRoot })
+  assert.deepEqual((await rows(resolveIcebergDir(partition))).map(row => row.session_id), ['keep'])
+  await age(cacheRoot, id, [original, rewritten])
+  await maintainCache({ cacheRoot })
+  assert.equal((await cachePurgeCleanupStatus(cacheRoot, id)).status, 'completed')
+  await assert.rejects(fs.stat(original), { code: 'ENOENT' })
+  await assert.rejects(fs.stat(rewritten), { code: 'ENOENT' })
+  assert.deepEqual((await rows(resolveIcebergDir(partition))).map(row => row.session_id), ['keep'])
+})
+
+test('mutation guard never expires a live owner, recovers a dead owner, and fails closed on missing ownership', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cache-guard-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const partition = path.join(root, 'partition')
+  const guard = path.join(root, '.partition.mutation-lock')
+  const module = JSON.stringify(new URL('../../src/core/cache/partition.js', import.meta.url).href)
+  const child = `import { withPartitionMutationLock } from ${module}
+    try { await withPartitionMutationLock(process.argv[1], async () => {})
+      console.log('acquired')
+    } catch { console.log('refused') }`
+  await withPartitionMutationLock(partition, async () => {
+    const old = new Date(0)
+    await fs.utimes(guard, old, old)
+    assert.equal(execFileSync(process.execPath, ['--input-type=module', '-e', child, partition], { encoding: 'utf8' }).trim(), 'refused')
+  })
+  // Exit without unwinding the guard, as after a daemon crash.
+  execFileSync(process.execPath, ['--input-type=module', '-e', `import { withPartitionMutationLock } from ${module}
+    await withPartitionMutationLock(process.argv[1], async () => { process.exit(0) })`, partition])
+  await withPartitionMutationLock(partition, async () => {})
+  await assert.rejects(fs.stat(guard), { code: 'ENOENT' })
+  await assert.rejects(withPartitionMutationLock(partition, async () => { throw new Error('injected') }), /injected/)
+  await withPartitionMutationLock(partition, async () => {})
+  await fs.mkdir(guard)
+  await assert.rejects(withPartitionMutationLock(partition, async () => assert.fail('must refuse')), /unverifiable/)
+})
+
+for (const source of [false, true]) test(`buffered append rechecks under the guard, source=${source}`, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cache-guard-append-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot: root })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  const input = [
+    { session_id: 'target', org: 'a', body: 'sensitive' },
+    { session_id: 'keep', org: 'a', body: 'neighbor' },
+  ]
+  if (source) await storage.appendRows(partition, columns, input)
+  const mkdir = sync.mkdirSync
+  let fenced = false
+  sync.mkdirSync = /** @type {typeof sync.mkdirSync} */ (function (directory, options) {
+    const result = mkdir(directory, options)
+    if (!fenced && String(directory).endsWith('.mutation-lock')) {
+      fenced = true
+      createSessionPurgeStore(root).add('target', 'a')
+    }
+    return result
+  })
+  try {
+    if (source) assert.equal((await storage.flushAll({ force: true })).droppedCount, 1)
+    else await storage.appendRowsToPartition('events', ['source=unknown'], columns, input)
+  } finally { sync.mkdirSync = mkdir }
+  assert(fenced, 'marker arrives after the storage precheck but before mutation')
+  assert.deepEqual((await rows(resolveIcebergDir(partition))).map(row => row.session_id), ['keep'])
 })
