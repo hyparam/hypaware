@@ -29,9 +29,10 @@ local config. Central documents and explicit host/server boot selection remain
 untouched, preserving LLP 0413#server and the server-owned tool registration.
 
 **Superseded-by: [LLP 0418 §no-forged-answer](./0418-grep-migration-forges-no-pick-answer.decision.md#no-forged-answer)**
-(2026-09-18), for the sentence above and for the exclusive-create clause in the
-paragraph below. The additive local config named above is the one document that
-would record a pick answer nobody gave, so the central-only lane keeps the
+(2026-09-18), for the "With only a central config, write an additive local
+config" sentence above and for the exclusive-create clause in the paragraph
+below. The additive local config named above is the one document that would
+record a pick answer nobody gave, so the central-only lane keeps the
 compatibility entry in memory instead of writing it, and no local file is
 created at all. Everything else in this section stands.
 
