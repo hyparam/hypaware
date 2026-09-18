@@ -988,3 +988,19 @@ test('an HTML page takes its title from the <h1>, not from a \'# \' line inside 
   assert.doesNotMatch(launches[0].prompt, /rm -rf/)
   assert.match(out.join(''), /Starting Claude Code on "Batch the retries"/)
 })
+
+test('fix: an answer the picker never offered is reported once, not re-asked forever', async (t) => {
+  stubFixServer(t)
+  const { ctx, err } = ctxWith()
+  ctx.stdin.isTTY = true
+  ctx.stdout.isTTY = true
+  // A prompt that keeps answering off-list is the only way `hit` misses,
+  // and the loop that re-asks on a miss has nothing to end it.
+  const { deps, launches, prompts } = fixDeps({
+    pick: async (/** @type {any} */ spec) => spec.title === 'Which report?' ? spec.options[0].value : 'hyprec-ffffffffffffffff',
+  })
+  assert.equal(await runReportFix([], ctx, deps), 1)
+  assert.equal(prompts.length, 2, 'the off-list answer is not re-asked')
+  assert.equal(launches.length, 0)
+  assert.match(err.join(''), /is not one of the recommendations offered/)
+})

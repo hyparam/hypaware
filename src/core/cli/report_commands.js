@@ -621,9 +621,15 @@ export async function runReportFix(argv, ctx, deps = {}) {
         }
         throw err
       }
-      // Every row's value is a key in `byId`; a miss re-asks rather than
-      // exiting 0 with nothing said.
+      // Every row's value is a key in `byId`, so a miss means the prompt
+      // answered with something it was never offered. That is said rather
+      // than exited 0 in silence, and said once: re-asking a prompt that
+      // answers off-list is a loop with nothing to end it.
       hit = group.byId.get(String(picked))
+      if (!hit) {
+        ctx.stderr.write(`hyp report fix: the picker answered '${esc(String(picked))}', which is not one of the recommendations offered\n`)
+        return 1
+      }
     }
     recommendation = hit.recommendation
     report = hit.report
