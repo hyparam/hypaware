@@ -93,14 +93,34 @@ where the normalized key reads 7 sessions on 3 days; the same machine's
 The key is the grouping, not the display: each candidate is headed by a
 typing as the person wrote it.
 
-A typing that normalizes to nothing is not a candidate at all. The fold
-keeps ASCII letters and digits, so a rule of dashes and a request
-written in a non-Latin script both key to the empty string, and
-grouping them would pool unrelated sessions into one candidate that
-outranks the real ones. The limit that follows is that a person who
-types in a script the key folds away gets no candidate rather than a
-wrong one; widening the character class is a later choice, not this
-one.
+A typing that normalizes to nothing is not a candidate at all: typings
+with nothing left to group on would pool unrelated sessions into one
+candidate that outranks the real ones. A rule of dashes is such a
+typing.
+
+What the fold erases is a decision of its own, so the fold is written as
+what it keeps. ASCII that is not a letter, a digit or a space folds to a
+space, the General Punctuation block folds with it, and every other
+character is kept. A first version kept only `a-z0-9`, which erased a
+request typed in Cyrillic, CJK or Arabic to the empty key and so gave a
+person who types in such a script no candidate at all (hypaware #1884).
+Keeping those letters cannot be said as a letter class here: the engine
+compiles a `regexp_replace` pattern with `new RegExp(pattern, 'g')` and
+no `u` flag, where `\p{L}` is the two characters `pL`, so the class
+names the ranges it keeps instead. A raw-prefix fallback for the lines
+the fold empties was rejected: it brings back the split key this
+decision replaced, on the lines least able to afford it.
+
+Two consequences are accepted. General Punctuation is folded so that a
+curly quote, an en dash and an ellipsis still fold the way their ASCII
+spellings do, but punctuation elsewhere above ASCII (an ideographic full
+stop, a guillemet, an Arabic question mark) is part of the key, so a
+request retyped with different punctuation of that kind reads as two
+lines rather than one. And a typing made only of non-ASCII symbols, an
+emoji rule for instance, now keys as itself rather than as nothing, so
+it can be counted like any other line. What it no longer does is pool
+with every other unrelated typing, which is what the empty-key exclusion
+is for.
 
 A first version measured four signals (reopened sessions, a repeated
 line, a request that should go to a worker, a recurring mistake) and

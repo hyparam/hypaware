@@ -63,7 +63,7 @@ test('evidenceSql: the candidate key is normalized, and the two statements share
   assert.ok(key.startsWith('trim(substr(trim(regexp_replace('), 'the key is computed in SQL, not read raw')
   assert.ok(key.includes('lower(content_text)'), 'case folded')
   assert.ok(key.includes("'^((okay|ok|now|please|can you|could you|yes|also|then|and|so|next)[,\\s]+)+'"), 'leading fillers dropped, one or more')
-  assert.ok(key.includes("'[^a-z0-9 ]+', ' '"), 'punctuation folded to a space')
+  assert.ok(key.includes("'[^a-z0-9 \\u0080-\\u1fff\\u2070-\\uffff]+', ' '"), 'ASCII punctuation and the General Punctuation block folded to a space, every script kept')
   assert.ok(key.endsWith(', 1, 36))'), 'a bounded key, with no trailing space where the cut fell on one')
   const trig = sql.triggers(['x'])
   assert.ok(trig.includes(`${key} as line`), 'the sessions are found by the same key the candidate was')
@@ -78,20 +78,21 @@ test('evidenceSql: the candidate key is normalized, and the two statements share
   assert.ok(sql.lines.includes("and line <> ''"), 'a typing that normalizes to nothing is not a candidate')
 })
 
-test('a typing with no letters is not a candidate, and an indented fragment is not a typed line', async () => {
-  // @ref LLP 0398#one-signal [tests]: the key groups typings of one request, not every typing it erases
-  // Through the same engine the gather runs on. Both shapes reached a
-  // candidate once the guards moved into SQL: the opener guards stopped
-  // trimming, and every typing with no letter or digit in it (a rule of
-  // dashes, an emoji, a request in a non-Latin script) shares the empty
-  // key, so unrelated sessions pool into one candidate that outranks the
-  // real ones.
+test('a request in a non-Latin script is a candidate of its own; a rule of dashes and an indented fragment are not candidates at all', async () => {
+  // @ref LLP 0398#one-signal [tests]: the key groups the typings of one request, and what keys to nothing is punctuation, not a language
+  // Through the same engine the gather runs on. hypaware #1884: a fold
+  // that kept only `a-z0-9` erased every non-Latin typing to the empty
+  // key, which `line <> ''` then dropped, so a request typed in Cyrillic
+  // in 3 sessions on 3 days returned nothing at all. Both halves are
+  // pinned: a non-Latin request is a candidate of its own, and two
+  // distinct ones do not pool back into one.
   const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
   const typings = [
     'commit on the right branch and open a PR',
     '  {"tool": "Bash", "input": "npm test"}',
     '--------------------------------------',
     'закоммить на нужную ветку и открыть пиар',
+    'проверь тесты и почини падающий тест',
   ]
   /** @type {Record<string, SqlPrimitive>[]} */
   const rows = []
@@ -118,7 +119,12 @@ test('a typing with no letters is not a candidate, and an indented fragment is n
   const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
   const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
   const result = await executeQuerySql({ query: evidenceSql('2026-08-08').lines, registry, storage })
-  assert.deepEqual(result.rows.map((r) => r.line), ['commit on the right branch and open'], 'the one request is the one candidate')
+  const lines = result.rows.map((r) => String(r.line)).sort()
+  assert.deepEqual(lines, ['commit on the right branch and open', 'закоммить на нужную ветку и открыть', 'проверь тесты и почини падающий тест'], 'each request is one candidate; the rule of dashes and the indented fragment are none')
+  for (const row of result.rows) {
+    assert.equal(row.sessions, 3, `${row.line} counts its own three sessions`)
+    assert.equal(row.days, 3, `${row.line} counts its own three days`)
+  }
 })
 
 test('commandHeads: a cd prefix is dropped and the head is the verb plus its subcommand', () => {
