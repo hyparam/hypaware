@@ -1,10 +1,11 @@
 // @ts-check
 
 import path from 'node:path'
+import fs from 'node:fs/promises'
 
 import { scopeGovernance } from '../usage-policy/matcher.js'
-import { discoverCachePartitions, readCursorSync, writeCursor } from './partition.js'
-import { deleteMatchingRows, scanRowsFromTable, tableExists } from './iceberg/store.js'
+import { discoverCachePartitions, readCursorSync, writeCursor, withPartitionMutationLock } from './partition.js'
+import { deleteMatchingRows, scanRowsFromTable } from './iceberg/store.js'
 import { resolveIcebergDir } from './storage.js'
 
 /**
@@ -14,8 +15,8 @@ import { resolveIcebergDir } from './storage.js'
 /**
  * Delete already-cached rows from the local query cache, cache-only: purge
  * never contacts a sink or the remote and never deletes exported copies
- * (LLP 0104 boundary, server-side deletion is out of scope, LLP 0069
- * §non-goals). The deletion mechanism is Iceberg position-deletes
+ * (LLP 0104's local primitive; LLP 0417 orchestrates server deletion
+ * separately). The deletion mechanism is Iceberg position-deletes
  * ({@link deleteMatchingRows}), which preserve surviving rows' `part_id`
  * identity and every sink's `_hyp_ingest_seq` watermark (see that function).
  *
@@ -63,13 +64,23 @@ export async function purgeCache({ cacheRoot, target, deps }) {
   let partitionsAffected = 0
 
   for (const part of partitions) {
-    const tableDir = resolveIcebergDir(part.path)
-    if (!tableExists(tableDir)) continue
-    const result = await deleteMatchingRows(tableDir, predicate, { columns })
-    if (result.rowsDeleted === 0) continue
-    rowsDeleted += result.rowsDeleted
-    partitionsAffected++
-    await refreshCursorRowCount(part.path, tableDir)
+    await withPartitionMutationLock(part.path, async () => {
+      const tableDir = resolveIcebergDir(part.path)
+      let names
+      try { names = await fs.readdir(path.join(tableDir, 'metadata')) } catch (error) {
+        if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' && part.rowCount === 0) return
+        throw error
+      }
+      if (!names.some(name => name.endsWith('.metadata.json'))) {
+        if (part.rowCount > 0) throw new Error('Purge found a populated partition without table metadata')
+        return
+      }
+      const result = await deleteMatchingRows(tableDir, predicate, { columns })
+      if (result.rowsDeleted === 0) return
+      rowsDeleted += result.rowsDeleted
+      partitionsAffected++
+      await refreshCursorRowCount(part.path, tableDir)
+    })
   }
 
   return {
@@ -149,9 +160,10 @@ function buildPredicate(target, purgedCwds, retainedAliases, deps) {
     }
     case 'session': {
       return {
-        columns: ['session_id', 'cwd'],
+        columns: ['session_id', 'cwd', 'org'],
         predicate: (row) => {
           if (row.session_id == null || String(row.session_id) !== target.id) return false
+          if (target.org !== undefined && (row.org ?? '') !== target.org) return false
           noteCwd(row)
           return true
         },

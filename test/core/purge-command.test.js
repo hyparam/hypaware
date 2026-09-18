@@ -449,7 +449,7 @@ test('runPurge --ignored is durable: an ignored dir does not warn', async () => 
   }
 })
 
-test('runPurge --json emits machine-readable counts and resurrectable dirs', async () => {
+test('runPurge --json reports a session fence instead of a resurrection warning', async () => {
   const cacheRoot = await makeTmpDir('cli-json')
   const hypHome = await makeTmpDir('cli-json-home')
   try {
@@ -460,7 +460,7 @@ test('runPurge --json emits machine-readable counts and resurrectable dirs', asy
     const parsed = JSON.parse(stdout.text)
     assert.equal(parsed.rowsDeleted, 2)
     assert.equal(parsed.partitionsAffected, 1)
-    assert.deepEqual(parsed.resurrectable.sort(), [REPO_A, REPO_A_SUB].sort())
+    assert.deepEqual(parsed.resurrectable, [])
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
     await fs.rm(hypHome, { recursive: true, force: true })

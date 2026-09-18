@@ -10,6 +10,9 @@ import { isTty } from '../cli/stdio.js'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { purgeCache } from '../cache/purge.js'
+import { createSessionPurgeStore } from '../cache/session-purges.js'
+import { effectiveRemotes } from '../remote/builtin_remotes.js'
+import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, resolveAccessJwt } from '../remote/credentials.js'
 import { captureSpoolRoot, sweepCaptureSpool } from '../capture_spool.js'
 import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/index.js'
 
@@ -17,14 +20,15 @@ import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/in
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  * @import { PurgeSummary, PurgeTarget } from '../../../src/core/cache/types.js'
  * @import { UsagePolicyResolver } from '../../../src/core/usage-policy/types.js'
+ * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
  */
 
 /**
  * `hyp purge <path> | --session <id> | --ignored | --all [--yes] [--json]`
  *
  * The destructive verb (LLP 0104): delete already-cached rows from this
- * machine's local query cache, cache-only, purge never contacts a sink or the
- * remote and never deletes exported copies. Exactly one target is required;
+ * machine's local query cache. A session target can additionally name a
+ * remote under LLP 0417. Exactly one target is required;
  * bare `hyp purge` errors (no implicit scope for a destructive verb). The
  * marking verbs (`hyp ignore` in any form) stay non-destructive; purge is the
  * separate capability the skill composes after marking (LLP 0104 boundary,
@@ -39,7 +43,8 @@ import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/in
  * removes: it also empties the raw-body capture spool, which is a transit area
  * holding bodies no row has been made from yet (LLP 0253).
  *
- * @ref LLP 0104 [implements]: the `hyp purge` verb (targeted, cache-only, confirmed), with non-destructive marking left intact
+ * @ref LLP 0104 [implements]: targeted confirmed deletion, with non-destructive marking left intact
+ * @ref LLP 0417#operation [implements]: a session can additionally target the selected server
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
  * @returns {Promise<number>}
@@ -54,6 +59,12 @@ export async function runPurge(argv, ctx) {
   const { hypHome, stateDir } = readObservabilityEnv(ctx.env)
   const resolver = createUsagePolicyResolver({ localOnlyListPath: localOnlyListPath(stateDir) })
   const target = buildTarget(parsed, ctx, resolver)
+  const remotes = effectiveRemotes(ctx.config)
+  const remote = parsed.remote && Object.hasOwn(remotes, parsed.remote) ? remotes[parsed.remote] : undefined
+  if (parsed.remote && !remote) {
+    ctx.stderr.write('error: unknown remote target\n')
+    return 2
+  }
 
   // Destructive verb: confirm on an interactive TTY, require --yes otherwise.
   if (!parsed.yes) {
@@ -65,7 +76,7 @@ export async function runPurge(argv, ctx) {
     }
     const ok = await askYesNo(
       ctx,
-      `Permanently delete ${describeTarget(target)} from the local cache? [y/N] `
+      `Delete ${describeTarget(target)} from the local cache${parsed.remote ? ` and remote '${parsed.remote}'` : ''}? [y/N] `
     )
     if (!ok) {
       ctx.stdout.write('purge cancelled\n')
@@ -74,8 +85,16 @@ export async function runPurge(argv, ctx) {
   }
 
   /** @type {PurgeSummary} */
-  let summary
+  let summary = { rowsDeleted: 0, partitionsAffected: 0, purgedCwds: [], retainedAliasRows: 0, retainedAliasCwds: [] }
+  let localError
   try {
+    if (target.kind === 'session') {
+      // @ref LLP 0417#operation [implements]: fence first, then drain waiting
+      // rows through the fence before deleting committed rows.
+      createSessionPurgeStore(ctx.storage.cacheRoot).add(target.id)
+      const storage = /** @type {ExtendedQueryStorageService} */ (ctx.storage)
+      if (storage.flushAll) await storage.flushAll({ reason: 'session_purge', force: true })
+    }
     summary = await withSpan(
       'purge.run',
       {
@@ -92,8 +111,9 @@ export async function runPurge(argv, ctx) {
     )
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    localError = message
     ctx.stderr.write(`error: purge failed: ${message}\n`)
-    return 1
+    if (!remote) return 1
   }
 
   // The capture spool, emptied whatever the target was. The files in it are
@@ -106,6 +126,16 @@ export async function runPurge(argv, ctx) {
   // @ref LLP 0253#purge-and-detach-sweep [implements]: `hyp purge` removes the
   //   spool directory's contents
   const swept = await sweepCaptureSpool(captureSpoolRoot(hypHome))
+  let remoteResult
+  let remoteError
+  if (remote && parsed.remote && target.kind === 'session') {
+    try {
+      remoteResult = await purgeRemoteSession({ ctx, target: parsed.remote, url: remote.url, sessionId: target.id })
+    } catch (error) {
+      remoteError = error instanceof Error ? error.message : String(error)
+      ctx.stderr.write(`error: local purge ${localError ? 'incomplete' : 'finished'}, remote purge incomplete: ${remoteError}\n`)
+    }
+  }
 
   getLogger('cache').info('purge.result', {
     [Attr.COMPONENT]: 'cmd-purge',
@@ -121,15 +151,15 @@ export async function runPurge(argv, ctx) {
     // on stderr, so a smoke could assert the user-visible result without any
     // internal signal that the spelling predicate actually ran the branch.
     retained_alias_rows: summary.retainedAliasRows,
-    status: 'ok',
+    status: localError || remoteError || swept.failed > 0 ? 'incomplete' : 'ok',
   })
 
   // Resurrection warning (LLP 0104 §resurrection): any purged directory that
   // still resolves `full` will be re-imported by the next backfill. An
   // `ignore`d subtree is durable (the capture seam blocks re-import), so the
-  // `--ignored` sweep never warns. Driven off the cwds actually deleted, not
-  // the target shape, so `--session` / `--all` warn precisely.
-  const resurrectable = summary.purgedCwds
+  // `--ignored` sweep never warns. A session now has a persistent purge fence;
+  // directory and all-row purges still warn from their deleted cwds.
+  const resurrectable = (target.kind === 'session' ? [] : summary.purgedCwds)
     .filter((cwd) => resolver.resolve(cwd).class === 'full')
     .sort()
 
@@ -137,15 +167,17 @@ export async function runPurge(argv, ctx) {
 
   if (parsed.json) {
     ctx.stdout.write(JSON.stringify({
-      rowsDeleted: summary.rowsDeleted,
-      partitionsAffected: summary.partitionsAffected,
+      rowsDeleted: localError ? null : summary.rowsDeleted,
+      partitionsAffected: localError ? null : summary.partitionsAffected,
       resurrectable,
       retainedAliasRows: summary.retainedAliasRows,
       retainedAliasCwds: retainedAliases,
       spoolFilesRemoved: swept.filesRemoved,
+      ...(localError ? { local: { status: 'incomplete', error: localError } } : {}),
+      ...(parsed.remote ? { remote: remoteResult ?? { status: 'incomplete', error: remoteError } } : {}),
     }) + '\n')
   } else {
-    ctx.stdout.write(
+    if (!localError) ctx.stdout.write(
       `purged ${summary.rowsDeleted} row${summary.rowsDeleted === 1 ? '' : 's'} ` +
       `from ${summary.partitionsAffected} partition${summary.partitionsAffected === 1 ? '' : 's'}\n`
     )
@@ -158,6 +190,10 @@ export async function runPurge(argv, ctx) {
         `also emptied the capture spool: ${swept.filesRemoved} ` +
         `raw body file${swept.filesRemoved === 1 ? '' : 's'} deleted\n`
       )
+    }
+    if (remoteResult) {
+      ctx.stdout.write(`remote session rows position-deleted on '${parsed.remote}'\n`)
+      ctx.stdout.write('copied content in generated reports and other derivatives is not included\n')
     }
   }
 
@@ -214,7 +250,37 @@ export async function runPurge(argv, ctx) {
     ctx.stderr.write("tip: mark them ignored first with 'hyp privacy set <path> ignore' so the purge is durable\n")
   }
 
-  return 0
+  return localError || remoteError || swept.failed > 0 ? 1 : 0
+}
+
+/**
+ * @ref LLP 0417#authorization [implements]: human remote credentials, never the upload gateway bearer
+ * @param {{ ctx: CommandRunContext, target: string, url: string, sessionId: string }} args
+ */
+async function purgeRemoteSession({ ctx, target, url, sessionId }) {
+  const stateDir = readObservabilityEnv(ctx.env).stateDir
+  const identityBase = deriveIdentityBase(url) ?? undefined
+  const resolved = await resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase })
+  if (!resolved.ok) throw new Error(resolved.error)
+  const endpoint = new URL(deriveMcpEndpoint(url))
+  endpoint.pathname = endpoint.pathname.replace(/\/mcp$/, '/sessions/purge')
+  const result = await attachWithRefresh({
+    resolved,
+    refresh: () => resolveAccessJwt({ target, env: ctx.env, stateDir, identityBase, forceRefresh: true }),
+    async op(token) {
+      const response = await fetch(endpoint, {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(300000),
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      })
+      return { authFailed: response.status === 401, value: response }
+    },
+  })
+  if (!result.ok) throw new Error(result.error)
+  if (!result.value.ok) throw new Error(`server returned HTTP ${result.value.status}; retry the same purge after resolving the server or authorization error`)
+  const receipt = /** @type {{ status?: string, session_id?: string }} */ (await result.value.json())
+  if (receipt?.status !== 'completed' || receipt?.session_id !== sessionId) throw new Error('server did not confirm session purge completion')
+  return receipt
 }
 
 /**
@@ -266,7 +332,7 @@ function hashTargetToken(target) {
 
 /**
  * @param {string[]} argv
- * @returns {{ path?: string, session?: string, ignored: boolean, all: boolean, yes: boolean, json: boolean, error?: string }}
+ * @returns {{ path?: string, session?: string, remote?: string, ignored: boolean, all: boolean, yes: boolean, json: boolean, error?: string }}
  */
 function parseArgs(argv) {
   const base = { ignored: false, all: false, yes: false, json: false }
@@ -275,6 +341,7 @@ function parseArgs(argv) {
     properties: {
       path: { type: 'string' },
       session: { type: 'string' },
+      remote: { type: 'string' },
       ignored: { type: 'boolean', default: false },
       all: { type: 'boolean', default: false },
       yes: { type: 'boolean', default: false },
@@ -286,7 +353,7 @@ function parseArgs(argv) {
     return { ...base, error: USAGE }
   }
   if (!parsed.ok) return { ...base, error: parsed.error }
-  const p = /** @type {{ path?: string, session?: string, ignored: boolean, all: boolean, yes: boolean, json: boolean }} */ (parsed.params)
+  const p = /** @type {{ path?: string, session?: string, remote?: string, ignored: boolean, all: boolean, yes: boolean, json: boolean }} */ (parsed.params)
 
   // Exactly one target selector. Bare `hyp purge` (no target) errors: a
   // destructive verb has no implicit scope (LLP 0104).
@@ -302,13 +369,17 @@ function parseArgs(argv) {
   if (selectors > 1) {
     return { ...base, error: `choose exactly one of <path>, --session, --ignored, --all.\n${USAGE}` }
   }
-  if (p.session !== undefined && p.session === '') {
+  if (p.remote !== undefined && (p.session === undefined || !p.remote.trim())) {
+    return { ...base, error: '--remote requires a named target and --session' }
+  }
+  if (p.session !== undefined && (!p.session.trim() || Buffer.byteLength(p.session) > 4096)) {
     return { ...base, error: '--session requires a session id' }
   }
 
   return {
     path: p.path,
     session: p.session,
+    remote: p.remote,
     ignored: p.ignored,
     all: p.all,
     yes: p.yes,
@@ -316,4 +387,4 @@ function parseArgs(argv) {
   }
 }
 
-const USAGE = 'usage: hyp purge <path> | --session <id> | --ignored | --all [--yes] [--json]'
+const USAGE = 'usage: hyp purge <path> | --session <id> [--remote <target>] | --ignored | --all [--yes] [--json]'

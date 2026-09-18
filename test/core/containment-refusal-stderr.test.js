@@ -95,7 +95,7 @@ async function makeHome({ planted }) {
   }
   await fs.writeFile(
     path.join(partition, 'cursor.json'),
-    JSON.stringify({ epoch: 1, rowCount: 3, compaction: null, layout: 'source-table' })
+    JSON.stringify({ epoch: 1, rowCount: planted ? 3 : 0, compaction: null, layout: 'source-table' })
   )
   return { root, hypHome }
 }

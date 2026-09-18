@@ -39,7 +39,7 @@ export interface PartitionCursor {
 // `all` is wholesale.
 export type PurgeTarget =
   | { kind: 'subtree'; path: string }
-  | { kind: 'session'; id: string }
+  | { kind: 'session'; id: string; org?: string }
   | { kind: 'ignored'; resolver: UsagePolicyResolver }
   | { kind: 'all' }
 

@@ -356,15 +356,17 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
   if (!tableExists(tablePath)) return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
+  return deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns: opts.columns })
+}
 
-  /** @type {TableMetadata} */
-  let metadata
-  try {
-    const loaded = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
-    metadata = loaded.metadata
-  } catch {
-    return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
-  }
+/**
+ * The same position-delete path for local cache and BlobStore archives.
+ * Unreadable metadata or data is a failed purge, never a zero-row success.
+ * @ref LLP 0417#erasure [implements]: logical deletion uses Iceberg positions; physical reclamation is separate
+ * @param {{ tableUrl: string, resolver: Resolver, lister: Lister, predicate: (row: Record<string, unknown>) => boolean, columns: string[] }} args
+ */
+export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns }) {
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) {
     return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
   }
@@ -379,7 +381,7 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
   // still, so the per-file read below narrows this list again.
   const schema = currentSchema(metadata)
   const schemaColumns = new Set(schema?.fields.map((f) => f.name) ?? [])
-  const projected = opts.columns.filter((c) => schemaColumns.has(c))
+  const projected = columns.filter((c) => schemaColumns.has(c))
 
   const alreadyDeleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
   const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
@@ -391,18 +393,18 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
   let batchCount = 0
 
   for (const [filePath] of dataFileMap) {
-    const positions = await scanFileForMatchingRows(
-      filePath, resolver, predicate, projected, alreadyDeleted.get(filePath)
-    )
-    if (positions.length === 0) continue
-    filesAffected++
-    pending.push(...positions.map((pos) => ({ file_path: filePath, pos })))
-    while (pending.length >= PURGE_DELETE_BATCH_SIZE) {
-      const batch = pending.splice(0, PURGE_DELETE_BATCH_SIZE)
-      await icebergDelete({ catalog, tableUrl: url, deletes: batch })
-      rowsDeleted += batch.length
-      batchCount++
+    let matched = false
+    for await (const pos of scanFileForMatchingRows(filePath, resolver, predicate, projected, alreadyDeleted.get(filePath))) {
+      matched = true
+      pending.push({ file_path: filePath, pos })
+      if (pending.length === PURGE_DELETE_BATCH_SIZE) {
+        await icebergDelete({ catalog, tableUrl: url, deletes: pending })
+        rowsDeleted += pending.length
+        pending = []
+        batchCount++
+      }
     }
+    if (matched) filesAffected++
   }
   if (pending.length > 0) {
     await icebergDelete({ catalog, tableUrl: url, deletes: pending })
@@ -461,26 +463,26 @@ export async function physicalProjection(file, columns) {
  * @param {(row: Record<string, unknown>) => boolean} predicate
  * @param {string[]} columns projected columns the predicate needs
  * @param {Set<bigint>} [deletedPositions]
- * @returns {Promise<number[]>}
+ * @returns {AsyncGenerator<number>}
  */
-async function scanFileForMatchingRows(filePath, resolver, predicate, columns, deletedPositions) {
-  /** @type {number[]} */
-  const positions = []
-  try {
-    const file = await Promise.resolve(resolver.reader(filePath))
-    const readOpts = columns.length > 0
-      ? { file, ...await physicalProjection(file, columns) }
-      : { file }
-    const rows = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects(readOpts))
+async function* scanFileForMatchingRows(filePath, resolver, predicate, columns, deletedPositions) {
+  const file = await Promise.resolve(resolver.reader(filePath))
+  const projection = await physicalProjection(file, columns)
+  // Hyparquet decodes a whole column chunk for any slice within its row
+  // group. Align reads to groups so a fixed-size slice does not repeatedly
+  // decode the same chunk. Positions are still committed in bounded batches.
+  let start = 0
+  for (const group of projection.metadata.row_groups) {
+    const end = start + Number(group.num_rows)
+    const rows = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({
+      file, ...projection, rowStart: start, rowEnd: end,
+    }))
     for (let i = 0; i < rows.length; i++) {
-      if (deletedPositions?.has(BigInt(i))) continue
-      if (predicate(rows[i])) positions.push(i)
+      const pos = start + i
+      if (!deletedPositions?.has(BigInt(pos)) && predicate(rows[i])) yield pos
     }
-  } catch {
-    // Unreadable file: skip rather than block the whole purge. The rows stay
-    // cached; a subsequent purge over a healthy file still removes them.
+    start = end
   }
-  return positions
 }
 
 /**
