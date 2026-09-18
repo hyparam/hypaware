@@ -861,6 +861,11 @@ export function resolveSessionIdForCli(args) {
   // passed on byte-identical; only the emptiness test trims.
   const claudeSessionId = statedEnv(args.env.CLAUDE_CODE_SESSION_ID)
   const codexThreadId = statedEnv(args.env[CODEX_THREAD_ENV])
+  const piSessionId = statedEnv(args.env.PI_SESSION_ID)
+  if (piSessionId && (claudeSessionId || codexThreadId)) {
+    return { ok: false, error: 'could not resolve a session id: more than one client states one for this invocation. Pass the intended session id explicitly: hyp session status <session-id>.' }
+  }
+  if (piSessionId) return { ok: true, sessionId: piSessionId, source: 'pi_env' }
   if (claudeSessionId && codexThreadId) {
     return {
       ok: false,

@@ -283,7 +283,7 @@ export type SessionIdResolution =
   | {
       ok: true
       sessionId: string
-      source: 'argument' | 'claude_env' | 'codex_rollout' | 'codex_env_rollout'
+      source: 'argument' | 'claude_env' | 'pi_env' | 'codex_rollout' | 'codex_env_rollout'
       evidence?: string
       threadId?: string
     }
@@ -362,7 +362,7 @@ export interface SessionStatusOutcome {
 export interface SessionStatusReport {
   status: 'ignored' | 'not_ignored' | 'unknown'
   session_id: string | null
-  session_id_source: 'argument' | 'claude_env' | 'codex_rollout' | 'codex_env_rollout' | null
+  session_id_source: 'argument' | 'claude_env' | 'pi_env' | 'codex_rollout' | 'codex_env_rollout' | null
   session_id_evidence: string | null
   /**
    * The Codex thread the invocation is in, when one was resolved. Distinct from

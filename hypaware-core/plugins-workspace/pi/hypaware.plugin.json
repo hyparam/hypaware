@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "name": "@hypaware/pi",
+  "version": "1.0.0",
+  "description": "First-party Pi collection with a standalone extension and bounded native-session recovery.",
+  "hypaware_api": "^1.0.0",
+  "runtime": "node",
+  "node_engine": ">=20",
+  "entrypoint": "./src/index.js",
+  "permissions": [
+    "network",
+    "read_home",
+    "write_home",
+    "read_state",
+    "write_state"
+  ],
+  "contributes": {
+    "client": {
+      "name": "pi",
+      "skill_dir": ".pi/agent/skills",
+      "attach_probe": {
+        "format": "managed_file",
+        "settings_file": ".pi/agent/extensions/hypaware.js",
+        "marker_text": "// HYPWARE_PI_EXTENSION v1"
+      },
+      "launch": {
+        "bin": "pi",
+        "args": [
+          "-p",
+          "{prompt}"
+        ],
+        "label": "Pi"
+      }
+    },
+    "picker": [
+      {
+        "name": "pi",
+        "label": "Pi",
+        "summary": "Records Pi conversations and imports recent history. Setup adds the HypAware extension to Pi.",
+        "detect": {
+          "settings_file": ".pi/agent/settings.json"
+        },
+        "compose": {
+          "plugin": {
+            "name": "@hypaware/pi"
+          }
+        }
+      }
+    ],
+    "sources": [
+      {
+        "name": "pi"
+      }
+    ],
+    "commands": [
+      {
+        "name": "session ignore",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Stop recording this AI session on every local recorder (saved until explicitly unignored)"
+      },
+      {
+        "name": "session unignore",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Resume recording this AI session"
+      },
+      {
+        "name": "session status",
+        "category": "capture-movement",
+        "audience": "everyday",
+        "summary": "Report whether this AI session is being dropped right now (fails closed)"
+      }
+    ],
+    "config_sections": [
+      {
+        "section": "pi",
+        "summary": "Pi listener, attach and scheduled session recovery."
+      }
+    ]
+  }
+}
