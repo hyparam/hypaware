@@ -176,6 +176,26 @@ const LEADING_FILLERS = 'okay|ok|now|please|can you|could you|yes|also|then|and|
 const KEY_CHARS = 36
 
 /**
+ * The characters folded to a space before the key is cut: ASCII that is
+ * not a letter, a digit or a space, plus the General Punctuation block,
+ * so a curly quote, an en dash and an ellipsis fold the way their ASCII
+ * spellings do. Every other character is kept, so a request typed in
+ * Cyrillic, CJK or Arabic keys as itself rather than as the empty string
+ * the `line <> ''` exclusion drops (hypaware #1884).
+ *
+ * Named ranges rather than a letter class because the engine compiles a
+ * `regexp_replace` pattern with `new RegExp(pattern, 'g')` and no `u`
+ * flag (squirreling `src/expression/regexp.js`), where `\p{L}` is not a
+ * letter class at all: `\p` is an identity escape there, so the pattern
+ * matches the four literal characters `p{L}`. Whitespace above ASCII
+ * needs no range of its own, since the `\s+` fold that follows already
+ * matches it, save the C1 control U+0085 that JavaScript's `\s` omits.
+ *
+ * @ref LLP 0398#one-signal [implements]: what the fold erases is the decision; it keeps every script's letters, so what keys to nothing is punctuation, not a language
+ */
+const FOLD_TO_SPACE = '[^a-z0-9 \\u0080-\\u1fff\\u2070-\\uffff]+'
+
+/**
  * The key two typings are grouped by: case folded, leading fillers
  * dropped, punctuation and whitespace runs folded to one space, the first
  * `KEY_CHARS` characters. One SQL expression used by both the statement
@@ -191,7 +211,7 @@ const KEY_CHARS = 36
  *
  * @ref LLP 0398#one-signal [implements]: the same line typed again is judged after normalizing, not verbatim
  */
-const TRIGGER_KEY = `trim(substr(trim(regexp_replace(regexp_replace(regexp_replace(lower(content_text), '^((${LEADING_FILLERS})[,\\s]+)+', ''), '[^a-z0-9 ]+', ' '), '\\s+', ' ')), 1, ${KEY_CHARS}))`
+const TRIGGER_KEY = `trim(substr(trim(regexp_replace(regexp_replace(regexp_replace(lower(content_text), '^((${LEADING_FILLERS})[,\\s]+)+', ''), '${FOLD_TO_SPACE}', ' '), '\\s+', ' ')), 1, ${KEY_CHARS}))`
 
 /**
  * What counts as a typed line at all: one line of request length. A
@@ -309,11 +329,12 @@ export function evidenceSql(from) {
   const human = `role = 'user' and part_type = 'text' and ${NOT_DUPLICATE_LANE} and ${HUMAN_TURN}`
   return {
     record: `select count(*) as session_days, count(distinct session_id) as sessions from (select session_id, date from ai_gateway_messages where date >= '${from}' and role = 'assistant' and ${NOT_DUPLICATE_LANE} group by 1, 2) s`,
-    // `line <> ''` because a typing with no letter or digit in it
-    // normalizes to nothing, and every such typing groups together: a row
-    // of dashes, an emoji, and a request written in a non-Latin script all
-    // land on the empty key, pooling unrelated sessions into one candidate
-    // that then outranks the real ones.
+    // `line <> ''` because a typing the fold erases entirely normalizes
+    // to nothing, and every such typing groups together: a rule of dashes
+    // and a row of ASCII punctuation both land on the empty key, pooling
+    // unrelated sessions into one candidate that then outranks the real
+    // ones. A request in a non-Latin script is not one of them, since the
+    // fold keeps its letters.
     lines: `select ${TRIGGER_KEY} as line, count(distinct session_id) as sessions, count(distinct date) as days, count(*) as typed from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} group by 1 having count(distinct session_id) >= 3 and count(distinct date) >= 3 and line <> '' order by sessions desc limit ${CANDIDATES + 3}`,
     // The one statement here with no `limit`, because the `group by` is its
     // ceiling and a `limit` would not be one (hypaware #1715): the engine
