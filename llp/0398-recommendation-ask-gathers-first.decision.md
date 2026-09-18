@@ -93,6 +93,15 @@ where the normalized key reads 7 sessions on 3 days; the same machine's
 The key is the grouping, not the display: each candidate is headed by a
 typing as the person wrote it.
 
+A typing that normalizes to nothing is not a candidate at all. The fold
+keeps ASCII letters and digits, so a rule of dashes and a request
+written in a non-Latin script both key to the empty string, and
+grouping them would pool unrelated sessions into one candidate that
+outranks the real ones. The limit that follows is that a person who
+types in a script the key folds away gets no candidate rather than a
+wrong one; widening the character class is a later choice, not this
+one.
+
 A first version measured four signals (reopened sessions, a repeated
 line, a request that should go to a worker, a recurring mistake) and
 chose among them by a rule with floors. It was replaced for three
