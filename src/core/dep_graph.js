@@ -16,7 +16,9 @@ import { matchesSemverRange } from './semver.js'
  * Resolve a topological activation order over a set of loaded plugin
  * manifests, taking `requires.plugins` and `requires.capabilities`
  * into account. Emits a `dep_graph.resolve` span with kernel-boot
- * attributes and a `dep_graph.reject` log per rejected plugin.
+ * attributes, a `dep_graph.reject` log per rejected plugin, and a
+ * `dep_graph.capability_skipped` warning per dropped malformed
+ * `provides.capabilities` pair.
  *
  * Cycle detection runs before capability resolution: a plugin in a
  * cycle never gets a chance to provide or require capabilities.
@@ -83,7 +85,21 @@ export async function resolveDependencies(manifests, opts = {}) {
           // naming no capability provides nothing to arbitrate over, so it is
           // skipped: registering it made two plugins that each declared `''`
           // clash with each other over the empty name.
-          if (capName === '' || version === '') continue
+          if (capName === '' || version === '') {
+            // `warn`, not the `dep_graph.reject` the other eliminations emit:
+            // nothing is rejected here, the plugin that wrote the declaration
+            // still activates. The cost falls on someone else, the consumer
+            // that required the capability and is reported with `cap_missing`,
+            // so a silent skip leaves the report naming only that innocent
+            // plugin (issue #1870).
+            log.warn('dep_graph.capability_skipped', {
+              [Attr.PLUGIN]: m.name,
+              [Attr.CAPABILITY]: capName,
+              hyp_capability_version: version,
+              [Attr.ERROR_KIND]: 'cap_malformed',
+            })
+            continue
+          }
           registry.provide(m.name, capName, version, null)
         }
       }
