@@ -7,6 +7,7 @@ import { scopeGovernance } from '../usage-policy/matcher.js'
 import { discoverCachePartitions, readCursorSync, writeCursor, withPartitionMutationLock } from './partition.js'
 import { deleteMatchingRows, scanRowsFromTable } from './iceberg/store.js'
 import { resolveIcebergDir } from './storage.js'
+import { sessionGraphNodeId } from './session-purges.js'
 
 /**
  * @import { PurgeSummary, PurgeTarget } from '../../../src/core/cache/types.js'
@@ -66,20 +67,33 @@ export async function purgeCache({ cacheRoot, target, deps }) {
   for (const part of partitions) {
     await withPartitionMutationLock(part.path, async () => {
       const tableDir = resolveIcebergDir(part.path)
-      let names
-      try { names = await fs.readdir(path.join(tableDir, 'metadata')) } catch (error) {
-        if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' && part.rowCount === 0) return
-        throw error
+      // Retired epochs can still be read by a reader holding an older
+      // generation. Session purges cover them under the partition lock too.
+      // Physical files and historical snapshots require separate reclamation.
+      const tables = new Set([tableDir])
+      if (target.kind === 'session') {
+        for (const entry of await fs.readdir(part.path, { withFileTypes: true })) {
+          if (entry.isDirectory() && /^epoch=\d+$/.test(entry.name)) tables.add(path.join(part.path, entry.name))
+        }
       }
-      if (!names.some(name => name.endsWith('.metadata.json'))) {
-        if (part.rowCount > 0) throw new Error('Purge found a populated partition without table metadata')
-        return
+      let affected = false
+      for (const current of tables) {
+        let names
+        try { names = await fs.readdir(path.join(current, 'metadata')) } catch (error) {
+          if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' && current === tableDir && part.rowCount === 0) continue
+          throw error
+        }
+        if (!names.some(name => name.endsWith('.metadata.json'))) {
+          if (current === tableDir && part.rowCount > 0) throw new Error('Purge found a populated partition without table metadata')
+          continue
+        }
+        const result = await deleteMatchingRows(current, predicate, { columns })
+        if (result.rowsDeleted === 0) continue
+        rowsDeleted += result.rowsDeleted
+        affected = true
+        if (current === tableDir) await refreshCursorRowCount(part.path, tableDir)
       }
-      const result = await deleteMatchingRows(tableDir, predicate, { columns })
-      if (result.rowsDeleted === 0) return
-      rowsDeleted += result.rowsDeleted
-      partitionsAffected++
-      await refreshCursorRowCount(part.path, tableDir)
+      if (affected) partitionsAffected++
     })
   }
 
@@ -159,10 +173,11 @@ function buildPredicate(target, purgedCwds, retainedAliases, deps) {
       }
     }
     case 'session': {
+      const nodeId = sessionGraphNodeId(target.id)
       return {
-        columns: ['session_id', 'cwd', 'org'],
+        columns: ['session_id', 'cwd', 'org', 'node_id', 'src_id', 'dst_id'],
         predicate: (row) => {
-          if (row.session_id == null || String(row.session_id) !== target.id) return false
+          if (row.session_id !== target.id && row.node_id !== nodeId && row.src_id !== nodeId && row.dst_id !== nodeId) return false
           if (target.org !== undefined && (row.org ?? '') !== target.org) return false
           noteCwd(row)
           return true

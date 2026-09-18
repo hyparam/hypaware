@@ -6,9 +6,9 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cache/storage.js'
-import { createSessionPurgeStore } from '../../src/core/cache/session-purges.js'
+import { createSessionPurgeStore, sessionGraphNodeId } from '../../src/core/cache/session-purges.js'
 import { runPurge } from '../../src/core/commands/purge.js'
-import { deleteMatchingRows, listLiveDataFiles, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
+import { appendRowsToTable, deleteMatchingRows, listLiveDataFiles, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 
 /** @import { ColumnSpec, CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
 /** @type {ColumnSpec[]} */
@@ -176,6 +176,8 @@ test('session purge automatically attempts every configured remote despite an ea
   const receipt = JSON.parse(output())
   assert.equal(receipt.remotes.first.status, 'incomplete')
   assert.equal(receipt.remotes.second.status, 'completed')
+  assert.equal(receipt.remotes.second.physical_cleanup.status, 'unverified')
+  assert.equal(receipt.local.physical_cleanup.status, 'not_implemented')
 })
 
 test('local-only explicitly skips remotes and incompatible scope flags fail before purging', async t => {
@@ -228,4 +230,47 @@ test('a signed-in built-in remote is included without adding it to config', asyn
   }
   assert.equal(await runPurge(['--session', 'delete', '--yes'], ctx), 0)
   assert.equal(calls, 1)
+})
+
+
+test('purge covers retired epochs and graph identifiers without deleting other orgs or shared nodes', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-retired-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { storage } = fixture(root)
+  const table = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(table, columns, [{ session_id: 'delete', org: 'a', body: 'current' }])
+  await storage.flushAll({ force: true })
+  const retired = path.join(table, 'epoch=999')
+  await appendRowsToTable(retired, columns, [
+    { session_id: 'delete', org: 'a', body: 'old secret' },
+    { session_id: 'delete', org: 'b', body: 'other org' },
+    { session_id: 'keep', org: 'a', body: 'neighbor' },
+  ])
+  const graphColumns = ['node_id', 'src_id', 'dst_id', 'org'].map(name => ({ name, type: /** @type {const} */ ('STRING'), nullable: true }))
+  const graph = storage.cacheTablePath('node', ['source=unknown'])
+  const id = sessionGraphNodeId('delete')
+  await storage.appendRows(graph, graphColumns, [
+    { node_id: id, org: 'a' }, { src_id: id, dst_id: 'shared', org: 'a' },
+    { node_id: id, org: 'b' }, { node_id: 'shared', org: 'a' },
+  ])
+  await storage.flushAll({ force: true })
+  await storage.flushTable(graph, { force: true })
+  const { purgeCache } = await import('../../src/core/cache/purge.js')
+  createSessionPurgeStore(storage.cacheRoot).add('delete', 'a')
+  const fence = createSessionPurgeStore(storage.cacheRoot)
+  fence.refresh()
+  assert.equal(fence.has({ src_id: id, org: 'a' }), true)
+  assert.equal(fence.has({ node_id: id, org: 'b' }), false)
+  const projected = []
+  for await (const row of storage.readRows(graph, ['org'])) projected.push(row)
+  assert.deepEqual(projected, [{ org: 'b' }, { org: 'a' }])
+  const result = await purgeCache({ cacheRoot: storage.cacheRoot, target: { kind: 'session', id: 'delete', org: 'a' } })
+  assert.equal(result.rowsDeleted, 4)
+  const old = []
+  for await (const row of scanRowsFromTable(retired)) old.push(row.body)
+  assert.deepEqual(old.sort(), ['neighbor', 'other org'])
+  const nodes = []
+  for await (const row of scanRowsFromTable(resolveIcebergDir(graph))) nodes.push(row.node_id)
+  assert.deepEqual(nodes, [id, 'shared'])
+  assert.equal((await purgeCache({ cacheRoot: storage.cacheRoot, target: { kind: 'session', id: 'delete', org: 'a' } })).rowsDeleted, 0)
 })

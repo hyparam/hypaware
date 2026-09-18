@@ -127,7 +127,7 @@ export async function runPurge(argv, ctx) {
   // @ref LLP 0253#purge-and-detach-sweep [implements]: `hyp purge` removes the
   //   spool directory's contents
   const swept = await sweepCaptureSpool(captureSpoolRoot(hypHome))
-  /** @type {Map<string, { status?: string, session_id?: string, error?: string }>} */
+  /** @type {Map<string, { status?: string, session_id?: string, error?: string, physical_cleanup?: { status?: string } }>} */
   const remoteResults = new Map()
   let remoteError = false
   if (target.kind === 'session') {
@@ -183,7 +183,10 @@ export async function runPurge(argv, ctx) {
       retainedAliasRows: summary.retainedAliasRows,
       retainedAliasCwds: retainedAliases,
       spoolFilesRemoved: swept.filesRemoved,
-      ...(localError ? { local: { status: 'incomplete', error: localError } } : {}),
+      ...(target.kind === 'session' ? { local: { status: localError ? 'incomplete' : 'completed',
+        containment: localError ? 'incomplete' : 'completed', physical_cleanup: { status: 'not_implemented' },
+        retained: ['historical_snapshots', 'original_data_and_metadata_files', 'search_sidecars', 'derived_copies_without_session_lineage', 'native_transcripts_and_backups'],
+        ...(localError ? { error: localError } : {}) } } : localError ? { local: { status: 'incomplete', error: localError } } : {}),
       ...(remotes.size ? { remotes: Object.fromEntries(remoteResults) } : {}),
       ...(parsed.remote ? { remote: remoteResults.get(parsed.remote) } : {}),
     }) + '\n')
@@ -203,9 +206,10 @@ export async function runPurge(argv, ctx) {
       )
     }
     for (const [name, result] of remoteResults) {
-      if (result.status === 'completed') ctx.stdout.write(`remote session rows position-deleted on '${name}'\n`)
+      if (result.status === 'completed') ctx.stdout.write(`remote session rows position-deleted on '${name}'; physical cleanup: ${result.physical_cleanup?.status ?? 'unverified'}\n`)
     }
-    if (remotes.size) ctx.stdout.write('copied content in generated reports and other derivatives is not included\n')
+    if (target.kind === 'session') ctx.stdout.write('local physical erasure is not implemented; historical files and snapshots remain\n')
+    if (target.kind === 'session') ctx.stdout.write('copied content in generated reports and other derivatives is not included\n')
   }
 
   if (swept.failed > 0) {
@@ -327,9 +331,9 @@ async function purgeRemoteSession({ ctx, target, url, sessionId }) {
   })
   if (!result.ok) throw new Error(result.error)
   if (!result.value.ok) throw new Error(`server returned HTTP ${result.value.status}; retry the same purge after resolving the server or authorization error`)
-  const receipt = /** @type {{ status?: string, session_id?: string }} */ (await result.value.json())
+  const receipt = /** @type {{ status?: string, session_id?: string, physical_cleanup?: { status?: string } }} */ (await result.value.json())
   if (receipt?.status !== 'completed' || receipt?.session_id !== sessionId) throw new Error('server did not confirm session purge completion')
-  return receipt
+  return { ...receipt, physical_cleanup: receipt.physical_cleanup ?? { status: 'unverified' } }
 }
 
 /**

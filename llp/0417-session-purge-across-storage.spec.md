@@ -111,8 +111,9 @@ The implemented scope covers these independently:
 3. Session-keyed canonical server archive tables, including sessions already
    evicted from cache and content split across receive days.
 4. Session-keyed query/search reads and the session locator are excluded.
+5. Session graph nodes and their incident edges are position-deleted and fenced.
 
-Generated reports, copied report-agent tool results, and graph/aggregate
+Generated reports, copied report-agent tool results, File nodes and aggregate
 records without complete session lineage remain outside this operation's
 scope. The receipt discloses this limitation. Matching their outer
 `session_id` cannot find source sessions copied into a tool result. Broader
@@ -176,3 +177,20 @@ Implemented in the client and sibling server. The command covers session-keyed r
 Existing generated reports and derivatives without complete session lineage
 are outside that guarantee and must be disclosed; never delete unrelated
 artifacts to conceal the provenance gap.
+
+## Review follow-up {#review-follow-up}
+
+Session purges position-delete matching rows in active and retired epochs
+under the partition mutation lock. Session graph IDs are derived using the
+existing graph convention. Their nodes and incident edges share the persistent
+fence, including projected reads and incremental exports. Shared File nodes
+are preserved; exclusive File-node discovery and report provenance remain
+unimplemented and explicitly outside the completion guarantee.
+
+JSON results distinguish logical containment from physical cleanup locally
+and per remote. Local physical cleanup is `not_implemented`; absent physical
+status on older servers is `unverified`. The CLI prints the physical limitation
+even for local-only purges. Historical snapshots and original files still
+require a separate, crash-safe reclamation implementation. The companion
+server's compactor now understands position deletes, but that rewrite alone
+is not physical erasure.

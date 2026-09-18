@@ -5,6 +5,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { atomicWriteFileSync } from '../util/fs_atomic.js'
 
+const graphIdentifiers = ['node_id', 'src_id', 'dst_id']
+
 /** @import { ScannableDataSource } from '../../../hypaware-plugin-kernel-types.js' */
 
 /**
@@ -21,6 +23,8 @@ export function createSessionPurgeStore(cacheRoot) {
   let keys = new Set()
   /** @type {Map<string | null, Set<string>>} */
   let sessions = new Map()
+  /** @type {Map<string | null, Set<string>>} */
+  let graphNodes = new Map()
   let storedBytes = 0
   let fingerprint = ''
   function refresh() {
@@ -32,6 +36,7 @@ export function createSessionPurgeStore(cacheRoot) {
       if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error
       keys = new Set()
       sessions = new Map()
+      graphNodes = new Map()
       storedBytes = 0
       fingerprint = ''
       return
@@ -40,6 +45,8 @@ export function createSessionPurgeStore(cacheRoot) {
     const loaded = new Set()
     /** @type {Map<string | null, Set<string>>} */
     const byOrg = new Map()
+    /** @type {Map<string | null, Set<string>>} */
+    const graphByOrg = new Map()
     let bytes = 0
     const dir = fs.opendirSync(directory)
     try {
@@ -60,10 +67,14 @@ export function createSessionPurgeStore(cacheRoot) {
         let ids = byOrg.get(value.org)
         if (!ids) byOrg.set(value.org, ids = new Set())
         ids.add(value.sessionId)
+        let nodes = graphByOrg.get(value.org)
+        if (!nodes) graphByOrg.set(value.org, nodes = new Set())
+        nodes.add(sessionGraphNodeId(value.sessionId))
       }
     } finally { dir.closeSync() }
     keys = loaded
     sessions = byOrg
+    graphNodes = graphByOrg
     storedBytes = bytes
     fingerprint = stamp
   }
@@ -88,9 +99,15 @@ export function createSessionPurgeStore(cacheRoot) {
     },
     /** @param {Record<string, unknown>} row */
     has(row) {
-      if (!keys.size || typeof row.session_id !== 'string') return false
-      return sessions.get(null)?.has(row.session_id) === true ||
-        sessions.get(typeof row.org === 'string' ? row.org : '')?.has(row.session_id) === true
+      if (!keys.size) return false
+      const org = typeof row.org === 'string' ? row.org : ''
+      if (typeof row.session_id === 'string' &&
+        (sessions.get(null)?.has(row.session_id) || sessions.get(org)?.has(row.session_id))) return true
+      for (const key of graphIdentifiers) {
+        const value = row[key]
+        if (typeof value === 'string' && (graphNodes.get(null)?.has(value) || graphNodes.get(org)?.has(value))) return true
+      }
+      return false
     },
     get size() { return keys.size },
   }
@@ -119,26 +136,34 @@ function sessionKey(sessionId, org) {
  */
 export function filterPurgedSessions(source, store) {
   store.refresh()
-  if (store.size === 0 || !source.columns.includes('session_id')) return source
+  if (store.size === 0) return source
+  const identifiers = ['session_id', ...graphIdentifiers].filter(name => source.columns.includes(name))
+  if (identifiers.length === 0) return source
+  const scopeColumns = [...identifiers, 'org']
   return {
     columns: source.columns,
     numRows: source.numRows,
     scan(options) {
       store.refresh()
       const requested = options?.columns ?? source.columns
-      const columns = [...new Set([...requested, 'session_id', ...(source.columns.includes('org') ? ['org'] : [])])]
+      const columns = [...new Set([...requested, ...identifiers, ...(source.columns.includes('org') ? ['org'] : [])])]
       const inner = source.scan({ ...options, columns, limit: undefined, offset: undefined })
       return {
         appliedWhere: inner.appliedWhere,
         appliedLimitOffset: false,
         async *rows() {
           for await (const row of inner.rows()) {
-            const session_id = row.resolved?.session_id ?? await row.cells?.session_id?.()
-            const org = row.resolved?.org ?? await row.cells?.org?.()
-            if (!store.has({ session_id, org })) yield row
+            const scope = {}
+            for (const key of scopeColumns) scope[key] = row.resolved?.[key] ?? await row.cells?.[key]?.()
+            if (!store.has(scope)) yield row
           }
         },
       }
     },
   }
+}
+
+/** @param {string} sessionId */
+export function sessionGraphNodeId(sessionId) {
+  return createHash('sha256').update(`node\0Session\0${sessionId}`).digest('hex').slice(0, 24)
 }

@@ -269,7 +269,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       sessionPurges.refresh()
       const since = opts?.since !== undefined ? continuationToSeq(opts.since) : undefined
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
-      const scanColumns = projected && sessionPurges.size ? [...new Set([...projected, 'session_id', 'org'])] : projected
+      const scanColumns = projected && sessionPurges.size ? [...new Set([...projected, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])] : projected
       const scanOpts = since !== undefined ? { since, includeLegacy: opts?.includeLegacy } : undefined
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, scanOpts)) {
         if (sessionPurges.has(row)) continue
@@ -284,7 +284,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     async *readRowsWhere(tablePath, columns, whereIn) {
       sessionPurges.refresh()
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
-      const scanColumns = projected && sessionPurges.size ? [...new Set([...projected, 'session_id', 'org'])] : projected
+      const scanColumns = projected && sessionPurges.size ? [...new Set([...projected, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])] : projected
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { whereIn })) {
         if (sessionPurges.has(row)) continue
         for (const f of INTERNAL_FIELDS) delete row[f]
@@ -349,7 +349,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         if (forceAttribution) scanColumns.push(/** @type {string} */ (attributionColumn))
         if (forceEntrypoint) scanColumns.push(/** @type {string} */ (entrypointColumn))
       }
-      if (scanColumns && sessionPurges.size) scanColumns = [...new Set([...scanColumns, 'session_id', 'org'])]
+      if (scanColumns && sessionPurges.size) scanColumns = [...new Set([...scanColumns, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])]
       // Running high-water of REAL (non-null) seqs seen so far, seeded with the
       // incoming watermark. `after` is this monotonic max, so a null-seq legacy
       // row never advances the watermark and progress never regresses even when
@@ -433,8 +433,9 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         if (forceCwd) delete row.cwd
         if (forceAttribution) delete row[/** @type {string} */ (attributionColumn)]
         if (forceEntrypoint) delete row[/** @type {string} */ (entrypointColumn)]
-        if (projected && !projected.includes('session_id')) delete row.session_id
-        if (projected && !projected.includes('org')) delete row.org
+        if (projected) for (const key of ['session_id', 'org', 'node_id', 'src_id', 'dst_id']) {
+          if (!projected.includes(key)) delete row[key]
+        }
         yield { row, after }
       }
       // Per-partition aggregate on the export read; cwds are hashed, never raw
