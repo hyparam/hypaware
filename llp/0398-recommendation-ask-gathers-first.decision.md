@@ -106,8 +106,9 @@ request typed in Cyrillic, CJK or Arabic to the empty key and so gave a
 person who types in such a script no candidate at all (hypaware #1884).
 Keeping those letters cannot be said as a letter class here: the engine
 compiles a `regexp_replace` pattern with `new RegExp(pattern, 'g')` and
-no `u` flag, where `\p{L}` is the two characters `pL`, so the class
-names the ranges it keeps instead. A raw-prefix fallback for the lines
+no `u` flag, where `\p` is an identity escape and `\p{L}` matches the
+four literal characters `p{L}`, so the class names the ranges it keeps
+instead. A raw-prefix fallback for the lines
 the fold empties was rejected: it brings back the split key this
 decision replaced, on the lines least able to afford it.
 

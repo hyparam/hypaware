@@ -88,17 +88,24 @@ test('a request in a non-Latin script is a candidate of its own; a rule of dashe
   // distinct ones do not pool back into one.
   const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
   const typings = [
-    'commit on the right branch and open a PR',
+    'commit on the "right" branch and open a PR',
     '  {"tool": "Bash", "input": "npm test"}',
     '--------------------------------------',
     'закоммить на нужную ветку и открыть пиар',
     'проверь тесты и почини падающий тест',
   ]
+  // The first request retyped with curly quotes on its third day. It
+  // reaches 3 sessions on 3 days only while the fold still erases the
+  // General Punctuation block, which is the gap the class leaves between
+  // the ranges it keeps: keep a curly quote and this request splits into
+  // two keys, each under the cut, and neither is a candidate.
+  const curly = 'commit on the “right” branch and open a PR'
   /** @type {Record<string, SqlPrimitive>[]} */
   const rows = []
   typings.forEach((text, t) => {
     for (const day of [10, 11, 12]) {
-      rows.push({ date: `2026-08-${day}`, session_id: `s${t}-${day}`, role: 'user', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: 'external', message_created_at: new Date(Date.UTC(2026, 7, day, t)), content_text: text })
+      const content = t === 0 && day === 12 ? curly : text
+      rows.push({ date: `2026-08-${day}`, session_id: `s${t}-${day}`, role: 'user', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: 'external', message_created_at: new Date(Date.UTC(2026, 7, day, t)), content_text: content })
     }
   })
   /** @type {AsyncDataSource} */

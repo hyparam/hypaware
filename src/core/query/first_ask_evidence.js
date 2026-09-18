@@ -186,9 +186,10 @@ const KEY_CHARS = 36
  * Named ranges rather than a letter class because the engine compiles a
  * `regexp_replace` pattern with `new RegExp(pattern, 'g')` and no `u`
  * flag (squirreling `src/expression/regexp.js`), where `\p{L}` is not a
- * letter class at all: it is the two characters `pL`. Whitespace above
- * ASCII needs no range of its own, since the `\s+` fold that follows
- * already matches it.
+ * letter class at all: `\p` is an identity escape there, so the pattern
+ * matches the four literal characters `p{L}`. Whitespace above ASCII
+ * needs no range of its own, since the `\s+` fold that follows already
+ * matches it, save the C1 control U+0085 that JavaScript's `\s` omits.
  *
  * @ref LLP 0398#one-signal [implements]: what the fold erases is the decision; it keeps every script's letters, so what keys to nothing is punctuation, not a language
  */
