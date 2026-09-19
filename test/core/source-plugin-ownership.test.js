@@ -410,11 +410,11 @@ test('a plugin cannot delete the facade members to uncover the registry\'s own',
   const honest = fixtureSource('bbb', A)
   ctxA.sources.register(honest.contribution)
   assert.equal(runtime.sources.ownerOf('bbb'), A)
-  // The four lifecycle members are bracketed over this registry too, and are
+  // The lifecycle members are bracketed over this registry too, and are
   // pinned the same way the two above are.
   assert.deepEqual(
     Object.keys(sources).sort(),
-    ['register', 'registeringAs', 'reload', 'start', 'stop', 'stopAll']
+    ['listStarted', 'register', 'registeringAs', 'reload', 'start', 'started', 'stop', 'stopAll']
   )
   assert.ok(ctxB)
 })
@@ -772,6 +772,8 @@ test('a registry with no lifecycle members of its own does not acquire them', ()
   assert.deepEqual(Object.keys(sources).sort(), ['register', 'registeringAs'])
   assert.equal(sources.start, undefined, 'the facade grew a start the registry behind it does not have')
   assert.equal('stopAll' in sources, false)
+  assert.equal('started' in sources, false)
+  assert.equal('listStarted' in sources, false)
   // The honest surface the read-through is for is unchanged.
   assert.equal(typeof sources.list, 'function')
   assert.equal(typeof sources.ownerOf, 'function')
@@ -780,7 +782,7 @@ test('a registry with no lifecycle members of its own does not acquire them', ()
 test('a plugin cannot delete or redefine the bracketed lifecycle members', () => {
   const { runtime, ctxA } = stage()
   const sources = /** @type {any} */ (ctxA.sources)
-  for (const member of ['start', 'stop', 'reload', 'stopAll']) {
+  for (const member of ['start', 'stop', 'reload', 'stopAll', 'started', 'listStarted']) {
     assert.equal(Reflect.deleteProperty(sources, member), false, `'${member}' can be deleted off the facade`)
     assert.equal(Reflect.set(sources, member, 1), false, `'${member}' can be written over on the facade`)
     assert.throws(() => Object.defineProperty(sources, member, { value: 1 }), TypeError)
@@ -791,4 +793,60 @@ test('a plugin cannot delete or redefine the bracketed lifecycle members', () =>
   for (const key of Reflect.ownKeys(sources)) {
     assert.notEqual(sources[key], runtime.sources, `the facade hands the registry out as '${String(key)}'`)
   }
+})
+
+test('a plugin cannot reach a neighbour\'s StartedSource through started or listStarted', async () => {
+  // Refusing `stop(name)` by name and then handing the same handle out through
+  // `started(name)` closes nothing: `started('aaa-victim').stop()` is the same
+  // call one hop further along, and it runs behind the registry, which keeps
+  // the source in its started map and the `hyp_sources_started` gauge ticked
+  // up. The boot walk reads `started(name)` to decide a source is already
+  // running, so the neighbour's row would keep reporting `started` with
+  // nothing behind it.
+  const { runtime, ctxA, ctxB } = stage()
+  /** @type {{ stops: number, reloads: number, ctx: unknown }} */
+  const handle = { stops: 0, reloads: 0, ctx: undefined }
+  const victim = /** @type {any} */ ({
+    name: 'aaa-victim',
+    plugin: A,
+    async start() {
+      return {
+        async stop() { handle.stops += 1 },
+        /** @param {unknown} ctx */
+        async reload(ctx) { handle.reloads += 1; handle.ctx = ctx },
+      }
+    },
+  })
+  const own = fixtureSource('zzz-own', B)
+  ctxA.sources.register(victim)
+  ctxB.sources.register(own.contribution)
+
+  const log = makeLog()
+  const fileLog = makeLog()
+  await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+  assert.ok(runtime.sources.started('aaa-victim'), 'the fixture did not start both sources')
+
+  const sourcesB = /** @type {any} */ (ctxB.sources)
+  assert.equal(sourcesB.started('aaa-victim'), undefined, 'a neighbour\'s lifecycle handle was handed out')
+  assert.deepEqual(
+    sourcesB.listStarted().map((/** @type {{ name: string }} */ e) => e.name),
+    ['zzz-own'],
+    'listStarted handed out every started source, neighbours included'
+  )
+  assert.equal(handle.stops, 0)
+  assert.equal(handle.reloads, 0)
+
+  // The owner still reads its own handle, and the kernel still reads every one.
+  const sourcesA = /** @type {any} */ (ctxA.sources)
+  assert.ok(sourcesA.started('aaa-victim'), 'a plugin lost its own started handle')
+  assert.deepEqual(sourcesA.listStarted().map((/** @type {{ name: string }} */ e) => e.name), ['aaa-victim'])
+  assert.deepEqual(
+    runtime.sources.listStarted().map((/** @type {{ name: string }} */ e) => e.name).sort(),
+    ['aaa-victim', 'zzz-own'],
+    'the kernel\'s own registry lost sight of a started source'
+  )
 })

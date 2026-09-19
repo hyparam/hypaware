@@ -210,8 +210,17 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * `otlp` from `activate()`, `@hypaware/gascity` starting and reloading
  * `gascity` from its commands) are each driving their own source.
  *
+ * `started` and `listStarted` are bracketed with them, because what they hand
+ * back is the `StartedSource` the four above drive: `started(name).stop()` is
+ * `stop(name)` reached through the handle, and it runs behind the registry, so
+ * the source stays in its started map and its gauge stays ticked up while
+ * nothing is running. Those two filter rather than refuse: each already has an
+ * answer for a source that is not started, and a plugin reading its own reads
+ * them unchanged.
+ *
  * `status` stays forwarded. It takes no context, moves no source between
- * states, and leaves the started set it reads exactly as it found it.
+ * states, hands back a value rather than the handle, and leaves the started
+ * set it reads exactly as it found it.
  *
  * A registry without `registeringAs` is called exactly as before, and so is
  * one without `ownerOf`: a host driving its own registry through
@@ -317,8 +326,10 @@ function createSourcesFacade(pluginName, registry) {
       `SourceRegistry.${operation}: source '${shown}' is registered by ${held}, not by '${pluginName}'`
     )
   }
-  // Async so a refusal arrives as the rejection every other lifecycle failure
-  // arrives as, rather than as a synchronous throw out of an awaited call.
+  // The four that refuse are async so a refusal arrives as the rejection every
+  // other lifecycle failure arrives as, rather than as a synchronous throw out
+  // of an awaited call. The two that filter keep the registry's own synchronous
+  // signatures, because a plugin reading its own reads them as it always did.
   // @ref LLP 0012#lifecycle-and-reload-context-invariant [constrained-by]: the kernel drives the lifecycle, so a plugin's own facade drives only what it registered
   const lifecycle = {
     /**
@@ -352,6 +363,29 @@ function createSourcesFacade(pluginName, registry) {
         if (registry.ownerOf(name) === pluginName) await registry.stop(name)
       }
     },
+    /**
+     * The `StartedSource` itself, which is why these two are bracketed
+     * alongside the four above rather than left forwarded with `status`:
+     * `started(name).stop()` and `started(name).reload(ctx)` are the refusals
+     * above reached through the handle instead of by name, and they run behind
+     * the registry, which keeps the source in its started map and the
+     * `hyp_sources_started` gauge ticked up, so the boot walk and `hyp status`
+     * go on reporting a source nothing is running. `listStarted` handed the
+     * whole set out without even needing the name.
+     *
+     * Filtered rather than refused: both members already answer "nothing
+     * started under that name", so a plugin reading its own is unaffected and
+     * one reading a neighbour's gets the answer it would get before the
+     * neighbour started.
+     *
+     * @param {string} name
+     */
+    started(name) {
+      return registry.ownerOf(name) === pluginName ? registry.started(name) : undefined
+    },
+    listStarted() {
+      return registry.listStarted().filter(({ name }) => registry.ownerOf(name) === pluginName)
+    },
   }
   // Non-writable and non-configurable, not merely assigned: `delete
   // ctx.sources.register` took the own property away and the miss below then
@@ -378,6 +412,8 @@ function createSourcesFacade(pluginName, registry) {
       stop: typeof registry.stop === 'function',
       reload: typeof registry.reload === 'function',
       stopAll: typeof registry.stopAll === 'function' && typeof registry.listStarted === 'function',
+      started: typeof registry.started === 'function',
+      listStarted: typeof registry.listStarted === 'function',
     }
     for (const [member, value] of Object.entries(lifecycle)) {
       if (shadowable[/** @type {keyof typeof shadowable} */ (member)]) pin(member, value)
