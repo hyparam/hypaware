@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { test } from 'node:test'
 import {
@@ -25,6 +25,7 @@ import {
 } from '../../src/core/product_telemetry/outbox.js'
 import {
   effectivePolicy,
+  safeDestination,
   writePolicy,
   productRoot
 } from '../../src/core/product_telemetry/policy.js'
@@ -473,7 +474,7 @@ for (const broken of ['missing identity', 'invalid identity', 'wrong destination
   })
 }
 
-// The raw destination becomes the POST target's prefix, so shapes a parse alone
+// The serialized destination becomes the POST target's prefix, so shapes a parse
 // accepts still move `/v1/telemetry` off the path: a bare `?`/`#` turns the
 // receiver path into a query or fragment, and a doubled trailing slash survives
 // a single-slash strip.
@@ -540,6 +541,57 @@ test('a refused destination is described by its actual defect', (t) => {
     () => writePolicy(root, 'organization', { url: 'https://Example.Invalid/receiver', identityPath: remote.identityPath }),
     /the way the URL parser normalizes it/
   )
+})
+
+// Both producers refuse a url that spells itself differently from its parse, so
+// a saved policy carrying one was hand-edited or foreign-written. The read guard
+// still accepts it by its parse, so delivery must send to the parse: the raw
+// string resolves to the doubled slash the receiver will not route.
+test('a saved destination that does not round-trip is delivered where the guard accepted it', async (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const url = 'https://example.invalid/receiver\\'
+  const identityPath = path.join(home, 'identity.json')
+  const gatewayId = randomUUID()
+  fs.writeFileSync(
+    identityPath,
+    JSON.stringify({
+      central_url: url,
+      gateway_id: gatewayId,
+      jwt: `header.${Buffer.from(JSON.stringify({ org: 'org-a' })).toString('base64url')}.signature`
+    })
+  )
+  fs.mkdirSync(root, { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'policy.json'),
+    JSON.stringify({
+      version: 1,
+      mode: 'organization',
+      generation: randomUUID(),
+      url,
+      identity_path: identityPath,
+      enrollment: createHash('sha256')
+        .update(JSON.stringify([url, gatewayId, 'org-a']))
+        .digest('hex')
+    })
+  )
+  const effective = effectivePolicy(root)
+  assert.equal(effective.mode, 'organization')
+  createOutbox(root, { now: () => NOW }).append(batch(), /** @type {string} */ (effective.binding))
+  const seen = []
+  const fetchFn = /** @type {typeof fetch} */ (
+    async (requested, init) => {
+      seen.push(String(requested))
+      return init?.method === 'POST'
+        ? new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+        : capability()
+    }
+  )
+  await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+  const target = safeDestination(url) + '/v1/telemetry'
+  assert.equal(target, 'https://example.invalid/receiver/v1/telemetry')
+  assert.deepEqual(seen, [target, target])
+  assert.equal(createOutbox(root, { now: () => NOW }).entries().length, 0)
 })
 
 // Local mode is a preview queue, not a network permission.
