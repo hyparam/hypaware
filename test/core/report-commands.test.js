@@ -1001,15 +1001,24 @@ test('get does not probe page extensions for a path that names its own', async (
   // is published under does not decide how many requests a miss costs.
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/chart.PNG'], ctx), 1)
   // An extension is alphanumerics with at least one letter among them, so
-  // digits cost a miss no extra requests, before the letter ('.7z', also the
-  // shortest an extension gets) or after it ('.mp3').
+  // digits cost a miss no extra requests, before the letter ('.7z') or after
+  // it ('.mp3'). One letter is the whole of the shortest extension: a digit
+  // run in front of it is what '.7z' adds, and a rule that asked for one
+  // would read '.c' as part of a name.
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/archive.7z'], ctx), 1)
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/audio.mp3'], ctx), 1)
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/tool.c'], ctx), 1)
+  // An extension runs as long as the alphanumerics do. 'report publish' takes
+  // a directory, so what an artifact is named is whatever was in it, and a
+  // rule that stopped counting would probe past a longer one.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/export.parquet'], ctx), 1)
   assert.deepEqual(calls.map((c) => c.url.pathname), [
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.png',
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.PNG',
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/archive.7z',
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/audio.mp3',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/tool.c',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/export.parquet',
   ])
   assert.match(err.join(''), /HTTP 404: not_found/)
 })
@@ -1066,7 +1075,13 @@ test('get does not probe for a path that names a page extension either', async (
   const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
   const { ctx, err } = ctxWith()
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-gone.md'], ctx), 1)
-  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.md'])
+  // Both of them, so the extension the probe appends second is read as one
+  // too and never appended to itself.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-gone.html'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.html',
+  ])
   assert.match(err.join(''), /HTTP 404: not_found/)
 })
 
