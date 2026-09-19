@@ -244,12 +244,25 @@ export async function runReportPublish(argv, ctx) {
   }
   const parsed = /** @type {any} */ (await response.json().catch(() => null))
   const record = parsed?.report ?? {}
-  const where = `${record.kind ?? kind}/${record.period ?? period}/${record.id ?? '?'}`
+  // The receipt echoes the server's own record back, so every `record` field is
+  // remote text on its way to a terminal and takes `esc` (the policy at the top of
+  // this file). The `??` fallbacks are this run's own argv, already checked against
+  // KIND_RE/PERIOD_RE above, and both grammars admit only characters `esc` and
+  // `shellWord` leave alone, so wrapping the whole expression costs a conforming
+  // run nothing.
+  const recordKind = record.kind ?? kind
+  const recordPeriod = record.period ?? period
+  const where = `${esc(recordKind)}/${esc(recordPeriod)}/${esc(record.id ?? '?')}`
   if (response.status === 200) {
     ctx.stdout.write(`already published as ${where} (same content) - nothing new uploaded\n`)
   } else {
-    ctx.stdout.write(`published ${where} (${record.files ?? '?'} file(s), ${record.bytes ?? '?'} bytes)\n`)
-    ctx.stdout.write(`  view: hyp report get ${record.kind ?? kind} ${record.period ?? period} ${record.id ?? '<id>'}\n`)
+    ctx.stdout.write(`published ${where} (${esc(record.files ?? '?')} file(s), ${esc(record.bytes ?? '?')} bytes)\n`)
+    // Unlike the `where` prose above, this line is a command to paste, so its
+    // server-authored words take both treatments, `shellWord(esc(...))`, as the
+    // missing-page hint composes them below. `<id>` is this file's own placeholder
+    // for a reader to fill in rather than a value to run, so it stays bare.
+    const viewId = record.id === undefined || record.id === null ? '<id>' : shellWord(esc(record.id))
+    ctx.stdout.write(`  view: hyp report get ${shellWord(esc(recordKind))} ${shellWord(esc(recordPeriod))} ${viewId}\n`)
   }
   return 0
 }

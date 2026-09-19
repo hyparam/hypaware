@@ -250,6 +250,57 @@ test('publish accepts the inline --flag=value form the gate parses', async (t) =
   assert.equal(calls[0].url.searchParams.get('title'), 'Weekly')
 })
 
+/**
+ * The receipt one publish prints, for a 201 answer carrying `report`. The run's
+ * own argv stays in grammar, so what the receipt renders is what the server sent.
+ *
+ * @param {TestContext} t
+ * @param {Record<string, unknown>} report
+ * @returns {Promise<string>}
+ */
+async function publishReceipt(t, report) {
+  const { file } = await tmpReportFile()
+  stubServer(t, () => ({ status: 201, json: { report } }))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportPublish([file, '--kind', 'usage-review', '--period', '2026-W29'], ctx), 0)
+  return out.join('')
+}
+
+/** The command the receipt hands back, taken from its own line. */
+const viewCommand = (/** @type {string} */ text) => (text.match(/^ {2}view: (hyp report get .*)$/m) ?? [])[1] ?? ''
+
+test('the publish receipt quotes a server-authored kind, period and id as one shell word each', async (t) => {
+  const text = await publishReceipt(t, {
+    id: "rpt-1'; echo pwn", kind: "usage review'; echo pwn", period: "2026-W29' rm -rf x", files: 1, bytes: 12,
+  })
+  assert.equal(
+    viewCommand(text),
+    "hyp report get 'usage review'\\''; echo pwn' '2026-W29'\\'' rm -rf x' 'rpt-1'\\''; echo pwn'"
+  )
+})
+
+// @ref LLP 0225#escape-not-strip [tests]: a control character in a remote value stays escaped where a person reads it, on the prose line as well as inside the quoting
+test('the publish receipt lets no raw control byte from the server reach stdout', async (t) => {
+  const escChar = String.fromCharCode(0x1b)
+  const text = await publishReceipt(t, { id: `rpt${escChar}[2K1`, kind: `usage${escChar}[2Kreview`, period: '2026-W29', files: 1, bytes: 12 })
+  assert.ok(!text.includes(escChar), 'no raw escape byte reaches stdout')
+  assert.equal(viewCommand(text), "hyp report get 'usage\\u001b[2Kreview' 2026-W29 'rpt\\u001b[2K1'")
+  // The `where` receipt is prose, so it takes the escape and not the quoting.
+  assert.match(text, /^published usage\\u001b\[2Kreview\/2026-W29\/rpt\\u001b\[2K1 /m)
+})
+
+test('the publish receipt is byte-identical for a conforming record', async (t) => {
+  assert.equal(
+    await publishReceipt(t, { id: 'rpt-1', kind: 'usage-review', period: '2026.07.20', files: 3, bytes: 1200 }),
+    'published usage-review/2026.07.20/rpt-1 (3 file(s), 1200 bytes)\n  view: hyp report get usage-review 2026.07.20 rpt-1\n'
+  )
+})
+
+test('a 201 answer with no id leaves the <id> placeholder bare for the reader to fill in', async (t) => {
+  const text = await publishReceipt(t, { kind: 'usage-review', period: '2026-W29', files: 1, bytes: 12 })
+  assert.equal(viewCommand(text), 'hyp report get usage-review 2026-W29 <id>')
+})
+
 /* ---------- list ---------- */
 
 test('list renders the index newest first and passes filters through', async (t) => {
