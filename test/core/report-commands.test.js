@@ -997,7 +997,13 @@ test('get does not probe page extensions for a path that names its own', async (
   const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
   const { ctx, err } = ctxWith()
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/chart.png'], ctx), 1)
-  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.png'])
+  // An extension is one in whatever case it was typed, so the case an artifact
+  // is published under does not decide how many requests a miss costs.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/chart.PNG'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.png',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.PNG',
+  ])
   assert.match(err.join(''), /HTTP 404: not_found/)
 })
 
@@ -1025,6 +1031,9 @@ test('a stem published nowhere fails the same way with a dot in it as without', 
   const { ctx, err } = ctxWith()
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-gone'], ctx), 1)
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'report.2026-W29'], ctx), 1)
+  // A dot-run of digits alone names no extension either, which is the half of
+  // the rule a dot-run broken by a '-' never reaches.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'report.2026'], ctx), 1)
   assert.deepEqual(calls.map((c) => c.url.pathname), [
     '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone',
     '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.md',
@@ -1032,8 +1041,11 @@ test('a stem published nowhere fails the same way with a dot in it as without', 
     '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29',
     '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29.md',
     '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026.html',
   ])
-  assert.equal(err.join('').match(/HTTP 404: not_found/g)?.length, 2)
+  assert.equal(err.join('').match(/HTTP 404: not_found/g)?.length, 3)
 })
 
 test('get does not probe for a path that names a page extension either', async (t) => {
