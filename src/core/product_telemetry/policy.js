@@ -25,8 +25,9 @@ export function safeDestination(url) {
   try {
     const u = new URL(url)
     if (u.username || u.password || u.search || u.hash) return null
-    // The raw string, not the parse, becomes the POST target's prefix, and a
-    // bare `?`/`#` leaves `search`/`hash` empty for the check above to miss.
+    // The serialized destination becomes the POST target's prefix, and a bare
+    // `?`/`#` survives serialization while leaving `search`/`hash` empty for
+    // the check above to miss.
     if (url.includes('?') || url.includes('#')) return null
     if (
       u.protocol !== 'https:' &&
@@ -148,8 +149,9 @@ function enrolledPolicy(root) {
   const sink = sinks[0].config
   const url = sink?.url
   // Same strictness as the explicit opt-in: a merely parseable url is not
-  // enough, because the raw string becomes the POST target. Trailing slashes
-  // are stripped the way delivery strips them, so both sides mean one place.
+  // enough, because the saved url is what status reports and what the identity
+  // must match. Trailing slashes are stripped the way safeDestination strips
+  // them, so both sides mean one place.
   if (typeof url !== 'string' || safeDestination(url) !== url.replace(/\/+$/, ''))
     return null
   const identityPath = sink?.identity?.persisted_path ??
