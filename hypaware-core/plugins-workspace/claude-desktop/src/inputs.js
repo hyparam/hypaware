@@ -56,7 +56,13 @@ const NODE_MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
  * writing the rot silently.
  *
  * An explicit `HYPAWARE_BIN`/`HYP_BIN` is taken as given: it names a path the
- * operator chose, and second-guessing it would defeat the override.
+ * operator chose, and second-guessing it would defeat the override. Which copy
+ * is all that settles, though, and the wrapper is a command line rather than a
+ * path: so the answer also carries `runsUnderNode` for the caller to build
+ * that command line around, and the variable's name for a word about it to
+ * say which knob set it (issue #1811). Asked of every lane, because which lane
+ * found a path is not what decides how a command line runs it; the walk tests
+ * its own candidates, so in practice only an override answers no.
  *
  * `entry` defaults to the running CLI's own entry script and is a parameter
  * only so a test can present an ephemeral entrypoint: nothing short of a real
@@ -65,16 +71,33 @@ const NODE_MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
  *
  * @param {NodeJS.ProcessEnv} [env]
  * @param {string} [entry]
- * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string }}
+ * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string, overrideVar?: string, nodeRunnable: boolean }}
  */
 export function resolveHypBin(env = process.env, entry = process.argv[1]) {
-  const explicit = [env.HYPAWARE_BIN, env.HYP_BIN]
-    .find((value) => typeof value === 'string' && value.trim() !== '')
+  const found = locateHypBin(env, entry)
+  return { ...found, nodeRunnable: runsUnderNode(found.binPath) }
+}
+
+/**
+ * Which copy, on its own. Split out so the runnability question is answered
+ * once, for whichever exit here returns, rather than at four returns that
+ * could drift.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string | undefined} entry
+ * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string, overrideVar?: string }}
+ */
+function locateHypBin(env, entry) {
+  const overrideVar = ['HYPAWARE_BIN', 'HYP_BIN']
+    .find((name) => typeof env[name] === 'string' && /** @type {string} */ (env[name]).trim() !== '')
   // Trimmed, because the emptiness test above is already the decision that
   // surrounding whitespace is not part of the value. Untrimmed, ` /opt/hyp`
   // is not absolute, so `path.resolve` would anchor it to whatever directory
   // this command ran in and bake that into the wrapper.
-  if (explicit !== undefined) return { binPath: path.resolve(explicit.trim()), ephemeral: false }
+  if (overrideVar !== undefined) {
+    const explicit = /** @type {string} */ (env[overrideVar])
+    return { binPath: path.resolve(explicit.trim()), ephemeral: false, overrideVar }
+  }
 
   const running = resolveEntryPath(entry)
   if (!isEphemeralBinPath(running, env)) return { binPath: running, ephemeral: false }
@@ -113,6 +136,10 @@ export function resolveHypBin(env = process.env, entry = process.argv[1]) {
  * not what this package happens to name its entry today: pinning the check to
  * the current `bin` filename would turn a later rename into a silent return to
  * ephemeral wrappers, with every test still green.
+ *
+ * On the override lane the same answer routes rather than rejects: the
+ * operator's copy is still what the wrapper runs, without an interpreter it
+ * was never going to survive (issue #1811).
  *
  * This is passed to the walk rather than applied to its answer, so a rejected
  * candidate costs the next `$PATH` entry and not the whole search - the
