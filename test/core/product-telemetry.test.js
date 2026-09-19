@@ -1166,3 +1166,64 @@ test('eligible delivery scans once and sends the oldest surviving batch', async 
   assert.equal(queueReads, QUEUE_SLOTS + 3)
   assert.equal(queue.entries().length, 1)
 })
+
+// With telemetry off there is no queue directory, so the fixed slot sweep is
+// 160 failing opens on every `hyp status`. The reported status must not change
+// because they stopped happening.
+test('status reads no slot when the queue directory does not exist', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  const open = fs.openSync
+  let slotReads = 0
+  t.mock.method(fs, 'openSync', (...args) => {
+    if (String(args[0]).startsWith(path.join(root, 'queue-v1') + path.sep))
+      slotReads++
+    return Reflect.apply(open, fs, args)
+  })
+  assert.equal(fs.existsSync(path.join(root, 'queue-v1')), false)
+  let rendered = ''
+  await runTelemetry(
+    ['status'],
+    /** @type {any} */ ({
+      env,
+      stdout: { write: (/** @type {string} */ s) => (rendered += s) },
+      stderr: { write() {} }
+    })
+  )
+  // Byte-identical to the pre-guard rendering of the same rendered queue.
+  assert.equal(
+    rendered,
+    JSON.stringify(
+      {
+        collection: 'off',
+        policy: 'disabled',
+        organization_destination: null,
+        vendor_sharing: 'unavailable',
+        standalone_delivery: 'unavailable',
+        queue_bytes: 0,
+        queue_batches: 0,
+        oldest_age_seconds: 0,
+        dropped_lower_bound: 0,
+        delivery: null
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  assert.equal(JSON.stringify(productStatus(env), null, 2) + '\n', rendered)
+  assert.equal(slotReads, 0)
+
+  const policy = writePolicy(root, 'local')
+  const queue = createOutbox(root, { now: () => NOW })
+  assert(queue.append(batch(), /** @type {string} */ (policy.binding)))
+  const bytes = queue.entries()[0].bytes
+  slotReads = 0
+  const status = createOutbox(root, { now: () => NOW + 5000 }).status()
+  assert.equal(status.queue_batches, 1)
+  assert.equal(status.queue_bytes, bytes)
+  assert.equal(status.oldest_age_seconds, 5)
+  assert.equal(status.dropped_lower_bound, 0)
+  assert.equal(slotReads, QUEUE_SLOTS)
+  assert.equal(productStatus(env).collection, 'local')
+})
