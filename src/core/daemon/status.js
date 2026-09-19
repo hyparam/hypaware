@@ -1741,6 +1741,51 @@ export async function collectHypAwareStatus(opts = {}) {
     })
   }
 
+  // ----- plugin directories whose manifest would not load (issue #1576) -----
+  // The third door into `unavailablePlugins`, and the one no surface could
+  // name: a manifest that is corrupt, unparseable, or fails schema validation
+  // leaves a directory that contributes nothing and has no plugin name, so the
+  // block above cannot carry it (its `name` is a plugin name and every reader
+  // treats it as one) and `hyp plugin list` deliberately will not invent one
+  // (issue #1570). Read off the snapshot on the same terms as every borrowed
+  // list here: only a live daemon's own file, and only entries that are
+  // objects (LLP 0164#status-reads-it-from-the-status-file).
+  // @ref LLP 0383#a-record-not-a-claim [constrained-by]: an `error` diagnostic is present tense, so it is raised off a live daemon's snapshot only
+  const unloadableManifests = snapshotIsLive && Array.isArray(daemonStatusFile?.unloadableManifests)
+    ? daemonStatusFile.unloadableManifests.filter((entry) => !!entry && typeof entry === 'object')
+    : []
+  // One log file, not the pair `activationLogGrep` names: only the gateway
+  // process records this door, because the manifest walk runs before any
+  // plugin is selected and so sees the same set in both processes.
+  const manifestLogGrep = unloadableManifests.length === 0 ? ''
+    : `grep -s plugin_manifest_unloadable ${path.join(daemonLogDir(stateRoot), 'daemon.log')}`
+  for (const entry of unloadableManifests) {
+    const rootDir = sanitizeLabel(entry.rootDir, MAX_ACTIVATION_MESSAGE_CHARS)
+    if (rootDir === undefined) continue
+    const reason = sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'
+    // An error, for the same reason the sibling above is one: whatever was in
+    // that directory is capturing nothing, and a machine that silently stopped
+    // capturing is the outage this surface exists to name.
+    //
+    // No "what is left of it" tail, unlike the sibling: that one has to read
+    // the claim back because a plugin can activate in one of the daemon's two
+    // processes and fail in the other. Here the kernel never got as far as a
+    // plugin in either process, so nothing from this directory can be running.
+    diagnostics.push({
+      severity: 'error',
+      kind: 'plugin_manifest_unloadable',
+      // The directory, never a name, and said as a directory: a manifest that
+      // did not parse has no plugin name, and there is no honest way to guess
+      // one from a path.
+      message: `plugin directory '${rootDir}' has no loadable manifest, so nothing in it is running: ${reason}`,
+      // The reason is clamped to a sentence above, so the first repair is the
+      // record that kept it whole - the same shape the activation diagnostic
+      // uses, and for the same reason (LLP 0139#repair-must-be-runnable). A
+      // restart is second because manifests are read once, at boot.
+      repair: [manifestLogGrep, 'hyp daemon restart  # manifests are read at boot'],
+    })
+  }
+
   // ----- recent client surfaces (LLP 0164) -----
   // Read from the status file specifically, never from `sources` above: the
   // daemon is the only process traffic flows through, so an in-process

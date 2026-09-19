@@ -121,6 +121,19 @@ export interface BootKernelResult {
    */
   unsatisfiedRequirements: UnsatisfiedRequirement[]
   /**
+   * The plugin directories this boot found a manifest in but could not load
+   * one from, with the rejection `loadManifest` recorded. `unavailablePlugins`
+   * below folds these into the same flat list, as the directory alone, which
+   * is all the prune needs; a caller that must *say* why a directory
+   * contributed nothing needs the reason too, and the daemon's status snapshot
+   * is one (issue #1576).
+   *
+   * Directory-shaped on purpose and for the whole of its life: a manifest that
+   * did not parse has no plugin name, so no reader may put a `rootDir` where a
+   * plugin name belongs.
+   */
+  unloadableManifests: FailedManifest[]
+  /**
    * Everything this boot did not get, in one list: plugins whose `activate()`
    * threw, plugins the dep graph eliminated for an unsatisfied `requires`,
    * plugins the boot profile withheld although the config enabled them, and

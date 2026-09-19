@@ -235,10 +235,15 @@ export async function bootKernel(opts = {}) {
       // name to be known by, so it is named by the directory it failed in. Both
       // pools count: an installed plugin whose manifest is unreadable leaves the
       // same hole a bundled one does.
-      const unloadable = [
-        ...discovered.failed.map((f) => f.rootDir),
-        ...installed.failed.map((f) => f.rootDir),
-      ]
+      //
+      // Kept whole here, for the reason `unsatisfiedRequirements` is kept
+      // beside `unavailablePlugins`: the flat list is all the client-asset
+      // prune needs, but a caller that has to *say* why a directory
+      // contributed nothing needs the rejection reason too, and `loadManifest`
+      // already recorded it (issue #1576). The flat term is derived from this
+      // one so the two cannot disagree.
+      const unloadableManifests = [...discovered.failed, ...installed.failed]
+      const unloadable = unloadableManifests.map((f) => f.rootDir)
 
       const log = getLogger('kernel')
       /** @type {PluginName[]} */
@@ -289,6 +294,7 @@ export async function bootKernel(opts = {}) {
           skipped,
           withheldByProfile,
           unsatisfiedRequirements: /** @type {UnsatisfiedRequirement[]} */ ([]),
+          unloadableManifests,
           unavailablePlugins: [...new Set([...unloadable, ...wantedButWithheld])],
           clientDescriptors: catalog.clientDescriptors,
         }
@@ -346,6 +352,7 @@ export async function bootKernel(opts = {}) {
         // that has to *say* why a plugin is missing rather than only that it
         // is: the flat list underneath keeps names alone (issue #1580).
         unsatisfiedRequirements: resolution.unsatisfied,
+        unloadableManifests,
         // The one list of "this boot did not get its whole plugin set", for
         // callers that must not read a missing contribution as a withdrawn one.
         // Four doors, and only the first ever reaches an activation record: a
