@@ -188,12 +188,38 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * the activation context a source starts under from that binding, and the
  * declared field is plugin-written (issue #1541).
  *
- * The rest of the registry is forwarded unchanged. `ctx.sources` has always
+ * The rest of the registry is read through to. `ctx.sources` has always
  * carried the kernel-side lifecycle members too, and `@hypaware/otel` starts
  * its own listener through them from `activate()`.
  *
- * A registry without `registeringAs` is called exactly as before. The plugin
- * doctor's stand-in delegates to the real registry, so it has it.
+ * Forwarding those unchanged aimed the #1541 defect the other way. A plugin
+ * could no longer take a neighbour's context by registering under its name,
+ * but it could still hand a neighbour's already-registered source its own
+ * context by starting it: `ctxB.sources.start('ai-gateway', ctxB)` ran the
+ * victim's `start()` with the squatter's config slice, paths, scoped logger,
+ * capability handles and permission context, and the boot walk that followed
+ * reached `started(name)` first and reported the row as started under its real
+ * owner, so nothing refused and nothing warned (issue #1947). `stop` and
+ * `stopAll` were the same handle pointed at a neighbour's running source. So
+ * those four are bracketed too, against the same `ownerOf` binding
+ * `register` already writes: a plugin drives the lifecycle of the sources the
+ * kernel recorded it as registering and of no others. The kernel is not on
+ * this path - the daemon's boot walk holds `runtime.sources`, picks the
+ * context from `ownerOf` itself, and never sees a facade - and the two
+ * bundled plugins that do drive a lifecycle here (`@hypaware/otel` starting
+ * `otlp` from `activate()`, `@hypaware/gascity` starting and reloading
+ * `gascity` from its commands) are each driving their own source.
+ *
+ * `status` stays forwarded. It takes no context, moves no source between
+ * states, and leaves the started set it reads exactly as it found it.
+ *
+ * A registry without `registeringAs` is called exactly as before, and so is
+ * one without `ownerOf`: a host driving its own registry through
+ * `hypaware/integration` records no registrar for anything, so there is no
+ * binding to read, and refusing on its absence would stop every source such a
+ * host runs. That is the rule the daemon's boot walk reads `ownerOf` under
+ * too. The plugin doctor's stand-in delegates to the real registry, so it has
+ * both.
  *
  * "The rest" is forwarded by reading through to the registry rather than by
  * copying it. A spread carries own enumerable properties and nothing else, so
@@ -217,11 +243,13 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * and the `plugin !== registrar` refusal never ran, and a contribution that
  * took a key that way declared any plugin it liked and was started under that
  * plugin's context, config slice, paths and capability handles (issue #1944).
- * The proxy target holds the two members below non-configurably and has a null
- * prototype, so nothing but this closure reaches the registry and neither
+ * The proxy target holds the bracketed members below non-configurably and has
+ * a null prototype, so nothing but this closure reaches the registry and no
  * shadow can be deleted out of the way. What the chain gave a plugin it still
  * gives: inherited members answer, `in` sees what the registry has, and a
- * write lands on the facade rather than on the shared registry.
+ * write lands on the facade rather than on the shared registry. A lifecycle
+ * member is shadowed only where the registry has one to shadow, so a registry
+ * that never offered `stopAll` does not acquire one here.
  *
  * @param {PluginName} pluginName
  * @param {ExtendedSourceRegistry} registry
@@ -256,18 +284,104 @@ function createSourcesFacade(pluginName, registry) {
       return registry.registeringAs(pluginName, fn)
     },
   }
+  /**
+   * Refuse a lifecycle call aimed at a source this plugin is not recorded as
+   * having registered, which includes one the registry recorded no registrar
+   * for at all: a source that took its key out of band chose the `plugin` it
+   * carries, and that claim is the one party the kernel must not ask.
+   *
+   * `name` is not validated the way `register` validates it, so it is quoted
+   * only when it is already a string: a hostile `toString` must not throw out
+   * of the refusal refusing it. A non-string keys no source, so it is refused
+   * either way. The logger is resolved here rather than per facade, which
+   * every activation builds and almost none of which ever refuse anything.
+   *
+   * @param {string} operation
+   * @param {string} name
+   */
+  function refuseForeignSource(operation, name) {
+    const owner = registry.ownerOf(name)
+    if (owner === pluginName) return
+    const shown = typeof name === 'string' ? name : '(non-string source name)'
+    const held = owner === undefined ? 'no recorded plugin' : `'${owner}'`
+    getLogger('sources').warn('source.lifecycle_owner_mismatch', {
+      [Attr.COMPONENT]: 'sources',
+      [Attr.OPERATION]: `source.${operation}`,
+      [Attr.ERROR_KIND]: 'source_owner_mismatch',
+      [Attr.PLUGIN]: pluginName,
+      hyp_owner_plugin: owner ?? '',
+      hyp_source: shown,
+      status: 'failed',
+    })
+    throw new Error(
+      `SourceRegistry.${operation}: source '${shown}' is registered by ${held}, not by '${pluginName}'`
+    )
+  }
+  // Async so a refusal arrives as the rejection every other lifecycle failure
+  // arrives as, rather than as a synchronous throw out of an awaited call.
+  // @ref LLP 0012#lifecycle-and-reload-context-invariant [constrained-by]: the kernel drives the lifecycle, so a plugin's own facade drives only what it registered
+  const lifecycle = {
+    /**
+     * @param {string} name
+     * @param {PluginActivationContext} ctx
+     */
+    async start(name, ctx) {
+      refuseForeignSource('start', name)
+      return registry.start(name, ctx)
+    },
+    /** @param {string} name */
+    async stop(name) {
+      refuseForeignSource('stop', name)
+      return registry.stop(name)
+    },
+    /**
+     * @param {string} name
+     * @param {PluginActivationContext} ctx
+     */
+    async reload(name, ctx) {
+      refuseForeignSource('reload', name)
+      return registry.reload(name, ctx)
+    },
+    /**
+     * This plugin's own started sources, not every source the daemon is
+     * running. Names come from `listStarted`, so each is the key the registry
+     * started the source under rather than a live `contribution.name`.
+     */
+    async stopAll() {
+      for (const { name } of registry.listStarted()) {
+        if (registry.ownerOf(name) === pluginName) await registry.stop(name)
+      }
+    },
+  }
   // Non-writable and non-configurable, not merely assigned: `delete
   // ctx.sources.register` took the own property away and the miss below then
   // read through to the registry's own unbracketed `register`, which is the
   // whole of issue #1944 again in one statement; deleting `registeringAs` too
   // reached the registrar lever and recorded any plugin at all as the owner.
   // A property the target holds non-configurably is one neither a plugin nor a
-  // later trap can take away, so the shadow over the two members that carry the
+  // later trap can take away, so the shadow over the members that carry the
   // binding cannot be lifted. `enumerable` so `Object.keys`, a spread and
   // `for...in` still see them, as the object this replaces answered.
   const facade = Object.create(null)
-  for (const [member, value] of Object.entries(members)) {
+  /** @param {string} member @param {unknown} value */
+  const pin = (member, value) => {
     Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  for (const [member, value] of Object.entries(members)) pin(member, value)
+  // Only where there is a binding to read, and only over a member the registry
+  // actually has: a host registry carrying neither is left reading as it did.
+  // `stopAll` is rebuilt out of `listStarted`, so it is shadowed only where
+  // that is there to rebuild it from.
+  if (typeof registry?.ownerOf === 'function') {
+    const shadowable = {
+      start: typeof registry.start === 'function',
+      stop: typeof registry.stop === 'function',
+      reload: typeof registry.reload === 'function',
+      stopAll: typeof registry.stopAll === 'function' && typeof registry.listStarted === 'function',
+    }
+    for (const [member, value] of Object.entries(lifecycle)) {
+      if (shadowable[/** @type {keyof typeof shadowable} */ (member)]) pin(member, value)
+    }
   }
   return new Proxy(facade, {
     /**
@@ -276,9 +390,9 @@ function createSourcesFacade(pluginName, registry) {
      * @param {unknown} receiver
      */
     get(target, prop, receiver) {
-      // Own first, so the two members above are the only `register` and
-      // `registeringAs` a plugin can reach, and neither can be deleted to
-      // uncover the registry's.
+      // Own first, so the bracketed members above are the only `register`,
+      // `registeringAs` and lifecycle members a plugin can reach, and none of
+      // them can be deleted to uncover the registry's.
       if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver)
       // The facade as the receiver, so a registry member reading its own state
       // off `this` still finds it. A runtime with no source registry builds a

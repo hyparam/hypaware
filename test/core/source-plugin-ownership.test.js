@@ -410,7 +410,12 @@ test('a plugin cannot delete the facade members to uncover the registry\'s own',
   const honest = fixtureSource('bbb', A)
   ctxA.sources.register(honest.contribution)
   assert.equal(runtime.sources.ownerOf('bbb'), A)
-  assert.deepEqual(Object.keys(sources).sort(), ['register', 'registeringAs'])
+  // The four lifecycle members are bracketed over this registry too, and are
+  // pinned the same way the two above are.
+  assert.deepEqual(
+    Object.keys(sources).sort(),
+    ['register', 'registeringAs', 'reload', 'start', 'stop', 'stopAll']
+  )
   assert.ok(ctxB)
 })
 
@@ -572,4 +577,218 @@ test('a registry that records no registrars at all is read as before', async () 
     'a host registry that never recorded a registrar stopped starting its sources'
   )
   assert.equal(source.seen.ctx, ctx)
+})
+
+// Issue #1947. The facade bracketed `register` and forwarded the kernel-side
+// lifecycle members unchanged, which is #1541 pointed the other way: rather
+// than taking a neighbour's context by registering under its name, a plugin
+// handed a neighbour's already-registered source its own context by starting
+// it. Activation order makes the window the ordinary one: a plugin activating
+// second sees its neighbours' sources registered and none of them started,
+// because `startConfiguredSources` runs after every activation. The same
+// handle pointed `stop` and `stopAll` at a neighbour's running source.
+
+test('a plugin cannot start a neighbour\'s source under its own context', async () => {
+  const { runtime, ctxA, ctxB } = stage()
+  const victim = fixtureSource('ai-gateway', A)
+  ctxA.sources.register(victim.contribution)
+
+  // B activates second and reaches for the neighbour the kernel has not
+  // started yet. Rejected, not resolved under B.
+  await assert.rejects(
+    () => /** @type {any} */ (ctxB.sources).start('ai-gateway', ctxB),
+    /is registered by '@fixture\/owner-a', not by '@fixture\/owner-b'/,
+    'a plugin started a source it does not own'
+  )
+  assert.equal(victim.seen.starts, 0, 'the neighbour\'s start() ran for the squatter')
+  assert.equal(victim.seen.ctx, undefined, 'the neighbour\'s start() was handed a context')
+
+  // And the owner still gets its own source, started under its own context, on
+  // the boot walk that follows activation.
+  const log = makeLog()
+  const fileLog = makeLog()
+  const snapshots = await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+  assert.deepEqual(
+    snapshots.map((s) => ({ name: s.name, plugin: s.plugin, state: s.state })),
+    [{ name: 'ai-gateway', plugin: A, state: 'started' }],
+    'the refusal cost the owner its own source'
+  )
+  assert.equal(victim.seen.starts, 1)
+  assert.equal(victim.seen.ctx, ctxA, 'the owner was not handed its own context')
+})
+
+test('a plugin cannot stop, reload or stopAll a neighbour\'s running source', async () => {
+  const { runtime, ctxA, ctxB } = stage()
+  const victim = fixtureSource('aaa-victim', A)
+  const own = fixtureSource('zzz-own', B)
+  ctxA.sources.register(victim.contribution)
+  ctxB.sources.register(own.contribution)
+
+  const log = makeLog()
+  const fileLog = makeLog()
+  await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+  assert.ok(runtime.sources.started('aaa-victim'), 'the fixture did not start both sources')
+  assert.ok(runtime.sources.started('zzz-own'))
+
+  const sourcesB = /** @type {any} */ (ctxB.sources)
+  await assert.rejects(() => sourcesB.stop('aaa-victim'), /not by '@fixture\/owner-b'/)
+  await assert.rejects(() => sourcesB.reload('aaa-victim', ctxB), /not by '@fixture\/owner-b'/)
+  assert.ok(runtime.sources.started('aaa-victim'), 'a neighbour stopped the source')
+
+  // `stopAll` addresses no source by name, so it is not refused: it stops the
+  // caller's own started sources and leaves every neighbour running.
+  await sourcesB.stopAll()
+  assert.ok(runtime.sources.started('aaa-victim'), 'stopAll took a neighbour down with it')
+  assert.equal(runtime.sources.started('zzz-own'), undefined, 'stopAll did not stop the caller\'s own source')
+})
+
+test('a source with no recorded registrar is nobody\'s to drive through a facade', async () => {
+  const { runtime, ctxA } = stage()
+  // Registered straight on the registry, so `ownerOf` is undefined: the claim
+  // the contribution carries is the one party that must not choose.
+  const ownerless = fixtureSource('aaa', A)
+  runtime.sources.register(ownerless.contribution)
+
+  await assert.rejects(
+    () => /** @type {any} */ (ctxA.sources).start('aaa', ctxA),
+    /is registered by no recorded plugin, not by '@fixture\/owner-a'/
+  )
+  assert.equal(ownerless.seen.starts, 0)
+  // A name no source was ever registered under is refused the same way.
+  await assert.rejects(() => /** @type {any} */ (ctxA.sources).start('nothing', ctxA), /no recorded plugin/)
+})
+
+test('the refused lifecycle call is observable as a structured warn naming both plugins', async () => {
+  const { ctxA, ctxB } = stage()
+  const victim = fixtureSource('aaa', A)
+  ctxA.sources.register(victim.contribution)
+
+  const records = await recordsFrom(async () => {
+    await assert.rejects(() => /** @type {any} */ (ctxB.sources).start('aaa', ctxB))
+  })
+
+  const warned = records.filter((r) => r.body === 'source.lifecycle_owner_mismatch')
+  assert.equal(warned.length, 1, 'a refused lifecycle call was silent')
+  assert.equal(warned[0].severityText, 'WARN')
+  assert.equal(warned[0].attributes.hyp_component, 'sources')
+  assert.equal(warned[0].attributes.hyp_operation, 'source.start')
+  assert.equal(warned[0].attributes.error_kind, 'source_owner_mismatch')
+  assert.equal(warned[0].attributes.hyp_source, 'aaa')
+  assert.equal(warned[0].attributes.hyp_plugin, B, 'the warn does not say which plugin was calling')
+  assert.equal(warned[0].attributes.hyp_owner_plugin, A, 'the warn does not say which plugin owns the source')
+})
+
+test('a plugin still drives its own source through the facade, the way @hypaware/otel does', async () => {
+  const { runtime, ctxA } = stage()
+  /** @type {{ reloads: number, stops: number }} */
+  const handle = { reloads: 0, stops: 0 }
+  /** @type {{ starts: number, ctx: unknown }} */
+  const seen = { starts: 0, ctx: undefined }
+  const own = /** @type {any} */ ({
+    name: 'otlp',
+    plugin: A,
+    /** @param {unknown} ctx */
+    async start(ctx) {
+      seen.starts += 1
+      seen.ctx = ctx
+      return {
+        async reload() { handle.reloads += 1 },
+        async stop() { handle.stops += 1 },
+      }
+    },
+  })
+  const sourcesA = /** @type {any} */ (ctxA.sources)
+
+  // `@hypaware/otel` registers and starts its listener inside `activate()`.
+  ctxA.sources.register(own)
+  await sourcesA.start('otlp', ctxA)
+  assert.equal(seen.starts, 1, 'a plugin could not start its own source')
+  assert.equal(seen.ctx, ctxA)
+  assert.ok(runtime.sources.started('otlp'))
+
+  // `@hypaware/gascity` reloads and stops its own source from its commands.
+  await sourcesA.reload('otlp', ctxA)
+  assert.equal(handle.reloads, 1, 'a plugin could not reload its own source')
+  assert.notEqual(await sourcesA.status('otlp'), undefined, 'status stopped answering for an own source')
+  await sourcesA.stop('otlp')
+  assert.equal(handle.stops, 1, 'a plugin could not stop its own source')
+  assert.equal(runtime.sources.started('otlp'), undefined)
+
+  // The boot walk then reports it as a source that is simply not started yet,
+  // rather than as something the refusal broke.
+  const log = makeLog()
+  const fileLog = makeLog()
+  const snapshots = await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+  assert.deepEqual(
+    snapshots.map((s) => ({ name: s.name, plugin: s.plugin, state: s.state })),
+    [{ name: 'otlp', plugin: A, state: 'started' }]
+  )
+  assert.equal(seen.starts, 2)
+  assert.equal(seen.ctx, ctxA)
+})
+
+test('a registry with no lifecycle members of its own does not acquire them', () => {
+  // Same host registry as above, plus the binding: the bracket has something
+  // to read, but there is no `start`/`stop`/`reload`/`stopAll` to shadow, so
+  // the facade must not grow one. A plugin feature-detecting `typeof
+  // ctx.sources.start === 'function'` still gets the truth about the registry
+  // behind it.
+  const inner = createSourceRegistry()
+  const runtime = /** @type {any} */ ({
+    sources: {
+      /** @param {any} c */
+      register(c) { return inner.register(c) },
+      /** @param {any} p @param {() => any} fn */
+      registeringAs(p, fn) { return inner.registeringAs(p, fn) },
+      /** @param {string} n */
+      ownerOf(n) { return inner.ownerOf(n) },
+      /** @param {string} n */
+      get(n) { return inner.get(n) },
+      list() { return inner.list() },
+    },
+    capabilities: { provide() {}, require() {}, has() { return false }, list() { return [] } },
+    activationContexts: new Map(),
+  })
+  const ctx = createActivationContext({
+    runtime,
+    plugin: /** @type {any} */ ({ name: A, version: '1.0.0', manifest: { name: A, permissions: [] }, rootDir: '/nowhere' }),
+    paths: /** @type {any} */ ({}),
+    config: {},
+    env: {},
+  })
+  const sources = /** @type {any} */ (ctx.sources)
+  assert.deepEqual(Object.keys(sources).sort(), ['register', 'registeringAs'])
+  assert.equal(sources.start, undefined, 'the facade grew a start the registry behind it does not have')
+  assert.equal('stopAll' in sources, false)
+  // The honest surface the read-through is for is unchanged.
+  assert.equal(typeof sources.list, 'function')
+  assert.equal(typeof sources.ownerOf, 'function')
+})
+
+test('a plugin cannot delete or redefine the bracketed lifecycle members', () => {
+  const { runtime, ctxA } = stage()
+  const sources = /** @type {any} */ (ctxA.sources)
+  for (const member of ['start', 'stop', 'reload', 'stopAll']) {
+    assert.equal(Reflect.deleteProperty(sources, member), false, `'${member}' can be deleted off the facade`)
+    assert.equal(Reflect.set(sources, member, 1), false, `'${member}' can be written over on the facade`)
+    assert.throws(() => Object.defineProperty(sources, member, { value: 1 }), TypeError)
+    assert.notEqual(sources[member], runtime.sources[member], `'${member}' is the registry's own, unbracketed`)
+  }
+  // Nothing the plugin can read off the facade is the registry itself, so
+  // there is no second hop to the unbracketed members either.
+  for (const key of Reflect.ownKeys(sources)) {
+    assert.notEqual(sources[key], runtime.sources, `the facade hands the registry out as '${String(key)}'`)
+  }
 })
