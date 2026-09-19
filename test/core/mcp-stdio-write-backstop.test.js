@@ -25,9 +25,10 @@ import { serveStdio } from '../../src/core/mcp/stdio.js'
  * @param {(message: any) => Promise<object | null>} handleMessage
  * @param {object[]} messages
  * @param {{ write: (chunk: string) => unknown }} [stdout]
+ * @param {(err: unknown) => void} [reporter] runs after each call is recorded, so a test can make onError raise
  * @returns {Promise<{ chunks: string[], errors: unknown[] }>}
  */
-async function drive(handleMessage, messages, stdout) {
+async function drive(handleMessage, messages, stdout, reporter) {
   /** @type {string[]} */
   const chunks = []
   /** @type {unknown[]} */
@@ -36,7 +37,10 @@ async function drive(handleMessage, messages, stdout) {
     server: { handleMessage },
     stdin: Readable.from(messages.map((m) => JSON.stringify(m) + '\n')),
     stdout: stdout ?? { write: (chunk) => chunks.push(chunk) },
-    onError: (err) => errors.push(err),
+    onError: (err) => {
+      errors.push(err)
+      if (reporter) reporter(err)
+    },
   })
   return { chunks, errors }
 }
@@ -229,4 +233,84 @@ test('a toJSON that throws a value String() cannot take still gets its line', as
   assert.equal(reply.error.code, -32603)
   assert.equal(typeof reply.error.message, 'string')
   assert.equal(errors.length, 1)
+})
+
+// The result of the `.catch` that calls `onError` is the chain the next line is
+// sequenced onto, and `chain.then(...)` skips its callback on a rejected chain,
+// so an `onError` that raises cost every later message on the session its
+// dispatch and its reply. These drive the real transport with the real coercion
+// both shipped `onError` bodies use, because the guard whose whole job is "one
+// bad line can't kill the session" must not be the thing that kills it.
+
+/**
+ * The body both `onError`s in the tree have: `src/core/commands/mcp.js` and
+ * `src/core/mcp/proxy.js` each build a log attribute this way.
+ *
+ * @param {unknown} err
+ */
+function bareIdiom(err) {
+  void (err instanceof Error ? err.message : String(err))
+}
+
+const reporterPoison = /** @type {[string, () => unknown][]} */ ([
+  // `String()` raises: no primitive conversion at all.
+  ['a value String() cannot take', () => Object.create(null)],
+  // `.message` raises: `instanceof Error` holds, so the idiom reads the getter.
+  ['an Error subclass whose message getter throws', () => new (class extends Error {
+    /** @returns {string} */
+    get message() { throw new Error('message getter blew up') }
+  })()],
+])
+
+for (const [label, poison] of reporterPoison) {
+  test(`later messages still get their replies when onError raises on ${label}`, async () => {
+    // `JSON.stringify` propagates whatever a `toJSON` threw verbatim, and
+    // `writeResponse` rethrows it, so the value reaches `onError` intact.
+    const thrown = poison()
+    const { chunks, errors } = await drive(
+      async (message) => message.id === 1
+        ? { jsonrpc: '2.0', id: 1, result: { toJSON() { throw thrown } } }
+        : { jsonrpc: '2.0', id: message.id, result: {} },
+      [
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        { jsonrpc: '2.0', id: 2, method: 'ping' },
+        { jsonrpc: '2.0', id: 3, method: 'ping' },
+      ],
+      undefined,
+      bareIdiom,
+    )
+
+    // The whole point: ids 2 and 3 got no line at all before the fix.
+    assert.deepEqual(chunks.map((c) => JSON.parse(c).id), [1, 2, 3])
+    assert.equal(JSON.parse(chunks[0]).error.code, -32603)
+    assert.deepEqual(JSON.parse(chunks[1]).result, {})
+    assert.deepEqual(JSON.parse(chunks[2]).result, {})
+
+    // The reporter's own failure is not swallowed: it comes back through the
+    // same channel as a plain `Error`, which the bare idiom can read, so the
+    // operator hears that a report was lost rather than nothing at all.
+    assert.equal(errors.length, 2)
+    assert.equal(errors[0], thrown)
+    assert.ok(errors[1] instanceof Error)
+    assert.match(errors[1].message, /error report failed/)
+  })
+}
+
+test('an onError that raises on everything, its own notice included, still does not cost a later message its reply', async () => {
+  const { chunks, errors } = await drive(
+    async (message) => message.id === 1
+      ? { jsonrpc: '2.0', id: 1, result: 1n }
+      : { jsonrpc: '2.0', id: message.id, result: {} },
+    [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { jsonrpc: '2.0', id: 2, method: 'ping' },
+    ],
+    undefined,
+    () => { throw new Error('onError blew up') },
+  )
+
+  assert.deepEqual(chunks.map((c) => JSON.parse(c).id), [1, 2])
+  // Both calls were made; both raised. A handler beyond reporting to is where
+  // the notice stops, not where the session does.
+  assert.equal(errors.length, 2)
 })
