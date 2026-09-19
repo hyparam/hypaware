@@ -322,7 +322,16 @@ export async function runGatewayDaemon(opts = {}) {
       throw new Error('configured gateway failed to activate')
     }
     if (source) {
-      const ctx = boot.runtime.activationContexts?.get(source.plugin)
+      // The plugin the kernel recorded as registering the source, never
+      // `source.plugin`: that is a live read of a property on a contribution
+      // the registry stores by reference, and it picks the context the source
+      // starts under, so a neighbour redefining it after registration hands the
+      // real gateway source its own config slice, paths, logger, capability
+      // handles and permission context (#1551). The same binding the boot
+      // walk's `readSourceIdentity` resolves through; the claim stands only for
+      // a source registered straight on the registry, which records no owner.
+      const owner = boot.runtime.sources.ownerOf('ai-gateway') ?? source.plugin
+      const ctx = boot.runtime.activationContexts?.get(owner)
       if (!ctx) throw new Error('gateway activation context missing')
       // The key it was looked up by, never `source.name`: that is a live read
       // of a plugin property on a contribution the registry stores by
