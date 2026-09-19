@@ -163,15 +163,17 @@ statements' row budget, and before the record floor is decided, which is
 where the same drop closes the gate half: the floor reads the candidates
 and needs no rule of its own.
 
-Past that headroom the drop does cost something, and it is left costing
-it. The statement returns `CANDIDATES + 3` rows, so four distinct
-symbol-only runs, each typed in 3 sessions on 3 days, leave four real
-lines where there were five, and eight leave none at all, which reads as
-the refusal the record floor prints. That is the conservative direction
-and it is what the ask did before the fold was widened, where the same
-record now yields five junk candidates and a gate that opens on them.
-Buying the last of it back means asking the statement for more rows on
-every ask, to pay for a shape no recorded machine has held.
+Past that headroom the drop does cost something, and it is left
+costing it. The statement returns `CANDIDATES + 3` rows in session
+order, so what decides the cost is rank, not the 3 sessions on 3 days
+that qualifies a row: four distinct symbol-only runs typed in more
+sessions than the real lines leave four real lines where there were
+five, and eight leave none at all, which reads as the refusal the
+record floor prints. That is the conservative direction and it is what
+the ask did before the fold was widened, where the same record now
+yields five junk candidates and a gate that opens on them. Buying the
+last of it back means asking the statement for more rows on every ask,
+to pay for a shape no recorded machine has held.
 
 A first version measured four signals (reopened sessions, a repeated
 line, a request that should go to a worker, a recurring mistake) and
