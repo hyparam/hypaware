@@ -182,9 +182,11 @@ function runsUnderNode(candidate) {
  * `node` - the failure the interpreter is baked in to avoid.
  *
  * The shebang separates the two populations exactly, which is what makes it
- * worth a read: pnpm's and yarn's global entries are `#!/bin/sh`, and volta's
- * and asdf's shims are compiled binaries with no shebang at all, so neither
- * can pass this and both keep the direct `exec` they need.
+ * worth a read: pnpm's and yarn's global entries are `#!/bin/sh`, volta's
+ * shims are compiled binaries with no shebang at all, and asdf's are
+ * `#!/usr/bin/env bash`. What the test rests on is that none of them names
+ * `node`, not which of the three shapes any one manager happens to ship, so
+ * all of them keep the direct `exec` they need.
  *
  * Kind first, because `openSync` on a fifo blocks until a writer shows up and
  * these paths are `$PATH` entries and operator-supplied values rather than
