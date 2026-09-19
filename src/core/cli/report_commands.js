@@ -317,8 +317,8 @@ export async function runReportList(argv, ctx) {
     const recommendations = Array.isArray(r.recommendations) ? r.recommendations : []
     for (const c of recommendations) {
       if (typeof c?.id !== 'string' || typeof c?.page !== 'string') continue
-      const title = typeof c.title === 'string' && c.title ? `\t${esc(c.title)}` : ''
-      ctx.stdout.write(`      ${esc(c.id)}\t${esc(c.page)}${title}\n`)
+      const titleCell = typeof c.title === 'string' && c.title ? `\t${esc(c.title)}` : ''
+      ctx.stdout.write(`      ${esc(c.id)}\t${esc(c.page)}${titleCell}\n`)
       if (typeof c.summary === 'string' && c.summary) ctx.stdout.write(`          ${esc(c.summary)}\n`)
     }
   }
@@ -392,18 +392,30 @@ export async function runReportGet(argv, ctx) {
   }
   // The artifact path is one positional with '/' separators; encode each
   // segment, never the separators.
-  const suffix = fileSegments.flatMap((s) => s.split('/')).map(encodeURIComponent).join('/')
-  const url = new URL(`${resolved.endpoint}/${encodeURIComponent(kind)}/${encodeURIComponent(period)}/${encodeURIComponent(id)}/${suffix}`)
-  applyOrgParam(gate.params, url)
-
-  const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd: 'report get' }, (token) =>
-    fetch(url, { headers: { authorization: `Bearer ${token}` } })
-  )
-  if (!outcome.ok) {
-    ctx.stderr.write(`hyp report get: ${outcome.error}\n`)
-    return outcome.exitCode
+  const segments = fileSegments.flatMap((s) => s.split('/'))
+  const suffix = segments.map(encodeURIComponent).join('/')
+  // `hyp report list` prints a recommendation by its page stem and calls
+  // that stem the path this command takes, but a page is stored under an
+  // extension. A last segment carrying no extension of its own is therefore
+  // tried bare (an artifact may genuinely have none) and then in the forms a
+  // page is published in; a path that names its own extension is one request.
+  const last = segments.at(-1) ?? ''
+  const candidates = last && !path.extname(last) ? [suffix, ...PAGE_EXTS.map((ext) => `${suffix}.${ext}`)] : [suffix]
+  /** @type {Response} */
+  let response
+  for (let i = 0; ; i++) {
+    const url = new URL(`${resolved.endpoint}/${encodeURIComponent(kind)}/${encodeURIComponent(period)}/${encodeURIComponent(id)}/${candidates[i]}`)
+    applyOrgParam(gate.params, url)
+    const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd: 'report get' }, (token) =>
+      fetch(url, { headers: { authorization: `Bearer ${token}` } })
+    )
+    if (!outcome.ok) {
+      ctx.stderr.write(`hyp report get: ${outcome.error}\n`)
+      return outcome.exitCode
+    }
+    response = outcome.response
+    if (response.status !== 404 || i + 1 === candidates.length) break
   }
-  const { response } = outcome
   if (response.status !== 200) {
     ctx.stderr.write(`hyp report get: ${await describeErrorResponse(response)}\n`)
     return 1
@@ -436,6 +448,14 @@ export async function runReportGet(argv, ctx) {
  * @ref LLP 0414#id-is-the-handle [constrained-by]: the grammar is the server's; the CLI admits what any live server mints
  */
 const RECOMMENDATION_ID_RE = /^(?:hyprec|rec)-[0-9a-f]{16}$/
+
+/**
+ * The forms a recommendation page is published in, most readable first:
+ * Markdown is what the report generator writes, HTML is what a report
+ * published without it carries. Both the page read and the stem
+ * `hyp report get` accepts probe them in this order.
+ */
+const PAGE_EXTS = ['md', 'html']
 
 /**
  * `hyp report fix [id]`: start an attached client on one of a report's
@@ -601,8 +621,15 @@ export async function runReportFix(argv, ctx, deps = {}) {
         }
         throw err
       }
+      // Every row's value is a key in `byId`, so a miss means the prompt
+      // answered with something it was never offered. That is said rather
+      // than exited 0 in silence, and said once: re-asking a prompt that
+      // answers off-list is a loop with nothing to end it.
       hit = group.byId.get(String(picked))
-      if (!hit) return 0
+      if (!hit) {
+        ctx.stderr.write(`hyp report fix: the picker answered '${esc(String(picked))}', which is not one of the recommendations offered\n`)
+        return 1
+      }
     }
     recommendation = hit.recommendation
     report = hit.report
@@ -650,7 +677,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
   if (typeof page === 'number') return page
 
   // 4. The launch, in the directory the command was typed in.
-  const title = pageTitle(page.bytes.toString('utf8')) ?? recommendation.title ?? recommendationLabel(recommendation.page)
+  const title = pageTitle(page.bytes.toString('utf8'), page.ext) ?? recommendation.title ?? recommendationLabel(recommendation.page)
   const where = `${report.kind}/${report.period}${typeof report.title === 'string' && report.title ? `, "${report.title}"` : ''}`
   // The target flags ride along so the client resolves the same org and
   // remote this run did; the credential reaches it through the inherited
@@ -724,7 +751,16 @@ async function resolveRecommendation({ ctx, gate, resolved, cmd }, id) {
     return 1
   }
   const parsed = /** @type {any} */ (await outcome.response.json().catch(() => null))
-  if (typeof parsed?.recommendation?.page !== 'string' || typeof parsed?.report?.id !== 'string') {
+  // Every field the page URL is built from, not just the id: a report
+  // missing `kind` or `period` would fetch `.../undefined/undefined/...` and
+  // read as a page the report no longer carries, not as an answer it owes.
+  const answered = parsed?.report
+  if (
+    typeof parsed?.recommendation?.page !== 'string' ||
+    typeof answered?.id !== 'string' ||
+    typeof answered?.kind !== 'string' ||
+    typeof answered?.period !== 'string'
+  ) {
     ctx.stderr.write(`hyp ${cmd}: '${resolved.target}' answered without the recommendation's report - is the server up to date?\n`)
     return 1
   }
@@ -746,7 +782,7 @@ async function resolveRecommendation({ ctx, gate, resolved, cmd }, id) {
  */
 async function fetchRecommendationPage({ ctx, gate, resolved, cmd }, { recommendation, report }) {
   const base = `${resolved.endpoint}/${encodeURIComponent(report.kind)}/${encodeURIComponent(report.period)}/${encodeURIComponent(report.id)}/${encodeURIComponent(recommendation.page)}`
-  for (const ext of ['md', 'html']) {
+  for (const ext of PAGE_EXTS) {
     const url = new URL(`${base}.${ext}`)
     applyOrgParam(gate.params, url)
     const outcome = await reportsRequest({ ctx, ...resolved, write: false, cmd }, (token) => fetch(url, { headers: { authorization: `Bearer ${token}` } }))
@@ -763,7 +799,11 @@ async function fetchRecommendationPage({ ctx, gate, resolved, cmd }, { recommend
     const appendix = citationsAppendix(recommendation, ext)
     return { bytes: appendix ? Buffer.concat([bytes, Buffer.from(appendix, 'utf8')]) : bytes, ext }
   }
-  ctx.stderr.write(`hyp ${cmd}: the report no longer carries '${esc(recommendation.page)}' - list what it has with 'hyp report get ${esc(report.kind)} ${esc(report.period)} ${esc(report.id)}'\n`)
+  // The repair has to run and do what the sentence says (LLP 0139
+  // #repair-must-be-runnable). `report get` on the report fetches its entry
+  // document to stdout and lists nothing; the listing filtered to this
+  // report prints every recommendation page the record carries.
+  ctx.stderr.write(`hyp ${cmd}: the report no longer carries '${esc(recommendation.page)}' - list the pages it does carry with 'hyp report list --kind ${esc(report.kind)} --period ${esc(report.period)}'\n`)
   return 1
 }
 
@@ -871,19 +911,23 @@ function firstSentence(text) {
 }
 
 /**
- * The page's own title: its first Markdown `#` heading, or the first `<h1>`
- * of an HTML page. Undefined when neither is present, so the caller falls
- * back to the stem.
+ * The page's own title, read the way the page is written: the first
+ * Markdown `#` heading of a Markdown page, the first `<h1>` of an HTML one.
+ * Undefined when the page has none, so the caller falls back to the stem.
+ * Reading both forms out of either page would let a `# ` line inside an HTML
+ * `<pre>` (the citations tail writes one) title the brief the client gets.
  *
  * @param {string} text
+ * @param {string} ext `md` or `html`, as the page was fetched
  * @returns {string | undefined}
  */
-function pageTitle(text) {
+function pageTitle(text, ext) {
+  if (ext === 'html') {
+    const html = text.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)
+    return html ? (html[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() || undefined) : undefined
+  }
   const md = text.match(/^#\s+(.+?)\s*$/m)
-  if (md) return md[1].replaceAll('`', '')
-  const html = text.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)
-  if (html) return html[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() || undefined
-  return undefined
+  return md ? md[1].replaceAll('`', '') : undefined
 }
 
 /**

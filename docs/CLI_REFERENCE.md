@@ -373,6 +373,9 @@ hyp report get <rec-id> [--output <file>] [--org <org>] [--remote <target>]
 
 Fetches a report's entry document or one artifact. Without `--output`, it
 writes the exact bytes to standard output, including binary artifact bytes.
+A `path` with no extension of its own is tried as given and then as
+`.md` and `.html`, so the `recommendation-<slug>` stem `hyp report list`
+prints fetches that page without spelling out how it was published.
 
 ```sh
 hyp report get usage-review 2026-W34 REPORT_ID --output ./usage-review.html
