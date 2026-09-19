@@ -39,6 +39,7 @@ import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { createProductClient } from '../../src/core/product_telemetry/client.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { productStatus, runTelemetry } from '../../src/core/product_telemetry/commands.js'
+import { readObservabilityEnv } from '../../src/core/observability/env.js'
 
 /** @param {any} t */
 function temp(t) {
@@ -293,6 +294,36 @@ test('queue rejects oversized, malformed and non-allowlisted batches without thr
       binding
     ),
     false
+  )
+})
+
+// The state root has one derivation, and this is what keeps it that way: a
+// nuance added to readObservabilityEnv, or a local copy reintroduced in
+// productRoot, fails here on whichever spelling of HYP_HOME diverges.
+test('the product telemetry root is the shared state root, however HYP_HOME is spelled', () => {
+  for (const env of [
+    { HYP_HOME: path.join(os.tmpdir(), 'hyp-root-absolute') },
+    {},
+    { HYP_HOME: path.join('relative', 'state') },
+    { HYP_HOME: '' }
+  ])
+    assert.equal(
+      productRoot(env),
+      path.join(readObservabilityEnv(env).stateDir, 'product-telemetry')
+    )
+  // The loop above still passes if both sides move together, so pin the
+  // default spelling itself.
+  assert.equal(
+    productRoot({}),
+    path.join(os.homedir(), '.hyp', 'hypaware', 'product-telemetry')
+  )
+  // And pin a set HYP_HOME too: the default pin covers only the unset branch,
+  // so a helper-side change to the set branch would pass both halves above.
+  // The relative spelling also fails on added normalization (a path.resolve
+  // would rewrite it), which an absolute pin cannot see.
+  assert.equal(
+    productRoot({ HYP_HOME: path.join('relative', 'state') }),
+    path.join('relative', 'state', 'hypaware', 'product-telemetry')
   )
 })
 
