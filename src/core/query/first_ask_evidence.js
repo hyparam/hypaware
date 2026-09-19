@@ -369,8 +369,11 @@ export function evidenceSql(from) {
     // @ref LLP 0398#consequences [constrained-by]: a row a session a candidate line is the bound; a LIMIT bounds only what comes back and would pick a different sample
     triggers: (lines) => `select session_id, ${TRIGGER_KEY} as line, min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} and ${TRIGGER_KEY} in (${lines.map(sqlString).join(', ')}) group by 1, 2`,
     // No `trim` around the strip, as in `sql.replies`: these args are
-    // serialized JSON, read only by `commandHeads`' captures, so a trim
-    // would only change slices the cut never split.
+    // serialized JSON, read only by `commandHeads`' captures, whose Bash
+    // branch splits the slice on whitespace. A trailing space can still
+    // reach a path or skill head, but it did so before the strip too,
+    // wherever the cut landed on one: trimming that is a separate tidy,
+    // not this repair.
     calls: (anchors) => `select session_id, message_created_at as at, tool_name, regexp_replace(substr(cast(tool_args as varchar), 1, 160), '${LONE_SURROGATE_TAIL}', '') as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${rowBudget(anchors)}`,
     // No `trim` around the strip, unlike the key: `buildCandidates` already
     // puts this text through `oneLine`, so trimming here would only change
