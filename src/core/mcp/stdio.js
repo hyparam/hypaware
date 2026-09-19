@@ -48,7 +48,7 @@ export function serveStdio({ server, stdin, stdout, onError }) {
         // A handler must never throw (it maps tool failures to isError
         // results), but guard the loop so one bad line can't kill the
         // session. Surface it off the protocol channel.
-        if (onError) onError(err)
+        report(onError, err)
       })
     })
 
@@ -57,6 +57,47 @@ export function serveStdio({ server, stdin, stdout, onError }) {
       chain.then(() => resolve(), () => resolve())
     })
   })
+}
+
+/**
+ * Hand one failure to the caller's `onError`, and survive an `onError` that
+ * raises on the way.
+ *
+ * `onError` is caller-supplied and takes an `unknown`, so it can raise on a
+ * value it is handed: both bodies in this tree coerce with the bare
+ * `err instanceof Error ? err.message : String(err)`, `String()` raises on a
+ * value with no primitive conversion, `.message` runs a getter that can, and
+ * {@link writeResponse} rethrows whatever a plugin's `toJSON` threw, verbatim,
+ * so both shapes reach here. The result of the `.catch` calling this *is* the
+ * chain the next line is sequenced onto, and `chain.then(...)` skips its
+ * callback on a rejected chain, so an uncontained raise costs every later
+ * message on the session its dispatch and its reply: exactly the failure the
+ * guard calling this exists to prevent, caused by the report of one line.
+ *
+ * Containment belongs here and not in the two bodies, which is why they are
+ * left as they are: it holds for any caller, including ones added later.
+ *
+ * The reporter's own failure is not swallowed. It goes back to `onError` once,
+ * as a plain `Error` whose message is built by {@link describeThrown} and so
+ * cannot itself raise, so a handler that reads `.message` off an `Error` takes
+ * it and the operator hears that a report was lost and why. A handler that
+ * refuses even that is beyond reporting to.
+ *
+ * @param {((err: unknown) => void) | undefined} onError
+ * @param {unknown} err
+ */
+function report(onError, err) {
+  if (!onError) return
+  try {
+    onError(err)
+  } catch (reportErr) {
+    try {
+      onError(new Error(`error report failed: ${describeThrown(reportErr)} (reporting: ${describeThrown(err)})`))
+    } catch {
+      // Nothing left to report through, and the session is worth more than the
+      // report.
+    }
+  }
 }
 
 /**
@@ -122,10 +163,11 @@ function writeResponse(stdout, response, id) {
 }
 
 /**
- * Describe a thrown value for the reason field, including one that throws on
- * the way out: `String()` raises on anything with no primitive conversion, and
- * the value described here can come from a `toJSON` a plugin wrote. The bare
- * idiom is repo-wide; it stays file-local, like its twins in
+ * Describe a thrown value for the reason field, or for {@link report}'s notice
+ * that a report was lost, including one that throws on the way out: `String()`
+ * raises on anything with no primitive conversion, and the value described here
+ * can come from a `toJSON` a plugin wrote. The bare idiom is repo-wide; it
+ * stays file-local, like its twins in
  * `src/core/mcp/server.js` and `src/core/sinks/driver.js`, because it is
  * load-bearing only where a raise would defeat the guard it reports from.
  *
