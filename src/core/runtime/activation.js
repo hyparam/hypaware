@@ -217,10 +217,11 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * and the `plugin !== registrar` refusal never ran, and a contribution that
  * took a key that way declared any plugin it liked and was started under that
  * plugin's context, config slice, paths and capability handles (issue #1944).
- * The proxy target holds the two members below and has a null prototype, so
- * nothing but this closure reaches the registry. What the chain gave a plugin
- * it still gives: inherited members answer, `in` sees what the registry has,
- * and a write lands on the facade rather than on the shared registry.
+ * The proxy target holds the two members below non-configurably and has a null
+ * prototype, so nothing but this closure reaches the registry and neither
+ * shadow can be deleted out of the way. What the chain gave a plugin it still
+ * gives: inherited members answer, `in` sees what the registry has, and a
+ * write lands on the facade rather than on the shared registry.
  *
  * @param {PluginName} pluginName
  * @param {ExtendedSourceRegistry} registry
@@ -228,7 +229,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * @ref LLP 0004#the-activation-context [implements]: `sources` is one of the per-plugin registry facades
  */
 function createSourcesFacade(pluginName, registry) {
-  const facade = Object.assign(Object.create(null), {
+  const members = {
     /** @param {SourceContribution} contribution */
     register(contribution) {
       if (typeof registry.registeringAs !== 'function') {
@@ -254,7 +255,20 @@ function createSourcesFacade(pluginName, registry) {
       if (typeof registry.registeringAs !== 'function') return fn()
       return registry.registeringAs(pluginName, fn)
     },
-  })
+  }
+  // Non-writable and non-configurable, not merely assigned: `delete
+  // ctx.sources.register` took the own property away and the miss below then
+  // read through to the registry's own unbracketed `register`, which is the
+  // whole of issue #1944 again in one statement; deleting `registeringAs` too
+  // reached the registrar lever and recorded any plugin at all as the owner.
+  // A property the target holds non-configurably is one neither a plugin nor a
+  // later trap can take away, so the shadow over the two members that carry the
+  // binding cannot be lifted. `enumerable` so `Object.keys`, a spread and
+  // `for...in` still see them, as the object this replaces answered.
+  const facade = Object.create(null)
+  for (const [member, value] of Object.entries(members)) {
+    Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
   return new Proxy(facade, {
     /**
      * @param {Record<string | symbol, unknown>} target
@@ -262,8 +276,9 @@ function createSourcesFacade(pluginName, registry) {
      * @param {unknown} receiver
      */
     get(target, prop, receiver) {
-      // Own first, so the two members below are the only `register` and
-      // `registeringAs` a plugin can reach.
+      // Own first, so the two members above are the only `register` and
+      // `registeringAs` a plugin can reach, and neither can be deleted to
+      // uncover the registry's.
       if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver)
       // The facade as the receiver, so a registry member reading its own state
       // off `this` still finds it. A runtime with no source registry builds a

@@ -375,6 +375,45 @@ test('a plugin cannot reach the registry through the facade it is handed', () =>
   assert.ok('ownerOf' in ctxA.sources, 'the facade stopped seeing the registry members')
 })
 
+// The shadow the facade puts over `register`/`registeringAs` is only as good
+// as a plugin's inability to lift it. While the two members were ordinary
+// assigned properties, `delete ctx.sources.register` took the own property
+// away and the proxy's miss read the registry's own unbracketed `register`
+// back out, reopening #1944 in one statement; deleting `registeringAs` as well
+// reached the registrar lever and recorded whatever owner the squatter named,
+// which the boot walk now trusts with no fallback.
+
+test('a plugin cannot delete the facade members to uncover the registry\'s own', () => {
+  const { runtime, ctxA, ctxB } = stage()
+  const sources = /** @type {any} */ (ctxA.sources)
+
+  assert.throws(() => { 'use strict'; delete sources.register }, TypeError)
+  assert.throws(() => { 'use strict'; delete sources.registeringAs }, TypeError)
+  assert.equal(Reflect.deleteProperty(sources, 'register'), false)
+  assert.equal(Reflect.deleteProperty(sources, 'registeringAs'), false)
+  assert.throws(() => Object.defineProperty(sources, 'register', { value: 1 }), TypeError)
+  assert.equal(Reflect.set(sources, 'register', 1), false)
+
+  // Non-vacuity: the members are still the facade's, not the registry's.
+  assert.notEqual(sources.register, runtime.sources.register)
+  assert.notEqual(sources.registeringAs, runtime.sources.registeringAs)
+
+  // The full squat the deletions bought, attempted against the live facade.
+  const squatter = fixtureSource('aaa', B)
+  sources.registeringAs(B, () => {
+    assert.throws(() => sources.register(squatter.contribution), /declares plugin/)
+  })
+  assert.equal(runtime.sources.get('aaa'), undefined, 'the squatter reached the registry anyway')
+  assert.equal(runtime.sources.ownerOf('aaa'), undefined)
+
+  // And the honest path is untouched by the lock.
+  const honest = fixtureSource('bbb', A)
+  ctxA.sources.register(honest.contribution)
+  assert.equal(runtime.sources.ownerOf('bbb'), A)
+  assert.deepEqual(Object.keys(sources).sort(), ['register', 'registeringAs'])
+  assert.ok(ctxB)
+})
+
 test('a squatter cannot take a name ownerless and be started under the plugin it names', async () => {
   const { runtime, ctxA, ctxB } = stage()
   // The whole squat: `aaa` is registered out of band, declaring B, so the
