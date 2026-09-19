@@ -34,6 +34,11 @@ import {
 // reads, and the folder the client is started in.
 // @ref LLP 0398#one-signal [tests]:
 
+// A surrogate half with no partner: what a cut counting UTF-16 code units
+// leaves behind, and what UTF-8 then writes as U+FFFD. Not global, so the
+// tests can share one without `lastIndex` carrying between them.
+const UNPAIRED_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/
+
 test('windowStart: thirty days back, as a UTC date', () => {
   assert.equal(windowStart(new Date('2026-09-07T05:00:00Z')), '2026-08-08')
   assert.equal(windowStart(new Date('2026-09-07T05:00:00Z'), 1), '2026-09-06')
@@ -125,11 +130,39 @@ test('an astral character straddling the key cut leaves no half of it in the key
   const result = await candidateLines([10, 11, 12].map((day) => typedRow(`s${day}`, day, 9, text)))
   assert.equal(result.rows.length, 1, 'the three typings are one candidate')
   const line = String(result.rows[0].line)
-  assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(line), `no unpaired surrogate in ${JSON.stringify(line)}`)
+  assert.ok(!UNPAIRED_SURROGATE.test(line), `no unpaired surrogate in ${JSON.stringify(line)}`)
   assert.equal(line, 'ship the release notes and the tag', 'the split character is dropped whole, and the space it left is trimmed')
   assert.equal(line, keyOf(text), 'and the JS mirror of the key agrees with the engine')
   assert.equal(result.rows[0].sessions, 3, 'the typing still groups its three sessions')
   assert.equal(result.rows[0].days, 3, 'on its three days')
+})
+
+test('an astral character straddling the reply cut leaves no half of it in the excerpt, and no other excerpt moves', async () => {
+  // @ref LLP 0398#one-signal [tests]: the ending is the first substantial reply, and a character in it is not half a surrogate pair
+  // Through the same engine the gather runs on. hypaware #1902: SUBSTR
+  // here counts UTF-16 code units, so a pair sitting across unit 500 was
+  // cut in half and the high half flowed through `ending.text` into
+  // `candidates.md`, which is written UTF-8 and renders it U+FFFD.
+  const tail = ' and then the tag was pushed.'
+  const rows = [
+    replyRow('sA', `${'x'.repeat(499)}\u{1F389}${tail}`),
+    replyRow('sB', `${'y'.repeat(498)}\u{1F389}${tail}`),
+    replyRow('sC', `\u{1F389}${'z'.repeat(600)}`),
+    replyRow('sD', 'w'.repeat(600)),
+    replyRow('sE', `${'v'.repeat(495)}     ${tail}`),
+  ]
+  const anchors = rows.map((r) => ({ id: String(r.session_id), at: Date.UTC(2026, 7, 12, 9), triggers: 1 }))
+  const result = await evidenceRows(rows, evidenceSql('2026-08-08').replies(anchors))
+  const text = new Map(result.rows.map((r) => [String(r.session_id), String(r.text)]))
+  assert.equal(text.size, rows.length, 'every reply is returned')
+  for (const [id, t] of text) assert.ok(!UNPAIRED_SURROGATE.test(t), `no unpaired surrogate in ${id}: ${JSON.stringify(t.slice(-4))}`)
+  assert.equal(text.get('sA'), 'x'.repeat(499), 'the split character is dropped whole, leaving the 499 units before it')
+  // The rows that split nothing are the guard against a repair that
+  // shortens every excerpt: only the straddling one loses a unit.
+  assert.equal(text.get('sB'), `${'y'.repeat(498)}\u{1F389}`, 'a pair that ends exactly on the cut is kept')
+  assert.equal(text.get('sC'), `\u{1F389}${'z'.repeat(498)}`, 'and one at the front, which a cut starting at unit 1 cannot split')
+  assert.equal(text.get('sD'), 'w'.repeat(500), 'an excerpt with no astral character is the same 500 units it always was')
+  assert.equal(text.get('sE'), `${'v'.repeat(495)}     `, 'and trailing space is left alone: the excerpt is prose, and buildCandidates is what collapses whitespace')
 })
 
 test('commandHeads: a cd prefix is dropped and the head is the verb plus its subcommand', () => {
@@ -167,12 +200,34 @@ function typedRow(sessionId, day, hour, text) {
 }
 
 /**
+ * One assistant reply in the window, as `sql.replies` reads it. The
+ * caller passes text long enough to clear the statement's own
+ * `length(content_text) > 200` floor.
+ * @param {string} sessionId
+ * @param {string} text
+ * @returns {Record<string, SqlPrimitive>}
+ */
+function replyRow(sessionId, text) {
+  return { date: '2026-08-12', session_id: sessionId, role: 'assistant', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: null, message_created_at: new Date(Date.UTC(2026, 7, 12, 10)), content_text: text }
+}
+
+/**
  * The candidate statement over `rows`, through the same engine the gather
  * runs on, so a test reads the keys the engine really returns rather than
  * asserting on the SQL text.
  * @param {Record<string, SqlPrimitive>[]} rows
  */
 function candidateLines(rows) {
+  return evidenceRows(rows, evidenceSql('2026-08-08').lines)
+}
+
+/**
+ * Any evidence statement over `rows`, through the same engine the gather
+ * runs on.
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @param {string} query
+ */
+function evidenceRows(rows, query) {
   const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
   /** @type {AsyncDataSource} */
   const source = {
@@ -191,7 +246,7 @@ function candidateLines(rows) {
   }
   const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
   const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
-  return executeQuerySql({ query: evidenceSql('2026-08-08').lines, registry, storage })
+  return executeQuerySql({ query, registry, storage })
 }
 
 /** Two sessions that typed the commit line and then ran the procedure. */
