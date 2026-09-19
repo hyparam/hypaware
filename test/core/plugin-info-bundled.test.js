@@ -113,6 +113,41 @@ test('plugin info answers for a healthy bundled plugin on a clean install', asyn
   }
 })
 
+// A bundled name in `V1_EXCLUDED_FROM_DEFAULT` read as a positive record while
+// `plugin list` named it under no heading at all: on a clean HYP_HOME it is
+// neither active, installed, nor failed, so the surface `plugin info` points an
+// operator at said nothing to contradict the record (issue #1599). Both
+// directions in one test, because the positive half alone does not pin the
+// fix: a line printed for every bundled plugin would pass it and would tell an
+// operator the opposite of the truth about `@hypaware/ai-gateway`.
+test('plugin info says a V1-excluded bundled plugin activates only when configured', async () => {
+  const hypHome = await makeHome('hyp-plugin-info-excluded-')
+  try {
+    const list = runCli(hypHome, ['plugin', 'list'])
+    assert.equal(list.status, 0, `expected exit 0, got ${list.status}: ${list.stderr}`)
+    assert.doesNotMatch(
+      list.stdout,
+      /@hypaware\/central/,
+      'fixture must be a boot where plugin list says nothing about the excluded name'
+    )
+
+    const excluded = runCli(hypHome, ['plugin', 'info', '@hypaware/central'])
+    assert.equal(excluded.status, 0, `expected exit 0, got ${excluded.status}: ${excluded.stderr}`)
+    assert.match(
+      excluded.stdout,
+      /^ {2}activation: {4}only when plugins\[\] names it; the default profiles never activate it$/m
+    )
+
+    // The allowlisted half, and the reason the line is conditional: this one
+    // does activate by default, so carrying the same line would be false.
+    const allowlisted = runCli(hypHome, ['plugin', 'info', '@hypaware/ai-gateway'])
+    assert.equal(allowlisted.status, 0, `expected exit 0, got ${allowlisted.status}: ${allowlisted.stderr}`)
+    assert.doesNotMatch(allowlisted.stdout, /activation:/)
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 // The repro in the issue, both halves in one HYP_HOME: `plugin list` names a
 // bundled plugin this boot did not activate, and the obvious next command used
 // to deny that the plugin existed. `@hypaware/vector-search` gets there without
@@ -140,6 +175,7 @@ test('plugin info answers for a bundled plugin the same boot did not activate', 
       info.stdout,
       `@hypaware/vector-search@${vector.manifest.version}\n`
         + '  source:        bundled (ships with this package, so there is no install record)\n'
+        + '  activation:    only when plugins[] names it; the default profiles never activate it\n'
         + `  root_dir:      ${vector.rootDir}\n`
     )
     // The two surfaces agree on the version of the copy in question, which is

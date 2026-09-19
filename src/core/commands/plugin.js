@@ -8,7 +8,7 @@ import process from 'node:process'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
-import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import {
   installPlugin,
@@ -524,12 +524,26 @@ export async function runPluginInfo(argv, ctx, opts = {}) {
     // The manifest, and nothing more: `install_dir`, `content_hash`,
     // `manifest_hash`, `installed_at` and the update block all describe an
     // install this copy never went through, so a value in any of them would be
-    // invented. The `source` line says why they are absent. Activation is
-    // absent too: `plugin list` owns "did this boot activate it" along with the
-    // scoping that claim needs, and a second surface restating it is how two
-    // surfaces come to contradict each other.
+    // invented. The `source` line says why they are absent. What this boot did
+    // is absent too: `plugin list` owns "did this boot activate it" along with
+    // the scoping that claim needs, and a second surface restating it is how
+    // two surfaces come to contradict each other.
+    //
+    // The `activation` line is the other kind of fact, and the one `plugin
+    // list` cannot supply: membership of `V1_EXCLUDED_FROM_DEFAULT` is a
+    // property of the name in this build, not of a boot, and until the config
+    // names one of those `plugin list` prints it under no heading at all
+    // (neither active, installed, nor failed), so this record is the only
+    // answer the operator gets (issue #1599). It claims config selection and
+    // not execution, exactly as the `shadowed` line below does:
+    // `computeSelectedPlugins` takes the `config` profile's set from
+    // `plugins[]`, and the default profiles (`all-bundled`, `all-available`)
+    // filter this set out whatever the manifest says.
     ctx.stdout.write(`${bundled.manifest.name}@${bundled.manifest.version}\n`)
     ctx.stdout.write('  source:        bundled (ships with this package, so there is no install record)\n')
+    if (V1_EXCLUDED_FROM_DEFAULT.has(bundled.manifest.name)) {
+      ctx.stdout.write('  activation:    only when plugins[] names it; the default profiles never activate it\n')
+    }
     ctx.stdout.write(`  root_dir:      ${bundled.rootDir}\n`)
     return 0
   }
