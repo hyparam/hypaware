@@ -77,9 +77,12 @@ export function checkHelperScript(helperPath, env) {
   }
   // A wrapper that execs its CLI directly bakes no interpreter, which is the
   // whole reason it is written that way (issue #1811): there is nothing there
-  // to rot, and the CLI path below is then the only path it has.
+  // to rot, and the CLI path below is then the only path it has. It is also
+  // the path the shell hands to execve there, so that shape alone is asked
+  // the mode question the wrapper is asked.
   const gone = (baked.nodeBin === undefined ? undefined : missingBin('interpreter', baked.nodeBin))
     ?? missingBin('CLI', baked.hypBin)
+    ?? (baked.nodeBin === undefined ? lostBakedExecuteBit(baked.hypBin) : undefined)
     ?? lostExecuteBit(helperPath)
   return gone === undefined ? { present: true, stale: false } : { present: true, stale: true, detail: gone }
 }
@@ -139,11 +142,50 @@ function missingBin(role, bin) {
  * @returns {string | undefined}
  */
 function lostExecuteBit(helperPath) {
+  if (isExecutable(helperPath)) return undefined
+  return 'the wrapper is no longer executable, and Desktop runs it as a bare executable'
+}
+
+/**
+ * The same question of the baked CLI, asked only of the direct-exec shape
+ * (issue #1927). There its mode decides whether the credential command runs at
+ * all; in the interpreted shape the CLI is an argument node opens for reading,
+ * where a non-executable file is how npm installs an entry script, so asking
+ * both shapes would report a false problem for the common one. Absolute or no
+ * claim, `missingBin`'s rule: a relative token would resolve against whatever
+ * cwd `verify` runs from.
+ *
+ * The repair is a mode on a file this plugin neither writes nor owns, so the
+ * detail names the `chmod` the way the `_npx` verdict names the durable
+ * install: `install-helper` chmods the wrapper it generates and nothing else,
+ * and re-running it bakes this same path straight back in.
+ *
+ * @param {string} bin
+ * @returns {string | undefined}
+ */
+function lostBakedExecuteBit(bin) {
+  if (!path.isAbsolute(bin) || isExecutable(bin)) return undefined
+  return `baked CLI is not executable, and this wrapper execs it directly rather than through an interpreter (${bin})`
+    + "; restore its mode with 'chmod +x' on that path"
+}
+
+/**
+ * Whether `bin` is executable, asked of the kernel rather than computed from
+ * mode bits: `access(X_OK)` answers against the caller's real uid and full
+ * group set, which is what a mode test would have to reconstruct to survive
+ * `verify` running as someone other than whoever installed, and it resolves a
+ * symlink to the target that is really exec'd rather than to a link mode that
+ * says nothing.
+ *
+ * @param {string} bin
+ * @returns {boolean}
+ */
+function isExecutable(bin) {
   try {
-    fs.accessSync(helperPath, fs.constants.X_OK)
-    return undefined
+    fs.accessSync(bin, fs.constants.X_OK)
+    return true
   } catch {
-    return 'the wrapper is no longer executable, and Desktop runs it as a bare executable'
+    return false
   }
 }
 
