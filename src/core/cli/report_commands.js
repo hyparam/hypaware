@@ -409,11 +409,11 @@ export async function runReportGet(argv, ctx) {
   const suffix = segments.map(encodeURIComponent).join('/')
   // `hyp report list` prints a recommendation by its page stem and calls
   // that stem the path this command takes, but a page is stored under an
-  // extension. A last segment carrying no extension of its own is therefore
+  // extension. A last segment that names no extension of its own is therefore
   // tried bare (an artifact may genuinely have none) and then in the forms a
-  // page is published in; a path that names its own extension is one request.
+  // page is published in; a path that names an extension is one request.
   const last = segments.at(-1) ?? ''
-  const candidates = last && !path.extname(last) ? [suffix, ...PAGE_EXTS.map((ext) => `${suffix}.${ext}`)] : [suffix]
+  const candidates = last && !NAMES_EXTENSION_RE.test(last) ? [suffix, ...PAGE_EXTS.map((ext) => `${suffix}.${ext}`)] : [suffix]
   /** @type {Response} */
   let response
   for (let i = 0; ; i++) {
@@ -469,6 +469,20 @@ const RECOMMENDATION_ID_RE = /^(?:hyprec|rec)-[0-9a-f]{16}$/
  * `hyp report get` accepts probe them in this order.
  */
 const PAGE_EXTS = ['md', 'html']
+
+/**
+ * Whether a path segment's trailing dot-run names a file extension. That is
+ * a narrower question than `path.extname`'s, which answers what POSIX calls
+ * the extension (everything after the last dot) and so reads a slug's version
+ * number as one: `path.extname('recommendation-http-1.1-keepalive')` is
+ * '.1-keepalive', which would skip the probe for a stem the listing prints.
+ * An extension is a word: alphanumerics to the end of the segment with at
+ * least one letter among them, so '.md' and '.png' are extensions while
+ * '.2026-W29' and '.2' are parts of a name.
+ *
+ * @ref LLP 0414#list-shows-ids [constrained-by]: every stem the listing prints has to be a path `hyp report get` takes
+ */
+const NAMES_EXTENSION_RE = /\.[0-9]*[a-z][a-z0-9]*$/i
 
 /**
  * `hyp report fix [id]`: start an attached client on one of a report's

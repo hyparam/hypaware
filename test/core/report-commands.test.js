@@ -1001,6 +1001,49 @@ test('get does not probe page extensions for a path that names its own', async (
   assert.match(err.join(''), /HTTP 404: not_found/)
 })
 
+// A slug can carry a dot (a version number, a period label) without naming an
+// extension, so the probe cannot be gated on `path.extname`, which calls
+// everything after the last dot one (#1903).
+// @ref LLP 0414#list-shows-ids [tests]: a stem carrying a dot is still a path `hyp report get` takes
+test('get takes a page stem carrying a dot, which is not an extension', async (t) => {
+  const { calls } = stubServer(t, (method, url) => (
+    url.pathname === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1-keepalive.md'
+      ? { status: 200, body: new TextEncoder().encode(PAGE) }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-http-1.1-keepalive'], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1-keepalive',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1-keepalive.md',
+  ])
+  assert.equal(out.join(''), PAGE)
+})
+
+test('a stem published nowhere fails the same way with a dot in it as without', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-gone'], ctx), 1)
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'report.2026-W29'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29.html',
+  ])
+  assert.equal(err.join('').match(/HTTP 404: not_found/g)?.length, 2)
+})
+
+test('get does not probe for a path that names a page extension either', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-gone.md'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.md'])
+  assert.match(err.join(''), /HTTP 404: not_found/)
+})
+
 // @ref LLP 0139#repair-must-be-runnable [tests]: the repair a diagnostic names has to be a command that does what the sentence says
 test('the missing-page hint names a command that lists what the report carries', async (t) => {
   stubServer(t, (method, url) => (
