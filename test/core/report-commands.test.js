@@ -1001,12 +1001,13 @@ test('get does not probe page extensions for a path that names its own', async (
   // is published under does not decide how many requests a miss costs.
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/chart.PNG'], ctx), 1)
   // An extension is alphanumerics with at least one letter among them, so
-  // digits cost a miss no extra requests, before the letter ('.7z') or after
-  // it ('.mp3'). One letter is the whole of the shortest extension: a digit
-  // run in front of it is what '.7z' adds, and a rule that asked for one
-  // would read '.c' as part of a name.
+  // digits cost a miss no extra requests, before the letter ('.7z'), after
+  // it ('.mp3'), or among them ('.m4a'). One letter is the whole of the
+  // shortest extension: a digit run in front of it is what '.7z' adds, and a
+  // rule that asked for one would read '.c' as part of a name.
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/archive.7z'], ctx), 1)
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/audio.mp3'], ctx), 1)
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/clip.m4a'], ctx), 1)
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/tool.c'], ctx), 1)
   // An extension runs as long as the alphanumerics do. 'report publish' takes
   // a directory, so what an artifact is named is whatever was in it, and a
@@ -1017,6 +1018,7 @@ test('get does not probe page extensions for a path that names its own', async (
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.PNG',
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/archive.7z',
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/audio.mp3',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/clip.m4a',
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/tool.c',
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/export.parquet',
   ])
@@ -1050,6 +1052,12 @@ test('a stem published nowhere fails the same way with a dot in it as without', 
   // A dot-run of digits alone names no extension either, which is the half of
   // the rule a dot-run broken by a '-' never reaches.
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'report.2026'], ctx), 1)
+  // A digit run of one is a part of a name for the same reason a run of four
+  // is, and a stem that ends at its version number is where that lands. It is
+  // the half with teeth: read '.1' as an extension and the stem loses the
+  // probe that resolves it, so a page the listing prints 404s (#1903), where
+  // every other miss here only costs requests.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-http-1.1'], ctx), 1)
   // An extension runs to the end of the segment: a dot-run that is
   // extension-shaped but carries on past it ('.1a' inside '1.1a-keepalive')
   // names one no more than '.1-keepalive' does.
@@ -1064,11 +1072,14 @@ test('a stem published nowhere fails the same way with a dot in it as without', 
     '/v1/reports/usage-review/2026-W29/rpt-b/report.2026',
     '/v1/reports/usage-review/2026-W29/rpt-b/report.2026.md',
     '/v1/reports/usage-review/2026-W29/rpt-b/report.2026.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1.html',
     '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive',
     '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive.md',
     '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive.html',
   ])
-  assert.equal(err.join('').match(/HTTP 404: not_found/g)?.length, 4)
+  assert.equal(err.join('').match(/HTTP 404: not_found/g)?.length, 5)
 })
 
 test('get does not probe for a path that names a page extension either', async (t) => {
