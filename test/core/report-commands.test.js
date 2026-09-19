@@ -997,7 +997,69 @@ test('get does not probe page extensions for a path that names its own', async (
   const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
   const { ctx, err } = ctxWith()
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/chart.png'], ctx), 1)
-  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.png'])
+  // An extension is one in whatever case it was typed, so the case an artifact
+  // is published under does not decide how many requests a miss costs.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/chart.PNG'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.png',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.PNG',
+  ])
+  assert.match(err.join(''), /HTTP 404: not_found/)
+})
+
+// A slug can carry a dot (a version number, a period label) without naming an
+// extension, so the probe cannot be gated on `path.extname`, which calls
+// everything after the last dot one (#1903).
+// @ref LLP 0414#list-shows-ids [tests]: a stem carrying a dot is still a path `hyp report get` takes
+test('get takes a page stem carrying a dot, which is not an extension', async (t) => {
+  const { calls } = stubServer(t, (method, url) => (
+    url.pathname === '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1-keepalive.md'
+      ? { status: 200, body: new TextEncoder().encode(PAGE) }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, out } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-http-1.1-keepalive'], ctx), 0)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1-keepalive',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1-keepalive.md',
+  ])
+  assert.equal(out.join(''), PAGE)
+})
+
+test('a stem published nowhere fails the same way with a dot in it as without', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-gone'], ctx), 1)
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'report.2026-W29'], ctx), 1)
+  // A dot-run of digits alone names no extension either, which is the half of
+  // the rule a dot-run broken by a '-' never reaches.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'report.2026'], ctx), 1)
+  // An extension runs to the end of the segment: a dot-run that is
+  // extension-shaped but carries on past it ('.1a' inside '1.1a-keepalive')
+  // names one no more than '.1-keepalive' does.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-http-1.1a-keepalive'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026-W29.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/report.2026.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive.html',
+  ])
+  assert.equal(err.join('').match(/HTTP 404: not_found/g)?.length, 4)
+})
+
+test('get does not probe for a path that names a page extension either', async (t) => {
+  const { calls } = stubServer(t, () => ({ status: 404, json: { error: 'not_found' } }))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-gone.md'], ctx), 1)
+  assert.deepEqual(calls.map((c) => c.url.pathname), ['/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.md'])
   assert.match(err.join(''), /HTTP 404: not_found/)
 })
 
