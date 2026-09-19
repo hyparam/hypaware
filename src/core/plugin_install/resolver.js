@@ -8,7 +8,15 @@ import { applyGitSourceFlags, parseGitSource, redactRawSource } from './git_sour
  * @import { PluginSourceSpec } from '../../../hypaware-plugin-kernel-types.js'
  */
 
-const SCOPED_NAME_RE = /^@([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)$/i
+/**
+ * A scoped npm-style plugin name, `@<scope>/<name>`. Exported because it is the
+ * one token shape this repo already treats as a name and never as a path:
+ * `looksLikeLocalPath` below routes every other slash-bearing token to
+ * `local-dir` and lets a leading `@` through to the name branches. A command
+ * whose positional is a directory can refuse this shape without inventing a
+ * second, disagreeing rule for what a plugin name looks like.
+ */
+export const SCOPED_NAME_RE = /^@([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)$/i
 const UNSCOPED_NAME_RE = /^([a-z0-9][a-z0-9._-]*)$/i
 const GIT_PREFIX_RE = /^(github:|gitlab:|bitbucket:|git\+|git:|ssh:|https?:\/\/|file:\/\/)/i
 const FIRST_PARTY_SCOPE = '@hypaware/'
