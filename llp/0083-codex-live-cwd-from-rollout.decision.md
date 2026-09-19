@@ -105,7 +105,10 @@ has the symmetric fallback.
   so the container is not what selects a rollout. The live path resolves the
   thread from the body's `client_metadata.thread_id`, else the turn-metadata blob
   ([LLP 0151](./0151-codex-lineage-from-body-client-metadata.decision.md#body-is-authority);
-  it was never a `thread-id` header, a name Codex does not emit). Only a real
+  it was never a `thread-id` header; that name is real on paths this document
+  did not reach, and stated no lineage the projector reads on any of them, see
+  **Extended-by: [LLP 0165](./0165-codex-flat-pair-needs-a-namespace-signal.decision.md#header-audit-correction)**).
+  Only a real
   Codex thread has a rollout, so non-codex traffic never scans. The name is a
   cheap prefilter, not the answer: the located file's `payload.id` is re-checked
   against the id asked for, and a disagreement is a **refusal** (cwd unknown)
@@ -228,6 +231,12 @@ has the symmetric fallback.
   remains the open acceptance check, and it is
   [LLP 0141](./0141-codex-desktop-rides-the-codex-adapter.decision.md)'s point
   that no hermetic smoke can supply it.
+  (**Extended-by: [LLP 0165](./0165-codex-flat-pair-needs-a-namespace-signal.decision.md#header-audit-correction)** -
+  `session-id` and `thread-id` are real names `codex-rs` emits from
+  `build_session_headers`, on the `/responses/compact` and websocket paths this
+  bullet's reading did not reach; only `parent-thread-id` is fictional. The rule
+  the bullet states is unaffected, because no Codex turn states its lineage in
+  those two names on any path the projector reads.)
 - **First line only, cached per thread id.** The rollout is written at session
   start, so it exists before the first exchange projects (earlier and more
   reliably than Claude's sidecar, which has a known session-start race). Reading a
