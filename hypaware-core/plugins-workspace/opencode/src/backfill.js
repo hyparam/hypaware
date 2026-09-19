@@ -13,8 +13,11 @@ import { projectOpenCodeSnapshot } from './projector.js'
 
 const execFileAsync = promisify(execFile)
 const MAX_SESSION_LIST = 1000
-// An `opencode` child that starts and never exits parks the daemon's whole
-// scheduled sweep, so both calls are bounded, on separate budgets. The listing
+// An `opencode` child that starts and never exits parks whichever foreground
+// import invoked it: this provider declares no `sweep`, so the daemon sweep
+// driver never fires it, and its call sites are `hyp backfill`, the `hyp init`
+// finale and the `hyp join`/attach finale. Unbounded, it hangs the first-run
+// wizard indefinitely. So both calls are bounded, on separate budgets. The listing
 // is a bounded metadata read and takes the workspace's existing ceiling for a
 // subprocess that does real I/O (the 10s on `gh auth token`), above the 1-3s
 // given to calls that only read a version or a git line. The export renders one
