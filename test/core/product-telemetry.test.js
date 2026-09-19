@@ -317,6 +317,14 @@ test('the product telemetry root is the shared state root, however HYP_HOME is s
     productRoot({}),
     path.join(os.homedir(), '.hyp', 'hypaware', 'product-telemetry')
   )
+  // And pin a set HYP_HOME too: the default pin covers only the unset branch,
+  // so a helper-side change to the set branch would pass both halves above.
+  // The relative spelling also fails on added normalization (a path.resolve
+  // would rewrite it), which an absolute pin cannot see.
+  assert.equal(
+    productRoot({ HYP_HOME: path.join('relative', 'state') }),
+    path.join('relative', 'state', 'hypaware', 'product-telemetry')
+  )
 })
 
 // The default has to be pinned through the CLI, not only through the policy
