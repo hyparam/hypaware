@@ -1034,6 +1034,10 @@ test('a stem published nowhere fails the same way with a dot in it as without', 
   // A dot-run of digits alone names no extension either, which is the half of
   // the rule a dot-run broken by a '-' never reaches.
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'report.2026'], ctx), 1)
+  // An extension runs to the end of the segment: a dot-run that is
+  // extension-shaped but carries on past it ('.1a' inside '1.1a-keepalive')
+  // names one no more than '.1-keepalive' does.
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'recommendation-http-1.1a-keepalive'], ctx), 1)
   assert.deepEqual(calls.map((c) => c.url.pathname), [
     '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone',
     '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-gone.md',
@@ -1044,8 +1048,11 @@ test('a stem published nowhere fails the same way with a dot in it as without', 
     '/v1/reports/usage-review/2026-W29/rpt-b/report.2026',
     '/v1/reports/usage-review/2026-W29/rpt-b/report.2026.md',
     '/v1/reports/usage-review/2026-W29/rpt-b/report.2026.html',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive.md',
+    '/v1/reports/usage-review/2026-W29/rpt-b/recommendation-http-1.1a-keepalive.html',
   ])
-  assert.equal(err.join('').match(/HTTP 404: not_found/g)?.length, 3)
+  assert.equal(err.join('').match(/HTTP 404: not_found/g)?.length, 4)
 })
 
 test('get does not probe for a path that names a page extension either', async (t) => {
