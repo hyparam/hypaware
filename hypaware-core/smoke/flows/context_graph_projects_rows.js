@@ -18,8 +18,10 @@ import {
 
 /**
  * Context-graph T0 projection smoke. Activates `@hypaware/ai-gateway` (for
- * its dataset registration + cache declaration) and
- * `@hypaware/context-graph`, seeds a small `ai_gateway_messages` fixture
+ * its dataset registration + cache declaration), `@hypaware/context-graph`
+ * (the projection engine) and `@hypaware/ai-gateway-graph` (the connector
+ * carrying the `ai_gateway_messages` contract; with no contract registered
+ * `graph project` is a no-op), seeds a small `ai_gateway_messages` fixture
  * with two file-touching tool calls, runs `hyp graph project`, and asserts:
  *
  * - `select count(*) from node` = 7 (Session, App, Model, 2× Tool, 2× File)
@@ -56,6 +58,7 @@ export async function run({ harness, expect }) {
       const { loaded } = await loadManifests([
         path.join(workspace, 'ai-gateway'),
         path.join(workspace, 'context-graph'),
+        path.join(workspace, 'ai-gateway-graph'),
       ])
       const entries = loaded.map((l) => ({ manifest: l.manifest, rootDir: l.rootDir, config: {} }))
       return activatePlugins({
@@ -94,8 +97,13 @@ export async function run({ harness, expect }) {
     v.Session === 1 && v.App === 1 && v.Model === 1 && v.Tool === 2 && v.File === 2
   )
 
+  // `natural_key` is a declared local-only content column, and a graph row
+  // carries no per-row `cwd`, so a caller below the top of the lattice reads
+  // it back nulled with a notice on stderr. Ask for full fidelity.
+  // @ref LLP 0105#graph-provenance [constrained-by]: unprovenanced graph rows expose structure, never content, unless the caller opts in
   const usedEdges = await runSql(
-    "select t.natural_key as tool from edge e join node t on e.dst_id = t.node_id where e.edge_type = 'used'"
+    "select t.natural_key as tool from edge e join node t on e.dst_id = t.node_id where e.edge_type = 'used'",
+    { includeLocalOnly: true }
   )
   const tools = usedEdges.map((r) => String(r.tool)).sort()
   expect.that("used edges link the session to Read and Edit", tools, (v) =>
@@ -161,12 +169,15 @@ export async function run({ harness, expect }) {
 
   /**
    * @param {string} sql
+   * @param {{ includeLocalOnly?: boolean }} [opts]
    * @returns {Promise<any[]>}
    */
-  async function runSql(sql) {
+  async function runSql(sql, opts) {
     const stdout = makeBuf()
     const stderr = makeBuf()
-    const code = await dispatch(['query', 'sql', sql, '--refresh', 'always', '--format', 'json'], {
+    const argv = ['query', 'sql', sql, '--refresh', 'always', '--format', 'json']
+    if (opts?.includeLocalOnly) argv.push('--include-local-only')
+    const code = await dispatch(argv, {
       stdout,
       stderr,
       kernel,
