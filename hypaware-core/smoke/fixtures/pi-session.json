@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "session": { "type": "session", "version": 3, "id": "pi-fixture", "cwd": "/work/pi-fixture", "timestamp": "2026-09-17T10:00:00.000Z" },
+  "entrypoint": "print",
+  "entries": [
+    { "type": "message", "id": "00000001", "parentId": null, "timestamp": "2026-09-17T10:00:01.000Z", "message": { "role": "user", "content": "Read notes.txt" } },
+    { "type": "message", "id": "00000002", "parentId": "00000001", "timestamp": "2026-09-17T10:00:02.000Z", "message": { "role": "assistant", "provider": "fixture", "model": "fixture-model", "stopReason": "toolUse", "content": [{ "type": "text", "text": "Reading notes." }, { "type": "toolCall", "id": "call-1", "name": "read", "arguments": { "path": "notes.txt" } }], "usage": { "input": 10, "output": 5, "cacheRead": 3, "cacheWrite": 2, "totalTokens": 20, "cost": { "total": 0.001 } } } },
+    { "type": "message", "id": "00000003", "parentId": "00000002", "timestamp": "2026-09-17T10:00:03.000Z", "message": { "role": "toolResult", "toolCallId": "call-1", "toolName": "read", "content": [{ "type": "text", "text": "Fixture notes" }], "isError": false } },
+    { "type": "compaction", "id": "00000004", "parentId": "00000003", "timestamp": "2026-09-17T10:00:04.000Z", "summary": "Read the notes", "firstKeptEntryId": "00000001", "tokensBefore": 20, "usage": { "input": 2, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 3 } }
+  ]
+}
