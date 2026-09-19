@@ -547,7 +547,7 @@ test('a refused destination is described by its actual defect', (t) => {
 // a saved policy carrying one was hand-edited or foreign-written. The read guard
 // still accepts it by its parse, so delivery must send to the parse: the raw
 // string resolves to the doubled slash the receiver will not route.
-test('a saved destination that does not round-trip is delivered where the guard accepted it', async (t) => {
+test('a saved destination that does not round-trip is delivered and reported where the guard accepted it', async (t) => {
   const home = temp(t)
   const root = productRoot({ HYP_HOME: home })
   const url = 'https://example.invalid/receiver\\'
@@ -592,6 +592,64 @@ test('a saved destination that does not round-trip is delivered where the guard 
   assert.equal(target, 'https://example.invalid/receiver/v1/telemetry')
   assert.deepEqual(seen, [target, target])
   assert.equal(createOutbox(root, { now: () => NOW }).entries().length, 0)
+  // Status names one place with delivery: the backslash form is not somewhere
+  // the batch this pass just delivered was ever sent.
+  const reported = productStatus({ HYP_HOME: home }).organization_destination
+  assert.equal(reported, 'https://example.invalid/receiver')
+  assert.equal(target, reported + '/v1/telemetry')
+})
+
+// Both producers require the saved string to equal its own parse apart from
+// trailing slashes, so that is the whole difference a legitimate policy can
+// show. One unconditional rule covers those too: a reported destination is
+// always the one the POST target is built from, never sometimes the saved
+// spelling, so reading the line needs no knowledge of which case it hit.
+test('a producer-written destination is reported as delivery resolves it', (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  const remote = remoteEnrollment(home)
+  assert.equal(remote.identity.central_url, 'https://example.invalid/')
+  const automatic = productStatus(env)
+  assert.equal(automatic.policy, 'enrolled_organization')
+  assert.equal(automatic.organization_destination, 'https://example.invalid')
+  const explicit = writePolicy(root, 'organization', {
+    url: remote.identity.central_url,
+    identityPath: remote.identityPath
+  })
+  assert.equal(explicit.mode, 'organization')
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(root, 'policy.json'), 'utf8')).url,
+    'https://example.invalid/'
+  )
+  assert.equal(
+    productStatus(env).organization_destination,
+    'https://example.invalid'
+  )
+})
+
+// A saved url the guard resolves to no destination is reported as none: the
+// neighbouring reason says why collection is off, and a url this far outside
+// the contract can carry the credentials `writePolicy` already refuses to echo.
+test('a destination that resolves to nothing is reported as none', (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'policy.json'),
+    JSON.stringify({
+      version: 1,
+      mode: 'organization',
+      generation: randomUUID(),
+      url: 'https://user:secret@example.invalid/receiver',
+      identity_path: path.join(home, 'missing.json'),
+      enrollment: 'a'.repeat(64)
+    })
+  )
+  const status = productStatus(env)
+  assert.equal(status.collection, 'off')
+  assert.equal(status.organization_destination, null)
 })
 
 // Local mode is a preview queue, not a network permission.

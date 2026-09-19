@@ -3,11 +3,17 @@
 import path from 'node:path'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { createOutbox } from './outbox.js'
-import { effectivePolicy, productRoot, writePolicy } from './policy.js'
+import { effectivePolicy, productRoot, safeDestination, writePolicy } from './policy.js'
 
 /** @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js' */
 
-/** @param {NodeJS.ProcessEnv} env */
+/**
+ * Report the destination delivery resolves, not the string it was saved as: a
+ * saved url that spells itself differently from its parse is still delivered to
+ * the parse, and one that resolves to nothing has no destination to name.
+ * @ref LLP 0393#policy [implements]: status shows the effective destination
+ * @param {NodeJS.ProcessEnv} env
+ */
 export function productStatus(env) {
   const root = productRoot(env)
   const effective = effectivePolicy(root)
@@ -15,7 +21,9 @@ export function productStatus(env) {
     collection: effective.mode,
     policy: effective.reason,
     organization_destination:
-      effective.policy?.mode === 'organization' ? effective.policy.url : null,
+      effective.policy?.mode === 'organization'
+        ? safeDestination(effective.policy.url)
+        : null,
     vendor_sharing: 'unavailable',
     standalone_delivery: 'unavailable',
     ...createOutbox(root).status()
