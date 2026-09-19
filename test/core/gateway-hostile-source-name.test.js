@@ -134,26 +134,33 @@ function poisonerEntrypoint() {
  * through the facade, so the kernel records no owner, and declare the
  * provider's name as the contribution's own `plugin`.
  *
- * `Object.getPrototypeOf(ctx.sources)` is the registry: the facade delegates
- * by prototype chain rather than by copy (`createSourcesFacade`), so its
- * unbracketed `register` is one property read away from any plugin holding a
- * context. Registering through it leaves `ownerOf('ai-gateway')` undefined,
- * and nothing else in this process can.
+ * `Object.getPrototypeOf(ctx.sources)` used to be the registry: the facade
+ * forwarded the rest of it by prototype chain, so its unbracketed `register`
+ * was one property read away from any plugin holding a context, and
+ * registering through it left `ownerOf('ai-gateway')` undefined (issue #1944).
+ * The facade now reads through to the registry rather than inheriting from it,
+ * so the hop finds `null` and the squat throws where it is attempted. The
+ * fixture records what it found, so what follows is measured rather than
+ * assumed.
  */
 function squatterEntrypoint() {
   return [
     recorderPreamble(),
     'export async function activate(ctx) {',
     '  const proto = Object.getPrototypeOf(ctx.sources)',
-    "  record({ event: 'squat_attempted', unbracketed_register: typeof proto.register })",
-    '  proto.register({',
-    "    name: 'ai-gateway',",
-    `    plugin: ${JSON.stringify(PROVIDER)},`,
-    '    async start(startCtx) {',
-    "      record({ event: 'start', source: 'ai-gateway', who: 'squatter', ctx_plugin: startCtx.plugin.name })",
-    "      return { async status() { return { state: 'ready' } }, async stop() { record({ event: 'stop', who: 'squatter' }) } }",
-    '    },',
-    '  })',
+    "  record({ event: 'squat_attempted', proto: String(proto), unbracketed_register: typeof proto?.register })",
+    '  try {',
+    '    proto.register({',
+    "      name: 'ai-gateway',",
+    `      plugin: ${JSON.stringify(PROVIDER)},`,
+    '      async start(startCtx) {',
+    "        record({ event: 'start', source: 'ai-gateway', who: 'squatter', ctx_plugin: startCtx.plugin.name })",
+    "        return { async status() { return { state: 'ready' } }, async stop() { record({ event: 'stop', who: 'squatter' }) } }",
+    '      },',
+    '    })',
+    '  } catch (err) {',
+    "    record({ event: 'squat_refused', message: String(err && err.message) })",
+    '  }',
     "  record({ event: 'squatted', owner_of: String(ctx.sources.ownerOf('ai-gateway')) })",
     '}',
     '',
@@ -437,29 +444,51 @@ test('the gateway starts the source under the context of the plugin that registe
   assert.deepEqual(records.filter(r => r.event === 'stop').map(r => r.source), ['ai-gateway'])
 })
 
-// The step past #1551 the claim fallback left open. A plugin that reaches the
-// registry's own unbracketed `register` (one prototype hop off `ctx.sources`)
-// takes the `ai-gateway` key with no owner recorded, and the real gateway
-// plugin's registration then fails as a duplicate. A fallback to the
-// contribution's `plugin` would resolve exactly the context that plugin named,
-// so the squatter's source ran under the provider's config slice, paths,
-// logger, capability handles and permission context with `bootError` null.
-test('a source that took the gateway key with no owner recorded does not start under the plugin it names', async (t) => {
+// The step past #1551 the claim fallback left open, and the door it came
+// through. A plugin reached the registry's own unbracketed `register` one
+// prototype hop off `ctx.sources`, took the `ai-gateway` key with no owner
+// recorded, and the real gateway plugin's registration then failed as a
+// duplicate. The gateway refuses an unowned key rather than falling back to
+// the contribution's `plugin` (#1551), so the squatter's source did not run,
+// and the provider's did not either, because the key was gone.
+//
+// The facade now reads through to the registry rather than putting it on the
+// plugin's prototype chain (issue #1944), so the hop finds nothing to register
+// with. The squat fails where it is made, the provider keeps its own key, and
+// the unowned registration the gateway's refusal is written against can no
+// longer be staged from inside a plugin at all. That refusal stays as the last
+// line; the same one in the processing daemon's boot walk is pinned directly
+// in `test/core/source-plugin-ownership.test.js`, where an unowned
+// registration can still be constructed on a bare registry.
+test('the gateway key cannot be taken with no owner recorded through the sources facade', async (t) => {
   const home = await makeSquatHome(t)
   const run = runGatewayOutsideTestRunner({ ...home, poison: 'none' })
   assert.equal(run.stopError, null, 'fixture invariant: the stop must complete')
   const records = await recordsFor(home.recordDir, run.pid)
 
-  // Fixture invariant: the squat has to have been attempted, or the assertion
-  // below passes against any code at all.
+  // Fixture invariant: the squat has to have been attempted, or the assertions
+  // below pass against any code at all.
   const attempt = records.find(r => r.event === 'squat_attempted')
   assert.ok(attempt, 'the squatter never ran, so nothing was staged')
-  assert.equal(attempt.unbracketed_register, 'function', 'the facade stopped delegating the registry by prototype')
+  assert.equal(attempt.proto, 'null', 'the facade still hands a plugin something to walk up to')
+  assert.equal(attempt.unbracketed_register, 'undefined', 'the facade still reaches an unbracketed register')
+  assert.ok(
+    records.find(r => r.event === 'squat_refused'),
+    'the squat neither threw nor registered, so this proves nothing'
+  )
 
   assert.equal(
     records.find(r => r.event === 'start' && r.who === 'squatter'),
     undefined,
     `the gateway started an unowned contribution under the plugin it named (bootError=${run.bootError})`
+  )
+  // The key stayed with the plugin that registers it, so the refused squat
+  // costs the real gateway nothing either.
+  assert.equal(run.bootError, null)
+  assert.deepEqual(
+    records.filter(r => r.event === 'start').map(r => ({ source: r.source, ctx_plugin: r.ctx_plugin })),
+    [{ source: 'ai-gateway', ctx_plugin: PROVIDER }],
+    'the provider lost its own source name to the squat'
   )
 })
 

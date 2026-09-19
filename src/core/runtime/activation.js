@@ -195,21 +195,33 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * A registry without `registeringAs` is called exactly as before. The plugin
  * doctor's stand-in delegates to the real registry, so it has it.
  *
- * "The rest" is forwarded by putting the registry on the facade's prototype
- * chain rather than by copying it. A spread carries own enumerable properties
- * and nothing else, so a registry keeping `get`/`list`/the lifecycle members
- * on a prototype reached a plugin without them: `ctx.sources.list` was not a
- * function, and `@hypaware/otel` could not start its own listener from
- * `activate()`. That is not hypothetical. `hypaware/integration`'s `run()`
- * takes `opts.kernel`, dispatch uses that kernel verbatim, and both its
- * activation seams (`activateSeamCommandPlugins` and `activatePluginClosure`)
- * hand it to `activatePlugins`, so a host's own registry reaches this
- * function without `createKernelRuntime` being exported at all. Delegating
- * also keeps `this` pointing at the facade, so a registry whose members read
- * their own state off `this` still finds it through the chain. It is the same
- * own-versus-inherited trap `neuter` documents in
- * `src/core/plugin_doctor/dry_run.js`, and it answers it the same way: read
- * through to the original rather than flatten a copy of it.
+ * "The rest" is forwarded by reading through to the registry rather than by
+ * copying it. A spread carries own enumerable properties and nothing else, so
+ * a registry keeping `get`/`list`/the lifecycle members on a prototype reached
+ * a plugin without them: `ctx.sources.list` was not a function, and
+ * `@hypaware/otel` could not start its own listener from `activate()`. That is
+ * not hypothetical. `hypaware/integration`'s `run()` takes `opts.kernel`,
+ * dispatch uses that kernel verbatim, and both its activation seams
+ * (`activateSeamCommandPlugins` and `activatePluginClosure`) hand it to
+ * `activatePlugins`, so a host's own registry reaches this function without
+ * `createKernelRuntime` being exported at all. Reading through also keeps
+ * `this` pointing at the facade, so a registry whose members read their own
+ * state off `this` still find it. It is the same own-versus-inherited trap
+ * `neuter` documents in `src/core/plugin_doctor/dry_run.js`, and it answers it
+ * the same way: read through to the original rather than flatten a copy of it.
+ *
+ * The read-through is a proxy rather than the registry on the facade's
+ * prototype chain, because a prototype is reachable from the object that
+ * inherits it: `Object.getPrototypeOf(ctx.sources).register(contribution)`
+ * reached the registry's own unbracketed `register`, so no owner was recorded
+ * and the `plugin !== registrar` refusal never ran, and a contribution that
+ * took a key that way declared any plugin it liked and was started under that
+ * plugin's context, config slice, paths and capability handles (issue #1944).
+ * The proxy target holds the two members below non-configurably and has a null
+ * prototype, so nothing but this closure reaches the registry and neither
+ * shadow can be deleted out of the way. What the chain gave a plugin it still
+ * gives: inherited members answer, `in` sees what the registry has, and a
+ * write lands on the facade rather than on the shared registry.
  *
  * @param {PluginName} pluginName
  * @param {ExtendedSourceRegistry} registry
@@ -217,10 +229,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * @ref LLP 0004#the-activation-context [implements]: `sources` is one of the per-plugin registry facades
  */
 function createSourcesFacade(pluginName, registry) {
-  // `?? null` so a runtime with no source registry still builds a context and
-  // fails on the call, the way the spread it replaces did, rather than
-  // throwing here.
-  return Object.assign(Object.create(registry ?? null), {
+  const members = {
     /** @param {SourceContribution} contribution */
     register(contribution) {
       if (typeof registry.registeringAs !== 'function') {
@@ -245,6 +254,43 @@ function createSourcesFacade(pluginName, registry) {
     registeringAs(_plugin, fn) {
       if (typeof registry.registeringAs !== 'function') return fn()
       return registry.registeringAs(pluginName, fn)
+    },
+  }
+  // Non-writable and non-configurable, not merely assigned: `delete
+  // ctx.sources.register` took the own property away and the miss below then
+  // read through to the registry's own unbracketed `register`, which is the
+  // whole of issue #1944 again in one statement; deleting `registeringAs` too
+  // reached the registrar lever and recorded any plugin at all as the owner.
+  // A property the target holds non-configurably is one neither a plugin nor a
+  // later trap can take away, so the shadow over the two members that carry the
+  // binding cannot be lifted. `enumerable` so `Object.keys`, a spread and
+  // `for...in` still see them, as the object this replaces answered.
+  const facade = Object.create(null)
+  for (const [member, value] of Object.entries(members)) {
+    Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  return new Proxy(facade, {
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     * @param {unknown} receiver
+     */
+    get(target, prop, receiver) {
+      // Own first, so the two members above are the only `register` and
+      // `registeringAs` a plugin can reach, and neither can be deleted to
+      // uncover the registry's.
+      if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver)
+      // The facade as the receiver, so a registry member reading its own state
+      // off `this` still finds it. A runtime with no source registry builds a
+      // context and fails on the call, the way the spread this replaces did.
+      return registry == null ? undefined : Reflect.get(registry, prop, receiver)
+    },
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     */
+    has(target, prop) {
+      return Object.hasOwn(target, prop) || (registry != null && Reflect.has(registry, prop))
     },
   })
 }

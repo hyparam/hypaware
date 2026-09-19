@@ -1395,16 +1395,22 @@ export async function runDaemon(opts = {}) {
         // based on a diff of loaded config is still deferred.
         for (const snap of status.sources) {
           if (snap.state !== 'started') continue
-          // The empty string is what a row carries when the boot walk could
-          // not read a plugin off the contribution, and it is no more a
-          // context key here than it is in `startConfiguredSources`: a source
-          // that would not say whose it is does not get reloaded under
-          // whatever that key holds, nor handed that key's config slice below.
-          if (snap.plugin === '') continue
-          const ctx = boot.runtime.activationContexts.get(snap.plugin)
+          // The registrar the kernel recorded, not `snap.plugin`: the row's
+          // plugin is a label, and it degrades to what the contribution
+          // claimed about itself when the kernel recorded no registrar. A
+          // source that took its key out of band chose that label, and it is
+          // no more a context key here than in `startConfiguredSources`
+          // (issue #1944). A source whose registrar the kernel never saw does
+          // not get reloaded under whatever that key holds, nor handed that
+          // key's config slice below.
+          const owner = typeof boot.runtime.sources.ownerOf === 'function'
+            ? boot.runtime.sources.ownerOf(snap.name)
+            : snap.plugin
+          if (typeof owner !== 'string' || owner === '') continue
+          const ctx = boot.runtime.activationContexts.get(owner)
           if (!ctx) continue
           ctx.config = /** @type {JsonObject} */ (
-            configByName.get(snap.plugin) ?? {}
+            configByName.get(owner) ?? {}
           )
           try {
             await boot.runtime.sources.reload(snap.name, ctx)
@@ -1700,14 +1706,31 @@ async function startConfiguredSources({ runtime, log, fileLog }) {
       })
       continue
     }
-    // The empty string is what an unreadable `plugin` degrades to, and no
-    // manifest can carry it as a name (`validateManifest` requires a non-empty
-    // one), so it is not asked of the context map as though it were one: a
-    // contribution that would not say which plugin it belongs to must not be
-    // handed whatever that key happens to hold.
-    const ctx = plugin === '' ? undefined : runtime.activationContexts.get(plugin)
+    // The plugin the kernel recorded as registering this source, with no
+    // fallback to `identity.plugin` when a registry that records registrars
+    // recorded none. `identity.plugin` is the right label for a row and the
+    // wrong key for this lookup: it degrades to the contribution's own claim,
+    // and this daemon boots its own kernel, where every registration reaches
+    // the registry through a plugin's `ctx.sources` facade and is bracketed. A
+    // source nobody is recorded as having registered took its key out of band
+    // and wrote the `plugin` it carries, so falling back to it asks the one
+    // party who should not choose which context, config slice, paths and
+    // capability handles the source starts under (issue #1944, the same
+    // refusal `runGatewayDaemon` makes for #1551).
+    //
+    // A registry with no `ownerOf` at all is read as before, the way the
+    // facade calls one with no `registeringAs` as before: a host driving its
+    // own registry through `hypaware/integration` records no registrar for
+    // anything, so there is no binding to defeat. The empty string is not asked
+    // of the context map either: no manifest can carry it as a name.
+    const owner = typeof runtime.sources.ownerOf === 'function'
+      ? runtime.sources.ownerOf(name)
+      : plugin
+    const ctx = typeof owner === 'string' && owner !== '' ? runtime.activationContexts.get(owner) : undefined
     if (!ctx) {
-      const message = `no activation context recorded for plugin '${plugin}'`
+      const message = owner === undefined
+        ? `no registering plugin recorded for source '${name}'`
+        : `no activation context recorded for plugin '${owner}'`
       fileLog.error('daemon.source_start_failed', {
         source: name,
         plugin,

@@ -342,3 +342,234 @@ test('a prototype-backed registry reaches a plugin with the whole registry, not 
   // The host registry's own state is not copied onto what the plugin holds.
   assert.deepEqual(Object.keys(sources).sort(), ['register', 'registeringAs'])
 })
+
+// Issue #1944. The facade forwarded "the rest" of the registry by putting the
+// registry on its prototype chain, and a prototype is reachable from the object
+// that inherits it. `Object.getPrototypeOf(ctx.sources).register(c)` reached the
+// registry's own unbracketed `register`, where the registrar is the empty
+// string: `owners.set` never ran and the `plugin !== registrar` refusal above
+// never ran, so a plugin took any free source name while declaring any plugin
+// it liked. The daemon's boot walk then resolved that claim into the named
+// plugin's activation context, its config slice, paths, logger, capability
+// handles and permission context.
+
+test('a plugin cannot reach the registry through the facade it is handed', () => {
+  const { runtime, ctxA } = stage()
+
+  assert.equal(
+    Object.getPrototypeOf(ctxA.sources),
+    null,
+    'the facade still puts the registry one property read away from the plugin'
+  )
+  // Not only the first hop: nothing the plugin can read off the facade is the
+  // registry, so there is no second hop either.
+  for (const key of Reflect.ownKeys(ctxA.sources)) {
+    assert.notEqual(
+      /** @type {any} */ (ctxA.sources)[key],
+      runtime.sources,
+      `the facade hands the registry out as '${String(key)}'`
+    )
+  }
+  // The registry's members still answer, which is what the chain was for.
+  assert.equal(typeof /** @type {any} */ (ctxA.sources).list, 'function')
+  assert.ok('ownerOf' in ctxA.sources, 'the facade stopped seeing the registry members')
+})
+
+// The shadow the facade puts over `register`/`registeringAs` is only as good
+// as a plugin's inability to lift it. While the two members were ordinary
+// assigned properties, `delete ctx.sources.register` took the own property
+// away and the proxy's miss read the registry's own unbracketed `register`
+// back out, reopening #1944 in one statement; deleting `registeringAs` as well
+// reached the registrar lever and recorded whatever owner the squatter named,
+// which the boot walk now trusts with no fallback.
+
+test('a plugin cannot delete the facade members to uncover the registry\'s own', () => {
+  const { runtime, ctxA, ctxB } = stage()
+  const sources = /** @type {any} */ (ctxA.sources)
+
+  assert.throws(() => { 'use strict'; delete sources.register }, TypeError)
+  assert.throws(() => { 'use strict'; delete sources.registeringAs }, TypeError)
+  assert.equal(Reflect.deleteProperty(sources, 'register'), false)
+  assert.equal(Reflect.deleteProperty(sources, 'registeringAs'), false)
+  assert.throws(() => Object.defineProperty(sources, 'register', { value: 1 }), TypeError)
+  assert.equal(Reflect.set(sources, 'register', 1), false)
+
+  // Non-vacuity: the members are still the facade's, not the registry's.
+  assert.notEqual(sources.register, runtime.sources.register)
+  assert.notEqual(sources.registeringAs, runtime.sources.registeringAs)
+
+  // The full squat the deletions bought, attempted against the live facade.
+  const squatter = fixtureSource('aaa', B)
+  sources.registeringAs(B, () => {
+    assert.throws(() => sources.register(squatter.contribution), /declares plugin/)
+  })
+  assert.equal(runtime.sources.get('aaa'), undefined, 'the squatter reached the registry anyway')
+  assert.equal(runtime.sources.ownerOf('aaa'), undefined)
+
+  // And the honest path is untouched by the lock.
+  const honest = fixtureSource('bbb', A)
+  ctxA.sources.register(honest.contribution)
+  assert.equal(runtime.sources.ownerOf('bbb'), A)
+  assert.deepEqual(Object.keys(sources).sort(), ['register', 'registeringAs'])
+  assert.ok(ctxB)
+})
+
+test('a squatter cannot take a name ownerless and be started under the plugin it names', async () => {
+  const { runtime, ctxA, ctxB } = stage()
+  // The whole squat: `aaa` is registered out of band, declaring B, so the
+  // registry records no owner and never compares the claim to the registrar.
+  // `ctxA` stands in for the squatter and `ctxB` for the plugin it names.
+  const squatter = fixtureSource('aaa', B)
+  assert.throws(
+    () => /** @type {any} */ (Object.getPrototypeOf(ctxA.sources)).register(squatter.contribution),
+    /Cannot read properties of null/,
+    'the facade prototype still reaches an unbracketed register'
+  )
+  assert.equal(runtime.sources.get('aaa'), undefined, 'the squatter reached the registry anyway')
+
+  // The registration the bypass used to produce, staged straight on the
+  // registry: the boot walk must refuse it rather than resolve its claim.
+  runtime.sources.register(squatter.contribution)
+  assert.equal(runtime.sources.ownerOf('aaa'), undefined)
+
+  const log = makeLog()
+  const fileLog = makeLog()
+  const snapshots = await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+
+  assert.equal(squatter.seen.starts, 0, 'a source with no recorded registrar was started')
+  assert.notEqual(squatter.seen.ctx, ctxB, 'the squatter was handed the context of the plugin it named')
+  assert.deepEqual(
+    snapshots.map((s) => ({ name: s.name, plugin: s.plugin, state: s.state, error: s.error })),
+    [{
+      name: 'aaa',
+      plugin: B,
+      state: 'failed',
+      error: "no registering plugin recorded for source 'aaa'",
+    }],
+    'the refusal is not on the status row, or does not say what it refused'
+  )
+  assert.equal(
+    fileLog.records.filter((r) => r.event === 'daemon.source_start_failed').length,
+    1,
+    'the refusal was not logged'
+  )
+})
+
+test('every way a plugin legitimately registers still records it as the owner', async () => {
+  const { runtime, ctxA, ctxB } = stage()
+
+  // Plain call.
+  const plain = fixtureSource('aaa-plain', A)
+  ctxA.sources.register(plain.contribution)
+
+  // Destructured off the facade, so `this` is not the facade at the call.
+  const detached = fixtureSource('bbb-detached', A)
+  const { register } = ctxA.sources
+  register(detached.contribution)
+
+  // After an `await` inside `activate()`, the case the bracket is synchronous
+  // for: two activations interleaved around a microtask still each record
+  // their own registrar.
+  const awaitedA = fixtureSource('ccc-awaited-a', A)
+  const awaitedB = fixtureSource('ddd-awaited-b', B)
+  await Promise.all([
+    (async () => { await Promise.resolve(); ctxA.sources.register(awaitedA.contribution) })(),
+    (async () => { await Promise.resolve(); ctxB.sources.register(awaitedB.contribution) })(),
+  ])
+
+  // The plugin brackets the call itself, through the extended surface
+  // `@hypaware/otel` already reaches for. The name it passes is ignored.
+  const bracketed = fixtureSource('eee-bracketed', A)
+  const extended = /** @type {any} */ (ctxA.sources)
+  extended.registeringAs(B, () => {
+    ctxA.sources.register(bracketed.contribution)
+  })
+
+  assert.deepEqual(
+    [
+      runtime.sources.ownerOf('aaa-plain'),
+      runtime.sources.ownerOf('bbb-detached'),
+      runtime.sources.ownerOf('ccc-awaited-a'),
+      runtime.sources.ownerOf('ddd-awaited-b'),
+      runtime.sources.ownerOf('eee-bracketed'),
+    ],
+    [A, A, A, B, A],
+    'a legitimate registration path lost its owner, or recorded the wrong one'
+  )
+
+  const log = makeLog()
+  const fileLog = makeLog()
+  const snapshots = await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+  assert.deepEqual(
+    snapshots.map((s) => ({ name: s.name, plugin: s.plugin, state: s.state })),
+    [
+      { name: 'aaa-plain', plugin: A, state: 'started' },
+      { name: 'bbb-detached', plugin: A, state: 'started' },
+      { name: 'ccc-awaited-a', plugin: A, state: 'started' },
+      { name: 'ddd-awaited-b', plugin: B, state: 'started' },
+      { name: 'eee-bracketed', plugin: A, state: 'started' },
+    ],
+    'a legitimately registered source stopped starting'
+  )
+  assert.equal(plain.seen.ctx, ctxA)
+  assert.equal(detached.seen.ctx, ctxA)
+  assert.equal(awaitedA.seen.ctx, ctxA)
+  assert.equal(awaitedB.seen.ctx, ctxB)
+  assert.equal(bracketed.seen.ctx, ctxA)
+  assert.equal(fileLog.records.filter((r) => r.level === 'error').length, 0, 'an honest boot failed a source')
+})
+
+test('a registry that records no registrars at all is read as before', async () => {
+  // A host drives its own registry through `hypaware/integration`. It has no
+  // `registeringAs` and no `ownerOf`, so there is no binding to defeat and the
+  // contribution's claim is all the boot walk has ever had here. Refusing on
+  // its absence would stop every source such a host runs.
+  /** @type {Map<string, any>} */
+  const held = new Map()
+  const runtime = /** @type {any} */ ({
+    sources: {
+      /** @param {any} c */
+      register(c) { held.set(c.name, c) },
+      /** @param {string} n */
+      get(n) { return held.get(n) },
+      list() { return Array.from(held.values()) },
+      started() { return undefined },
+      /** @param {string} n @param {any} ctx */
+      async start(n, ctx) { await held.get(n).start(ctx) },
+      async status() { return undefined },
+    },
+    capabilities: { provide() {}, require() {}, has() { return false }, list() { return [] } },
+    activationContexts: new Map(),
+  })
+  const ctx = createActivationContext({
+    runtime,
+    plugin: /** @type {any} */ ({ name: A, version: '1.0.0', manifest: { name: A, permissions: [] }, rootDir: '/nowhere' }),
+    paths: /** @type {any} */ ({}),
+    config: {},
+    env: {},
+  })
+  const source = fixtureSource('host', A)
+  ctx.sources.register(source.contribution)
+
+  const log = makeLog()
+  const fileLog = makeLog()
+  const snapshots = await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+  assert.deepEqual(
+    snapshots.map((s) => ({ name: s.name, plugin: s.plugin, state: s.state })),
+    [{ name: 'host', plugin: A, state: 'started' }],
+    'a host registry that never recorded a registrar stopped starting its sources'
+  )
+  assert.equal(source.seen.ctx, ctx)
+})
