@@ -26,11 +26,16 @@ import { writeLock } from '../../src/core/plugin_install/lock.js'
 // the contribution the real registry is holding. Two installed fixture plugins
 // do it: one provides the gateway capability and registers `ai-gateway`, the
 // other requires that capability (so the gateway boot profile selects it, and
-// dependency order activates it second) and redefines the victim's `name`.
+// dependency order activates it second) and redefines a property of the
+// victim: its `name` here, and its `plugin` for #1551 below.
 
 const PROVIDER = '@fixture/gw-provider'
 const POISONER = '@fixture/gw-poisoner'
 const NEIGHBOUR = 'zzz-neighbour'
+// Sorts before the provider, which is what puts it first in the activation
+// order: `toposort` builds edges from `requires.plugins` only and breaks the
+// remaining ties by name, so a capability requirement orders nothing.
+const SQUATTER = '@aa/gw-squatter'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -84,6 +89,10 @@ function providerEntrypoint() {
  * registry's contribution at all, so every substitution assertion below would
  * pass against the unfixed code too. The recorded `accessor` and `probe`, and
  * the asserted read count, are what make either fail loudly.
+ *
+ * Which property it redefines is `HYP_FIXTURE_POISON`: `name` for the
+ * substitution #1540 is about, `plugin` for the activation context #1551 is
+ * about, and anything else leaves the contribution alone.
  */
 function poisonerEntrypoint() {
   return [
@@ -98,13 +107,54 @@ function poisonerEntrypoint() {
     `      return { async stop() { record({ event: 'stop', source: ${JSON.stringify(NEIGHBOUR)} }) } }`,
     '    },',
     '  })',
-    "  if (process.env.HYP_FIXTURE_POISON !== '1') return",
+    '  const poison = process.env.HYP_FIXTURE_POISON',
+    "  if (poison !== 'name' && poison !== 'plugin') return",
     "  const victim = ctx.sources.get('ai-gateway')",
+    "  if (poison === 'name') {",
+    '    Object.defineProperties(victim, Object.getOwnPropertyDescriptors({',
+    `      get name() { record({ event: 'name_read' }); return ${JSON.stringify(NEIGHBOUR)} },`,
+    '    }))',
+    "    const descriptor = Object.getOwnPropertyDescriptor(victim, 'name')",
+    "    record({ event: 'poisoned', field: 'name', accessor: typeof descriptor?.get === 'function', probe: victim.name })",
+    '    return',
+    '  }',
     '  Object.defineProperties(victim, Object.getOwnPropertyDescriptors({',
-    `    get name() { record({ event: 'name_read' }); return ${JSON.stringify(NEIGHBOUR)} },`,
+    `    get plugin() { record({ event: 'plugin_read' }); return ${JSON.stringify(POISONER)} },`,
     '  }))',
-    "  const descriptor = Object.getOwnPropertyDescriptor(victim, 'name')",
-    "  record({ event: 'poisoned', accessor: typeof descriptor?.get === 'function', probe: victim.name })",
+    "  const descriptor = Object.getOwnPropertyDescriptor(victim, 'plugin')",
+    "  record({ event: 'poisoned', field: 'plugin', accessor: typeof descriptor?.get === 'function', probe: victim.plugin })",
+    '}',
+    '',
+  ].join('\n')
+}
+
+/**
+ * The other way to reach the same context, and the one the claim fallback was
+ * written for: register `ai-gateway` on the registry itself rather than
+ * through the facade, so the kernel records no owner, and declare the
+ * provider's name as the contribution's own `plugin`.
+ *
+ * `Object.getPrototypeOf(ctx.sources)` is the registry: the facade delegates
+ * by prototype chain rather than by copy (`createSourcesFacade`), so its
+ * unbracketed `register` is one property read away from any plugin holding a
+ * context. Registering through it leaves `ownerOf('ai-gateway')` undefined,
+ * and nothing else in this process can.
+ */
+function squatterEntrypoint() {
+  return [
+    recorderPreamble(),
+    'export async function activate(ctx) {',
+    '  const proto = Object.getPrototypeOf(ctx.sources)',
+    "  record({ event: 'squat_attempted', unbracketed_register: typeof proto.register })",
+    '  proto.register({',
+    "    name: 'ai-gateway',",
+    `    plugin: ${JSON.stringify(PROVIDER)},`,
+    '    async start(startCtx) {',
+    "      record({ event: 'start', source: 'ai-gateway', who: 'squatter', ctx_plugin: startCtx.plugin.name })",
+    "      return { async status() { return { state: 'ready' } }, async stop() { record({ event: 'stop', who: 'squatter' }) } }",
+    '    },',
+    '  })',
+    "  record({ event: 'squatted', owner_of: String(ctx.sources.ownerOf('ai-gateway')) })",
     '}',
     '',
   ].join('\n')
@@ -182,6 +232,52 @@ async function makeHome(t) {
 }
 
 /**
+ * The same two roles, with the neighbour replaced by one that squats the key
+ * instead of redefining a property on the contribution behind it.
+ *
+ * @param {TestContext} t
+ */
+async function makeSquatHome(t) {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-gateway-squat-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const entries = [
+    await stagePlugin(hypHome, PROVIDER, {
+      provides: { capabilities: { 'hypaware.ai-gateway': '2.0.0' } },
+      contributes: { sources: [{ name: 'ai-gateway' }] },
+    }, providerEntrypoint()),
+    await stagePlugin(hypHome, SQUATTER, {
+      // The capability requirement, and no plugin requirement: the first is
+      // what the gateway boot profile selects on, and leaving the second out
+      // is what lets the name tie-break put this plugin first.
+      requires: { capabilities: { 'hypaware.ai-gateway': '^2.0.0' } },
+    }, squatterEntrypoint()),
+  ]
+  /** @type {Record<string, any>} */
+  const plugins = {}
+  for (const e of entries) {
+    plugins[e.name] = {
+      name: e.name,
+      version: e.version,
+      source: { kind: 'local-dir', raw: e.installDir, path: e.installDir },
+      install_dir: e.installDir,
+      content_hash: 'a'.repeat(64),
+      manifest_hash: 'b'.repeat(64),
+      installed_at: '2026-05-21T00:00:00.000Z',
+    }
+  }
+  await writeLock(path.join(hypHome, 'hypaware'), { schema_version: 1, plugins })
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({
+    version: 2,
+    auto_update: false,
+    plugins: [{ name: PROVIDER, config: {} }, { name: SQUATTER, config: {} }],
+  }))
+  const recordDir = path.join(hypHome, 'records')
+  await fs.mkdir(recordDir, { recursive: true })
+  return { hypHome, configPath, recordDir }
+}
+
+/**
  * Boot one gateway daemon against `hypHome`, snapshot it, stop it, and report
  * what it did.
  *
@@ -193,7 +289,7 @@ async function makeHome(t) {
  * `gateway-boot-failure-status.test.js`, #1527). So the daemon runs outside the
  * runner and reports through a file.
  *
- * @param {{ hypHome: string, configPath: string, recordDir: string, poison: boolean }} opts
+ * @param {{ hypHome: string, configPath: string, recordDir: string, poison: 'name' | 'plugin' | 'none' }} opts
  * @returns {{ pid: number, bootError: string | null, stopError: string | null, snapshot: any }}
  */
 function runGatewayOutsideTestRunner({ hypHome, configPath, recordDir, poison }) {
@@ -238,7 +334,7 @@ function runGatewayOutsideTestRunner({ hypHome, configPath, recordDir, poison })
         HOME: hypHome,
         HYP_HOME: hypHome,
         HYP_FIXTURE_RECORD: recordDir,
-        HYP_FIXTURE_POISON: poison ? '1' : '0',
+        HYP_FIXTURE_POISON: poison,
       },
       stdio: ['ignore', 'ignore', errFd],
       timeout: 60_000,
@@ -265,7 +361,7 @@ async function recordsFor(recordDir, pid) {
 
 test('the gateway starts the source it looked up, not the name that contribution hands back', async (t) => {
   const home = await makeHome(t)
-  const run = runGatewayOutsideTestRunner({ ...home, poison: true })
+  const run = runGatewayOutsideTestRunner({ ...home, poison: 'name' })
   assert.equal(run.bootError, null, 'fixture invariant: the staged gateway home must boot')
   assert.equal(run.stopError, null, 'fixture invariant: the stop must complete')
   const records = await recordsFor(home.recordDir, run.pid)
@@ -304,9 +400,72 @@ test('the gateway starts the source it looked up, not the name that contribution
   assert.ok(records.some(r => r.event === 'status'), 'the snapshot never asked the started source for its status')
 })
 
+// Issue #1551, the same read one property over. The gateway picked the
+// activation context it starts the source under from `source.plugin`, so a
+// neighbour redefining that property after registration handed the real
+// `ai-gateway` source the neighbour's config slice, paths, logger, capability
+// handles and permission context, and nothing logged the swap.
+test('the gateway starts the source under the context of the plugin that registered it, not the one that contribution claims', async (t) => {
+  const home = await makeHome(t)
+  const run = runGatewayOutsideTestRunner({ ...home, poison: 'plugin' })
+  assert.equal(run.bootError, null, 'fixture invariant: the staged gateway home must boot')
+  assert.equal(run.stopError, null, 'fixture invariant: the stop must complete')
+  const records = await recordsFor(home.recordDir, run.pid)
+
+  // Fixture invariant, asserted before anything else: the registry is holding a
+  // contribution whose `plugin` is a live accessor naming the neighbour. Both
+  // near-misses in `poisonerEntrypoint`'s note apply here too, so without this
+  // the rest of the test is vacuous.
+  const poisoned = records.find(r => r.event === 'poisoned')
+  assert.ok(poisoned, 'the substitution was never staged')
+  assert.equal(poisoned.field, 'plugin')
+  assert.equal(poisoned.accessor, true, 'the fixture stopped being hostile: `plugin` is not an accessor')
+  assert.equal(poisoned.probe, POISONER, 'the accessor does not answer with the neighbour\'s plugin name')
+
+  // The one that matters: the registrar the kernel recorded, not the claim.
+  assert.deepEqual(
+    records.filter(r => r.event === 'start').map(r => ({ source: r.source, ctx_plugin: r.ctx_plugin })),
+    [{ source: 'ai-gateway', ctx_plugin: PROVIDER }],
+    'the gateway started the gateway source under a neighbour\'s activation context'
+  )
+
+  // One read: the fixture's own probe above. `ownerOf` answers, so the claim is
+  // never consulted at all.
+  const reads = records.filter(r => r.event === 'plugin_read')
+  assert.equal(reads.length, 1, `the gateway read the contribution's plugin claim after the probe (${reads.length} reads), so a neighbour can still steer the context`)
+
+  assert.deepEqual(records.filter(r => r.event === 'stop').map(r => r.source), ['ai-gateway'])
+})
+
+// The step past #1551 the claim fallback left open. A plugin that reaches the
+// registry's own unbracketed `register` (one prototype hop off `ctx.sources`)
+// takes the `ai-gateway` key with no owner recorded, and the real gateway
+// plugin's registration then fails as a duplicate. A fallback to the
+// contribution's `plugin` would resolve exactly the context that plugin named,
+// so the squatter's source ran under the provider's config slice, paths,
+// logger, capability handles and permission context with `bootError` null.
+test('a source that took the gateway key with no owner recorded does not start under the plugin it names', async (t) => {
+  const home = await makeSquatHome(t)
+  const run = runGatewayOutsideTestRunner({ ...home, poison: 'none' })
+  assert.equal(run.stopError, null, 'fixture invariant: the stop must complete')
+  const records = await recordsFor(home.recordDir, run.pid)
+
+  // Fixture invariant: the squat has to have been attempted, or the assertion
+  // below passes against any code at all.
+  const attempt = records.find(r => r.event === 'squat_attempted')
+  assert.ok(attempt, 'the squatter never ran, so nothing was staged')
+  assert.equal(attempt.unbracketed_register, 'function', 'the facade stopped delegating the registry by prototype')
+
+  assert.equal(
+    records.find(r => r.event === 'start' && r.who === 'squatter'),
+    undefined,
+    `the gateway started an unowned contribution under the plugin it named (bootError=${run.bootError})`
+  )
+})
+
 test('an honest gateway boot starts, reports and stops unchanged', async (t) => {
   const home = await makeHome(t)
-  const run = runGatewayOutsideTestRunner({ ...home, poison: false })
+  const run = runGatewayOutsideTestRunner({ ...home, poison: 'none' })
   assert.equal(run.bootError, null)
   assert.equal(run.stopError, null)
   const records = await recordsFor(home.recordDir, run.pid)
