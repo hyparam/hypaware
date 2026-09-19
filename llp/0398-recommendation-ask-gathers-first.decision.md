@@ -112,16 +112,49 @@ instead. A raw-prefix fallback for the lines
 the fold empties was rejected: it brings back the split key this
 decision replaced, on the lines least able to afford it.
 
-Two consequences are accepted. General Punctuation is folded so that a
+One consequence is accepted. General Punctuation is folded so that a
 curly quote, an en dash and an ellipsis still fold the way their ASCII
 spellings do, but punctuation elsewhere above ASCII (an ideographic full
 stop, a guillemet, an Arabic question mark) is part of the key, so a
 request retyped with different punctuation of that kind reads as two
-lines rather than one. And a typing made only of non-ASCII symbols, an
-emoji rule for instance, now keys as itself rather than as nothing, so
-it can be counted like any other line. What it no longer does is pool
-with every other unrelated typing, which is what the empty-key exclusion
-is for.
+lines rather than one.
+
+A second consequence was accepted and then closed. Keeping every script
+also keeps the symbols interleaved with those scripts, so a typing made
+only of non-ASCII symbols keys as itself rather than as nothing and was
+counted like any other line: a run of box-drawing rules, emoji,
+fullwidth punctuation, middle dots or U+0085 typed in 5 sessions on 3
+days took a slot in `candidates.md` and satisfied the record floor on
+its own, so the ask proceeded where it had correctly refused
+(hypaware #1894).
+
+<a id="a-request"></a>**A key with no letter and no decimal digit, in
+any script, is not a request.** That is the whole rule, and it is
+applied to the key rather than to the raw typing, so it reads what the
+fold left. It is not in the statement, because the engine cannot say it
+and an approximation of it would pick winners among scripts. `\p{L}` is
+not a letter class there for the same reason the fold names ranges:
+patterns compile with no `u` flag, so `\p` is an identity escape and
+`\p{L}` matches the four literal characters `p{L}`. That leaves code
+unit ranges, and letters, digits, symbols and punctuation are
+interleaved across the ranges the fold keeps, fullwidth `！` beside
+fullwidth `ｃ` and halfwidth katakana in one block, a middle dot beside
+the accented Latin letters in another. A range rule is therefore an
+approximation whose omissions stop a script from producing candidates at
+all, silently, which is the regression hypaware #1884 was filed to fix.
+`\p{L}` and `\p{Nd}` in JavaScript, under `u`, are exact over every
+script and approximate nothing, so the rule is read in JavaScript, over
+the rows the candidate statement returns.
+
+Reading it there rather than in the statement is also what keeps it off
+the per-row path: it is one test of at most `KEY_CHARS` characters
+against at most `CANDIDATES + 3` rows per ask, where a rule in the
+statement would run on every scanned row beside the fold. It is read
+before the cut to `CANDIDATES`, so a dropped run of symbols costs no
+candidate slot up to that headroom and spends none of the session
+statements' row budget, and before the record floor is decided, which is
+where the same drop closes the gate half: the floor reads the candidates
+and needs no rule of its own.
 
 A first version measured four signals (reopened sessions, a repeated
 line, a request that should go to a worker, a recurring mistake) and

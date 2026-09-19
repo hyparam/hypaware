@@ -120,6 +120,54 @@ test('a request in a non-Latin script is a candidate of its own; a rule of dashe
   }
 })
 
+test('a run of symbols with no letter or digit is no candidate and does not satisfy the record floor; a non-Latin request still is one', async () => {
+  // @ref LLP 0398#a-request [tests]: a key with no letter and no decimal digit is not a request, whatever block its characters come from
+  // Through the same engine the gather runs on, and through the whole
+  // gather, so both halves are read where the product reads them.
+  // hypaware #1894: the fold keeps every script's letters and so keeps
+  // the symbols interleaved with them, and a run of them typed in 5
+  // sessions on 3 days both took a slot in `candidates.md` and satisfied
+  // the record floor on its own.
+  const symbolRuns = [
+    ['box drawing', '─'.repeat(20)],
+    ['emoji', '\u{1F525}'.repeat(10)],
+    ['fullwidth punctuation', '！'.repeat(20)],
+    ['middle dot', '·'.repeat(20)],
+    ['C1 next line', '\u0085'.repeat(20)],
+  ]
+  // The control, and the direction this must not break: a request in a
+  // script with no ASCII letters is a candidate. Three sessions on three
+  // days, which clears the candidate cut and not the record floor, so
+  // `enough` below reports the symbol run alone.
+  const request = 'закоммить на нужную ветку и открыть пиар'
+  // Enough recorded for the record half of the floor to clear, so the gate
+  // below is decided by the lines and not by the size of the record.
+  /** @type {Record<string, SqlPrimitive>[]} */
+  const background = []
+  for (let i = 0; i < RECORD_FLOOR.sessions; i += 1) {
+    background.push({ date: '2026-08-10', session_id: `bulk-${i}`, role: 'assistant', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: null, message_created_at: new Date(Date.UTC(2026, 7, 10, 1)), content_text: 'ok' })
+  }
+  for (const day of [10, 11, 12]) background.push(typedRow(`req-${day}`, day, 5, request))
+  // One folder for the run, as the product has: the gather wipes it each
+  // time, so every pass reads the page its own ask wrote.
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-runs-'))
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  for (const [what, symbols] of symbolRuns) {
+    // Five sessions on three days: the line floor, which the symbol run
+    // clears on its own and the non-Latin request does not.
+    const rows = background.concat(['a', 'b', 'c', 'd', 'e'].map((s, i) => typedRow(`sym-${s}`, 10 + Math.floor(i / 2), i, symbols)))
+    const runner = { hasDataset: () => true, /** @param {string} query */ run: (query) => evidenceRows(rows, query) }
+    const evidence = await prepareFirstAskEvidence({ runner, root, homeDir: home, now: new Date('2026-09-07T05:00:00Z') })
+
+    assert.deepEqual(evidence.candidates?.map((c) => c.line), [keyOf(request)], `a run of ${what} is no candidate; the non-Latin request still is`)
+    assert.equal(evidence.enough, false, `a run of ${what} does not satisfy the record floor on its own`)
+    assert.equal(evidence.record?.sessions, RECORD_FLOOR.sessions, 'the record half of the floor cleared, so the lines decided the gate')
+    const page = await fsp.readFile(path.join(root, 'candidates.md'), 'utf8')
+    assert.ok(!page.includes(symbols.slice(0, 2)), `the run of ${what} is not on the page`)
+    assert.ok(page.includes('Nothing is typed often enough yet'), 'the ask refuses, as it did before the fold was widened')
+  }
+})
+
 test('an astral character straddling the key cut leaves no half of it in the key', async () => {
   // @ref LLP 0398#one-signal [tests]: the key is the first characters of the normalized line, and a character is not half a surrogate pair
   // Through the same engine the gather runs on. hypaware #1893: SUBSTR

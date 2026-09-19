@@ -254,6 +254,30 @@ const TYPED_LINE = [
 ].join(' and ')
 
 /**
+ * What makes a key a request rather than a run of symbols: one letter or
+ * one decimal digit, in any script. A key of box-drawing rules, emoji,
+ * fullwidth punctuation, middle dots or U+0085 is not a line a person
+ * asks for again (hypaware #1894). Read on the key, not on the typing,
+ * so it sees what the fold left.
+ *
+ * In JavaScript because the engine cannot say this. A pattern there
+ * compiles with no `u` flag (squirreling `src/expression/regexp.js`), so
+ * `\p` is an identity escape and `\p{L}` matches the four literal
+ * characters `p{L}`, and the code-unit ranges that leaves interleave
+ * letters with symbols: fullwidth `！` beside fullwidth `ｃ` in one
+ * block, a middle dot beside the accented Latin letters in another. A
+ * range rule would therefore be an approximation whose omissions
+ * silently stop a script from producing candidates at all, which is the
+ * regression hypaware #1884 was filed to fix. Under `u` these two
+ * classes are exact over every script.
+ *
+ * Not global, so `lastIndex` carries nothing between calls.
+ *
+ * @ref LLP 0398#a-request [implements]: a key with no letter and no decimal digit is not a request, and what says so is a letter class the engine does not have
+ */
+const A_REQUEST = /[\p{L}\p{Nd}]/u
+
+/**
  * First day of the window, `days` calendar days before `now`, as
  * `YYYY-MM-DD` in UTC. Dates in the cache are UTC partition dates.
  *
@@ -801,7 +825,12 @@ export async function prepareFirstAskEvidence({ runner, root, homeDir, now = new
   say(`Looking through the last ${windowDays} days...`)
   const recordRow = (await runner.run(sql.record)).rows[0] ?? {}
   const record = { sessions: num(recordRow.sessions), sessionDays: num(recordRow.session_days) }
-  const lines = (await runner.run(sql.lines)).rows.slice(0, CANDIDATES)
+  // Before the cut to `CANDIDATES`, so a real candidate takes the place
+  // of each dropped line up to the statement's three rows of headroom,
+  // and before the session statements, so a dropped line spends none of
+  // their row budget. This is also the whole of the fix to the record
+  // floor: `enoughRecorded` reads the candidates built from here.
+  const lines = (await runner.run(sql.lines)).rows.filter((l) => A_REQUEST.test(String(l.line ?? ''))).slice(0, CANDIDATES)
   /** @type {FirstAskCandidate[]} */
   let candidates = []
   if (lines.length > 0) {
