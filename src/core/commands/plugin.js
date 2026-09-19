@@ -1,5 +1,6 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
@@ -18,6 +19,7 @@ import {
   updatePlugin,
 } from '../plugin_install/install.js'
 import { getEntry } from '../plugin_install/lock.js'
+import { SCOPED_NAME_RE } from '../plugin_install/resolver.js'
 import {
   buildTtyPrompt,
   buildWarnings,
@@ -726,8 +728,13 @@ export async function runPluginRemove(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {object} [opts]
+ * @param {string} [opts.workspaceDir] Override the bundled workspace location.
+ *   The command registry never passes it: it is here, as it is on
+ *   `runPluginInfo`, so a test can put a workspace this process cannot read
+ *   behind the lookup the refusal below makes (issue #1600).
  */
-export async function runPluginDoctor(argv, ctx) {
+export async function runPluginDoctor(argv, ctx, opts = {}) {
   /** @type {string|undefined} */
   let dir
   let json = false
@@ -749,6 +756,22 @@ export async function runPluginDoctor(argv, ctx) {
   }
 
   const rootDir = path.resolve(ctx.cwd ?? process.cwd(), dir ?? '.')
+
+  // A plugin name is not a directory, so without this it joins to the cwd and
+  // is diagnosed as a phantom: a header naming a path that never existed, and
+  // two repair hints written for a plugin the operator is authoring rather than
+  // a first-party adapter the package ships (issue #1584). Refused rather than
+  // resolved, so the command never has to decide which copy of a name it means.
+  //
+  // Only when the token is not also a directory under the cwd. `@<scope>/<name>`
+  // is the npm on-disk layout, so it is a positional this command has always
+  // taken and diagnosed, and refusing an operator who points at one (from
+  // inside `node_modules`, say) would trade the phantom for a denial that a
+  // directory they are standing next to exists.
+  if (dir !== undefined && SCOPED_NAME_RE.test(dir) && !(await isExistingDirectory(rootDir))) {
+    return refuseDoctorPluginName(dir, ctx, opts)
+  }
+
   const { knownPlugins } = await buildKnownPluginsForCtx(ctx)
   const knownCapabilities = capabilitiesFromMetadata(knownPlugins)
 
@@ -769,6 +792,66 @@ export async function runPluginDoctor(argv, ctx) {
     ctx.stdout.write(renderReport(report))
   }
   return report.ok ? 0 : 1
+}
+
+/**
+ * Whether `p` names an existing directory. Absence and an unreadable path both
+ * read as "not a directory": the caller is only deciding whether a token the
+ * operator typed is a path at all, and `diagnosePlugin` owns saying what is
+ * wrong with one that is.
+ *
+ * @param {string} p
+ * @returns {Promise<boolean>}
+ */
+function isExistingDirectory(p) {
+  return fs.stat(p).then((st) => st.isDirectory(), () => false)
+}
+
+/**
+ * Refuse a `plugin doctor` positional that is a plugin name, naming the
+ * directory that plugin actually occupies so the operator can re-run against
+ * it. The directory comes from the same bundled discovery `plugin list` and
+ * `plugin info` read rather than from a guess built out of the name, and a
+ * bundled copy is preferred over an install record so the directory named is
+ * the one whose code runs.
+ *
+ * A name matching neither is still a usage error, and it is hedged the way
+ * `plugin info` hedges its own miss (issue #1600): a discovery that could not
+ * read the whole workspace cannot say the package ships nothing, so it says
+ * what it could not read instead of denying the name.
+ *
+ * @param {string} name
+ * @param {CommandRunContext} ctx
+ * @param {{ workspaceDir?: string }} [opts]
+ * @returns {Promise<number>}
+ * @ref LLP 0380#bundled-copy-wins [implements]: the copy boot selects is the copy worth diagnosing
+ */
+async function refuseDoctorPluginName(name, ctx, opts = {}) {
+  const discovered = await discoverBundledManifests(opts)
+  // `unrecognized` too: a bundled directory declaring a name this build does
+  // not know still exists, and diagnosing it is what doctor is for.
+  const rootDir = (discovered.manifests.get(name) ?? discovered.unrecognized.get(name))?.rootDir
+    ?? getEntry(await loadLock(pluginStateDir(ctx)), name)?.install_dir
+  ctx.stderr.write(`hyp plugin doctor: '${name}' is a plugin name; this command takes a plugin directory\n`)
+  if (rootDir) {
+    ctx.stderr.write(`  ${name} lives at ${rootDir}\n`)
+    ctx.stderr.write(`  run: hyp plugin doctor ${rootDir}\n`)
+  } else if (discovered.unread) {
+    // Not the flat denial below: a discovery short of the package cannot say
+    // the package lacks the name, which is the claim `plugin info` had removed
+    // from its own miss message for this exact reason (issue #1600).
+    ctx.stderr.write(
+      `  no plugin named '${name}' is installed, and the plugins bundled with this package could not`
+        + ' all be read, so whether this package ships one is unknown\n'
+    )
+    ctx.stderr.write(`  ${discovered.unread}\n`)
+  } else {
+    ctx.stderr.write(
+      `  no plugin named '${name}' is installed or bundled with this package, so there is no directory to diagnose\n`
+    )
+  }
+  ctx.stderr.write('usage: hyp plugin doctor [dir] [--json]\n')
+  return 2
 }
 
 /**
