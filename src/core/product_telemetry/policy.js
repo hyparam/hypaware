@@ -1,20 +1,16 @@
 // @ts-check
 
 import path from 'node:path'
-import os from 'node:os'
 import fs from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { MAX_CONFIG_DOCUMENT_BYTES, resolveCentralLayerPath } from '../config/apply.js'
+import { readObservabilityEnv } from '../observability/env.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 import { readSmallJson } from './outbox.js'
 
 /** @param {NodeJS.ProcessEnv} [env] */
 export function productRoot(env = process.env) {
-  return path.join(
-    env.HYP_HOME || path.join(os.homedir(), '.hyp'),
-    'hypaware',
-    'product-telemetry'
-  )
+  return path.join(readObservabilityEnv(env).stateDir, 'product-telemetry')
 }
 /** @param {unknown} value */
 function hash(value) {
