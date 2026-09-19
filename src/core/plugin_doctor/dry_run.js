@@ -206,16 +206,14 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * and none of them reads anything plugin-controlled. The three calls stay
  * routed through `listed`; what it still guards is on that function.
  *
- * `skills` and `agents` are contained but not verified. `skills.register` and
- * `agents.register` do build a registry-owned record out of the fields they
- * validated, but `list()` hands the elements of that array straight back
- * (`items.slice()` copies the array, not its entries) and `ctx.skills` and
- * `ctx.agents` are on the activation context, so a plugin that calls `list()`
- * inside its own `activate()` can install an accessor on the very record the
- * registry holds. Neither registry is keyed, so there is no key to resolve a
- * name back to and no divergence to detect here; the guard below can only stop
- * a throwing accessor costing the whole run, and closing the rest belongs in
- * those two registries (hyparam/hypaware#1552).
+ * `skills` and `agents` are contained rather than verified, and no longer need
+ * to be verified here. Both registries build a record out of fields they read
+ * once and validated, and `list()` hands back a copy of every record and of
+ * its `clients` array, so the objects reaching this snapshot are not the
+ * objects the registries hold and nothing a plugin does to them afterwards is
+ * visible to a later reader (hyparam/hypaware#1552). Neither registry is
+ * keyed, so there is still no key to resolve a name back to; what the guard
+ * below buys for these two is the containment, not a check.
  *
  * @param {ReturnType<typeof createKernelRuntime>} runtime
  * @param {ReturnType<typeof createCommandRegistry>} commandRegistry
