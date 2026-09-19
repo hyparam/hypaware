@@ -660,3 +660,32 @@ test('a runnable override is still baked as the interpreter plus the script, byt
   ].join('\n'))
   assert.equal(err, '', 'an override node can load is not worth a word')
 })
+
+// The other half of "a runnable override is unchanged", and the half an
+// extension test alone gets wrong: a real JavaScript entry script that carries
+// no extension. `node <path>` loads it, the wrapper baked the absolute
+// interpreter for it and worked, and dropping that interpreter would rest it
+// on Desktop's stripped environment carrying a `node` - the failure the
+// interpreter is baked in to avoid. The shebang is what tells it apart from
+// the pnpm/volta/asdf shims above, which have `#!/bin/sh` or none at all.
+test('an extensionless node script override keeps its absolute interpreter', {
+  skip: process.platform === 'win32' && 'sh wrapper + exec bit are darwin artifacts',
+}, async (t) => {
+  const rig = npxRig({ installedBin: true })
+  const override = path.join(rig.stateDir, 'opt', 'bin', 'hypaware')
+  fs.mkdirSync(path.dirname(override), { recursive: true })
+  fs.writeFileSync(override, '#!/usr/bin/env node\nprocess.stdout.write("{}")\n')
+  fs.chmodSync(override, 0o755)
+
+  const { code, err, body } = await runInstallHelperWithEntry(
+    t, rig, rig.npxCliPath, { HYPAWARE_BIN: override },
+  )
+
+  assert.equal(code, 0)
+  assert.ok(
+    body.includes(`exec ${shellQuote(process.execPath)} ${shellQuote(override)} claude-account credential`),
+    `a node script lost its interpreter on its extension alone: ${body}`,
+  )
+  assert.equal(err, '', 'an override node can load is not worth a word')
+})
+
