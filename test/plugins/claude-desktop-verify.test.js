@@ -381,3 +381,58 @@ test('verify: a wrapper that execs its CLI directly is judged on the one path it
   assert.equal(rotted, 1, bufs2.stdout.text())
   assert.match(bufs2.stdout.text(), /STALE: baked CLI path no longer exists/)
 })
+
+// Issue #1927. The direct-exec shape hands the baked CLI to `execve` itself,
+// so its mode is now load-bearing where it never was before: a CLI that is
+// present but not executable fails Desktop's credential call and nothing on
+// this machine says why.
+test('verify: a direct-exec wrapper whose baked CLI lost its execute bit is STALE', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  const hypBin = path.join(stateDir, 'pnpm-ish-hypaware')
+  fs.writeFileSync(hypBin, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  const helperPath = writeHelper({ stateDir, hypBin, direct: true })
+
+  // Healthy first, so the STALE below is the mode and nothing else.
+  const live = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+  assert.equal(live, 0, bufs.stdout.text())
+  assert.doesNotMatch(bufs.stdout.text(), /STALE/)
+
+  // What a restore, a cross-filesystem copy, or a sync tool does: the file
+  // stays, the mode does not. The wrapper's own mode is untouched.
+  fs.chmodSync(hypBin, 0o644)
+  assert.ok(fs.existsSync(hypBin), 'the baked CLI is still on disk')
+  assert.ok(fs.statSync(helperPath).mode & 0o111, 'the wrapper itself is still executable')
+
+  const { cmdCtx: cmdCtx2, bufs: bufs2 } = fixture({ stateDir })
+  const rotted = await runVerify([], cmdCtx2, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
+  assert.equal(rotted, 1, bufs2.stdout.text())
+  assert.match(bufs2.stdout.text(), /installed but STALE: baked CLI is not executable/)
+  assert.ok(bufs2.stdout.text().includes(`(${hypBin})`), bufs2.stdout.text())
+  // The generic re-run cannot clear this one either: install-helper chmods the
+  // wrapper it writes, not the CLI, and would bake the same path back in.
+  assert.match(bufs2.stdout.text(), /restore its mode with 'chmod \+x' on that path/)
+})
+
+// The other half of the same rule, and the reason the check is conditional:
+// under an interpreter the baked CLI is an argument node opens for reading,
+// so a non-executable one is exactly how npm installs a `bin` entry script.
+test('verify: an interpreted wrapper whose baked CLI is not executable stays healthy', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-desktop-verify-'))
+  const { cmdCtx, bufs, credential, sectionConfig } = fixture({ stateDir })
+  const inputs = resolveInputs(sectionConfig, credential, cmdCtx, stateDir)
+  const managedPlistPath = path.join(stateDir, 'managed.plist')
+  fs.writeFileSync(managedPlistPath, computeDesiredPlistContent(inputs))
+  const hypBin = path.join(stateDir, 'hypaware.js')
+  fs.writeFileSync(hypBin, '// stand-in CLI entry\n', { mode: 0o644 })
+  writeHelper({ stateDir, hypBin })
+
+  const code = await runVerify([], cmdCtx, { sectionConfig, credential, stateDir, managedPlistPath, platform: 'darwin' })
+
+  assert.equal(code, 0, bufs.stdout.text())
+  assert.doesNotMatch(bufs.stdout.text(), /STALE/)
+})
