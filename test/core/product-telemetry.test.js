@@ -461,7 +461,7 @@ for (const broken of ['missing identity', 'invalid identity', 'wrong destination
       fs.writeFileSync(remote.identityPath, JSON.stringify(remote.identity))
     }
     if (broken === 'ambiguous sinks') Object.assign(remote.config.sinks, { other: remote.config.sinks.central })
-    // A bare `#`/`?` suffix parses and leaves `hash`/`search` rendered, so it
+    // A bare `#`/`?` suffix parses and leaves `hash`/`search` empty, so it
     // survives a truthiness check while making the POST target the server root.
     for (const [kind, suffix] of [['fragment destination', '#'], ['query destination', '?']])
       if (broken === kind) {
