@@ -1000,9 +1000,16 @@ test('get does not probe page extensions for a path that names its own', async (
   // An extension is one in whatever case it was typed, so the case an artifact
   // is published under does not decide how many requests a miss costs.
   assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/chart.PNG'], ctx), 1)
+  // An extension is alphanumerics with at least one letter among them, so
+  // digits cost a miss no extra requests, before the letter ('.7z', also the
+  // shortest an extension gets) or after it ('.mp3').
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/archive.7z'], ctx), 1)
+  assert.equal(await runReportGet(['usage-review', '2026-W29', 'rpt-b', 'assets/audio.mp3'], ctx), 1)
   assert.deepEqual(calls.map((c) => c.url.pathname), [
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.png',
     '/v1/reports/usage-review/2026-W29/rpt-b/assets/chart.PNG',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/archive.7z',
+    '/v1/reports/usage-review/2026-W29/rpt-b/assets/audio.mp3',
   ])
   assert.match(err.join(''), /HTTP 404: not_found/)
 })
