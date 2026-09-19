@@ -2,7 +2,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,7 +12,7 @@ import {
   activate,
 } from '../../hypaware-core/plugins-workspace/claude-desktop/src/index.js'
 import { resolveHypBin } from '../../hypaware-core/plugins-workspace/claude-desktop/src/inputs.js'
-import { shellQuote } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
+import { HELPER_GENERATED_MARKER, shellQuote } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
 import { isNpxBinPath } from '../../src/core/cli/global_install.js'
 
 /**
@@ -322,8 +322,9 @@ function npxRig(opts = {}) {
  * @param {TestContext} t
  * @param {{ stateDir: string, env: NodeJS.ProcessEnv, cleanup: () => void }} rig
  * @param {string} entry
+ * @param {NodeJS.ProcessEnv} [envExtra] laid over the rig's environment, for the override lane
  */
-async function runInstallHelperWithEntry(t, rig, entry) {
+async function runInstallHelperWithEntry(t, rig, entry, envExtra) {
   const realArgv1 = process.argv[1]
   process.argv[1] = entry
   t.after(() => { process.argv[1] = realArgv1 })
@@ -335,7 +336,7 @@ async function runInstallHelperWithEntry(t, rig, entry) {
     commands.get('client claude-desktop install-helper').run,
     [],
     undefined,
-    rig.env,
+    { ...rig.env, ...envExtra },
   )
   return { ...result, body: fs.readFileSync(path.join(rig.stateDir, HELPER_BASENAME), 'utf8') }
 }
@@ -581,17 +582,110 @@ test('an explicit binary override wins over both', (t) => {
   const rig = npxRig({ installedBin: true })
   t.after(() => rig.cleanup())
   const cases = [
-    { override: { HYP_BIN: '/custom/hyp' }, expected: '/custom/hyp' },
-    { override: { HYPAWARE_BIN: '/preferred/hyp', HYP_BIN: '/custom/hyp' }, expected: '/preferred/hyp' },
+    { override: { HYP_BIN: '/custom/hyp' }, expected: '/custom/hyp', overrideVar: 'HYP_BIN' },
+    { override: { HYPAWARE_BIN: '/preferred/hyp', HYP_BIN: '/custom/hyp' }, expected: '/preferred/hyp', overrideVar: 'HYPAWARE_BIN' },
     // The emptiness test above trims, so the value taken has to trim too:
     // ` /custom/hyp` is not absolute, and `path.resolve` would silently anchor
     // it to whatever directory install-helper ran in.
-    { override: { HYP_BIN: '  /custom/hyp  ' }, expected: '/custom/hyp' },
+    { override: { HYP_BIN: '  /custom/hyp  ' }, expected: '/custom/hyp', overrideVar: 'HYP_BIN' },
   ]
-  for (const { override, expected } of cases) {
+  for (const { override, expected, overrideVar } of cases) {
     assert.deepEqual(resolveHypBin({ ...rig.env, ...override }, rig.npxCliPath), {
       binPath: path.resolve(expected),
       ephemeral: false,
+      // Which variable named it, so a diagnostic about the value can say which
+      // knob to turn, and whether `node <path>` could load it: neither of
+      // these takes the choice of copy back off the operator.
+      overrideVar,
+      nodeRunnable: false,
     })
   }
 })
+
+// Issue #1811. An override settles WHICH copy of the CLI the wrapper runs. It
+// cannot settle whether `node` can parse that file, and pnpm, volta and asdf
+// all put a shell script or a compiled shim at the name a `$PATH` walk meets:
+// the exact value a pnpm or yarn user reaches for when told to pin the copy
+// they mean. Baked into `exec <node> <shim>` it is a SyntaxError on the
+// wrapper's first run, which Desktop reports as a failed credential helper and
+// nothing on this machine reports at all - the same outcome `runsUnderNode`
+// exists to keep off the `$PATH` lane. So the override is honoured to the
+// letter instead of through an interpreter it was never going to survive.
+test('an override node cannot load is exec\'d directly, not handed to node', {
+  skip: process.platform === 'win32' && 'sh wrapper + exec bit are darwin artifacts',
+}, async (t) => {
+  const rig = npxRig({ installedBin: true, shimAhead: true })
+
+  const { code, err, body } = await runInstallHelperWithEntry(
+    t, rig, rig.npxCliPath, { HYPAWARE_BIN: rig.shimBin },
+  )
+
+  assert.equal(code, 0)
+  assert.ok(
+    body.includes(`exec ${shellQuote(rig.shimBin)} claude-account credential`),
+    `the override was not run as the operator named it: ${body}`,
+  )
+  assert.ok(!body.includes(process.execPath), `the shim was handed to node: ${body}`)
+  // Desktop runs the wrapper as a bare executable (LLP 0116#helper-contract),
+  // so the only check that settles "can Desktop run this" is running it. A
+  // wrapper is what this issue is about, not what the parser thinks of one.
+  const ran = spawnSync(path.join(rig.stateDir, HELPER_BASENAME), [], { encoding: 'utf8' })
+  assert.equal(ran.status, 0, `Desktop could not run the wrapper: ${ran.stderr}`)
+  // Read once, by whoever is at the terminal now, and naming the variable
+  // rather than only the path: the repair is to change what it names.
+  assert.match(err, /HYPAWARE_BIN/)
+  assert.match(err, new RegExp(rig.shimBin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+})
+
+test('a runnable override is still baked as the interpreter plus the script, byte for byte', {
+  skip: process.platform === 'win32' && 'sh wrapper + exec bit are darwin artifacts',
+}, async (t) => {
+  // The one regression that would be worse than the bug: changing the wrapper
+  // written for an override that always worked.
+  const rig = npxRig({ installedBin: true })
+  const override = path.join(rig.stateDir, 'opt', 'hypaware', 'bin', 'hypaware.js')
+  writeExecutable(override)
+
+  const { code, err, body } = await runInstallHelperWithEntry(
+    t, rig, rig.npxCliPath, { HYPAWARE_BIN: override },
+  )
+
+  assert.equal(code, 0)
+  assert.equal(body, [
+    '#!/bin/sh',
+    HELPER_GENERATED_MARKER,
+    '# Claude Desktop runs this with no arguments and reads stdout.',
+    `exec ${shellQuote(process.execPath)} ${shellQuote(override)} claude-account credential`,
+    '',
+  ].join('\n'))
+  assert.equal(err, '', 'an override node can load is not worth a word')
+})
+
+// The other half of "a runnable override is unchanged", and the half an
+// extension test alone gets wrong: a real JavaScript entry script that carries
+// no extension. `node <path>` loads it, the wrapper baked the absolute
+// interpreter for it and worked, and dropping that interpreter would rest it
+// on Desktop's stripped environment carrying a `node` - the failure the
+// interpreter is baked in to avoid. The shebang is what tells it apart from
+// the pnpm/volta/asdf shims above, which have `#!/bin/sh` or none at all.
+test('an extensionless node script override keeps its absolute interpreter', {
+  skip: process.platform === 'win32' && 'sh wrapper + exec bit are darwin artifacts',
+}, async (t) => {
+  const rig = npxRig({ installedBin: true })
+  const override = path.join(rig.stateDir, 'opt', 'bin', 'hypaware')
+  fs.mkdirSync(path.dirname(override), { recursive: true })
+  fs.writeFileSync(override, '#!/usr/bin/env node\nprocess.stdout.write("{}")\n')
+  fs.chmodSync(override, 0o755)
+
+  const { code, err, body } = await runInstallHelperWithEntry(
+    t, rig, rig.npxCliPath, { HYPAWARE_BIN: override },
+  )
+
+  assert.equal(code, 0)
+  assert.ok(
+    body.includes(`exec ${shellQuote(process.execPath)} ${shellQuote(override)} claude-account credential`),
+    `a node script lost its interpreter on its extension alone: ${body}`,
+  )
+  assert.equal(err, '', 'an override node can load is not worth a word')
+})
+

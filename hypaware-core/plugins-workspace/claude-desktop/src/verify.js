@@ -75,7 +75,10 @@ export function checkHelperScript(helperPath, env) {
         + "; install a durable CLI first with 'npm install -g hypaware'",
     }
   }
-  const gone = missingBin('interpreter', baked.nodeBin)
+  // A wrapper that execs its CLI directly bakes no interpreter, which is the
+  // whole reason it is written that way (issue #1811): there is nothing there
+  // to rot, and the CLI path below is then the only path it has.
+  const gone = (baked.nodeBin === undefined ? undefined : missingBin('interpreter', baked.nodeBin))
     ?? missingBin('CLI', baked.hypBin)
     ?? lostExecuteBit(helperPath)
   return gone === undefined ? { present: true, stale: false } : { present: true, stale: true, detail: gone }
@@ -86,7 +89,7 @@ export function checkHelperScript(helperPath, env) {
  * not one this plugin generated.
  *
  * @param {string} helperPath
- * @returns {{ nodeBin: string, hypBin: string } | undefined}
+ * @returns {{ nodeBin: string | undefined, hypBin: string } | undefined}
  */
 function readBakedPaths(helperPath) {
   let fd
