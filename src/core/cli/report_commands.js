@@ -802,14 +802,19 @@ async function fetchRecommendationPage({ ctx, gate, resolved, cmd }, { recommend
   // #repair-must-be-runnable). `report get` on the report fetches its entry
   // document to stdout and lists nothing; the listing filtered to this
   // report prints every recommendation page the record carries.
-  const listCommand = [`hyp report list --kind ${esc(report.kind)} --period ${esc(report.period)}`, ...targetFlags(gate.params)].join(' ')
+  // `kind` and `period` are server-authored and land in command position, so they
+  // take both treatments: `esc` because a person reads the sentence (LLP 0225), and
+  // `shellWord` because they are pasted as arguments. Escaping first puts the quoting
+  // decision on the bytes the reader sees. Both are the identity on every
+  // KIND_RE/PERIOD_RE value, so a conforming server's hint is unchanged.
+  const listCommand = [`hyp report list --kind ${shellWord(esc(report.kind))} --period ${shellWord(esc(report.period))}`, ...targetFlags(gate.params)].join(' ')
   ctx.stderr.write(`hyp ${cmd}: the report no longer carries '${esc(recommendation.page)}' - list the pages it does carry with '${listCommand}'\n`)
   return 1
 }
 
 /**
  * One argument as it can be pasted into a shell: bare when it is plain,
- * single-quoted otherwise. For the target flags a message hands back.
+ * single-quoted otherwise. For every value a message hands back inside a command.
  *
  * @param {string} s
  * @returns {string}

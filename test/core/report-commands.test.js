@@ -975,6 +975,66 @@ test('the missing-page hint carries the run\'s target flags, shellWord-quoted', 
   assert.match(err.join(''), /hyp report list --kind usage-review --period 2026-W29 --org 'acme corp' --remote prod/)
 })
 
+/**
+ * The missing-page hint for one resolve answer, with the run's own argv.
+ *
+ * @param {TestContext} t
+ * @param {{ kind: string, period: string }} report
+ * @param {string[]} [argv]
+ * @returns {Promise<string>}
+ */
+async function missingPageHint(t, report, argv = []) {
+  stubServer(t, (method, url) => (
+    url.pathname === `/v1/reports/_recommendations/${REC}`
+      ? { status: 200, json: { recommendation: { id: REC, page: 'recommendation-gone' }, report: { ...REPORT, ...report } } }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet([REC, ...argv], ctx), 1)
+  return err.join('')
+}
+
+/** The hinted command, taken from between the prose quotes that close the line. */
+const hintedCommand = (/** @type {string} */ text) => (text.match(/does carry with '(hyp report list .*)'\n$/) ?? [])[1] ?? ''
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: a kind the server sent outside its own grammar still pastes as one command, and only that command
+test('the missing-page hint quotes a kind carrying a space and a quote as one shell word', async (t) => {
+  const text = await missingPageHint(t, { kind: "usage review'; echo pwn", period: '2026-W29' })
+  assert.equal(hintedCommand(text), "hyp report list --kind 'usage review'\\''; echo pwn' --period 2026-W29")
+})
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: the period sits in the same position as the kind and takes the same treatment
+test('the missing-page hint quotes a period carrying a space and a quote as one shell word', async (t) => {
+  const text = await missingPageHint(t, { kind: 'usage-review', period: "2026-W29' rm -rf x" })
+  assert.equal(hintedCommand(text), "hyp report list --kind usage-review --period '2026-W29'\\'' rm -rf x'")
+})
+
+// @ref LLP 0225#escape-not-strip [tests]: a control character in a remote value stays escaped where a person reads it, and the escape is what the quoting wraps
+test('the missing-page hint keeps a control character in the kind escaped, as one shell word', async (t) => {
+  const escChar = String.fromCharCode(0x1b)
+  const text = await missingPageHint(t, { kind: `usage${escChar}[2Kreview`, period: '2026-W29' })
+  assert.equal(hintedCommand(text), "hyp report list --kind 'usage\\u001b[2Kreview' --period 2026-W29")
+  assert.ok(!text.includes(escChar), 'no raw escape byte reaches stderr')
+})
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: quoting is a no-op on every value a conforming server can send, so the hint a real deployment reads is unchanged
+test('the missing-page hint is byte-identical for an in-grammar kind and period, target flags included', async (t) => {
+  assert.equal(
+    hintedCommand(await missingPageHint(t, { kind: 'usage-review', period: '2026-W29' })),
+    'hyp report list --kind usage-review --period 2026-W29'
+  )
+  assert.equal(
+    hintedCommand(await missingPageHint(t, { kind: 'usage-review', period: '2026.07.20' }, ['--org', 'acme corp', '--remote', 'prod'])),
+    "hyp report list --kind usage-review --period 2026.07.20 --org 'acme corp' --remote prod"
+  )
+})
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: an out-of-grammar kind and the run's target flags are quoted by the same rule, on the same line
+test('a quoted kind and the run\'s target flags render side by side', async (t) => {
+  const text = await missingPageHint(t, { kind: "usage review'; echo pwn", period: '2026-W29' }, ['--org', 'acme corp', '--remote', 'prod'])
+  assert.equal(hintedCommand(text), "hyp report list --kind 'usage review'\\''; echo pwn' --period 2026-W29 --org 'acme corp' --remote prod")
+})
+
 test('a resolve answer carrying a report id but no kind or period is a malformed answer, not a missing page', async (t) => {
   const { calls } = stubServer(t, () => ({
     status: 200,
