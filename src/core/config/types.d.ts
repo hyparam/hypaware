@@ -64,6 +64,7 @@ export type ConfigValidationErrorKind =
   | 'capability_ambiguous'
   | 'config_section_invalid'
   | 'plugin_unknown'
+  | 'plugin_installed_unloadable'
   | 'duplicate_plugin'
 
 export type ConfigValidationError = ValidationError & { errorKind: ConfigValidationErrorKind }
@@ -146,6 +147,14 @@ export interface ValidateContext {
   knownPlugins?: Map<PluginName, PluginMetadata>
   knownDatasets?: Set<string>
   configRegistry?: ConfigRegistry
+  /**
+   * Plugin names the install lock carries whose `install_dir` manifest was
+   * rejected, so they reach `knownPlugins` from neither the bundled nor the
+   * installed side. Without it such a plugin is indistinguishable from a name
+   * nothing on the machine matches, and both read as `plugin_unknown` ("is
+   * not installed"). Omitting it keeps that older, single reading.
+   */
+  unloadablePlugins?: Set<PluginName>
 }
 
 export interface ValidateResult {
