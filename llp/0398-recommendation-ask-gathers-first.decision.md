@@ -144,7 +144,14 @@ approximation whose omissions stop a script from producing candidates at
 all, silently, which is the regression hypaware #1884 was filed to fix.
 `\p{L}` and `\p{Nd}` in JavaScript, under `u`, are exact over every
 script and approximate nothing, so the rule is read in JavaScript, over
-the rows the candidate statement returns.
+the rows the candidate statement returns. `\p{Nd}` and not `\p{N}`,
+because a circled or superscript digit is `No` rather than a decimal
+digit, and a run of `①②③` is symbols however it is spelled. Accepted
+with it: a key made only of combining marks, of letter-numbers
+(`\p{Nl}`, Roman numerals) or of a block Unicode classes as symbols
+(Braille patterns) is dropped too. None of those is a request a person
+types again, and the scripts they might stand in for all have `\p{L}`
+letters of their own, iteration and prolongation marks included.
 
 Reading it there rather than in the statement is also what keeps it off
 the per-row path: it is one test of at most `KEY_CHARS` characters
@@ -155,6 +162,16 @@ candidate slot up to that headroom and spends none of the session
 statements' row budget, and before the record floor is decided, which is
 where the same drop closes the gate half: the floor reads the candidates
 and needs no rule of its own.
+
+Past that headroom the drop does cost something, and it is left costing
+it. The statement returns `CANDIDATES + 3` rows, so four distinct
+symbol-only runs, each typed in 3 sessions on 3 days, leave four real
+lines where there were five, and eight leave none at all, which reads as
+the refusal the record floor prints. That is the conservative direction
+and it is what the ask did before the fold was widened, where the same
+record now yields five junk candidates and a gate that opens on them.
+Buying the last of it back means asking the statement for more rows on
+every ask, to pay for a shape no recorded machine has held.
 
 A first version measured four signals (reopened sessions, a repeated
 line, a request that should go to a worker, a recurring mistake) and
