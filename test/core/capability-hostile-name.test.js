@@ -25,7 +25,12 @@ import process from 'node:process'
 
 import { resolveDependencies } from '../../src/core/dep_graph.js'
 import { bootKernel } from '../../src/core/runtime/boot.js'
+import { installLoggerProvider } from '../../src/core/observability/logger.js'
+import { readObservabilityEnv } from '../../src/core/observability/index.js'
 import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
+// The mirror writes to the real `process.stderr` (LLP 0329#consequences), so
+// the capture that stands in front of that descriptor is the shared one.
+import { stderrTextFrom } from '../helpers/stderr_lines.js'
 
 const HOSTILE = '@hypaware/local-fs'
 const NEIGHBOUR = '@hypaware/format-jsonl'
@@ -285,15 +290,17 @@ async function recordsFrom(fn) {
   return records
 }
 
-test('a skipped capability declaration names the plugin that wrote it', async () => {
-  // The skip costs someone else their activation: the consumer requiring the
-  // capability is eliminated and reported with `cap_missing`, while the
-  // provider whose manifest is malformed activates. Without a signal naming
-  // the provider, the report points an operator at the innocent plugin
-  // (issue #1870). Both halves of the skip, and the resolution output
-  // alongside the signal, because the signal has to be purely additive.
-  /** @type {any[]} */
-  const manifests = [
+/**
+ * The three manifests both skip tests resolve: two malformed halves and the
+ * consumer that pays for one of them.
+ *
+ * Rebuilt per call rather than shared, so neither test can observe the other
+ * having mutated one.
+ *
+ * @returns {any[]}
+ */
+function skipManifests() {
+  return [
     {
       schema_version: 1, name: 'empty-version', version: '1.0.0', hypaware_api: '^1.0.0',
       runtime: 'node', entrypoint: './i.js', provides: { capabilities: { 'cap.real': '' } },
@@ -307,6 +314,16 @@ test('a skipped capability declaration names the plugin that wrote it', async ()
       runtime: 'node', entrypoint: './i.js', requires: { capabilities: { 'cap.real': '*' } },
     },
   ]
+}
+
+test('a skipped capability declaration names the plugin that wrote it', async () => {
+  // The skip costs someone else their activation: the consumer requiring the
+  // capability is eliminated and reported with `cap_missing`, while the
+  // provider whose manifest is malformed activates. Without a signal naming
+  // the provider, the report points an operator at the innocent plugin
+  // (issue #1870). Both halves of the skip, and the resolution output
+  // alongside the signal, because the signal has to be purely additive.
+  const manifests = skipManifests()
 
   /** @type {any} */
   let resolution = null
@@ -337,4 +354,76 @@ test('a skipped capability declaration names the plugin that wrote it', async ()
     ],
     'a skipped declaration left the operator with only the consumer to blame'
   )
+})
+
+// @ref LLP 0362#absence-not-refusal [tests]: the skip report reaches stderr with no provider installed, and the healthy resolve stays silent.
+test('a skipped capability declaration reaches an install with no telemetry configured', async () => {
+  // The signal issue #1870 asked for was emitted through `getLogger` alone,
+  // and on a shipped install that is nowhere: `installLoggerProvider` attaches
+  // no exporter without `HYP_DEV_TELEMETRY` or `OTEL_EXPORTER_OTLP_ENDPOINT`,
+  // so the record was built and dropped and the operator was left with the
+  // consumer's `cap_missing` again (issue #1889). Run on that substrate, with
+  // both variables stripped and no provider installed, so the only channel
+  // that can carry the two lines is the one a stock install has.
+  const savedDev = process.env.HYP_DEV_TELEMETRY
+  const savedOtlp = process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+  delete process.env.HYP_DEV_TELEMETRY
+  delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+  logs.setGlobalLoggerProvider(/** @type {any} */ (null))
+  try {
+    const installed = installLoggerProvider({
+      env: readObservabilityEnv(),
+      resource: { attributes: { service_name: 'hypaware-test' } },
+    })
+    assert.equal(installed.provider, null, 'the shipped-install substrate installs no logger provider')
+
+    /** @type {any} */
+    let resolution = null
+    const text = await stderrTextFrom(async () => {
+      resolution = await resolveDependencies(skipManifests())
+    })
+
+    // Byte-identical to the resolution without the report: the provider still
+    // activates, the consumer is still the only elimination, and the report is
+    // purely additive.
+    assert.deepEqual(resolution.order, ['empty-name', 'empty-version'])
+    assert.deepEqual(resolution.unsatisfied, [
+      { plugin: 'consumer', errorKind: 'cap_missing', detail: 'capability cap.real@*' },
+    ])
+
+    const lines = text.split('\n').filter((line) => line.includes('dep_graph.capability_skipped'))
+    assert.equal(lines.length, 2, 'both malformed halves are named on a channel the install keeps')
+    for (const line of lines) {
+      assert.match(line, /WARN/, 'a skip is a warning, not the rejection of a plugin that still activates')
+      assert.match(line, /"error_kind":"cap_malformed"/)
+    }
+    assert.match(lines[0], /"hyp_plugin":"empty-version"/)
+    assert.match(lines[0], /"hyp_capability":"cap.real"/)
+    assert.match(lines[0], /"hyp_capability_version":""/)
+    assert.match(lines[1], /"hyp_plugin":"empty-name"/)
+    assert.match(lines[1], /"hyp_capability":""/)
+    assert.match(lines[1], /"hyp_capability_version":"1.0.0"/)
+
+    // The other direction, which LLP 0329#testable requires of any mirrored
+    // line: a well-formed declaration prints nothing at all.
+    const healthy = await stderrTextFrom(async () => {
+      await resolveDependencies(/** @type {any} */ ([
+        {
+          schema_version: 1, name: 'provider', version: '1.0.0', hypaware_api: '^1.0.0',
+          runtime: 'node', entrypoint: './i.js', provides: { capabilities: { 'cap.real': '1.0.0' } },
+        },
+        {
+          schema_version: 1, name: 'consumer', version: '1.0.0', hypaware_api: '^1.0.0',
+          runtime: 'node', entrypoint: './i.js', requires: { capabilities: { 'cap.real': '*' } },
+        },
+      ]))
+    })
+    assert.equal(healthy, '', 'an ordinary resolve stays as quiet as it was')
+  } finally {
+    logs.setGlobalLoggerProvider(/** @type {any} */ (null))
+    if (savedDev === undefined) delete process.env.HYP_DEV_TELEMETRY
+    else process.env.HYP_DEV_TELEMETRY = savedDev
+    if (savedOtlp === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+    else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedOtlp
+  }
 })

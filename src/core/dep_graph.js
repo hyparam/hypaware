@@ -92,12 +92,7 @@ export async function resolveDependencies(manifests, opts = {}) {
             // that required the capability and is reported with `cap_missing`,
             // so a silent skip leaves the report naming only that innocent
             // plugin (issue #1870).
-            log.warn('dep_graph.capability_skipped', {
-              [Attr.PLUGIN]: m.name,
-              [Attr.CAPABILITY]: capName,
-              hyp_capability_version: version,
-              [Attr.ERROR_KIND]: 'cap_malformed',
-            })
+            reportSkippedCapability(m.name, capName, version)
             continue
           }
           registry.provide(m.name, capName, version, null)
@@ -177,6 +172,43 @@ export async function resolveDependencies(manifests, opts = {}) {
     },
     { component: 'dep_graph' }
   )
+}
+
+/**
+ * Say that a malformed `provides.capabilities` pair was dropped, on a channel
+ * an install with no telemetry configured still has.
+ *
+ * Through the stderr mirror rather than `dep_graph`'s own logger, because the
+ * whole symptom of the skip is an absence: the provider activates, the
+ * registry never hears the capability, and all the operator is shown is the
+ * consumer eliminated with `cap_missing`. With neither `HYP_DEV_TELEMETRY` nor
+ * `OTEL_EXPORTER_OTLP_ENDPOINT` set there is no logger provider, so the record
+ * was built and dropped and the name of the plugin that wrote the declaration
+ * reached nobody (issue #1889).
+ *
+ * Not the daemon file log `recordFailedPlugins` writes, the other channel a
+ * shipped install keeps: that one reports a plugin that did not come up, and
+ * this plugin does come up. It would also reach a daemon boot only, while
+ * dependency resolution runs in every process that boots the kernel.
+ *
+ * Guarded because a diagnostic may cost itself and never the thing it comments
+ * on: the mirror's `process.stderr.write` is the one step of the emit that is
+ * not already contained, and a throw escaping it would cost the boot.
+ *
+ * @ref LLP 0362#absence-not-refusal [implements]: the site refuses nothing and its symptom is only the absence, so it takes the mirror.
+ * @param {string} plugin the manifest that declared the pair
+ * @param {string} capName the declared capability name, possibly empty
+ * @param {string} version the declared version, possibly empty
+ */
+function reportSkippedCapability(plugin, capName, version) {
+  try {
+    getLogger('dep_graph', { mirrorStderr: true }).warn('dep_graph.capability_skipped', {
+      [Attr.PLUGIN]: plugin,
+      [Attr.CAPABILITY]: capName,
+      hyp_capability_version: version,
+      [Attr.ERROR_KIND]: 'cap_malformed',
+    })
+  } catch { /* the channel that would carry the report is the thing that failed; the skip stands */ }
 }
 
 /**
