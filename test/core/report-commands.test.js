@@ -995,9 +995,17 @@ test('fix: an answer the picker never offered is reported once, not re-asked for
   ctx.stdin.isTTY = true
   ctx.stdout.isTTY = true
   // A prompt that keeps answering off-list is the only way `hit` misses,
-  // and the loop that re-asks on a miss has nothing to end it.
+  // and the loop that re-asks on a miss has nothing to end it. The stub
+  // stops at a third ask so that a regression fails here: the spin is an
+  // async loop that never settles, and `node --test` cannot interrupt one,
+  // so an unbounded loop would wedge the run rather than time the test out.
+  let asks = 0
   const { deps, launches, prompts } = fixDeps({
-    pick: async (/** @type {any} */ spec) => spec.title === 'Which report?' ? spec.options[0].value : 'hyprec-ffffffffffffffff',
+    pick: async (/** @type {any} */ spec) => {
+      asks += 1
+      if (asks > 2) throw new Error('the off-list answer was re-asked')
+      return spec.title === 'Which report?' ? spec.options[0].value : 'hyprec-ffffffffffffffff'
+    },
   })
   assert.equal(await runReportFix([], ctx, deps), 1)
   assert.equal(prompts.length, 2, 'the off-list answer is not re-asked')
