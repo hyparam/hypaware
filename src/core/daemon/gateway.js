@@ -250,7 +250,7 @@ export async function runGatewayDaemon(opts = {}) {
     // that exit ends the worker mid-file, dropping every later test in it
     // while the run still reports green (#1531). The SIGKILL the deadline
     // exists for happens either way.
-    // @ref LLP 0038#implemented-boundary [implements]: a stuck child or an open stream cannot strand the stop
+    // @ref LLP 0038#lifecycle-and-operator-behavior [implements]: a stuck child or an open stream cannot strand the stop
     const deadline = setTimeout(() => {
       child?.kill('SIGKILL')
       if (opts.installSignalHandlers !== false) process.exit(code)

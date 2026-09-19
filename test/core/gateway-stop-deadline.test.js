@@ -44,6 +44,12 @@ function alive(pid) {
  * out the `disconnect` handler `processor.js` exits on when its supervisor
  * dies, leaving exactly the child the SIGKILL deadline exists for.
  *
+ * `Atomics.wait` on a never-notified word, never a spin: the block has to
+ * last the deadline's whole four seconds on every `npm test`, and a
+ * `for (;;) {}` spends that pegging a core. It also decides what a leaked
+ * copy costs the shared runner if this test is ever killed before its
+ * cleanup - a parked thread rather than one at 100%.
+ *
  * @param {string} dir
  * @returns {Promise<string>}
  */
@@ -51,7 +57,9 @@ async function writeBlockedChildPreload(dir) {
   const blocker = path.join(dir, 'block-processing-stop.cjs')
   await fs.writeFile(blocker, [
     "process.on('message', msg => {",
-    "  if (msg && msg.type === 'processing.stop') for (;;) {}",
+    "  if (msg && msg.type === 'processing.stop') {",
+    '    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)',
+    '  }',
     '})',
     '',
   ].join('\n'))
