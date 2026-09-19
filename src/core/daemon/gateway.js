@@ -12,7 +12,7 @@ import { readObservabilityEnv } from '../observability/env.js'
 import { clearPidFile, processIsAlive, processingStateRoot, readPidFile, writePidFile } from './pid.js'
 import { DAEMON_HEARTBEAT_STALE_MS, daemonHeartbeatAgeMs, readStatusFile, writeStatusFile } from './status.js'
 import { clearControlRequests, watchControlRequests, writeControlRequest } from './control.js'
-import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
+import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins, recordUnloadableManifests } from './boot_failure.js'
 import { openDaemonLog } from './logs.js'
 
 /**
@@ -288,6 +288,14 @@ export async function runGatewayDaemon(opts = {}) {
   try {
     boot = await bootKernel({ hypHome, configPath: opts.configPath, env, runId, mode: 'daemon', bootProfile: 'gateway', storage })
     gatewayFailedPlugins = recordFailedPlugins({ activations: boot.activations, unsatisfied: boot.unsatisfiedRequirements, log })
+    // Recorded here alone, and not aggregated from the child the way
+    // `failedPlugins` is, because this door is profile-independent: the
+    // manifest walk runs before `selectBootPlugins` and over the same
+    // `hypHome` in both processes, so the child could only report the identical
+    // set back (issue #1576). `refreshStatus` mutates `status` field by field
+    // and persists it, so the first tick carries this one.
+    const unloadable = recordUnloadableManifests({ unloadableManifests: boot.unloadableManifests, log })
+    if (unloadable.length > 0) status.unloadableManifests = unloadable
     const source = boot.runtime.sources.get('ai-gateway')
     if (!source && boot.config?.plugins?.some(plugin => plugin.name === '@hypaware/ai-gateway' && plugin.enabled !== false)) {
       throw new Error('configured gateway failed to activate')
