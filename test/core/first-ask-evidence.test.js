@@ -60,11 +60,11 @@ test('evidenceSql: the candidate key is normalized, and the two statements share
   // @ref LLP 0398#one-signal [tests]: "okay commit on ..." and "Commit on ..." are one line
   const sql = evidenceSql('2026-08-08')
   const key = sql.lines.slice('select '.length, sql.lines.indexOf(' as line'))
-  assert.ok(key.startsWith('trim(substr(trim(regexp_replace('), 'the key is computed in SQL, not read raw')
+  assert.ok(key.startsWith('trim(regexp_replace(substr(trim(regexp_replace('), 'the key is computed in SQL, not read raw')
   assert.ok(key.includes('lower(content_text)'), 'case folded')
   assert.ok(key.includes("'^((okay|ok|now|please|can you|could you|yes|also|then|and|so|next)[,\\s]+)+'"), 'leading fillers dropped, one or more')
   assert.ok(key.includes("'[^a-z0-9 \\u0080-\\u1fff\\u2070-\\uffff]+', ' '"), 'ASCII punctuation and the General Punctuation block folded to a space, every script kept')
-  assert.ok(key.endsWith(', 1, 36))'), 'a bounded key, with no trailing space where the cut fell on one')
+  assert.ok(key.endsWith(", 1, 36), '[\\ud800-\\udbff]$', ''))"), 'a bounded key, less a surrogate half the cut split off, with no trailing space where the cut fell on one')
   const trig = sql.triggers(['x'])
   assert.ok(trig.includes(`${key} as line`), 'the sessions are found by the same key the candidate was')
   assert.ok(trig.includes(`${key} in ('x')`), 'and looked up by it')
@@ -86,7 +86,6 @@ test('a request in a non-Latin script is a candidate of its own; a rule of dashe
   // in 3 sessions on 3 days returned nothing at all. Both halves are
   // pinned: a non-Latin request is a candidate of its own, and two
   // distinct ones do not pool back into one.
-  const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
   const typings = [
     'commit on the "right" branch and open a PR',
     '  {"tool": "Bash", "input": "npm test"}',
@@ -104,10 +103,77 @@ test('a request in a non-Latin script is a candidate of its own; a rule of dashe
   const rows = []
   typings.forEach((text, t) => {
     for (const day of [10, 11, 12]) {
-      const content = t === 0 && day === 12 ? curly : text
-      rows.push({ date: `2026-08-${day}`, session_id: `s${t}-${day}`, role: 'user', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: 'external', message_created_at: new Date(Date.UTC(2026, 7, day, t)), content_text: content })
+      rows.push(typedRow(`s${t}-${day}`, day, t, t === 0 && day === 12 ? curly : text))
     }
   })
+  const result = await candidateLines(rows)
+  const lines = result.rows.map((r) => String(r.line)).sort()
+  assert.deepEqual(lines, ['commit on the right branch and open', 'закоммить на нужную ветку и открыть', 'проверь тесты и почини падающий тест'], 'each request is one candidate; the rule of dashes and the indented fragment are none')
+  for (const row of result.rows) {
+    assert.equal(row.sessions, 3, `${row.line} counts its own three sessions`)
+    assert.equal(row.days, 3, `${row.line} counts its own three days`)
+  }
+})
+
+test('an astral character straddling the key cut leaves no half of it in the key', async () => {
+  // @ref LLP 0398#one-signal [tests]: the key is the first characters of the normalized line, and a character is not half a surrogate pair
+  // Through the same engine the gather runs on. hypaware #1893: SUBSTR
+  // here counts UTF-16 code units and the fold keeps astral characters,
+  // so a pair sitting across unit 36 was cut in half and the key went to
+  // disk with a half character, which UTF-8 writes as U+FFFD.
+  const text = 'ship the release notes and the tag \u{1F600} please'
+  const result = await candidateLines([10, 11, 12].map((day) => typedRow(`s${day}`, day, 9, text)))
+  assert.equal(result.rows.length, 1, 'the three typings are one candidate')
+  const line = String(result.rows[0].line)
+  assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(line), `no unpaired surrogate in ${JSON.stringify(line)}`)
+  assert.equal(line, 'ship the release notes and the tag', 'the split character is dropped whole, and the space it left is trimmed')
+  assert.equal(line, keyOf(text), 'and the JS mirror of the key agrees with the engine')
+  assert.equal(result.rows[0].sessions, 3, 'the typing still groups its three sessions')
+  assert.equal(result.rows[0].days, 3, 'on its three days')
+})
+
+test('commandHeads: a cd prefix is dropped and the head is the verb plus its subcommand', () => {
+  const heads = commandHeads([
+    { session_id: 's1', tool_name: 'Bash', args: '{"command":"cd /repo && git checkout -b topic"}' },
+    { session_id: 's2', tool_name: 'Bash', args: '{"command":"git checkout master"}' },
+    { session_id: 's1', tool_name: 'Read', args: '{"file_path":"/a/b/types.d.ts"}' },
+  ])
+  assert.deepEqual(heads.map((h) => h.head), ['Bash: git checkout -b', 'Bash: git checkout master', 'Read: types.d.ts'])
+  assert.equal(heads[0].sessions, 1)
+})
+
+/**
+ * The SQL candidate key, mirrored in JS: what `sql.lines` returns for a
+ * typing, so an engine-backed test can name the keys it expects. The
+ * folded class and the trailing-half strip have to track `FOLD_TO_SPACE`
+ * and `LONE_SURROGATE_TAIL`, or a mirror that still erases every
+ * non-Latin letter will name keys the engine never returns.
+ * @param {string} t
+ */
+function keyOf(t) {
+  return t.toLowerCase().replace(/^((okay|ok|now|please|can you|could you|yes|also|then|and|so|next)[,\s]+)+/, '').replace(/[^a-z0-9 \u0080-\u1fff\u2070-\uffff]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 36).replace(/[\ud800-\udbff]$/, '').trim()
+}
+
+/**
+ * One human turn in the window, as the evidence statements read it.
+ * @param {string} sessionId
+ * @param {number} day - day of August 2026
+ * @param {number} hour
+ * @param {string} text
+ * @returns {Record<string, SqlPrimitive>}
+ */
+function typedRow(sessionId, day, hour, text) {
+  return { date: `2026-08-${day}`, session_id: sessionId, role: 'user', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: 'external', message_created_at: new Date(Date.UTC(2026, 7, day, hour)), content_text: text }
+}
+
+/**
+ * The candidate statement over `rows`, through the same engine the gather
+ * runs on, so a test reads the keys the engine really returns rather than
+ * asserting on the SQL text.
+ * @param {Record<string, SqlPrimitive>[]} rows
+ */
+function candidateLines(rows) {
+  const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
   /** @type {AsyncDataSource} */
   const source = {
     columns,
@@ -125,34 +191,7 @@ test('a request in a non-Latin script is a candidate of its own; a rule of dashe
   }
   const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
   const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
-  const result = await executeQuerySql({ query: evidenceSql('2026-08-08').lines, registry, storage })
-  const lines = result.rows.map((r) => String(r.line)).sort()
-  assert.deepEqual(lines, ['commit on the right branch and open', 'закоммить на нужную ветку и открыть', 'проверь тесты и почини падающий тест'], 'each request is one candidate; the rule of dashes and the indented fragment are none')
-  for (const row of result.rows) {
-    assert.equal(row.sessions, 3, `${row.line} counts its own three sessions`)
-    assert.equal(row.days, 3, `${row.line} counts its own three days`)
-  }
-})
-
-test('commandHeads: a cd prefix is dropped and the head is the verb plus its subcommand', () => {
-  const heads = commandHeads([
-    { session_id: 's1', tool_name: 'Bash', args: '{"command":"cd /repo && git checkout -b topic"}' },
-    { session_id: 's2', tool_name: 'Bash', args: '{"command":"git checkout master"}' },
-    { session_id: 's1', tool_name: 'Read', args: '{"file_path":"/a/b/types.d.ts"}' },
-  ])
-  assert.deepEqual(heads.map((h) => h.head), ['Bash: git checkout -b', 'Bash: git checkout master', 'Read: types.d.ts'])
-  assert.equal(heads[0].sessions, 1)
-})
-
-/**
- * The SQL candidate key, mirrored in JS: what `sql.lines` returns for a
- * typing, so an engine-backed test can name the keys it expects. The
- * folded class has to track `FOLD_TO_SPACE`, or a mirror that still
- * erases every non-Latin letter will name keys the engine never returns.
- * @param {string} t
- */
-function keyOf(t) {
-  return t.toLowerCase().replace(/^((okay|ok|now|please|can you|could you|yes|also|then|and|so|next)[,\s]+)+/, '').replace(/[^a-z0-9 \u0080-\u1fff\u2070-\uffff]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 36).trim()
+  return executeQuerySql({ query: evidenceSql('2026-08-08').lines, registry, storage })
 }
 
 /** Two sessions that typed the commit line and then ran the procedure. */
