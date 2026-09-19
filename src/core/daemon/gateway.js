@@ -244,9 +244,16 @@ export async function runGatewayDaemon(opts = {}) {
     writeStatusFile(stateRoot, status)
     log.info('gateway.stopping', { code })
     // Bound the complete stop, including a client that never ends its stream.
+    // The `process.exit` is the installed service's own ending, so it is
+    // withheld from a caller that does not own this process:
+    // `installSignalHandlers: false` already says so, and inside `node --test`
+    // that exit ends the worker mid-file, dropping every later test in it
+    // while the run still reports green (#1531). The SIGKILL the deadline
+    // exists for happens either way.
+    // @ref LLP 0038#implemented-boundary [implements]: a stuck child or an open stream cannot strand the stop
     const deadline = setTimeout(() => {
       child?.kill('SIGKILL')
-      process.exit(code)
+      if (opts.installSignalHandlers !== false) process.exit(code)
     }, STOP_DEADLINE_MS)
     deadline.unref()
     if (child?.connected) child.send({ type: 'processing.stop' }, () => {})
@@ -254,8 +261,22 @@ export async function runGatewayDaemon(opts = {}) {
       ? new Promise(resolve => child?.once('exit', resolve))
       : Promise.resolve()
     try {
-      await boot?.runtime.sources.stop('ai-gateway')
-      await stoppedChild
+      try {
+        await boot?.runtime.sources.stop('ai-gateway')
+      } catch (error) {
+        // Onto the gateway's own log, so a stop that failed is counted by
+        // `recent_errors` rather than reaching only an unhandled rejection.
+        log.error('gateway.source_stop_failed', { message: error instanceof Error ? error.message : String(error) })
+        throw error
+      } finally {
+        // In a `finally`, never after the line above: the child holds the half
+        // of the daemon that captures, and the deadline the outer `finally` is
+        // about to clear is the only thing that guarantees it dies. A source
+        // stop that rejects past this wait leaves an unsupervised
+        // `processor.js` on the same `HYP_HOME`, behind a snapshot that reads
+        // `stopped` (#1531).
+        await stoppedChild
+      }
     } finally {
       clearTimeout(deadline)
       setGatewayProcessTransport(undefined)

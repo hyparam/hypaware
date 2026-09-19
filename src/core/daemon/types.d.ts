@@ -942,7 +942,14 @@ export interface RunDaemonOptions {
   runId?: string
   /** Sink tick cadence (default 60_000). */
   tickIntervalMs?: number
-  /** Default true; smoke flows opt out and drive shutdown directly. */
+  /**
+   * Default true; smoke flows and in-process tests opt out and drive shutdown
+   * directly. It also declares that the caller does not own this process, so
+   * the gateway's stop deadline kills the processing child without exiting
+   * (#1531): left default inside `node --test`, a stop that reaches its
+   * deadline ends the worker mid-file, dropping every later test in it while
+   * the run still reports green.
+   */
   installSignalHandlers?: boolean
   /** Whether the runtime reports foreground mode (default true). */
   foreground?: boolean
