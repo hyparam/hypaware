@@ -336,32 +336,50 @@ function createSkillRegistry() {
   const items = []
   return {
     register(skill) {
-      if (!skill || typeof skill.name !== 'string' || skill.name.length === 0) {
+      // Read each field once and build the record out of what these lines
+      // checked. `skill` is the plugin's own object, so every re-read is a
+      // fresh question an accessor may answer differently: the `name` stored
+      // below was the fourth read, three after `isSafeContributionName`
+      // cleared one, so a traversal name could reach the record with nothing
+      // having validated it (issue #1552, as #1555 in the preset registry).
+      const name = skill?.name
+      const plugin = skill?.plugin
+      const clients = skill?.clients
+      const sourceDir = skill?.sourceDir
+      const projectLocal = skill?.projectLocal
+      if (typeof name !== 'string' || name.length === 0) {
         throw new TypeError('skills.register: name is required')
       }
       // @ref LLP 0003#principle [constrained-by]: name is interpolated into
       // `<skill_dir>/<name>`; reject traversal before it reaches the filesystem.
-      if (!isSafeContributionName(skill.name)) {
-        throw new TypeError(`skills.register '${skill.name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
+      if (!isSafeContributionName(name)) {
+        throw new TypeError(`skills.register '${name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
       }
-      if (typeof skill.plugin !== 'string' || skill.plugin.length === 0) {
-        throw new TypeError(`skills.register '${skill.name}': plugin is required`)
+      if (typeof plugin !== 'string' || plugin.length === 0) {
+        throw new TypeError(`skills.register '${name}': plugin is required`)
       }
-      if (!Array.isArray(skill.clients) || skill.clients.length === 0) {
-        throw new TypeError(`skills.register '${skill.name}': clients must be a non-empty array`)
+      if (!Array.isArray(clients) || clients.length === 0) {
+        throw new TypeError(`skills.register '${name}': clients must be a non-empty array`)
       }
-      if (typeof skill.sourceDir !== 'string' || skill.sourceDir.length === 0) {
-        throw new TypeError(`skills.register '${skill.name}': sourceDir is required`)
+      if (typeof sourceDir !== 'string' || sourceDir.length === 0) {
+        throw new TypeError(`skills.register '${name}': sourceDir is required`)
       }
       items.push({
-        name: skill.name,
-        plugin: skill.plugin,
-        clients: [...skill.clients],
-        sourceDir: skill.sourceDir,
-        ...(skill.projectLocal !== undefined ? { projectLocal: skill.projectLocal } : {}),
+        name,
+        plugin,
+        clients: [...clients],
+        sourceDir,
+        ...(projectLocal !== undefined ? { projectLocal } : {}),
       })
     },
-    list() { return items.slice() },
+    // A copy per entry, and of the `clients` array inside it, the way
+    // `capabilities.list()` already hands back fresh objects. `ctx.skills` is
+    // on the activation context, so `items.slice()` - a copy of the array,
+    // whose elements were the stored records - let a plugin calling `list()`
+    // inside its own `activate()` rewrite the record every later reader then
+    // read: the doctor's report, and the `<skill_dir>/<name>` an install
+    // joins (issue #1552).
+    list() { return items.map((item) => ({ ...item, clients: [...item.clients] })) },
   }
 }
 
@@ -379,31 +397,38 @@ function createAgentRegistry() {
   const items = []
   return {
     register(agent) {
-      if (!agent || typeof agent.name !== 'string' || agent.name.length === 0) {
+      // Read once and store what was checked, for the reason on the skill
+      // registry above (issue #1552).
+      const name = agent?.name
+      const plugin = agent?.plugin
+      const clients = agent?.clients
+      const sourceFile = agent?.sourceFile
+      if (typeof name !== 'string' || name.length === 0) {
         throw new TypeError('agents.register: name is required')
       }
       // @ref LLP 0003#principle [constrained-by]: name is interpolated into
       // `<agent_dir>/<name>.md`; reject traversal before it reaches the filesystem.
-      if (!isSafeContributionName(agent.name)) {
-        throw new TypeError(`agents.register '${agent.name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
+      if (!isSafeContributionName(name)) {
+        throw new TypeError(`agents.register '${name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
       }
-      if (typeof agent.plugin !== 'string' || agent.plugin.length === 0) {
-        throw new TypeError(`agents.register '${agent.name}': plugin is required`)
+      if (typeof plugin !== 'string' || plugin.length === 0) {
+        throw new TypeError(`agents.register '${name}': plugin is required`)
       }
-      if (!Array.isArray(agent.clients) || agent.clients.length === 0) {
-        throw new TypeError(`agents.register '${agent.name}': clients must be a non-empty array`)
+      if (!Array.isArray(clients) || clients.length === 0) {
+        throw new TypeError(`agents.register '${name}': clients must be a non-empty array`)
       }
-      if (typeof agent.sourceFile !== 'string' || agent.sourceFile.length === 0) {
-        throw new TypeError(`agents.register '${agent.name}': sourceFile is required`)
+      if (typeof sourceFile !== 'string' || sourceFile.length === 0) {
+        throw new TypeError(`agents.register '${name}': sourceFile is required`)
       }
       items.push({
-        name: agent.name,
-        plugin: agent.plugin,
-        clients: [...agent.clients],
-        sourceFile: agent.sourceFile,
+        name,
+        plugin,
+        clients: [...clients],
+        sourceFile,
       })
     },
-    list() { return items.slice() },
+    // Copies, for the reason on the skill registry above (issue #1552).
+    list() { return items.map((item) => ({ ...item, clients: [...item.clients] })) },
   }
 }
 
