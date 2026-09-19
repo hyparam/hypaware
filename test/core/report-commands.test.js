@@ -960,6 +960,19 @@ test('the missing-page hint names a command that lists what the report carries',
   assert.match(text, /the report no longer carries 'recommendation-gone'/)
   assert.match(text, /'hyp report list --kind usage-review --period 2026-W29'/)
   assert.doesNotMatch(text, /hyp report get usage-review/, 'a report read lists nothing')
+  assert.doesNotMatch(text, /--org|--remote/, 'a default-target run names no target flags')
+})
+
+// @ref LLP 0139#repair-must-be-runnable [tests]: the hinted listing has to reach the target the failing run did, not the default one
+test('the missing-page hint carries the run\'s target flags, shellWord-quoted', async (t) => {
+  stubServer(t, (method, url) => (
+    url.pathname === `/v1/reports/_recommendations/${REC}`
+      ? { status: 200, json: { recommendation: { id: REC, page: 'recommendation-gone' }, report: REPORT } }
+      : { status: 404, json: { error: 'not_found' } }
+  ))
+  const { ctx, err } = ctxWith()
+  assert.equal(await runReportGet([REC, '--org', 'acme corp', '--remote', 'prod'], ctx), 1)
+  assert.match(err.join(''), /hyp report list --kind usage-review --period 2026-W29 --org 'acme corp' --remote prod/)
 })
 
 test('a resolve answer carrying a report id but no kind or period is a malformed answer, not a missing page', async (t) => {

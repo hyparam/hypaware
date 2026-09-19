@@ -682,8 +682,7 @@ export async function runReportFix(argv, ctx, deps = {}) {
   // The target flags ride along so the client resolves the same org and
   // remote this run did; the credential reaches it through the inherited
   // environment, as every `hyp` call the client makes already relies on.
-  const targetFlags = ['org', 'remote'].flatMap((f) => gate.params[f] !== undefined ? [`--${f} ${shellWord(String(gate.params[f]))}`] : [])
-  const readCommand = ['hyp report get', recommendation.id, ...targetFlags].join(' ')
+  const readCommand = ['hyp report get', recommendation.id, ...targetFlags(gate.params)].join(' ')
   const prompt =
     `Run \`${readCommand}\` and read its output. It is one recommendation from a HypAware usage report (${where}): "${title}", ` +
     'followed by the evidence it cites and the queries the report ran to reach it. ' +
@@ -803,19 +802,32 @@ async function fetchRecommendationPage({ ctx, gate, resolved, cmd }, { recommend
   // #repair-must-be-runnable). `report get` on the report fetches its entry
   // document to stdout and lists nothing; the listing filtered to this
   // report prints every recommendation page the record carries.
-  ctx.stderr.write(`hyp ${cmd}: the report no longer carries '${esc(recommendation.page)}' - list the pages it does carry with 'hyp report list --kind ${esc(report.kind)} --period ${esc(report.period)}'\n`)
+  const listCommand = [`hyp report list --kind ${esc(report.kind)} --period ${esc(report.period)}`, ...targetFlags(gate.params)].join(' ')
+  ctx.stderr.write(`hyp ${cmd}: the report no longer carries '${esc(recommendation.page)}' - list the pages it does carry with '${listCommand}'\n`)
   return 1
 }
 
 /**
  * One argument as it can be pasted into a shell: bare when it is plain,
- * single-quoted otherwise. For the flags the launch prompt carries.
+ * single-quoted otherwise. For the target flags a message hands back.
  *
  * @param {string} s
  * @returns {string}
  */
 function shellWord(s) {
   return /^[A-Za-z0-9_.:@%+=\/-]+$/.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`
+}
+
+/**
+ * The run's target flags as pasteable words, shellWord-quoted: a command
+ * handed back to the user has to reach the target the run did, or it answers
+ * about another org's reports. A default-target run yields none.
+ *
+ * @param {Record<string, unknown>} params the gate's parsed params
+ * @returns {string[]}
+ */
+function targetFlags(params) {
+  return ['org', 'remote'].flatMap((f) => params[f] !== undefined ? [`--${f} ${shellWord(String(params[f]))}`] : [])
 }
 
 /**
