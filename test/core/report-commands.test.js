@@ -282,11 +282,14 @@ test('the publish receipt quotes a server-authored kind, period and id as one sh
 // @ref LLP 0225#escape-not-strip [tests]: a control character in a remote value stays escaped where a person reads it, on the prose line as well as inside the quoting
 test('the publish receipt lets no raw control byte from the server reach stdout', async (t) => {
   const escChar = String.fromCharCode(0x1b)
-  const text = await publishReceipt(t, { id: `rpt${escChar}[2K1`, kind: `usage${escChar}[2Kreview`, period: '2026-W29', files: 1, bytes: 12 })
+  const cr = String.fromCharCode(0x0d)
+  const text = await publishReceipt(t, { id: `rpt${escChar}[2K1`, kind: `usage${escChar}[2Kreview`, period: '2026-W29', files: `1${cr}`, bytes: `12${cr}` })
   assert.ok(!text.includes(escChar), 'no raw escape byte reaches stdout')
+  assert.ok(!text.includes(cr), 'no raw carriage return reaches stdout')
   assert.equal(viewCommand(text), "hyp report get 'usage\\u001b[2Kreview' 2026-W29 'rpt\\u001b[2K1'")
-  // The `where` receipt is prose, so it takes the escape and not the quoting.
-  assert.match(text, /^published usage\\u001b\[2Kreview\/2026-W29\/rpt\\u001b\[2K1 /m)
+  // The `where` receipt and the counts beside it are prose, so each takes the
+  // escape and not the quoting. The counts are the server's own too.
+  assert.match(text, /^published usage\\u001b\[2Kreview\/2026-W29\/rpt\\u001b\[2K1 \(1\\r file\(s\), 12\\r bytes\)$/m)
 })
 
 test('the publish receipt is byte-identical for a conforming record', async (t) => {
