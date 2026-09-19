@@ -327,11 +327,20 @@ export async function runGatewayDaemon(opts = {}) {
       // the registry stores by reference, and it picks the context the source
       // starts under, so a neighbour redefining it after registration hands the
       // real gateway source its own config slice, paths, logger, capability
-      // handles and permission context (#1551). The same binding the boot
-      // walk's `readSourceIdentity` resolves through; the claim stands only for
-      // a source registered straight on the registry, which records no owner.
-      const owner = boot.runtime.sources.ownerOf('ai-gateway') ?? source.plugin
-      const ctx = boot.runtime.activationContexts?.get(owner)
+      // handles and permission context (#1551).
+      //
+      // With no fallback to the claim when the registry recorded no owner. In
+      // this process there is nothing an unowned `ai-gateway` can be but a
+      // contribution that took the key out of band: `runGatewayDaemon` boots
+      // its own kernel, and every registration in it reaches the registry
+      // through a plugin's `ctx.sources` facade, which brackets the call so
+      // the owner is recorded. A contribution that got the key any other way
+      // wrote the `plugin` it carries, so falling back to it asks the one
+      // party who should not choose which context the gateway source starts
+      // under. Refusing costs a gateway that was already not the registered
+      // one, and says so.
+      const owner = boot.runtime.sources.ownerOf('ai-gateway')
+      const ctx = owner === undefined ? undefined : boot.runtime.activationContexts?.get(owner)
       if (!ctx) throw new Error('gateway activation context missing')
       // The key it was looked up by, never `source.name`: that is a live read
       // of a plugin property on a contribution the registry stores by

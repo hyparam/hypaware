@@ -32,6 +32,10 @@ import { writeLock } from '../../src/core/plugin_install/lock.js'
 const PROVIDER = '@fixture/gw-provider'
 const POISONER = '@fixture/gw-poisoner'
 const NEIGHBOUR = 'zzz-neighbour'
+// Sorts before the provider, which is what puts it first in the activation
+// order: `toposort` builds edges from `requires.plugins` only and breaks the
+// remaining ties by name, so a capability requirement orders nothing.
+const SQUATTER = '@aa/gw-squatter'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -125,6 +129,38 @@ function poisonerEntrypoint() {
 }
 
 /**
+ * The other way to reach the same context, and the one the claim fallback was
+ * written for: register `ai-gateway` on the registry itself rather than
+ * through the facade, so the kernel records no owner, and declare the
+ * provider's name as the contribution's own `plugin`.
+ *
+ * `Object.getPrototypeOf(ctx.sources)` is the registry: the facade delegates
+ * by prototype chain rather than by copy (`createSourcesFacade`), so its
+ * unbracketed `register` is one property read away from any plugin holding a
+ * context. Registering through it leaves `ownerOf('ai-gateway')` undefined,
+ * and nothing else in this process can.
+ */
+function squatterEntrypoint() {
+  return [
+    recorderPreamble(),
+    'export async function activate(ctx) {',
+    '  const proto = Object.getPrototypeOf(ctx.sources)',
+    "  record({ event: 'squat_attempted', unbracketed_register: typeof proto.register })",
+    '  proto.register({',
+    "    name: 'ai-gateway',",
+    `    plugin: ${JSON.stringify(PROVIDER)},`,
+    '    async start(startCtx) {',
+    "      record({ event: 'start', source: 'ai-gateway', who: 'squatter', ctx_plugin: startCtx.plugin.name })",
+    "      return { async status() { return { state: 'ready' } }, async stop() { record({ event: 'stop', who: 'squatter' }) } }",
+    '    },',
+    '  })',
+    "  record({ event: 'squatted', owner_of: String(ctx.sources.ownerOf('ai-gateway')) })",
+    '}',
+    '',
+  ].join('\n')
+}
+
+/**
  * Materialise an installed-plugin fixture and its lock entry, the way
  * `test/core/boot-installed.test.js` does, so a real boot discovers it.
  *
@@ -189,6 +225,52 @@ async function makeHome(t) {
     version: 2,
     auto_update: false,
     plugins: [{ name: PROVIDER, config: {} }, { name: POISONER, config: {} }],
+  }))
+  const recordDir = path.join(hypHome, 'records')
+  await fs.mkdir(recordDir, { recursive: true })
+  return { hypHome, configPath, recordDir }
+}
+
+/**
+ * The same two roles, with the neighbour replaced by one that squats the key
+ * instead of redefining a property on the contribution behind it.
+ *
+ * @param {TestContext} t
+ */
+async function makeSquatHome(t) {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-gateway-squat-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const entries = [
+    await stagePlugin(hypHome, PROVIDER, {
+      provides: { capabilities: { 'hypaware.ai-gateway': '2.0.0' } },
+      contributes: { sources: [{ name: 'ai-gateway' }] },
+    }, providerEntrypoint()),
+    await stagePlugin(hypHome, SQUATTER, {
+      // The capability requirement, and no plugin requirement: the first is
+      // what the gateway boot profile selects on, and leaving the second out
+      // is what lets the name tie-break put this plugin first.
+      requires: { capabilities: { 'hypaware.ai-gateway': '^2.0.0' } },
+    }, squatterEntrypoint()),
+  ]
+  /** @type {Record<string, any>} */
+  const plugins = {}
+  for (const e of entries) {
+    plugins[e.name] = {
+      name: e.name,
+      version: e.version,
+      source: { kind: 'local-dir', raw: e.installDir, path: e.installDir },
+      install_dir: e.installDir,
+      content_hash: 'a'.repeat(64),
+      manifest_hash: 'b'.repeat(64),
+      installed_at: '2026-05-21T00:00:00.000Z',
+    }
+  }
+  await writeLock(path.join(hypHome, 'hypaware'), { schema_version: 1, plugins })
+  const configPath = path.join(hypHome, 'hypaware-config.json')
+  await fs.writeFile(configPath, JSON.stringify({
+    version: 2,
+    auto_update: false,
+    plugins: [{ name: PROVIDER, config: {} }, { name: SQUATTER, config: {} }],
   }))
   const recordDir = path.join(hypHome, 'records')
   await fs.mkdir(recordDir, { recursive: true })
@@ -353,6 +435,32 @@ test('the gateway starts the source under the context of the plugin that registe
   assert.equal(reads.length, 1, `the gateway read the contribution's plugin claim after the probe (${reads.length} reads), so a neighbour can still steer the context`)
 
   assert.deepEqual(records.filter(r => r.event === 'stop').map(r => r.source), ['ai-gateway'])
+})
+
+// The step past #1551 the claim fallback left open. A plugin that reaches the
+// registry's own unbracketed `register` (one prototype hop off `ctx.sources`)
+// takes the `ai-gateway` key with no owner recorded, and the real gateway
+// plugin's registration then fails as a duplicate. A fallback to the
+// contribution's `plugin` would resolve exactly the context that plugin named,
+// so the squatter's source ran under the provider's config slice, paths,
+// logger, capability handles and permission context with `bootError` null.
+test('a source that took the gateway key with no owner recorded does not start under the plugin it names', async (t) => {
+  const home = await makeSquatHome(t)
+  const run = runGatewayOutsideTestRunner({ ...home, poison: 'none' })
+  assert.equal(run.stopError, null, 'fixture invariant: the stop must complete')
+  const records = await recordsFor(home.recordDir, run.pid)
+
+  // Fixture invariant: the squat has to have been attempted, or the assertion
+  // below passes against any code at all.
+  const attempt = records.find(r => r.event === 'squat_attempted')
+  assert.ok(attempt, 'the squatter never ran, so nothing was staged')
+  assert.equal(attempt.unbracketed_register, 'function', 'the facade stopped delegating the registry by prototype')
+
+  assert.equal(
+    records.find(r => r.event === 'start' && r.who === 'squatter'),
+    undefined,
+    `the gateway started an unowned contribution under the plugin it named (bootError=${run.bootError})`
+  )
 })
 
 test('an honest gateway boot starts, reports and stops unchanged', async (t) => {
