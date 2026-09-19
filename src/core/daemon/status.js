@@ -72,6 +72,7 @@ import {
  * @import { Dirent } from 'node:fs'
  * @import { FileHandle } from 'node:fs/promises'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
+ * @import { DiscoverInstalledResult } from '../../../src/core/runtime/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  * @import { LocalCaInfo } from '../../../src/core/tls/types.js'
  */
@@ -1103,6 +1104,12 @@ export async function collectHypAwareStatus(opts = {}) {
     discovered: manifests.bundled,
     installed: manifests.installed,
   })
+  // The second question the catalog cannot answer: which config entries name a
+  // plugin this machine has installed but whose manifest the kernel rejected.
+  // They are absent from the catalog exactly as a typo is, and only this tells
+  // the validator which of the two it is looking at (issue #1936).
+  const unloadableInstalled = unloadableInstalledPlugins(manifests.installed)
+  const unloadablePlugins = new Set(unloadableInstalled.keys())
 
   // @ref LLP 0031#central-layer-is-sacrosanct [implements]: Same merge + validation pruning as boot, so status shows exactly what runs
   const merged = resolveLayeredConfig({
@@ -1110,6 +1117,7 @@ export async function collectHypAwareStatus(opts = {}) {
     local: localConfig,
     validate: (cfg) => collectConfigErrors(cfg, {
       ...(catalog ? { knownPlugins: catalog.pluginMetadata, knownDatasets: catalog.knownDatasets } : {}),
+      unloadablePlugins,
     }),
   })
   const config = (centralConfig || localConfig) ? merged.effective : null
@@ -1198,6 +1206,7 @@ export async function collectHypAwareStatus(opts = {}) {
       const result = await validateConfig(config, {
         knownPlugins: catalog.pluginMetadata,
         knownDatasets: catalog.knownDatasets,
+        unloadablePlugins,
       })
       validationErrors = result.errors
     } catch (err) {
@@ -1242,12 +1251,16 @@ export async function collectHypAwareStatus(opts = {}) {
         repair: ['hyp setup --from-file <config.json> --force'],
       })
     }
+    // A per-entry repair wins over the by-kind one where the entry has
+    // something the kind cannot know - the install directory of a plugin whose
+    // manifest would not load.
+    const pluginRepairs = pluginRepairsByPointer(config, unloadableInstalled)
     for (const err of validationErrors) {
       diagnostics.push({
         severity: 'error',
         kind: 'config_invalid',
         message: `[${err.errorKind}] ${err.pointer || '<root>'}: ${err.message}`,
-        repair: repairForConfigError(err.errorKind),
+        repair: pluginRepairs.get(err.pointer) ?? repairForConfigError(err.errorKind),
         pointer: err.pointer,
       })
     }
@@ -3499,19 +3512,25 @@ async function buildStatusCatalog({ stateDir }) {
 
 /**
  * The one discovery pass behind {@link buildStatusCatalog}, exposed so the
- * collector can also ask the manifests a question the catalog cannot answer:
- * which installed plugins are shadowed by a bundled name. The catalog is
- * first-writer-wins, so a shadowed installed manifest leaves no trace in it.
- * Each discovery failure degrades to empty, never throws.
+ * collector can also ask the manifests questions the catalog cannot answer:
+ * which installed plugins are shadowed by a bundled name, and which are in
+ * the lock but contributed no manifest. The catalog is built from manifests
+ * that loaded, so neither leaves a trace in it. Each discovery failure
+ * degrades to empty, never throws.
+ *
+ * The installed side is returned whole rather than narrowed to `loaded`: the
+ * lock entries are what say a plugin is installed, and the collector needs
+ * them to tell an unloadable install from a name this machine never had
+ * (issue #1936).
  *
  * @param {{ stateDir: string }} args
- * @returns {Promise<{ bundled: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }>}
+ * @returns {Promise<{ bundled: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: DiscoverInstalledResult }>}
  */
 async function discoverStatusManifests({ stateDir }) {
   /** @type {{ loaded: LoadedManifest[], excluded: LoadedManifest[] }} */
   let bundled = { loaded: [], excluded: [] }
-  /** @type {{ loaded: LoadedManifest[] }} */
-  let installed = { loaded: [] }
+  /** @type {DiscoverInstalledResult} */
+  let installed = { loaded: [], failed: [], lockEntries: [] }
   try {
     bundled = await discoverBundledPlugins()
   } catch { /* bundled discovery failure is non-fatal */ }
@@ -3519,6 +3538,35 @@ async function discoverStatusManifests({ stateDir }) {
     installed = await discoverInstalledPlugins({ stateDir })
   } catch { /* installed discovery failure is non-fatal */ }
   return { bundled, installed }
+}
+
+/**
+ * Installed plugins the kernel cannot see: a lock entry whose `install_dir`
+ * manifest `discoverInstalledPlugins` rejected (corrupt, unparseable, failing
+ * schema validation, or naming a different plugin). Keyed by the lock entry's
+ * name and valued by its directory, because the name is the only trustworthy
+ * one available - a manifest that did not parse has none, which is why the
+ * sibling `plugin_manifest_unloadable` diagnostic (issue #1576) is
+ * directory-shaped throughout. The lock is also exactly what `hyp plugin list`
+ * calls installed, so the two surfaces stop contradicting each other.
+ *
+ * Derived by subtracting the manifests that loaded from the lock, rather than
+ * by matching `failed[]` back to a directory: `FailedManifest` carries no
+ * name, and the subtraction also catches the name-mismatch rejection, whose
+ * manifest parsed under someone else's name.
+ *
+ * @param {Awaited<ReturnType<typeof discoverStatusManifests>>['installed']} installed
+ * @returns {Map<string, string>} plugin name -> install directory
+ */
+function unloadableInstalledPlugins(installed) {
+  /** @type {Map<string, string>} */
+  const out = new Map()
+  const loaded = new Set(installed.loaded.map((m) => m.manifest.name))
+  for (const entry of installed.lockEntries) {
+    if (loaded.has(entry.name)) continue
+    out.set(entry.name, entry.install_dir)
+  }
+  return out
 }
 
 /**
@@ -3923,6 +3971,36 @@ function requiresUnsatisfiedConfigRepair({ plugin, dependency, centralPluginName
         + ` - '${dependency}' is named by the central config but disabled there, so enabling it in the local file changes nothing`
       : `remove '${plugin}' from ${configPath}, or install '${dependency}' on this host`
         + ` - '${dependency}' is named by the central config, so enabling it in the local file changes nothing`
+}
+
+/**
+ * Per-entry repairs for the config errors that have one, keyed by the
+ * validator's own pointer so no message is parsed and no index is re-derived.
+ * Today that is `plugin_installed_unloadable`: the validator can say the
+ * install is the fault but not where it lives, so the directory is filled in
+ * here from the same discovery pass that classified the name.
+ *
+ * `hyp plugin doctor` first because it prints the rejection the operator is
+ * missing, then `hyp plugin update`, which re-fetches from the source the
+ * lock recorded. Neither touches the config: the config entry is the one
+ * thing about this install that is right (issue #1936).
+ *
+ * @param {HypAwareV2Config | null} config the merged config the pointers index
+ * @param {Map<string, string>} unloadable plugin name -> install directory
+ * @returns {Map<string, string[]>} pointer -> repair
+ * @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair is a command that runs, so the directory is filled in rather than left a placeholder
+ */
+function pluginRepairsByPointer(config, unloadable) {
+  /** @type {Map<string, string[]>} */
+  const out = new Map()
+  if (unloadable.size === 0 || !config?.plugins) return out
+  for (let i = 0; i < config.plugins.length; i += 1) {
+    const name = config.plugins[i].name
+    const dir = sanitizeLabel(unloadable.get(name), MAX_ACTIVATION_MESSAGE_CHARS)
+    if (dir === undefined) continue
+    out.set(`/plugins/${i}/name`, [`hyp plugin doctor ${dir}`, `hyp plugin update ${name}`])
+  }
+  return out
 }
 
 /**

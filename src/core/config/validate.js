@@ -168,7 +168,7 @@ export function collectConfigErrors(config, ctx = {}) {
   /** @type {ConfigValidationError[]} */
   const errors = []
   checkDuplicatePlugins(config, errors)
-  checkPluginsKnown(config, knownPlugins, errors)
+  checkPluginsKnown(config, knownPlugins, errors, ctx.unloadablePlugins)
   checkSinks(config, knownPlugins, errors)
   checkRetention(config, knownDatasets, errors)
   checkCapabilityAmbiguity(config, knownPlugins, errors)
@@ -231,7 +231,12 @@ export async function validateConfig(config, ctx = {}) {
       sink_count: sinkCount,
     },
     async (span) => {
-      const errors = collectConfigErrors(config, { knownPlugins, knownDatasets, configRegistry })
+      const errors = collectConfigErrors(config, {
+        knownPlugins,
+        knownDatasets,
+        configRegistry,
+        unloadablePlugins: ctx.unloadablePlugins,
+      })
 
       for (const e of errors) {
         log.error('config.validate.error', {
@@ -278,15 +283,35 @@ function checkDuplicatePlugins(config, errors) {
 }
 
 /**
+ * A config entry naming no known plugin is one of two faults, and they want
+ * opposite repairs: a name nothing on this machine matches (a typo - rewrite
+ * the config), and a name the install lock does match whose manifest was
+ * rejected (fix the install; the config is right). Both are absent from
+ * `knownPlugins`, which is built from manifests that loaded, so only
+ * `unloadablePlugins` separates them. Callers that do not supply it keep the
+ * single older reading.
+ *
  * @param {HypAwareV2Config} config
  * @param {Map<PluginName, PluginMetadata>} knownPlugins
  * @param {ConfigValidationError[]} errors
+ * @param {Set<PluginName>} [unloadablePlugins]
  */
-function checkPluginsKnown(config, knownPlugins, errors) {
+function checkPluginsKnown(config, knownPlugins, errors, unloadablePlugins) {
   if (!config.plugins) return
   for (let i = 0; i < config.plugins.length; i += 1) {
     const entry = config.plugins[i]
     if (!knownPlugins.has(entry.name)) {
+      if (unloadablePlugins?.has(entry.name)) {
+        // Still an error - the plugin captures nothing either way - but the
+        // operator is sent to the install, not the config. The directory is
+        // named by the status surface that owns the repair, not here.
+        errors.push({
+          pointer: `/plugins/${i}/name`,
+          errorKind: 'plugin_installed_unloadable',
+          message: `plugin '${entry.name}' is installed but its manifest will not load, so nothing in it is running`,
+        })
+        continue
+      }
       // For first-party only knowledge this catches typos against
       // declared plugins. Third-party plugins land in Phase 7; this
       // check should not fail then because the merged registry will
