@@ -265,8 +265,11 @@ test('hyp session ignore / unignore round-trip through the control route', async
   })
 })
 
-test('the lifetime note describes persistence and warns that forks need a new exclusion', async () => {
+test('the lifetime note describes persistence, and the write receipt states the fork answer for THIS id', async () => {
   // @ref LLP 0403#contract [tests]: reads and writes share the lifetime receipt.
+  // @ref LLP 0419#receipt [tests]: whether a fork is covered is a per-session
+  // fact now, so the blanket warning is replaced by the answer for this id -
+  // and silence, which would read as the armed case, is not an option.
   const set = /** @type {Set<string>} */ (new Set())
   await withControlServer(set, async (base) => {
     const env = { CLAUDE_CODE_SESSION_ID: 'sess-fork' }
@@ -274,15 +277,20 @@ test('the lifetime note describes persistence and warns that forks need a new ex
     const mut = fakeCtx({ endpoint: base, env })
     assert.equal(await runSessionIgnore([], mut.ctx), 0)
     assert.match(mut.stdout(), /survives daemon restarts/, 'the receipt must describe persistence')
-    assert.match(mut.stdout(), /fork/)
-    assert.match(mut.stdout(), /mints a new session id it no longer covers/)
+    // No transcript is on record for this id, so the honest answer is that
+    // fork protection was NOT established.
+    assert.match(mut.stdout(), /fork:\s+fork protection is UNCONFIRMED/)
+    assert.doesNotMatch(
+      mut.stdout(),
+      /mints a new session id it no longer covers/,
+      'the blanket claim is false for a session whose fork IS covered'
+    )
 
-    // `status` prints the same caveat off the same constant, so the writer's
+    // `status` prints the lifetime note off the same constant, so the writer's
     // wording and the reader's cannot drift apart.
     const read = fakeCtx({ endpoint: base, env })
     assert.equal(await runSessionStatus([], read.ctx), 0)
     assert.match(read.stdout(), /survives daemon restarts/)
-    assert.match(read.stdout(), /mints a new session id it no longer covers/)
 
     // `unignore` has no opt-out to qualify, so it stays silent about both.
     const off = fakeCtx({ endpoint: base, env })

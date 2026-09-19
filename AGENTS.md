@@ -187,6 +187,12 @@ Written acceptance procedures:
   check. Also records that a repeat `hyp github backfill` re-appends by design
   (LLP 0374), so a row-count check is not read as a regression. See
   `docs/ACCEPTANCE.md`.
+- `claude_fork_session_optout`: opt-in/manual, needs a real Claude Code. Proves
+  the two upstream facts the fork guard rests on and that no fixture can
+  settle: that a real `claude --fork-session` still copies each transcript
+  line's `uuid` unchanged, and that the managed hook still sees the fork. If
+  either drifts, an opted-out conversation is recorded in full under the fork's
+  id with nothing to say so. See `docs/ACCEPTANCE.md`.
 - `cursor_editor_cli_capture`: opt-in/manual, needs a real Cursor editor and
   Cursor CLI. The adapter reads a private, version-specific saved-session
   format, so only a real client can say whether the recovered rows match what

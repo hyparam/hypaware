@@ -2118,6 +2118,95 @@ pass. The daemon retained bounded backlog and scheduled a retry for
 
 ---
 
+## `claude_fork_session_optout`
+
+**What it proves:** that a real `claude --fork-session` still carries the
+parent transcript's line `uuid` values into the copy, that the installed
+managed hook still receives the fork (`source: "fork"` on `SessionStart`), and
+that the fork's new session id therefore reaches the drop set before the
+fork's first exchange is recorded.
+
+Both halves are upstream facts that no fixture can settle. A hermetic test
+forks a transcript we wrote ourselves, so it agrees with itself whatever
+Claude Code does. If a release renames the `uuid` field, stops copying it
+unchanged, rewrites it per fork, or drops `source` from the hook payload, the
+guard silently stops recognising forks: nothing errors, no column goes null,
+and the only symptom is an opted-out conversation being recorded in full under
+a new id, which is exactly the failure LLP 0419 exists to prevent.
+
+**What it does not prove:** anything about the Codex lane, which is not
+implemented (hyparam/hypaware#1891 remains open for it); that content recorded
+before the opt-out is purged (it is not, by design); or that a fork made
+before its parent was ignored is retroactively excluded (it is not).
+
+**Required when:** a release changes the fork guard in
+`hypaware-core/plugins-workspace/claude/src/hook_command.js`, the fingerprint
+store in `src/core/control/session_ignore_store.js`, the transcript reader in
+`src/core/claude/transcript_fingerprint.js`, or the managed hook event list in
+`hypaware-core/plugins-workspace/claude/src/settings.js`. Also worth running
+against a new Claude Code major, alongside `claude_otel_shape_check`.
+
+**Requires:**
+
+- A real Claude Code (2.1.214 or newer for `source: "fork"`; an older build is
+  still covered by the `UserPromptSubmit` backstop, and running against one is
+  a useful second pass).
+- HypAware attached (`hyp client attach claude`) and the daemon running, in a
+  disposable `HYP_HOME`.
+- `jq` on `PATH`.
+
+**Procedure:**
+
+1. Start a Claude Code session and exchange two or three turns, so the
+   transcript has a head to fingerprint. Note its session id
+   (`hyp session status --json | jq -r .session_id`) as `$A`.
+2. `hyp session ignore` in that session. Record the receipt. The `fork:` line
+   must read as armed, and `--json` must carry
+   `"fork_protection": "armed"`. If it says `UNCONFIRMED`, the session-context
+   channel has no `transcript_path` for `$A` and the rest of this procedure
+   proves nothing: fix that first.
+3. Confirm the fingerprint landed:
+   `ls "$HYP_HOME"/hypaware/session-ignores/*.fingerprint.json`. Record its
+   content. It must be a JSON array of uuids and nothing else.
+4. Compare it to the parent transcript by hand:
+   `head -8 <transcript> | jq -r .uuid`. The stored list must be a prefix of
+   this, in order. **This is the upstream fact a fixture cannot check.**
+5. Fork it: `claude --resume $A --fork-session`. Send exactly one prompt.
+6. In the fork, `hyp session status --json`. It must report `ignored: true`
+   for the fork's own id, `$B`. Record `$A` and `$B` and confirm they differ.
+7. Confirm the copy really did carry the uuids:
+   `head -8 <fork transcript> | jq -r .uuid` must share at least one value
+   with step 3's list, and its `sessionId` must be `$B`, not `$A`.
+8. Query for the fork's content:
+   `hyp query sql "select count(*) from ai_gateway_messages where session_id = '$B'"`
+   and the same over `claude_telemetry_events`. Both must be 0.
+9. Run the transcript backfill over the fork and repeat step 8. Still 0.
+10. Fork the fork (`claude --resume $B --fork-session`), send one prompt, and
+    repeat steps 6 and 8 for `$C`. A fork of a fork is covered by the original
+    parent's fingerprint, with no record of its own.
+11. The direction that matters more: start an unrelated session, fork it, send
+    one prompt, and confirm `hyp session status` reports it NOT ignored and
+    that its rows are being written. A guard that ignores sessions nobody
+    opted out of destroys capture silently.
+12. `hyp session unignore $A`, then `$B`, then `$C`. Every fork in a chain
+    carries the same leading uuids, so each auto-ignored fork has a
+    fingerprint of its own: unignoring only `$A` leaves `$B`'s fingerprint
+    still matching `$A`, and the guard re-adds `$A` on its next prompt. That
+    is a known limit (LLP 0419 #scope), not a failure of this run. Confirm
+    `session-ignores/` is then empty of both file kinds, and that a fresh fork
+    of `$A` is recorded again.
+
+**Pass condition:** steps 4 and 7 show shared uuids, steps 6 and 10 report
+`ignored: true`, steps 8 and 9 report 0 rows, step 11 records normally, and
+step 12 leaves the directory empty of both files.
+
+**Record in the release notes:** the observed `claude --version`, the stored
+fingerprint from step 3, the `head -8 ... | jq -r .uuid` output from steps 4
+and 7, and whether the hook saw `source: "fork"`. That is the baseline the
+next release diffs against.
+
+---
+
 ## Other candidates
 
 `CLAUDE.md` lists further acceptance candidates that have no written

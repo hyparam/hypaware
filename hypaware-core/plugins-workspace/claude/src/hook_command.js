@@ -6,6 +6,12 @@ import { execFile } from 'node:child_process'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
+import { readTranscriptHeadUuids } from '../../../../src/core/claude/transcript_fingerprint.js'
+import {
+  hasSessionForkFingerprint,
+  hasSessionIgnoreMarker,
+  sessionForkFingerprintMatches,
+} from '../../../../src/core/control/session_ignore_store.js'
 import { readObservabilityEnv } from '../../../../src/core/observability/env.js'
 import { appendSessionContext } from './session_context.js'
 import {
@@ -22,6 +28,16 @@ const execFileAsync = promisify(execFile)
 
 /** The plugin whose v2 config slice carries the spool cap this hook applies. */
 const PLUGIN_NAME = '@hypaware/claude'
+
+/**
+ * How long the fork guard waits for `hyp session ignore` to finish.
+ *
+ * Generous, because the alternative to waiting is recording a conversation the
+ * user opted out of, and this runs at most once per forked session. Claude
+ * blocks on a SessionStart hook, so the wait is felt - but only by someone who
+ * just forked an excluded conversation, and only once.
+ */
+const FORK_IGNORE_TIMEOUT_MS = 20_000
 
 /**
  * `hyp claude-hook session-context --state-file <absolute-path>`
@@ -56,9 +72,10 @@ const PLUGIN_NAME = '@hypaware/claude'
  * source by writing cwd before the git lookups.
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ gitBranch?: typeof currentGitBranch, gitRepoFacts?: typeof gitRepoFacts, sweepSpool?: typeof sweepBodySpool }} [deps]
- *   injectable git lookups and spool sweep (tests); default to the real
- *   subprocess helpers and the real sweep.
+ * @param {{ gitBranch?: typeof currentGitBranch, gitRepoFacts?: typeof gitRepoFacts, sweepSpool?: typeof sweepBodySpool, ignoreSession?: typeof ignoreSessionViaCli }} [deps]
+ *   injectable git lookups, spool sweep, and fork-guard opt-out call (tests);
+ *   default to the real subprocess helpers, the real sweep, and the real CLI
+ *   re-invocation.
  */
 export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
   if (argv.includes('--help') || argv.includes('-h')) {
@@ -101,7 +118,7 @@ export async function runClaudeSessionContextHook(argv, ctx, deps = {}) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
- * @param {{ gitBranch?: typeof currentGitBranch, gitRepoFacts?: typeof gitRepoFacts }} deps
+ * @param {{ gitBranch?: typeof currentGitBranch, gitRepoFacts?: typeof gitRepoFacts, ignoreSession?: typeof ignoreSessionViaCli }} deps
  * @returns {Promise<void>}
  */
 async function recordSessionContext(argv, ctx, deps) {
@@ -156,7 +173,18 @@ async function recordSessionContext(argv, ctx, deps) {
     }
   }
 
-  // Enriched record SECOND: run the (slower) git subprocesses, then append the
+  // Fork guard THIRD, before the git lookups: a fork of an excluded session
+  // has to reach the drop set before the first exchange leaves, and nothing on
+  // the row-enrichment path is worth delaying it for. It runs after the
+  // minimal record above on purpose - `hyp session ignore` reads that record
+  // to fingerprint the fork in turn, which is what covers a fork of a fork.
+  try {
+    await applyForkGuard(event, sessionId, transcriptPath, ctx, deps)
+  } catch {
+    /* hook MUST never throw back into Claude Code */
+  }
+
+  // Enriched record LAST: run the (slower) git subprocesses, then append the
   // branch / repo-graph identity. Wrapped so a git hang-or-throw or write error
   // still leaves the minimal record safely on disk (degrade to cwd-only).
   try {
@@ -185,6 +213,108 @@ async function recordSessionContext(argv, ctx, deps) {
   } catch {
     /* git or write failure: the minimal record already landed */
   }
+}
+
+/**
+ * Close a fork of an excluded session, before its first exchange is recorded.
+ *
+ * `claude --fork-session` (and `/branch`) mints a NEW session id and copies the
+ * parent transcript under it, so an opt-out taken on the parent - which every
+ * recorder keys on that id alone - covers none of the copied conversation.
+ * Claude hands a hook no parent id and has declined to add one, so the parent
+ * is identified by what the copy carries unchanged: each copied line keeps its
+ * `uuid` while `sessionId` is rewritten. `hyp session ignore` stored the
+ * parent's leading uuids; a match here means this session is a copy of one.
+ *
+ * The new id is added through the CLI verb rather than by writing the store
+ * directly, so the fork lands in the persistent marker AND in the in-memory set
+ * of every live recorder by exactly the path a hand-typed `hyp session ignore`
+ * takes (LLP 0256#cli-posts-to-both). Hooks cannot block a session on either
+ * client, so arriving before the first exchange is what is possible.
+ *
+ * Cost on the ordinary path: one `stat` (is this session already excluded) plus
+ * one `readdir` that stops at its first entry (has anything ever been
+ * excluded). The transcript is read, and the CLI is spawned, only for a session
+ * that is neither.
+ *
+ * @ref LLP 0419#hook-closes-the-fork [implements]: any-match on the parent's
+ * leading uuids, then the ordinary ignore path
+ * @param {Record<string, unknown>} event
+ * @param {string} sessionId
+ * @param {string | undefined} transcriptPath
+ * @param {CommandRunContext} ctx
+ * @param {{ ignoreSession?: typeof ignoreSessionViaCli }} deps
+ * @returns {Promise<void>}
+ */
+async function applyForkGuard(event, sessionId, transcriptPath, ctx, deps) {
+  if (!transcriptPath || !isForkCheckEvent(event)) return
+  const stateRoot = readObservabilityEnv(ctx.env).stateDir
+  // Already excluded: the SessionStart pass took it, and the UserPromptSubmit
+  // repeats that follow have nothing left to do.
+  if (hasSessionIgnoreMarker(stateRoot, sessionId)) return
+  if (!hasSessionForkFingerprint(stateRoot)) return
+  const uuids = readTranscriptHeadUuids(transcriptPath)
+  if (uuids.length === 0 || !sessionForkFingerprintMatches(stateRoot, uuids)) return
+  try {
+    await (deps.ignoreSession ?? ignoreSessionViaCli)(sessionId, ctx)
+    ctx.stderr.write('hyp claude-hook: this session is a fork of an ignored session; its session ID has been added to the drop set\n')
+  } catch (err) {
+    // Nothing here can stop the session, so the only honest response to a
+    // failed write is to say the fork is NOT covered, loudly enough to find.
+    const reason = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp claude-hook: this session is a fork of an ignored session but could not be ignored (${reason}); run 'hyp session ignore' in it\n`)
+  }
+}
+
+/**
+ * Which events get the fork check.
+ *
+ * `SessionStart` is where a fork announces itself: Claude Code 2.1.214 and
+ * newer set `source: "fork"`. A build that sends no `source` at all still gets
+ * checked, because the field's absence says nothing about whether this is a
+ * fork; a `source` that names something else (`startup`, `resume`, `clear`)
+ * does, and is skipped.
+ *
+ * `UserPromptSubmit` repeats the check unconditionally and idempotently. It is
+ * the backstop for a copy that lands after SessionStart ran, and it still fires
+ * before the prompt reaches the model, so the repeat is also in time.
+ *
+ * @param {Record<string, unknown>} event
+ * @returns {boolean}
+ */
+function isForkCheckEvent(event) {
+  if (event.hook_event_name === 'UserPromptSubmit') return true
+  if (event.hook_event_name !== 'SessionStart') return false
+  return typeof event.source !== 'string' || event.source === 'fork'
+}
+
+/**
+ * Add one session id to the drop set by running the ordinary CLI verb, in this
+ * same install: `process.argv[1]` is the `bin/hypaware.js` this hook is already
+ * executing, so the spawned verb resolves the same recorders, writes the same
+ * marker, and applies the same receipt rules with nothing duplicated here.
+ *
+ * Output is captured and discarded rather than forwarded: a SessionStart hook's
+ * stdout is injected into Claude's context, and the receipt is not something to
+ * put in front of the model.
+ *
+ * @param {string} sessionId
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<void>}
+ */
+async function ignoreSessionViaCli(sessionId, ctx) {
+  const entrypoint = process.argv[1]
+  if (typeof entrypoint !== 'string' || entrypoint.length === 0) {
+    throw new Error('no hyp entrypoint to re-invoke')
+  }
+  await execFileAsync(
+    process.execPath,
+    // `--json` first, then `--`: the id is client-supplied and an id opening
+    // with a dash would otherwise be read as an unknown flag and refused on
+    // every prompt for the life of the session.
+    [entrypoint, 'session', 'ignore', '--json', '--', sessionId],
+    { env: ctx.env, timeout: FORK_IGNORE_TIMEOUT_MS, maxBuffer: 256 * 1024 }
+  )
 }
 
 /**

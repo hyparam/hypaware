@@ -259,9 +259,11 @@ export async function activate(ctx) {
   })
 
   // @ref LLP 0106 [implements]: Codex's degraded classification prompt. Codex
-  // has no SessionStart context-injection hook, so the "force" degrades to a
-  // firm first-prompt nag this command emits; same decision, copy, and verbs
-  // as Claude's blocking prompt.
+  // does ship hooks (0.153.4 lists them as a stable feature, with a
+  // Claude-compatible `hooks.json` and a `SessionStart` event), but HypAware
+  // installs none, so there is no attach-time channel to inject the
+  // classification into: the "force" degrades to a firm first-prompt nag this
+  // command emits; same decision, copy, and verbs as Claude's blocking prompt.
   ctx.commands.register({
     name: 'codex-hook classify-cwd',
     summary: 'Internal Codex hook: nag to classify an unclassified folder on an enrolled machine',
