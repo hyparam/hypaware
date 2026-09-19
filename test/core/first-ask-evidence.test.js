@@ -165,6 +165,43 @@ test('an astral character straddling the reply cut leaves no half of it in the e
   assert.equal(text.get('sE'), `${'v'.repeat(495)}     `, 'and trailing space is left alone: the excerpt is prose, and buildCandidates is what collapses whitespace')
 })
 
+test('an astral character straddling the tool-args cut leaves no half of it in the args, and none in the head built from them', async () => {
+  // @ref LLP 0398#one-signal [tests]: the steps are the calls the record shows ran, and a character in a head is not half a surrogate pair
+  // Through the same engine the gather runs on. hypaware #1910: SUBSTR
+  // here counts UTF-16 code units, so a pair sitting across unit 160 was
+  // cut in half, and `commandHeads` carried the high half through
+  // `path.basename` into a head `renderCandidates` writes into
+  // `candidates.md`, which is written UTF-8 and renders it U+FFFD. The
+  // head shows the half only when a branch matches and its 120-unit
+  // capture window reaches the cut, which is what `readArgs` opens
+  // `file_path` late enough to do.
+  const early = `{"file_path":"/repo/\u{1F389}early.md","description":"${'d'.repeat(200)}"}`
+  const bash = `{"command":"npm test ${'-'.repeat(200)}"}`
+  const short = '{"file_path":"/repo/short.md"}'
+  const rows = [
+    callRow('sA', 'Read', readArgs(159)),
+    callRow('sB', 'Read', readArgs(158)),
+    callRow('sC', 'Read', early),
+    callRow('sD', 'Bash', bash),
+    callRow('sE', 'Read', short),
+  ]
+  const anchors = rows.map((r) => ({ id: String(r.session_id), at: Date.UTC(2026, 7, 12, 9), triggers: 1 }))
+  const result = await evidenceRows(rows, evidenceSql('2026-08-08').calls(anchors))
+  const args = new Map(result.rows.map((r) => [String(r.session_id), String(r.args)]))
+  assert.equal(args.size, rows.length, 'every call is returned')
+  for (const [id, a] of args) assert.ok(!UNPAIRED_SURROGATE.test(a), `no unpaired surrogate in ${id}: ${JSON.stringify(a.slice(-4))}`)
+  assert.equal(args.get('sA'), readArgs(159).slice(0, 159), 'the split character is dropped whole, leaving the 159 units before it')
+  // The rows that split nothing are the guard against a repair that
+  // shortens every slice: only the straddling one loses a unit.
+  assert.equal(args.get('sB'), readArgs(158).slice(0, 160), 'a pair that ends exactly on the cut is kept')
+  assert.equal(args.get('sC'), early.slice(0, 160), 'and one at the front, which a cut starting at unit 1 cannot split')
+  assert.equal(args.get('sD'), bash.slice(0, 160), 'a slice with no astral character is the same 160 units it always was')
+  assert.equal(args.get('sE'), short, 'and a call shorter than the cut is untouched, closing brace and all')
+  const heads = commandHeads(result.rows).map((h) => h.head)
+  for (const head of heads) assert.ok(!UNPAIRED_SURROGATE.test(head), `no unpaired surrogate in ${JSON.stringify(head)}`)
+  assert.ok(heads.includes(`Read: ${'p'.repeat(112)}`), 'the head of the straddling call is its path less the split character')
+})
+
 test('commandHeads: a cd prefix is dropped and the head is the verb plus its subcommand', () => {
   const heads = commandHeads([
     { session_id: 's1', tool_name: 'Bash', args: '{"command":"cd /repo && git checkout -b topic"}' },
@@ -212,6 +249,33 @@ function replyRow(sessionId, text) {
 }
 
 /**
+ * One tool call in the window, as `sql.calls` reads it.
+ * @param {string} sessionId
+ * @param {string} toolName
+ * @param {string} toolArgs
+ * @returns {Record<string, SqlPrimitive>}
+ */
+function callRow(sessionId, toolName, toolArgs) {
+  return { date: '2026-08-12', session_id: sessionId, part_type: 'tool_call', conversation_source: null, message_created_at: new Date(Date.UTC(2026, 7, 12, 10)), tool_name: toolName, tool_args: toolArgs }
+}
+
+/**
+ * Where `readArgs` opens the `file_path` value: code unit 47, late enough
+ * that `commandHeads`' 120-unit capture window reaches the statement's cut
+ * at 160, and early enough that the path is what that window holds.
+ */
+const READ_ARGS_OPEN = '{"description":"dddddddddd","file_path":"/repo/'
+
+/**
+ * A Read call's serialized `tool_args`, with an astral character starting
+ * on code unit `at` of the serialization and a plain path either side.
+ * @param {number} at
+ */
+function readArgs(at) {
+  return `${READ_ARGS_OPEN}${'p'.repeat(at - READ_ARGS_OPEN.length)}\u{1F389}.md"}`
+}
+
+/**
  * The candidate statement over `rows`, through the same engine the gather
  * runs on, so a test reads the keys the engine really returns rather than
  * asserting on the SQL text.
@@ -228,7 +292,7 @@ function candidateLines(rows) {
  * @param {string} query
  */
 function evidenceRows(rows, query) {
-  const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
+  const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text', 'tool_name', 'tool_args']
   /** @type {AsyncDataSource} */
   const source = {
     columns,

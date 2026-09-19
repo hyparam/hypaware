@@ -205,13 +205,14 @@ const FOLD_TO_SPACE = '[^a-z0-9 \\u0080-\\u1fff\\u2070-\\uffff]+'
  * `KEY_CHARS` states. Anchored, because the cut is the only thing here
  * that can split a pair.
  *
- * The reply excerpt in `sql.replies` takes the same repair for the same
- * reason: that cut counts code units too, and its text is written into
- * `candidates.md` as UTF-8. Anchored suffices there as well, because that
- * cut starts at code unit 1 and so cannot orphan a low half at the front,
- * and because a low half cannot already be sitting in `content_text`: the
- * cache encodes strings with `TextEncoder`, which writes any unpaired
- * half as U+FFFD.
+ * The reply excerpt in `sql.replies` and the tool-args slice in
+ * `sql.calls` take the same repair for the same reason: both cuts count
+ * code units too, and both reach `candidates.md` as UTF-8, the args by
+ * way of the head `commandHeads` builds from them. Anchored suffices for
+ * all three, because each cut starts at code unit 1 and so cannot orphan
+ * a low half at the front, and because a low half cannot already be
+ * sitting in the column: the cache encodes strings with `TextEncoder`,
+ * which writes any unpaired half as U+FFFD.
  */
 const LONE_SURROGATE_TAIL = '[\\ud800-\\udbff]$'
 
@@ -367,7 +368,13 @@ export function evidenceSql(from) {
     // to avoid.
     // @ref LLP 0398#consequences [constrained-by]: a row a session a candidate line is the bound; a LIMIT bounds only what comes back and would pick a different sample
     triggers: (lines) => `select session_id, ${TRIGGER_KEY} as line, min(message_created_at) as at, min(date) as date, min(substr(content_text, 1, 160)) as example from ai_gateway_messages where date >= '${from}' and ${human} and ${TYPED_LINE} and ${TRIGGER_KEY} in (${lines.map(sqlString).join(', ')}) group by 1, 2`,
-    calls: (anchors) => `select session_id, message_created_at as at, tool_name, substr(cast(tool_args as varchar), 1, 160) as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${rowBudget(anchors)}`,
+    // No `trim` around the strip, as in `sql.replies`: these args are
+    // serialized JSON, read only by `commandHeads`' captures, whose Bash
+    // branch splits the slice on whitespace. A trailing space can still
+    // reach a path or skill head, but it did so before the strip too,
+    // wherever the cut landed on one: trimming that is a separate tidy,
+    // not this repair.
+    calls: (anchors) => `select session_id, message_created_at as at, tool_name, regexp_replace(substr(cast(tool_args as varchar), 1, 160), '${LONE_SURROGATE_TAIL}', '') as args from ai_gateway_messages where date >= '${from}' and part_type = 'tool_call' and ${NOT_DUPLICATE_LANE} and ${afterTrigger(anchors)} order by session_id, message_created_at limit ${rowBudget(anchors)}`,
     // No `trim` around the strip, unlike the key: `buildCandidates` already
     // puts this text through `oneLine`, so trimming here would only change
     // excerpts the cut never split.
