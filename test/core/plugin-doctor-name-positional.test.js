@@ -21,6 +21,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { discoverBundledPlugins } from '../../src/core/runtime/bundled.js'
+import { runPluginDoctor } from '../../src/core/commands/plugin.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -73,8 +74,9 @@ async function makeHome(prefix, fixture = {}) {
 test('plugin doctor refuses a bundled plugin name and names the directory it ships in', async () => {
   const claude = await bundledManifest('@hypaware/claude')
   const hypHome = await makeHome('hyp-doctor-name-bundled-')
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-doctor-name-cwd-'))
   try {
-    const out = runCli(hypHome, ['plugin', 'doctor', '@hypaware/claude'], os.tmpdir())
+    const out = runCli(hypHome, ['plugin', 'doctor', '@hypaware/claude'], cwd)
     assert.equal(out.status, 2, `expected exit 2, got ${out.status}: ${out.stderr}`)
     assert.equal(out.stdout, '')
     assert.equal(
@@ -85,11 +87,12 @@ test('plugin doctor refuses a bundled plugin name and names the directory it shi
         + USAGE
     )
     // The cwd the old code would have joined the name to is never named.
-    assert.ok(!out.stderr.includes(path.join(os.tmpdir(), '@hypaware')))
+    assert.ok(!out.stderr.includes(path.join(cwd, '@hypaware')))
     // And the directory it does name is one doctor can actually be re-run on.
     await fs.stat(path.join(claude.rootDir, 'hypaware.plugin.json'))
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(cwd, { recursive: true, force: true })
   }
 })
 
@@ -110,8 +113,9 @@ test('plugin doctor names the install directory for an installed-only plugin nam
       },
     },
   })
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-doctor-installed-cwd-'))
   try {
-    const out = runCli(hypHome, ['plugin', 'doctor', '@acme/hypaware-plugin-widget'], os.tmpdir())
+    const out = runCli(hypHome, ['plugin', 'doctor', '@acme/hypaware-plugin-widget'], cwd)
     assert.equal(out.status, 2, `expected exit 2, got ${out.status}: ${out.stderr}`)
     assert.equal(
       out.stderr,
@@ -122,6 +126,7 @@ test('plugin doctor names the install directory for an installed-only plugin nam
     )
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(cwd, { recursive: true, force: true })
   }
 })
 
@@ -129,8 +134,9 @@ test('plugin doctor names the install directory for an installed-only plugin nam
 // diagnosis of a path that never existed.
 test('plugin doctor refuses a name-shaped positional matching no plugin', async () => {
   const hypHome = await makeHome('hyp-doctor-name-unknown-')
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-doctor-unknown-cwd-'))
   try {
-    const out = runCli(hypHome, ['plugin', 'doctor', '@nope/missing'], os.tmpdir())
+    const out = runCli(hypHome, ['plugin', 'doctor', '@nope/missing'], cwd)
     assert.equal(out.status, 2, `expected exit 2, got ${out.status}: ${out.stderr}`)
     assert.equal(
       out.stderr,
@@ -141,6 +147,7 @@ test('plugin doctor refuses a name-shaped positional matching no plugin', async 
     )
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(cwd, { recursive: true, force: true })
   }
 })
 
@@ -190,5 +197,70 @@ test('plugin doctor still treats a bare token as a directory', async () => {
   } finally {
     await fs.rm(hypHome, { recursive: true, force: true })
     await fs.rm(cwd, { recursive: true, force: true })
+  }
+})
+
+// The refusal is narrow in the other direction too. `@<scope>/<name>` is the
+// npm on-disk layout, so a directory of that shape under the cwd is a
+// positional this command has always taken, and it is still diagnosed rather
+// than answered with a denial that it exists.
+test('plugin doctor still diagnoses a scoped directory that exists under the cwd', async () => {
+  const hypHome = await makeHome('hyp-doctor-scoped-dir-')
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-doctor-scoped-cwd-'))
+  try {
+    const scopeDir = path.join(cwd, '@acme')
+    await fs.mkdir(scopeDir, { recursive: true })
+    const made = runCli(hypHome, ['plugin', 'new', 'widget', '--kind', 'source', '--dir', scopeDir], cwd)
+    assert.equal(made.status, 0, `expected plugin new to scaffold, got ${made.status}: ${made.stderr}`)
+
+    const out = runCli(hypHome, ['plugin', 'doctor', '@acme/widget'], cwd)
+    assert.equal(out.status, 0, `expected exit 0, got ${out.status}: ${out.stderr}${out.stdout}`)
+    assert.ok(
+      out.stdout.includes(path.join(scopeDir, 'widget')),
+      `expected the report to name the scaffolded directory, got: ${out.stdout}`
+    )
+    assert.equal(out.stderr, '')
+  } finally {
+    await fs.rm(hypHome, { recursive: true, force: true })
+    await fs.rm(cwd, { recursive: true, force: true })
+  }
+})
+
+// The miss message must not deny the package ships a name when discovery could
+// not read the whole workspace, which is the claim `plugin info` had removed
+// from its own miss for this reason (issue #1600). Driven through the command
+// function rather than the CLI, because the workspace seam is the only way to
+// put an unreadable bundled directory behind the lookup, exactly as
+// `test/core/plugin-info-bundled.test.js` reaches the same path.
+test('plugin doctor hedges the miss when bundled discovery could not read the workspace', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-doctor-unread-'))
+  try {
+    const workspaceDir = path.join(root, 'plugins-workspace')
+    // A directory with no manifest at all routes to `failed` just as a corrupt
+    // one does, so this stages the hedge with no chmod and runs as root.
+    const badDir = path.join(workspaceDir, 'claude')
+    await fs.mkdir(badDir, { recursive: true })
+    const stderr = []
+    const ctx = /** @type {any} */ ({
+      env: { ...process.env, HYP_HOME: path.join(root, 'home'), HYP_CONFIG: '' },
+      cwd: root,
+      stdout: { write: () => true },
+      stderr: { write: (/** @type {string} */ chunk) => { stderr.push(chunk); return true } },
+    })
+    assert.equal(await runPluginDoctor(['@nope/missing'], ctx, { workspaceDir }), 2)
+    const text = stderr.join('')
+    const lines = text.split('\n')
+    assert.equal(lines[0], "hyp plugin doctor: '@nope/missing' is a plugin name; this command takes a plugin directory")
+    assert.equal(
+      lines[1],
+      "  no plugin named '@nope/missing' is installed, and the plugins bundled with this package"
+        + ' could not all be read, so whether this package ships one is unknown'
+    )
+    assert.equal(lines[2], `  the bundled plugin directory ${badDir} did not yield a usable manifest`)
+    // The claim discovery cannot support.
+    assert.equal(text.includes('or bundled with this package'), false)
+    assert.ok(text.endsWith(USAGE))
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
   }
 })
