@@ -13,9 +13,18 @@ import { projectOpenCodeSnapshot } from './projector.js'
 
 const execFileAsync = promisify(execFile)
 const MAX_SESSION_LIST = 1000
+// An `opencode` child that starts and never exits parks the daemon's whole
+// scheduled sweep, so both calls are bounded, on separate budgets. The listing
+// is a bounded metadata read and takes the workspace's existing ceiling for a
+// subprocess that does real I/O (the 10s on `gh auth token`), above the 1-3s
+// given to calls that only read a version or a git line. The export renders one
+// whole transcript, which `maxBuffer` already sizes at 32MB, and overrunning it
+// costs one warned session where a slow listing fails the run.
+const LIST_TIMEOUT_MS = 10_000
+const EXPORT_TIMEOUT_MS = 60_000
 
 /**
- * @param {{ localOnlyListPath?: string, runCommand?: (args: string[]) => Promise<string>, exactSessionIds?: string[], ignoredSessions?: Set<string> }} [opts]
+ * @param {{ localOnlyListPath?: string, runCommand?: (args: string[], timeoutMs: number) => Promise<string>, exactSessionIds?: string[], ignoredSessions?: Set<string> }} [opts]
  * @returns {BackfillContribution}
  */
 export function createOpenCodeBackfillProvider(opts = {}) {
@@ -39,7 +48,7 @@ export function createOpenCodeBackfillProvider(opts = {}) {
   }
 }
 
-/** @param {{ ctx: BackfillRunContext, resolver: ReturnType<typeof createUsagePolicyResolver>, runCommand: (args: string[]) => Promise<string>, exactSessionIds?: string[], ignoredSessions?: Set<string> }} deps */
+/** @param {{ ctx: BackfillRunContext, resolver: ReturnType<typeof createUsagePolicyResolver>, runCommand: (args: string[], timeoutMs: number) => Promise<string>, exactSessionIds?: string[], ignoredSessions?: Set<string> }} deps */
 async function* runBackfill(deps) {
   const window = resolveWindow(deps.ctx)
   let emptyStdout = false
@@ -57,7 +66,7 @@ async function* runBackfill(deps) {
     /** @type {string} */
     let rawList
     try {
-      rawList = await deps.runCommand(['session', 'list', '--format', 'json', '--max-count', String(MAX_SESSION_LIST)])
+      rawList = await deps.runCommand(['session', 'list', '--format', 'json', '--max-count', String(MAX_SESSION_LIST)], LIST_TIMEOUT_MS)
     } catch (err) {
       if (!isMissingBinary(err)) throw err
       deps.ctx.log.info('opencode.backfill.cli_absent', {
@@ -126,7 +135,7 @@ async function* runBackfill(deps) {
     // to MAX_SESSION_LIST sessions behind a single bad export.
     let exported
     try {
-      const rawExport = await deps.runCommand(['export', item.id])
+      const rawExport = await deps.runCommand(['export', item.id], EXPORT_TIMEOUT_MS)
       exported = JSON.parse(rawExport)
     } catch (err) {
       deps.ctx.log.warn('opencode.backfill.session_read_failed', {
@@ -190,18 +199,45 @@ function isMissingBinary(err) {
 }
 
 /**
+ * Did this command break its timeout, as opposed to exiting on its own?
+ * `execFile` reports that as a kill it performed itself. The other failure it
+ * kills for is a `maxBuffer` overflow, and that one names itself in `code`.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isTimeoutKill(err) {
+  if (!(err instanceof Error)) return false
+  const failure = /** @type {NodeJS.ErrnoException & { killed?: boolean }} */ (err)
+  return failure.killed === true && failure.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+}
+
+/**
  * Stdout is returned verbatim. The empty-list check above reads exact
  * emptiness, so trimming here would silently turn a truncated whitespace-only
  * response into a successful "no sessions" import instead of the failure it is.
  *
+ * A timeout kill reaches the caller as "Command failed: opencode ..." with no
+ * mention of the deadline it broke. Restate it, so the disposition each call
+ * site already gives a failure names the command and its budget:
+ * `opencode.backfill.session_read_failed` for an export,
+ * `backfill.provider_error` for a listing that fails the run.
+ *
  * @param {string[]} args
+ * @param {number} timeoutMs
  */
-async function runOpenCode(args) {
-  const result = await execFileAsync('opencode', args, {
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  })
-  return result.stdout
+export async function runOpenCode(args, timeoutMs) {
+  try {
+    const result = await execFileAsync('opencode', args, {
+      encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: timeoutMs,
+    })
+    return result.stdout
+  } catch (err) {
+    if (isTimeoutKill(err)) throw new Error(`opencode ${args.join(' ')} timed out after ${timeoutMs}ms`)
+    throw err
+  }
 }
 
 /** @param {number | undefined} timestamp @param {{ sinceMs?: number, untilMs?: number }} window */
