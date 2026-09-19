@@ -18,6 +18,7 @@ import {
   updatePlugin,
 } from '../plugin_install/install.js'
 import { getEntry } from '../plugin_install/lock.js'
+import { SCOPED_NAME_RE } from '../plugin_install/resolver.js'
 import {
   buildTtyPrompt,
   buildWarnings,
@@ -748,6 +749,13 @@ export async function runPluginDoctor(argv, ctx) {
     }
   }
 
+  // A plugin name is not a directory, so without this it joins to the cwd and
+  // is diagnosed as a phantom: a header naming a path that never existed, and
+  // two repair hints written for a plugin the operator is authoring rather than
+  // a first-party adapter the package ships (issue #1584). Refused rather than
+  // resolved, so the command never has to decide which copy of a name it means.
+  if (dir !== undefined && SCOPED_NAME_RE.test(dir)) return refuseDoctorPluginName(dir, ctx)
+
   const rootDir = path.resolve(ctx.cwd ?? process.cwd(), dir ?? '.')
   const { knownPlugins } = await buildKnownPluginsForCtx(ctx)
   const knownCapabilities = capabilitiesFromMetadata(knownPlugins)
@@ -769,6 +777,43 @@ export async function runPluginDoctor(argv, ctx) {
     ctx.stdout.write(renderReport(report))
   }
   return report.ok ? 0 : 1
+}
+
+/**
+ * Refuse a `plugin doctor` positional that is a plugin name, naming the
+ * directory that plugin actually occupies so the operator can re-run against
+ * it. The directory comes from the same bundled discovery `plugin list` and
+ * `plugin info` read rather than from a guess built out of the name, and a
+ * bundled copy is preferred over an install record so the directory named is
+ * the one whose code runs.
+ *
+ * A name matching neither is still a usage error, and `unread` rides along
+ * there for the reason `plugin info` prints it (issue #1600): a discovery that
+ * could not read the whole workspace cannot say the package ships nothing.
+ *
+ * @param {string} name
+ * @param {CommandRunContext} ctx
+ * @returns {Promise<number>}
+ * @ref LLP 0380#bundled-copy-wins [implements]: the copy boot selects is the copy worth diagnosing
+ */
+async function refuseDoctorPluginName(name, ctx) {
+  const discovered = await discoverBundledManifests()
+  // `unrecognized` too: a bundled directory declaring a name this build does
+  // not know still exists, and diagnosing it is what doctor is for.
+  const rootDir = (discovered.manifests.get(name) ?? discovered.unrecognized.get(name))?.rootDir
+    ?? getEntry(await loadLock(pluginStateDir(ctx)), name)?.install_dir
+  ctx.stderr.write(`hyp plugin doctor: '${name}' is a plugin name; this command takes a plugin directory\n`)
+  if (rootDir) {
+    ctx.stderr.write(`  ${name} lives at ${rootDir}\n`)
+    ctx.stderr.write(`  run: hyp plugin doctor ${rootDir}\n`)
+  } else {
+    ctx.stderr.write(
+      `  no plugin named '${name}' is installed or bundled with this package, so there is no directory to diagnose\n`
+    )
+    if (discovered.unread) ctx.stderr.write(`  ${discovered.unread}\n`)
+  }
+  ctx.stderr.write('usage: hyp plugin doctor [dir] [--json]\n')
+  return 2
 }
 
 /**
