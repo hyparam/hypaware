@@ -31,6 +31,7 @@ import { compareStrings } from '../util/compare_strings.js'
  *   listGroups: () => CommandGroupRegistration[],
  *   registeringAs: <T>(plugin: PluginName, fn: () => T) => T,
  *   ownerOf: (name: string) => PluginName | undefined,
+ *   bodyOf: (name: string) => CommandRegistration['run'] | undefined,
  * }}
  * @ref LLP 0009#core-owns-dispatch [implements]: core routes argv to the owning command; plugins only register
  */
@@ -57,6 +58,22 @@ export function createCommandRegistry() {
    * @type {Map<string, PluginName>}
    */
   const owners = new Map()
+  /**
+   * The `run` each command was registered with, keyed by the primary name this
+   * registry validated. Written once per registration and never again, so the
+   * body {@link bodyOf} answers with is the function {@link register}'s shape
+   * check cleared.
+   *
+   * Kept here for the reason {@link owners} is, one question further on. That
+   * map settles *what a command body may reach*; this one settles *whose body
+   * runs*. `get()` and `list()` hand the stored record to the registering
+   * plugin and `run` is an ordinary writable property on it, so that field
+   * cannot be what decides which function executes (issue #1977).
+   *
+   * @type {Map<string, CommandRegistration['run']>}
+   * @ref LLP 0421#private-body [implements]: the dispatched body is the registered one, read from where the registrant cannot reach it
+   */
+  const bodies = new Map()
   /**
    * The plugin currently registering, or `''` outside an activation. Set
    * only by {@link registeringAs}, which brackets a synchronous `register`
@@ -106,6 +123,23 @@ export function createCommandRegistry() {
     return aliased === undefined ? undefined : owners.get(aliased)
   }
 
+  /**
+   * The body registered under the name `name` addresses, or `undefined` when
+   * nothing is registered under it. Accepts whatever {@link get} accepts, and
+   * resolves an alias the way {@link ownerOf} does, so a command dispatched by
+   * an alias runs the same function as one dispatched by its primary name.
+   * This is what the dispatcher calls, for the reason {@link bodies} gives.
+   *
+   * @param {string} name
+   * @returns {CommandRegistration['run'] | undefined}
+   * @ref LLP 0421#private-body [implements]: dispatch asks the registry for the body, the way it asks it for the owner
+   */
+  function bodyOf(name) {
+    if (bodies.has(name)) return bodies.get(name)
+    const aliased = aliasIndex.get(name)
+    return aliased === undefined ? undefined : bodies.get(aliased)
+  }
+
   /** @param {CommandRegistration} command */
   function register(command) {
     // Read once, before any plugin property below can run and re-enter.
@@ -143,7 +177,11 @@ export function createCommandRegistry() {
         `CommandRegistry.register: '${record.name}' missing usage${copyMiss(command, record, 'usage')}`
       )
     }
-    if (typeof record.run !== 'function') {
+    // Held as a value: the function checked here is the one stored below and
+    // dispatched later, so no second read can put a body nothing checked
+    // behind a registration this one cleared.
+    const body = record.run
+    if (typeof body !== 'function') {
       throw new TypeError(
         `CommandRegistry.register: '${record.name}' missing run()${copyMiss(command, record, 'run')}`
       )
@@ -236,6 +274,7 @@ export function createCommandRegistry() {
       }
     }
     byName.set(record.name, record)
+    bodies.set(record.name, body)
     for (const alias of aliases) {
       aliasIndex.set(alias, record.name)
     }
@@ -274,6 +313,7 @@ export function createCommandRegistry() {
     if (primary === undefined || !byName.has(primary)) return
     byName.delete(primary)
     owners.delete(primary)
+    bodies.delete(primary)
     for (const [alias, target] of aliasIndex) {
       if (target === primary) aliasIndex.delete(alias)
     }
@@ -398,7 +438,7 @@ export function createCommandRegistry() {
     return best
   }
 
-  return { register, registerGroup, unregister, get, getGroup, listGroups, list, has, size, match, registeringAs, ownerOf }
+  return { register, registerGroup, unregister, get, getGroup, listGroups, list, has, size, match, registeringAs, ownerOf, bodyOf }
 }
 
 /**

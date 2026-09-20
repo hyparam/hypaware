@@ -1,4 +1,4 @@
-import type { CommandGroupRegistration, PluginName } from '../../../hypaware-plugin-kernel-types.d.ts'
+import type { CommandGroupRegistration, CommandRegistration, PluginName } from '../../../hypaware-plugin-kernel-types.d.ts'
 
 export type {
   CommandRegistry,
@@ -31,4 +31,11 @@ export declare function createCommandRegistry(): import('../../../hypaware-plugi
    * for a core command, a verb projection, or a host-driven registration.
    */
   ownerOf(name: string): PluginName | undefined
+  /**
+   * The `run` the command `name` addresses was registered with, or
+   * `undefined` when nothing is registered under it. What the dispatcher
+   * calls: `get(name).run` is a writable property of a record the
+   * registering plugin holds, so it cannot say whose code should execute.
+   */
+  bodyOf(name: string): CommandRegistration['run'] | undefined
 }
