@@ -543,7 +543,15 @@ async function dispatchInternal(argv, opts) {
         runId: devRunId ?? `cli-${process.pid}`,
         activePlugins,
       }),
-    verbs: kernel.verbs,
+    // Same owner, same rule again: registering a verb is a plugin extension
+    // point, so a plugin's command body reaches the verb table through the
+    // facade its `activate()` holds and can neither release a verb it does not
+    // own nor write on a neighbour's registration (issue #1983). A core
+    // command keeps the raw registry for the reason it keeps the rest: `hyp
+    // mcp` assembles its tool list from every active plugin's verbs, and that
+    // is core's job.
+    // @ref LLP 0423#facade [implements]: the verbs member joins the LLP 0420 split, by the owner the split already resolved
+    verbs: ownerFacades ? ownerFacades.verbs : kernel.verbs,
     storage: kernel.storage,
     skills: kernel.skills,
     agents: kernel.agents,
