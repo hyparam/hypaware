@@ -81,10 +81,14 @@ on every dispatch. That is what closes `hyp query sql`: the command the
 dispatcher routes is the pre-boot projection, and the verb registry skips its
 own projection when the name is already taken (LLP 0264 #verb).
 
-`get()`, `getByTool()` and `list()` still hand back the stored record to the
-plugin that registered it, still unfrozen. A plugin may still rewrite its own
-`operation`. The rewrite simply stops deciding anything, the way rewriting
-`CommandRegistration.plugin` stopped deciding anything in LLP 0420.
+The registry's own `get()`, `getByTool()` and `list()` still hand back the
+stored record, still unfrozen, and so does a registrant's `ctx.verbs.get(name)`
+for its own verb. Through the facade, `getByTool` and `list` narrow even the
+owner's own entry, for the keying reason #facade gives, so a registrant asks
+`get` by the name it registered under. Either way a plugin may still rewrite
+its own `operation`, because it holds the object it registered. The rewrite
+simply stops deciding anything, the way rewriting `CommandRegistration.plugin`
+stopped deciding anything in LLP 0420.
 
 ## A plugin drives and reads the verb table through its own facade {#facade}
 
