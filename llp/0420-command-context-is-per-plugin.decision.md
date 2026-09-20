@@ -92,8 +92,9 @@ same tolerance `createSinksFacade` extends to a registry without `ownerOf`.
   the verb registry registers the projection itself, so it keeps the raw
   registries. As registered, nothing reaches a plugin through it: the
   projected `run` is kernel code (`runVerbCommand`), and the
-  `VerbOperationContext` it builds for the plugin's `operation` carries only
-  `query`, `storage`, `config`, `env` and `callerCwd`. But "as registered"
+  `VerbOperationContext` it builds for the plugin's `operation` carries
+  `query`, `storage`, `config`, `env`, `refresh`, a no-op `log` and
+  `callerCwd`, none of them a route back to a registry. But "as registered"
   is load-bearing: the stored record's `run` is writable (next bullet), so
   an ownerless projection is one of the records a plugin can rewrite.
 - This split narrows what an honestly registered command body receives. It
