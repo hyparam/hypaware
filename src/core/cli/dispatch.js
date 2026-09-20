@@ -19,7 +19,7 @@ import {
 } from '../observability/index.js'
 import { resolveDependencies } from '../dep_graph.js'
 import { createCommandRegistry } from '../registry/commands.js'
-import { createKernelRuntime } from '../runtime/activation.js'
+import { createKernelRuntime, pluginRegistryFacades } from '../runtime/activation.js'
 import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
@@ -451,6 +451,24 @@ async function dispatchInternal(argv, opts) {
 
   const tracer = getTracer('cmd-dispatch')
   const instruments = getKernelInstruments()
+  // Whose command body is about to run. Contributing a command is a plugin
+  // extension point, so a command body is a second context the same plugin
+  // reaches the registries through, and it gets the same per-plugin facades
+  // its `activate()` holds. A core command has no owner and keeps the
+  // kernel's registries: `hyp status`, `hyp sync`, `hyp sink maintain` and
+  // the wizard read every plugin's sources and sinks, and rendering that is
+  // core's job (LLP 0009 #core-rendered-status).
+  //
+  // Asked of the registry, not read off `matched.command.plugin`: that field
+  // is the plugin's own, may be omitted at registration, and `get()` hands
+  // the stored record back so it can be rewritten afterwards. The lookup is
+  // keyed on the name argv actually matched. A registry with no `ownerOf` (a
+  // host's own, injected) falls back to the declared field.
+  // @ref LLP 0420#split [implements]: a plugin-contributed command body gets its own facades; a core command keeps the raw registries
+  const commandOwner = typeof registry.ownerOf === 'function'
+    ? registry.ownerOf(matched.invokedName)
+    : matched.command.plugin
+  const ownerFacades = commandOwner ? pluginRegistryFacades(kernel, commandOwner) : undefined
   /** @type {CommandRunContext} */
   const cmdCtx = {
     stdout,
@@ -461,7 +479,7 @@ async function dispatchInternal(argv, opts) {
     config: activeConfig,
     plugins: activePlugins,
     failedPlugins,
-    capabilities: kernel.capabilities,
+    capabilities: ownerFacades ? ownerFacades.capabilities : kernel.capabilities,
     clients: kernel.clients,
     query: kernel.query,
     // In-process command dispatch seam. A thin `run(name, argv)` wrapper
@@ -508,8 +526,8 @@ async function dispatchInternal(argv, opts) {
     storage: kernel.storage,
     skills: kernel.skills,
     agents: kernel.agents,
-    sources: kernel.sources,
-    sinks: kernel.sinks,
+    sources: ownerFacades ? ownerFacades.sources : kernel.sources,
+    sinks: ownerFacades ? ownerFacades.sinks : kernel.sinks,
     initPresets: kernel.initPresets,
     backfills: kernel.backfills,
     backfillMaterializers: kernel.backfillMaterializers,

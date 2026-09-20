@@ -4,7 +4,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { CommandGroupRegistration, CommandRegistration, CommandRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandGroupRegistration, CommandRegistration, CommandRegistry, PluginName } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -29,6 +29,8 @@ import { compareStrings } from '../util/compare_strings.js'
  *   size: () => number,
  *   unregister: (name: string) => void,
  *   listGroups: () => CommandGroupRegistration[],
+ *   registeringAs: <T>(plugin: PluginName, fn: () => T) => T,
+ *   ownerOf: (name: string) => PluginName | undefined,
  * }}
  * @ref LLP 0009#core-owns-dispatch [implements]: core routes argv to the owning command; plugins only register
  */
@@ -39,9 +41,75 @@ export function createCommandRegistry() {
   const aliasIndex = new Map()
   /** @type {Map<string, CommandGroupRegistration>} */
   const groups = new Map()
+  /**
+   * The plugin whose activation registered each command, keyed by the primary
+   * name this registry validated. Populated only inside a `registeringAs`
+   * bracket, so a command core registered directly carries no owner and a
+   * plugin-registered one cannot be missing its own.
+   *
+   * Kept here rather than read back off `CommandRegistration.plugin`:
+   * `get()` and `list()` hand the stored record to the registering plugin,
+   * so that field is a live property it can redefine afterwards (the reason
+   * {@link list} orders by key rather than by `record.name`). A dispatcher
+   * deciding what a command body may reach has to ask a value the plugin
+   * cannot rewrite between registration and dispatch.
+   *
+   * @type {Map<string, PluginName>}
+   */
+  const owners = new Map()
+  /**
+   * The plugin currently registering, or `''` outside an activation. Set
+   * only by {@link registeringAs}, which brackets a synchronous `register`
+   * call, so no two activations can hold it at once however they interleave.
+   * Mirrors `SourceRegistry`/`SinkRegistry` for the reason it exists there:
+   * `command.plugin` is written by the plugin and cannot be the answer to
+   * who is calling.
+   */
+  let registrar = ''
+
+  /**
+   * Run `fn` with `plugin` recorded as the plugin doing the registering. The
+   * activation context brackets its own `register` call with this, which is
+   * how this registry learns who is calling.
+   *
+   * A bracket rather than a `register(plugin, command)` overload, for the
+   * reason `SinkRegistry.registeringAs` is one: a second entry point routes
+   * around whatever wraps `register`.
+   *
+   * @template T
+   * @param {PluginName} plugin
+   * @param {() => T} fn
+   * @returns {T}
+   * @ref LLP 0420#owner [implements]: who registered a command is recorded by core, because the dispatcher decides what its body may reach
+   */
+  function registeringAs(plugin, fn) {
+    const previous = registrar
+    registrar = typeof plugin === 'string' ? plugin : ''
+    try {
+      return fn()
+    } finally {
+      registrar = previous
+    }
+  }
+
+  /**
+   * The plugin that registered the command `name` addresses, or `undefined`
+   * when core registered it, when a verb projected it, or when a host drove
+   * this registry itself. Accepts whatever {@link get} accepts.
+   *
+   * @param {string} name
+   * @returns {PluginName | undefined}
+   */
+  function ownerOf(name) {
+    if (owners.has(name)) return owners.get(name)
+    const aliased = aliasIndex.get(name)
+    return aliased === undefined ? undefined : owners.get(aliased)
+  }
 
   /** @param {CommandRegistration} command */
   function register(command) {
+    // Read once, before any plugin property below can run and re-enter.
+    const registeredBy = registrar
     if (!command || typeof command !== 'object') {
       throw new TypeError('CommandRegistry.register: command must be an object')
     }
@@ -171,6 +239,11 @@ export function createCommandRegistry() {
     for (const alias of aliases) {
       aliasIndex.set(alias, record.name)
     }
+    // Keyed on the copy's name, which is the string the checks above cleared
+    // and the key `byName` holds, never on a re-read of the plugin's object.
+    // Aliases resolve through `aliasIndex` in {@link ownerOf}, so one entry
+    // per command is the whole record.
+    if (registeredBy !== '') owners.set(record.name, registeredBy)
     warnDroppedOptionals(record.name, dropped)
   }
 
@@ -200,6 +273,7 @@ export function createCommandRegistry() {
     const primary = byName.has(name) ? name : aliasIndex.get(name)
     if (primary === undefined || !byName.has(primary)) return
     byName.delete(primary)
+    owners.delete(primary)
     for (const [alias, target] of aliasIndex) {
       if (target === primary) aliasIndex.delete(alias)
     }
@@ -324,7 +398,7 @@ export function createCommandRegistry() {
     return best
   }
 
-  return { register, registerGroup, unregister, get, getGroup, listGroups, list, has, size, match }
+  return { register, registerGroup, unregister, get, getGroup, listGroups, list, has, size, match, registeringAs, ownerOf }
 }
 
 /**

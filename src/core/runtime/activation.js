@@ -21,7 +21,7 @@ import { isSafeContributionName } from './contribution_names.js'
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkContribution, SinkHandle, SkillContribution, SkillRegistry, SourceContribution, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, CommandGroupRegistration, CommandRegistration, CommandRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkContribution, SinkHandle, SinkRegistry, SkillContribution, SkillRegistry, SourceContribution, SourceRegistry, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
@@ -143,7 +143,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     log,
     permissions,
     capabilities,
-    commands: runtime.commands,
+    commands: createCommandsFacade(pluginName, runtime.commands),
     configRegistry: runtime.configRegistry,
     sources: createSourcesFacade(pluginName, runtime.sources),
     sinks: createSinksFacade(pluginName, runtime.sinks),
@@ -179,6 +179,100 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
   }
   runtime.activationContexts.set(pluginName, ctx)
   return ctx
+}
+
+/**
+ * The three registry facades a plugin reaches the kernel through, for the
+ * plugin named. `createActivationContext` stores the context it built, so an
+ * activated plugin gets back the very objects its own `activate()` holds;
+ * the fallback builds them for a plugin whose activation this runtime never
+ * recorded (a host that pre-registered a contribution itself, and the
+ * kernel's own tests), because the alternative is handing back the kernel's
+ * raw registries, which is the reach this exists to close.
+ *
+ * @param {KernelRuntime} runtime
+ * @param {PluginName} pluginName
+ * @returns {{ capabilities: CapabilityRegistry, sources: SourceRegistry, sinks: SinkRegistry }}
+ * @ref LLP 0420#split [implements]: a plugin reaches the registries through its own facade, whichever context it reaches them through
+ */
+export function pluginRegistryFacades(runtime, pluginName) {
+  const ctx = runtime.activationContexts?.get(pluginName)
+  if (ctx) return { capabilities: ctx.capabilities, sources: ctx.sources, sinks: ctx.sinks }
+  return {
+    capabilities: createCapabilitiesFacade(pluginName, runtime.capabilities),
+    sources: createSourcesFacade(pluginName, runtime.sources),
+    sinks: createSinksFacade(pluginName, runtime.sinks),
+  }
+}
+
+/**
+ * Per-plugin facade over the command registry. `register` runs inside
+ * `registeringAs`, so the registry records which plugin claimed the name
+ * instead of taking `command.plugin` on trust, and `registeringAs` itself
+ * forces this plugin's name the way the sources facade does.
+ *
+ * That record is what the dispatcher asks before it decides whether a command
+ * body is a plugin's or core's. Read off the registration instead, the
+ * answer would be a plugin-controlled value twice over: a registration may
+ * omit `plugin`, and `get()` hands the stored record back afterwards, so
+ * the field can also be rewritten on a command already registered.
+ *
+ * `registerGroup` is not bracketed because a group is metadata with no
+ * `run`: nothing dispatches to it, so it has no body to scope.
+ *
+ * Everything else reads through to the registry, which is the surface
+ * `ctx.commands` already had. A registry with no `registeringAs` (a host's
+ * own, injected, or a runtime carrying none at all) is handed over unwrapped,
+ * the way the sources and sinks facades tolerate one.
+ *
+ * @param {PluginName} pluginName
+ * @param {CommandRegistry} registry
+ * @returns {CommandRegistry}
+ * @ref LLP 0420#owner [implements]: the owner is the registrar core recorded, not the plugin-written `CommandRegistration.plugin`
+ */
+function createCommandsFacade(pluginName, registry) {
+  // Held as a value, so the guard below is the one the calls run under: a
+  // second read could answer differently on a host registry.
+  const bracket = /** @type {CommandRegistry & { registeringAs?: (plugin: PluginName, fn: () => void) => void }} */ (registry)?.registeringAs
+  if (typeof bracket !== 'function') return registry
+  const facade = Object.create(null)
+  // Non-writable and non-configurable, so `delete ctx.commands.register`
+  // cannot take the own property away and uncover the registry's own
+  // unbracketed one through the proxy below.
+  const members = {
+    /** @param {CommandRegistration} command */
+    register(command) {
+      bracket.call(registry, pluginName, () => { registry.register(command) })
+    },
+    /**
+     * @param {PluginName} _plugin
+     * @param {() => void} fn
+     */
+    registeringAs(_plugin, fn) {
+      return bracket.call(registry, pluginName, fn)
+    },
+  }
+  for (const [member, value] of Object.entries(members)) {
+    Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  return /** @type {CommandRegistry} */ (new Proxy(facade, {
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     * @param {unknown} receiver
+     */
+    get(target, prop, receiver) {
+      if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver)
+      return Reflect.get(registry, prop, receiver)
+    },
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     */
+    has(target, prop) {
+      return Object.hasOwn(target, prop) || Reflect.has(registry, prop)
+    },
+  }))
 }
 
 /**
