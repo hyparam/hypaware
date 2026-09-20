@@ -4,7 +4,7 @@ import { Attr, getKernelInstruments, getLogger, withSpan } from '../observabilit
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { SinkContribution, SinkCreateContext, SinkEncoder, SinkSupportTag, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { PluginName, SinkContribution, SinkCreateContext, SinkEncoder, SinkSupportTag, TableFormatProvider } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -19,7 +19,8 @@ import { compareStrings } from '../util/compare_strings.js'
 /**
  * Build the kernel-side SinkRegistry. The contract surface
  * (`register`/`get`/`list`) matches `hypaware-plugin-kernel-types.d.ts
- * §Sinks` and is what plugins see through `ctx.sinks`: plugins call
+ * §Sinks` and is what a plugin reaches through the per-plugin `ctx.sinks`
+ * facade (`src/core/runtime/activation.js`): plugins call
  * `register(contribution)` to declare a sink type (matching their
  * manifest `contributes.sinks[]` entry). Instance creation (per
  * `HypAwareV2Config.sinks.<name>`) is driven by the kernel through
@@ -27,6 +28,11 @@ import { compareStrings } from '../util/compare_strings.js'
  * contribution's `create(ctx)`, emits a `sink.register` log with
  * `sink_kind`/`writer`/`destination`/`supports`, and ticks the
  * `hyp_sinks_registered` counter.
+ *
+ * `registeringAs`/`ownerOf` bind each instance to the plugin the kernel built
+ * it from, the way `SourceRegistry` binds a source to its registrar. They are
+ * kernel-side like `instantiate`: they live on `ExtendedSinkRegistry`, not on
+ * the plugin-facing contract, and the facade is what reads them.
  *
  * @returns {ExtendedSinkRegistry}
  * @ref LLP 0014#sinks-are-export-targets-not-the-write-path: instances driven from config; sources never reach here
@@ -36,8 +42,65 @@ export function createSinkRegistry() {
   const contributions = new Map()
   /** @type {Map<string, ExtendedSinkHandle>} */
   const handles = new Map()
+  /**
+   * The plugin the kernel built each sink instance from, by the instance name
+   * `instantiate` validated. Written from the `ActivePlugin` record the
+   * kernel's materializer resolved out of the config row, never from a
+   * property of the contribution, so it is the kernel's own record of who owns
+   * an instance rather than a plugin's claim about itself (issue #1961).
+   * Entries go with their handle in `closeAll`, so the map is bounded by the
+   * live instances rather than by everything a long-running daemon ever
+   * materialized.
+   *
+   * @type {Map<string, PluginName>}
+   */
+  const owners = new Map()
   const log = getLogger('sinks')
   const instruments = getKernelInstruments()
+  /**
+   * The plugin currently registering, or `''` outside an activation. Set only
+   * by `registeringAs`, which brackets a synchronous `register` call, so no
+   * two activations can hold it at once however they interleave. It mirrors
+   * `SourceRegistry` for the reason it exists there: `contribution.plugin` is
+   * written by the plugin and cannot be the answer to who is calling.
+   */
+  let registrar = ''
+
+  /**
+   * Run `fn` with `plugin` recorded as the plugin doing the registering. The
+   * activation context brackets its own `register` call with this, which is
+   * how this registry learns who is calling.
+   *
+   * A bracket rather than a `register(plugin, contribution)` overload, for the
+   * reason `SourceRegistry.registeringAs` is one: a second entry point routes
+   * around whatever wraps `register` (the plugin doctor's dry run does).
+   *
+   * @template T
+   * @param {PluginName} plugin
+   * @param {() => T} fn
+   * @returns {T}
+   */
+  function registeringAs(plugin, fn) {
+    const previous = registrar
+    registrar = typeof plugin === 'string' ? plugin : ''
+    try {
+      return fn()
+    } finally {
+      registrar = previous
+    }
+  }
+
+  /**
+   * The plugin the kernel built the instance `name` from, or `undefined` when
+   * nothing materialized an instance under that name through a plugin record
+   * (a host driving this registry itself, and the kernel's own tests).
+   *
+   * @param {string} name
+   * @returns {PluginName | undefined}
+   */
+  function ownerOf(name) {
+    return owners.get(name)
+  }
 
   /**
    * `name`, `plugin` and `supports` are each read once, before the Map is
@@ -64,9 +127,23 @@ export function createSinkRegistry() {
    * registry checked, and published in `sink.contribute`, is what every later
    * step gets.
    *
+   * `plugin` is checked against the registrar rather than taken on trust, the
+   * way `SourceRegistry.register` checks it. It is half the key this registry
+   * indexes a contribution under, and `materializeSinks` selects the
+   * contribution for a configured sink by it, so a contribution naming a
+   * neighbour either captured that neighbour's configured instance (its
+   * `create()` running against the neighbour's validated config, inline
+   * credentials included) or made the neighbour's own materialization fail as
+   * ambiguous. It is also the claim a per-plugin facade would otherwise have to
+   * bracket on, which is the #1541 shape exactly (issue #1961). Refusing at
+   * registration leaves no half-registered sink, and lands as an activation
+   * failure like the duplicate name below.
+   *
    * @param {SinkContribution} contribution
    */
   function register(contribution) {
+    // Read once, before any plugin property can run and re-enter.
+    const registeredBy = registrar
     if (!contribution || typeof contribution !== 'object') {
       throw new TypeError('SinkRegistry.register: contribution must be an object')
     }
@@ -77,6 +154,20 @@ export function createSinkRegistry() {
     const plugin = contribution.plugin
     if (typeof plugin !== 'string' || plugin.length === 0) {
       throw new TypeError(`SinkRegistry.register: '${name}' missing plugin`)
+    }
+    if (registeredBy !== '' && plugin !== registeredBy) {
+      log.warn('sink.register_plugin_mismatch', {
+        [Attr.COMPONENT]: 'sinks',
+        [Attr.OPERATION]: 'sink.register',
+        [Attr.ERROR_KIND]: 'sink_plugin_mismatch',
+        [Attr.PLUGIN]: registeredBy,
+        hyp_declared_plugin: plugin,
+        hyp_sink: name,
+        status: 'failed',
+      })
+      throw new Error(
+        `SinkRegistry.register: '${name}' declares plugin '${plugin}' but was registered by '${registeredBy}'`
+      )
     }
     const declaredSupports = contribution.supports
     if (!Array.isArray(declaredSupports)) {
@@ -129,10 +220,11 @@ export function createSinkRegistry() {
   /**
    * Fresh wrappers carrying a copy of the validated tags. The copy at
    * `register` guards the plugin's array; this one guards the registry's own,
-   * which the listing is the only route to: `ctx.sinks` is this registry
-   * (`src/core/runtime/activation.js`), so a plugin that could edit the array
+   * which the listing is the only route to: a plugin that could edit the array
    * it is handed here would decide `supports` after the check, which is the
-   * drift #1568 closed arriving by the other door.
+   * drift #1568 closed arriving by the other door. The facade over `ctx.sinks`
+   * narrows the `contribution` in each wrapper for a plugin that did not
+   * register it, but the wrapper and its tags are built here.
    */
   function listContributions() {
     return Array.from(contributions.values(), (entry) => ({ ...entry, supports: entry.supports.slice() }))
@@ -157,6 +249,21 @@ export function createSinkRegistry() {
     }
     const declared = contribution.supports
     return Array.isArray(declared) ? declared : []
+  }
+
+  /**
+   * Record which plugin the kernel built an instance from, taken off the
+   * `ActivePlugin` the materializer resolved from the config row rather than
+   * off the contribution: `handle.plugin` is a live read of a plugin-written
+   * property, and a facade bracketing on it would bracket on the one party the
+   * kernel must not ask (issue #1961).
+   *
+   * @param {string} instanceName
+   * @param {{ name?: unknown } | undefined} plugin
+   */
+  function recordOwner(instanceName, plugin) {
+    const owner = plugin?.name
+    if (typeof owner === 'string' && owner.length > 0) owners.set(instanceName, /** @type {PluginName} */ (owner))
   }
 
   function listHandles() {
@@ -256,6 +363,7 @@ export function createSinkRegistry() {
           ...(args.kind === 'blob' ? { writer: args.writerPlugin, destination: contributionPlugin, encoder: args.encoder } : {}),
         }
         handles.set(instanceName, handle)
+        recordOwner(instanceName, args.plugin)
         instruments.sinksRegistered.add(1, {
           [Attr.SINK_INSTANCE]: instanceName,
           hyp_sink_kind: args.kind,
@@ -357,6 +465,7 @@ export function createSinkRegistry() {
           blobStore,
         }
         handles.set(instanceName, handle)
+        recordOwner(instanceName, args.plugin)
         instruments.sinksRegistered.add(1, {
           [Attr.SINK_INSTANCE]: instanceName,
           hyp_sink_kind: 'table-format',
@@ -377,22 +486,36 @@ export function createSinkRegistry() {
     )
   }
 
-  async function closeAll() {
+  /**
+   * Close every live sink instance, or only the ones `owner` was recorded as
+   * owning. The kernel's shutdown passes nothing and closes the lot; the
+   * per-plugin facade passes its own name, so a plugin's `closeAll` stops its
+   * own exports and not a neighbour's (issue #1961). Filtering here rather
+   * than in the facade keeps the handle and its owner record leaving this
+   * registry together, which a facade closing sinks from outside could not do.
+   *
+   * @param {PluginName} [owner]
+   */
+  async function closeAll(owner) {
     const names = Array.from(handles.keys())
     for (const name of names) {
       const handle = handles.get(name)
       if (!handle) continue
+      if (owner !== undefined && owners.get(name) !== owner) continue
       try {
         await handle.sink.close()
       } catch {
         // best-effort during shutdown
       }
       handles.delete(name)
+      owners.delete(name)
     }
   }
 
   return {
     register,
+    registeringAs,
+    ownerOf,
     get,
     list,
     instantiate,

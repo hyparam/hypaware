@@ -107,11 +107,24 @@ export type ExtendedSinkHandle = SinkHandle & {
 }
 
 export type ExtendedSinkRegistry = SinkRegistry & {
+  /**
+   * Run `fn` with `plugin` recorded as the plugin doing the registering,
+   * and return what it returns. The kernel brackets each plugin's own
+   * `register` call with this, so the registry learns who is calling from
+   * the kernel rather than from `contribution.plugin` (issue #1961).
+   */
+  registeringAs<T>(plugin: PluginName, fn: () => T): T
+  /**
+   * The plugin the kernel built the sink instance `name` from, or
+   * `undefined` for an instance materialized outside a plugin record.
+   */
+  ownerOf(name: string): PluginName | undefined
   instantiate(args: InstantiateArgs): Promise<ExtendedSinkHandle>
   getContribution(plugin: string, sinkName: string): SinkContribution | undefined
   listContributions(): Array<{ plugin: string; contribution: SinkContribution; supports: SinkSupportTag[] }>
   listHandles(): ExtendedSinkHandle[]
-  closeAll(): Promise<void>
+  /** Every live instance, or only those `owner` owns. */
+  closeAll(owner?: PluginName): Promise<void>
 }
 
 export type ExtendedSourceRegistry = SourceRegistry & {
