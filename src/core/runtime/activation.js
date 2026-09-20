@@ -193,7 +193,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * @param {KernelRuntime} runtime
  * @param {PluginName} pluginName
  * @returns {{ capabilities: CapabilityRegistry, sources: SourceRegistry, sinks: SinkRegistry }}
- * @ref LLP 0004#the-activation-context [implements]: a plugin reaches the registries through its own facade, whichever context it reaches them through
+ * @ref LLP 0420#split [implements]: a plugin reaches the registries through its own facade, whichever context it reaches them through
  */
 export function pluginRegistryFacades(runtime, pluginName) {
   const ctx = runtime.activationContexts?.get(pluginName)

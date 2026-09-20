@@ -59,10 +59,12 @@ Everything else on the context is unchanged, and deliberately: `query`,
 `storage`, `verbs`, `skills`, `agents`, `clients`, `initPresets`,
 `backfills` and `backfillMaterializers` are already the raw registries on the
 activation context too, so leaving them is the same-as-`activate()` rule, not
-an exemption from it. `config` stays the whole effective config rather than
-the plugin's slice: a command is invoked by a person who is reading and
-writing their own config file, which is not the cross-plugin reach this
-closes.
+an exemption from it. `config` is the one member that rule does not cover:
+activation narrows it to the plugin's slice, and `CommandRunContext.config`
+stays the whole effective config, so a plugin-owned command body reads every
+section, a neighbour's inline credentials included. That is a scope call
+left open, not a boundary this decision provides; narrowing it to the slice
+`activate()` gets is issue #1978.
 
 ## Who owns a command {#owner}
 
@@ -88,10 +90,22 @@ same tolerance `createSinksFacade` extends to a registry without `ownerOf`.
 
 - A command a **verb** projected (LLP 0034) has no recorded registrar, since
   the verb registry registers the projection itself, so it keeps the raw
-  registries. Nothing reaches a plugin through it: the projected `run` is
-  kernel code (`runVerbCommand`), and the `VerbOperationContext` it builds
-  for the plugin's `operation` carries only `query`, `storage`, `config`,
-  `env` and `callerCwd`. A verb is not a way back to the registries.
+  registries. As registered, nothing reaches a plugin through it: the
+  projected `run` is kernel code (`runVerbCommand`), and the
+  `VerbOperationContext` it builds for the plugin's `operation` carries only
+  `query`, `storage`, `config`, `env` and `callerCwd`. But "as registered"
+  is load-bearing: the stored record's `run` is writable (next bullet), so
+  an ownerless projection is one of the records a plugin can rewrite.
+- This split narrows what an honestly registered command body receives. It
+  is **not yet a boundary against a hostile plugin**: `get()` and `list()`
+  hand back the stored, mutable record, and `run` is the field that decides
+  whose code executes. A plugin can assign `ctx.commands.get(name).run` on
+  any ownerless command (every core command, every verb projection) and run
+  its own code with the raw registries, or on a neighbour's command and run
+  with the neighbour's facades. Closing that is a design decision of its own
+  (freezing the record breaks 13 existing tests), deferred to issue #1977.
+  Until it lands, #1970's "a plugin cannot shadow `hyp status`" holds for
+  registration only, not for the stored record's body.
 - The `ctx.commands.run` seam needs no rule of its own. It re-enters
   `dispatch`, which resolves the owner of the command actually invoked, so a
   core command running a plugin command narrows into it and a plugin command

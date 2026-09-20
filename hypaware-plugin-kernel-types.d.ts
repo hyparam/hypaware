@@ -1060,6 +1060,12 @@ export interface CommandRunContext {
   stdin?: NodeJS.ReadStream
   env: NodeJS.ProcessEnv
   cwd: string
+  /**
+   * The whole effective config, not the plugin's slice `activate()`
+   * receives (LLP 0420 #split). A plugin-owned command body therefore
+   * reads every section, a neighbour's inline credentials included;
+   * narrowing it is issue #1978.
+   */
   config: HypAwareV2Config
   plugins: ActivePlugin[]
   /**
@@ -1169,6 +1175,9 @@ export interface CommandRunContext {
    *
    * The owner is the plugin the registry recorded as registering the
    * command, not `CommandRegistration.plugin`, which the plugin writes.
+   * The split scopes the command as registered: the stored record stays
+   * mutable through `get()`, and rewriting its `run` sidesteps the split
+   * (issue #1977).
    *
    * @see LLP 0420 #split
    */
