@@ -8,9 +8,10 @@ import { Attr, getLogger } from '../observability/index.js'
 import { createMcpServer } from '../mcp/server.js'
 import { serveStdio } from '../mcp/stdio.js'
 import { buildOperationContext } from '../cli/verb_command.js'
+import { pluginScopedConfig } from '../config/plugin_scope.js'
 
 /**
- * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRunContext, HypAwareV2Config, PluginName, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -48,8 +49,49 @@ export async function runMcp(argv, ctx) {
 
   const require = createRequire(import.meta.url)
   const { version } = require('../../../package.json')
+  // Whose verb each tool call is about to run. `hyp mcp` is core's own
+  // command, so `ctx.config` is the whole effective config, and running every
+  // tool against it handed a plugin's `operation` every other plugin's
+  // `plugins[]` config and a configured sink's inline credential (issue #1982).
+  //
+  // Asked of the registry, for the reason dispatch asks
+  // `CommandRegistry.ownerOf` instead of reading `command.plugin`:
+  // `verb.plugin` may be omitted, and the registration is handed back by
+  // reference, so it is the plugin's to rewrite. A registry with no
+  // `ownerOfTool` (a host's own, injected) recorded no registrar for
+  // anything, so every tool keeps the whole config, which is what it had.
+  const verbs = ctx.verbs
+  const ownerOfTool = /** @type {VerbRegistry & { ownerOfTool?: (tool: string) => PluginName | undefined }} */ (verbs).ownerOfTool
+  /**
+   * The slice each owner reads, built on its first tool call and kept for the
+   * session. `ctx.config` and `ctx.plugins` are fixed for this invocation,
+   * so a long-lived stdio host pays one slice per plugin that owns a tool
+   * rather than one per `tools/call`. Bounded by the active plugin set.
+   *
+   * @type {Map<PluginName, HypAwareV2Config>}
+   * @ref LLP 0425#session-slice [implements]: one slice per owner per session, not one per tools/call
+   */
+  const scopedConfigs = new Map()
+  /**
+   * @param {string} tool the key `getByTool` resolved the running verb under
+   * @returns {HypAwareV2Config}
+   * @ref LLP 0425#tool-owner [implements]: the owner is asked for by the key the host dispatched on, and an ownerless verb is core's
+   */
+  function configForTool(tool) {
+    const owner = typeof ownerOfTool === 'function' ? ownerOfTool.call(verbs, tool) : undefined
+    // Core's own verbs are ownerless (`registerCoreVerbs` runs outside any
+    // activation), which is the signal for "core", not a missing answer:
+    // `query_sql` keeps the whole config, as `hyp query sql` does.
+    if (owner === undefined) return ctx.config
+    let scoped = scopedConfigs.get(owner)
+    if (scoped === undefined) {
+      scoped = pluginScopedConfig(ctx.config, owner, ctx.plugins)
+      scopedConfigs.set(owner, scoped)
+    }
+    return scoped
+  }
   const server = createMcpServer({
-    verbs: ctx.verbs,
+    verbs,
     query: ctx.query,
     // buildOperationContext derives `callerCwd` from ctx.cwd: an MCP client
     // spawns this stdio server inside the project it serves, so the process
@@ -57,7 +99,15 @@ export async function runMcp(argv, ctx) {
     // the caller's real class instead of the fail-closed unknown backstop.
     // A future transport that cannot derive one (e.g. --http) must pass a ctx
     // whose cwd is absent so the filter stays fail-closed (LLP 0105 #unknown).
-    runTool: (verb, params) => Promise.resolve(verb.operation(params, buildOperationContext(ctx, 'auto'))),
+    // The CLI route settles `config` a step earlier: dispatch narrows the
+    // command context before `buildOperationContext` copies it, while here the
+    // owner is not known until a call names a tool.
+    // @ref LLP 0422#scope [implements]: a plugin's verb operation reads its own slice on whichever surface invoked it
+    runTool: (verb, params, tool) => {
+      const opCtx = buildOperationContext(ctx, 'auto')
+      opCtx.config = configForTool(tool)
+      return Promise.resolve(verb.operation(params, opCtx))
+    },
     transport: 'stdio',
     allowOperator: true,
     serverVersion: version,

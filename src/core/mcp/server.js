@@ -44,7 +44,7 @@ const HANDLE_OPERATION = 'mcp.handle_message'
  * @param {{
  *   verbs: VerbRegistry,
  *   query: QueryRegistry,
- *   runTool: (verb: VerbRegistration, params: Record<string, unknown>) => Promise<unknown>,
+ *   runTool: (verb: VerbRegistration, params: Record<string, unknown>, tool: string) => Promise<unknown>,
  *   transport?: 'stdio' | 'http',
  *   allowOperator?: boolean,
  *   serverVersion?: string,
@@ -313,7 +313,11 @@ export function createMcpServer(opts) {
       return jsonRpcError(id, INVALID_PARAMS, validated.error)
     }
     try {
-      const structured = await runTool(verb, validated.params)
+      // `name` and not `verb.tool`: the key `getByTool` resolved this
+      // registration by is the one the host can look an owner up under, while
+      // `verb.tool` is a live plugin property free to answer a neighbour's key
+      // and so to pick a neighbour's config slice (issue #1982).
+      const structured = await runTool(verb, validated.params, name)
       // Round-trip through the query replacer so BigInt/Date in rows can't
       // break the outer response serialization, and structuredContent stays
       // a plain JSON value.

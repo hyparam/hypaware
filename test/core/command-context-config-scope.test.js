@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
@@ -60,15 +61,39 @@ export function observe(config, env, file) {
 `
 
 const OWNER_SOURCE = `
+import nodeFs from 'node:fs'
+import nodePath from 'node:path'
+
 export async function activate(ctx) {
   ctx.sinks.register({
     name: 'central',
     plugin: ${JSON.stringify(OWNER)},
+    supports: [],
     async create() {
       return {
         async exportBatch() { return { exported: true } },
         async close() {},
       }
+    },
+  })
+  ctx.verbs.register({
+    name: 'own probe',
+    tool: 'owner_probe',
+    plugin: ${JSON.stringify(OWNER)},
+    summary: 'fixture owner verb',
+    inputSchema: { type: 'object', properties: {} },
+    async operation(_params, opCtx) {
+      const plugins = Array.isArray(opCtx.config?.plugins) ? opCtx.config.plugins : []
+      const entry = (name) => plugins.find((p) => p && p.name === name)
+      nodeFs.writeFileSync(nodePath.join(opCtx.env.HYP_FIXTURE_OUT, 'owner-verb.json'), JSON.stringify({
+        ownConfig: entry(${JSON.stringify(OWNER)})?.config ?? null,
+        neighbourConfig: entry(${JSON.stringify(SQUATTER)})?.config ?? null,
+        sinkToken: opCtx.config?.sinks?.['org-central']?.config?.token ?? null,
+      }))
+      return { ok: true }
+    },
+    render() {
+      return { stdout: 'owner probed\\n' }
     },
   })
 }
@@ -225,13 +250,15 @@ async function stage() {
 /**
  * @param {Awaited<ReturnType<typeof stage>>} staged
  * @param {string[]} argv
+ * @param {NodeJS.ReadableStream} [stdin] the client channel, for `hyp mcp`
  */
-async function invoke(staged, argv) {
+async function invoke(staged, argv, stdin) {
   const stdout = makeBuf()
   const stderr = makeBuf()
   const code = await dispatch(argv, {
     stdout,
     stderr,
+    ...(stdin ? { stdin: /** @type {any} */ (stdin) } : {}),
     env: {
       ...process.env,
       HYP_HOME: staged.hypHome,
@@ -285,6 +312,78 @@ test('a verb a plugin registered gets the same narrowing on its operation config
     assert.equal(seen.neighbourConfig, null, 'a plugin verb operation read another plugin\'s config section')
     assert.deepEqual(seen.ownConfig, { mine: 'visible' }, 'a plugin verb operation lost its own config section')
     assert.equal(seen.queryDefaultRemote, 'fixture-remote', 'the kernel query block stopped being visible')
+  } finally {
+    await fs.rm(staged.hypHome, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Drive one MCP stdio session over the staged boot: the Readable ends after
+ * the last line, so `hyp mcp` sees EOF, stops serving and exits 0.
+ *
+ * @param {Awaited<ReturnType<typeof stage>>} staged
+ * @param {string[]} tools tool names to call, one `tools/call` each
+ */
+async function mcpSession(staged, tools) {
+  const requests = tools.map((name, i) => ({
+    jsonrpc: '2.0',
+    id: i + 1,
+    method: 'tools/call',
+    params: { name, arguments: {} },
+  }))
+  const stdin = Readable.from(requests.map((r) => JSON.stringify(r) + '\n'))
+  const run = await invoke(staged, ['mcp'], /** @type {any} */ (stdin))
+  const responses = run.stdout.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l))
+  return { ...run, responses }
+}
+
+// The same verb, reached as an MCP tool instead of through its projected CLI
+// command. `hyp mcp` is a core command, so its own context carries the whole
+// effective config, and every tool call was run against it: the surface that
+// exists to hand a verb to an AI client read out every other plugin's section
+// and a configured sink's inline credential (issue #1982).
+test('a verb reached as an MCP tool reads the same narrowed config its CLI projection does', async () => {
+  const staged = await stage()
+  try {
+    const run = await mcpSession(staged, ['squat_probe'])
+    assert.equal(run.code, 0, run.stderr)
+    assert.equal(run.responses.length, 1, run.stdout)
+    assert.equal(run.responses[0]?.result?.isError, false, run.stdout)
+    const seen = await observation(staged, 'verb.json')
+
+    assert.equal(seen.sinkPresent, true, 'the configured sink instance stopped being visible at all')
+    assert.equal(seen.sinkToken, null, 'an MCP tool call read a neighbour sink\'s inline token')
+    assert.equal(seen.neighbourConfig, null, 'an MCP tool call read another plugin\'s config section')
+    assert.deepEqual(seen.ownConfig, { mine: 'visible' }, 'an MCP tool call lost its own plugin\'s config section')
+    assert.deepEqual(seen.pluginNames, [OWNER, SQUATTER], 'the plugin roster stopped being visible')
+    assert.equal(seen.version, 2)
+    assert.equal(seen.queryDefaultRemote, 'fixture-remote', 'the kernel query block stopped being visible')
+  } finally {
+    await fs.rm(staged.hypHome, { recursive: true, force: true })
+  }
+})
+
+// One session, two owners: the slice is resolved per tool call, not once for
+// the host. The sink owner still reads the sink instance it composes, which is
+// what tells a narrowing apart from a blanket redaction.
+test('two plugins\' tools in one MCP session each read their own slice', async () => {
+  const staged = await stage()
+  try {
+    const run = await mcpSession(staged, ['squat_probe', 'owner_probe'])
+    assert.equal(run.code, 0, run.stderr)
+    assert.equal(run.responses.length, 2, run.stdout)
+    for (const response of run.responses) {
+      assert.equal(response?.result?.isError, false, run.stdout)
+    }
+
+    const squatter = await observation(staged, 'verb.json')
+    assert.equal(squatter.neighbourConfig, null, 'the squatter\'s tool read the sink owner\'s config section')
+    assert.equal(squatter.sinkToken, null, 'the squatter\'s tool read a sink instance it composes no part of')
+
+    const owner = await observation(staged, 'owner-verb.json')
+    assert.deepEqual(owner.ownConfig, { api_key: OWNER_API_KEY }, 'the sink owner\'s tool lost its own config section')
+    assert.equal(owner.neighbourConfig, null, 'the sink owner\'s tool read the squatter\'s config section')
+    assert.equal(owner.sinkToken, SINK_TOKEN, 'the sink owner\'s tool lost the sink instance it composes')
   } finally {
     await fs.rm(staged.hypHome, { recursive: true, force: true })
   }
