@@ -201,6 +201,10 @@ export function createVerbRegistry(opts = {}) {
     unregister(name) {
       const verb = byName.get(name)
       if (!verb) return
+      // Read before the ledger entry is released below: the retraction at the
+      // bottom compares this against the registrar the command registry
+      // recorded, and after `owners.delete` the verb's own answer is gone.
+      const registrar = owners.get(name)
       // One read, so the tool slot released is the one just verified to hold
       // this verb. Reading `verb.tool` again for the delete let a verb pass the
       // identity check against its own slot and delete a *different* plugin's,
@@ -221,7 +225,7 @@ export function createVerbRegistry(opts = {}) {
       // command `retractCommand` takes back, which is the only thing holding
       // the closure it lives in.
       owners.delete(name)
-      retractCommand(commandRegistry, name)
+      retractCommand(commandRegistry, name, registrar)
     },
     get(name) {
       return byName.get(name)
@@ -360,8 +364,9 @@ function commandAlreadyRegistered(registry, name) {
 
 /**
  * Retract the CLI command a released verb name is entitled to, which is
- * whatever `verbToCommand` projected under it. The test is the mark that
- * projection carries, not a ledger kept here: `register` skips its own
+ * whatever `verbToCommand` projected under it. The test is two facts, and
+ * neither is a ledger kept here. The first is the mark that projection
+ * carries, which says *what* the command is: `register` skips its own
  * projection when the name is already taken, and on the real boot path it
  * always is, because `registerCoreCommands` pre-projects every core verb
  * into the same command registry so `hyp --help` renders before the kernel
@@ -369,23 +374,41 @@ function commandAlreadyRegistered(registry, name) {
  * the core verbs a host wants to displace, so it would leave `hyp query sql`
  * running the verb the host just took the tool slot from.
  *
+ * The second is *whose* it is, which the mark cannot say: it is an
+ * enumerable symbol on a record `ctx.commands.get` hands back live, so a
+ * plugin can lift it off any real projection and stamp it onto a
+ * neighbour's command, then register and release a verb of that name and
+ * have this function delete the record it forged (issue #1987). So the
+ * released verb's recorded registrar has to agree with the registrar the
+ * command registry recorded for the name. Both bindings are written by the
+ * kernel inside `registeringAs` brackets, never read off the registration,
+ * and the two paths with no plugin behind them agree at `undefined`: a core
+ * verb is ownerless and so is the pre-boot core projection it retracts,
+ * which is what keeps the host displacement above working.
+ *
  * A plugin's own command that merely shares the name is not a projection
  * and survives. Tolerates a command registry that predates `unregister`,
  * the same way {@link commandAlreadyRegistered} tolerates one without
  * `has`: the verb is still released from both maps, the stale CLI command
- * is the only thing left behind.
+ * is the only thing left behind. One without `ownerOf` (a host's own,
+ * injected) retracts on the mark alone, the tolerance LLP 0420 #owner and
+ * LLP 0424 #unknown extend to the same registry: a host records no
+ * registrar for anything, so there is no binding to read.
  *
- * Both tolerated branches warn. The caller's prescribed success check is
- * `getByTool`, which the map deletion already satisfies, so a half
- * retraction reads as a win while `hyp <verb>` keeps routing at the run
- * closure of the verb the host just displaced. That is the silent
+ * Every tolerated or refusing branch warns. The caller's prescribed
+ * success check is `getByTool`, which the map deletion already satisfies,
+ * so a half retraction reads as a win while `hyp <verb>` keeps routing at
+ * the run closure of the verb the host just displaced. That is the silent
  * local-cache regression LLP 0264 §verb warns about, so it has to name
  * itself in the logs rather than only show up as a wrong answer.
  *
- * @param {CommandRegistry | undefined} registry
+ * @param {(CommandRegistry & { ownerOf?: (name: string) => PluginName | undefined }) | undefined} registry
  * @param {string} name
+ * @param {PluginName | undefined} registrar the plugin recorded as having
+ *   registered the released verb, `undefined` for a core verb or a host
+ *   driving this registry directly
  */
-function retractCommand(registry, name) {
+function retractCommand(registry, name, registrar) {
   if (!registry) return
   if (typeof registry.unregister !== 'function') {
     getLogger('verb-registry').warn('verb.retract.unsupported', {
@@ -403,6 +426,21 @@ function retractCommand(registry, name) {
       [Attr.OPERATION]: 'verb.unregister',
       [Attr.STATUS]: 'degraded',
       [Attr.ERROR_KIND]: 'command_not_verb_projection',
+      verb_name: name,
+    })
+    return
+  }
+  // The registrar the command registry recorded, never the mark, is what says
+  // the projection is this verb's to take back. `owners.set` there runs only
+  // inside a `registeringAs` bracket, so unlike the symbol on the record just
+  // read, no plugin write can move a name from one answer to another.
+  // @ref LLP 0427#two-facts [implements]: the mark says the command is a projection; agreement between the two kernel-recorded registrars says it is the released verb's own
+  const ownerOf = registry.ownerOf
+  if (typeof ownerOf === 'function' && ownerOf.call(registry, name) !== registrar) {
+    getLogger('verb-registry').warn('verb.retract.registrar_mismatch', {
+      [Attr.OPERATION]: 'verb.unregister',
+      [Attr.STATUS]: 'degraded',
+      [Attr.ERROR_KIND]: 'command_registrar_mismatch',
       verb_name: name,
     })
     return
