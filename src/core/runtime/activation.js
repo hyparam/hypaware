@@ -182,6 +182,112 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
 }
 
 /**
+ * The declared `SourceContribution` surface, which is the whole of what a
+ * narrowed view answers for.
+ *
+ * A whitelist rather than a mask over `start`, because a mask only hides what
+ * it was told to hide. A contribution is often a class instance (the plugin
+ * doctor keeps a whole stand-in honest about that), and a class supplies
+ * `start` from its prototype, which a view forwarding `getPrototypeOf` hands
+ * straight back; a contribution carrying a second entry point of its own is
+ * the same leak without a prototype. Nothing outside this list is the kernel's
+ * to pass on.
+ */
+const CONTRIBUTION_FIELDS = ['name', 'plugin', 'summary', 'configSection']
+
+/**
+ * A read-only view of a source contribution, for the members of `ctx.sources`
+ * that hand one back to a plugin that did not register it.
+ *
+ * Read through to the contribution rather than copied out of it. A copy has to
+ * run every `name`/`summary`/`configSection` accessor at the moment it is
+ * made, which puts one plugin's code inside another plugin's `list()` call,
+ * where a throw is an outage for the caller and not for whoever wrote it. That
+ * is the trade this exists to refuse, so the view defers each read to the
+ * moment the caller asks for it, exactly as the live object did, and carries
+ * fields a prototype supplies for the same reason.
+ *
+ * `start` is the one member answering with something of this module's own: an
+ * async refusal, so it arrives as the rejection every other lifecycle refusal
+ * arrives as. It is not simply absent, because the contract declares
+ * `get`/`list` answering with a `SourceContribution` and a plugin reading the
+ * shape it was promised should find one. What it must not find is a function
+ * that runs a neighbour's source under a context this plugin chose.
+ *
+ * Writes, defines, deletes and reparenting are all refused, which is the half
+ * a hidden `start` alone does not close: a plugin able to put its own function
+ * on the object the daemon's boot walk calls has it run under the victim's
+ * real context rather than dragging the victim into its own.
+ *
+ * @param {PluginName} pluginName The plugin the view is being handed to.
+ * @param {SourceContribution} contribution
+ * @returns {SourceContribution}
+ */
+function narrowContribution(pluginName, contribution) {
+  /** @returns {Promise<never>} */
+  async function start() {
+    let shown = ''
+    try {
+      const declared = contribution.name
+      if (typeof declared === 'string') shown = declared
+    } catch {
+      // A `name` that throws is the registering plugin's business. This
+      // refusal has to arrive as itself, not as whatever that accessor raised.
+    }
+    getLogger('sources').warn('source.contribution_start_denied', {
+      [Attr.COMPONENT]: 'sources',
+      [Attr.OPERATION]: 'source.start',
+      [Attr.ERROR_KIND]: 'source_contribution_start_denied',
+      [Attr.PLUGIN]: pluginName,
+      hyp_source: shown,
+      status: 'failed',
+    })
+    const subject = shown === '' ? 'a source' : `'${shown}'`
+    throw new Error(
+      `SourceRegistry: a contribution reached through get()/list() carries no live start(), so '${pluginName}' ` +
+      `cannot start ${subject} under a context of its own choosing: use SourceRegistry.start(name, ctx)`
+    )
+  }
+  /** @param {string | symbol} prop */
+  const answers = (prop) =>
+    prop === 'start' ||
+    (typeof prop === 'string' && CONTRIBUTION_FIELDS.includes(prop) && Reflect.has(contribution, prop))
+  // The contribution as the receiver, so an accessor reading a private field
+  // off `this` still finds it, as `neuter` does in
+  // `src/core/plugin_doctor/dry_run.js`.
+  /** @param {string | symbol} prop */
+  const read = (prop) => (prop === 'start' ? start : Reflect.get(contribution, prop, contribution))
+  // A null-prototype target holding nothing, so the view answers out of the
+  // traps alone and `Object.getPrototypeOf` reaches no class of the
+  // registering plugin's.
+  const view = new Proxy(Object.create(null), {
+    /** @param {object} _target @param {string | symbol} prop */
+    get(_target, prop) { return answers(prop) ? read(prop) : undefined },
+    /** @param {object} _target @param {string | symbol} prop */
+    has(_target, prop) { return answers(prop) },
+    ownKeys() {
+      return [...CONTRIBUTION_FIELDS.filter((field) => Reflect.has(contribution, field)), 'start']
+    },
+    /** @param {object} _target @param {string | symbol} prop */
+    getOwnPropertyDescriptor(_target, prop) {
+      if (!answers(prop)) return undefined
+      // `configurable: true` because the target holds nothing: a proxy may not
+      // report a property the target does not carry as non-configurable.
+      return { value: read(prop), writable: false, enumerable: true, configurable: true }
+    },
+    set() { return false },
+    defineProperty() { return false },
+    deleteProperty() { return false },
+    setPrototypeOf() { return false },
+    // Left extensible deliberately. A `preventExtensions` that landed would
+    // bind `ownKeys` to the empty target, and every later read of the view
+    // would throw a proxy invariant at its caller instead of answering.
+    preventExtensions() { return false },
+  })
+  return /** @type {SourceContribution} */ (view)
+}
+
+/**
  * Per-plugin facade over the global source registry. `register` tells the
  * registry which plugin is calling, so a source is bound to its registrar
  * rather than to the `plugin` its own contribution declares: the daemon picks
@@ -259,6 +365,36 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * write lands on the facade rather than on the shared registry. A lifecycle
  * member is shadowed only where the registry has one to shadow, so a registry
  * that never offered `stopAll` does not acquire one here.
+ *
+ * `get` and `list` are the same reach one hop further along. Both forwarded
+ * the contribution the registry is holding, by reference and writable, so a
+ * plugin did not need `start` at all: `ctxB.sources.get('ai-gateway').start(ctxB)`
+ * ran the victim's `start()` under the squatter's config slice, paths, scoped
+ * logger, capability handles and permission context, with `list()` the same
+ * reach without needing the name. None of it went through the registry, so the
+ * source was neither counted nor spanned and the boot walk started the real one
+ * afterwards: two binds of one port, or two writers on the victim's dataset
+ * (issue #1953). The same handle writable was worse still: replacing `.start`
+ * on what `get` returned put the squatter's function on the object the boot
+ * walk calls, so squatter code ran under the victim's own context.
+ *
+ * So both are narrowed to a read-only view (`narrowContribution` above): the
+ * declarative fields the contract declares, read through to the contribution,
+ * and a `start` that refuses the way the four lifecycle members refuse. What
+ * the contract promises is unchanged - `get` still answers with a
+ * `SourceContribution`, `list` with all of them in registry order - because
+ * what it never promised is that a plugin may run another plugin's `start()`.
+ *
+ * The two narrow differently because they know different things. `get` is
+ * asked for a name, which is the key the registry validated and the key
+ * `ownerOf` answers on, so it hands this plugin its own contribution back
+ * unchanged and narrows only a neighbour's. `list` has no such key: the only
+ * name on a contribution is `contribution.name`, a live plugin property the
+ * registry itself refuses to treat as the key, and one a hostile source could
+ * make answer with a neighbour's name precisely to be handed that neighbour's
+ * object. So `list` narrows every entry, and a plugin that wants its own
+ * contribution back by identity asks `get` for it by the name it registered
+ * under.
  *
  * @param {PluginName} pluginName
  * @param {ExtendedSourceRegistry} registry
@@ -387,6 +523,40 @@ function createSourcesFacade(pluginName, registry) {
       return registry.listStarted().filter(({ name }) => registry.ownerOf(name) === pluginName)
     },
   }
+  /**
+   * The views this facade has already built, so repeated reads hand back the
+   * same object: a plugin that stores one in a `Set`, keys a `Map` by it, or
+   * compares two `list()` results with `===` or `indexOf` sees the stable
+   * identity the live contribution gave it. Weak and keyed by the
+   * contribution, so a view lives exactly as long as the source it stands for
+   * rather than pinning every source a long-lived daemon ever registered.
+   *
+   * @type {WeakMap<object, SourceContribution>}
+   */
+  const views = new WeakMap()
+  /** @param {SourceContribution | undefined} contribution */
+  function narrow(contribution) {
+    // An unknown name answers `undefined`, and a host registry is free to hand
+    // back whatever it holds. Only an object keys a `WeakMap`, and only an
+    // object has a `start` to reach.
+    if (contribution === null || typeof contribution !== 'object') return contribution
+    const existing = views.get(contribution)
+    if (existing !== undefined) return existing
+    const view = narrowContribution(pluginName, contribution)
+    views.set(contribution, view)
+    return view
+  }
+  // @ref LLP 0012#lifecycle-and-reload-context-invariant [constrained-by]: the kernel drives start, so no read hands a plugin a live start() it does not own
+  const reads = {
+    /** @param {string} name */
+    get(name) {
+      const contribution = registry.get(name)
+      return registry.ownerOf(name) === pluginName ? contribution : narrow(contribution)
+    },
+    list() {
+      return registry.list().map((contribution) => narrow(contribution))
+    },
+  }
   // Non-writable and non-configurable, not merely assigned: `delete
   // ctx.sources.register` took the own property away and the miss below then
   // read through to the registry's own unbracketed `register`, which is the
@@ -405,7 +575,11 @@ function createSourcesFacade(pluginName, registry) {
   // Only where there is a binding to read, and only over a member the registry
   // actually has: a host registry carrying neither is left reading as it did.
   // `stopAll` is rebuilt out of `listStarted`, so it is shadowed only where
-  // that is there to rebuild it from.
+  // that is there to rebuild it from. `get` is in the same block rather than
+  // narrowing unconditionally, because without `ownerOf` it cannot tell this
+  // plugin's own contribution from a neighbour's and would have to narrow both;
+  // `list` is there with it so the two members a plugin reads the registry
+  // through go on agreeing about which registries this facade brackets.
   if (typeof registry?.ownerOf === 'function') {
     const shadowable = {
       start: typeof registry.start === 'function',
@@ -414,8 +588,10 @@ function createSourcesFacade(pluginName, registry) {
       stopAll: typeof registry.stopAll === 'function' && typeof registry.listStarted === 'function',
       started: typeof registry.started === 'function',
       listStarted: typeof registry.listStarted === 'function',
+      get: typeof registry.get === 'function',
+      list: typeof registry.list === 'function',
     }
-    for (const [member, value] of Object.entries(lifecycle)) {
+    for (const [member, value] of Object.entries({ ...lifecycle, ...reads })) {
       if (shadowable[/** @type {keyof typeof shadowable} */ (member)]) pin(member, value)
     }
   }

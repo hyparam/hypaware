@@ -24,10 +24,12 @@ import { writeLock } from '../../src/core/plugin_install/lock.js'
 //
 // The substitution has to be staged inside a real boot, because the read is on
 // the contribution the real registry is holding. Two installed fixture plugins
-// do it: one provides the gateway capability and registers `ai-gateway`, the
-// other requires that capability (so the gateway boot profile selects it, and
-// dependency order activates it second) and redefines a property of the
-// victim: its `name` here, and its `plugin` for #1551 below.
+// do it: one provides the gateway capability, registers `ai-gateway`, and then
+// redefines a property of the contribution it still holds a reference to (its
+// `name` here, and its `plugin` for #1551 below); the other requires that
+// capability (so the gateway boot profile selects it, and dependency order
+// activates it second) and records that the same reach from a neighbour, which
+// is what used to stage this, is closed (issue #1953).
 
 const PROVIDER = '@fixture/gw-provider'
 const POISONER = '@fixture/gw-poisoner'
@@ -54,13 +56,40 @@ function recorderPreamble() {
   ].join('\n')
 }
 
-/** The source the gateway is meant to start, under the key it looks up by. */
+/**
+ * The source the gateway is meant to start, under the key it looks up by, plus
+ * the substitution itself.
+ *
+ * Self-inflicted, and it has to be: the registry stores contributions by
+ * reference, so the plugin that registered one keeps a live handle on the
+ * object the kernel is holding and can turn any property of it into an
+ * accessor at any moment. A neighbour used to be able to do it too, through
+ * `ctx.sources.get`, and `poisonerEntrypoint` below now records that it
+ * cannot (issue #1953). The kernel-side invariant under test is the same
+ * either way: the key the registry validated, and the registrar it recorded,
+ * are what the gateway acts on, not what a live property answers now.
+ *
+ * `Object.defineProperties(contribution, Object.getOwnPropertyDescriptors(...))`
+ * is what leaves a live accessor on the object the registry is holding, and
+ * two near-misses would not. `Object.assign(contribution, over)` reads the
+ * getter and assigns its value, leaving the registry a contribution whose
+ * `name` is an ordinary lying string: still a substitution, but no longer the
+ * live read this issue is about, and no longer a read the count below can see.
+ * `{ ...contribution, ...over }` builds a new object and never touches the
+ * registry's contribution at all, so every substitution assertion below would
+ * pass against the unfixed code too. The recorded `accessor` and `probe`, and
+ * the asserted read count, are what make either fail loudly.
+ *
+ * Which property it redefines is `HYP_FIXTURE_POISON`: `name` for the
+ * substitution #1540 is about, `plugin` for the activation context #1551 is
+ * about, and anything else leaves the contribution alone.
+ */
 function providerEntrypoint() {
   return [
     recorderPreamble(),
     'export async function activate(ctx) {',
     "  ctx.provideCapability('hypaware.ai-gateway', '2.0.0', {})",
-    '  ctx.sources.register({',
+    '  const contribution = {',
     "    name: 'ai-gateway',",
     `    plugin: ${JSON.stringify(PROVIDER)},`,
     '    async start(startCtx) {',
@@ -70,29 +99,36 @@ function providerEntrypoint() {
     "        async stop() { record({ event: 'stop', source: 'ai-gateway' }) },",
     '      }',
     '    },',
-    '  })',
+    '  }',
+    '  ctx.sources.register(contribution)',
+    '  const poison = process.env.HYP_FIXTURE_POISON',
+    "  if (poison !== 'name' && poison !== 'plugin') return",
+    "  if (poison === 'name') {",
+    '    Object.defineProperties(contribution, Object.getOwnPropertyDescriptors({',
+    `      get name() { record({ event: 'name_read' }); return ${JSON.stringify(NEIGHBOUR)} },`,
+    '    }))',
+    '  } else {',
+    '    Object.defineProperties(contribution, Object.getOwnPropertyDescriptors({',
+    `      get plugin() { record({ event: 'plugin_read' }); return ${JSON.stringify(POISONER)} },`,
+    '    }))',
+    '  }',
+    '  const descriptor = Object.getOwnPropertyDescriptor(contribution, poison)',
+    "  record({ event: 'poisoned', field: poison, accessor: typeof descriptor?.get === 'function', probe: contribution[poison] })",
     '}',
     '',
   ].join('\n')
 }
 
 /**
- * The neighbour, plus the substitution itself.
+ * The neighbour, and the reach that used to stage the substitution above.
  *
- * `Object.defineProperties(victim, Object.getOwnPropertyDescriptors(...))` is
- * what leaves a live accessor on the object the registry is holding, and two
- * near-misses would not. `Object.assign(victim, over)` reads the getter and
- * assigns its value, leaving the registry a contribution whose `name` is an
- * ordinary lying string: still a substitution, but no longer the live read
- * this issue is about, and no longer a read the count below can see.
- * `{ ...victim, ...over }` builds a new object and never touches the
- * registry's contribution at all, so every substitution assertion below would
- * pass against the unfixed code too. The recorded `accessor` and `probe`, and
- * the asserted read count, are what make either fail loudly.
- *
- * Which property it redefines is `HYP_FIXTURE_POISON`: `name` for the
- * substitution #1540 is about, `plugin` for the activation context #1551 is
- * about, and anything else leaves the contribution alone.
+ * `ctx.sources.get('ai-gateway')` handed this plugin the live contribution the
+ * registry is holding, by reference and writable, so a neighbour could both
+ * redefine a property of it and call its `start()` under a context of its own
+ * (issue #1953). It now answers with a read-only view, so the define throws
+ * where it is made. The fixture records what it found rather than assuming it,
+ * and it reads no poisoned property, so the read counts below stay the
+ * provider's own probe alone.
  */
 function poisonerEntrypoint() {
   return [
@@ -109,20 +145,16 @@ function poisonerEntrypoint() {
     '  })',
     '  const poison = process.env.HYP_FIXTURE_POISON',
     "  if (poison !== 'name' && poison !== 'plugin') return",
-    "  const victim = ctx.sources.get('ai-gateway')",
-    "  if (poison === 'name') {",
-    '    Object.defineProperties(victim, Object.getOwnPropertyDescriptors({',
-    `      get name() { record({ event: 'name_read' }); return ${JSON.stringify(NEIGHBOUR)} },`,
-    '    }))',
-    "    const descriptor = Object.getOwnPropertyDescriptor(victim, 'name')",
-    "    record({ event: 'poisoned', field: 'name', accessor: typeof descriptor?.get === 'function', probe: victim.name })",
-    '    return',
-    '  }',
-    '  Object.defineProperties(victim, Object.getOwnPropertyDescriptors({',
-    `    get plugin() { record({ event: 'plugin_read' }); return ${JSON.stringify(POISONER)} },`,
-    '  }))',
-    "  const descriptor = Object.getOwnPropertyDescriptor(victim, 'plugin')",
-    "  record({ event: 'poisoned', field: 'plugin', accessor: typeof descriptor?.get === 'function', probe: victim.plugin })",
+    "  const reached = ctx.sources.get('ai-gateway')",
+    "  let define_error = ''",
+    "  let write_error = ''",
+    '  try {',
+    "    Object.defineProperty(reached, poison, { get() { return 'neighbour' }, configurable: true })",
+    '  } catch (err) { define_error = String(err && err.name) }',
+    '  try {',
+    "    reached.start = async () => ({ async stop() {} })",
+    '  } catch (err) { write_error = String(err && err.name) }',
+    "  record({ event: 'neighbour_reach', field: poison, define_error, write_error, reached_type: typeof reached, start_type: typeof reached.start })",
     '}',
     '',
   ].join('\n')
@@ -393,6 +425,18 @@ test('the gateway starts the source it looked up, not the name that contribution
   const reads = records.filter(r => r.event === 'name_read')
   assert.equal(reads.length, 1, `the gateway read the contribution's name again after the probe (${reads.length} reads), so its lookup and its start can disagree`)
 
+
+  // And the reach that used to stage this from a neighbour: `ctx.sources.get`
+  // handed the poisoner the live contribution, by reference and writable, so
+  // the substitution above was a neighbour's to make and `start()` was a
+  // neighbour's to call (issue #1953). It now answers with a read-only view.
+  const reach = records.find(r => r.event === 'neighbour_reach')
+  assert.ok(reach, 'the neighbour never reached for the contribution')
+  assert.equal(reach.reached_type, 'object', 'get() stopped answering a neighbour at all')
+  assert.equal(reach.start_type, 'function', 'the narrowed contribution lost the shape the contract declares')
+  assert.equal(reach.define_error, 'TypeError', 'a neighbour redefined a property of the live contribution')
+  assert.equal(reach.write_error, 'TypeError', 'a neighbour wrote its own start() onto the live contribution')
+
   // What was started is what gets stopped.
   assert.deepEqual(
     records.filter(r => r.event === 'stop').map(r => r.source),
@@ -440,6 +484,18 @@ test('the gateway starts the source under the context of the plugin that registe
   // never consulted at all.
   const reads = records.filter(r => r.event === 'plugin_read')
   assert.equal(reads.length, 1, `the gateway read the contribution's plugin claim after the probe (${reads.length} reads), so a neighbour can still steer the context`)
+
+
+  // And the reach that used to stage this from a neighbour: `ctx.sources.get`
+  // handed the poisoner the live contribution, by reference and writable, so
+  // the substitution above was a neighbour's to make and `start()` was a
+  // neighbour's to call (issue #1953). It now answers with a read-only view.
+  const reach = records.find(r => r.event === 'neighbour_reach')
+  assert.ok(reach, 'the neighbour never reached for the contribution')
+  assert.equal(reach.reached_type, 'object', 'get() stopped answering a neighbour at all')
+  assert.equal(reach.start_type, 'function', 'the narrowed contribution lost the shape the contract declares')
+  assert.equal(reach.define_error, 'TypeError', 'a neighbour redefined a property of the live contribution')
+  assert.equal(reach.write_error, 'TypeError', 'a neighbour wrote its own start() onto the live contribution')
 
   assert.deepEqual(records.filter(r => r.event === 'stop').map(r => r.source), ['ai-gateway'])
 })

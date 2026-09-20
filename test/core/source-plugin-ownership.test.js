@@ -340,7 +340,9 @@ test('a prototype-backed registry reaches a plugin with the whole registry, not 
   assert.equal(sources.ownerOf('proto'), A, 'the registrar was not recorded through the inherited member')
 
   // The host registry's own state is not copied onto what the plugin holds.
-  assert.deepEqual(Object.keys(sources).sort(), ['register', 'registeringAs'])
+  // `get` and `list` are bracketed because this registry records registrars;
+  // the lifecycle members are not, because it has none to bracket.
+  assert.deepEqual(Object.keys(sources).sort(), ['get', 'list', 'register', 'registeringAs'])
 })
 
 // Issue #1944. The facade forwarded "the rest" of the registry by putting the
@@ -414,8 +416,17 @@ test('a plugin cannot delete the facade members to uncover the registry\'s own',
   // pinned the same way the two above are.
   assert.deepEqual(
     Object.keys(sources).sort(),
-    ['listStarted', 'register', 'registeringAs', 'reload', 'start', 'started', 'stop', 'stopAll']
+    ['get', 'list', 'listStarted', 'register', 'registeringAs', 'reload', 'start', 'started', 'stop', 'stopAll']
   )
+  // Every one of them pinned the same way, which is what makes the `[[Get]]`
+  // trap fail closed when `Object.hasOwn` is patched out from under it.
+  for (const member of Object.keys(sources)) {
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptor(sources, member),
+      { value: sources[member], writable: false, enumerable: true, configurable: false },
+      `'${member}' is not pinned`
+    )
+  }
   assert.ok(ctxB)
 })
 
@@ -769,7 +780,8 @@ test('a registry with no lifecycle members of its own does not acquire them', ()
     env: {},
   })
   const sources = /** @type {any} */ (ctx.sources)
-  assert.deepEqual(Object.keys(sources).sort(), ['register', 'registeringAs'])
+  // `get` and `list` are there because this registry has both to shadow.
+  assert.deepEqual(Object.keys(sources).sort(), ['get', 'list', 'register', 'registeringAs'])
   assert.equal(sources.start, undefined, 'the facade grew a start the registry behind it does not have')
   assert.equal('stopAll' in sources, false)
   assert.equal('started' in sources, false)
@@ -849,4 +861,239 @@ test('a plugin cannot reach a neighbour\'s StartedSource through started or list
     ['aaa-victim', 'zzz-own'],
     'the kernel\'s own registry lost sight of a started source'
   )
+})
+
+// Issue #1953. #1950 bracketed the lifecycle members, and the rule they land is
+// that a plugin drives the lifecycle of the sources the kernel recorded it as
+// registering and of no others. `get` and `list` reached around it one hop
+// along: the registry stores contributions by reference and both forwarded the
+// live object, so a plugin did not need `sources.start` at all. It took the
+// neighbour's `start` off the contribution and called it with its own context,
+// and because nothing went through the registry the start was not counted, not
+// spanned, and not in `started`, so the boot walk started the real source again
+// afterwards: two binds of one port, or two writers on the victim's dataset.
+
+test('a plugin cannot start a neighbour\'s source through the contribution get() hands back', async () => {
+  const { runtime, ctxA, ctxB } = stage()
+  const victim = fixtureSource('ai-gateway', A)
+  ctxA.sources.register(victim.contribution)
+
+  const reached = /** @type {any} */ (ctxB.sources).get('ai-gateway')
+  assert.notEqual(reached, victim.contribution, 'a neighbour was handed the registry\'s own contribution')
+  await assert.rejects(
+    () => reached.start(ctxB),
+    /carries no live start\(\).*cannot start 'ai-gateway'/s,
+    'a neighbour\'s start() ran off the contribution get() handed back'
+  )
+  assert.equal(victim.seen.starts, 0, 'the neighbour\'s start() ran for the squatter')
+  assert.equal(victim.seen.ctx, undefined, 'the neighbour\'s start() was handed a context')
+
+  // And the owner still gets its own source, started once, under its own
+  // context, on the boot walk that follows activation.
+  const log = makeLog()
+  const fileLog = makeLog()
+  const snapshots = await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+  assert.deepEqual(
+    snapshots.map((s) => ({ name: s.name, plugin: s.plugin, state: s.state })),
+    [{ name: 'ai-gateway', plugin: A, state: 'started' }],
+    'the narrowing cost the owner its own source'
+  )
+  assert.equal(victim.seen.starts, 1, 'the source did not start exactly once')
+  assert.equal(victim.seen.ctx, ctxA, 'the owner was not handed its own context')
+})
+
+test('list() is the same reach without needing the name, and is narrowed too', async () => {
+  const { runtime, ctxA, ctxB } = stage()
+  const victim = fixtureSource('ai-gateway', A)
+  ctxA.sources.register(victim.contribution)
+
+  const listed = /** @type {any[]} */ (/** @type {any} */ (ctxB.sources).list())
+  assert.equal(listed.length, 1, 'list() stopped answering with the registered set')
+  assert.notEqual(listed[0], victim.contribution, 'list() handed out the registry\'s own contribution')
+  await assert.rejects(() => listed[0].start(ctxB), /carries no live start\(\)/)
+  assert.equal(victim.seen.starts, 0, 'the neighbour\'s start() ran off a list() entry')
+
+  const log = makeLog()
+  const fileLog = makeLog()
+  await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+  assert.equal(victim.seen.starts, 1)
+  assert.equal(victim.seen.ctx, ctxA)
+})
+
+// Round 2 of the same review. Hiding `start` behind a refusal is only half of
+// it while the object it sits on is writable: assigning over `.start` put the
+// squatter's own function on the contribution the daemon's boot walk calls, so
+// the squatter ran under the *victim's* real context rather than dragging the
+// victim into its own.
+test('a plugin cannot write its own start() onto a neighbour\'s contribution', async () => {
+  const { runtime, ctxA, ctxB } = stage()
+  const victim = fixtureSource('ai-gateway', A)
+  ctxA.sources.register(victim.contribution)
+  /** @type {unknown} */
+  let hijacked
+  /** @param {unknown} ctx */
+  const squatterStart = async (ctx) => { hijacked = ctx; return { async stop() {} } }
+
+  for (const reached of [
+    /** @type {any} */ (ctxB.sources).get('ai-gateway'),
+    /** @type {any} */ (ctxB.sources).list()[0],
+  ]) {
+    assert.throws(() => { 'use strict'; reached.start = squatterStart }, TypeError)
+    assert.equal(Reflect.set(reached, 'start', squatterStart), false)
+    assert.equal(Reflect.defineProperty(reached, 'start', { value: squatterStart }), false)
+    assert.equal(Reflect.deleteProperty(reached, 'start'), false)
+    // Not only `start`: nothing on the view is the plugin's to move, and the
+    // prototype is not a second way to reach the contribution's own `start`.
+    assert.equal(Reflect.set(reached, 'plugin', B), false)
+    assert.equal(Reflect.setPrototypeOf(reached, { start: squatterStart }), false)
+    assert.equal(Object.getPrototypeOf(reached), null)
+    assert.notEqual(victim.contribution.start, squatterStart, 'the write reached the live contribution')
+  }
+
+  const log = makeLog()
+  const fileLog = makeLog()
+  const snapshots = await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+  assert.equal(hijacked, undefined, 'the boot walk ran the squatter\'s function under the victim\'s context')
+  assert.equal(victim.seen.starts, 1, 'the victim\'s own start() did not run')
+  assert.equal(victim.seen.ctx, ctxA)
+  assert.deepEqual(
+    snapshots.map((s) => ({ name: s.name, plugin: s.plugin, state: s.state })),
+    [{ name: 'ai-gateway', plugin: A, state: 'started' }]
+  )
+})
+
+test('a class-supplied start() is not reachable through the view either', () => {
+  const { ctxA, ctxB } = stage()
+  /** @type {unknown} */
+  let seenCtx
+  // The shape the plugin doctor keeps a whole stand-in honest about: a
+  // contribution whose fields, `start` included, come from its prototype.
+  class ClassSource {
+    get name() { return 'ai-gateway' }
+    get plugin() { return A }
+    get summary() { return 'a class instance' }
+    /** @param {unknown} ctx */
+    async start(ctx) { seenCtx = ctx; return { async stop() {} } }
+  }
+  ctxA.sources.register(/** @type {any} */ (new ClassSource()))
+
+  const reached = /** @type {any} */ (ctxB.sources).get('ai-gateway')
+  // The declarative fields the prototype supplies still read through.
+  assert.equal(reached.name, 'ai-gateway')
+  assert.equal(reached.plugin, A)
+  assert.equal(reached.summary, 'a class instance')
+  assert.equal(Object.getPrototypeOf(reached), null, 'the view handed back the contribution\'s prototype')
+  assert.equal(seenCtx, undefined)
+})
+
+test('the narrowed contribution still reads as the contract declares one', () => {
+  const { ctxA, ctxB } = stage()
+  const victim = /** @type {any} */ ({
+    name: 'ai-gateway',
+    plugin: A,
+    summary: 'the gateway',
+    configSection: 'ai_gateway',
+    async start() { return { async stop() {} } },
+  })
+  ctxA.sources.register(victim)
+
+  const reached = /** @type {any} */ (ctxB.sources).get('ai-gateway')
+  assert.deepEqual(
+    { ...reached, start: typeof reached.start },
+    { name: 'ai-gateway', plugin: A, summary: 'the gateway', configSection: 'ai_gateway', start: 'function' },
+    'a plugin reading the declared shape no longer finds it'
+  )
+  assert.deepEqual(Object.keys(reached), ['name', 'plugin', 'summary', 'configSection', 'start'])
+  assert.ok('start' in reached)
+  assert.ok('summary' in reached)
+  // Nothing outside the declared surface, so a second entry point a
+  // contribution carries of its own is not passed on with it.
+  assert.equal(reached.somethingElse, undefined)
+  assert.equal('somethingElse' in reached, false)
+
+  // One view per contribution, so a plugin keying a `Set` or a `Map` by what
+  // it read, or comparing two reads, sees the identity the live object gave it.
+  assert.equal(reached, /** @type {any} */ (ctxB.sources).get('ai-gateway'))
+  assert.equal(reached, /** @type {any} */ (ctxB.sources).list()[0])
+})
+
+test('the refused contribution start is observable as a structured warn', async () => {
+  const { ctxA, ctxB } = stage()
+  ctxA.sources.register(fixtureSource('aaa', A).contribution)
+
+  const records = await recordsFrom(async () => {
+    await assert.rejects(() => /** @type {any} */ (ctxB.sources).get('aaa').start(ctxB))
+  })
+
+  const warned = records.filter((r) => r.body === 'source.contribution_start_denied')
+  assert.equal(warned.length, 1, 'a refused contribution start was silent')
+  assert.equal(warned[0].severityText, 'WARN')
+  assert.equal(warned[0].attributes.hyp_component, 'sources')
+  assert.equal(warned[0].attributes.hyp_operation, 'source.start')
+  assert.equal(warned[0].attributes.error_kind, 'source_contribution_start_denied')
+  assert.equal(warned[0].attributes.hyp_source, 'aaa')
+  assert.equal(warned[0].attributes.hyp_plugin, B, 'the warn does not say which plugin was calling')
+})
+
+test('a plugin reads its own contribution back exactly as it registered it', async () => {
+  const { runtime, ctxA, ctxB } = stage()
+  const own = fixtureSource('aaa-own', A)
+  const neighbour = fixtureSource('zzz-neighbour', B)
+  ctxA.sources.register(own.contribution)
+  ctxB.sources.register(neighbour.contribution)
+
+  const sourcesA = /** @type {any} */ (ctxA.sources)
+  assert.equal(sourcesA.get('aaa-own'), own.contribution, 'a plugin lost its own contribution')
+  assert.equal(sourcesA.get('zzz-neighbour').name, 'zzz-neighbour', 'a neighbour fell out of get()')
+  assert.equal(sourcesA.get('nothing-registered'), undefined, 'an unknown name stopped answering undefined')
+
+  // `list()` keeps every source and the registry's order, which is what the
+  // plugin doctor's report and a plugin's own introspection read it for.
+  assert.deepEqual(
+    sourcesA.list().map((/** @type {any} */ c) => c.name),
+    ['aaa-own', 'zzz-neighbour'],
+    'list() lost a source or its order'
+  )
+
+  const log = makeLog()
+  const fileLog = makeLog()
+  const snapshots = await startConfiguredSources({
+    runtime,
+    log: /** @type {any} */ (log),
+    fileLog: /** @type {any} */ (fileLog),
+  })
+  assert.deepEqual(
+    snapshots.map((s) => ({ name: s.name, plugin: s.plugin, state: s.state })),
+    [
+      { name: 'aaa-own', plugin: A, state: 'started' },
+      { name: 'zzz-neighbour', plugin: B, state: 'started' },
+    ]
+  )
+  assert.equal(own.seen.ctx, ctxA)
+  assert.equal(neighbour.seen.ctx, ctxB)
+})
+
+test('a hostile name accessor cannot throw out of the refusal refusing it', async () => {
+  const { ctxA, ctxB } = stage()
+  const victim = fixtureSource('aaa', A)
+  ctxA.sources.register(victim.contribution)
+  // Registered under a name the registry validated, then turned into an
+  // accessor that raises. The refusal has to arrive as itself.
+  beHostile(victim.contribution, { get name() { throw new Error('hostile name') } })
+
+  const reached = /** @type {any} */ (ctxB.sources).get('aaa')
+  await assert.rejects(() => reached.start(ctxB), /carries no live start\(\)/)
+  assert.equal(victim.seen.starts, 0)
 })
