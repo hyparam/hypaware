@@ -54,12 +54,48 @@ export function defaultConfigPath(hypHome) {
  * and `collectHypAwareStatus` both read it, and the daemon must not import
  * the CLI walkthrough to ask one question about a config document.
  *
+ * One document is carved out of the plugins-array rule: the exact grep-only
+ * config the v1.36.0 migration's central-only lane forged. No composer output
+ * ever matched it, so classifying it answer-less discards no user's answer;
+ * see {@link isForgedGrepOnlyConfig}.
+ *
  * @ref LLP 0277#answer-less [implements]: a config without a plugins array holds no pick answer, so it seeds like no config at all
+ * @ref LLP 0426#readers-classify [implements]: the forged population heals at this read, not by a config rewrite
  * @param {HypAwareV2Config} config
  * @returns {boolean}
  */
 export function configRecordsPickAnswer(config) {
-  return Array.isArray(config.plugins)
+  return Array.isArray(config.plugins) && !isForgedGrepOnlyConfig(config)
+}
+
+/**
+ * Whether a config is, at the shape level, the one document the v1.36.0
+ * grep migration's central-only lane wrote as a machine's whole local
+ * config: `version: 2` plus a one-entry `plugins` array holding exactly
+ * `{ name: '@hypaware/grep' }`, and nothing else.
+ *
+ * Nothing the product writes matches it. The picker's composer has written
+ * `query.cache.retention.default_days` into every config since its first
+ * release, grep only enters a composed plugin list by riding
+ * `@hypaware/ai-gateway` (its manifest's `compose_with`), the attach lane
+ * appends client-adapter entries onto an existing config, and the migration
+ * itself declines the one append that would produce this document
+ * (grep_migration.js). So a match is the pre-fix migration's write or a
+ * hand-authored document that reproduces it, and reading it as "never
+ * picked" discards no answer a product surface recorded.
+ *
+ * The test is over the parsed document (the recognized keys), not the bytes:
+ * that is what both readers hold when they ask.
+ *
+ * @ref LLP 0426#forged-shape [implements]: exactly { version, plugins: [{ name: grep }] } and nothing else is migration residue, not an answer
+ * @param {HypAwareV2Config} config
+ * @returns {boolean}
+ */
+export function isForgedGrepOnlyConfig(config) {
+  if (!Array.isArray(config.plugins) || config.plugins.length !== 1) return false
+  const entry = config.plugins[0]
+  if (entry.name !== '@hypaware/grep' || Object.keys(entry).length !== 1) return false
+  return Object.keys(config).every((key) => key === 'version' || key === 'plugins')
 }
 
 /**

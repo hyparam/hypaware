@@ -7,6 +7,7 @@
 **Date:** 2026-09-18
 **Supersedes:** LLP 0415#migration, in part ("With only a central config, write an additive local config", and with it "exclusively create a missing local file")
 **Extends:** LLP 0277#answer-less (a missing local layer is answer-less in the same way an answer-less one is)
+**Extended-by:** LLP 0426 (#readers-classify: heals the population the pre-fix lane already forged, the residue this doc's #consequences records)
 **Related:** LLP 0011, LLP 0183, LLP 0281, LLP 0413
 
 > LLP 0415 settled that a central-only install gets a new additive local

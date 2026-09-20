@@ -178,3 +178,47 @@ test('a central layer carrying only non-capture plugins records no pick answer',
   assert.equal(report.configExists, true, 'and configured enough to boot')
   assert.equal(report.configRecordsAnswer, false, 'but a sink plugin answers no pick question')
 })
+
+// The document the v1.36.0 grep migration's central-only lane forged as a
+// machine's whole local config (issue #1892): `version` plus a one-entry
+// `plugins` array holding exactly `{ name: '@hypaware/grep' }`. No composer
+// output ever matched it, so the readers classify it answer-less and the
+// returning gate takes the first-run path.
+// @ref LLP 0426#forged-shape [tests]:
+test('the forged grep-only document records no pick answer', async () => {
+  const hypHome = await makeHome()
+  await writeCentralSeed(hypHome, {
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://example.invalid', identity: {} } } },
+  })
+  await fs.writeFile(defaultConfigPath(hypHome),
+    JSON.stringify({ version: 2, plugins: [{ name: '@hypaware/grep' }] }, null, 2) + '\n',
+    { mode: 0o600 })
+
+  const report = await collectHypAwareStatus({ env: env(hypHome) })
+  assert.equal(report.configExists, true, 'the file is there')
+  assert.equal(report.configValid, true, 'and it validates')
+  assert.equal(report.configRecordsAnswer, false, 'but the forged document is not an answer')
+})
+
+// Near misses stay answers: the carve-out matches only the exact document the
+// pre-fix lane wrote. Everything the product's own writers produce around
+// grep (the composer's query key, a decorated entry, a second entry, an
+// emptied list) records an answer exactly as before.
+// @ref LLP 0426#forged-shape [tests]:
+test('anything but the exact forged document still records an answer', async () => {
+  const configs = [
+    { version: 2, plugins: [{ name: '@hypaware/grep' }], query: { cache: { retention: { default_days: 30 } } } },
+    { version: 2, plugins: [{ name: '@hypaware/grep', enabled: false }] },
+    { version: 2, plugins: [{ name: '@hypaware/grep' }], auto_update: false },
+    { version: 2, plugins: [{ name: '@hypaware/grep' }, { name: '@hypaware/ai-gateway' }] },
+    { version: 2, plugins: [] },
+  ]
+  for (const config of configs) {
+    const hypHome = await makeHome()
+    await fs.writeFile(defaultConfigPath(hypHome), JSON.stringify(config) + '\n')
+    const report = await collectHypAwareStatus({ env: env(hypHome) })
+    assert.equal(report.configRecordsAnswer, true, JSON.stringify(config))
+  }
+})
