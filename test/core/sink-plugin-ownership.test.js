@@ -298,3 +298,29 @@ test('the kernel keeps the live registry, so the driver and hyp status are unaff
   await registry.closeAll()
   assert.equal(owner.seen.closes, 1, 'the kernel\'s own shutdown no longer closes the sink')
 })
+
+test('an owner\'s throwing accessor does not escape into a neighbour\'s list()', async () => {
+  const staged = stage()
+  const owner = fixtureSink('central', A)
+  const materialized = await materialize(staged, owner)
+
+  // A handle is a live object the owner still holds, so `name` is a property
+  // the owner can replace with code of its own. The ownership check a listing
+  // runs must not become a seam that runs it inside a neighbour's call.
+  Object.defineProperty(materialized, 'name', {
+    configurable: true,
+    get() { throw new Error('boom from the owner') },
+  })
+
+  const registry = /** @type {any} */ (staged.ctxB.sinks)
+  for (const member of ['list', 'listHandles']) {
+    const listed = registry[member]()
+    assert.equal(listed.length, 1, `${member}() dropped the entry instead of narrowing it`)
+    await assert.rejects(
+      () => listed[0].sink.exportBatch({ partitions: [], batchId: 'forged' }, {}),
+      /not owned by '@fixture\/squatter'/,
+      `${member}() handed a neighbour a live export path for an unreadable name`
+    )
+  }
+  assert.deepEqual(owner.seen.exports, [], 'forged rows reached the owner\'s destination')
+})

@@ -925,8 +925,17 @@ function createSinksFacade(pluginName, registry) {
     // One read of `name`, resolved back through the registry: a handle that is
     // not the one this registry answers with for the name it just claimed is
     // not the handle keyed under it, whatever it says.
-    const name = handle?.name
-    if (typeof name !== 'string') return false
+    //
+    // Read through `shownName`, which is why that guard is shared rather than
+    // local to the refusals: a handle is a live object its owner still holds,
+    // so an owner that puts a throwing accessor on its own `name` would
+    // otherwise raise out of every neighbour's `list()`, which is the owner's
+    // code escaping into the neighbour's call that reading through instead of
+    // copying exists to prevent. A name that cannot be read owns nothing here
+    // and the entry is narrowed, which is the fail-closed answer.
+    if (handle === null || typeof handle !== 'object') return false
+    const name = shownName(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (handle)))
+    if (name === '') return false
     return registry.ownerOf(name) === pluginName && registry.get(name) === handle
   }
   /** @param {SinkHandle[]} handles */
