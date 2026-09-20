@@ -7,6 +7,7 @@ import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { createActivationContext, createKernelRuntime } from '../../src/core/runtime/activation.js'
+import { temporaryDirectory } from '../helpers/temp_dir.js'
 
 /** @import { CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
 /** @import { ExtendedSinkRegistry } from '../../src/core/registry/types.js' */
@@ -122,14 +123,17 @@ function contributeCommand(staged, owner, name, run) {
 /**
  * @param {Awaited<ReturnType<typeof stage>>} staged
  * @param {string[]} argv
+ * @param {NodeJS.ProcessEnv} [env] what the invocation runs under, defaulting
+ *   to this process's. Only the cases that dispatch a *real* core command pass
+ *   one; the fixture commands touch no disk.
  */
-async function invoke(staged, argv) {
+async function invoke(staged, argv, env = process.env) {
   const stdout = makeBuf()
   const stderr = makeBuf()
   const code = await dispatch(argv, {
     stdout,
     stderr,
-    env: { ...process.env },
+    env: { ...env },
     cwd: process.cwd(),
     registry: staged.registry,
     kernel: staged.kernel,
@@ -454,4 +458,134 @@ test('a plugin cannot register a command as someone else through the facade it i
     commands.register({ name: 'borrowed', plugin: A, summary: 's', usage: 'u', async run() { return 0 } })
   })
   assert.equal(staged.registry.ownerOf('borrowed'), B, 'a plugin registered a command under a neighbour\'s name')
+})
+
+// The split above narrows what a command body *receives*. It did not decide
+// whose body runs: `get()` and `list()` hand back the stored record, and `run`
+// is a plain writable property on it, so a plugin rewrote the body of any
+// command the dispatcher reads as nobody's (every core command, every verb
+// projection) and ran its own code with the kernel's raw registries, or
+// rewrote a neighbour's and ran under the neighbour's facades (issue #1977).
+// The body dispatch runs is now the function `register` validated, kept where
+// `ownerOf`'s owners are. The three routes below are the three it named.
+
+/**
+ * Everything a rewritten body would reach, measured from inside it rather than
+ * inferred from the shape of the context.
+ *
+ * @param {Awaited<ReturnType<typeof stage>>} staged
+ * @param {CommandRunContext} ctx
+ */
+async function reachFrom(staged, ctx) {
+  const handle = /** @type {any} */ (ctx.sinks.get('org-central'))
+  let forged = 'refused'
+  try {
+    await handle.sink.exportBatch({ partitions: [], batchId: 'forged' }, {})
+    forged = 'ACCEPTED'
+  } catch {
+    // Refused is the answer, and so is a handle that carries no live sink.
+  }
+  return {
+    raw: ctx.sinks === staged.kernel.sinks,
+    rawSources: ctx.sources === staged.kernel.sources,
+    rawCaps: ctx.capabilities === staged.kernel.capabilities,
+    config: handle?.config,
+    forged,
+  }
+}
+
+/**
+ * The invariant issue #1977 asks for, whichever way a shape provides it: the
+ * rewritten body either never ran, so there is nothing for it to have
+ * observed, or ran against the narrowed context. What the cases assert about
+ * the mechanism is separate, and is that the body the registry validated ran.
+ *
+ * @param {any} hijacked what the rewritten body recorded, or undefined
+ * @param {string} where the command whose stored `run` was rewritten
+ */
+function assertNoRawReach(hijacked, where) {
+  if (hijacked === undefined) return
+  assert.equal(hijacked.raw, false, `'${where}': a rewritten body got the kernel's own sink registry`)
+  assert.equal(hijacked.rawSources, false, `'${where}': a rewritten body got the kernel's own source registry`)
+  assert.equal(hijacked.rawCaps, false, `'${where}': a rewritten body got the kernel's own capability registry`)
+  assert.equal(hijacked.config, undefined, `'${where}': a rewritten body read the neighbour's instance config`)
+  assert.notEqual(hijacked.forged, 'ACCEPTED', `'${where}': a rewritten body forged an export`)
+}
+
+test('rewriting the stored run of a core command does not put a plugin\'s body behind it', async () => {
+  const staged = await stage()
+  /** @type {any} */
+  let hijacked
+  assert.equal(staged.registry.ownerOf('status'), undefined, 'status is no longer read as a core command')
+  const stored = /** @type {any} */ (staged.ctxB.commands.get('status'))
+  stored.run = async (/** @type {string[]} */ _argv, /** @type {CommandRunContext} */ ctx) => {
+    hijacked = await reachFrom(staged, ctx)
+    return 0
+  }
+
+  const home = temporaryDirectory('hyp-command-body-')
+  const { code, stdout } = await invoke(staged, ['status'], { ...process.env, HYP_HOME: home, HYP_CONFIG: '' })
+
+  assertNoRawReach(hijacked, 'status')
+  assert.equal(hijacked, undefined, 'the rewritten body ran in place of the core command')
+  assert.equal(code, 0)
+  assert.match(stdout, /^hypaware\n {2}overall:/, 'the core command core registered no longer runs')
+  assert.deepEqual(staged.sink.seen.exports, [], 'forged rows reached the owner\'s destination')
+})
+
+test('rewriting the stored run of a verb projection does not put the registering plugin\'s body behind it', async () => {
+  const staged = await stage()
+  /** @type {any} */
+  let hijacked
+  let operations = 0
+  // A verb the registry projects into a CLI command itself, so the projection
+  // has no recorded registrar and the dispatcher reads it as core's.
+  staged.ctxB.verbs.register(/** @type {any} */ ({
+    name: 'squat verb',
+    tool: 'squat_verb',
+    summary: 'fixture verb',
+    inputSchema: { type: 'object', properties: {}, required: [], positional: [] },
+    async operation() { operations += 1; return { ok: true } },
+    render: () => ({ stdout: 'ok\n' }),
+  }))
+  assert.equal(staged.registry.ownerOf('squat verb'), undefined, 'a verb projection acquired a registrar')
+  const stored = /** @type {any} */ (staged.ctxB.commands.get('squat verb'))
+  stored.run = async (/** @type {string[]} */ _argv, /** @type {CommandRunContext} */ ctx) => {
+    hijacked = await reachFrom(staged, ctx)
+    return 0
+  }
+
+  const { code, stdout } = await invoke(staged, ['squat', 'verb'])
+
+  assertNoRawReach(hijacked, 'squat verb')
+  assert.equal(hijacked, undefined, 'the rewritten body ran in place of the verb projection')
+  assert.equal(code, 0)
+  assert.equal(operations, 1, 'the kernel\'s own projection no longer runs the verb')
+  assert.equal(stdout, 'ok\n')
+  assert.deepEqual(staged.sink.seen.exports, [], 'forged rows reached the owner\'s destination')
+})
+
+test('rewriting the stored run of a neighbour\'s command does not put a plugin\'s body under the neighbour\'s facades', async () => {
+  const staged = await stage()
+  /** @type {any} */
+  let hijacked
+  /** @type {any} */
+  let ownerObserved
+  contributeCommand(staged, staged.ctxA, 'owner body', async (_argv, ctx) => {
+    ownerObserved = { isLive: /** @type {any} */ (ctx.sinks.get('org-central')) === staged.live }
+    return 0
+  })
+  const stored = /** @type {any} */ (staged.ctxB.commands.get('owner body'))
+  stored.run = async (/** @type {string[]} */ _argv, /** @type {CommandRunContext} */ ctx) => {
+    hijacked = await reachFrom(staged, ctx)
+    return 0
+  }
+
+  const { code } = await invoke(staged, ['owner', 'body'])
+
+  assertNoRawReach(hijacked, 'owner body')
+  assert.equal(hijacked, undefined, 'a plugin ran its own body under a neighbour\'s recorded ownership')
+  assert.equal(code, 0)
+  assert.equal(ownerObserved?.isLive, true, 'the owner\'s own body no longer runs from its own command')
+  assert.deepEqual(staged.sink.seen.exports, [], 'forged rows reached the owner\'s destination')
 })

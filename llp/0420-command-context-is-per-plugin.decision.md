@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-09-20
 **Extends:** LLP 0004#the-activation-context (the per-plugin facade rule now holds for the second context a plugin reaches the registries through), LLP 0009#core-owns-dispatch (core, which routes argv to the owning command, is also what records who owns it)
+**Extended-by:** LLP 0421 (#consequences: the stored record's `run` no longer decides whose code executes, so the split below is a boundary and not only a narrowing)
 **Related:** LLP 0006, LLP 0012, LLP 0014, LLP 0130, LLP 0136
 
 > `CommandRunContext` handed every command body the kernel's own
@@ -108,6 +109,11 @@ same tolerance `createSinksFacade` extends to a registry without `ownerOf`.
   (freezing the record breaks 13 existing tests), deferred to issue #1977.
   Until it lands, #1970's "a plugin cannot shadow `hyp status`" holds for
   registration only, not for the stored record's body.
+  **Extended by [LLP 0421](./0421-command-body-is-registry-private.decision.md):**
+  the registry now keeps the `run` it validated and `dispatch` asks for it by
+  name, so rewriting the stored record's `run` decides nothing. This bullet
+  and the "as registered" caveat in the one above it record what this
+  decision left open, and are no longer the current behavior.
 - The `ctx.commands.run` seam needs no rule of its own. It re-enters
   `dispatch`, which resolves the owner of the command actually invoked, so a
   core command running a plugin command narrows into it and a plugin command

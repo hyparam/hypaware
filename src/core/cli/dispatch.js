@@ -469,6 +469,14 @@ async function dispatchInternal(argv, opts) {
     ? registry.ownerOf(matched.invokedName)
     : matched.command.plugin
   const ownerFacades = commandOwner ? pluginRegistryFacades(kernel, commandOwner) : undefined
+  // And whose code is about to run, asked of the registry for the reason the
+  // owner is: `matched.command.run` is a writable property of a record `get()`
+  // hands to the registering plugin, so it cannot decide which function
+  // executes under the owner resolved a few lines up (issue #1977). A registry
+  // with no `bodyOf` (a host's own, injected) falls back to the record, the
+  // same tolerance the owner lookup extends.
+  // @ref LLP 0421#private-body [implements]: dispatch runs the body the registry validated, not the one the stored record carries now
+  const commandBody = typeof registry.bodyOf === 'function' ? registry.bodyOf(matched.invokedName) : undefined
   /** @type {CommandRunContext} */
   const cmdCtx = {
     stdout,
@@ -555,7 +563,9 @@ async function dispatchInternal(argv, opts) {
             }
             exitCode = 0
           } else {
-            exitCode = await matched.command.run(matched.rest, cmdCtx)
+            // Called on the stored record, so a body written as a method of
+            // its own registration still sees the `this` it saw before.
+            exitCode = await (commandBody ?? matched.command.run).call(matched.command, matched.rest, cmdCtx)
           }
           if (typeof exitCode !== 'number' || !Number.isFinite(exitCode)) {
             exitCode = 0
