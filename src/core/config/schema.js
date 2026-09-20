@@ -84,19 +84,34 @@ export function configRecordsPickAnswer(config) {
  * hand-authored document that reproduces it, and reading it as "never
  * picked" discards no answer a product surface recorded.
  *
- * The test is over the parsed document (the recognized keys), not the bytes:
- * that is what both readers hold when they ask.
+ * The test is over the recognized keys, not the bytes, and not over whatever
+ * document shape the caller happens to hold: `collectHypAwareStatus` asks
+ * over `parseConfigShape` output (where `parsePluginEntry` has already
+ * dropped any entry key it does not recognize), while the pick lane asks
+ * over a raw `JSON.parse` of the same file. So the entry check ignores
+ * exactly the keys the parser drops, and a decorating key the parser keeps
+ * (`enabled`, `config`, or a pin field) defeats the match in both lanes:
+ * one document, one classification, whichever reader asks.
  *
- * @ref LLP 0426#forged-shape [implements]: exactly { version, plugins: [{ name: grep }] } and nothing else is migration residue, not an answer
+ * @ref LLP 0426#forged-shape [implements]: exactly { version: 2, plugins: [{ name: grep }] } and nothing else is migration residue, not an answer
  * @param {HypAwareV2Config} config
  * @returns {boolean}
  */
 export function isForgedGrepOnlyConfig(config) {
+  if (config.version !== 2) return false
   if (!Array.isArray(config.plugins) || config.plugins.length !== 1) return false
   const entry = config.plugins[0]
-  if (entry.name !== '@hypaware/grep' || Object.keys(entry).length !== 1) return false
+  if (entry.name !== '@hypaware/grep') return false
+  const decorated = Object.keys(entry).some((key) => key !== 'name' && RECOGNIZED_PLUGIN_ENTRY_KEYS.has(key))
+  if (decorated) return false
   return Object.keys(config).every((key) => key === 'version' || key === 'plugins')
 }
+
+// The entry keys `parsePluginEntry` keeps. A raw entry key outside this set
+// is one the parser drops, invisible to the reader holding the parsed
+// document, so the forged-shape test ignores it too. Extend this set and
+// `parsePluginEntry` together.
+const RECOGNIZED_PLUGIN_ENTRY_KEYS = new Set(['name', 'enabled', 'config', 'version', 'artifact_hash', 'source'])
 
 /**
  * Guard a write to the user-owned **local** config layer
@@ -447,6 +462,10 @@ export function createConfigRegistry() {
 /* ---------- helpers ---------- */
 
 /**
+ * The keys this parser recognizes are mirrored in
+ * `RECOGNIZED_PLUGIN_ENTRY_KEYS` (the forged-shape test); extend both
+ * together.
+ *
  * @param {unknown} entry
  * @param {string} pointer
  * @param {ValidationError[]} errors
