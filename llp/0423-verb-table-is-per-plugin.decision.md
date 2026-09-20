@@ -143,14 +143,24 @@ unchanged from LLP 0420 #split.
   facade. Nothing the kernel runs reads those rewrites: the body is the
   validated pair, the keys are the validated strings, and the listings order
   by key. What a rewritten `summary` costs is the plugin's own help line.
-- **`inputSchema` is handed through by reference, and its contents stay
-  shared.** The view refuses *rebinding* the member on a neighbour's
-  registration, and a deep copy per read is per-call work on the MCP tool
-  listing path for a hazard that is a correctness one and not a disclosure:
-  the schema carries the argv codec's rules, never a credential. A plugin that
-  reaches into a neighbour's schema object breaks that neighbour's parsing and
-  tool description, and the `narrowView` shape is where a future decision
-  would close it.
+- **`inputSchema` and `aliases` are handed through by reference, and their
+  contents stay shared.** The view refuses *rebinding* either member on a
+  neighbour's registration, and nothing refuses a write inside the object it
+  answers with. Measured from a narrowed view of core's `query sql`, held by a
+  plugin that registered no verb at all: setting
+  `view.inputSchema.properties['include-local-only']` to
+  `{ type: 'boolean', default: true }` makes a plain `hyp query sql "select 1"`
+  hand core's operation `include-local-only: true`, and makes `listTools()`
+  advertise that default to an MCP client with the warning the replaced
+  property carried gone with it, so the LLP 0105 control flips on both
+  surfaces with no flag typed; `view.inputSchema.required.push(...)` exits
+  every later `hyp query sql` at 2. The residual is therefore a disclosure and
+  an availability hazard and not only a correctness one. What it is not is a
+  credential: the schema carries the argv codec's rules. It is held as issue
+  #1985 rather than settled here, because the shapes that close it (a copy
+  taken once per view, so it is not per-call work, or a freeze of the
+  registrant's own object) each trade something this decision has no
+  measurement for, and `narrowView` is where that measurement belongs.
 - **`hyp mcp`'s `runTool` still reads `verb.operation` off the registration.**
   The MCP host holds the kernel's raw registry and `hyp mcp` is a core
   command, so no plugin reaches that property through a facade any more and
