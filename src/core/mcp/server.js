@@ -15,7 +15,7 @@ import {
 } from './jsonrpc.js'
 
 /**
- * @import { DatasetRegistration, QueryRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { DatasetRegistration, PluginName, QueryRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /** Protocol version advertised when the client sends none. */
@@ -44,7 +44,7 @@ const HANDLE_OPERATION = 'mcp.handle_message'
  * @param {{
  *   verbs: VerbRegistry,
  *   query: QueryRegistry,
- *   runTool: (verb: VerbRegistration, params: Record<string, unknown>, tool: string) => Promise<unknown>,
+ *   runTool: (verb: VerbRegistration, params: Record<string, unknown>, owner: PluginName | undefined) => Promise<unknown>,
  *   transport?: 'stdio' | 'http',
  *   allowOperator?: boolean,
  *   serverVersion?: string,
@@ -305,7 +305,26 @@ export function createMcpServer(opts) {
   async function callTool(id, params) {
     const name = params?.name
     const verb = typeof name === 'string' ? verbs.getByTool(name) : undefined
-    if (!verb || !toolVisible(verb)) {
+    if (!verb) {
+      return jsonRpcError(id, METHOD_NOT_FOUND, `unknown tool '${name}'`)
+    }
+    // Settle the owner from the same resolution that produced `verb`, before a
+    // single plugin-controlled property runs: `toolVisible` reads `verb.exposure`
+    // and `verb.authClass`, and `validateToolArguments` reads `verb.inputSchema`,
+    // any of which can be an accessor that unregisters this verb and empties the
+    // ledger for the slot the host is mid-dispatch on. Resolved by `name`, the
+    // key `getByTool` matched, never `verb.tool`; carried into `runTool` so the
+    // config slice is picked from the owner captured here and never from a
+    // re-read of a ledger plugin code has since mutated (issue #1982). This is
+    // the CLI route's order: `dispatch` settles `commandOwner` from
+    // `registry.ownerOf(matched.invokedName)` before it runs any plugin code.
+    // @ref LLP 0425#tool-owner [implements]: capture the owner at the resolution instant, before any plugin property runs, and carry it forward
+    // `ownerOfTool` is core `createVerbRegistry`'s, not the plugin-facing
+    // `VerbRegistry` contract (a host may drive its own registry without it),
+    // so feature-detect it: absent means every tool keeps the whole config.
+    const ownerOfTool = /** @type {VerbRegistry & { ownerOfTool?: (tool: string) => PluginName | undefined }} */ (verbs).ownerOfTool
+    const owner = typeof ownerOfTool === 'function' ? ownerOfTool.call(verbs, name) : undefined
+    if (!toolVisible(verb)) {
       return jsonRpcError(id, METHOD_NOT_FOUND, `unknown tool '${name}'`)
     }
     const validated = validateToolArguments(verb.inputSchema, params?.arguments ?? {})
@@ -313,11 +332,7 @@ export function createMcpServer(opts) {
       return jsonRpcError(id, INVALID_PARAMS, validated.error)
     }
     try {
-      // `name` and not `verb.tool`: the key `getByTool` resolved this
-      // registration by is the one the host can look an owner up under, while
-      // `verb.tool` is a live plugin property free to answer a neighbour's key
-      // and so to pick a neighbour's config slice (issue #1982).
-      const structured = await runTool(verb, validated.params, name)
+      const structured = await runTool(verb, validated.params, owner)
       // Round-trip through the query replacer so BigInt/Date in rows can't
       // break the outer response serialization, and structuredContent stays
       // a plain JSON value.

@@ -15,7 +15,9 @@
 > whole effective config and every `tools/call` ran against it. The surface
 > that exists to hand a verb to an AI client was the one surface that still
 > disclosed every other plugin's `plugins[]` config and a configured sink's
-> inline credential (issue #1982). The host now resolves the owner per call.
+> inline credential (issue #1982). The host now settles the owner at the instant
+> it resolves the tool, before any plugin property runs, and carries it into the
+> call.
 
 ## Context {#context}
 
@@ -27,7 +29,7 @@ verb name never enters that path, so `VerbRegistry.ownerOf`, keyed by name, had
 no question the host could ask it. That is why LLP 0422 #consequences deferred
 this rather than widening the CLI fix.
 
-## The owner is looked up by the key the host dispatched on {#tool-owner}
+## The owner is captured at the instant the tool is resolved {#tool-owner}
 
 `VerbRegistry` keeps a second ledger of the same registrar, keyed by the tool
 name it validated, and answers it as `ownerOfTool(tool)`. Both ledgers are
@@ -39,23 +41,55 @@ time, for the reason LLP 0422 #verb-owner rejected `VerbRegistration.plugin`:
 the registry stores the registration by reference and hands it back, so `tool`
 is a live plugin property free to answer a neighbour's key. Deriving the owner
 from it would have made "which plugin's config do I read" a thing a plugin
-could ask for. The tool the host passes to `runTool` is the key `getByTool`
-resolved the registration under, not a second read of the record.
+could ask for.
+
+**When** the host asks is as load-bearing as **what** it asks. `callTool`
+resolves the registration with `getByTool(name)` and then reads plugin-controlled
+properties before dispatch: `verb.exposure` and `verb.authClass` (the visibility
+gate) and `verb.inputSchema` (argument validation). Any of those can be an
+accessor that unregisters this very verb, emptying the tool slot the host is
+mid-dispatch on, so a `ownerOfTool` asked after them answers `undefined` for a
+plugin verb and the slice widens back to the whole config (issue #1982, the
+defect this decision's first shape reopened). So the host captures the owner
+from the same resolution that produced the verb, before it reads a single plugin
+property, and carries that value into `runTool`. This is the CLI route's order:
+`dispatch` settles `commandOwner` from `registry.ownerOf(matched.invokedName)`
+before it builds the context or runs any plugin code. Nothing plugin-controlled
+runs between `getByTool(name)` and `ownerOfTool(name)`, so the captured owner is
+authoritative and no later mutation of the ledger can reach it.
 
 Core's verbs register outside any activation bracket and stay ownerless, and
 `undefined` is the signal for "core", not a missing answer: `query_sql` keeps
 the whole config on the MCP surface exactly as `hyp query sql` does on the CLI.
-A host driving its own verb registry records no registrar for anything, so a
-registry with no `ownerOfTool` is read exactly as it was.
+Because the owner is captured at the resolution instant and not re-asked later,
+this `undefined` can only be a core verb (a present tool with no registrar),
+never a plugin verb whose registrar a mid-dispatch `unregister` erased. A host
+driving its own verb registry records no registrar for anything, so a registry
+with no `ownerOfTool` is read exactly as it was.
 
 ## The slice is per owner, and built once for the session {#session-slice}
 
 `hyp mcp serve` is a long-lived process answering many calls from one
-`CommandRunContext`, so `ctx.config` and `ctx.plugins` are fixed for the whole
-session. The host keeps each owner's slice in a `Map` keyed by the owner name
-and builds it on that owner's first tool call. A session pays one slice per
-plugin that owns a tool, bounded by the active plugin set, rather than the
-per-invocation slice the CLI route pays once and exits.
+`CommandRunContext`, so the *bindings* `ctx.config` and `ctx.plugins` do not
+change across the session: no call rebinds them, so a slice built from them
+stays a correct slice of the same config. The host keeps each owner's slice in a
+`Map` keyed by the owner name and builds it on that owner's first tool call. A
+session pays one slice per plugin that owns a tool, bounded by the active plugin
+set, rather than the per-invocation slice the CLI route pays once and exits.
+
+This says nothing about *mutation*. `pluginScopedConfig` returns a shallow
+`{...config}`, so core's own sections (`query`, `version`, `disambiguate`,
+`auto_update`) and the owner's own `plugins[]` entry are carried by reference
+into every slice (LLP 0422 #scope documents this deliberately: core code reads
+the same `query` block to resolve `--remote`). A tool's `operation` that mutates
+one of those objects therefore changes what a later call in the same session,
+core's `query_sql` included, resolves out of it. On the CLI this sharing exists
+too but the process handles one command and exits; the long-lived host is what
+makes it cross-call. Whether to freeze or copy those shared sections is left
+open here and tracked separately (issue #1992): it is a cross-surface change to
+`pluginScopedConfig`, and LLP 0421 #shapes measured that freezing and copying a
+live record broke shipped identity checks, so the trade wants its own decision
+rather than a slice-site patch.
 
 ## Consequences {#consequences}
 
@@ -63,9 +97,12 @@ per-invocation slice the CLI route pays once and exits.
   differs by caller. `refresh` is still `'auto'` for every tool and `callerCwd`
   is still the host process's cwd (LLP 0105 #unknown), because neither is a
   question about who registered the verb.
-- `runTool` takes the dispatching tool name as a third argument. It is the
-  server assembly's only new coupling to the host, and it carries a registry
-  key rather than a registration, which is what keeps the lookup honest.
+- `runTool` takes the resolved owner as a third argument, and the host settles
+  it (via `ownerOfTool`) at the instant it resolves the tool, before it reads
+  any plugin property. It is the server assembly's only new coupling to the
+  host, and it carries the captured owner rather than a registration or a key to
+  re-resolve, which is what keeps a mid-dispatch `unregister` from widening the
+  slice.
 - Per tool call the host allocates the operation context it already allocated,
   plus a `Map` lookup. The slice itself, one shallow object, one array of
   `plugins[]` length and one record of `sinks{}` size (LLP 0422 #scope), is
