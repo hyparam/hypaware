@@ -1,4 +1,4 @@
-# LLP 0424: A plugin releases only the command names it registered
+# LLP 0424: ctx.commands.unregister releases only the names its plugin registered
 
 **Type:** Decision
 **Status:** Accepted
@@ -93,12 +93,18 @@ no registrar for anything, so there is no binding to read.
 - **One `ownerOf` lookup per release, and releases are rare.** No allocation on
   any hot path, nothing per-record, nothing per-row, and the refusal path
   builds its strings only when it refuses. The dispatch path is untouched.
-- **A plugin's own record is still its own.** `get`, `list` and `match` hand
-  back the stored `CommandRegistration` by reference and unfrozen, which
-  LLP 0421 #shapes measured the alternatives to and kept deliberately. Nothing
-  the kernel routes on reads those rewrites: the body is the validated function
-  (LLP 0421 #private-body), the owner is the recorded registrar, and the
-  listings order by key.
+- **`get`, `list` and `match` hand back the stored record by reference, a
+  neighbour's and core's included**, unfrozen, which LLP 0421 #shapes measured
+  the alternatives to and kept deliberately. Nothing that decides whose body
+  runs, who owns a name, or how a listing orders reads those rewrites: the
+  body is the validated function (LLP 0421 #private-body), the owner is the
+  recorded registrar, and the listings order by key. Two things do read the
+  live record: `retractCommand` routes a deletion on
+  `isVerbProjection(commandRegistry.get(name))`, which is the forge below, and
+  `renderCommandHelp` renders `summary`, `usage` and `help` as they read at
+  dispatch time, so `hyp <name> --help` prints what a neighbour wrote onto a
+  record it does not own (measured: B rewrote A's `summary` and `--help`
+  printed B's string, A's gone).
 - **The `VERB_PROJECTION` forge is a second spelling of this deletion, and it
   is still open.** `verb_command.js` documents that the mark is liftable with
   `Object.getOwnPropertySymbols` off any real projection, and `ctx.commands.get`
@@ -106,8 +112,17 @@ no registrar for anything, so there is no binding to read.
   registers a verb of that name (the projection is skipped, because the command
   name is taken) and releases it, and `retractCommand` deletes what now looks
   like its own projection. Measured after this decision landed, it still
-  removes a neighbour's command. It was accepted on the premise that forging
+  removes a neighbour's command, and a core command with it: the same lines
+  took `status` off the registry, and the plugin then answered `hyp status`
+  with its own body under its own recorded ownership, which is issue #1980's
+  headline harm by another spelling. It was accepted on the premise that forging
   the mark buys nothing, and it buys exactly this, so the premise wants
   revisiting rather than the refusal above widening: the caller doing the
   deleting is the kernel, on the registry it owns, and nothing about the owner
   of the *name* is what it gets wrong. Held as issue #1987.
+- **Groups are outside this decision.** `registerGroup` stays forwarded with
+  no owner check, last write wins across owners, and the caller's group object
+  is stored and handed back by reference through `getGroup` and `listGroups`
+  (measured: B's `registerGroup({ name: 'acme', ... })` displaced A's outright).
+  A group is metadata with no `run` (LLP 0214 #d2), so what this reaches is
+  the prose `hyp <group> --help` renders, never a body, an owner, or dispatch.
