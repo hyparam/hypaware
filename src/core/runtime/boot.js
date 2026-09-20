@@ -243,7 +243,16 @@ export async function bootKernel(opts = {}) {
       // already recorded it (issue #1576). The flat term is derived from this
       // one so the two cannot disagree.
       const unloadableManifests = [...discovered.failed, ...installed.failed]
-      const unloadable = unloadableManifests.map((f) => f.rootDir)
+      // The flat term carries one thing the reasoned list above cannot: a lock
+      // entry with no usable `install_dir`, which discovery could not even
+      // attempt a manifest for, so it has no `rootDir` to be a `FailedManifest`
+      // by and is named by its lock key instead. It leaves the same hole in
+      // this boot's plan as a manifest that would not load, and the prune
+      // stands down on the hole rather than on how the hole was made; omitting
+      // it would read that plugin's client assets as retired and delete them
+      // out of the user's home on the first boot after the lock was hand-edited
+      // (issue #1958).
+      const unloadable = [...unloadableManifests.map((f) => f.rootDir), ...installed.malformed]
 
       const log = getLogger('kernel')
       /** @type {PluginName[]} */
