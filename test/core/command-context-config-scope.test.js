@@ -9,8 +9,10 @@ import path from 'node:path'
 import { dispatch } from '../../src/core/cli/dispatch.js'
 import { registerCoreCommands } from '../../src/core/cli/core_commands.js'
 import { CONFIG_BASENAME } from '../../src/core/config/schema.js'
+import { pluginScopedConfig } from '../../src/core/config/plugin_scope.js'
 import { createCommandRegistry } from '../../src/core/registry/commands.js'
 import { writeLock } from '../../src/core/plugin_install/lock.js'
+import { resolveGatewayBaseUrl } from '../../hypaware-core/plugins-workspace/claude-desktop/src/profile.js'
 
 // `CommandRunContext.config` was the whole effective config, so contributing a
 // command (or a verb, whose `operation` receives the same object through
@@ -108,10 +110,10 @@ export async function activate(ctx) {
  * Mirrors `test/core/boot-installed.test.js`: what `hyp plugin install` lands
  * on disk, without running the install pipeline.
  *
- * @param {{ hypHome: string, name: string, files: Record<string, string> }} args
+ * @param {{ hypHome: string, name: string, files: Record<string, string>, manifest?: Record<string, unknown> }} args
  * @returns {Promise<{ name: string, version: string, installDir: string }>}
  */
-async function stageInstalledPlugin({ hypHome, name, files }) {
+async function stageInstalledPlugin({ hypHome, name, files, manifest }) {
   const installDir = path.join(hypHome, 'hypaware', 'plugins', name)
   await fs.mkdir(installDir, { recursive: true })
   await fs.writeFile(
@@ -123,6 +125,7 @@ async function stageInstalledPlugin({ hypHome, name, files }) {
       hypaware_api: '^1.0.0',
       runtime: 'node',
       entrypoint: './index.js',
+      ...manifest,
     })
   )
   for (const [file, body] of Object.entries(files)) {
@@ -285,6 +288,185 @@ test('a verb a plugin registered gets the same narrowing on its operation config
   } finally {
     await fs.rm(staged.hypHome, { recursive: true, force: true })
   }
+})
+
+// The one widening the slice makes: a declared capability requirer keeps its
+// provider's `plugins[]` section. The bundled case is `@hypaware/claude-desktop`
+// resolving `@hypaware/ai-gateway`'s pinned `listen` (LLP 0422 #scope); these
+// fixtures prove the rule through the real `dispatch()`, in both directions.
+const CAP_PROVIDER = '@fixture/cap-gateway'
+const CAP_REQUIRER = '@fixture/desktop'
+
+const CAP_PROVIDER_SOURCE = `
+import nodeFs from 'node:fs'
+import nodePath from 'node:path'
+
+export async function activate(ctx) {
+  ctx.commands.register({
+    name: 'prov peek',
+    plugin: ${JSON.stringify(CAP_PROVIDER)},
+    summary: 'fixture provider command',
+    usage: 'hyp prov peek',
+    async run(_argv, cmdCtx) {
+      const entry = (name) => (cmdCtx.config?.plugins ?? []).find((p) => p && p.name === name)
+      nodeFs.writeFileSync(nodePath.join(cmdCtx.env.HYP_FIXTURE_OUT, 'provider.json'), JSON.stringify({
+        requirerConfig: entry(${JSON.stringify(CAP_REQUIRER)})?.config ?? null,
+        ownConfig: entry(${JSON.stringify(CAP_PROVIDER)})?.config ?? null,
+      }))
+      return 0
+    },
+  })
+}
+`
+
+const CAP_REQUIRER_SOURCE = `
+import nodeFs from 'node:fs'
+import nodePath from 'node:path'
+
+export async function activate(ctx) {
+  ctx.commands.register({
+    name: 'desk peek',
+    plugin: ${JSON.stringify(CAP_REQUIRER)},
+    summary: 'fixture requirer command',
+    usage: 'hyp desk peek',
+    async run(_argv, cmdCtx) {
+      const entry = (name) => (cmdCtx.config?.plugins ?? []).find((p) => p && p.name === name)
+      nodeFs.writeFileSync(nodePath.join(cmdCtx.env.HYP_FIXTURE_OUT, 'requirer.json'), JSON.stringify({
+        providerConfig: entry(${JSON.stringify(CAP_PROVIDER)})?.config ?? null,
+        ownConfig: entry(${JSON.stringify(CAP_REQUIRER)})?.config ?? null,
+        unrelatedConfig: entry(${JSON.stringify(OWNER)})?.config ?? null,
+        sinkToken: cmdCtx.config?.sinks?.['org-central']?.config?.token ?? null,
+      }))
+      return 0
+    },
+  })
+}
+`
+
+/**
+ * A second staged boot: a capability provider with a pinned setting, the
+ * plugin whose manifest requires that capability, and an unrelated third
+ * plugin owning a sink with an inline token.
+ */
+async function stageCapabilityPair() {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-cmd-config-cap-'))
+  const out = path.join(hypHome, 'observed')
+  await fs.mkdir(out, { recursive: true })
+  const provider = await stageInstalledPlugin({
+    hypHome,
+    name: CAP_PROVIDER,
+    files: { 'index.js': CAP_PROVIDER_SOURCE },
+    manifest: { provides: { capabilities: { 'fixture.gateway': '2.0.0' } } },
+  })
+  const requirer = await stageInstalledPlugin({
+    hypHome,
+    name: CAP_REQUIRER,
+    files: { 'index.js': CAP_REQUIRER_SOURCE },
+    manifest: { requires: { capabilities: { 'fixture.gateway': '^2.0.0' } } },
+  })
+  const owner = await stageInstalledPlugin({
+    hypHome,
+    name: OWNER,
+    files: { 'index.js': OWNER_SOURCE },
+  })
+  await writeFixtureLock(hypHome, [provider, requirer, owner])
+  await fs.writeFile(
+    path.join(hypHome, CONFIG_BASENAME),
+    JSON.stringify({
+      version: 2,
+      plugins: [
+        { name: CAP_PROVIDER, config: { listen: '127.0.0.1:9911' } },
+        { name: CAP_REQUIRER, config: { mine: 'visible' } },
+        { name: OWNER, config: { api_key: OWNER_API_KEY } },
+      ],
+      sinks: {
+        'org-central': {
+          plugin: OWNER,
+          config: { schedule: '* * * * *', endpoint: 'https://central.example', token: SINK_TOKEN },
+        },
+      },
+    })
+  )
+  const registry = createCommandRegistry()
+  registerCoreCommands(registry)
+  return { hypHome, out, registry }
+}
+
+test('a declared capability requirer keeps its provider\'s config section, and only that', async () => {
+  const staged = await stageCapabilityPair()
+  try {
+    const run = await invoke(staged, ['desk', 'peek'])
+    assert.equal(run.code, 0, run.stderr)
+    const seen = await observation(staged, 'requirer.json')
+
+    assert.deepEqual(seen.providerConfig, { listen: '127.0.0.1:9911' },
+      'the requirer lost the config of the capability provider its manifest declares')
+    assert.deepEqual(seen.ownConfig, { mine: 'visible' })
+    assert.equal(seen.unrelatedConfig, null, 'the widening leaked an undeclared neighbour\'s config section')
+    assert.equal(seen.sinkToken, null, 'the widening leaked a sink instance\'s inline token')
+  } finally {
+    await fs.rm(staged.hypHome, { recursive: true, force: true })
+  }
+})
+
+test('the capability edge is directed: the provider does not read its requirer\'s config', async () => {
+  const staged = await stageCapabilityPair()
+  try {
+    const run = await invoke(staged, ['prov', 'peek'])
+    assert.equal(run.code, 0, run.stderr)
+    const seen = await observation(staged, 'provider.json')
+
+    assert.equal(seen.requirerConfig, null, 'providing a capability granted a read of the requirer\'s config')
+    assert.deepEqual(seen.ownConfig, { listen: '127.0.0.1:9911' })
+  } finally {
+    await fs.rm(staged.hypHome, { recursive: true, force: true })
+  }
+})
+
+// Binds the shipped cross-plugin reader to the slice without a darwin boot:
+// `@hypaware/claude-desktop`'s real manifest and real `resolveGatewayBaseUrl`
+// over the slice `dispatch()` would hand its commands. Fails at the pre-fix
+// head: the scoped config lost the gateway's `listen`, so the profile pointed
+// at the fixed default and the LLP 0115 ephemeral refusal was unreachable.
+test('claude-desktop resolves the gateway pinned listen through its slice, and still refuses an ephemeral one', async () => {
+  const workspace = path.join(import.meta.dirname, '..', '..', 'hypaware-core', 'plugins-workspace')
+  /** @param {string} dir */
+  const manifestOf = async (dir) =>
+    JSON.parse(await fs.readFile(path.join(workspace, dir, 'hypaware.plugin.json'), 'utf8'))
+  const gateway = await manifestOf('ai-gateway')
+  const desktop = await manifestOf('claude-desktop')
+  const activePlugins = [
+    { name: gateway.name, version: gateway.version, manifest: gateway, rootDir: path.join(workspace, 'ai-gateway') },
+    { name: desktop.name, version: desktop.version, manifest: desktop, rootDir: path.join(workspace, 'claude-desktop') },
+  ]
+  /** @param {string} listen */
+  const configWith = (listen) => ({
+    version: 2,
+    plugins: [
+      { name: gateway.name, config: { listen } },
+      { name: desktop.name },
+      { name: OWNER, config: { api_key: OWNER_API_KEY } },
+    ],
+  })
+
+  const scoped = pluginScopedConfig(/** @type {any} */ (configWith('127.0.0.1:9911')), desktop.name, /** @type {any} */ (activePlugins))
+  assert.equal(
+    resolveGatewayBaseUrl({ hypConfig: scoped, sectionConfig: {} }),
+    'http://127.0.0.1:9911',
+    'the Desktop profile lost the operator\'s pinned gateway listen'
+  )
+  assert.equal(
+    scoped.plugins?.find((p) => p.name === OWNER)?.config,
+    undefined,
+    'the widening kept a section claude-desktop\'s manifest declares no edge to'
+  )
+
+  const ephemeral = pluginScopedConfig(/** @type {any} */ (configWith('127.0.0.1:0')), desktop.name, /** @type {any} */ (activePlugins))
+  assert.throws(
+    () => resolveGatewayBaseUrl({ hypConfig: ephemeral, sectionConfig: {} }),
+    /ephemeral/,
+    'the LLP 0115 ephemeral-listen refusal became unreachable through the slice'
+  )
 })
 
 test('a core command still receives the whole effective config', async () => {

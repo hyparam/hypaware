@@ -111,8 +111,10 @@ export function createCommandRegistry() {
 
   /**
    * The plugin that registered the command `name` addresses, or `undefined`
-   * when core registered it, when a verb projected it, or when a host drove
-   * this registry itself. Accepts whatever {@link get} accepts.
+   * when core registered it (a core verb's projection included), or when a
+   * host drove this registry itself. A plugin's verb projection answers with
+   * the plugin: the verb registry registers it inside this registry's own
+   * bracket (LLP 0422 #verb-owner). Accepts whatever {@link get} accepts.
    *
    * @param {string} name
    * @returns {PluginName | undefined}

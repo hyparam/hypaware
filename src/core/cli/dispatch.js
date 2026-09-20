@@ -492,8 +492,12 @@ async function dispatchInternal(argv, opts) {
     // registries. `runVerbCommand` passes this object straight on as the
     // `config` a verb's `operation` receives, so a plugin's verb is narrowed
     // by the same binding, with no second notion of ownership to keep honest.
+    // `activePlugins` carries the manifests the one widening reads: the owner
+    // keeps the section of a plugin providing a capability it declares in
+    // `requires.capabilities`, which is how `@hypaware/claude-desktop` still
+    // resolves the gateway's pinned `listen`.
     // @ref LLP 0422#scope [implements]: the config member joins the split LLP 0420 left it out of
-    config: commandOwner ? pluginScopedConfig(activeConfig, commandOwner) : activeConfig,
+    config: commandOwner ? pluginScopedConfig(activeConfig, commandOwner, activePlugins) : activeConfig,
     plugins: activePlugins,
     failedPlugins,
     capabilities: ownerFacades ? ownerFacades.capabilities : kernel.capabilities,
