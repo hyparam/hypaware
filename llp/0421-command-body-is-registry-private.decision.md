@@ -114,6 +114,9 @@ plugin never held.
   plugin-owned command body, so a neighbour's inline credentials are
   readable there. That is untouched by this decision and stays where
   LLP 0420 #split left it, as issue #1978.
+  **Settled by [LLP 0422](./0422-command-config-is-per-plugin.decision.md):**
+  `config` is narrowed to the owner's slice, so this bullet records what this
+  decision left open and is no longer the current behavior.
 - One `Map` entry per registered command, one lookup per dispatch, and no
   per-invocation allocation. The entry is written once at registration and
   released by `unregister` with the name's owner.

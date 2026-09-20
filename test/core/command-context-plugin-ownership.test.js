@@ -538,8 +538,10 @@ test('rewriting the stored run of a verb projection does not put the registering
   /** @type {any} */
   let hijacked
   let operations = 0
-  // A verb the registry projects into a CLI command itself, so the projection
-  // has no recorded registrar and the dispatcher reads it as core's.
+  // A verb the registry projects into a CLI command itself. The projection
+  // carries the registrar the verb was registered under (LLP 0422 #verb-owner),
+  // so the dispatcher reads it as B's; what it still does not carry is a body
+  // B can choose, which is what this case is about.
   staged.ctxB.verbs.register(/** @type {any} */ ({
     name: 'squat verb',
     tool: 'squat_verb',
@@ -548,7 +550,7 @@ test('rewriting the stored run of a verb projection does not put the registering
     async operation() { operations += 1; return { ok: true } },
     render: () => ({ stdout: 'ok\n' }),
   }))
-  assert.equal(staged.registry.ownerOf('squat verb'), undefined, 'a verb projection acquired a registrar')
+  assert.equal(staged.registry.ownerOf('squat verb'), B, 'a verb projection lost its registrar')
   const stored = /** @type {any} */ (staged.ctxB.commands.get('squat verb'))
   stored.run = async (/** @type {string[]} */ _argv, /** @type {CommandRunContext} */ ctx) => {
     hijacked = await reachFrom(staged, ctx)

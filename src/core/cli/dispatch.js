@@ -25,6 +25,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { activatePlugins } from '../runtime/loader.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { pluginScopedConfig } from '../config/plugin_scope.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
@@ -484,7 +485,19 @@ async function dispatchInternal(argv, opts) {
     stdin,
     env,
     cwd,
-    config: activeConfig,
+    // Same owner, same rule: a plugin's command body reads the config through
+    // its own slice, so contributing a command stops being a way to read a
+    // neighbour's section and the inline credential in it (issue #1978). A
+    // core command keeps the whole config for the reason it keeps the raw
+    // registries. `runVerbCommand` passes this object straight on as the
+    // `config` a verb's `operation` receives, so a plugin's verb is narrowed
+    // by the same binding, with no second notion of ownership to keep honest.
+    // `activePlugins` carries the manifests the one widening reads: the owner
+    // keeps the section of a plugin providing a capability it declares in
+    // `requires.capabilities`, which is how `@hypaware/claude-desktop` still
+    // resolves the gateway's pinned `listen`.
+    // @ref LLP 0422#scope [implements]: the config member joins the split LLP 0420 left it out of
+    config: commandOwner ? pluginScopedConfig(activeConfig, commandOwner, activePlugins) : activeConfig,
     plugins: activePlugins,
     failedPlugins,
     capabilities: ownerFacades ? ownerFacades.capabilities : kernel.capabilities,

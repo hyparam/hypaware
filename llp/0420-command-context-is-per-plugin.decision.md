@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-09-20
 **Extends:** LLP 0004#the-activation-context (the per-plugin facade rule now holds for the second context a plugin reaches the registries through), LLP 0009#core-owns-dispatch (core, which routes argv to the owning command, is also what records who owns it)
-**Extended-by:** LLP 0421 (#consequences: the stored record's `run` no longer decides whose code executes, so the split below is a boundary and not only a narrowing)
+**Extended-by:** LLP 0421 (#consequences: the stored record's `run` no longer decides whose code executes, so the split below is a boundary and not only a narrowing), LLP 0422 (#split: `config` joins the split by the same owner; #consequences: a verb projection now carries a registrar)
 **Related:** LLP 0006, LLP 0012, LLP 0014, LLP 0130, LLP 0136
 
 > `CommandRunContext` handed every command body the kernel's own
@@ -66,6 +66,10 @@ stays the whole effective config, so a plugin-owned command body reads every
 section, a neighbour's inline credentials included. That is a scope call
 left open, not a boundary this decision provides; narrowing it to the slice
 `activate()` gets is issue #1978.
+**Extended by [LLP 0422](./0422-command-config-is-per-plugin.decision.md):**
+`config` now follows the same owner, narrowed in place by the slice rule
+`activate()` uses. The sentence above records what this decision left open,
+and is no longer the current behavior.
 
 ## Who owns a command {#owner}
 
@@ -99,6 +103,11 @@ same tolerance `createSinksFacade` extends to a registry without `ownerOf`.
   narrows. But "as registered" is load-bearing: the stored record's `run`
   is writable (next bullet), so an ownerless projection is one of the
   records a plugin can rewrite.
+  **Extended by [LLP 0422](./0422-command-config-is-per-plugin.decision.md):**
+  the verb registry now records its own registrar and registers the projection
+  inside the command registry's bracket, so a plugin's verb projection carries
+  an owner and gets that plugin's facades. This bullet records what this
+  decision left ownerless, and is no longer the current behavior.
 - This split narrows what an honestly registered command body receives. It
   is **not yet a boundary against a hostile plugin**: `get()` and `list()`
   hand back the stored, mutable record, and `run` is the field that decides
