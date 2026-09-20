@@ -21,9 +21,9 @@ import { isSafeContributionName } from './contribution_names.js'
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SkillContribution, SkillRegistry, SourceContribution, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkContribution, SinkHandle, SkillContribution, SkillRegistry, SourceContribution, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
- * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
+ * @import { ExtendedSinkHandle, ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  */
 
@@ -146,7 +146,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     commands: runtime.commands,
     configRegistry: runtime.configRegistry,
     sources: createSourcesFacade(pluginName, runtime.sources),
-    sinks: runtime.sinks,
+    sinks: createSinksFacade(pluginName, runtime.sinks),
     query: runtime.query,
     verbs: runtime.verbs,
     storage: runtime.storage,
@@ -609,6 +609,424 @@ function createSourcesFacade(pluginName, registry) {
       // The facade as the receiver, so a registry member reading its own state
       // off `this` still finds it. A runtime with no source registry builds a
       // context and fails on the call, the way the spread this replaces did.
+      return registry == null ? undefined : Reflect.get(registry, prop, receiver)
+    },
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     */
+    has(target, prop) {
+      return Object.hasOwn(target, prop) || (registry != null && Reflect.has(registry, prop))
+    },
+  })
+}
+
+/**
+ * The declared `SinkHandle` surface, which is the whole of what a narrowed
+ * handle answers for. `hypaware-plugin-kernel-types.d.ts` §Sinks declares
+ * `{ name, plugin, supports, sink }`; the kernel's own `ExtendedSinkHandle`
+ * adds `config`, `kind`, `encoder`, `blobStore` and the writer/destination
+ * pair, and none of those are the kernel's to pass on to a plugin that does
+ * not own the instance: `config` is the validated instance config with any
+ * inline credential in it, and `encoder` and `blobStore` are live objects
+ * belonging to two further plugins.
+ */
+const SINK_HANDLE_FIELDS = ['name', 'plugin', 'supports']
+
+/**
+ * The declared `SinkContribution` surface, minus `create`. Spelled out
+ * separately from the handle's list, which it happens to match today, because
+ * the two are different declarations and either may gain a field.
+ */
+const SINK_CONTRIBUTION_FIELDS = ['name', 'plugin', 'supports']
+
+/**
+ * A read-only view over a live object, answering only for `fields` (read
+ * through to the original) plus whatever `extra` supplies of this module's
+ * own. Shared by the two narrowings below, which differ only in their field
+ * list and in the members they replace.
+ *
+ * Read through rather than copied out, for the reason `narrowContribution`
+ * gives: a copy runs every accessor at the moment it is made, which puts one
+ * plugin's code inside another plugin's `list()` call.
+ *
+ * `supports` is the one field that is not a string. It is an array, and on a
+ * kernel-built handle it is the resolved tag list the sink driver and
+ * `hyp status` read, so handing it over by reference would let a neighbour
+ * edit what they read. It is copied and frozen once per view rather than per
+ * read: a kernel-built handle's tags are fixed at `instantiate`, so one copy
+ * cannot go stale, and a plugin walking a listing allocates nothing per read.
+ *
+ * @param {string[]} fields
+ * @param {Record<string, unknown>} source
+ * @param {Record<string, unknown>} extra
+ */
+function narrowView(fields, source, extra) {
+  /** @type {unknown} */
+  let tags
+  /** @param {string | symbol} prop */
+  const answers = (prop) =>
+    typeof prop === 'string' && (prop in extra || (fields.includes(prop) && Reflect.has(source, prop)))
+  /** @param {string | symbol} prop */
+  const read = (prop) => {
+    const key = /** @type {string} */ (prop)
+    if (key in extra) return extra[key]
+    // The source as the receiver, so an accessor reading a private field off
+    // `this` still finds it.
+    if (key !== 'supports') return Reflect.get(source, key, source)
+    if (tags === undefined) {
+      const value = Reflect.get(source, key, source)
+      tags = Object.freeze(Array.isArray(value) ? Array.from(value) : value)
+    }
+    return tags
+  }
+  // A null-prototype target holding nothing, so the view answers out of the
+  // traps alone and `Object.getPrototypeOf` reaches no class of the
+  // registering plugin's.
+  return new Proxy(Object.create(null), {
+    /** @param {object} _target @param {string | symbol} prop */
+    get(_target, prop) { return answers(prop) ? read(prop) : undefined },
+    /** @param {object} _target @param {string | symbol} prop */
+    has(_target, prop) { return answers(prop) },
+    ownKeys() {
+      return [...fields.filter((field) => Reflect.has(source, field)), ...Object.keys(extra)]
+    },
+    /** @param {object} _target @param {string | symbol} prop */
+    getOwnPropertyDescriptor(_target, prop) {
+      if (!answers(prop)) return undefined
+      // `configurable: true` because the target holds nothing: a proxy may not
+      // report a property the target does not carry as non-configurable.
+      return { value: read(prop), writable: false, enumerable: true, configurable: true }
+    },
+    set() { return false },
+    defineProperty() { return false },
+    deleteProperty() { return false },
+    setPrototypeOf() { return false },
+    // Left extensible deliberately, as `narrowContribution` is: a
+    // `preventExtensions` that landed would bind `ownKeys` to the empty target.
+    preventExtensions() { return false },
+  })
+}
+
+/**
+ * The name a refusal quotes, when the object will say. A hostile `name` must
+ * not throw out of the refusal refusing it, and a non-string names nothing.
+ *
+ * @param {Record<string, unknown>} source
+ */
+function shownName(source) {
+  try {
+    const declared = source.name
+    return typeof declared === 'string' ? declared : ''
+  } catch {
+    // A `name` that throws is the owning plugin's business. The refusal has to
+    // arrive as itself, not as whatever that accessor raised.
+    return ''
+  }
+}
+
+/**
+ * A read-only view of a sink handle, for the members of `ctx.sinks` that hand
+ * one to a plugin that does not own the instance.
+ *
+ * `sink` is the member this exists for. The live `Sink` is the object the sink
+ * driver calls: `exportBatch` ships caller-controlled rows to the owner's
+ * configured destination under the owner's credentials, off the driver, so the
+ * export is neither scheduled, spanned, cursor-advanced nor counted and neither
+ * `hyp sync`'s preview nor the usage-policy read at the shared export path
+ * (LLP 0070) sees it; `close()` stops the owner's exports while the driver
+ * keeps its handle; `reader()` is the whole of a queryable sink's data
+ * (issue #1961).
+ *
+ * The view carries a refusing `sink` rather than no `sink` at all, because the
+ * contract declares `get`/`list` answering with a `SinkHandle` and a plugin
+ * reading the shape it was promised should find one. Writes, defines, deletes
+ * and reparenting are refused with it: `handle.sink = mine` put the caller's
+ * object on what the driver calls next.
+ *
+ * @param {PluginName} pluginName The plugin the view is being handed to.
+ * @param {SinkHandle} handle
+ * @returns {SinkHandle}
+ */
+function narrowSinkHandle(pluginName, handle) {
+  const source = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (handle))
+  /** @param {string} member */
+  const refuse = (member) => async () => {
+    const shown = shownName(source)
+    getLogger('sinks').warn('sink.handle_member_denied', {
+      [Attr.COMPONENT]: 'sinks',
+      [Attr.OPERATION]: `sink.${member}`,
+      [Attr.ERROR_KIND]: 'sink_handle_member_denied',
+      [Attr.PLUGIN]: pluginName,
+      [Attr.SINK_INSTANCE]: shown,
+      status: 'failed',
+    })
+    throw new Error(
+      `SinkRegistry: sink ${shown === '' ? 'instance' : `'${shown}'`} is not owned by '${pluginName}', so the handle ` +
+      `it reached through get()/list() carries no live ${member}(): the kernel's driver exports on the configured schedule`
+    )
+  }
+  // The three members every `Sink` declares, each refusing. The optional rest
+  // (`reader`, `datasetDisposition`, `previewSourceHistory`,
+  // `replaySourceHistory`) are absent, which is a shape the contract already
+  // describes: a sink that does not implement them.
+  const sink = narrowView([], {}, {
+    exportBatch: refuse('exportBatch'),
+    flush: refuse('flush'),
+    close: refuse('close'),
+  })
+  return /** @type {SinkHandle} */ (narrowView(SINK_HANDLE_FIELDS, source, { sink }))
+}
+
+/**
+ * A read-only view of a sink contribution, for the members of `ctx.sinks` that
+ * hand one to a plugin that did not register it.
+ *
+ * `create(ctx)` is the reach: it is the owner's sink constructor, and a caller
+ * running it with a `SinkCreateContext` of its own gets a live `Sink` built
+ * out of the owner's code against config the caller chose, which is the
+ * `get`/`list` half of issue #1953 one registry along.
+ *
+ * @param {PluginName} pluginName
+ * @param {SinkContribution} contribution
+ * @returns {SinkContribution}
+ */
+function narrowSinkContribution(pluginName, contribution) {
+  const source = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (contribution))
+  /** @returns {Promise<never>} */
+  async function create() {
+    const shown = shownName(source)
+    getLogger('sinks').warn('sink.contribution_create_denied', {
+      [Attr.COMPONENT]: 'sinks',
+      [Attr.OPERATION]: 'sink.create',
+      [Attr.ERROR_KIND]: 'sink_contribution_create_denied',
+      [Attr.PLUGIN]: pluginName,
+      hyp_sink: shown,
+      status: 'failed',
+    })
+    throw new Error(
+      `SinkRegistry: a contribution reached through getContribution()/listContributions() carries no live create(), ` +
+      `so '${pluginName}' cannot build a sink from a contribution it did not register`
+    )
+  }
+  return /** @type {SinkContribution} */ (narrowView(SINK_CONTRIBUTION_FIELDS, source, { create }))
+}
+
+/**
+ * Per-plugin facade over the global sink registry. `ctx.sinks` was the
+ * registry itself, handed over with no facade at all, so every one of its
+ * members was a reach into a neighbour's configured export path: the live
+ * handle from `get`/`list`/`listHandles` (egress, denial, read, disclosure and
+ * substitution, all measured), the live contribution behind
+ * `getContribution`/`listContributions`, an `instantiate` that stands up an
+ * export target the config never declared, and a `closeAll` that stops
+ * everybody's (issue #1961).
+ *
+ * Sinks had no ownership key to bracket on. `SinkRegistry.register` validated
+ * `contribution.plugin` as a non-empty string with no registrar to check it
+ * against, so a plugin could register a contribution claiming a neighbour, and
+ * `handle.plugin` was that self-declared claim read once at `instantiate` -
+ * the #1541 shape exactly. So the binding is established first, the way
+ * `SourceRegistry` establishes it: `register` is bracketed with
+ * `registeringAs` and refuses a contribution naming anyone but its registrar,
+ * and `instantiate` records the instance's owner from the `ActivePlugin`
+ * record the kernel's materializer resolved out of the config row. `ownerOf`
+ * answers from that record, so nothing here brackets on a plugin-written
+ * property.
+ *
+ * What each member does:
+ *
+ * - `register` / `registeringAs` bracket on this plugin's name, as the sources
+ *   facade does, so the registrar is the kernel's observation and not a claim.
+ * - `get` narrows a handle whose instance this plugin does not own. The name
+ *   it is asked for is the key `ownerOf` answers on, so the plugin's own
+ *   handle comes back untouched.
+ * - `list` / `listHandles` narrow every entry the plugin does not own. Unlike
+ *   `SourceRegistry.list`, the key is readable from the entry: `handle.name`
+ *   is written by `instantiate` from the validated instance name, not by a
+ *   plugin. A host registry's handles are not this registry's, so the name
+ *   read off one is resolved back through `get` and has to answer with the
+ *   very handle it came from before it is trusted, which is the round trip
+ *   `src/core/plugin_doctor/dry_run.js` applies to a listing.
+ * - `getContribution` / `listContributions` narrow a contribution this plugin
+ *   did not register, so a neighbour's `create()` is not a live constructor.
+ *   The listing still enumerates every contribution, as it did.
+ * - `instantiate` refuses. Instance creation is driven by the kernel from
+ *   config (LLP 0014), and a plugin calling it puts a handle the driver then
+ *   exports on into the shared map under a name no config declared.
+ * - `closeAll` passes this plugin's name, so it closes the instances this
+ *   plugin owns and leaves a neighbour's running.
+ * - `ownerOf` is forwarded. It takes a name, answers a string, and moves
+ *   nothing; the owner it names is already on every handle and on the
+ *   `hyp status` sink lines.
+ *
+ * The read-through is the proxy over a null-prototype target that
+ * `createSourcesFacade` documents, for the reasons it gives there.
+ *
+ * @param {PluginName} pluginName
+ * @param {ExtendedSinkRegistry} registry
+ * @returns {ExtendedSinkRegistry}
+ * @ref LLP 0004#the-activation-context [implements]: `sinks` is one of the per-plugin registry facades
+ */
+function createSinksFacade(pluginName, registry) {
+  const members = {
+    /** @param {SinkContribution} contribution */
+    register(contribution) {
+      if (typeof registry.registeringAs !== 'function') {
+        registry.register(contribution)
+        return
+      }
+      registry.registeringAs(pluginName, () => { registry.register(contribution) })
+    },
+    /**
+     * Always the activating plugin's name, whatever is passed, as on the
+     * sources and capabilities facades. Delegation would otherwise hand a
+     * plugin the kernel's own lever for saying who is registering.
+     *
+     * @template T
+     * @param {PluginName} _plugin
+     * @param {() => T} fn
+     * @returns {T}
+     */
+    registeringAs(_plugin, fn) {
+      if (typeof registry.registeringAs !== 'function') return fn()
+      return registry.registeringAs(pluginName, fn)
+    },
+  }
+  /**
+   * The views this facade has already built, so repeated reads hand back the
+   * same object: a plugin that stores one in a `Set`, keys a `Map` by it, or
+   * compares two `list()` results with `===` sees the stable identity the live
+   * object gave it. Weak and keyed by the live object, so a view lives
+   * exactly as long as the sink it stands for rather than pinning every
+   * instance a long-running daemon ever materialized.
+   *
+   * @type {WeakMap<object, object>}
+   */
+  const views = new WeakMap()
+  /**
+   * @template T
+   * @param {T} source
+   * @param {(value: any) => object} build
+   * @returns {T}
+   */
+  function narrow(source, build) {
+    // An unknown name answers `undefined`, and a host registry is free to hand
+    // back whatever it holds. Only an object keys a `WeakMap`.
+    if (source === null || typeof source !== 'object') return source
+    const existing = views.get(source)
+    if (existing !== undefined) return /** @type {T} */ (existing)
+    const view = build(source)
+    views.set(source, view)
+    return /** @type {T} */ (view)
+  }
+  /** @param {SinkHandle} handle */
+  const ownsHandle = (handle) => {
+    // One read of `name`, resolved back through the registry: a handle that is
+    // not the one this registry answers with for the name it just claimed is
+    // not the handle keyed under it, whatever it says.
+    //
+    // Read through `shownName`, which is why that guard is shared rather than
+    // local to the refusals: a handle is a live object its owner still holds,
+    // so an owner that puts a throwing accessor on its own `name` would
+    // otherwise raise out of every neighbour's `list()`, which is the owner's
+    // code escaping into the neighbour's call that reading through instead of
+    // copying exists to prevent. A name that cannot be read owns nothing here
+    // and the entry is narrowed, which is the fail-closed answer.
+    if (handle === null || typeof handle !== 'object') return false
+    const name = shownName(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (handle)))
+    if (name === '') return false
+    return registry.ownerOf(name) === pluginName && registry.get(name) === handle
+  }
+  /** @param {SinkHandle[]} handles */
+  const narrowListing = (handles) =>
+    handles.map((handle) => (ownsHandle(handle) ? handle : narrow(handle, (h) => narrowSinkHandle(pluginName, h))))
+  /** @param {SinkContribution | undefined} contribution @param {string} plugin */
+  const narrowContributionFor = (contribution, plugin) =>
+    plugin === pluginName ? contribution : narrow(contribution, (c) => narrowSinkContribution(pluginName, c))
+  const reads = {
+    /** @param {string} name */
+    get(name) {
+      const handle = registry.get(name)
+      if (registry.ownerOf(name) === pluginName) return handle
+      return narrow(handle, (h) => narrowSinkHandle(pluginName, h))
+    },
+    list() { return narrowListing(registry.list()) },
+    listHandles() { return /** @type {ExtendedSinkHandle[]} */ (narrowListing(registry.listHandles())) },
+    /** @param {string} plugin @param {string} sinkName */
+    getContribution(plugin, sinkName) {
+      return narrowContributionFor(registry.getContribution(plugin, sinkName), plugin)
+    },
+    listContributions() {
+      return registry.listContributions().map((entry) => ({
+        ...entry,
+        contribution: /** @type {SinkContribution} */ (narrowContributionFor(entry.contribution, entry.plugin)),
+      }))
+    },
+    /**
+     * Instance creation is the kernel's, driven from `HypAwareV2Config.sinks`.
+     * A plugin reaching it registers a handle the sink driver then exports on,
+     * under a name no config declared and against a contribution it may not
+     * have registered.
+     *
+     * @returns {Promise<never>}
+     * @ref LLP 0014#sinks-are-export-targets-not-the-write-path [constrained-by]: instances are driven from config, so no plugin stands one up
+     */
+    async instantiate() {
+      getLogger('sinks').warn('sink.instantiate_denied', {
+        [Attr.COMPONENT]: 'sinks',
+        [Attr.OPERATION]: 'sink.instantiate',
+        [Attr.ERROR_KIND]: 'sink_instantiate_denied',
+        [Attr.PLUGIN]: pluginName,
+        status: 'failed',
+      })
+      throw new Error(
+        `SinkRegistry.instantiate: sink instance creation is driven by the kernel from config, not by '${pluginName}'`
+      )
+    },
+    /** This plugin's own instances, not every sink the daemon is exporting. */
+    async closeAll() {
+      await registry.closeAll(pluginName)
+    },
+  }
+  // Non-writable and non-configurable, not merely assigned: a deletable own
+  // property is one a plugin removes to uncover the registry's own member
+  // through the read-through below, which is issue #1946 in one statement.
+  const facade = Object.create(null)
+  /** @param {string} member @param {unknown} value */
+  const pin = (member, value) => {
+    Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  for (const [member, value] of Object.entries(members)) pin(member, value)
+  // Only where there is a binding to read, and only over a member the registry
+  // actually has: a host registry carrying neither `ownerOf` nor the member is
+  // left reading as it did.
+  if (typeof registry?.ownerOf === 'function' && typeof registry.get === 'function') {
+    const shadowable = {
+      get: true,
+      list: typeof registry.list === 'function',
+      listHandles: typeof registry.listHandles === 'function',
+      getContribution: typeof registry.getContribution === 'function',
+      listContributions: typeof registry.listContributions === 'function',
+      instantiate: typeof registry.instantiate === 'function',
+      closeAll: typeof registry.closeAll === 'function',
+    }
+    for (const [member, value] of Object.entries(reads)) {
+      if (shadowable[/** @type {keyof typeof shadowable} */ (member)]) pin(member, value)
+    }
+  }
+  return new Proxy(facade, {
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     * @param {unknown} receiver
+     */
+    get(target, prop, receiver) {
+      // Own first, so the bracketed members above are the only ones a plugin
+      // can reach, and none of them can be deleted to uncover the registry's.
+      if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver)
+      // The facade as the receiver, so a registry member reading its own state
+      // off `this` still finds it.
       return registry == null ? undefined : Reflect.get(registry, prop, receiver)
     },
     /**
