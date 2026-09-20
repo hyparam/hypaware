@@ -221,15 +221,38 @@ export function pluginRegistryFacades(runtime, pluginName) {
  * `registerGroup` is not bracketed because a group is metadata with no
  * `run`: nothing dispatches to it, so it has no body to scope.
  *
+ * `unregister` is bracketed against that same binding, because forwarding it
+ * aimed the reach the other way. A plugin could not claim a name a neighbour
+ * held, but the registry's own `unregister` is by-name and checks no owner, so
+ * any plugin released any command it could name and then registered its own
+ * under the freed name: `ctxB.commands.unregister('acme sync')` took A's
+ * command off the CLI (`hyp acme sync` exited 2 as an unknown command), and
+ * the same two lines put a plugin's body behind `hyp status`. Nothing raw came
+ * back with it - the re-registration goes through `register` above, so the
+ * squatter is the recorded owner and its body runs under its own facades - so
+ * what it cost was availability and attribution: a plugin removed any other
+ * plugin's CLI surface, core's included, unopposed and unlogged (issue #1980).
+ *
+ * Read on the name as passed, not on a primary name: this registry resolves
+ * aliases, and `get`, `has`, `ownerOf` and `unregister` all accept one, so a
+ * check that refused only primary names would leave `unregister('asy')`
+ * releasing the command that alias points at, and every alias with it.
+ * `ownerOf` answers the owner of the command an alias resolves to, which is
+ * the value the registrant is entitled to release under either spelling.
+ *
  * Everything else reads through to the registry, which is the surface
  * `ctx.commands` already had. A registry with no `registeringAs` (a host's
  * own, injected, or a runtime carrying none at all) is handed over unwrapped,
- * the way the sources and sinks facades tolerate one.
+ * the way the sources and sinks facades tolerate one, and so is one with no
+ * `ownerOf`: a host driving its own registry records no registrar for
+ * anything, so there is no binding to read and refusing on its absence would
+ * stop every release such a host makes.
  *
  * @param {PluginName} pluginName
  * @param {CommandRegistry} registry
  * @returns {CommandRegistry}
  * @ref LLP 0420#owner [implements]: the owner is the registrar core recorded, not the plugin-written `CommandRegistration.plugin`
+ * @ref LLP 0424#alias [implements]: a plugin releases the names it registered, under either spelling, and no others
  */
 function createCommandsFacade(pluginName, registry) {
   // Held as a value, so the guard below is the one the calls run under: a
@@ -253,8 +276,53 @@ function createCommandsFacade(pluginName, registry) {
       return bracket.call(registry, pluginName, fn)
     },
   }
-  for (const [member, value] of Object.entries(members)) {
+  /** @param {string} member @param {unknown} value */
+  const pin = (member, value) => {
     Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  for (const [member, value] of Object.entries(members)) pin(member, value)
+  // Held as a value for the reason `bracket` is. `unregister` is optional on
+  // the declared contract, so a registry that never offered one does not
+  // acquire one here.
+  const owned = /** @type {CommandRegistry & { ownerOf?: (name: string) => PluginName | undefined }} */ (registry).ownerOf
+  if (typeof owned === 'function' && typeof registry.unregister === 'function') {
+    /**
+     * Release a command this plugin registered, and refuse one it did not,
+     * which includes a name the registry recorded no registrar for at all: a
+     * core command is nobody's to retract from inside an activation, and so is
+     * a name nothing holds. The kernel is not on this path - `retractCommand`
+     * in `src/core/registry/verbs.js` is the one caller that needs the
+     * registry's own by-name, total `unregister`, and it drives the registry
+     * the runtime was built with, never a facade.
+     *
+     * `name` is quoted only when it is already a string, so a hostile
+     * `toString` cannot throw out of the refusal refusing it. A non-string
+     * keys no command, so it is refused either way.
+     *
+     * @param {string} name
+     * @ref LLP 0424#unknown [implements]: a name nothing holds answers the same "nobody's" a core command does, and is refused in the same words
+     */
+    const unregister = (name) => {
+      const owner = owned.call(registry, name)
+      if (owner !== pluginName) {
+        const shown = typeof name === 'string' ? name : '(non-string command name)'
+        const held = owner === undefined ? 'no recorded plugin' : `'${owner}'`
+        getLogger('command-registry').warn('command.unregister_owner_mismatch', {
+          [Attr.COMPONENT]: 'commands',
+          [Attr.OPERATION]: 'command.unregister',
+          [Attr.ERROR_KIND]: 'command_owner_mismatch',
+          [Attr.PLUGIN]: pluginName,
+          hyp_owner_plugin: owner ?? '',
+          command_name: shown,
+          status: 'failed',
+        })
+        throw new Error(
+          `CommandRegistry.unregister: command '${shown}' is registered by ${held}, not by '${pluginName}'`
+        )
+      }
+      /** @type {(name: string) => void} */ (registry.unregister).call(registry, name)
+    }
+    pin('unregister', unregister)
   }
   return /** @type {CommandRegistry} */ (new Proxy(facade, {
     /**

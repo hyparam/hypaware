@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-09-20
 **Extends:** LLP 0422#consequences (the carve-out that decision recorded: `ctx.verbs` was a narrowing for honest plugins and not a boundary), LLP 0421#private-body (the same shape, reaching the pair a verb projection closes over)
+**Extended-by:** LLP 0424 (#consequences: `ctx.commands.unregister` is bracketed against the same binding, so the owner check below has its twin on the command registry)
 **Related:** LLP 0004, LLP 0009, LLP 0033, LLP 0034, LLP 0130, LLP 0264, LLP 0420
 
 > LLP 0422 gave a verb a registrar, so the CLI command it projects is
@@ -176,6 +177,10 @@ unchanged from LLP 0420 #split.
   check here has no twin on the command registry yet (issue #1980). The two
   registries now answer `ownerOf` the same way, so that fix is the refusal
   above in the other facade.
+  **Settled by [LLP 0424](./0424-command-names-are-released-by-their-registrar.decision.md):**
+  it is that refusal, read on the name as passed because the command registry
+  resolves aliases. This bullet records what this decision left open and is no
+  longer the current behavior.
 - Cost is one `Map` entry and one two-field object per registered verb, both
   written once at registration and released with the name, plus one `WeakMap`
   lookup per narrowed read and one proxy per neighbour verb a plugin actually
