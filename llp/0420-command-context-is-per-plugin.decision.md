@@ -19,9 +19,9 @@
 ## Context {#context}
 
 LLP 0004 says a plugin reaches the registries through per-plugin facades, and
-six issues made that true member by member: `ctx.sources` (#1944, #1946,
-#1947, #1950, #1953, #1960) and `ctx.sinks` (#1961). Each closed the
-**activation** door.
+four issues made that true member by member: `ctx.sources` (#1944, #1947
+and #1953, landed by PRs #1946, #1950 and #1960) and `ctx.sinks` (#1961).
+Each closed the **activation** door.
 
 There are two doors. `createActivationContext` builds the one `activate()`
 sees. The dispatcher builds the other, `CommandRunContext`, and it was the
@@ -94,9 +94,10 @@ same tolerance `createSinksFacade` extends to a registry without `ownerOf`.
   projected `run` is kernel code (`runVerbCommand`), and the
   `VerbOperationContext` it builds for the plugin's `operation` carries
   `query`, `storage`, `config`, `env`, `refresh`, a no-op `log` and
-  `callerCwd`, none of them a route back to a registry. But "as registered"
-  is load-bearing: the stored record's `run` is writable (next bullet), so
-  an ownerless projection is one of the records a plugin can rewrite.
+  `callerCwd`, none of them a route back to the registries this decision
+  narrows. But "as registered" is load-bearing: the stored record's `run`
+  is writable (next bullet), so an ownerless projection is one of the
+  records a plugin can rewrite.
 - This split narrows what an honestly registered command body receives. It
   is **not yet a boundary against a hostile plugin**: `get()` and `list()`
   hand back the stored, mutable record, and `run` is the field that decides
