@@ -26,6 +26,7 @@ import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { detectShadowedPlugins } from '../runtime/boot.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { pluginLockPath } from '../plugin_install/paths.js'
 import { compareStrings } from '../util/compare_strings.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { isEphemeralBinPath } from '../cli/global_install.js'
@@ -1277,6 +1278,26 @@ export async function collectHypAwareStatus(opts = {}) {
       kind: 'installed_plugin_shadowed',
       message: `installed plugin ${name} is shadowed by the bundled copy of the same name; the installed code never runs`,
       repair: [`hyp plugin remove ${name}`],
+    })
+  }
+
+  // A lock entry the loader cannot use at all: hand-edited to drop its
+  // `install_dir`, or no longer an object. Boot skips it, so this is the only
+  // surface that can name it (issue #1958). Read off the lock like the shadow
+  // above, so it holds with no daemon running, and an error rather than a
+  // warning for the reason the sibling manifest diagnostic is one: whatever
+  // that entry installed is capturing nothing. The lock path rides in the
+  // message because the repair cannot reach a non-object entry, which `hyp
+  // plugin remove` reads as not installed; for the reported shape (an object
+  // missing `install_dir`) `removePlugin` falls back to the conventional
+  // install directory and clears the row.
+  for (const name of manifests.installed.malformed) {
+    const label = sanitizeLabel(name, MAX_ACTIVATION_MESSAGE_CHARS) ?? '<unnamed>'
+    diagnostics.push({
+      severity: 'error',
+      kind: 'plugin_lock_entry_invalid',
+      message: `plugin-lock.json entry '${label}' has no usable install_dir, so nothing it installed is running: ${pluginLockPath(stateRoot)}`,
+      repair: [`hyp plugin remove ${label}`],
     })
   }
 
@@ -3530,7 +3551,7 @@ async function discoverStatusManifests({ stateDir }) {
   /** @type {{ loaded: LoadedManifest[], excluded: LoadedManifest[] }} */
   let bundled = { loaded: [], excluded: [] }
   /** @type {DiscoverInstalledResult} */
-  let installed = { loaded: [], failed: [], lockEntries: [] }
+  let installed = { loaded: [], failed: [], lockEntries: [], malformed: [] }
   try {
     bundled = await discoverBundledPlugins()
   } catch { /* bundled discovery failure is non-fatal */ }
