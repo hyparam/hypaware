@@ -6,7 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-09-20
 **Extends:** LLP 0420#split (the one member that decision left out of the split, recorded there as "a scope call left open"), LLP 0420#consequences (a verb projection is no longer ownerless)
-**Extended-by:** LLP 0423 (#consequences: `ctx.verbs` and `CommandRunContext.verbs` are now the boundary the carve-out below said they were not)
+**Extended-by:** LLP 0423 (#consequences: `ctx.verbs` and `CommandRunContext.verbs` are now the boundary the carve-out below said they were not), LLP 0425 (#consequences: `hyp mcp` is covered)
 **Related:** LLP 0004, LLP 0006, LLP 0009, LLP 0033, LLP 0034, LLP 0115, LLP 0421
 
 > LLP 0420 split `CommandRunContext` by who owns the command about to run and
@@ -182,6 +182,10 @@ verbs register outside any bracket (`registerCoreVerbs` runs inside
   the core `mcp` command's own, so a plugin's `operation` invoked as an MCP
   tool still receives the whole config. Closing it needs a second owner lookup
   keyed by the tool a request named, which is a shape of its own; deferred.
+  **Settled by [LLP 0425](./0425-mcp-tool-config-is-per-plugin.decision.md):**
+  the verb registry answers `ownerOfTool(tool)`, and the host narrows per
+  tool call. This bullet records what this decision left open and is no longer
+  the current behavior.
 - Cost is one shallow object, one array of `plugins[]` length and one record of
   `sinks{}` size, built once per invocation and only for a plugin-owned
   command, plus one pass over the active plugins' manifests for the

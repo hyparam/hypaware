@@ -22,6 +22,7 @@ import { compareStrings } from '../util/compare_strings.js'
  *   unregister: (name: string) => void,
  *   registeringAs: <T>(plugin: PluginName, fn: () => T) => T,
  *   ownerOf: (name: string) => PluginName | undefined,
+ *   ownerOfTool: (tool: string) => PluginName | undefined,
  * }}
  * @ref LLP 0034#tool-exposure-emergent [implements]: no central tool gate; the surface is exactly the verbs active plugins register
  */
@@ -46,6 +47,18 @@ export function createVerbRegistry(opts = {}) {
    * @type {Map<string, PluginName>}
    */
   const owners = new Map()
+  /**
+   * The same registrar, keyed by the MCP tool name this registry validated.
+   * The two surfaces a verb claims dispatch on different keys: the CLI by verb
+   * name, the MCP host by `getByTool(tool)`, so the ledger above answers
+   * nothing the tool route can ask (issue #1982). Written and released with
+   * its twin, off the same single read of `tool`, rather than derived on
+   * demand from `verb.tool`, which is a live plugin property free to answer a
+   * neighbour's key.
+   *
+   * @type {Map<string, PluginName>}
+   */
+  const toolOwners = new Map()
   /**
    * The plugin currently registering, or `''` outside an activation. Set only
    * by {@link registeringAs}, which brackets a synchronous `register` call,
@@ -92,9 +105,25 @@ export function createVerbRegistry(opts = {}) {
     return owners.get(name)
   }
 
+  /**
+   * The plugin that registered the verb the MCP tool `tool` dispatches to,
+   * or `undefined` when core registered it or a host drove this registry
+   * itself. The same answer {@link ownerOf} gives for that verb's name, asked
+   * by the key the MCP host actually holds: `hyp mcp` has the registration
+   * and the tool it was called by, never the verb name.
+   *
+   * @param {string} tool
+   * @returns {PluginName | undefined}
+   * @ref LLP 0425#tool-owner [implements]: the MCP host dispatches on the tool, so the registrar is keyed by the tool too, never derived from the registration's own `tool`
+   */
+  function ownerOfTool(tool) {
+    return toolOwners.get(tool)
+  }
+
   return {
     registeringAs,
     ownerOf,
+    ownerOfTool,
     // A verb claims three namespaces (verb name, MCP tool, CLI command) from
     // two plugin properties, and {@link validateVerb} reads each exactly once
     // before any of them is claimed. The registration is stored by reference,
@@ -157,7 +186,10 @@ export function createVerbRegistry(opts = {}) {
       }
       byName.set(name, verb)
       byTool.set(tool, verb)
-      if (registeredBy !== '') owners.set(name, registeredBy)
+      if (registeredBy !== '') {
+        owners.set(name, registeredBy)
+        toolOwners.set(tool, registeredBy)
+      }
     },
     // Release a claimed verb name: both maps, plus the CLI command a verb
     // projection put under that name (and only that one). By-name,
@@ -177,7 +209,13 @@ export function createVerbRegistry(opts = {}) {
       // which costs it its own slot and nobody else's.
       const tool = verb.tool
       byName.delete(name)
-      if (byTool.get(tool) === verb) byTool.delete(tool)
+      // The tool ledger goes with the slot, not with the name: a verb whose
+      // `tool` has drifted releases neither, so the entry left behind still
+      // names the plugin whose verb still holds that slot.
+      if (byTool.get(tool) === verb) {
+        byTool.delete(tool)
+        toolOwners.delete(tool)
+      }
       // Released with the name, so a name re-registered later carries the
       // owner of whoever claims it this time. The body goes with the CLI
       // command `retractCommand` takes back, which is the only thing holding
