@@ -205,8 +205,28 @@ export function createSinkRegistry() {
     return handles.get(name)
   }
 
+  /**
+   * Every live sink instance, ordered by instance name.
+   *
+   * The order comes from the keys, not from `a.instanceName`: the key is the
+   * instance name `instantiate` validated, while the handle is a live object
+   * its owner still holds through `ctx.sinks.get`, so `instanceName` is a
+   * property the owner is free to replace with an accessor of its own.
+   * Reading it here runs that code inside a comparator, where a throw escapes
+   * into every caller of `list()` before a single handle has been handed back
+   * - a neighbour's `ctx.sinks.list()`, ahead of the facade's own guarded
+   * `name` read, and the kernel's `listHandles()` readers in `hyp status` and
+   * the daemon runtime - and where `compareStrings` refuses a non-string, so
+   * an accessor that merely stops answering with a string is the same outage
+   * (issue #1971, the `instanceName` half of #1961).
+   *
+   * The order is unchanged for an honest handle: both `handles.set` sites key
+   * the map with the very binding they write to `handle.instanceName`.
+   */
   function list() {
-    return Array.from(handles.values()).sort((a, b) => compareStrings(a.instanceName, b.instanceName))
+    return Array.from(handles.keys())
+      .sort(compareStrings)
+      .map((name) => /** @type {ExtendedSinkHandle} */ (handles.get(name)))
   }
 
   /**

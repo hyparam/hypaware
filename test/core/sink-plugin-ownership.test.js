@@ -85,13 +85,16 @@ function fixtureSink(name, plugin) {
  *
  * @param {ReturnType<typeof stage>} staged
  * @param {ReturnType<typeof fixtureSink>} owner
+ * @param {string} [instanceName] The config key the instance is materialized under.
  */
-async function materialize(staged, owner) {
-  staged.ctxA.sinks.register(owner.contribution)
+async function materialize(staged, owner, instanceName = 'org-central') {
   const registry = /** @type {ExtendedSinkRegistry} */ (staged.runtime.sinks)
+  // Registered once, so a second instance of the same sink can be materialized
+  // without tripping the duplicate-contribution check.
+  if (!registry.getContribution(A, owner.contribution.name)) staged.ctxA.sinks.register(owner.contribution)
   return registry.instantiate({
     kind: 'request',
-    instanceName: 'org-central',
+    instanceName,
     contribution: owner.contribution,
     config: { schedule: '* * * * *', endpoint: 'https://central.example', token: 'SECRET-TOKEN' },
     plugin: /** @type {any} */ (staged.ctxA.plugin),
@@ -322,5 +325,60 @@ test('an owner\'s throwing accessor does not escape into a neighbour\'s list()',
       `${member}() handed a neighbour a live export path for an unreadable name`
     )
   }
+  assert.deepEqual(owner.seen.exports, [], 'forged rows reached the owner\'s destination')
+})
+
+test('an owner\'s throwing instanceName accessor does not escape out of a listing', async () => {
+  const staged = stage()
+  const owner = fixtureSink('central', A)
+  // Three instances, in an order the sort has to undo: `Array.prototype.sort`
+  // never calls the comparator for a single element, and with two there is no
+  // ordering a wrong comparator could not stumble into.
+  /** @type {any[]} */
+  const live = []
+  for (const name of ['b-two', 'a-one', 'c-three']) live.push(await materialize(staged, owner, name))
+  const registry = /** @type {ExtendedSinkRegistry} */ (staged.runtime.sinks)
+  const ordered = ['a-one', 'b-two', 'c-three']
+  assert.deepEqual(
+    registry.listHandles().map((h) => h.instanceName),
+    ordered,
+    'honest handles are no longer ordered by instance name'
+  )
+
+  // A handle is a live object the owner still holds, so `instanceName` is a
+  // property the owner can replace with code of its own. The registry's own
+  // ordering must not become a seam that runs it inside anyone else's call.
+  Object.defineProperty(live[0], 'instanceName', {
+    configurable: true,
+    get() { throw new Error('boom from the owner') },
+  })
+
+  // `name` carries the same validated instance name and is untouched here, so
+  // it reports the order without re-reading what the owner redefined.
+  assert.deepEqual(registry.list().map((h) => h.name), ordered, 'the owner\'s accessor escaped out of registry.list()')
+  assert.deepEqual(
+    registry.listHandles().map((h) => h.name),
+    ordered,
+    'the owner\'s accessor escaped out of registry.listHandles()'
+  )
+
+  const neighbour = /** @type {any} */ (staged.ctxB.sinks)
+  for (const member of ['list', 'listHandles']) {
+    const listed = neighbour[member]()
+    assert.deepEqual(
+      listed.map((/** @type {any} */ h) => h.name),
+      ordered,
+      `the owner's accessor escaped out of a neighbour's ${member}()`
+    )
+    await assert.rejects(
+      () => listed[0].sink.exportBatch({ partitions: [], batchId: 'forged' }, {}),
+      /not owned by '@fixture\/squatter'/,
+      `${member}() handed a neighbour a live export path`
+    )
+  }
+
+  const own = /** @type {any} */ (staged.ctxA.sinks).list()
+  assert.deepEqual(own.map((/** @type {any} */ h) => h.name), ordered, 'the owner\'s own listing changed order')
+  assert.equal(own[0], live[1], 'the owner no longer gets its own live handles back')
   assert.deepEqual(owner.seen.exports, [], 'forged rows reached the owner\'s destination')
 })
