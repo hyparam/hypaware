@@ -813,3 +813,101 @@ test('no member reachable through ctx.verbs hands back a neighbour\'s live opera
     assert.equal(carriesLive(answer), false, 'a ctx.verbs member handed back a neighbour\'s live operation')
   }
 })
+
+// `ctx.commands` pinned `register` and `registeringAs` and forwarded
+// everything else to the registry, `unregister` among them. The registry's own
+// is by-name and checks no owner, so a plugin released any command it could
+// name: a neighbour's, or a core one, and then registered its own under the
+// freed name (issue #1980). No raw registry came back with it, so the cost is
+// availability and attribution rather than reach. Every case below drives the
+// real `dispatch()`.
+
+test('a plugin cannot release a neighbour\'s command, and can still release its own', async () => {
+  const staged = await stage()
+  /** @type {string[]} */
+  const ran = []
+  contributeCommand(staged, staged.ctxA, 'acme sync', async () => { ran.push('owner'); return 0 })
+
+  const refused = refusal(() => /** @type {any} */ (staged.ctxB.commands).unregister('acme sync'))
+  assert.match(String(refused), /not by '@fixture\/squatter'/, 'a plugin released a neighbour\'s command')
+  assert.equal(staged.registry.has('acme sync'), true, 'the neighbour\'s command left the registry')
+  assert.equal(staged.registry.ownerOf('acme sync'), A, 'the neighbour\'s command changed owner')
+
+  const claimed = refusal(() => contributeCommand(staged, staged.ctxB, 'acme sync', async () => { ran.push('squatter'); return 0 }))
+  assert.match(String(claimed), /duplicate command name 'acme sync'/, 'the squatter claimed the neighbour\'s name')
+
+  const { code } = await invoke(staged, ['acme', 'sync'])
+  assert.equal(code, 0)
+  assert.deepEqual(ran, ['owner'], 'hyp acme sync stopped running the body A registered')
+
+  // The owner's own release is the affordance this must not cost, for the
+  // reason `ctx.verbs` keeps it.
+  assert.equal(refusal(() => /** @type {any} */ (staged.ctxA.commands).unregister('acme sync')), 'ACCEPTED')
+  assert.equal(staged.registry.has('acme sync'), false, 'the owner could not release its own command')
+})
+
+test('a plugin cannot release a core command', async () => {
+  const staged = await stage()
+
+  const refused = refusal(() => /** @type {any} */ (staged.ctxB.commands).unregister('status'))
+  assert.match(String(refused), /registered by no recorded plugin/, 'a plugin released a core command')
+  assert.equal(staged.registry.has('status'), true, 'hyp status left the registry')
+  assert.equal(staged.registry.ownerOf('status'), undefined, 'status stopped reading as a core command')
+
+  const claimed = refusal(() => contributeCommand(staged, staged.ctxB, 'status', async () => 0))
+  assert.match(String(claimed), /duplicate command name 'status'/, 'the squatter claimed hyp status')
+
+  const home = temporaryDirectory('hyp-command-release-')
+  const { code, stdout } = await invoke(staged, ['status'], { ...process.env, HYP_HOME: home, HYP_CONFIG: '' })
+  assert.equal(code, 0)
+  assert.match(stdout, /^hypaware\n {2}overall:/, 'the core command core registered no longer runs')
+})
+
+test('a plugin cannot release a neighbour\'s command by one of its aliases', async () => {
+  const staged = await stage()
+  /** @type {string[]} */
+  const ran = []
+  // The wrinkle this registry has and the verb registry does not: `get`,
+  // `has`, `ownerOf` and `unregister` all accept an alias, so a check written
+  // against primary names alone would refuse the obvious spelling and pass
+  // this one, which releases the command and every alias with it.
+  staged.ctxA.commands.register({
+    name: 'acme sync',
+    aliases: ['asy'],
+    summary: 'fixture',
+    usage: 'hyp acme sync',
+    async run() { ran.push('owner'); return 0 },
+  })
+
+  const refused = refusal(() => /** @type {any} */ (staged.ctxB.commands).unregister('asy'))
+  assert.match(String(refused), /not by '@fixture\/squatter'/, 'a plugin released a neighbour\'s command by its alias')
+  assert.equal(staged.registry.has('asy'), true, 'the alias left the registry')
+  assert.equal(staged.registry.has('acme sync'), true, 'the aliased command left the registry')
+  assert.equal(staged.registry.ownerOf('asy'), A, 'the alias changed owner')
+
+  const claimed = refusal(() => contributeCommand(staged, staged.ctxB, 'asy', async () => { ran.push('squatter'); return 0 }))
+  assert.match(String(claimed), /duplicate command name 'asy'/, 'the squatter claimed the neighbour\'s alias')
+
+  const { code } = await invoke(staged, ['asy'])
+  assert.equal(code, 0)
+  assert.deepEqual(ran, ['owner'], 'hyp asy stopped running the body A registered')
+
+  // And the owner still releases its own command by the alias it registered.
+  assert.equal(refusal(() => /** @type {any} */ (staged.ctxA.commands).unregister('asy')), 'ACCEPTED')
+  assert.equal(staged.registry.has('acme sync'), false, 'the owner could not release its own command by its alias')
+})
+
+test('a plugin cannot release a name nothing registered, and the kernel still retracts its own projection', async () => {
+  const staged = await stage()
+  // Nobody's name is refused the way a core command's is: the facade reads an
+  // owner, and "no recorded plugin" is the same answer for both.
+  const refused = refusal(() => /** @type {any} */ (staged.ctxB.commands).unregister('no such command'))
+  assert.match(String(refused), /registered by no recorded plugin/, 'the facade invented a third answer for an unknown name')
+
+  // The kernel's own `unregister` stays unrestricted: `VerbRegistry.unregister`
+  // drives the raw registry and must keep retracting what it projected.
+  contributeVerb(staged.ctxA, 'owner verb', 'owner_verb')
+  assert.equal(staged.registry.has('owner verb'), true, 'a verb projected no CLI command')
+  assert.equal(refusal(() => /** @type {any} */ (staged.ctxA.verbs).unregister('owner verb')), 'ACCEPTED')
+  assert.equal(staged.registry.has('owner verb'), false, 'the kernel stopped retracting a released verb\'s command')
+})
