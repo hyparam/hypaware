@@ -21,6 +21,7 @@ import { compareStrings } from '../util/compare_strings.js'
  * @returns {VerbRegistry & {
  *   unregister: (name: string) => void,
  *   registeringAs: <T>(plugin: PluginName, fn: () => T) => T,
+ *   ownerOf: (name: string) => PluginName | undefined,
  * }}
  * @ref LLP 0034#tool-exposure-emergent [implements]: no central tool gate; the surface is exactly the verbs active plugins register
  */
@@ -30,6 +31,21 @@ export function createVerbRegistry(opts = {}) {
   const byName = new Map()
   /** @type {Map<string, VerbRegistration>} */
   const byTool = new Map()
+  /**
+   * The plugin whose activation registered each verb, keyed by the name this
+   * registry validated. Written only inside a {@link registeringAs} bracket,
+   * so a core verb (`registerCoreVerbs` runs outside one) carries no owner and
+   * a plugin-registered one cannot be missing its own.
+   *
+   * Kept here rather than read back off `VerbRegistration.plugin` for the
+   * reason `CommandRegistry.owners` is: the registration is stored by
+   * reference and handed back by {@link get}, so that field is a live property
+   * the plugin can rewrite after it registered. The per-plugin `ctx.verbs`
+   * facade asks this before it lets a plugin release a verb (issue #1983).
+   *
+   * @type {Map<string, PluginName>}
+   */
+  const owners = new Map()
   /**
    * The plugin currently registering, or `''` outside an activation. Set only
    * by {@link registeringAs}, which brackets a synchronous `register` call,
@@ -61,8 +77,24 @@ export function createVerbRegistry(opts = {}) {
     }
   }
 
+  /**
+   * The plugin that registered the verb `name`, or `undefined` when core
+   * registered it or a host drove this registry itself. The discriminator the
+   * per-plugin facade refuses a foreign `unregister` against, and the same
+   * value `CommandRegistry.ownerOf` answers for the CLI command this verb
+   * projected (LLP 0422 #verb-owner), so the two surfaces a verb claims agree
+   * about who owns it.
+   *
+   * @param {string} name
+   * @returns {PluginName | undefined}
+   */
+  function ownerOf(name) {
+    return owners.get(name)
+  }
+
   return {
     registeringAs,
+    ownerOf,
     // A verb claims three namespaces (verb name, MCP tool, CLI command) from
     // two plugin properties, and {@link validateVerb} reads each exactly once
     // before any of them is claimed. The registration is stored by reference,
@@ -76,7 +108,11 @@ export function createVerbRegistry(opts = {}) {
     register(verb) {
       // Read once, before any plugin property below can run and re-enter.
       const registeredBy = registrar
-      const { name, tool } = validateVerb(verb)
+      // `operation` and `render` come back as values for the reason `name` and
+      // `tool` do: what runs behind the verb has to be what the shape check
+      // cleared, and a second read of either is a fresh answer from a plugin
+      // property. They are stored below and the projection closes over them.
+      const { name, tool, operation, render } = validateVerb(verb)
       if (byName.has(name)) {
         throw new Error(`registerVerb: verb '${name}' already registered`)
       }
@@ -107,12 +143,21 @@ export function createVerbRegistry(opts = {}) {
       // `CommandRunContext` the dispatcher had nobody to narrow for
       // (issue #1978). Core's verbs register outside any bracket and stay
       // ownerless, so the discriminator is still one value and still core's.
+      // The projection closes over the validated pair rather than over the
+      // registration's live members, so the function `hyp <verb>` runs is the
+      // one checked above however the stored record reads by then. That
+      // closure is the private storage, which is why there is no `bodyOf` to
+      // go with `ownerOf` above: a lookup member would be one more thing the
+      // per-plugin facade reads through to, answering with the pair by
+      // reference, which is the defect this closes.
       // @ref LLP 0422#verb-owner [implements]: the projected command carries the verb's registrar, so one owner lookup covers a plugin's command and its verb alike
+      // @ref LLP 0423#private-body [implements]: the operation dispatch runs is the one the registry validated, held where the registrant cannot reach it
       if (commandRegistry && !commandAlreadyRegistered(commandRegistry, name)) {
-        registerProjection(commandRegistry, verbToCommand(verb, name), registeredBy)
+        registerProjection(commandRegistry, verbToCommand(verb, name, { operation, render }), registeredBy)
       }
       byName.set(name, verb)
       byTool.set(tool, verb)
+      if (registeredBy !== '') owners.set(name, registeredBy)
     },
     // Release a claimed verb name: both maps, plus the CLI command a verb
     // projection put under that name (and only that one). By-name,
@@ -133,6 +178,11 @@ export function createVerbRegistry(opts = {}) {
       const tool = verb.tool
       byName.delete(name)
       if (byTool.get(tool) === verb) byTool.delete(tool)
+      // Released with the name, so a name re-registered later carries the
+      // owner of whoever claims it this time. The body goes with the CLI
+      // command `retractCommand` takes back, which is the only thing holding
+      // the closure it lives in.
+      owners.delete(name)
       retractCommand(commandRegistry, name)
     },
     get(name) {
@@ -190,8 +240,15 @@ export function verbAuthClass(verb) {
  * projection runs ahead of both `set`s, so a divergent second answer costs the
  * registration itself and never another plugin's.
  *
+ * `operation` and `render` are returned for a stronger version of the same
+ * reason: they are not keys but they are the code the projection runs, and
+ * every read of a plugin property is a fresh answer, so the two checked here
+ * have to be the two the caller stores. Read again at dispatch, a member that
+ * cleared `typeof === 'function'` was free to answer with something else, or
+ * with nothing at all, by the time it mattered.
+ *
  * @param {VerbRegistration} verb
- * @returns {{ name: string, tool: string }}
+ * @returns {{ name: string, tool: string, operation: VerbRegistration['operation'], render: VerbRegistration['render'] }}
  */
 function validateVerb(verb) {
   if (!verb || typeof verb !== 'object') {
@@ -212,10 +269,12 @@ function validateVerb(verb) {
   if (!inputSchema || typeof inputSchema !== 'object') {
     throw new TypeError(`registerVerb '${name}': inputSchema is required`)
   }
-  if (typeof verb.operation !== 'function') {
+  const operation = verb.operation
+  if (typeof operation !== 'function') {
     throw new TypeError(`registerVerb '${name}': operation() is required`)
   }
-  if (typeof verb.render !== 'function') {
+  const render = verb.render
+  if (typeof render !== 'function') {
     throw new TypeError(`registerVerb '${name}': render() is required`)
   }
   const exposure = verb.exposure
@@ -226,7 +285,7 @@ function validateVerb(verb) {
   if (authClass && !['read', 'operator'].includes(authClass)) {
     throw new TypeError(`registerVerb '${name}': unknown authClass '${authClass}'`)
   }
-  return { name, tool }
+  return { name, tool, operation, render }
 }
 
 /**

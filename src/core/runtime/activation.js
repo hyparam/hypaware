@@ -192,16 +192,17 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  *
  * @param {KernelRuntime} runtime
  * @param {PluginName} pluginName
- * @returns {{ capabilities: CapabilityRegistry, sources: SourceRegistry, sinks: SinkRegistry }}
+ * @returns {{ capabilities: CapabilityRegistry, sources: SourceRegistry, sinks: SinkRegistry, verbs: VerbRegistry }}
  * @ref LLP 0420#split [implements]: a plugin reaches the registries through its own facade, whichever context it reaches them through
  */
 export function pluginRegistryFacades(runtime, pluginName) {
   const ctx = runtime.activationContexts?.get(pluginName)
-  if (ctx) return { capabilities: ctx.capabilities, sources: ctx.sources, sinks: ctx.sinks }
+  if (ctx) return { capabilities: ctx.capabilities, sources: ctx.sources, sinks: ctx.sinks, verbs: ctx.verbs }
   return {
     capabilities: createCapabilitiesFacade(pluginName, runtime.capabilities),
     sources: createSourcesFacade(pluginName, runtime.sources),
     sinks: createSinksFacade(pluginName, runtime.sinks),
+    verbs: createVerbsFacade(pluginName, runtime.verbs),
   }
 }
 
@@ -289,15 +290,49 @@ function createCommandsFacade(pluginName, registry) {
  * `CommandRunContext` to and the plugin's `operation` read every other
  * plugin's config section (issue #1978).
  *
+ * `unregister` and the three read members are bracketed against that same
+ * binding, because forwarding them aimed the reach the other way. A plugin
+ * could not claim a neighbour's verb name, but `unregister` checked no owner
+ * at all, so any plugin released any verb (core's included) and took the CLI
+ * command and the MCP tool it projected off the surface, unopposed and
+ * unlogged. And `get()`, `getByTool()` and `list()` handed back the stored
+ * registration by reference and writable, so a plugin did not need to own a
+ * verb to decide what runs behind it: `ctxB.verbs.get('query sql').operation =
+ * mine` put a plugin's function behind `hyp query sql`, where it read the
+ * whole effective config out of the ownerless core projection's context, a
+ * configured sink's inline token and a neighbour's `api_key` included, and
+ * `list()` was the same reach without needing the name (issue #1983).
+ *
+ * The three reads narrow a verb this plugin does not own to a read-only view
+ * (`narrowVerb` below), for the reason the sources and sinks facades narrow:
+ * a view reads *through* to the registration rather than copying it, so no
+ * accessor of the registering plugin's runs inside a neighbour's `list()`.
+ * `get` narrows only a neighbour's, because the name it is asked for is the
+ * key the registry validated and the key `ownerOf` answers on; `getByTool` and
+ * `list` narrow every entry, because neither is keyed by that name and the
+ * only name on a registration is `verb.name`, a live plugin property this
+ * registry already refuses to treat as a key. A plugin that wants its own
+ * registration back by identity asks `get` for it by the name it registered
+ * under, exactly as with `ctx.sources`.
+ *
+ * Narrowing is the half that keeps a hostile plugin from writing; it is not
+ * what decides whose code runs. That is settled behind the registry, by the
+ * body `register` validated (LLP 0423 #private-body), so the registrant's own
+ * later rewrite of its own record decides nothing either.
+ *
  * Everything else reads through to the registry, which is the surface
  * `ctx.verbs` already had. A registry with no `registeringAs` (a host's own,
  * injected) is handed over unwrapped, the same tolerance the commands,
- * sources and sinks facades extend.
+ * sources and sinks facades extend, and so is one with no `ownerOf`: a host
+ * driving its own registry records no registrar for anything, so there is no
+ * binding to read and refusing on its absence would stop every verb such a
+ * host runs.
  *
  * @param {PluginName} pluginName
  * @param {VerbRegistry} registry
  * @returns {VerbRegistry}
  * @ref LLP 0422#verb-owner [implements]: a plugin's verb is registered under its own name, so the command it projects is attributable
+ * @ref LLP 0423#facade [implements]: a plugin drives and reads the verbs the kernel recorded it as registering, and reads a neighbour's through a view
  */
 function createVerbsFacade(pluginName, registry) {
   // Held as a value, so the guard below is the one the calls run under: a
@@ -321,8 +356,91 @@ function createVerbsFacade(pluginName, registry) {
       return bracket.call(registry, pluginName, fn)
     },
   }
-  for (const [member, value] of Object.entries(members)) {
+  const owned = /** @type {VerbRegistry & { ownerOf?: (name: string) => PluginName | undefined }} */ (registry).ownerOf
+  /** @param {string} member @param {unknown} value */
+  const pin = (member, value) => {
     Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  for (const [member, value] of Object.entries(members)) pin(member, value)
+  // Only where there is a binding to read: a host registry carrying no
+  // `ownerOf` recorded no registrar for anything, so there is nothing to
+  // refuse against and it is left reading exactly as it did.
+  if (typeof owned === 'function') {
+    /**
+     * The views this facade has already built, so repeated reads hand back the
+     * same object and a plugin comparing two `list()` results with `===` sees
+     * the stable identity the live registration gave it. Weak and keyed by the
+     * registration, so a view lives exactly as long as the verb it stands for
+     * rather than pinning every verb a long-lived daemon ever registered.
+     *
+     * @type {WeakMap<object, VerbRegistration>}
+     */
+    const views = new WeakMap()
+    /** @param {VerbRegistration | undefined} verb */
+    const narrow = (verb) => {
+      // An unknown name answers `undefined`, and a host registry is free to
+      // hand back whatever it holds. Only an object keys a `WeakMap`.
+      if (verb === null || typeof verb !== 'object') return verb
+      const existing = views.get(verb)
+      if (existing !== undefined) return existing
+      const view = narrowVerb(pluginName, verb)
+      views.set(verb, view)
+      return view
+    }
+    const bracketed = {
+      /**
+       * Release a verb this plugin registered, and refuse one it did not, which
+       * includes a verb the registry recorded no registrar for at all: a core
+       * verb is nobody's to retract from inside an activation. A host displacing
+       * a kernel-shipped verb (LLP 0264 #verb) drives the registry itself and
+       * never sees this facade.
+       *
+       * `name` is quoted only when it is already a string, so a hostile
+       * `toString` cannot throw out of the refusal refusing it. A non-string
+       * keys no verb, so it is refused either way.
+       *
+       * @param {string} name
+       */
+      unregister(name) {
+        const owner = owned.call(registry, name)
+        if (owner !== pluginName) {
+          const shown = typeof name === 'string' ? name : '(non-string verb name)'
+          const held = owner === undefined ? 'no recorded plugin' : `'${owner}'`
+          getLogger('verb-registry').warn('verb.unregister_owner_mismatch', {
+            [Attr.COMPONENT]: 'verbs',
+            [Attr.OPERATION]: 'verb.unregister',
+            [Attr.ERROR_KIND]: 'verb_owner_mismatch',
+            [Attr.PLUGIN]: pluginName,
+            hyp_owner_plugin: owner ?? '',
+            verb_name: shown,
+            status: 'failed',
+          })
+          throw new Error(
+            `VerbRegistry.unregister: verb '${shown}' is registered by ${held}, not by '${pluginName}'`
+          )
+        }
+        /** @type {(name: string) => void} */ (registry.unregister).call(registry, name)
+      },
+      /** @param {string} name */
+      get(name) {
+        const verb = registry.get(name)
+        return owned.call(registry, name) === pluginName ? verb : narrow(verb)
+      },
+      /** @param {string} tool */
+      getByTool(tool) {
+        return narrow(registry.getByTool(tool))
+      },
+      list() {
+        return registry.list().map((verb) => /** @type {VerbRegistration} */ (narrow(verb)))
+      },
+    }
+    for (const [member, value] of Object.entries(bracketed)) {
+      // `unregister` is optional on the declared contract, so a registry that
+      // never offered one does not acquire one here. The three reads are
+      // required members, so there is nothing to feature-detect.
+      if (member === 'unregister' && typeof registry.unregister !== 'function') continue
+      pin(member, value)
+    }
   }
   return /** @type {VerbRegistry} */ (new Proxy(facade, {
     /**
@@ -341,6 +459,73 @@ function createVerbsFacade(pluginName, registry) {
     has(target, prop) {
       return Object.hasOwn(target, prop) || Reflect.has(registry, prop)
     },
+  }))
+}
+
+/**
+ * The declarative half of the `VerbRegistration` surface, which is the whole
+ * of what a narrowed verb answers for. `operation` and `render` are the other
+ * half and are replaced rather than listed: they are the two functions the CLI
+ * projection and the MCP host run, and neither is the kernel's to hand to a
+ * plugin that did not register the verb.
+ *
+ * A whitelist rather than a mask over those two, for the reason
+ * `CONTRIBUTION_FIELDS` is one: a registration is often a module-level object
+ * with a prototype, and a mask only hides what it was told to hide.
+ */
+const VERB_FIELDS = [
+  'name', 'tool', 'summary', 'plugin', 'category', 'audience', 'aliases', 'help',
+  'inputSchema', 'exposure', 'authClass',
+]
+
+/**
+ * A read-only view of a verb registration, for the members of `ctx.verbs` that
+ * hand one to a plugin that did not register it.
+ *
+ * `operation` is the member this exists for: it is the function `hyp <verb>`
+ * and the MCP tool both run, and a plugin able to write it decides whose code
+ * executes behind a name it does not own. `render` is the same reach one step
+ * on, running over whatever the operation returned. Both answer with a refusal
+ * of this module's own rather than being absent, because the contract declares
+ * `get`/`getByTool`/`list` answering with a `VerbRegistration` and a plugin
+ * reading the shape it was promised should find one. `operation` refuses
+ * asynchronously and `render` synchronously, each the way its declared
+ * signature returns.
+ *
+ * Writes, defines, deletes and reparenting are refused by the view itself,
+ * which is the half a replaced pair alone does not close: the point is that a
+ * neighbour's registration is not a plugin's to edit, and `inputSchema` (the
+ * argv codec's rules and the MCP tool's advertised schema) is as load-bearing
+ * as the functions.
+ *
+ * @param {PluginName} pluginName The plugin the view is being handed to.
+ * @param {VerbRegistration} verb
+ * @returns {VerbRegistration}
+ */
+function narrowVerb(pluginName, verb) {
+  const source = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (verb))
+  /** @param {string} member */
+  function refuse(member) {
+    const shown = shownName(source)
+    getLogger('verb-registry').warn('verb.body_denied', {
+      [Attr.COMPONENT]: 'verbs',
+      [Attr.OPERATION]: `verb.${member}`,
+      [Attr.ERROR_KIND]: 'verb_body_denied',
+      [Attr.PLUGIN]: pluginName,
+      verb_name: shown,
+      status: 'failed',
+    })
+    const subject = shown === '' ? 'a verb' : `'${shown}'`
+    return new Error(
+      `VerbRegistry: a registration reached through get()/getByTool()/list() carries no live ${member}(), so ` +
+      `'${pluginName}' cannot run ${subject} under arguments of its own choosing: register your own verb`
+    )
+  }
+  return /** @type {VerbRegistration} */ (narrowView(VERB_FIELDS, source, {
+    /** @returns {Promise<never>} */
+    async operation() { throw refuse('operation') },
+    /** @returns {never} */
+    render() { throw refuse('render') },
   }))
 }
 

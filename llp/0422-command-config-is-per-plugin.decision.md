@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-09-20
 **Extends:** LLP 0420#split (the one member that decision left out of the split, recorded there as "a scope call left open"), LLP 0420#consequences (a verb projection is no longer ownerless)
+**Extended-by:** LLP 0423 (#consequences: `ctx.verbs` and `CommandRunContext.verbs` are now the boundary the carve-out below said they were not)
 **Related:** LLP 0004, LLP 0006, LLP 0009, LLP 0033, LLP 0034, LLP 0115, LLP 0421
 
 > LLP 0420 split `CommandRunContext` by who owns the command about to run and
@@ -158,6 +159,11 @@ verbs register outside any bracket (`registerCoreVerbs` runs inside
   `{ version: 2 }`, which is an accident of the seam and not a boundary. The
   reach predates this decision (`ctx.verbs` was the raw registry) and is held
   as issue #1983.
+  **Settled by [LLP 0423](./0423-verb-table-is-per-plugin.decision.md):** the
+  registry keeps each verb's `operation` and `render` privately, `unregister`
+  is owner-checked, the read members narrow a verb a plugin does not own, and
+  `CommandRunContext.verbs` follows the owner. This bullet records what this
+  decision left open and is no longer the current behavior.
 - **One reader crosses the line, and was measured rather than argued.**
   `hyp session ignore|unignore|status` is registered by whichever of
   `@hypaware/ai-gateway`, `@hypaware/opencode` and `@hypaware/cursor` activates

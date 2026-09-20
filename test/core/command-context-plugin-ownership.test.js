@@ -591,3 +591,225 @@ test('rewriting the stored run of a neighbour\'s command does not put a plugin\'
   assert.equal(ownerObserved?.isLive, true, 'the owner\'s own body no longer runs from its own command')
   assert.deepEqual(staged.sink.seen.exports, [], 'forged rows reached the owner\'s destination')
 })
+
+// `ctx.verbs` pinned `register` and `registeringAs` and read everything else
+// through to the registry, which stores each registration by reference. So
+// `get()`, `getByTool()` and `list()` handed a plugin a neighbour's live
+// registration and `verb.operation` is the field the projection's `run`
+// closure reads at dispatch, `unregister` checked no owner, and
+// `CommandRunContext.verbs` was the raw registry besides (issue #1983). Every
+// case below drives the real `dispatch()`.
+
+/**
+ * A verb owned by `owner`'s plugin, with the record of whose operation ran.
+ *
+ * @param {{ verbs: any }} owner the activation context registering it
+ * @param {string} name
+ * @param {string} tool
+ */
+function contributeVerb(owner, name, tool) {
+  /** @type {{ ran: string[] }} */
+  const seen = { ran: [] }
+  owner.verbs.register(/** @type {any} */ ({
+    name,
+    tool,
+    summary: 'fixture verb',
+    inputSchema: { type: 'object', properties: {}, required: [], positional: [] },
+    async operation() { seen.ran.push('owner'); return { ok: true } },
+    render: () => ({ stdout: 'owner\n' }),
+  }))
+  return seen
+}
+
+/**
+ * Run `attempt` and say whether it was refused, so a case reads the same
+ * whether the boundary throws (a frozen member, a refusing proxy) or the
+ * write simply stops deciding anything.
+ *
+ * @param {() => void} attempt
+ */
+function refusal(attempt) {
+  try {
+    attempt()
+    return 'ACCEPTED'
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
+}
+
+test('a plugin cannot rewrite a neighbour\'s verb operation through ctx.verbs.get', async () => {
+  const staged = await stage()
+  const seen = contributeVerb(staged.ctxA, 'owner verb', 'owner_verb')
+  let hijacked = false
+  const held = /** @type {any} */ (staged.ctxB.verbs.get('owner verb'))
+  refusal(() => { held.operation = async () => { hijacked = true; return { ok: true } } })
+
+  const { code, stdout } = await invoke(staged, ['owner', 'verb'])
+
+  assert.equal(code, 0)
+  assert.equal(hijacked, false, 'a plugin\'s function ran behind a neighbour\'s verb')
+  assert.deepEqual(seen.ran, ['owner'], 'the owner\'s own operation no longer runs')
+  assert.equal(stdout, 'owner\n')
+})
+
+test('a plugin cannot rewrite a neighbour\'s verb operation through ctx.verbs.list', async () => {
+  const staged = await stage()
+  const seen = contributeVerb(staged.ctxA, 'owner verb', 'owner_verb')
+  let hijacked = false
+  for (const verb of /** @type {any[]} */ (staged.ctxB.verbs.list())) {
+    refusal(() => { verb.operation = async () => { hijacked = true; return { ok: true } } })
+  }
+
+  const { code, stdout } = await invoke(staged, ['owner', 'verb'])
+
+  assert.equal(code, 0)
+  assert.equal(hijacked, false, 'a plugin\'s function ran behind a verb it reached through list()')
+  assert.deepEqual(seen.ran, ['owner'], 'the owner\'s own operation no longer runs')
+  assert.equal(stdout, 'owner\n')
+})
+
+test('a plugin cannot rewrite a neighbour\'s verb operation through ctx.verbs.getByTool', async () => {
+  const staged = await stage()
+  const seen = contributeVerb(staged.ctxA, 'owner verb', 'owner_verb')
+  let hijacked = false
+  const held = /** @type {any} */ (staged.ctxB.verbs.getByTool('owner_verb'))
+  refusal(() => { held.operation = async () => { hijacked = true; return { ok: true } } })
+
+  const { code, stdout } = await invoke(staged, ['owner', 'verb'])
+
+  assert.equal(code, 0)
+  assert.equal(hijacked, false, 'a plugin\'s function ran behind a verb it reached through getByTool()')
+  assert.deepEqual(seen.ran, ['owner'], 'the owner\'s own operation no longer runs')
+  assert.equal(stdout, 'owner\n')
+})
+
+test('a plugin cannot release a neighbour\'s verb, and can still release its own', async () => {
+  const staged = await stage()
+  const seen = contributeVerb(staged.ctxA, 'owner verb', 'owner_verb')
+
+  const refused = refusal(() => /** @type {any} */ (staged.ctxB.verbs).unregister('owner verb'))
+  assert.match(String(refused), /not by '@fixture\/squatter'/, 'a plugin released a neighbour\'s verb')
+  assert.ok(staged.kernel.verbs.get('owner verb'), 'the neighbour\'s verb left the name map')
+  assert.ok(staged.kernel.verbs.getByTool('owner_verb'), 'the neighbour\'s verb left the tool map')
+
+  const { code, stdout } = await invoke(staged, ['owner', 'verb'])
+  assert.equal(code, 0)
+  assert.deepEqual(seen.ran, ['owner'], 'the owner\'s verb stopped dispatching')
+  assert.equal(stdout, 'owner\n')
+
+  // The owner's own release is the affordance LLP 0264 #verb rests on.
+  assert.equal(refusal(() => /** @type {any} */ (staged.ctxA.verbs).unregister('owner verb')), 'ACCEPTED')
+  assert.equal(staged.kernel.verbs.get('owner verb'), undefined, 'the owner could not release its own verb')
+})
+
+test('a plugin cannot rewrite or release a core verb', async (t) => {
+  const staged = await stage()
+  const core = /** @type {any} */ (staged.kernel.verbs.get('query sql'))
+  const original = core.operation
+  t.after(() => { core.operation = original })
+  let hijacked = false
+
+  const held = /** @type {any} */ (staged.ctxB.verbs.get('query sql'))
+  refusal(() => { held.operation = async () => { hijacked = true; return { rows: [], columns: [] } } })
+  const refused = refusal(() => /** @type {any} */ (staged.ctxB.verbs).unregister('query sql'))
+  assert.match(String(refused), /not by '@fixture\/squatter'/, 'a plugin released a core verb')
+  assert.ok(staged.kernel.verbs.getByTool('query_sql'), 'a core verb left the tool map')
+
+  const home = temporaryDirectory('hyp-verb-body-')
+  await invoke(staged, ['query', 'sql', 'select 1'], { ...process.env, HYP_HOME: home, HYP_CONFIG: '' })
+  assert.equal(hijacked, false, 'a plugin\'s function ran behind hyp query sql')
+})
+
+test('a plugin-owned command body reaches the verb table through its own facade', async () => {
+  const staged = await stage()
+  const seen = contributeVerb(staged.ctxA, 'owner verb', 'owner_verb')
+  /** @type {any} */
+  let observed
+  let hijacked = false
+  contributeCommand(staged, staged.ctxB, 'squat verbs', async (_argv, ctx) => {
+    const held = /** @type {any} */ (ctx.verbs.get('owner verb'))
+    observed = {
+      raw: ctx.verbs === staged.kernel.verbs,
+      rewrite: refusal(() => { held.operation = async () => { hijacked = true; return { ok: true } } }),
+      release: refusal(() => /** @type {any} */ (ctx.verbs).unregister('owner verb')),
+    }
+    return 0
+  })
+
+  assert.equal((await invoke(staged, ['squat', 'verbs'])).code, 0)
+  assert.equal(observed.raw, false, 'a plugin command body got the kernel\'s own verb registry')
+  assert.match(String(observed.release), /not by '@fixture\/squatter'/, 'a command body released a neighbour\'s verb')
+  assert.ok(staged.kernel.verbs.get('owner verb'), 'a command body took a neighbour\'s verb off the table')
+
+  const { code, stdout } = await invoke(staged, ['owner', 'verb'])
+  assert.equal(code, 0)
+  assert.equal(hijacked, false, 'a command body put its own function behind a neighbour\'s verb')
+  assert.deepEqual(seen.ran, ['owner'], 'the owner\'s own operation no longer runs')
+  assert.equal(stdout, 'owner\n')
+})
+
+test('a core command body keeps the kernel\'s verb registry', async () => {
+  const staged = await stage()
+  /** @type {any} */
+  let observed
+  // Registered on the registry directly, the way core's own commands are, so
+  // the dispatcher reads it as nobody's.
+  staged.registry.register({
+    name: 'corey verbs',
+    summary: 'fixture core command',
+    usage: 'hyp corey verbs',
+    run: async (_argv, ctx) => { observed = ctx.verbs; return 0 },
+  })
+
+  assert.equal((await invoke(staged, ['corey', 'verbs'])).code, 0)
+  assert.equal(observed, staged.kernel.verbs, 'a core command body lost the kernel\'s verb registry')
+})
+
+test('no member reachable through ctx.verbs hands back a neighbour\'s live operation', async () => {
+  const staged = await stage()
+  contributeVerb(staged.ctxA, 'owner verb', 'owner_verb')
+  const live = /** @type {any} */ (staged.kernel.verbs.get('owner verb')).operation
+
+  // Every member the facade's read-through can reach, asked the way a plugin
+  // would ask it. Enumerated off the registry rather than listed here, so a
+  // member added later is probed by this case instead of quietly reopening the
+  // reach through the one nobody wrote a test for.
+  const mutators = new Set(['register', 'registeringAs', 'unregister'])
+  /** @type {unknown[]} */
+  const answers = []
+  for (const key of Reflect.ownKeys(staged.kernel.verbs)) {
+    if (typeof key !== 'string' || mutators.has(key)) continue
+    const member = /** @type {any} */ (staged.ctxB.verbs)[key]
+    if (typeof member !== 'function') { answers.push(member); continue }
+    for (const args of [[], ['owner verb'], ['owner_verb']]) {
+      try {
+        answers.push(member.apply(staged.ctxB.verbs, args))
+      } catch {
+        // A refusal is an answer, and so is a member that will not take these
+        // arguments. Neither can be carrying the function.
+      }
+    }
+  }
+  assert.ok(answers.length > 0, 'nothing was probed, so this case proves nothing')
+
+  /**
+   * Whether `value` is, or one level down carries, the neighbour's live
+   * `operation`. One level is the whole depth that matters: what the reads
+   * answer with is a registration or a list of them.
+   *
+   * @param {unknown} value
+   */
+  const carriesLive = (value) => {
+    if (value === live) return true
+    if (value === null || typeof value !== 'object') return false
+    const entries = Array.isArray(value) ? value : Object.values(value)
+    for (const entry of entries) {
+      if (entry === live) return true
+      if (entry !== null && typeof entry === 'object' && Object.values(entry).includes(live)) return true
+    }
+    return false
+  }
+  for (const answer of answers) {
+    assert.equal(carriesLive(answer), false, 'a ctx.verbs member handed back a neighbour\'s live operation')
+  }
+})
