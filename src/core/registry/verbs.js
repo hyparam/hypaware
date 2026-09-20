@@ -5,7 +5,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { CommandRegistry, VerbAuthClass, VerbExposure, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { CommandRegistration, CommandRegistry, PluginName, VerbAuthClass, VerbExposure, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 /**
@@ -18,7 +18,10 @@ import { compareStrings } from '../util/compare_strings.js'
  * core change.
  *
  * @param {{ commandRegistry?: CommandRegistry }} [opts]
- * @returns {VerbRegistry & { unregister: (name: string) => void }}
+ * @returns {VerbRegistry & {
+ *   unregister: (name: string) => void,
+ *   registeringAs: <T>(plugin: PluginName, fn: () => T) => T,
+ * }}
  * @ref LLP 0034#tool-exposure-emergent [implements]: no central tool gate; the surface is exactly the verbs active plugins register
  */
 export function createVerbRegistry(opts = {}) {
@@ -27,8 +30,39 @@ export function createVerbRegistry(opts = {}) {
   const byName = new Map()
   /** @type {Map<string, VerbRegistration>} */
   const byTool = new Map()
+  /**
+   * The plugin currently registering, or `''` outside an activation. Set only
+   * by {@link registeringAs}, which brackets a synchronous `register` call,
+   * so no two activations can hold it at once however they interleave. The
+   * same shape `CommandRegistry` uses, and for the same reason: `verb.plugin`
+   * is written by the plugin, and the registration is stored by reference, so
+   * that field can answer differently every time it is read.
+   */
+  let registrar = ''
+
+  /**
+   * Run `fn` with `plugin` recorded as the plugin doing the registering. The
+   * activation context brackets its own `register` call with this, which is
+   * how this registry learns who is calling.
+   *
+   * @template T
+   * @param {PluginName} plugin
+   * @param {() => T} fn
+   * @returns {T}
+   * @ref LLP 0422#verb-owner [implements]: a verb's registrar is recorded by core, so the CLI command it projects is attributable to the plugin whose `operation` will run
+   */
+  function registeringAs(plugin, fn) {
+    const previous = registrar
+    registrar = typeof plugin === 'string' ? plugin : ''
+    try {
+      return fn()
+    } finally {
+      registrar = previous
+    }
+  }
 
   return {
+    registeringAs,
     // A verb claims three namespaces (verb name, MCP tool, CLI command) from
     // two plugin properties, and {@link validateVerb} reads each exactly once
     // before any of them is claimed. The registration is stored by reference,
@@ -40,6 +74,8 @@ export function createVerbRegistry(opts = {}) {
     // command projected under, which put a verb in `hyp --help` under a name
     // this registry had not keyed it by.
     register(verb) {
+      // Read once, before any plugin property below can run and re-enter.
+      const registeredBy = registrar
       const { name, tool } = validateVerb(verb)
       if (byName.has(name)) {
         throw new Error(`registerVerb: verb '${name}' already registered`)
@@ -64,8 +100,16 @@ export function createVerbRegistry(opts = {}) {
       // namespaces or none of them.
       // Idempotent: a runtime re-created over a shared command registry (or a
       // verb whose name a command already occupies) must not double-register.
+      // Registered under the same registrar the verb was, so the projection
+      // carries an owner the way a plugin's own command does. It was
+      // ownerless (LLP 0420 #consequences), which left the plugin's
+      // `operation` reading the whole effective config through a
+      // `CommandRunContext` the dispatcher had nobody to narrow for
+      // (issue #1978). Core's verbs register outside any bracket and stay
+      // ownerless, so the discriminator is still one value and still core's.
+      // @ref LLP 0422#verb-owner [implements]: the projected command carries the verb's registrar, so one owner lookup covers a plugin's command and its verb alike
       if (commandRegistry && !commandAlreadyRegistered(commandRegistry, name)) {
-        commandRegistry.register(verbToCommand(verb, name))
+        registerProjection(commandRegistry, verbToCommand(verb, name), registeredBy)
       }
       byName.set(name, verb)
       byTool.set(tool, verb)
@@ -183,6 +227,28 @@ function validateVerb(verb) {
     throw new TypeError(`registerVerb '${name}': unknown authClass '${authClass}'`)
   }
   return { name, tool }
+}
+
+/**
+ * Register a verb's projected CLI command, inside the command registry's own
+ * `registeringAs` bracket when the verb had a registrar to carry.
+ *
+ * Unbracketed in the two cases that have no plugin behind them: a core verb
+ * (`registerCoreVerbs` calls `register` outside any activation) and a command
+ * registry a host injected that predates `registeringAs`. Both then land
+ * ownerless, which is what they were before and what core's commands are.
+ *
+ * @param {CommandRegistry & { registeringAs?: (plugin: PluginName, fn: () => void) => void }} registry
+ * @param {CommandRegistration} command
+ * @param {string} registeredBy the verb's registrar, `''` outside an activation
+ */
+function registerProjection(registry, command, registeredBy) {
+  const bracket = registry.registeringAs
+  if (registeredBy === '' || typeof bracket !== 'function') {
+    registry.register(command)
+    return
+  }
+  bracket.call(registry, /** @type {PluginName} */ (registeredBy), () => { registry.register(command) })
 }
 
 /**

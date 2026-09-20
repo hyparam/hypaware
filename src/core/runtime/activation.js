@@ -21,7 +21,7 @@ import { isSafeContributionName } from './contribution_names.js'
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, CommandGroupRegistration, CommandRegistration, CommandRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkContribution, SinkHandle, SinkRegistry, SkillContribution, SkillRegistry, SourceContribution, SourceRegistry, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, CommandGroupRegistration, CommandRegistration, CommandRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkContribution, SinkHandle, SinkRegistry, SkillContribution, SkillRegistry, SourceContribution, SourceRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
  * @import { ExtendedSinkHandle, ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
@@ -148,7 +148,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     sources: createSourcesFacade(pluginName, runtime.sources),
     sinks: createSinksFacade(pluginName, runtime.sinks),
     query: runtime.query,
-    verbs: runtime.verbs,
+    verbs: createVerbsFacade(pluginName, runtime.verbs),
     storage: runtime.storage,
     skills: runtime.skills,
     agents: runtime.agents,
@@ -256,6 +256,75 @@ function createCommandsFacade(pluginName, registry) {
     Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
   }
   return /** @type {CommandRegistry} */ (new Proxy(facade, {
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     * @param {unknown} receiver
+     */
+    get(target, prop, receiver) {
+      if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver)
+      return Reflect.get(registry, prop, receiver)
+    },
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     */
+    has(target, prop) {
+      return Object.hasOwn(target, prop) || Reflect.has(registry, prop)
+    },
+  }))
+}
+
+/**
+ * Per-plugin facade over the verb registry, with exactly the reach and
+ * exactly the shape {@link createCommandsFacade} has. `register` runs inside
+ * `registeringAs`, so the registry records which plugin claimed the verb
+ * rather than reading `VerbRegistration.plugin`, which the plugin writes and
+ * which the registry holds by reference so it can answer differently on every
+ * read.
+ *
+ * A verb is a command: the registry projects one into the CLI immediately,
+ * and the plugin's `operation` runs behind it. Without a registrar that
+ * projection was ownerless, so the dispatcher had no owner to scope its
+ * `CommandRunContext` to and the plugin's `operation` read every other
+ * plugin's config section (issue #1978).
+ *
+ * Everything else reads through to the registry, which is the surface
+ * `ctx.verbs` already had. A registry with no `registeringAs` (a host's own,
+ * injected) is handed over unwrapped, the same tolerance the commands,
+ * sources and sinks facades extend.
+ *
+ * @param {PluginName} pluginName
+ * @param {VerbRegistry} registry
+ * @returns {VerbRegistry}
+ * @ref LLP 0422#verb-owner [implements]: a plugin's verb is registered under its own name, so the command it projects is attributable
+ */
+function createVerbsFacade(pluginName, registry) {
+  // Held as a value, so the guard below is the one the calls run under: a
+  // second read could answer differently on a host registry.
+  const bracket = /** @type {VerbRegistry & { registeringAs?: (plugin: PluginName, fn: () => void) => void }} */ (registry)?.registeringAs
+  if (typeof bracket !== 'function') return registry
+  const facade = Object.create(null)
+  // Non-writable and non-configurable, so `delete ctx.verbs.register` cannot
+  // take the own property away and uncover the registry's own unbracketed one
+  // through the proxy below.
+  const members = {
+    /** @param {VerbRegistration} verb */
+    register(verb) {
+      bracket.call(registry, pluginName, () => { registry.register(verb) })
+    },
+    /**
+     * @param {PluginName} _plugin
+     * @param {() => void} fn
+     */
+    registeringAs(_plugin, fn) {
+      return bracket.call(registry, pluginName, fn)
+    },
+  }
+  for (const [member, value] of Object.entries(members)) {
+    Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  return /** @type {VerbRegistry} */ (new Proxy(facade, {
     /**
      * @param {Record<string | symbol, unknown>} target
      * @param {string | symbol} prop
