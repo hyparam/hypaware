@@ -255,7 +255,11 @@ function promptListFooter(footer, hasRows) {
  * @returns {Promise<{ ok: boolean, code?: number | null, error?: string }>}
  */
 export function launchClient({ launcher, prompt, cwd, env, spawnFn = spawn }) {
-  const args = launcher.args.map((a) => a.replaceAll('{prompt}', prompt))
+  // A replacer function, not the string: a string replacement expands the
+  // `$&`-family patterns, so a prompt carrying one substituted the matched
+  // `{prompt}` back into itself. Harmless while every caller passed a
+  // constant; `hyp report fix` builds its prompt from a fetched page's title.
+  const args = launcher.args.map((a) => a.replaceAll('{prompt}', () => prompt))
   return new Promise((resolve) => {
     let settled = false
     /** @param {{ ok: boolean, code?: number | null, error?: string }} r */

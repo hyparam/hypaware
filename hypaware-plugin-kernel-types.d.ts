@@ -1060,6 +1060,12 @@ export interface CommandRunContext {
   stdin?: NodeJS.ReadStream
   env: NodeJS.ProcessEnv
   cwd: string
+  /**
+   * The whole effective config, not the plugin's slice `activate()`
+   * receives (LLP 0420 #split). A plugin-owned command body therefore
+   * reads every section, a neighbour's inline credentials included;
+   * narrowing it is issue #1978.
+   */
   config: HypAwareV2Config
   plugins: ActivePlugin[]
   /**
@@ -1078,6 +1084,10 @@ export interface CommandRunContext {
    * (LLP 0219 #incomplete-activation-prunes-nothing).
    */
   failedPlugins?: string[]
+  /**
+   * Capability registry. Per-plugin for a plugin-contributed command, raw
+   * for a core one: see `sinks` below for the rule and why it exists.
+   */
   capabilities: CapabilityRegistry
   /** Kernel-owned client lifecycle registry. Present on current hosts. */
   clients?: ClientRegistry
@@ -1143,15 +1153,33 @@ export interface CommandRunContext {
    */
   agents: AgentRegistry
   /**
-   * Source registry (kernel-owned). Populated by the dispatcher.
-   * `hyp status` and the Phase 9 walkthrough enumerate this to render
-   * the per-source breakdown and harvest source picks.
+   * Source registry. Per-plugin for a plugin-contributed command, raw for a
+   * core one: see `sinks` below for the rule and why it exists. `hyp status`
+   * and the wizard's pick phase are core, so they still enumerate every
+   * plugin's sources to render the breakdown and harvest source picks.
    */
   sources: SourceRegistry
   /**
-   * Sink registry (kernel-owned). Populated by the dispatcher.
-   * `hyp status` and the Phase 9 walkthrough enumerate this to render
-   * the per-sink breakdown and harvest sink picks.
+   * Sink registry. Which registry depends on who owns the command:
+   *
+   * - A command a **plugin** contributed gets that plugin's own
+   *   `ctx.sinks` facade, the one its `activate()` holds. Registering a
+   *   command is a plugin extension point, so the body of one is a second
+   *   context the same plugin reaches the kernel through, and it is
+   *   bracketed the way the first one is: a neighbour's configured instance
+   *   answers with no `config`, no live `exportBatch`, no `reader()`, no
+   *   writable `sink`, and `closeAll()` closes only this plugin's own.
+   * - A **core** command gets the kernel's registry unchanged. `hyp status`
+   *   and the wizard render every plugin's sinks, `hyp sink maintain`
+   *   drives them, and that is core's job.
+   *
+   * The owner is the plugin the registry recorded as registering the
+   * command, not `CommandRegistration.plugin`, which the plugin writes.
+   * The split scopes the command as registered: the stored record stays
+   * mutable through `get()`, and rewriting its `run` sidesteps the split
+   * (issue #1977).
+   *
+   * @see LLP 0420 #split
    */
   sinks: SinkRegistry
   /**

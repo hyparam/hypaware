@@ -1,5 +1,6 @@
 // @ts-check
 
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import { parseCoreCommandArgv } from '../cli/command_args.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
@@ -8,7 +9,7 @@ import process from 'node:process'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
-import { discoverBundledPlugins } from '../runtime/bundled.js'
+import { V1_EXCLUDED_FROM_DEFAULT, discoverBundledPlugins } from '../runtime/bundled.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import {
   installPlugin,
@@ -18,6 +19,7 @@ import {
   updatePlugin,
 } from '../plugin_install/install.js'
 import { getEntry } from '../plugin_install/lock.js'
+import { SCOPED_NAME_RE } from '../plugin_install/resolver.js'
 import {
   buildTtyPrompt,
   buildWarnings,
@@ -222,19 +224,87 @@ function parsePluginInstallArgs(argv) {
  * under every profile, and so a bundled plugin this boot did not get can still
  * be named with its version and root directory: it never became an
  * `ActivePlugin` and a bundled plugin is not in the lock, so nothing else here
- * knows either fact. Discovery failure degrades to empty (no marks, and
- * `plugin info` reads as if the name were unknown), never throws: neither a
- * listing nor a lookup is the place to fail. A bundled plugin whose manifest
- * will not load is absent here too, having no name to be keyed by (issue #1576).
+ * knows either fact. Discovery failure still degrades to a short map and never
+ * throws (neither a listing nor a lookup is the place to fail), but it no
+ * longer degrades *silently*: `unread` says the map is not the whole package,
+ * so a caller that would otherwise state what the package contains can hedge
+ * instead (issue #1600). `plugin list` ignores it and marks only what it can
+ * see, which is what a listing of the present tense means.
  *
- * @returns {Promise<Map<string, LoadedManifest>>}
+ * The map can fall short of the package, and the routes there do not answer the
+ * same way. What follows is a list of the ones known to this code, not a census
+ * of what exists: the flat "installed or bundled with this package" denial is
+ * not evidence a name is absent from the package, only that discovery did not
+ * produce it, and a route found later joins the list without unsettling the
+ * entries already on it. Counting them instead got this block wrong twice
+ * (PRs #1841 and #1845, each correcting the number and keeping the form), so
+ * the count is gone rather than corrected again (issue #1846).
+ *
+ * - The workspace will not enumerate for a reason other than ENOENT, such as a
+ *   permission error or a path that is not a directory. `discoverBundledPlugins`
+ *   rethrows, the catch below turns it into `unread`, and the caller hedges.
+ *   Hard to reach from a booted CLI, since boot runs this same discovery first
+ *   and dies on the same throw.
+ * - A bundled plugin's manifest will not load. It routes to `failed` and does
+ *   not throw, so boot survives it and a booted CLI holds a map short of a name
+ *   it cannot even report as missing, having no name to be keyed by (issue
+ *   #1576). `unread` carries it, keyed by the directory.
+ * - A manifest parses under a name in neither the allowlist nor the exclude set.
+ *   It routes to `unknown` and comes back as `unrecognized` keyed by the name it
+ *   declares, which is why it is answered rather than hedged: hedging would
+ *   claim the bundled plugins could not all be read when every one of them was
+ *   (issue #1843).
+ * - The workspace directory does not exist. `discoverBundledPlugins` in
+ *   `src/core/runtime/bundled.js` maps ENOENT to all-empty buckets and returns
+ *   without throwing (the reason that file gives for the branch is keeping
+ *   `npx hypaware --help` working from any directory), and `bootKernel` in
+ *   `src/core/runtime/boot.js` reads the all-empty result and carries on. A fully booted CLI therefore arrives here with an empty map and
+ *   gives the flat denial for every name the package ships. The "boot dies on a
+ *   throw" reasoning above does not reach this one: ENOENT is the readdir
+ *   failure deliberately made not to throw. A workspace that exists and
+ *   enumerates to nothing lands in the same place.
+ * - A plugin directory that readdir does not report as a directory. The
+ *   `withFileTypes` filter is lstat-shaped, so a symlink pointing at a real
+ *   plugin directory is dropped before `loadManifests` sees it, leaving no entry
+ *   in `loaded`, `failed`, `excluded` or `unknown`, and the same flat denial
+ *   follows by a different mechanism.
+ *
+ * `unread` needs something actually unreadable and no name left to answer with,
+ * so the missing-workspace and non-directory routes do not set it: the empty
+ * buckets they leave are indistinguishable here from a workspace that read
+ * clean.
+ *
+ * The reason strings say a directory "did not yield a usable manifest" rather
+ * than that it holds one: `src/core/manifest.js` maps a missing
+ * `hypaware.plugin.json` to the same `manifest_invalid` failure as a corrupt
+ * one, so the `failed` bucket cannot tell which it was and the line must be
+ * true of both (issue #1842).
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.workspaceDir] Override the bundled workspace location.
+ * @returns {Promise<{ manifests: Map<string, LoadedManifest>, unrecognized: Map<string, LoadedManifest>, unread: string | null }>}
  */
-async function discoverBundledManifests() {
+async function discoverBundledManifests(opts = {}) {
   try {
-    const bundled = await discoverBundledPlugins()
-    return new Map([...bundled.loaded, ...bundled.excluded].map((m) => [m.manifest.name, m]))
-  } catch {
-    return new Map()
+    const bundled = await discoverBundledPlugins(opts)
+    const manifests = new Map([...bundled.loaded, ...bundled.excluded].map((m) => [m.manifest.name, m]))
+    const unrecognized = new Map(bundled.unknown.map((m) => [m.manifest.name, m]))
+    if (bundled.failed.length === 0) return { manifests, unrecognized, unread: null }
+    const first = bundled.failed[0].rootDir
+    return {
+      manifests,
+      unrecognized,
+      unread: bundled.failed.length === 1
+        ? `the bundled plugin directory ${first} did not yield a usable manifest`
+        : `${bundled.failed.length} bundled plugin directories did not yield a usable manifest, including ${first}`,
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return {
+      manifests: new Map(),
+      unrecognized: new Map(),
+      unread: `the bundled plugins directory could not be read: ${message}`,
+    }
   }
 }
 
@@ -249,7 +319,7 @@ export async function runPluginList(argv, ctx) {
   const stateDir = pluginStateDir(ctx)
   const installed = await listInstalledPlugins(stateDir)
   const active = ctx.plugins ?? []
-  const bundledManifests = await discoverBundledManifests()
+  const bundledManifests = (await discoverBundledManifests()).manifests
   const installedByName = new Map(installed.map((e) => [e.name, e]))
   const activeByName = new Map(active.map((p) => [p.name, p]))
 
@@ -371,19 +441,25 @@ export async function runPluginList(argv, ctx) {
     // named) nor why, since four different shortfalls land in this one list. The
     // closing line says which boot is missing from the answer: this CLI process
     // is not the daemon, and a plugin can fail in either one alone.
-    // It names the one thing `hyp status` actually reports, and not "plugin
-    // failures" at large: the daemon's `failedPlugins` is built from its
-    // `activations` (`recordFailedPlugins`), which only the throwing-`activate()`
-    // route ever reaches. A plugin the dep graph eliminated for an unsatisfied
-    // `requires` lands in this section and is reported by `hyp status` as active
-    // under `overall: healthy`, so a wider pointer would send an operator to a
-    // surface that contradicts this one (issue #1580).
+    // It names the two things `hyp status` actually reports, and not "plugin
+    // failures" at large: the daemon's `failedPlugins` is built by
+    // `recordFailedPlugins` from both its `activations` and its
+    // `unsatisfiedRequirements`, so a throwing `activate()` and a plugin the dep
+    // graph eliminated for an unsatisfied `requires` each reach it, each get a
+    // diagnostic of their own, and each degrade `overall` (issue #1580). A
+    // plugin the boot profile withheld stops at this listing, because it is no
+    // shortfall in the daemon at all, so a pointer at "the daemon's plugin
+    // failures" at large would promise an answer `hyp status` does not give. A
+    // manifest that would not load reaches neither surface: it lands in
+    // `unavailablePlugins` as a directory rather than a plugin name, so the
+    // name bound above keeps it out of this listing entirely, and `hyp status`
+    // has no plugin name to report it under (issue #1576).
     ctx.stdout.write('Plugins this boot did not activate:\n')
     for (const name of [...unavailable].sort()) {
       const { version, source } = unavailableCopy(name)
       ctx.stdout.write(`  ${name}@${version}  (${source})\n`)
     }
-    ctx.stdout.write('  The daemon boots separately; hyp status names a plugin whose activate() threw in a running one.\n')
+    ctx.stdout.write('  The daemon boots separately; hyp status names a plugin whose activate() threw in a running one, or one its dependency resolver eliminated.\n')
   }
   return 0
 }
@@ -391,8 +467,12 @@ export async function runPluginList(argv, ctx) {
 /**
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {{ workspaceDir?: string }} [opts] Override the bundled workspace
+ *   location. The command registry never passes it: it is here so a test can
+ *   put a workspace this process cannot read behind the lookup, which is the
+ *   only way to reach the hedged miss message below (issue #1600).
  */
-export async function runPluginInfo(argv, ctx) {
+export async function runPluginInfo(argv, ctx, opts = {}) {
   const parsed = parseCoreCommandArgv('plugin info', argv, ctx)
   if (!parsed.ok) return parsed.code
   const name = String(parsed.params.plugin)
@@ -403,9 +483,41 @@ export async function runPluginInfo(argv, ctx) {
   // every bundled name read as `is not installed` whatever its state (issue
   // #1578). Same discovery as the listing, so the two cannot disagree about
   // what the package ships.
-  const bundled = (await discoverBundledManifests()).get(name)
+  const discovered = await discoverBundledManifests(opts)
+  const bundled = discovered.manifests.get(name)
   if (!entry) {
     if (!bundled) {
+      // Absent from the map is not the same fact as absent from the package,
+      // so the flat claim is only honest when discovery saw the whole
+      // workspace. An operator running this against a broken install is owed
+      // the difference between "this name is unknown" and "I could not look"
+      // (issue #1600).
+      //
+      // A manifest this build does not recognize is a third state, and not a
+      // read failure: it parsed, so the name is known exactly and gets said
+      // back rather than hedged. Checked before `unread` because it answers
+      // *this* name, where the hedge only says the map is short somewhere
+      // (issue #1843).
+      const unrecognized = discovered.unrecognized.get(name)
+      if (unrecognized) {
+        ctx.stderr.write(
+          `hyp plugin info: no plugin named '${name}' is installed, and the manifest this package`
+            + ' bundles under that name is one this build does not recognize\n'
+        )
+        ctx.stderr.write(
+          `  the bundled plugin directory ${unrecognized.rootDir} declares '${name}', a name in`
+            + " neither this build's bundled plugin allowlist nor its excluded set, so nothing activates it\n"
+        )
+        return 1
+      }
+      if (discovered.unread) {
+        ctx.stderr.write(
+          `hyp plugin info: no plugin named '${name}' is installed, and the plugins bundled with`
+            + ' this package could not all be read, so whether this package ships one is unknown\n'
+        )
+        ctx.stderr.write(`  ${discovered.unread}\n`)
+        return 1
+      }
       ctx.stderr.write(
         `hyp plugin info: no plugin named '${name}' is installed or bundled with this package\n`
       )
@@ -414,12 +526,26 @@ export async function runPluginInfo(argv, ctx) {
     // The manifest, and nothing more: `install_dir`, `content_hash`,
     // `manifest_hash`, `installed_at` and the update block all describe an
     // install this copy never went through, so a value in any of them would be
-    // invented. The `source` line says why they are absent. Activation is
-    // absent too: `plugin list` owns "did this boot activate it" along with the
-    // scoping that claim needs, and a second surface restating it is how two
-    // surfaces come to contradict each other.
+    // invented. The `source` line says why they are absent. What this boot did
+    // is absent too: `plugin list` owns "did this boot activate it" along with
+    // the scoping that claim needs, and a second surface restating it is how
+    // two surfaces come to contradict each other.
+    //
+    // The `activation` line is the other kind of fact, and the one `plugin
+    // list` cannot supply: membership of `V1_EXCLUDED_FROM_DEFAULT` is a
+    // property of the name in this build, not of a boot, and until the config
+    // names one of those `plugin list` prints it under no heading at all
+    // (neither active, installed, nor failed), so this record is the only
+    // answer the operator gets (issue #1599). It claims config selection and
+    // not execution, exactly as the `shadowed` line below does:
+    // `computeSelectedPlugins` takes the `config` profile's set from
+    // `plugins[]`, and the default profiles (`all-bundled`, `all-available`)
+    // filter this set out whatever the manifest says.
     ctx.stdout.write(`${bundled.manifest.name}@${bundled.manifest.version}\n`)
     ctx.stdout.write('  source:        bundled (ships with this package, so there is no install record)\n')
+    if (V1_EXCLUDED_FROM_DEFAULT.has(bundled.manifest.name)) {
+      ctx.stdout.write('  activation:    only when plugins[] names it; the default profiles never activate it\n')
+    }
     ctx.stdout.write(`  root_dir:      ${bundled.rootDir}\n`)
     return 0
   }
@@ -602,8 +728,13 @@ export async function runPluginRemove(argv, ctx) {
  *
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {object} [opts]
+ * @param {string} [opts.workspaceDir] Override the bundled workspace location.
+ *   The command registry never passes it: it is here, as it is on
+ *   `runPluginInfo`, so a test can put a workspace this process cannot read
+ *   behind the lookup the refusal below makes (issue #1600).
  */
-export async function runPluginDoctor(argv, ctx) {
+export async function runPluginDoctor(argv, ctx, opts = {}) {
   /** @type {string|undefined} */
   let dir
   let json = false
@@ -625,6 +756,22 @@ export async function runPluginDoctor(argv, ctx) {
   }
 
   const rootDir = path.resolve(ctx.cwd ?? process.cwd(), dir ?? '.')
+
+  // A plugin name is not a directory, so without this it joins to the cwd and
+  // is diagnosed as a phantom: a header naming a path that never existed, and
+  // two repair hints written for a plugin the operator is authoring rather than
+  // a first-party adapter the package ships (issue #1584). Refused rather than
+  // resolved, so the command never has to decide which copy of a name it means.
+  //
+  // Only when the token is not also a directory under the cwd. `@<scope>/<name>`
+  // is the npm on-disk layout, so it is a positional this command has always
+  // taken and diagnosed, and refusing an operator who points at one (from
+  // inside `node_modules`, say) would trade the phantom for a denial that a
+  // directory they are standing next to exists.
+  if (dir !== undefined && SCOPED_NAME_RE.test(dir) && !(await isExistingDirectory(rootDir))) {
+    return refuseDoctorPluginName(dir, ctx, opts)
+  }
+
   const { knownPlugins } = await buildKnownPluginsForCtx(ctx)
   const knownCapabilities = capabilitiesFromMetadata(knownPlugins)
 
@@ -648,20 +795,88 @@ export async function runPluginDoctor(argv, ctx) {
 }
 
 /**
+ * Whether `p` names an existing directory. Absence and an unreadable path both
+ * read as "not a directory": the caller is only deciding whether a token the
+ * operator typed is a path at all, and `diagnosePlugin` owns saying what is
+ * wrong with one that is.
+ *
+ * @param {string} p
+ * @returns {Promise<boolean>}
+ */
+function isExistingDirectory(p) {
+  return fs.stat(p).then((st) => st.isDirectory(), () => false)
+}
+
+/**
+ * Refuse a `plugin doctor` positional that is a plugin name, naming the
+ * directory that plugin actually occupies so the operator can re-run against
+ * it. The directory comes from the same bundled discovery `plugin list` and
+ * `plugin info` read rather than from a guess built out of the name, and a
+ * bundled copy is preferred over an install record so the directory named is
+ * the one whose code runs.
+ *
+ * A name matching neither is still a usage error, and it is hedged the way
+ * `plugin info` hedges its own miss (issue #1600): a discovery that could not
+ * read the whole workspace cannot say the package ships nothing, so it says
+ * what it could not read instead of denying the name.
+ *
+ * @param {string} name
+ * @param {CommandRunContext} ctx
+ * @param {{ workspaceDir?: string }} [opts]
+ * @returns {Promise<number>}
+ * @ref LLP 0380#bundled-copy-wins [implements]: the copy boot selects is the copy worth diagnosing
+ */
+async function refuseDoctorPluginName(name, ctx, opts = {}) {
+  const discovered = await discoverBundledManifests(opts)
+  // `unrecognized` too: a bundled directory declaring a name this build does
+  // not know still exists, and diagnosing it is what doctor is for.
+  const rootDir = (discovered.manifests.get(name) ?? discovered.unrecognized.get(name))?.rootDir
+    ?? getEntry(await loadLock(pluginStateDir(ctx)), name)?.install_dir
+  ctx.stderr.write(`hyp plugin doctor: '${name}' is a plugin name; this command takes a plugin directory\n`)
+  if (rootDir) {
+    ctx.stderr.write(`  ${name} lives at ${rootDir}\n`)
+    ctx.stderr.write(`  run: hyp plugin doctor ${rootDir}\n`)
+  } else if (discovered.unread) {
+    // Not the flat denial below: a discovery short of the package cannot say
+    // the package lacks the name, which is the claim `plugin info` had removed
+    // from its own miss message for this exact reason (issue #1600).
+    ctx.stderr.write(
+      `  no plugin named '${name}' is installed, and the plugins bundled with this package could not`
+        + ' all be read, so whether this package ships one is unknown\n'
+    )
+    ctx.stderr.write(`  ${discovered.unread}\n`)
+  } else {
+    ctx.stderr.write(
+      `  no plugin named '${name}' is installed or bundled with this package, so there is no directory to diagnose\n`
+    )
+  }
+  ctx.stderr.write('usage: hyp plugin doctor [dir] [--json]\n')
+  return 2
+}
+
+/**
  * Map every capability name any known plugin provides to the versions
  * provided, used to resolve a plugin's `requires.capabilities` against
  * their declared semver ranges (not just by name).
  *
+ * Entries without a usable identity are skipped: `isStringMap` (manifest.js)
+ * checks values and never keys, so a manifest declaring `{"": "1.0.0"}` or
+ * `{"cap.real": ""}` loads and reaches here verbatim. Neither identifies a
+ * capability a `requires.capabilities` range could resolve against, and the
+ * doctor seeds this map one `CapabilityRegistry.provide` call per entry, so
+ * one malformed neighbour manifest would otherwise reach that seeding on
+ * behalf of every plugin being diagnosed (hyparam/hypaware#1860).
+ *
  * @param {Map<PluginName, PluginMetadata>} knownPlugins
  * @returns {Map<string, string[]>}
  */
-function capabilitiesFromMetadata(knownPlugins) {
+export function capabilitiesFromMetadata(knownPlugins) {
   /** @type {Map<string, string[]>} */
   const caps = new Map()
   for (const meta of knownPlugins.values()) {
     if (!meta.provides) continue
     for (const [name, version] of Object.entries(meta.provides)) {
-      if (typeof version !== 'string') continue
+      if (typeof version !== 'string' || name === '' || version === '') continue
       const versions = caps.get(name)
       if (versions) versions.push(version)
       else caps.set(name, [version])

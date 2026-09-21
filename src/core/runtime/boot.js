@@ -7,7 +7,8 @@ import {
   getLogger,
   runRoot,
 } from '../observability/index.js'
-import { defaultConfigPath, loadConfigFile } from '../config/schema.js'
+import { defaultConfigPath } from '../config/schema.js'
+import { loadClientConfigLayers } from '../config/grep_migration.js'
 import { resolveCentralLayerPath } from '../config/apply.js'
 import { resolveLayeredConfig } from '../config/merge.js'
 import { collectConfigErrors } from '../config/validate.js'
@@ -123,10 +124,9 @@ export async function bootKernel(opts = {}) {
       // Two-layer config resolution (LLP 0031): the effective config is
       // the merge of a server-owned **central** layer (authoritative,
       // locked) and the user-owned **local** layer (`hypaware-config.json`,
-      // additive-only). Both are read-only here. Only the daemon's apply
-      // engine ever writes the central layer. A host that never joined has
-      // no central layer, so `effective = local` (this whole block is a
-      // no-op for it) and behaviour is byte-for-byte what it was before.
+      // additive-only). Only the daemon's apply engine writes the central
+      // layer; the client may migrate its local grep entry. A host that never
+      // joined has no central layer, so `effective = local` after migration.
       // The catalog is built from the very manifests this boot discovered
       // so the merge validates local additions against the same plugin set
       // it will activate.
@@ -137,6 +137,7 @@ export async function bootKernel(opts = {}) {
         configPath,
         knownPlugins: catalog.pluginMetadata,
         knownDatasets: catalog.knownDatasets,
+        migrateGrep: bootProfile === 'config',
       })
       const centralConfig = merged.centralConfig
       const centralConfigPath = merged.centralConfigPath
@@ -234,10 +235,15 @@ export async function bootKernel(opts = {}) {
       // name to be known by, so it is named by the directory it failed in. Both
       // pools count: an installed plugin whose manifest is unreadable leaves the
       // same hole a bundled one does.
-      const unloadable = [
-        ...discovered.failed.map((f) => f.rootDir),
-        ...installed.failed.map((f) => f.rootDir),
-      ]
+      //
+      // Kept whole here, for the reason `unsatisfiedRequirements` is kept
+      // beside `unavailablePlugins`: the flat list is all the client-asset
+      // prune needs, but a caller that has to *say* why a directory
+      // contributed nothing needs the rejection reason too, and `loadManifest`
+      // already recorded it (issue #1576). The flat term is derived from this
+      // one so the two cannot disagree.
+      const unloadableManifests = [...discovered.failed, ...installed.failed]
+      const unloadable = unloadableManifests.map((f) => f.rootDir)
 
       const log = getLogger('kernel')
       /** @type {PluginName[]} */
@@ -288,6 +294,7 @@ export async function bootKernel(opts = {}) {
           skipped,
           withheldByProfile,
           unsatisfiedRequirements: /** @type {UnsatisfiedRequirement[]} */ ([]),
+          unloadableManifests,
           unavailablePlugins: [...new Set([...unloadable, ...wantedButWithheld])],
           clientDescriptors: catalog.clientDescriptors,
         }
@@ -345,6 +352,7 @@ export async function bootKernel(opts = {}) {
         // that has to *say* why a plugin is missing rather than only that it
         // is: the flat list underneath keeps names alone (issue #1580).
         unsatisfiedRequirements: resolution.unsatisfied,
+        unloadableManifests,
         // The one list of "this boot did not get its whole plugin set", for
         // callers that must not read a missing contribution as a withdrawn one.
         // Four doors, and only the first ever reaches an activation record: a
@@ -371,8 +379,8 @@ export async function bootKernel(opts = {}) {
  * Resolve the effective two-layer config from disk (LLP 0031): load the
  * user-owned **local** layer (`configPath`) and the server-owned
  * **central** layer (active slot / join seed under `stateRoot`), then
- * merge + prune via {@link resolveLayeredConfig}. Both layers are read
- * read-only. Only the daemon's apply engine ever writes the central
+ * merge + prune via {@link resolveLayeredConfig}. Client boot can opt into
+ * the local grep migration. Only the daemon's apply engine writes the central
  * layer. The single place `bootKernel` and the SIGHUP reload agree on
  * what "effective" means, so a reload can never silently drop the central
  * layer.
@@ -382,9 +390,10 @@ export async function bootKernel(opts = {}) {
  * right to collapse them (either way there is nothing to merge), but a caller
  * deciding a *permission* on "is this machine enrolled" is not: it must be
  * able to tell "not enrolled" from "cannot tell". `centralLoaded` is returned
- * raw alongside for exactly that, the way `localLoaded` already is.
+ * raw alongside for exactly that. `localLoaded` includes the compatibility
+ * entry when migration cannot persist to a read-only local file.
  *
- * @param {{ stateRoot: string, configPath: string | null, knownPlugins?: Map<PluginName, PluginMetadata>, knownDatasets?: Set<string> }} args
+ * @param {{ stateRoot: string, configPath: string | null, knownPlugins?: Map<PluginName, PluginMetadata>, knownDatasets?: Set<string>, migrateGrep?: boolean }} args
  * @returns {Promise<{
  *   centralConfig: HypAwareV2Config | null,
  *   localConfig: HypAwareV2Config | null,
@@ -396,11 +405,13 @@ export async function bootKernel(opts = {}) {
  *   centralQueryIgnored: boolean,
  * }>}
  */
-export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, knownPlugins, knownDatasets }) {
-  const localLoaded = configPath ? await loadConfigFile(configPath) : null
-  const localConfig = localLoaded?.ok ? localLoaded.config : null
+export async function resolveLayeredConfigFromDisk({ stateRoot, configPath, knownPlugins, knownDatasets, migrateGrep = false }) {
   const centralConfigPath = resolveCentralLayerPath({ stateRoot })
-  const centralLoaded = centralConfigPath ? await loadConfigFile(centralConfigPath) : null
+  const { local: localLoaded, central: centralLoaded } = await loadClientConfigLayers({
+    configPath, centralConfigPath,
+    migrateGrep: migrateGrep && knownPlugins?.has('@hypaware/grep') === true,
+  })
+  const localConfig = localLoaded?.ok ? localLoaded.config : null
   const centralConfig = centralLoaded?.ok ? centralLoaded.config : null
 
   const merged = resolveLayeredConfig({
@@ -452,6 +463,7 @@ export async function resolveLayeredConfigForDaemon({ stateRoot, configPath, wor
     configPath,
     knownPlugins: catalog.pluginMetadata,
     knownDatasets: catalog.knownDatasets,
+    migrateGrep: true,
   })
 }
 

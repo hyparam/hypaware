@@ -2,7 +2,7 @@
 
 import { runBackfill, runBackfillList, runBackfillPlan } from '../commands/backfill.js'
 import { runRemoteAdd, runRemoteList, runRemoteLogin, runRemoteMint, runRemoteRemove } from './remote_commands.js'
-import { runReportDelete, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
+import { runReportDelete, runReportFix, runReportGet, runReportList, runReportPublish, runReportRender } from './report_commands.js'
 import { coreUsage } from './command_args.js'
 import { CORE_VERBS } from './core_verbs.js'
 import { verbToCommand } from './verb_command.js'
@@ -572,11 +572,17 @@ function buildCoreCommands(registry) {
     {
       name: 'privacy purge',
       aliases: ['purge'],
-      summary: 'Delete already-cached rows from the local cache (destructive)',
-      usage: 'hyp privacy purge <path> | --session <id> | --ignored | --all [--yes] [--json]',
+      summary: 'Delete recorded rows; session purges include configured servers',
+      usage: 'hyp privacy purge <path> | --session <id> [--remote <target> | --local-only] | --ignored | --all [--yes] [--json]',
       help: [
-        'Permanently deletes recorded rows from THIS machine\'s local cache.',
-        'Never contacts a sink or the remote and never deletes exported copies.',
+        'Position-deletes recorded rows from this machine\'s local cache.',
+        'Session purges also exclude future recording and drain pending spool rows.',
+        'Session purges automatically include configured and signed-in remotes and enrolled servers.',
+        '--remote <target> limits the remote scope to one server; --local-only skips servers.',
+        'Remote deletion requires the session owner or an organization admin.',
+        'Physical files remain until compaction; copies in derived reports are not covered.',
+        'Remote failures return a nonzero exit status; retry to finish incomplete purges.',
+        'Non-session targets only purge locally.',
         'Exactly one target is required:',
         '  <path>          rows whose cwd equals or descends from the path',
         '  --session <id>  one session\'s rows',
@@ -776,7 +782,7 @@ function buildCoreCommands(registry) {
         'a static HTML site and takes no --remote and no credential.\n' +
         '\n' +
         'The rest talk to the server. Reports are server-hosted (there is no\n' +
-        'local reports plane), so publish/list/get/delete each take --remote\n' +
+        'local reports plane), so publish/list/get/fix/delete each take --remote\n' +
         '<target> and default to the default remote target, the same resolution\n' +
         'as bare --remote on queries. Reads use your login session; publish and\n' +
         'delete need the publisher role (or an operator-minted publish token\n' +
@@ -824,7 +830,31 @@ function buildCoreCommands(registry) {
       name: 'report get',
       summary: "Fetch a report's entry document (or one artifact) to stdout or --output",
       usage: coreUsage('report get'),
+      help: [
+        "Given a recommendation id instead (hyprec-0123456789abcdef, as 'hyp report",
+        "list' prints under each report), fetches that recommendation's page",
+        'with the evidence it cites and the queries the report ran to reach it',
+        'appended. This is the read to make when asked to fix a recommendation',
+        'by id from inside an AI client session.',
+      ].join('\n'),
       run: runReportGet,
+    },
+    {
+      name: 'report fix',
+      summary: "Start an attached AI client on one of a report's recommendations, here",
+      usage: coreUsage('report fix'),
+      help: [
+        "The id is a recommendation's, as 'hyp report list' prints under each",
+        'report (hyprec-0123456789abcdef). HypAware checks the recommendation still',
+        'exists and starts an attached client in the current directory with',
+        "instructions to read it through 'hyp report get <id>' and make the",
+        'change here; nothing is written to disk. With no id on a terminal, pick',
+        'a report (newest first), then one of its recommendations (--kind,',
+        '--period and --limit narrow which reports). If more than one attached',
+        'client could be started, it asks which. The client takes over the',
+        'terminal; nothing is pre-authorised.',
+      ].join('\n'),
+      run: runReportFix,
     },
     {
       name: 'report delete',

@@ -189,6 +189,12 @@ failures return `1`.
 hyp query grep <pattern> [--regex] [--session-id <id>] [--chain-id <id>] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--limit <n>] [--include-local-only] [--format <fmt>] [--output <file>] [--max-cell <n>] [--max-bytes <n>] [--remote <target> [--org <label|*>]]
 ```
 
+Provided by the bundled `@hypaware/grep` plugin. New `hyp init` capture
+configurations include it; existing client configurations gain it automatically
+on startup, preserving explicit `enabled: false` entries. The migration backs up
+the local config before writing. With a read-only config, search remains
+available for the current process and a warning reports that persistence failed.
+
 Searches recorded `ai_gateway_messages` text without SQL. The pattern is a
 case-insensitive substring by default, or a regular expression with `--regex`.
 Hits arrive newest first, one row per matched column, each carrying
@@ -202,10 +208,9 @@ Only these columns are searched: `content_text`, `tool_name`, `session_id`,
 hits is not evidence the text is absent from `system_text`, `tools`,
 `tool_args`, `attributes`, or `raw_frame`; read those with `hyp query sql`.
 
-Data files the daemon has indexed at maintenance are served through hypgrep
-sidecar indexes and the rest are scanned, so coverage affects speed and never
-correctness.
-`hyp cache status` prints the index coverage. Local-only rows are withheld with
+Local search scans the cache directly without building or reading indexes.
+Narrow the date range on large histories to reduce scan work. Remote servers
+retain their own hypgrep indexes. Local-only rows are withheld with
 a count on stderr, exactly as in SQL, and `--include-local-only` is the same
 informed-consent override. `--remote TARGET` runs the same search on a server,
 which enforces its own visibility: `--regex` is operator-only there, and
@@ -341,7 +346,19 @@ hyp report list [--kind <kind>] [--period <period>] [--limit <n>] [--before <pub
 ```
 
 Lists the newest reports visible to the selected organization. An empty list
-succeeds.
+succeeds. Each report's recommendations follow its line, one per line, as the
+server-minted id, the `recommendation-<slug>` page the id names, and the page's
+title, with its thesis on the line below. The page is the artifact path
+`hyp report get` takes. A server that does not read the page's opening at
+publish, or a report published before it did, lists the id and page alone.
+`--json` prints the records whole, `recommendations` included.
+
+```text
+  2026-08-24T09:00:00.000Z	usage-review/2026-W34	REPORT_ID	48213 bytes	Usage review
+      hyprec-0123456789abcdef	recommendation-batch-the-retries	Batch the retries
+          Every retry is its own call, 506 times a month. One queue fixes it.
+      hyprec-fedcba9876543210	recommendation-tenant-check
+```
 
 ```sh
 hyp report list --kind usage-review --limit 10 --json
@@ -351,16 +368,61 @@ hyp report list --kind usage-review --limit 10 --json
 
 ```text
 hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]
+hyp report get <rec-id> [--output <file>] [--org <org>] [--remote <target>]
 ```
 
 Fetches a report's entry document or one artifact. Without `--output`, it
 writes the exact bytes to standard output, including binary artifact bytes.
+A `path` with no extension of its own is tried as given and then as
+`.md` and `.html`, so the `recommendation-<slug>` stem `hyp report list`
+prints fetches that page without spelling out how it was published.
 
 ```sh
 hyp report get usage-review 2026-W34 REPORT_ID --output ./usage-review.html
 ```
 
 Replace `REPORT_ID` with the ID from `hyp report list`.
+
+Given a recommendation id instead (`hyprec-` and sixteen hex characters, the id
+`hyp report list` prints under each report), it resolves the id to its report
+and page and prints that page (Markdown, or HTML when the report was published
+without it) with a `Citations from the report record` tail: the turns the page
+cites as `evidence:N`, numbered to match, and the queries the report ran to
+reach the recommendation, verbatim in `sql` blocks. This is the read to make
+from inside an AI client session when asked to fix a recommendation by id.
+
+```sh
+hyp report get hyprec-0123456789abcdef
+```
+
+### `hyp report fix`
+
+```text
+hyp report fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <org>] [--remote <target>]
+```
+
+Starts an attached AI client on one recommendation, in the current directory.
+The id is the one `hyp report list` prints under each report. HypAware
+resolves it to its report, checks the recommendation page still exists, and
+starts the client with instructions to read it through
+`hyp report get <rec-id>` and make the change in the current repository.
+Nothing is written to disk. The client takes over the terminal and nothing is
+pre-authorised: the client asks before running the read.
+
+With no id on a terminal, it asks in two steps: first which report, newest
+first, each with its publish date and how many recommendations it carries
+(a report with none is not offered); then which of that report's
+recommendations, labelled by the page's title and described by its thesis
+when the server lists them, else by the page name. Escape on the second list
+returns to the first. `--kind`, `--period` and `--limit` narrow which reports
+are offered. Without a terminal the id is required. If more than one attached
+client could be started, it asks which. A declined pick succeeds. An unknown
+id, no launchable client, or a process-start failure returns `1`.
+
+```sh
+hyp report fix hyprec-0123456789abcdef
+hyp report fix --kind usage-review
+```
 
 ### `hyp report delete`
 

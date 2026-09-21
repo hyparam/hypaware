@@ -14,7 +14,6 @@ import {
   readCursorSync,
   resolveClientName,
   resolvePartitionDate,
-  resolvePartitionSegments,
   resolveSourceSegments,
   sanitizePathSegment,
   validateIcebergPartitionFields,
@@ -279,36 +278,6 @@ test('resolvePartitionDate extracts date from date field', () => {
 
 test('resolvePartitionDate returns undefined when no timestamp field present', () => {
   assert.equal(resolvePartitionDate({ id: 1, value: 'foo' }), undefined)
-})
-
-// --- resolvePartitionSegments ---
-
-test('resolvePartitionSegments returns client+date for rows with both', () => {
-  assert.deepEqual(
-    resolvePartitionSegments({ client_name: 'claude', timestamp: '2026-05-26T12:00:00Z' }),
-    ['client=claude', 'date=2026-05-26']
-  )
-})
-
-test('resolvePartitionSegments returns client+date using fallback chain', () => {
-  assert.deepEqual(
-    resolvePartitionSegments({ provider: 'openai', created_at: '2026-05-25T00:00:00Z' }),
-    ['client=openai', 'date=2026-05-25']
-  )
-})
-
-test('resolvePartitionSegments falls back to ["all"] when no partition keys', () => {
-  assert.deepEqual(
-    resolvePartitionSegments({ id: 1, value: 'test' }),
-    ['all']
-  )
-})
-
-test('resolvePartitionSegments returns client=unknown+date when only date present', () => {
-  assert.deepEqual(
-    resolvePartitionSegments({ timestamp: '2026-05-26T12:00:00Z' }),
-    ['client=unknown', 'date=2026-05-26']
-  )
 })
 
 // --- legacy partition discovery ---

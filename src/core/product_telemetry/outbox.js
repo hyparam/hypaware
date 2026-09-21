@@ -109,6 +109,10 @@ export function createOutbox(root, { now = Date.now } = {}) {
   // Maintenance and status retain one decoded slot at a time. Only explicit
   // preview enumeration needs to materialize the whole queue.
   function* scan() {
+    // No queue directory means no slots, so the sweep would be 160 failing
+    // opens per call. A queue created after the check is empty at creation, and
+    // `maintain` still lstats every slot, so its grace period covers the race.
+    if (!fs.existsSync(queue)) return
     for (let slot = 0; slot < QUEUE_SLOTS; slot++) {
       const text = readSmallText(slotPath(slot), MAX_BATCH_BYTES)
       if (text === null) continue

@@ -44,7 +44,7 @@ import {
 import { readFirstSyncDeadline } from '../usage-policy/first_sync_hold.js'
 import { displayableCaHosts, readLocalCaInfo } from '../tls/ca.js'
 import { isCaTrusted as probeCaTrusted } from '../tls/darwin_trust.js'
-import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, warningsRecordBootFailure } from './boot_failure.js'
+import { MAX_ACTIVATION_MESSAGE_CHARS, REQUIRES_UNSATISFIED_ERROR_KIND, requiredPluginFromMessage, warningsRecordBootFailure } from './boot_failure.js'
 import { isLaunchdEnvSet as probeLaunchdEnvSet } from './launchd_env.js'
 import { daemonLogDir } from './logs.js'
 import { resolveClientSettingsPath } from './client_settings_path.js'
@@ -72,6 +72,7 @@ import {
  * @import { Dirent } from 'node:fs'
  * @import { FileHandle } from 'node:fs/promises'
  * @import { ClientDescriptor, LoadedManifest, PluginCatalog } from '../../../src/core/types.js'
+ * @import { DiscoverInstalledResult } from '../../../src/core/runtime/types.js'
  * @import { FolderAskMode } from '../../../src/core/usage-policy/types.js'
  * @import { LocalCaInfo } from '../../../src/core/tls/types.js'
  */
@@ -1103,6 +1104,12 @@ export async function collectHypAwareStatus(opts = {}) {
     discovered: manifests.bundled,
     installed: manifests.installed,
   })
+  // The second question the catalog cannot answer: which config entries name a
+  // plugin this machine has installed but whose manifest the kernel rejected.
+  // They are absent from the catalog exactly as a typo is, and only this tells
+  // the validator which of the two it is looking at (issue #1936).
+  const unloadableInstalled = unloadableInstalledPlugins(manifests.installed)
+  const unloadablePlugins = new Set(unloadableInstalled.keys())
 
   // @ref LLP 0031#central-layer-is-sacrosanct [implements]: Same merge + validation pruning as boot, so status shows exactly what runs
   const merged = resolveLayeredConfig({
@@ -1110,10 +1117,18 @@ export async function collectHypAwareStatus(opts = {}) {
     local: localConfig,
     validate: (cfg) => collectConfigErrors(cfg, {
       ...(catalog ? { knownPlugins: catalog.pluginMetadata, knownDatasets: catalog.knownDatasets } : {}),
+      unloadablePlugins,
     }),
   })
   const config = (centralConfig || localConfig) ? merged.effective : null
   const centralPluginNames = new Set((centralConfig?.plugins ?? []).map((p) => p.name))
+  // A second fact about the same names, not a filter over them:
+  // `mergeConfigLayers` drops a colliding local entry by name whatever its
+  // enablement, so narrowing `centralPluginNames` would make status disagree
+  // with the merge it reports.
+  const centralDisabledPluginNames = new Set(
+    (centralConfig?.plugins ?? []).filter((p) => p.enabled === false).map((p) => p.name)
+  )
   const centralSinkNames = new Set(Object.keys(centralConfig?.sinks ?? {}))
   /** @type {HypAwareStatusReport['layered']} */
   const layered = hasCentral
@@ -1191,6 +1206,7 @@ export async function collectHypAwareStatus(opts = {}) {
       const result = await validateConfig(config, {
         knownPlugins: catalog.pluginMetadata,
         knownDatasets: catalog.knownDatasets,
+        unloadablePlugins,
       })
       validationErrors = result.errors
     } catch (err) {
@@ -1235,12 +1251,16 @@ export async function collectHypAwareStatus(opts = {}) {
         repair: ['hyp setup --from-file <config.json> --force'],
       })
     }
+    // A per-entry repair wins over the by-kind one where the entry has
+    // something the kind cannot know - the install directory of a plugin whose
+    // manifest would not load.
+    const pluginRepairs = pluginRepairsByPointer(config, unloadableInstalled)
     for (const err of validationErrors) {
       diagnostics.push({
         severity: 'error',
         kind: 'config_invalid',
         message: `[${err.errorKind}] ${err.pointer || '<root>'}: ${err.message}`,
-        repair: repairForConfigError(err.errorKind),
+        repair: pluginRepairs.get(err.pointer) ?? repairForConfigError(err.errorKind),
         pointer: err.pointer,
       })
     }
@@ -1681,8 +1701,25 @@ export async function collectHypAwareStatus(opts = {}) {
         // The reason is the resolver's own and names what is missing, so the
         // repair is the config edit that supplies it or withdraws the request.
         // Only a restart re-resolves: the daemon reads `requires` at boot.
+        //
+        // Which layer can make either edit is the whole question, because the
+        // merge drops a local `plugins[]` entry whose name collides with a
+        // central one - whichever of the two names it is. Withdrawing the
+        // request edits the eliminated plugin's entry, so "remove '<name>'"
+        // is inert for a central-owned plugin (issue #1598); supplying the
+        // dependency edits the *dependency's* entry, so "enable what the
+        // reason names" is inert when that name is the central-owned one
+        // (issue #1826). A dependency named differently from the eliminated
+        // plugin cannot collide with *its* entry, which says nothing about a
+        // central entry of the dependency's own name.
         repair: [
-          `enable what the reason names, or remove '${name}', in ${configPath}`,
+          requiresUnsatisfiedConfigRepair({
+            plugin: name,
+            dependency: requiredPluginFromMessage(reason),
+            centralPluginNames,
+            centralDisabledPluginNames,
+            configPath,
+          }),
           'hyp daemon restart  # requires are resolved at boot',
         ],
       })
@@ -1695,14 +1732,70 @@ export async function collectHypAwareStatus(opts = {}) {
         + `(${sanitizeLabel(entry.errorKind) ?? 'activate_failed'}): `
         + reason
         + runningTail,
-      // Not `hyp plugin list`: it prints the plugins *this* CLI boot activated
-      // plus the install lock, so the plugin that just failed is either missing
-      // from the output entirely (a bundled adapter, the likeliest subject) or
-      // sits under "Installed plugins" with nothing marking it as broken. The
-      // reason above is clamped to a sentence and the commonest real one is a
-      // module-resolution error longer than that, so the first repair is the
-      // record that kept it whole.
+      // Not `hyp plugin list`, which since issue #1570 does name a plugin that
+      // came up short - but for its own CLI boot: `ctx.failedPlugins` is that
+      // process's `unavailablePlugins`, while this diagnostic is raised only
+      // off a live daemon's snapshot. The two part company where it costs
+      // most: the daemon boots under launchd/systemd with its own
+      // environment, so a plugin that fails only there activates normally in
+      // this process, and the listing would print it active while this line
+      // says it failed. (A plugin the gateway's storage proxy defeats would
+      // diverge the same way, if one called a withheld method at activate.)
+      // That is consistent with `runPluginList` closing its own section by
+      // sending the operator back here rather than the reverse. What the
+      // listing supplies that this message does not is the version and which
+      // copy boot selected; what it never supplies is the reason, the thing
+      // the operator is missing. That reason is clamped to a sentence here
+      // and the commonest real one is a module-resolution error longer than
+      // that, so the first repair is the record that kept it whole. A
+      // listing would in any case be a read that changes nothing
+      // (LLP 0139#repair-must-be-runnable, as generalised by LLP 0195).
       repair: [activationLogGrep, 'hyp daemon restart'],
+    })
+  }
+
+  // ----- plugin directories whose manifest would not load (issue #1576) -----
+  // The third door into `unavailablePlugins`, and the one no surface could
+  // name: a manifest that is corrupt, unparseable, or fails schema validation
+  // leaves a directory that contributes nothing and has no plugin name, so the
+  // block above cannot carry it (its `name` is a plugin name and every reader
+  // treats it as one) and `hyp plugin list` deliberately will not invent one
+  // (issue #1570). Read off the snapshot on the same terms as every borrowed
+  // list here: only a live daemon's own file, and only entries that are
+  // objects (LLP 0164#status-reads-it-from-the-status-file).
+  // @ref LLP 0383#a-record-not-a-claim [constrained-by]: an `error` diagnostic is present tense, so it is raised off a live daemon's snapshot only
+  const unloadableManifests = snapshotIsLive && Array.isArray(daemonStatusFile?.unloadableManifests)
+    ? daemonStatusFile.unloadableManifests.filter((entry) => !!entry && typeof entry === 'object')
+    : []
+  // One log file, not the pair `activationLogGrep` names: only the gateway
+  // process records this door, because the manifest walk runs before any
+  // plugin is selected and so sees the same set in both processes.
+  const manifestLogGrep = unloadableManifests.length === 0 ? ''
+    : `grep -s plugin_manifest_unloadable ${path.join(daemonLogDir(stateRoot), 'daemon.log')}`
+  for (const entry of unloadableManifests) {
+    const rootDir = sanitizeLabel(entry.rootDir, MAX_ACTIVATION_MESSAGE_CHARS)
+    if (rootDir === undefined) continue
+    const reason = sanitizeLabel(entry.message, MAX_ACTIVATION_MESSAGE_CHARS) ?? 'no message recorded'
+    // An error, for the same reason the sibling above is one: whatever was in
+    // that directory is capturing nothing, and a machine that silently stopped
+    // capturing is the outage this surface exists to name.
+    //
+    // No "what is left of it" tail, unlike the sibling: that one has to read
+    // the claim back because a plugin can activate in one of the daemon's two
+    // processes and fail in the other. Here the kernel never got as far as a
+    // plugin in either process, so nothing from this directory can be running.
+    diagnostics.push({
+      severity: 'error',
+      kind: 'plugin_manifest_unloadable',
+      // The directory, never a name, and said as a directory: a manifest that
+      // did not parse has no plugin name, and there is no honest way to guess
+      // one from a path.
+      message: `plugin directory '${rootDir}' has no loadable manifest, so nothing in it is running: ${reason}`,
+      // The reason is clamped to a sentence above, so the first repair is the
+      // record that kept it whole - the same shape the activation diagnostic
+      // uses, and for the same reason (LLP 0139#repair-must-be-runnable). A
+      // restart is second because manifests are read once, at boot.
+      repair: [manifestLogGrep, 'hyp daemon restart  # manifests are read at boot'],
     })
   }
 
@@ -1870,9 +1963,18 @@ export async function collectHypAwareStatus(opts = {}) {
       // satisfies the one check that does look. A repair line that sends the
       // user to a command which affirms the broken config is worse than no
       // repair line, so point at the file and the two required keys instead.
+      //
+      // Which file is the question the eliminated-plugin repair above answers
+      // (issue #1598): upstreams are the gateway plugin's own config slice, so
+      // they live in whichever layer owns its `plugins[]` entry. When that is
+      // the central layer the local entry carrying them is dropped at merge,
+      // and an edit to it is exactly the inert repair this @ref forbids.
       // @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair has to be a step that changes something, so the inert validate command gives way to the edit that fixes it
       repair: [
-        `add the missing 'name' / 'base_url' to each upstream in ${configPath} ('hyp config validate' does not check upstream shape)`,
+        centralPluginNames.has(GATEWAY_PLUGIN_NAME)
+          ? `add the missing 'name' / 'base_url' to each upstream in the central config's '${GATEWAY_PLUGIN_NAME}' entry`
+            + ` - a local entry for it is dropped at merge, so editing ${configPath} changes nothing`
+          : `add the missing 'name' / 'base_url' to each upstream in ${configPath} ('hyp config validate' does not check upstream shape)`,
         `hyp daemon restart  # the daemon reads the file only at boot`,
       ],
     })
@@ -3410,19 +3512,25 @@ async function buildStatusCatalog({ stateDir }) {
 
 /**
  * The one discovery pass behind {@link buildStatusCatalog}, exposed so the
- * collector can also ask the manifests a question the catalog cannot answer:
- * which installed plugins are shadowed by a bundled name. The catalog is
- * first-writer-wins, so a shadowed installed manifest leaves no trace in it.
- * Each discovery failure degrades to empty, never throws.
+ * collector can also ask the manifests questions the catalog cannot answer:
+ * which installed plugins are shadowed by a bundled name, and which are in
+ * the lock but contributed no manifest. The catalog is built from manifests
+ * that loaded, so neither leaves a trace in it. Each discovery failure
+ * degrades to empty, never throws.
+ *
+ * The installed side is returned whole rather than narrowed to `loaded`: the
+ * lock entries are what say a plugin is installed, and the collector needs
+ * them to tell an unloadable install from a name this machine never had
+ * (issue #1936).
  *
  * @param {{ stateDir: string }} args
- * @returns {Promise<{ bundled: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: { loaded: LoadedManifest[] } }>}
+ * @returns {Promise<{ bundled: { loaded: LoadedManifest[], excluded: LoadedManifest[] }, installed: DiscoverInstalledResult }>}
  */
 async function discoverStatusManifests({ stateDir }) {
   /** @type {{ loaded: LoadedManifest[], excluded: LoadedManifest[] }} */
   let bundled = { loaded: [], excluded: [] }
-  /** @type {{ loaded: LoadedManifest[] }} */
-  let installed = { loaded: [] }
+  /** @type {DiscoverInstalledResult} */
+  let installed = { loaded: [], failed: [], lockEntries: [] }
   try {
     bundled = await discoverBundledPlugins()
   } catch { /* bundled discovery failure is non-fatal */ }
@@ -3430,6 +3538,35 @@ async function discoverStatusManifests({ stateDir }) {
     installed = await discoverInstalledPlugins({ stateDir })
   } catch { /* installed discovery failure is non-fatal */ }
   return { bundled, installed }
+}
+
+/**
+ * Installed plugins the kernel cannot see: a lock entry whose `install_dir`
+ * manifest `discoverInstalledPlugins` rejected (corrupt, unparseable, failing
+ * schema validation, or naming a different plugin). Keyed by the lock entry's
+ * name and valued by its directory, because the name is the only trustworthy
+ * one available - a manifest that did not parse has none, which is why the
+ * sibling `plugin_manifest_unloadable` diagnostic (issue #1576) is
+ * directory-shaped throughout. The lock is also exactly what `hyp plugin list`
+ * calls installed, so the two surfaces stop contradicting each other.
+ *
+ * Derived by subtracting the manifests that loaded from the lock, rather than
+ * by matching `failed[]` back to a directory: `FailedManifest` carries no
+ * name, and the subtraction also catches the name-mismatch rejection, whose
+ * manifest parsed under someone else's name.
+ *
+ * @param {Awaited<ReturnType<typeof discoverStatusManifests>>['installed']} installed
+ * @returns {Map<string, string>} plugin name -> install directory
+ */
+function unloadableInstalledPlugins(installed) {
+  /** @type {Map<string, string>} */
+  const out = new Map()
+  const loaded = new Set(installed.loaded.map((m) => m.manifest.name))
+  for (const entry of installed.lockEntries) {
+    if (loaded.has(entry.name)) continue
+    out.set(entry.name, entry.install_dir)
+  }
+  return out
 }
 
 /**
@@ -3783,6 +3920,87 @@ async function countDevTelemetryErrors(telemetryDir, sinceMs) {
     }
   }
   return count
+}
+
+/**
+ * The config edit that repairs a `plugin_requires_unsatisfied` diagnostic,
+ * routed to the layer that can actually make it.
+ *
+ * `mergeConfigLayers` drops a local `plugins[]` entry whose name collides
+ * with a central one, so each half of the edit belongs to whoever owns the
+ * name that half touches: withdrawing the request touches the eliminated
+ * plugin's entry, supplying the dependency touches the dependency's. A half
+ * whose name the central layer owns gives way to a step that does change
+ * something, and the local file is named as the place that would not.
+ *
+ * A central name carrying `enabled: false` is central-owned by that same rule,
+ * so the local enable stays inert - but installing the dependency here repairs
+ * nothing either when it is already installed and the central layer is what
+ * withholds it, so that sub-case names the central enable as well.
+ *
+ * `dependency` is `undefined` for every reason that names no missing plugin
+ * (a version mismatch, a capability require), and those keep the original
+ * wording: the reason still names what is missing and the local file is still
+ * where the operator's own entry lives.
+ *
+ * @param {object} args
+ * @param {string} args.plugin The plugin the resolver eliminated.
+ * @param {string | undefined} args.dependency The missing plugin its reason named.
+ * @param {Set<string>} args.centralPluginNames Names the central layer owns.
+ * @param {Set<string>} args.centralDisabledPluginNames The subset of those the central layer withholds (`enabled: false`).
+ * @param {string} args.configPath The local config file.
+ * @returns {string}
+ * @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair has to be a step that changes something, so an edit the next merge discards is not one
+ */
+function requiresUnsatisfiedConfigRepair({ plugin, dependency, centralPluginNames, centralDisabledPluginNames, configPath }) {
+  const pluginIsCentral = centralPluginNames.has(plugin)
+  if (dependency === undefined || !centralPluginNames.has(dependency)) {
+    return pluginIsCentral
+      ? `enable what the reason names in ${configPath}`
+        + ` - '${plugin}' is enabled by the central config, so removing it from the local file changes nothing`
+      : `enable what the reason names, or remove '${plugin}', in ${configPath}`
+  }
+  // The dependency is central-owned, so a local entry adding it is dropped at
+  // merge. What still changes something: installing it here (the central layer
+  // already asks for it), or the fleet edit that stops asking.
+  return pluginIsCentral
+    ? `install '${dependency}' on this host, or enable it in the central config`
+      + ` - the central config names both '${plugin}' and '${dependency}', so no edit to ${configPath} survives the merge`
+    : centralDisabledPluginNames.has(dependency)
+      ? `remove '${plugin}' from ${configPath}, or enable '${dependency}' in the central config and install it on this host`
+        + ` - '${dependency}' is named by the central config but disabled there, so enabling it in the local file changes nothing`
+      : `remove '${plugin}' from ${configPath}, or install '${dependency}' on this host`
+        + ` - '${dependency}' is named by the central config, so enabling it in the local file changes nothing`
+}
+
+/**
+ * Per-entry repairs for the config errors that have one, keyed by the
+ * validator's own pointer so no message is parsed and no index is re-derived.
+ * Today that is `plugin_installed_unloadable`: the validator can say the
+ * install is the fault but not where it lives, so the directory is filled in
+ * here from the same discovery pass that classified the name.
+ *
+ * `hyp plugin doctor` first because it prints the rejection the operator is
+ * missing, then `hyp plugin update`, which re-fetches from the source the
+ * lock recorded. Neither touches the config: the config entry is the one
+ * thing about this install that is right (issue #1936).
+ *
+ * @param {HypAwareV2Config | null} config the merged config the pointers index
+ * @param {Map<string, string>} unloadable plugin name -> install directory
+ * @returns {Map<string, string[]>} pointer -> repair
+ * @ref LLP 0139#repair-must-be-runnable [constrained-by]: a repair is a command that runs, so the directory is filled in rather than left a placeholder
+ */
+function pluginRepairsByPointer(config, unloadable) {
+  /** @type {Map<string, string[]>} */
+  const out = new Map()
+  if (unloadable.size === 0 || !config?.plugins) return out
+  for (let i = 0; i < config.plugins.length; i += 1) {
+    const name = config.plugins[i].name
+    const dir = sanitizeLabel(unloadable.get(name), MAX_ACTIVATION_MESSAGE_CHARS)
+    if (dir === undefined) continue
+    out.set(`/plugins/${i}/name`, [`hyp plugin doctor ${dir}`, `hyp plugin update ${name}`])
+  }
+  return out
 }
 
 /**

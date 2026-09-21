@@ -7,6 +7,7 @@
 **Date:** 2026-09-15
 **Extends:** LLP 0360
 **Related:** LLP 0065, LLP 0361, LLP 0367, LLP 0374, LLP 0392
+**Extended-by:** LLP 0411 (onboarding offers activation and invokes this login)
 
 ## Request
 

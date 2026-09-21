@@ -19,12 +19,13 @@ import {
 } from '../observability/index.js'
 import { resolveDependencies } from '../dep_graph.js'
 import { createCommandRegistry } from '../registry/commands.js'
-import { createKernelRuntime } from '../runtime/activation.js'
+import { createKernelRuntime, pluginRegistryFacades } from '../runtime/activation.js'
 import { bootKernel, resolveConfigPath, resolveLayeredConfigFromDisk, selectBootPlugins } from '../runtime/boot.js'
 import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { discoverInstalledPlugins } from '../runtime/installed.js'
 import { activatePlugins } from '../runtime/loader.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
+import { pluginScopedConfig } from '../config/plugin_scope.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { registerCoreCommands } from './core_commands.js'
 import { isHelpFlag, listGroupChildren, renderCommandHelp, renderGroupHelp, synthesizeGroupSummary } from './group_help.js'
@@ -451,6 +452,32 @@ async function dispatchInternal(argv, opts) {
 
   const tracer = getTracer('cmd-dispatch')
   const instruments = getKernelInstruments()
+  // Whose command body is about to run. Contributing a command is a plugin
+  // extension point, so a command body is a second context the same plugin
+  // reaches the registries through, and it gets the same per-plugin facades
+  // its `activate()` holds. A core command has no owner and keeps the
+  // kernel's registries: `hyp status`, `hyp sync`, `hyp sink maintain` and
+  // the wizard read every plugin's sources and sinks, and rendering that is
+  // core's job (LLP 0009 #core-rendered-status).
+  //
+  // Asked of the registry, not read off `matched.command.plugin`: that field
+  // is the plugin's own, may be omitted at registration, and `get()` hands
+  // the stored record back so it can be rewritten afterwards. The lookup is
+  // keyed on the name argv actually matched. A registry with no `ownerOf` (a
+  // host's own, injected) falls back to the declared field.
+  // @ref LLP 0420#split [implements]: a plugin-contributed command body gets its own facades; a core command keeps the raw registries
+  const commandOwner = typeof registry.ownerOf === 'function'
+    ? registry.ownerOf(matched.invokedName)
+    : matched.command.plugin
+  const ownerFacades = commandOwner ? pluginRegistryFacades(kernel, commandOwner) : undefined
+  // And whose code is about to run, asked of the registry for the reason the
+  // owner is: `matched.command.run` is a writable property of a record `get()`
+  // hands to the registering plugin, so it cannot decide which function
+  // executes under the owner resolved a few lines up (issue #1977). A registry
+  // with no `bodyOf` (a host's own, injected) falls back to the record, the
+  // same tolerance the owner lookup extends.
+  // @ref LLP 0421#private-body [implements]: dispatch runs the body the registry validated, not the one the stored record carries now
+  const commandBody = typeof registry.bodyOf === 'function' ? registry.bodyOf(matched.invokedName) : undefined
   /** @type {CommandRunContext} */
   const cmdCtx = {
     stdout,
@@ -458,10 +485,22 @@ async function dispatchInternal(argv, opts) {
     stdin,
     env,
     cwd,
-    config: activeConfig,
+    // Same owner, same rule: a plugin's command body reads the config through
+    // its own slice, so contributing a command stops being a way to read a
+    // neighbour's section and the inline credential in it (issue #1978). A
+    // core command keeps the whole config for the reason it keeps the raw
+    // registries. `runVerbCommand` passes this object straight on as the
+    // `config` a verb's `operation` receives, so a plugin's verb is narrowed
+    // by the same binding, with no second notion of ownership to keep honest.
+    // `activePlugins` carries the manifests the one widening reads: the owner
+    // keeps the section of a plugin providing a capability it declares in
+    // `requires.capabilities`, which is how `@hypaware/claude-desktop` still
+    // resolves the gateway's pinned `listen`.
+    // @ref LLP 0422#scope [implements]: the config member joins the split LLP 0420 left it out of
+    config: commandOwner ? pluginScopedConfig(activeConfig, commandOwner, activePlugins) : activeConfig,
     plugins: activePlugins,
     failedPlugins,
-    capabilities: kernel.capabilities,
+    capabilities: ownerFacades ? ownerFacades.capabilities : kernel.capabilities,
     clients: kernel.clients,
     query: kernel.query,
     // In-process command dispatch seam. A thin `run(name, argv)` wrapper
@@ -504,12 +543,20 @@ async function dispatchInternal(argv, opts) {
         runId: devRunId ?? `cli-${process.pid}`,
         activePlugins,
       }),
-    verbs: kernel.verbs,
+    // Same owner, same rule again: registering a verb is a plugin extension
+    // point, so a plugin's command body reaches the verb table through the
+    // facade its `activate()` holds and can neither release a verb it does not
+    // own nor write on a neighbour's registration (issue #1983). A core
+    // command keeps the raw registry for the reason it keeps the rest: `hyp
+    // mcp` assembles its tool list from every active plugin's verbs, and that
+    // is core's job.
+    // @ref LLP 0423#facade [implements]: the verbs member joins the LLP 0420 split, by the owner the split already resolved
+    verbs: ownerFacades ? ownerFacades.verbs : kernel.verbs,
     storage: kernel.storage,
     skills: kernel.skills,
     agents: kernel.agents,
-    sources: kernel.sources,
-    sinks: kernel.sinks,
+    sources: ownerFacades ? ownerFacades.sources : kernel.sources,
+    sinks: ownerFacades ? ownerFacades.sinks : kernel.sinks,
     initPresets: kernel.initPresets,
     backfills: kernel.backfills,
     backfillMaterializers: kernel.backfillMaterializers,
@@ -537,7 +584,9 @@ async function dispatchInternal(argv, opts) {
             }
             exitCode = 0
           } else {
-            exitCode = await matched.command.run(matched.rest, cmdCtx)
+            // Called on the stored record, so a body written as a method of
+            // its own registration still sees the `this` it saw before.
+            exitCode = await (commandBody ?? matched.command.run).call(matched.command, matched.rest, cmdCtx)
           }
           if (typeof exitCode !== 'number' || !Number.isFinite(exitCode)) {
             exitCode = 0
@@ -1011,6 +1060,7 @@ async function computeBootSelection({ workspaceDir, stateRoot, configPath }) {
     configPath,
     knownPlugins: catalog.pluginMetadata,
     knownDatasets: catalog.knownDatasets,
+    migrateGrep: true,
   })
   const selection = selectBootPlugins({
     discovered: bundled,

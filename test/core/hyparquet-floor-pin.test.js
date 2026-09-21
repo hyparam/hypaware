@@ -12,12 +12,12 @@
 //
 // `hypgrep` (LLP 0264 #dependency) was the first read-path dependency to
 // declare a hyparquet below the floor: 0.5.1 pinned 1.27.1, adopted behind a
-// root `overrides` entry. Both entries are doing work at the pin this head
-// carries: 0.5.2 declares 1.30.0 and 0.8.28 declares 1.29.2, and the 1.30.1
-// root pin satisfies neither, so dropping either one nests a private copy
-// under that package. hypgrep's entry was a restatement while the root pin was
-// 1.30.0 and stopped being one the moment the pin moved past it, which is a
-// thing a patch bump does silently.
+// root `overrides` entry. Whether an entry does work depends on the pin this
+// head carries: icebird 0.8.29 declares the 1.31.1 root pin itself, so its
+// entry is gone, while hyparquet-writer 0.16.9 still declares 1.29.2 and keeps
+// one. hypgrep's entry was a restatement while the root pin was 1.30.0 and
+// stopped being one the moment the pin moved past it, which is a thing a
+// patch bump does silently.
 // The two swap roles as upstream moves, which is why the checks below are
 // written against the pins rather than against either package by name. Three
 // kinds of check live here and they prove different things:
@@ -38,25 +38,25 @@
 // What neither half reaches: npm honours `overrides` only for the root
 // project, so the entries govern this checkout and any install that treats
 // hypaware as the root, and are ignored when hypaware is itself installed as a
-// dependency (`npm i -g hypaware`, `npx hypaware`), where icebird still gets
-// its own 1.29.2. That gap now costs a second reader rather than a wrong row:
-// the below-floor version of it closed when hypgrep 0.5.2 stopped declaring
-// 1.27.1. Moving the declaration upstream, which LLP 0264 #dependency already
-// names as the durable fix, is what closes the rest; a check on it would have
-// to pack and install this package, which is not a job for the traditional
-// suite.
+// dependency (`npm i -g hypaware`, `npx hypaware`), where a dependency
+// declaring below the pin gets its own copy. That gap costs a second reader
+// rather than a wrong row: the below-floor version of it closed when hypgrep
+// 0.5.2 stopped declaring 1.27.1. Moving the declaration upstream, which LLP
+// 0264 #dependency already names as the durable fix, is what closes the rest;
+// a check on it would have to pack and install this package, which is not a
+// job for the traditional suite.
 //
 // Scope is the root `dependencies`, which is the query read path: the kernel
 // reads parquet through icebird and (from LLP 0264) hypgrep. The
 // optionalDependencies are write-side and vector-side (`hyparquet-writer`,
 // `hypvector`); neither runs icebird's converter, so neither is checked here.
 // The root `overrides` do name one of them, and not as part of any floor: no
-// published `hyparquet-writer` declares 1.30.1 (0.16.9 declares 1.29.2), so
+// published `hyparquet-writer` declares 1.31.1 (0.16.9 declares 1.29.2), so
 // once the root pin moved there npm bound the hoisted writer to it regardless
 // and then reported the tree invalid. The entry says that binding is intended.
 // Its key is version-scoped (`hyparquet-writer@0.16.9`) on purpose: a bare key
 // would also reach the 0.16.1 copy nested under `hypvector` and drag it from
-// 1.26.1 to 1.30.1, which is a change to the vector path with nothing asking
+// 1.26.1 to 1.31.1, which is a change to the vector path with nothing asking
 // for it.
 //
 // @ref LLP 0222#hyparquet-floor [tests]: a floor only holds if nothing below it resolves beside the pin, and the deduping the same section claims is a separate property that has to be held separately
@@ -142,42 +142,9 @@ test('the root hyparquet pin is exact and at or above the floor', () => {
   }
 })
 
-test('hypgrep is a plain dependency, held at the floor by an override', () => {
-  // LLP 0264 #dependency: the client both builds and reads indexes, so hypgrep
-  // is a root dependency rather than an optional one.
-  assert.ok(dependencies.hypgrep,
-    'LLP 0264 #dependency: hypgrep belongs in `dependencies`')
-  assert.match(dependencies.hypgrep, /^\d+\.\d+\.\d+$/,
-    'hypgrep is pinned exactly, in the idiom of every other dependency here')
-  // The override was the whole of the adoption while hypgrep 0.5.1 declared
-  // hyparquet 1.27.1: without the entry npm resolved that older copy privately
-  // under `node_modules/hypgrep`. It is the whole of the adoption again: 0.5.2
-  // declares 1.30.0, which the 1.30.1 root pin no longer satisfies, so without
-  // the entry npm nests a private 1.30.0 under `node_modules/hypgrep` and the
-  // read path runs on two hyparquets. It restated the declaration only while
-  // the root pin sat exactly on 1.30.0, which is how little it takes: the
-  // header above says why the roles swap, and a patch bump swapped them. A
-  // hypgrep that declares below the pin resolves onto the hoisted copy with
-  // the entry in place and nests a private one without it, and that regression
-  // is silent. Asserted straight off the manifest so a dropped or
-  // misspelled entry reddens on a checkout with nothing installed, not only
-  // where the resolved half below can run. It names the root pin rather than
-  // the floor so the copy it forces is the one already hoisted, not a second
-  // correct one.
-  assert.ok(pinsRoot(overrides.hypgrep?.hyparquet, 'hyparquet', ROOT_PINS),
-    'LLP 0222 #hyparquet-floor: the hypgrep override holds hyparquet at the root pin, ' +
-    `and it names ${overrides.hypgrep?.hyparquet}`)
-  assert.ok(pinsRoot(overrides.hypgrep?.['hyparquet-writer'], 'hyparquet-writer', ROOT_PINS),
-    'the hypgrep override holds hyparquet-writer at the root pin, ' +
-    `and it names ${overrides.hypgrep?.['hyparquet-writer']}`)
-  // Index writes ride the existing optionalDependency exactly as the cache
-  // write path does. Pinning the writer inside an override must not promote it
-  // to a hard root dependency: an install with `--omit=optional` still has to
-  // boot and read.
-  assert.equal(dependencies['hyparquet-writer'], undefined,
-    'hyparquet-writer is an optionalDependency; the overrides pin must not promote it')
-  assert.ok(optionalDependencies['hyparquet-writer'],
-    'hyparquet-writer stays in optionalDependencies')
+test('local search has no hypgrep runtime dependency or override', () => {
+  assert.equal(dependencies.hypgrep, undefined)
+  assert.equal(overrides.hypgrep, undefined)
 })
 
 // The floor above is correctness. This pair is hygiene, and it is here because
@@ -191,9 +158,9 @@ test('hypgrep is a plain dependency, held at the floor by an override', () => {
 // and reading a dedupe failure as a correctness failure is how the floor tests
 // would start lying.
 //
-// icebird carries an override entry again: it declared the root pins itself
-// while the root pinned hyparquet 1.29.2, and 0.8.28 still declares 1.29.2 now
-// that the root pin is 1.30.1, so npm nests a private copy without one. An
+// icebird's override entry comes and goes with the pins: 0.8.29 declares the
+// 1.31.1 root pin itself, so there is none now, while 0.8.28 declared 1.29.2
+// against a 1.30.1 root pin and needed one or npm nested a private copy. An
 // entry is worth having only while it names something the dependency does not
 // already ask for; one that merely restates the declaration is a second place
 // to forget to bump. That is why this check reads icebird's own installed

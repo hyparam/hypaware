@@ -27,6 +27,7 @@ re-appends; 0374 records that as the design and refuses a committed-row dedup)
 (GitHub capture projects its dataset automatically after each changed tick)
 **Extended-by:** [LLP 0409](./0409-local-github-oauth.spec.md)
 (local device OAuth credentials and explicit one-time repository imports)
+**Extended-by:** LLP 0411 (onboarding explicitly offers activation and browser login)
 
 > `@hypaware/github` ships under `hypaware-core/plugins-workspace/github`.
 > Bundling does not activate it by default: adding it to `plugins[]` remains the

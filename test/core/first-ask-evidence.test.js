@@ -34,6 +34,11 @@ import {
 // reads, and the folder the client is started in.
 // @ref LLP 0398#one-signal [tests]:
 
+// A surrogate half with no partner: what a cut counting UTF-16 code units
+// leaves behind, and what UTF-8 then writes as U+FFFD. Not global, so the
+// tests can share one without `lastIndex` carrying between them.
+const UNPAIRED_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/
+
 test('windowStart: thirty days back, as a UTC date', () => {
   assert.equal(windowStart(new Date('2026-09-07T05:00:00Z')), '2026-08-08')
   assert.equal(windowStart(new Date('2026-09-07T05:00:00Z'), 1), '2026-09-06')
@@ -56,6 +61,195 @@ test('evidenceSql: every statement excludes the duplicate OTEL lane; user text i
   assert.ok(sql.triggers(["it's done"]).includes("'it''s done'"), 'a quote in a line is escaped')
 })
 
+test('evidenceSql: the candidate key is normalized, and the two statements share it', () => {
+  // @ref LLP 0398#one-signal [tests]: "okay commit on ..." and "Commit on ..." are one line
+  const sql = evidenceSql('2026-08-08')
+  const key = sql.lines.slice('select '.length, sql.lines.indexOf(' as line'))
+  assert.ok(key.startsWith('trim(regexp_replace(substr(trim(regexp_replace('), 'the key is computed in SQL, not read raw')
+  assert.ok(key.includes('lower(content_text)'), 'case folded')
+  assert.ok(key.includes("'^((okay|ok|now|please|can you|could you|yes|also|then|and|so|next)[,\\s]+)+'"), 'leading fillers dropped, one or more')
+  assert.ok(key.includes("'[^a-z0-9 \\u0080-\\u1fff\\u2070-\\uffff]+', ' '"), 'ASCII punctuation and the General Punctuation block folded to a space, every script kept')
+  assert.ok(key.endsWith(", 1, 36), '[\\ud800-\\udbff]$', ''))"), 'a bounded key, less a surrogate half the cut split off, with no trailing space where the cut fell on one')
+  const trig = sql.triggers(['x'])
+  assert.ok(trig.includes(`${key} as line`), 'the sessions are found by the same key the candidate was')
+  assert.ok(trig.includes(`${key} in ('x')`), 'and looked up by it')
+  assert.ok(!sql.lines.includes('substr(content_text, 1, 42)') && !trig.includes('substr(content_text, 1, 42)'), 'the raw prefix key is gone')
+  // The guards the key would erase are tested on the raw text, in both,
+  // and on the trimmed text: a pasted fragment arrives indented.
+  for (const stmt of [sql.lines, trig]) {
+    assert.ok(stmt.includes("content_text not like '%\n%'"), 'a pasted block is not a typed line')
+    for (const c of ['{', '"', '#', '>', '[']) assert.ok(stmt.includes(`trim(content_text) not like '${c}%'`), `a line opening with ${c}, indented or not, is a fragment, not a request`)
+  }
+  assert.ok(sql.lines.includes("and line <> ''"), 'a typing that normalizes to nothing is not a candidate')
+})
+
+test('a request in a non-Latin script is a candidate of its own; a rule of dashes and an indented fragment are not candidates at all', async () => {
+  // @ref LLP 0398#one-signal [tests]: the key groups the typings of one request, and what keys to nothing is punctuation, not a language
+  // Through the same engine the gather runs on. hypaware #1884: a fold
+  // that kept only `a-z0-9` erased every non-Latin typing to the empty
+  // key, which `line <> ''` then dropped, so a request typed in Cyrillic
+  // in 3 sessions on 3 days returned nothing at all. Both halves are
+  // pinned: a non-Latin request is a candidate of its own, and two
+  // distinct ones do not pool back into one.
+  const typings = [
+    'commit on the "right" branch and open a PR',
+    '  {"tool": "Bash", "input": "npm test"}',
+    '--------------------------------------',
+    'закоммить на нужную ветку и открыть пиар',
+    'проверь тесты и почини падающий тест',
+  ]
+  // The first request retyped with curly quotes on its third day. It
+  // reaches 3 sessions on 3 days only while the fold still erases the
+  // General Punctuation block, which is the gap the class leaves between
+  // the ranges it keeps: keep a curly quote and this request splits into
+  // two keys, each under the cut, and neither is a candidate.
+  const curly = 'commit on the “right” branch and open a PR'
+  /** @type {Record<string, SqlPrimitive>[]} */
+  const rows = []
+  typings.forEach((text, t) => {
+    for (const day of [10, 11, 12]) {
+      rows.push(typedRow(`s${t}-${day}`, day, t, t === 0 && day === 12 ? curly : text))
+    }
+  })
+  const result = await candidateLines(rows)
+  const lines = result.rows.map((r) => String(r.line)).sort()
+  assert.deepEqual(lines, ['commit on the right branch and open', 'закоммить на нужную ветку и открыть', 'проверь тесты и почини падающий тест'], 'each request is one candidate; the rule of dashes and the indented fragment are none')
+  for (const row of result.rows) {
+    assert.equal(row.sessions, 3, `${row.line} counts its own three sessions`)
+    assert.equal(row.days, 3, `${row.line} counts its own three days`)
+  }
+})
+
+test('a run of symbols with no letter or digit is no candidate and does not satisfy the record floor; a non-Latin request still is one', async () => {
+  // @ref LLP 0398#a-request [tests]: a key with no letter and no decimal digit is not a request, whatever block its characters come from
+  // Through the same engine the gather runs on, and through the whole
+  // gather, so both halves are read where the product reads them.
+  // hypaware #1894: the fold keeps every script's letters and so keeps
+  // the symbols interleaved with them, and a run of them typed in 5
+  // sessions on 3 days both took a slot in `candidates.md` and satisfied
+  // the record floor on its own.
+  const symbolRuns = [
+    ['box drawing', '─'.repeat(20)],
+    ['emoji', '\u{1F525}'.repeat(10)],
+    ['fullwidth punctuation', '！'.repeat(20)],
+    ['middle dot', '·'.repeat(20)],
+    ['C1 next line', '\u0085'.repeat(20)],
+  ]
+  // The control, and the direction this must not break: a request in a
+  // script with no ASCII letters is a candidate. Three sessions on three
+  // days, which clears the candidate cut and not the record floor, so
+  // `enough` below reports the symbol run alone.
+  const request = 'закоммить на нужную ветку и открыть пиар'
+  // Enough recorded for the record half of the floor to clear, so the gate
+  // below is decided by the lines and not by the size of the record.
+  /** @type {Record<string, SqlPrimitive>[]} */
+  const background = []
+  for (let i = 0; i < RECORD_FLOOR.sessions; i += 1) {
+    background.push({ date: '2026-08-10', session_id: `bulk-${i}`, role: 'assistant', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: null, message_created_at: new Date(Date.UTC(2026, 7, 10, 1)), content_text: 'ok' })
+  }
+  for (const day of [10, 11, 12]) background.push(typedRow(`req-${day}`, day, 5, request))
+  // One folder for the run, as the product has: the gather wipes it each
+  // time, so every pass reads the page its own ask wrote.
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-runs-'))
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), 'hyp-ask-home-'))
+  for (const [what, symbols] of symbolRuns) {
+    // Five sessions on three days: the line floor, which the symbol run
+    // clears on its own and the non-Latin request does not.
+    const rows = background.concat(['a', 'b', 'c', 'd', 'e'].map((s, i) => typedRow(`sym-${s}`, 10 + Math.floor(i / 2), i, symbols)))
+    const runner = { hasDataset: () => true, /** @param {string} query */ run: (query) => evidenceRows(rows, query) }
+    const evidence = await prepareFirstAskEvidence({ runner, root, homeDir: home, now: new Date('2026-09-07T05:00:00Z') })
+
+    assert.deepEqual(evidence.candidates?.map((c) => c.line), [keyOf(request)], `a run of ${what} is no candidate; the non-Latin request still is`)
+    assert.equal(evidence.enough, false, `a run of ${what} does not satisfy the record floor on its own`)
+    assert.equal(evidence.record?.sessions, RECORD_FLOOR.sessions, 'the record half of the floor cleared, so the lines decided the gate')
+    const page = await fsp.readFile(path.join(root, 'candidates.md'), 'utf8')
+    assert.ok(!page.includes(symbols.slice(0, 2)), `the run of ${what} is not on the page`)
+    assert.ok(page.includes('Nothing is typed often enough yet'), 'the ask refuses, as it did before the fold was widened')
+  }
+})
+
+test('an astral character straddling the key cut leaves no half of it in the key', async () => {
+  // @ref LLP 0398#one-signal [tests]: the key is the first characters of the normalized line, and a character is not half a surrogate pair
+  // Through the same engine the gather runs on. hypaware #1893: SUBSTR
+  // here counts UTF-16 code units and the fold keeps astral characters,
+  // so a pair sitting across unit 36 was cut in half and the key went to
+  // disk with a half character, which UTF-8 writes as U+FFFD.
+  const text = 'ship the release notes and the tag \u{1F600} please'
+  const result = await candidateLines([10, 11, 12].map((day) => typedRow(`s${day}`, day, 9, text)))
+  assert.equal(result.rows.length, 1, 'the three typings are one candidate')
+  const line = String(result.rows[0].line)
+  assert.ok(!UNPAIRED_SURROGATE.test(line), `no unpaired surrogate in ${JSON.stringify(line)}`)
+  assert.equal(line, 'ship the release notes and the tag', 'the split character is dropped whole, and the space it left is trimmed')
+  assert.equal(line, keyOf(text), 'and the JS mirror of the key agrees with the engine')
+  assert.equal(result.rows[0].sessions, 3, 'the typing still groups its three sessions')
+  assert.equal(result.rows[0].days, 3, 'on its three days')
+})
+
+test('an astral character straddling the reply cut leaves no half of it in the excerpt, and no other excerpt moves', async () => {
+  // @ref LLP 0398#one-signal [tests]: the ending is the first substantial reply, and a character in it is not half a surrogate pair
+  // Through the same engine the gather runs on. hypaware #1902: SUBSTR
+  // here counts UTF-16 code units, so a pair sitting across unit 500 was
+  // cut in half and the high half flowed through `ending.text` into
+  // `candidates.md`, which is written UTF-8 and renders it U+FFFD.
+  const tail = ' and then the tag was pushed.'
+  const rows = [
+    replyRow('sA', `${'x'.repeat(499)}\u{1F389}${tail}`),
+    replyRow('sB', `${'y'.repeat(498)}\u{1F389}${tail}`),
+    replyRow('sC', `\u{1F389}${'z'.repeat(600)}`),
+    replyRow('sD', 'w'.repeat(600)),
+    replyRow('sE', `${'v'.repeat(495)}     ${tail}`),
+  ]
+  const anchors = rows.map((r) => ({ id: String(r.session_id), at: Date.UTC(2026, 7, 12, 9), triggers: 1 }))
+  const result = await evidenceRows(rows, evidenceSql('2026-08-08').replies(anchors))
+  const text = new Map(result.rows.map((r) => [String(r.session_id), String(r.text)]))
+  assert.equal(text.size, rows.length, 'every reply is returned')
+  for (const [id, t] of text) assert.ok(!UNPAIRED_SURROGATE.test(t), `no unpaired surrogate in ${id}: ${JSON.stringify(t.slice(-4))}`)
+  assert.equal(text.get('sA'), 'x'.repeat(499), 'the split character is dropped whole, leaving the 499 units before it')
+  // The rows that split nothing are the guard against a repair that
+  // shortens every excerpt: only the straddling one loses a unit.
+  assert.equal(text.get('sB'), `${'y'.repeat(498)}\u{1F389}`, 'a pair that ends exactly on the cut is kept')
+  assert.equal(text.get('sC'), `\u{1F389}${'z'.repeat(498)}`, 'and one at the front, which a cut starting at unit 1 cannot split')
+  assert.equal(text.get('sD'), 'w'.repeat(500), 'an excerpt with no astral character is the same 500 units it always was')
+  assert.equal(text.get('sE'), `${'v'.repeat(495)}     `, 'and trailing space is left alone: the excerpt is prose, and buildCandidates is what collapses whitespace')
+})
+
+test('an astral character straddling the tool-args cut leaves no half of it in the args, and none in the head built from them', async () => {
+  // @ref LLP 0398#one-signal [tests]: the steps are the calls the record shows ran, and a character in a head is not half a surrogate pair
+  // Through the same engine the gather runs on. hypaware #1910: SUBSTR
+  // here counts UTF-16 code units, so a pair sitting across unit 160 was
+  // cut in half, and `commandHeads` carried the high half through
+  // `path.basename` into a head `renderCandidates` writes into
+  // `candidates.md`, which is written UTF-8 and renders it U+FFFD. The
+  // head shows the half only when a branch matches and its 120-unit
+  // capture window reaches the cut, which is what `readArgs` opens
+  // `file_path` late enough to do.
+  const early = `{"file_path":"/repo/\u{1F389}early.md","description":"${'d'.repeat(200)}"}`
+  const bash = `{"command":"npm test ${'-'.repeat(200)}"}`
+  const short = '{"file_path":"/repo/short.md"}'
+  const rows = [
+    callRow('sA', 'Read', readArgs(159)),
+    callRow('sB', 'Read', readArgs(158)),
+    callRow('sC', 'Read', early),
+    callRow('sD', 'Bash', bash),
+    callRow('sE', 'Read', short),
+  ]
+  const anchors = rows.map((r) => ({ id: String(r.session_id), at: Date.UTC(2026, 7, 12, 9), triggers: 1 }))
+  const result = await evidenceRows(rows, evidenceSql('2026-08-08').calls(anchors))
+  const args = new Map(result.rows.map((r) => [String(r.session_id), String(r.args)]))
+  assert.equal(args.size, rows.length, 'every call is returned')
+  for (const [id, a] of args) assert.ok(!UNPAIRED_SURROGATE.test(a), `no unpaired surrogate in ${id}: ${JSON.stringify(a.slice(-4))}`)
+  assert.equal(args.get('sA'), readArgs(159).slice(0, 159), 'the split character is dropped whole, leaving the 159 units before it')
+  // The rows that split nothing are the guard against a repair that
+  // shortens every slice: only the straddling one loses a unit.
+  assert.equal(args.get('sB'), readArgs(158).slice(0, 160), 'a pair that ends exactly on the cut is kept')
+  assert.equal(args.get('sC'), early.slice(0, 160), 'and one at the front, which a cut starting at unit 1 cannot split')
+  assert.equal(args.get('sD'), bash.slice(0, 160), 'a slice with no astral character is the same 160 units it always was')
+  assert.equal(args.get('sE'), short, 'and a call shorter than the cut is untouched, closing brace and all')
+  const heads = commandHeads(result.rows).map((h) => h.head)
+  for (const head of heads) assert.ok(!UNPAIRED_SURROGATE.test(head), `no unpaired surrogate in ${JSON.stringify(head)}`)
+  assert.ok(heads.includes(`Read: ${'p'.repeat(112)}`), 'the head of the straddling call is its path less the split character')
+})
+
 test('commandHeads: a cd prefix is dropped and the head is the verb plus its subcommand', () => {
   const heads = commandHeads([
     { session_id: 's1', tool_name: 'Bash', args: '{"command":"cd /repo && git checkout -b topic"}' },
@@ -65,6 +259,107 @@ test('commandHeads: a cd prefix is dropped and the head is the verb plus its sub
   assert.deepEqual(heads.map((h) => h.head), ['Bash: git checkout -b', 'Bash: git checkout master', 'Read: types.d.ts'])
   assert.equal(heads[0].sessions, 1)
 })
+
+/**
+ * The SQL candidate key, mirrored in JS: what `sql.lines` returns for a
+ * typing, so an engine-backed test can name the keys it expects. The
+ * folded class and the trailing-half strip have to track `FOLD_TO_SPACE`
+ * and `LONE_SURROGATE_TAIL`, or a mirror that still erases every
+ * non-Latin letter will name keys the engine never returns.
+ * @param {string} t
+ */
+function keyOf(t) {
+  return t.toLowerCase().replace(/^((okay|ok|now|please|can you|could you|yes|also|then|and|so|next)[,\s]+)+/, '').replace(/[^a-z0-9 \u0080-\u1fff\u2070-\uffff]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 36).replace(/[\ud800-\udbff]$/, '').trim()
+}
+
+/**
+ * One human turn in the window, as the evidence statements read it.
+ * @param {string} sessionId
+ * @param {number} day - day of August 2026
+ * @param {number} hour
+ * @param {string} text
+ * @returns {Record<string, SqlPrimitive>}
+ */
+function typedRow(sessionId, day, hour, text) {
+  return { date: `2026-08-${day}`, session_id: sessionId, role: 'user', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: 'external', message_created_at: new Date(Date.UTC(2026, 7, day, hour)), content_text: text }
+}
+
+/**
+ * One assistant reply in the window, as `sql.replies` reads it. The
+ * caller passes text long enough to clear the statement's own
+ * `length(content_text) > 200` floor.
+ * @param {string} sessionId
+ * @param {string} text
+ * @returns {Record<string, SqlPrimitive>}
+ */
+function replyRow(sessionId, text) {
+  return { date: '2026-08-12', session_id: sessionId, role: 'assistant', part_type: 'text', conversation_source: null, is_sidechain: false, user_type: null, message_created_at: new Date(Date.UTC(2026, 7, 12, 10)), content_text: text }
+}
+
+/**
+ * One tool call in the window, as `sql.calls` reads it.
+ * @param {string} sessionId
+ * @param {string} toolName
+ * @param {string} toolArgs
+ * @returns {Record<string, SqlPrimitive>}
+ */
+function callRow(sessionId, toolName, toolArgs) {
+  return { date: '2026-08-12', session_id: sessionId, part_type: 'tool_call', conversation_source: null, message_created_at: new Date(Date.UTC(2026, 7, 12, 10)), tool_name: toolName, tool_args: toolArgs }
+}
+
+/**
+ * Where `readArgs` opens the `file_path` value: code unit 47, late enough
+ * that `commandHeads`' 120-unit capture window reaches the statement's cut
+ * at 160, and early enough that the path is what that window holds.
+ */
+const READ_ARGS_OPEN = '{"description":"dddddddddd","file_path":"/repo/'
+
+/**
+ * A Read call's serialized `tool_args`, with an astral character starting
+ * on code unit `at` of the serialization and a plain path either side.
+ * @param {number} at
+ */
+function readArgs(at) {
+  return `${READ_ARGS_OPEN}${'p'.repeat(at - READ_ARGS_OPEN.length)}\u{1F389}.md"}`
+}
+
+/**
+ * The candidate statement over `rows`, through the same engine the gather
+ * runs on, so a test reads the keys the engine really returns rather than
+ * asserting on the SQL text.
+ * @param {Record<string, SqlPrimitive>[]} rows
+ */
+function candidateLines(rows) {
+  return evidenceRows(rows, evidenceSql('2026-08-08').lines)
+}
+
+/**
+ * Any evidence statement over `rows`, through the same engine the gather
+ * runs on.
+ * @param {Record<string, SqlPrimitive>[]} rows
+ * @param {string} query
+ */
+function evidenceRows(rows, query) {
+  const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text', 'tool_name', 'tool_args']
+  /** @type {AsyncDataSource} */
+  const source = {
+    columns,
+    numRows: rows.length,
+    scan(options) {
+      const rowColumns = options?.columns ?? columns
+      return {
+        appliedWhere: false,
+        appliedLimitOffset: false,
+        async *rows() {
+          for (const row of rows) yield asyncRow(row, rowColumns)
+        },
+      }
+    },
+  }
+  const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
+  const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
+  return executeQuerySql({ query, registry, storage })
+}
 
 /** Two sessions that typed the commit line and then ran the procedure. */
 function commitRows() {
@@ -150,7 +445,7 @@ test('renderCandidates: a reader-ready page, or the not-enough sentence', () => 
   const cands = buildCandidates(commitRows())
   const page = renderCandidates({ sessions: 100, sessionDays: 120 }, cands, true)
   assert.ok(page.includes('Recorded: 100 sessions over 120 session-days.'))
-  assert.ok(page.includes('## 1. "commit on appropriate branch and make a pr"'))
+  assert.ok(page.includes('## 1. "commit on appropriate branch and make a PR"'), 'headed by a typing as written, not by the key')
   assert.ok(page.includes('- `git checkout -b` (2)'))
   assert.ok(page.includes('How one ended (2026-08-12): "Committed on topic'))
   const thin = renderCandidates({ sessions: 3, sessionDays: 3 }, cands, false)
@@ -480,7 +775,7 @@ test('the trigger statement is bounded by the sessions of a window, not by what 
   // Eight, which is over the five `prepareFirstAskEvidence` slices to: the
   // bound is asserted against more lines than the statement is ever given.
   const texts = Array.from({ length: 8 }, (_, i) => `commit on branch ${i} and open a pull request when green`)
-  const lines = texts.map((t) => t.slice(0, 42).toLowerCase())
+  const lines = texts.map(keyOf)
   const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'content_text']
   const base = Date.UTC(2026, 7, 10)
 
@@ -555,8 +850,12 @@ test('a session that typed two candidate lines is budgeted for both of them', as
   // the ordinary shape: the line is typed, the agent works, and the person
   // types the second line later in the same session.
   const columns = ['date', 'session_id', 'role', 'part_type', 'conversation_source', 'is_sidechain', 'user_type', 'message_created_at', 'tool_name', 'tool_args', 'content_text']
-  const textA = 'commit on the right branch and open a pr'
+  // The first line is typed the way a person types it, filler, case and
+  // punctuation included: the key has to fold those or the engine finds
+  // no trigger for the candidate at all.
+  const textA = 'Okay, commit on the right branch and open a PR!'
   const textB = 'run the release checklist for this repo'
+  assert.equal(keyOf(textA), 'commit on the right branch and open', 'filler, case and punctuation are not part of the line')
   const base = Date.UTC(2026, 7, 10, 1, 0, 0)
   /** @type {Record<string, SqlPrimitive>[]} */
   const rows = []
@@ -594,7 +893,7 @@ test('a session that typed two candidate lines is budgeted for both of them', as
   const registry = /** @type {any} */ ({ getDataset: () => ({ discoverPartitions: async () => [], createDataSource: async () => source }), listDatasets: () => [] })
   const storage = /** @type {any} */ ({ cacheRoot: '/tmp/hypaware-test', pendingInfo: async () => ({ pending: false }) })
   const sql = evidenceSql('2026-08-08')
-  const lines = [textA, textB].map((t) => t.slice(0, 42).toLowerCase())
+  const lines = [textA, textB].map(keyOf)
   const triggers = sampleTriggers((await executeQuerySql({ query: sql.triggers(lines), registry, storage })).rows)
   const anchors = sessionAnchors(triggers)
   assert.equal(anchors.length, 1, 'one session, anchored once: the disjunction still costs one pass a scanned row')

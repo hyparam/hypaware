@@ -12,6 +12,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { writeLock } from '../../src/core/plugin_install/lock.js'
 import { REQUIRES_UNSATISFIED_ERROR_KIND, recordFailedPlugins } from '../../src/core/daemon/boot_failure.js'
+import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
+import { writePidFile } from '../../src/core/daemon/pid.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
 
 // Issue #1580. `recordFailedPlugins` walked `bootKernel`'s `activations` only,
 // and three of the four doors into `unavailablePlugins` never produce an
@@ -536,4 +539,226 @@ test('recordFailedPlugins does not let a throw claim the resolver door', () => {
     { name: '@acme/liar', errorKind: 'activate_failed', message: 'db locked' },
   ])
   assert.deepEqual(entries.map((e) => e.event), ['daemon.plugin_activate_failed'])
+})
+
+// Issue #1598. On an enrolled machine the effective config is the central
+// layer merged over the local one, and `mergeConfigLayers` silently drops a
+// local `plugins[]` entry whose name collides with a central one
+// (`collides_with_central`). The repair above names the *local* file, so on
+// such a host "remove '<name>'" is an edit the next boot discards whenever the
+// central layer is what asked for the plugin.
+//
+// Driven off a written snapshot rather than a third daemon boot: which layer
+// enabled the plugin is a property of the config on disk, and the daemon runs
+// above already prove the snapshot this collector reads is the one a real boot
+// writes.
+
+/**
+ * A live daemon's own snapshot naming one eliminated plugin, over the two
+ * config layers `collectHypAwareStatus` merges. `centralPlugins` omitted is a
+ * host that never joined: no central layer at all.
+ *
+ * @param {{ hypHome: string, eliminated: string, localPlugins: string[], centralPlugins?: (string | { name: string, enabled?: boolean })[], reason?: string }} args
+ * @returns {Promise<any>}
+ */
+async function collectOverLayers({ hypHome, eliminated, localPlugins, centralPlugins, reason }) {
+  const stateRoot = path.join(hypHome, 'hypaware')
+  await fs.mkdir(path.join(stateRoot, 'run'), { recursive: true })
+  await fs.writeFile(path.join(hypHome, 'hypaware-config.json'), JSON.stringify({
+    version: 2,
+    plugins: localPlugins.map((name) => ({ name })),
+  }) + '\n')
+  if (centralPlugins) {
+    const seedPath = centralSeedPath(stateRoot)
+    await fs.mkdir(path.dirname(seedPath), { recursive: true })
+    await fs.writeFile(seedPath, JSON.stringify({
+      version: 2,
+      plugins: centralPlugins.map((entry) => (typeof entry === 'string' ? { name: entry } : entry)),
+    }) + '\n')
+  }
+  writePidFile(stateRoot, /** @type {any} */ ({ pid: process.pid, runId: 'r', mode: 'foreground' }))
+  writeStatusFile(stateRoot, /** @type {any} */ ({
+    state: 'healthy',
+    pid: process.pid,
+    healthyAt: new Date().toISOString(),
+    uptimeMs: 0,
+    sources: [],
+    sinks: [],
+    failedPlugins: [{
+      name: eliminated,
+      errorKind: REQUIRES_UNSATISFIED_ERROR_KIND,
+      message: reason ?? `plugin_missing: requires plugin ${MISSING_DEPENDENCY}@^1.0.0`,
+    }],
+  }))
+  const report = await collectHypAwareStatus({
+    env: { ...process.env, HYP_HOME: hypHome, HYP_CONFIG: '' },
+    platform: 'linux',
+    homeDir: hypHome,
+    isLaunchAgentInstalled: () => false,
+  })
+  return report.diagnostics.find((/** @type {any} */ d) => d.kind === 'plugin_requires_unsatisfied')
+}
+
+test('the repair for a central-owned plugin does not tell the operator to edit the local file', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-requires-central-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const diag = await collectOverLayers({
+    hypHome,
+    eliminated: '@acme/needy',
+    // The collision the merge drops: the local entry for the eliminated
+    // plugin is discarded, the central one is what boots.
+    localPlugins: ['@acme/needy'],
+    centralPlugins: ['@acme/needy'],
+  })
+  assert.ok(diag, 'the elimination is still reported on an enrolled host')
+  const localConfigPath = path.join(hypHome, 'hypaware-config.json')
+  assert.deepEqual(diag.repair, [
+    `enable what the reason names in ${localConfigPath}`
+      + " - '@acme/needy' is enabled by the central config, so removing it from the local file changes nothing",
+    'hyp daemon restart  # requires are resolved at boot',
+  ])
+})
+
+test('the repair on an enrolled host still offers to remove a local-owned plugin', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-requires-local-owned-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // Enrolled, but the eliminated plugin is the operator's own addition: the
+  // central layer names a different plugin, nothing collides, and the local
+  // entry is exactly what the next boot reads.
+  const diag = await collectOverLayers({
+    hypHome,
+    eliminated: '@acme/needy',
+    localPlugins: ['@acme/needy'],
+    centralPlugins: ['@acme/quiet'],
+  })
+  assert.ok(diag, 'the elimination is reported')
+  assert.deepEqual(diag.repair, [
+    `enable what the reason names, or remove '@acme/needy', in ${path.join(hypHome, 'hypaware-config.json')}`,
+    'hyp daemon restart  # requires are resolved at boot',
+  ])
+})
+
+// Issue #1826. The kept half of the same repair has the same flaw one level
+// down. `dep_graph` raises `plugin_missing` whenever the required plugin's
+// manifest is absent from the resolved set, whichever layer named it, so when
+// the missing *dependency* is the central-owned name, "enable what the reason
+// names in <local file>" is the inert instruction: a local `plugins[]` entry
+// adding that dependency collides with the central one and is dropped at merge
+// exactly as the eliminated plugin's own entry was. A dependency name being
+// different from the eliminated plugin's proves only that those two do not
+// collide with each other.
+
+test('the repair does not tell the operator to enable a central-owned dependency locally', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-requires-dep-central-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // The eliminated plugin is the operator's own, so withdrawing the request is
+  // still a local edit; the dependency it needs is the central-owned name.
+  const diag = await collectOverLayers({
+    hypHome,
+    eliminated: '@acme/needy',
+    localPlugins: ['@acme/needy'],
+    centralPlugins: [MISSING_DEPENDENCY],
+  })
+  assert.ok(diag, 'the elimination is still reported on an enrolled host')
+  const localConfigPath = path.join(hypHome, 'hypaware-config.json')
+  assert.deepEqual(diag.repair, [
+    `remove '@acme/needy' from ${localConfigPath}, or install '${MISSING_DEPENDENCY}' on this host`
+      + ` - '${MISSING_DEPENDENCY}' is named by the central config, so enabling it in the local file changes nothing`,
+    'hyp daemon restart  # requires are resolved at boot',
+  ])
+  assert.ok(
+    !diag.repair.some((/** @type {string} */ line) => line.includes('enable what the reason names')),
+    `the inert local enable must not be offered: ${JSON.stringify(diag.repair)}`
+  )
+})
+
+test('the repair names the central layer when it owns both the plugin and its missing dependency', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-requires-both-central-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const diag = await collectOverLayers({
+    hypHome,
+    eliminated: '@acme/needy',
+    localPlugins: ['@acme/needy'],
+    centralPlugins: ['@acme/needy', MISSING_DEPENDENCY],
+  })
+  assert.ok(diag, 'the elimination is still reported on an enrolled host')
+  const localConfigPath = path.join(hypHome, 'hypaware-config.json')
+  assert.deepEqual(diag.repair, [
+    `install '${MISSING_DEPENDENCY}' on this host, or enable it in the central config`
+      + ` - the central config names both '@acme/needy' and '${MISSING_DEPENDENCY}', so no edit to ${localConfigPath} survives the merge`,
+    'hyp daemon restart  # requires are resolved at boot',
+  ])
+})
+
+// Issue #1833. One rung further down: the central layer can name the missing
+// dependency and still withhold it, because `enabled: false` on a `plugins[]`
+// entry is a selection skip at boot. The name is central-owned either way - the
+// merge drops a colliding local entry by name regardless of enablement - so the
+// local enable stays inert, but "install it on this host" can be a no-op too,
+// when the dependency is already installed and the central layer is what holds
+// it back. The edit that changes something there is the central enable.
+
+test('the repair names the central enable when the central config disables the missing dependency', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-requires-dep-central-off-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  // The eliminated plugin is the operator's own, so withdrawing the request is
+  // a local edit that runs; the dependency is central-owned but disabled there.
+  const diag = await collectOverLayers({
+    hypHome,
+    eliminated: '@acme/needy',
+    localPlugins: ['@acme/needy'],
+    centralPlugins: [{ name: MISSING_DEPENDENCY, enabled: false }],
+  })
+  assert.ok(diag, 'the elimination is still reported on an enrolled host')
+  const localConfigPath = path.join(hypHome, 'hypaware-config.json')
+  assert.deepEqual(diag.repair, [
+    `remove '@acme/needy' from ${localConfigPath}, or enable '${MISSING_DEPENDENCY}' in the central config and install it on this host`
+      + ` - '${MISSING_DEPENDENCY}' is named by the central config but disabled there, so enabling it in the local file changes nothing`,
+    'hyp daemon restart  # requires are resolved at boot',
+  ])
+  const repairText = diag.repair.join('\n')
+  // (a) the edit that actually changes something is named.
+  assert.ok(
+    repairText.includes(`enable '${MISSING_DEPENDENCY}' in the central config`),
+    `the central enable must be named: ${JSON.stringify(diag.repair)}`
+  )
+  // (b) the inert local enable #1826 removed must not come back: a local entry
+  // for the dependency collides by name even when the central entry is off.
+  assert.ok(
+    !repairText.includes('enable what the reason names'),
+    `the inert local enable must not be offered: ${JSON.stringify(diag.repair)}`
+  )
+  // (c) LLP 0139#repair-must-be-runnable: a step that runs unconditionally.
+  assert.ok(
+    repairText.includes(`remove '@acme/needy' from ${localConfigPath}`),
+    `the unconditional local removal must survive: ${JSON.stringify(diag.repair)}`
+  )
+})
+
+// The dependency name is read back out of the snapshot's composed `message`,
+// so the two reasons that name no missing plugin must fall through to the
+// local-file repair rather than to a half-parsed name: a version mismatch
+// (where the dependency is present and enabling nothing repairs it) and a
+// capability require (where the name is a capability, not a plugin).
+test('a reason that names no missing plugin keeps the local-file repair', async (t) => {
+  const hypHome = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-requires-other-reasons-'))
+  t.after(() => fs.rm(hypHome, { recursive: true, force: true }))
+  const localConfigPath = path.join(hypHome, 'hypaware-config.json')
+  for (const reason of [
+    `plugin_missing: ${MISSING_DEPENDENCY}@0.9.0 does not satisfy ^1.0.0`,
+    'cap_missing: capability acme.blob@^1.0.0',
+  ]) {
+    const diag = await collectOverLayers({
+      hypHome,
+      eliminated: '@acme/needy',
+      localPlugins: ['@acme/needy'],
+      centralPlugins: [MISSING_DEPENDENCY],
+      reason,
+    })
+    assert.ok(diag, `the elimination is reported for ${reason}`)
+    assert.deepEqual(diag.repair, [
+      `enable what the reason names, or remove '@acme/needy', in ${localConfigPath}`,
+      'hyp daemon restart  # requires are resolved at boot',
+    ], reason)
+  }
 })

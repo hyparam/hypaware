@@ -98,6 +98,19 @@ export interface FailedPluginSnapshot {
   message: string
 }
 
+/**
+ * A plugin directory this boot found but could not load a manifest from
+ * (issue #1576). Deliberately not a `FailedPluginSnapshot`: a manifest that is
+ * corrupt, unparseable, or fails schema validation has no plugin name, and a
+ * `rootDir` in a `name` field would be read as one by every consumer of it.
+ */
+export interface UnloadableManifestSnapshot {
+  /** The plugin directory, which is the only identity it has. Never a name. */
+  rootDir: string
+  /** Why `loadManifest` rejected it, clamped the way a throw's message is. */
+  message: string
+}
+
 export interface SinkSnapshot {
   instance: string
   plugin: string
@@ -220,6 +233,15 @@ export interface DaemonStatus {
    */
   failedPlugins?: FailedPluginSnapshot[]
   /**
+   * The plugin directories this daemon's boot could not load a manifest from,
+   * with the rejection reason (issue #1576). The third door into
+   * `unavailablePlugins`, kept in a field of its own because it is the one
+   * that names a directory rather than a plugin. Absent, never `[]`, when
+   * every manifest loaded, so a boot with nothing to report writes the file
+   * shape it always wrote.
+   */
+  unloadableManifests?: UnloadableManifestSnapshot[]
+  /**
    * What the last completed cache-maintenance tick left fragmented, and why
    * (LLP 0228#status-file-is-the-surface). Absent until a tick has run.
    */
@@ -256,6 +278,7 @@ export type StatusDiagnosticKind =
   | 'source_name_unregistered'
   | 'plugin_activate_failed'
   | 'plugin_requires_unsatisfied'
+  | 'plugin_manifest_unloadable'
 
 /**
  * Diagnostic surfaced by `hyp status`. Carries a severity, the
@@ -942,7 +965,14 @@ export interface RunDaemonOptions {
   runId?: string
   /** Sink tick cadence (default 60_000). */
   tickIntervalMs?: number
-  /** Default true; smoke flows opt out and drive shutdown directly. */
+  /**
+   * Default true; smoke flows and in-process tests opt out and drive shutdown
+   * directly. It also declares that the caller does not own this process, so
+   * the gateway's stop deadline kills the processing child without exiting
+   * (#1531): left default inside `node --test`, a stop that reaches its
+   * deadline ends the worker mid-file, dropping every later test in it while
+   * the run still reports green.
+   */
   installSignalHandlers?: boolean
   /** Whether the runtime reports foreground mode (default true). */
   foreground?: boolean

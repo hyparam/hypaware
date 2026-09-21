@@ -9,6 +9,7 @@ import { temporaryDirectory } from '../helpers/temp_dir.js'
 import { collectHypAwareStatus, writeStatusFile } from '../../src/core/daemon/status.js'
 import { writePidFile } from '../../src/core/daemon/pid.js'
 import { defaultConfigPath } from '../../src/core/config/schema.js'
+import { centralSeedPath } from '../../src/core/config/apply.js'
 import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
 import { createStartSource, mergeUpstreams } from '../../hypaware-core/plugins-workspace/ai-gateway/src/source.js'
 import { compileUpstreams } from '../../hypaware-core/plugins-workspace/ai-gateway/src/config.js'
@@ -1040,4 +1041,60 @@ test('an older status file counts every name it holds, capped or not', async () 
   // 20 held, 8 printed: the 12 the line does not show are all accounted for,
   // whichever filter withheld them.
   assert.match(diag.message, /\+12 more/, 'and every name it does not print is counted back')
+})
+
+// Issue #1598. The repair above names the local config file, which is the
+// file the upstreams live in only while the local layer owns the
+// `@hypaware/ai-gateway` entry. On an enrolled host a local `plugins[]` entry
+// colliding with a central one is dropped at merge, so the gateway is running
+// the central layer's upstreams and editing the local file changes nothing.
+test('the dropped-upstream repair points at the central layer when it owns the gateway entry', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const seedPath = centralSeedPath(stateRoot)
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/ai-gateway', config: { upstreams: [] } }],
+  }) + '\n')
+  const details = await realGatewayDetails([
+    VALID_UPSTREAM,
+    { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
+  ])
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag, 'the partial loss is still reported on an enrolled host')
+  assert.deepEqual(diag.repair, [
+    "add the missing 'name' / 'base_url' to each upstream in the central config's "
+      + "'@hypaware/ai-gateway' entry - a local entry for it is dropped at merge, so editing "
+      + `${path.join(hypHome, 'hypaware-config.json')} changes nothing`,
+    'hyp daemon restart  # the daemon reads the file only at boot',
+  ])
+})
+
+// And the same host, with the gateway entry local: nothing collides, the
+// local file is what the next boot reads, and the repair is unchanged.
+test('the dropped-upstream repair still names the local file when the local layer owns the gateway entry', async () => {
+  const { hypHome, stateRoot } = await makeHome()
+  const seedPath = centralSeedPath(stateRoot)
+  await fs.mkdir(path.dirname(seedPath), { recursive: true })
+  await fs.writeFile(seedPath, JSON.stringify({
+    version: 2,
+    plugins: [{ name: '@hypaware/central' }],
+  }) + '\n')
+  const details = await realGatewayDetails([
+    VALID_UPSTREAM,
+    { name: 'openai', url: 'https://api.openai.com', path_prefix: '/openai' },
+  ])
+  writeRunningDaemon(stateRoot, details)
+
+  const report = await collectHypAwareStatus(collectOpts(hypHome))
+  const diag = report.diagnostics.find((d) => d.kind === 'gateway_upstreams_dropped')
+  assert.ok(diag)
+  assert.deepEqual(diag.repair, [
+    "add the missing 'name' / 'base_url' to each upstream in "
+      + `${path.join(hypHome, 'hypaware-config.json')} ('hyp config validate' does not check upstream shape)`,
+    'hyp daemon restart  # the daemon reads the file only at boot',
+  ])
 })

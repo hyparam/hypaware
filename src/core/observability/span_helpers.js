@@ -2,7 +2,7 @@
 
 import { buildAttrs } from './attrs.js'
 import { getTracer } from './tracer.js'
-import { context, ROOT_CONTEXT, SpanStatusCode } from './runtime.js'
+import { context, describeThrown, ROOT_CONTEXT, SpanStatusCode } from './runtime.js'
 
 /**
  * @import { Span } from './runtime.js'
@@ -73,9 +73,14 @@ export async function withSpan(name, attrs, fn, opts = {}) {
       }
       return result
     } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error))
-      span.recordException(err)
-      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message })
+      const { err, message } = reportable(error)
+      try {
+        // The same reads, one seam later: the event takes `name`, `message`
+        // and `stack` off the value. Losing it costs the stack, not the
+        // status below or the throw.
+        span.recordException(err)
+      } catch { /* unreadable, and already rendered as far as it can be */ }
+      span.setStatus({ code: SpanStatusCode.ERROR, message })
       span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
       throw err
     } finally {
@@ -117,9 +122,11 @@ export async function runRoot(name, attrs, fn, opts = {}) {
         }
         return result
       } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error))
-        span.recordException(err)
-        span.setStatus({ code: SpanStatusCode.ERROR, message: err.message })
+        const { err, message } = reportable(error)
+        try {
+          span.recordException(err)
+        } catch { /* as in `withSpan`: unreadable, and the status still says what */ }
+        span.setStatus({ code: SpanStatusCode.ERROR, message })
         span.setAttribute('error_kind', sanitized.error_kind ?? 'unhandled_exception')
         throw err
       } finally {
@@ -127,4 +134,31 @@ export async function runRoot(name, attrs, fn, opts = {}) {
       }
     })
   ))
+}
+
+/**
+ * What to report, and what to rethrow, for a value the span body threw.
+ *
+ * Every way of reading that value is the thrower's to define: `message` and
+ * `stack` are own accessors a genuine `Error` can have redefined, and
+ * `instanceof` walks `[[GetPrototypeOf]]`, a `Proxy` trap. A read that throws
+ * throws out of the `catch` recording the failure, so the caller never sees
+ * the failure at all: a plugin whose `activate()` threw an `Error` with a
+ * throwing `message` getter took the whole kernel activation down that way
+ * (hyparam/hypaware#1857). So the rendering goes through `describeThrown`,
+ * which is total, and the type test sits inside a `try`.
+ *
+ * An ordinary `Error` is still rethrown by identity and anything else still
+ * wrapped carrying the rendered text, unchanged for every value that could be
+ * read in the first place.
+ *
+ * @param {unknown} error
+ * @returns {{ err: Error, message: string }}
+ */
+function reportable(error) {
+  const message = describeThrown(error)
+  try {
+    if (error instanceof Error) return { err: error, message }
+  } catch { /* the type test itself threw; nothing here can treat it as an Error */ }
+  return { err: new Error(message), message }
 }

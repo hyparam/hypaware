@@ -247,9 +247,8 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
           span.setAttribute('budget_ms', budgetMs)
           span.setAttribute('missing_sections', missingSections(rows).join(','))
         }
-        // `footer: false` because the closing line below is this run's single
-        // pointer: setup should teach one command, not two dim lines naming
-        // the same one.
+        // `footer: false` because the block ends on its last section: the
+        // first look prints no pointer line at all, dim or otherwise.
         stdout.write(renderOverview({
           ...rows,
           title: FIRST_LOOK_TITLE,
@@ -274,11 +273,6 @@ export async function runWizardFirstLook({ runner, stdout: target, color = false
               : '\nStopped here to keep setup moving.\n'
           )
         }
-        // The block is re-runnable, and the full one is *bigger* than what
-        // setup just printed: naming the two sections it adds is what stops
-        // the trim from reading as all there is. One durable entry point,
-        // stated as an upgrade rather than a repeat.
-        stdout.write(`\nSee more anytime: hyp query overview (adds repos and tools; --sql shows the queries)\n`)
         return {
           shown: true,
           providerRows: rows.providerRows.length,

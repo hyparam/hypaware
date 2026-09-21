@@ -21,9 +21,9 @@ import { isSafeContributionName } from './contribution_names.js'
 import { compareStrings } from '../util/compare_strings.js'
 
 /**
- * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SkillContribution, SkillRegistry, SourceContribution, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
+ * @import { ActivePlugin, AgentContribution, AgentRegistry, BackfillMaterializerRegistry, BackfillRegistry, CapabilityName, CapabilityRegistry, ClientRegistry, CommandGroupRegistration, CommandRegistration, CommandRegistry, ConfigControlFacade, InitPresetContribution, InitPresetRegistry, JsonObject, PermissionContext, PluginActivationContext, PluginLogger, PluginName, PluginPaths, PluginPermission, QueryRegistry, SemverRange, SemverVersion, SinkContribution, SinkHandle, SinkRegistry, SkillContribution, SkillRegistry, SourceContribution, SourceRegistry, VerbRegistration, VerbRegistry } from '../../../hypaware-plugin-kernel-types.js'
  * @import { ExtendedQueryStorageService, SourceWithholdResolver } from '../../../src/core/cache/types.js'
- * @import { ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
+ * @import { ExtendedSinkHandle, ExtendedSinkRegistry, ExtendedSourceRegistry } from '../../../src/core/registry/types.js'
  * @import { KernelRuntime } from '../../../src/core/runtime/types.js'
  */
 
@@ -143,12 +143,12 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
     log,
     permissions,
     capabilities,
-    commands: runtime.commands,
+    commands: createCommandsFacade(pluginName, runtime.commands),
     configRegistry: runtime.configRegistry,
     sources: createSourcesFacade(pluginName, runtime.sources),
-    sinks: runtime.sinks,
+    sinks: createSinksFacade(pluginName, runtime.sinks),
     query: runtime.query,
-    verbs: runtime.verbs,
+    verbs: createVerbsFacade(pluginName, runtime.verbs),
     storage: runtime.storage,
     skills: runtime.skills,
     agents: runtime.agents,
@@ -182,34 +182,635 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
 }
 
 /**
+ * The three registry facades a plugin reaches the kernel through, for the
+ * plugin named. `createActivationContext` stores the context it built, so an
+ * activated plugin gets back the very objects its own `activate()` holds;
+ * the fallback builds them for a plugin whose activation this runtime never
+ * recorded (a host that pre-registered a contribution itself, and the
+ * kernel's own tests), because the alternative is handing back the kernel's
+ * raw registries, which is the reach this exists to close.
+ *
+ * @param {KernelRuntime} runtime
+ * @param {PluginName} pluginName
+ * @returns {{ capabilities: CapabilityRegistry, sources: SourceRegistry, sinks: SinkRegistry, verbs: VerbRegistry }}
+ * @ref LLP 0420#split [implements]: a plugin reaches the registries through its own facade, whichever context it reaches them through
+ */
+export function pluginRegistryFacades(runtime, pluginName) {
+  const ctx = runtime.activationContexts?.get(pluginName)
+  if (ctx) return { capabilities: ctx.capabilities, sources: ctx.sources, sinks: ctx.sinks, verbs: ctx.verbs }
+  return {
+    capabilities: createCapabilitiesFacade(pluginName, runtime.capabilities),
+    sources: createSourcesFacade(pluginName, runtime.sources),
+    sinks: createSinksFacade(pluginName, runtime.sinks),
+    verbs: createVerbsFacade(pluginName, runtime.verbs),
+  }
+}
+
+/**
+ * Per-plugin facade over the command registry. `register` runs inside
+ * `registeringAs`, so the registry records which plugin claimed the name
+ * instead of taking `command.plugin` on trust, and `registeringAs` itself
+ * forces this plugin's name the way the sources facade does.
+ *
+ * That record is what the dispatcher asks before it decides whether a command
+ * body is a plugin's or core's. Read off the registration instead, the
+ * answer would be a plugin-controlled value twice over: a registration may
+ * omit `plugin`, and `get()` hands the stored record back afterwards, so
+ * the field can also be rewritten on a command already registered.
+ *
+ * `registerGroup` is not bracketed because a group is metadata with no
+ * `run`: nothing dispatches to it, so it has no body to scope.
+ *
+ * `unregister` is bracketed against that same binding, because forwarding it
+ * aimed the reach the other way. A plugin could not claim a name a neighbour
+ * held, but the registry's own `unregister` is by-name and checks no owner, so
+ * any plugin released any command it could name and then registered its own
+ * under the freed name: `ctxB.commands.unregister('acme sync')` took A's
+ * command off the CLI (`hyp acme sync` exited 2 as an unknown command), and
+ * the same two lines put a plugin's body behind `hyp status`. Nothing raw came
+ * back with it - the re-registration goes through `register` above, so the
+ * squatter is the recorded owner and its body runs under its own facades - so
+ * what it cost was availability and attribution: a plugin removed any other
+ * plugin's CLI surface, core's included, unopposed and unlogged (issue #1980).
+ *
+ * Read on the name as passed, not on a primary name: this registry resolves
+ * aliases, and `get`, `has`, `ownerOf` and `unregister` all accept one, so a
+ * check that refused only primary names would leave `unregister('asy')`
+ * releasing the command that alias points at, and every alias with it.
+ * `ownerOf` answers the owner of the command an alias resolves to, which is
+ * the value the registrant is entitled to release under either spelling.
+ *
+ * Everything else reads through to the registry, which is the surface
+ * `ctx.commands` already had. A registry with no `registeringAs` (a host's
+ * own, injected, or a runtime carrying none at all) is handed over unwrapped,
+ * the way the sources and sinks facades tolerate one, and so is one with no
+ * `ownerOf`: a host driving its own registry records no registrar for
+ * anything, so there is no binding to read and refusing on its absence would
+ * stop every release such a host makes.
+ *
+ * @param {PluginName} pluginName
+ * @param {CommandRegistry} registry
+ * @returns {CommandRegistry}
+ * @ref LLP 0420#owner [implements]: the owner is the registrar core recorded, not the plugin-written `CommandRegistration.plugin`
+ * @ref LLP 0424#alias [implements]: a plugin releases the names it registered, under either spelling, and no others
+ */
+function createCommandsFacade(pluginName, registry) {
+  // Held as a value, so the guard below is the one the calls run under: a
+  // second read could answer differently on a host registry.
+  const bracket = /** @type {CommandRegistry & { registeringAs?: (plugin: PluginName, fn: () => void) => void }} */ (registry)?.registeringAs
+  if (typeof bracket !== 'function') return registry
+  const facade = Object.create(null)
+  // Non-writable and non-configurable, so `delete ctx.commands.register`
+  // cannot take the own property away and uncover the registry's own
+  // unbracketed one through the proxy below.
+  const members = {
+    /** @param {CommandRegistration} command */
+    register(command) {
+      bracket.call(registry, pluginName, () => { registry.register(command) })
+    },
+    /**
+     * @param {PluginName} _plugin
+     * @param {() => void} fn
+     */
+    registeringAs(_plugin, fn) {
+      return bracket.call(registry, pluginName, fn)
+    },
+  }
+  /** @param {string} member @param {unknown} value */
+  const pin = (member, value) => {
+    Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  for (const [member, value] of Object.entries(members)) pin(member, value)
+  // Held as a value for the reason `bracket` is. `unregister` is optional on
+  // the declared contract, so a registry that never offered one does not
+  // acquire one here.
+  const owned = /** @type {CommandRegistry & { ownerOf?: (name: string) => PluginName | undefined }} */ (registry).ownerOf
+  if (typeof owned === 'function' && typeof registry.unregister === 'function') {
+    /**
+     * Release a command this plugin registered, and refuse one it did not,
+     * which includes a name the registry recorded no registrar for at all: a
+     * core command is nobody's to retract from inside an activation, and so is
+     * a name nothing holds. The kernel is not on this path - `retractCommand`
+     * in `src/core/registry/verbs.js` is the one caller that needs the
+     * registry's own by-name, total `unregister`, and it drives the registry
+     * the runtime was built with, never a facade.
+     *
+     * `name` is quoted only when it is already a string, so a hostile
+     * `toString` cannot throw out of the refusal refusing it. A non-string
+     * keys no command, so it is refused either way.
+     *
+     * @param {string} name
+     * @ref LLP 0424#unknown [implements]: a name nothing holds answers the same "nobody's" a core command does, and is refused in the same words
+     */
+    const unregister = (name) => {
+      const owner = owned.call(registry, name)
+      if (owner !== pluginName) {
+        const shown = typeof name === 'string' ? name : '(non-string command name)'
+        const held = owner === undefined ? 'no recorded plugin' : `'${owner}'`
+        getLogger('command-registry').warn('command.unregister_owner_mismatch', {
+          [Attr.COMPONENT]: 'commands',
+          [Attr.OPERATION]: 'command.unregister',
+          [Attr.ERROR_KIND]: 'command_owner_mismatch',
+          [Attr.PLUGIN]: pluginName,
+          hyp_owner_plugin: owner ?? '',
+          command_name: shown,
+          status: 'failed',
+        })
+        throw new Error(
+          `CommandRegistry.unregister: command '${shown}' is registered by ${held}, not by '${pluginName}'`
+        )
+      }
+      /** @type {(name: string) => void} */ (registry.unregister).call(registry, name)
+    }
+    pin('unregister', unregister)
+  }
+  return /** @type {CommandRegistry} */ (new Proxy(facade, {
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     * @param {unknown} receiver
+     */
+    get(target, prop, receiver) {
+      if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver)
+      return Reflect.get(registry, prop, receiver)
+    },
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     */
+    has(target, prop) {
+      return Object.hasOwn(target, prop) || Reflect.has(registry, prop)
+    },
+  }))
+}
+
+/**
+ * Per-plugin facade over the verb registry, with exactly the reach and
+ * exactly the shape {@link createCommandsFacade} has. `register` runs inside
+ * `registeringAs`, so the registry records which plugin claimed the verb
+ * rather than reading `VerbRegistration.plugin`, which the plugin writes and
+ * which the registry holds by reference so it can answer differently on every
+ * read.
+ *
+ * A verb is a command: the registry projects one into the CLI immediately,
+ * and the plugin's `operation` runs behind it. Without a registrar that
+ * projection was ownerless, so the dispatcher had no owner to scope its
+ * `CommandRunContext` to and the plugin's `operation` read every other
+ * plugin's config section (issue #1978).
+ *
+ * `unregister` and the three read members are bracketed against that same
+ * binding, because forwarding them aimed the reach the other way. A plugin
+ * could not claim a neighbour's verb name, but `unregister` checked no owner
+ * at all, so any plugin released any verb (core's included) and took the CLI
+ * command and the MCP tool it projected off the surface, unopposed and
+ * unlogged. And `get()`, `getByTool()` and `list()` handed back the stored
+ * registration by reference and writable, so a plugin did not need to own a
+ * verb to decide what runs behind it: `ctxB.verbs.get('query sql').operation =
+ * mine` put a plugin's function behind `hyp query sql`, where it read the
+ * whole effective config out of the ownerless core projection's context, a
+ * configured sink's inline token and a neighbour's `api_key` included, and
+ * `list()` was the same reach without needing the name (issue #1983).
+ *
+ * The three reads narrow a verb this plugin does not own to a read-only view
+ * (`narrowVerb` below), for the reason the sources and sinks facades narrow:
+ * a view reads *through* to the registration rather than copying it, so no
+ * accessor of the registering plugin's runs inside a neighbour's `list()`.
+ * `get` narrows only a neighbour's, because the name it is asked for is the
+ * key the registry validated and the key `ownerOf` answers on; `getByTool` and
+ * `list` narrow every entry, because neither is keyed by that name and the
+ * only name on a registration is `verb.name`, a live plugin property this
+ * registry already refuses to treat as a key. A plugin that wants its own
+ * registration back by identity asks `get` for it by the name it registered
+ * under, exactly as with `ctx.sources`.
+ *
+ * Narrowing is the half that keeps a hostile plugin from writing; it is not
+ * what decides whose code runs. That is settled behind the registry, by the
+ * body `register` validated (LLP 0423 #private-body), so the registrant's own
+ * later rewrite of its own record decides nothing either.
+ *
+ * Everything else reads through to the registry, which is the surface
+ * `ctx.verbs` already had. A registry with no `registeringAs` (a host's own,
+ * injected) is handed over unwrapped, the same tolerance the commands,
+ * sources and sinks facades extend, and so is one with no `ownerOf`: a host
+ * driving its own registry records no registrar for anything, so there is no
+ * binding to read and refusing on its absence would stop every verb such a
+ * host runs.
+ *
+ * @param {PluginName} pluginName
+ * @param {VerbRegistry} registry
+ * @returns {VerbRegistry}
+ * @ref LLP 0422#verb-owner [implements]: a plugin's verb is registered under its own name, so the command it projects is attributable
+ * @ref LLP 0423#facade [implements]: a plugin drives and reads the verbs the kernel recorded it as registering, and reads a neighbour's through a view
+ */
+function createVerbsFacade(pluginName, registry) {
+  // Held as a value, so the guard below is the one the calls run under: a
+  // second read could answer differently on a host registry.
+  const bracket = /** @type {VerbRegistry & { registeringAs?: (plugin: PluginName, fn: () => void) => void }} */ (registry)?.registeringAs
+  if (typeof bracket !== 'function') return registry
+  const facade = Object.create(null)
+  // Non-writable and non-configurable, so `delete ctx.verbs.register` cannot
+  // take the own property away and uncover the registry's own unbracketed one
+  // through the proxy below.
+  const members = {
+    /** @param {VerbRegistration} verb */
+    register(verb) {
+      bracket.call(registry, pluginName, () => { registry.register(verb) })
+    },
+    /**
+     * @param {PluginName} _plugin
+     * @param {() => void} fn
+     */
+    registeringAs(_plugin, fn) {
+      return bracket.call(registry, pluginName, fn)
+    },
+  }
+  const owned = /** @type {VerbRegistry & { ownerOf?: (name: string) => PluginName | undefined }} */ (registry).ownerOf
+  /** @param {string} member @param {unknown} value */
+  const pin = (member, value) => {
+    Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  for (const [member, value] of Object.entries(members)) pin(member, value)
+  // Only where there is a binding to read: a host registry carrying no
+  // `ownerOf` recorded no registrar for anything, so there is nothing to
+  // refuse against and it is left reading exactly as it did.
+  if (typeof owned === 'function') {
+    /**
+     * The views this facade has already built, so repeated reads hand back the
+     * same object and a plugin comparing two `list()` results with `===` sees
+     * the stable identity the live registration gave it. Weak and keyed by the
+     * registration, so a view lives exactly as long as the verb it stands for
+     * rather than pinning every verb a long-lived daemon ever registered.
+     *
+     * @type {WeakMap<object, VerbRegistration>}
+     */
+    const views = new WeakMap()
+    /** @param {VerbRegistration | undefined} verb */
+    const narrow = (verb) => {
+      // An unknown name answers `undefined`, and a host registry is free to
+      // hand back whatever it holds. Only an object keys a `WeakMap`.
+      if (verb === null || typeof verb !== 'object') return verb
+      const existing = views.get(verb)
+      if (existing !== undefined) return existing
+      const view = narrowVerb(pluginName, verb)
+      views.set(verb, view)
+      return view
+    }
+    const bracketed = {
+      /**
+       * Release a verb this plugin registered, and refuse one it did not, which
+       * includes a verb the registry recorded no registrar for at all: a core
+       * verb is nobody's to retract from inside an activation. A host displacing
+       * a kernel-shipped verb (LLP 0264 #verb) drives the registry itself and
+       * never sees this facade.
+       *
+       * `name` is quoted only when it is already a string, so a hostile
+       * `toString` cannot throw out of the refusal refusing it. A non-string
+       * keys no verb, so it is refused either way.
+       *
+       * @param {string} name
+       */
+      unregister(name) {
+        const owner = owned.call(registry, name)
+        if (owner !== pluginName) {
+          const shown = typeof name === 'string' ? name : '(non-string verb name)'
+          const held = owner === undefined ? 'no recorded plugin' : `'${owner}'`
+          getLogger('verb-registry').warn('verb.unregister_owner_mismatch', {
+            [Attr.COMPONENT]: 'verbs',
+            [Attr.OPERATION]: 'verb.unregister',
+            [Attr.ERROR_KIND]: 'verb_owner_mismatch',
+            [Attr.PLUGIN]: pluginName,
+            hyp_owner_plugin: owner ?? '',
+            verb_name: shown,
+            status: 'failed',
+          })
+          throw new Error(
+            `VerbRegistry.unregister: verb '${shown}' is registered by ${held}, not by '${pluginName}'`
+          )
+        }
+        /** @type {(name: string) => void} */ (registry.unregister).call(registry, name)
+      },
+      /** @param {string} name */
+      get(name) {
+        const verb = registry.get(name)
+        return owned.call(registry, name) === pluginName ? verb : narrow(verb)
+      },
+      /** @param {string} tool */
+      getByTool(tool) {
+        return narrow(registry.getByTool(tool))
+      },
+      list() {
+        return registry.list().map((verb) => /** @type {VerbRegistration} */ (narrow(verb)))
+      },
+    }
+    for (const [member, value] of Object.entries(bracketed)) {
+      // `unregister` is optional on the declared contract, so a registry that
+      // never offered one does not acquire one here. The three reads are
+      // required members, so there is nothing to feature-detect.
+      if (member === 'unregister' && typeof registry.unregister !== 'function') continue
+      pin(member, value)
+    }
+  }
+  return /** @type {VerbRegistry} */ (new Proxy(facade, {
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     * @param {unknown} receiver
+     */
+    get(target, prop, receiver) {
+      if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver)
+      return Reflect.get(registry, prop, receiver)
+    },
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     */
+    has(target, prop) {
+      return Object.hasOwn(target, prop) || Reflect.has(registry, prop)
+    },
+  }))
+}
+
+/**
+ * The declarative half of the `VerbRegistration` surface, which is the whole
+ * of what a narrowed verb answers for. `operation` and `render` are the other
+ * half and are replaced rather than listed: they are the two functions the CLI
+ * projection and the MCP host run, and neither is the kernel's to hand to a
+ * plugin that did not register the verb.
+ *
+ * A whitelist rather than a mask over those two, for the reason
+ * `CONTRIBUTION_FIELDS` is one: a registration is often a module-level object
+ * with a prototype, and a mask only hides what it was told to hide.
+ */
+const VERB_FIELDS = [
+  'name', 'tool', 'summary', 'plugin', 'category', 'audience', 'aliases', 'help',
+  'inputSchema', 'exposure', 'authClass',
+]
+
+/**
+ * A read-only view of a verb registration, for the members of `ctx.verbs` that
+ * hand one to a plugin that did not register it.
+ *
+ * `operation` is the member this exists for: it is the function `hyp <verb>`
+ * and the MCP tool both run, and a plugin able to write it decides whose code
+ * executes behind a name it does not own. `render` is the same reach one step
+ * on, running over whatever the operation returned. Both answer with a refusal
+ * of this module's own rather than being absent, because the contract declares
+ * `get`/`getByTool`/`list` answering with a `VerbRegistration` and a plugin
+ * reading the shape it was promised should find one. `operation` refuses
+ * asynchronously and `render` synchronously, each the way its declared
+ * signature returns.
+ *
+ * Writes, defines, deletes and reparenting are refused by the view itself,
+ * which is the half a replaced pair alone does not close: the point is that a
+ * neighbour's registration is not a plugin's to edit, and `inputSchema` (the
+ * argv codec's rules and the MCP tool's advertised schema) is as load-bearing
+ * as the functions.
+ *
+ * @param {PluginName} pluginName The plugin the view is being handed to.
+ * @param {VerbRegistration} verb
+ * @returns {VerbRegistration}
+ */
+function narrowVerb(pluginName, verb) {
+  const source = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (verb))
+  /** @param {string} member */
+  function refuse(member) {
+    const shown = shownName(source)
+    getLogger('verb-registry').warn('verb.body_denied', {
+      [Attr.COMPONENT]: 'verbs',
+      [Attr.OPERATION]: `verb.${member}`,
+      [Attr.ERROR_KIND]: 'verb_body_denied',
+      [Attr.PLUGIN]: pluginName,
+      verb_name: shown,
+      status: 'failed',
+    })
+    const subject = shown === '' ? 'a verb' : `'${shown}'`
+    return new Error(
+      `VerbRegistry: a registration reached through get()/getByTool()/list() carries no live ${member}(), so ` +
+      `'${pluginName}' cannot run ${subject} under arguments of its own choosing: register your own verb`
+    )
+  }
+  return /** @type {VerbRegistration} */ (narrowView(VERB_FIELDS, source, {
+    /** @returns {Promise<never>} */
+    async operation() { throw refuse('operation') },
+    /** @returns {never} */
+    render() { throw refuse('render') },
+  }))
+}
+
+/**
+ * The declared `SourceContribution` surface, which is the whole of what a
+ * narrowed view answers for.
+ *
+ * A whitelist rather than a mask over `start`, because a mask only hides what
+ * it was told to hide. A contribution is often a class instance (the plugin
+ * doctor keeps a whole stand-in honest about that), and a class supplies
+ * `start` from its prototype, which a view forwarding `getPrototypeOf` hands
+ * straight back; a contribution carrying a second entry point of its own is
+ * the same leak without a prototype. Nothing outside this list is the kernel's
+ * to pass on.
+ */
+const CONTRIBUTION_FIELDS = ['name', 'plugin', 'summary', 'configSection']
+
+/**
+ * A read-only view of a source contribution, for the members of `ctx.sources`
+ * that hand one back to a plugin that did not register it.
+ *
+ * Read through to the contribution rather than copied out of it. A copy has to
+ * run every `name`/`summary`/`configSection` accessor at the moment it is
+ * made, which puts one plugin's code inside another plugin's `list()` call,
+ * where a throw is an outage for the caller and not for whoever wrote it. That
+ * is the trade this exists to refuse, so the view defers each read to the
+ * moment the caller asks for it, exactly as the live object did, and carries
+ * fields a prototype supplies for the same reason.
+ *
+ * `start` is the one member answering with something of this module's own: an
+ * async refusal, so it arrives as the rejection every other lifecycle refusal
+ * arrives as. It is not simply absent, because the contract declares
+ * `get`/`list` answering with a `SourceContribution` and a plugin reading the
+ * shape it was promised should find one. What it must not find is a function
+ * that runs a neighbour's source under a context this plugin chose.
+ *
+ * Writes, defines, deletes and reparenting are all refused, which is the half
+ * a hidden `start` alone does not close: a plugin able to put its own function
+ * on the object the daemon's boot walk calls has it run under the victim's
+ * real context rather than dragging the victim into its own.
+ *
+ * @param {PluginName} pluginName The plugin the view is being handed to.
+ * @param {SourceContribution} contribution
+ * @returns {SourceContribution}
+ */
+function narrowContribution(pluginName, contribution) {
+  /** @returns {Promise<never>} */
+  async function start() {
+    let shown = ''
+    try {
+      const declared = contribution.name
+      if (typeof declared === 'string') shown = declared
+    } catch {
+      // A `name` that throws is the registering plugin's business. This
+      // refusal has to arrive as itself, not as whatever that accessor raised.
+    }
+    getLogger('sources').warn('source.contribution_start_denied', {
+      [Attr.COMPONENT]: 'sources',
+      [Attr.OPERATION]: 'source.start',
+      [Attr.ERROR_KIND]: 'source_contribution_start_denied',
+      [Attr.PLUGIN]: pluginName,
+      hyp_source: shown,
+      status: 'failed',
+    })
+    const subject = shown === '' ? 'a source' : `'${shown}'`
+    throw new Error(
+      `SourceRegistry: a contribution reached through get()/list() carries no live start(), so '${pluginName}' ` +
+      `cannot start ${subject} under a context of its own choosing: use SourceRegistry.start(name, ctx)`
+    )
+  }
+  /** @param {string | symbol} prop */
+  const answers = (prop) =>
+    prop === 'start' ||
+    (typeof prop === 'string' && CONTRIBUTION_FIELDS.includes(prop) && Reflect.has(contribution, prop))
+  // The contribution as the receiver, so an accessor reading a private field
+  // off `this` still finds it, as `neuter` does in
+  // `src/core/plugin_doctor/dry_run.js`.
+  /** @param {string | symbol} prop */
+  const read = (prop) => (prop === 'start' ? start : Reflect.get(contribution, prop, contribution))
+  // A null-prototype target holding nothing, so the view answers out of the
+  // traps alone and `Object.getPrototypeOf` reaches no class of the
+  // registering plugin's.
+  const view = new Proxy(Object.create(null), {
+    /** @param {object} _target @param {string | symbol} prop */
+    get(_target, prop) { return answers(prop) ? read(prop) : undefined },
+    /** @param {object} _target @param {string | symbol} prop */
+    has(_target, prop) { return answers(prop) },
+    ownKeys() {
+      return [...CONTRIBUTION_FIELDS.filter((field) => Reflect.has(contribution, field)), 'start']
+    },
+    /** @param {object} _target @param {string | symbol} prop */
+    getOwnPropertyDescriptor(_target, prop) {
+      if (!answers(prop)) return undefined
+      // `configurable: true` because the target holds nothing: a proxy may not
+      // report a property the target does not carry as non-configurable.
+      return { value: read(prop), writable: false, enumerable: true, configurable: true }
+    },
+    set() { return false },
+    defineProperty() { return false },
+    deleteProperty() { return false },
+    setPrototypeOf() { return false },
+    // Left extensible deliberately. A `preventExtensions` that landed would
+    // bind `ownKeys` to the empty target, and every later read of the view
+    // would throw a proxy invariant at its caller instead of answering.
+    preventExtensions() { return false },
+  })
+  return /** @type {SourceContribution} */ (view)
+}
+
+/**
  * Per-plugin facade over the global source registry. `register` tells the
  * registry which plugin is calling, so a source is bound to its registrar
  * rather than to the `plugin` its own contribution declares: the daemon picks
  * the activation context a source starts under from that binding, and the
  * declared field is plugin-written (issue #1541).
  *
- * The rest of the registry is forwarded unchanged. `ctx.sources` has always
+ * The rest of the registry is read through to. `ctx.sources` has always
  * carried the kernel-side lifecycle members too, and `@hypaware/otel` starts
  * its own listener through them from `activate()`.
  *
- * A registry without `registeringAs` is called exactly as before. The plugin
- * doctor's stand-in delegates to the real registry, so it has it.
+ * Forwarding those unchanged aimed the #1541 defect the other way. A plugin
+ * could no longer take a neighbour's context by registering under its name,
+ * but it could still hand a neighbour's already-registered source its own
+ * context by starting it: `ctxB.sources.start('ai-gateway', ctxB)` ran the
+ * victim's `start()` with the squatter's config slice, paths, scoped logger,
+ * capability handles and permission context, and the boot walk that followed
+ * reached `started(name)` first and reported the row as started under its real
+ * owner, so nothing refused and nothing warned (issue #1947). `stop` and
+ * `stopAll` were the same handle pointed at a neighbour's running source. So
+ * those four are bracketed too, against the same `ownerOf` binding
+ * `register` already writes: a plugin drives the lifecycle of the sources the
+ * kernel recorded it as registering and of no others. The kernel is not on
+ * this path - the daemon's boot walk holds `runtime.sources`, picks the
+ * context from `ownerOf` itself, and never sees a facade - and the two
+ * bundled plugins that do drive a lifecycle here (`@hypaware/otel` starting
+ * `otlp` from `activate()`, `@hypaware/gascity` starting and reloading
+ * `gascity` from its commands) are each driving their own source.
  *
- * "The rest" is forwarded by putting the registry on the facade's prototype
- * chain rather than by copying it. A spread carries own enumerable properties
- * and nothing else, so a registry keeping `get`/`list`/the lifecycle members
- * on a prototype reached a plugin without them: `ctx.sources.list` was not a
- * function, and `@hypaware/otel` could not start its own listener from
- * `activate()`. That is not hypothetical. `hypaware/integration`'s `run()`
- * takes `opts.kernel`, dispatch uses that kernel verbatim, and both its
- * activation seams (`activateSeamCommandPlugins` and `activatePluginClosure`)
- * hand it to `activatePlugins`, so a host's own registry reaches this
- * function without `createKernelRuntime` being exported at all. Delegating
- * also keeps `this` pointing at the facade, so a registry whose members read
- * their own state off `this` still finds it through the chain. It is the same
- * own-versus-inherited trap `neuter` documents in
- * `src/core/plugin_doctor/dry_run.js`, and it answers it the same way: read
- * through to the original rather than flatten a copy of it.
+ * `started` and `listStarted` are bracketed with them, because what they hand
+ * back is the `StartedSource` the four above drive: `started(name).stop()` is
+ * `stop(name)` reached through the handle, and it runs behind the registry, so
+ * the source stays in its started map and its gauge stays ticked up while
+ * nothing is running. Those two filter rather than refuse: each already has an
+ * answer for a source that is not started, and a plugin reading its own reads
+ * them unchanged.
+ *
+ * `status` stays forwarded. It takes no context, moves no source between
+ * states, hands back a value rather than the handle, and leaves the started
+ * set it reads exactly as it found it.
+ *
+ * A registry without `registeringAs` is called exactly as before, and so is
+ * one without `ownerOf`: a host driving its own registry through
+ * `hypaware/integration` records no registrar for anything, so there is no
+ * binding to read, and refusing on its absence would stop every source such a
+ * host runs. That is the rule the daemon's boot walk reads `ownerOf` under
+ * too. The plugin doctor's stand-in delegates to the real registry, so it has
+ * both.
+ *
+ * "The rest" is forwarded by reading through to the registry rather than by
+ * copying it. A spread carries own enumerable properties and nothing else, so
+ * a registry keeping `get`/`list`/the lifecycle members on a prototype reached
+ * a plugin without them: `ctx.sources.list` was not a function, and
+ * `@hypaware/otel` could not start its own listener from `activate()`. That is
+ * not hypothetical. `hypaware/integration`'s `run()` takes `opts.kernel`,
+ * dispatch uses that kernel verbatim, and both its activation seams
+ * (`activateSeamCommandPlugins` and `activatePluginClosure`) hand it to
+ * `activatePlugins`, so a host's own registry reaches this function without
+ * `createKernelRuntime` being exported at all. Reading through also keeps
+ * `this` pointing at the facade, so a registry whose members read their own
+ * state off `this` still find it. It is the same own-versus-inherited trap
+ * `neuter` documents in `src/core/plugin_doctor/dry_run.js`, and it answers it
+ * the same way: read through to the original rather than flatten a copy of it.
+ *
+ * The read-through is a proxy rather than the registry on the facade's
+ * prototype chain, because a prototype is reachable from the object that
+ * inherits it: `Object.getPrototypeOf(ctx.sources).register(contribution)`
+ * reached the registry's own unbracketed `register`, so no owner was recorded
+ * and the `plugin !== registrar` refusal never ran, and a contribution that
+ * took a key that way declared any plugin it liked and was started under that
+ * plugin's context, config slice, paths and capability handles (issue #1944).
+ * The proxy target holds the bracketed members below non-configurably and has
+ * a null prototype, so nothing but this closure reaches the registry and no
+ * shadow can be deleted out of the way. What the chain gave a plugin it still
+ * gives: inherited members answer, `in` sees what the registry has, and a
+ * write lands on the facade rather than on the shared registry. A lifecycle
+ * member is shadowed only where the registry has one to shadow, so a registry
+ * that never offered `stopAll` does not acquire one here.
+ *
+ * `get` and `list` are the same reach one hop further along. Both forwarded
+ * the contribution the registry is holding, by reference and writable, so a
+ * plugin did not need `start` at all: `ctxB.sources.get('ai-gateway').start(ctxB)`
+ * ran the victim's `start()` under the squatter's config slice, paths, scoped
+ * logger, capability handles and permission context, with `list()` the same
+ * reach without needing the name. None of it went through the registry, so the
+ * source was neither counted nor spanned and the boot walk started the real one
+ * afterwards: two binds of one port, or two writers on the victim's dataset
+ * (issue #1953). The same handle writable was worse still: replacing `.start`
+ * on what `get` returned put the squatter's function on the object the boot
+ * walk calls, so squatter code ran under the victim's own context.
+ *
+ * So both are narrowed to a read-only view (`narrowContribution` above): the
+ * declarative fields the contract declares, read through to the contribution,
+ * and a `start` that refuses the way the four lifecycle members refuse. What
+ * the contract promises is unchanged - `get` still answers with a
+ * `SourceContribution`, `list` with all of them in registry order - because
+ * what it never promised is that a plugin may run another plugin's `start()`.
+ *
+ * The two narrow differently because they know different things. `get` is
+ * asked for a name, which is the key the registry validated and the key
+ * `ownerOf` answers on, so it hands this plugin its own contribution back
+ * unchanged and narrows only a neighbour's. `list` has no such key: the only
+ * name on a contribution is `contribution.name`, a live plugin property the
+ * registry itself refuses to treat as the key, and one a hostile source could
+ * make answer with a neighbour's name precisely to be handed that neighbour's
+ * object. So `list` narrows every entry, and a plugin that wants its own
+ * contribution back by identity asks `get` for it by the name it registered
+ * under.
  *
  * @param {PluginName} pluginName
  * @param {ExtendedSourceRegistry} registry
@@ -217,10 +818,7 @@ export function createActivationContext({ runtime, plugin, paths, config, env })
  * @ref LLP 0004#the-activation-context [implements]: `sources` is one of the per-plugin registry facades
  */
 function createSourcesFacade(pluginName, registry) {
-  // `?? null` so a runtime with no source registry still builds a context and
-  // fails on the call, the way the spread it replaces did, rather than
-  // throwing here.
-  return Object.assign(Object.create(registry ?? null), {
+  const members = {
     /** @param {SourceContribution} contribution */
     register(contribution) {
       if (typeof registry.registeringAs !== 'function') {
@@ -245,6 +843,614 @@ function createSourcesFacade(pluginName, registry) {
     registeringAs(_plugin, fn) {
       if (typeof registry.registeringAs !== 'function') return fn()
       return registry.registeringAs(pluginName, fn)
+    },
+  }
+  /**
+   * Refuse a lifecycle call aimed at a source this plugin is not recorded as
+   * having registered, which includes one the registry recorded no registrar
+   * for at all: a source that took its key out of band chose the `plugin` it
+   * carries, and that claim is the one party the kernel must not ask.
+   *
+   * `name` is not validated the way `register` validates it, so it is quoted
+   * only when it is already a string: a hostile `toString` must not throw out
+   * of the refusal refusing it. A non-string keys no source, so it is refused
+   * either way. The logger is resolved here rather than per facade, which
+   * every activation builds and almost none of which ever refuse anything.
+   *
+   * @param {string} operation
+   * @param {string} name
+   */
+  function refuseForeignSource(operation, name) {
+    const owner = registry.ownerOf(name)
+    if (owner === pluginName) return
+    const shown = typeof name === 'string' ? name : '(non-string source name)'
+    const held = owner === undefined ? 'no recorded plugin' : `'${owner}'`
+    getLogger('sources').warn('source.lifecycle_owner_mismatch', {
+      [Attr.COMPONENT]: 'sources',
+      [Attr.OPERATION]: `source.${operation}`,
+      [Attr.ERROR_KIND]: 'source_owner_mismatch',
+      [Attr.PLUGIN]: pluginName,
+      hyp_owner_plugin: owner ?? '',
+      hyp_source: shown,
+      status: 'failed',
+    })
+    throw new Error(
+      `SourceRegistry.${operation}: source '${shown}' is registered by ${held}, not by '${pluginName}'`
+    )
+  }
+  // The four that refuse are async so a refusal arrives as the rejection every
+  // other lifecycle failure arrives as, rather than as a synchronous throw out
+  // of an awaited call. The two that filter keep the registry's own synchronous
+  // signatures, because a plugin reading its own reads them as it always did.
+  // @ref LLP 0012#lifecycle-and-reload-context-invariant [constrained-by]: the kernel drives the lifecycle, so a plugin's own facade drives only what it registered
+  const lifecycle = {
+    /**
+     * @param {string} name
+     * @param {PluginActivationContext} ctx
+     */
+    async start(name, ctx) {
+      refuseForeignSource('start', name)
+      return registry.start(name, ctx)
+    },
+    /** @param {string} name */
+    async stop(name) {
+      refuseForeignSource('stop', name)
+      return registry.stop(name)
+    },
+    /**
+     * @param {string} name
+     * @param {PluginActivationContext} ctx
+     */
+    async reload(name, ctx) {
+      refuseForeignSource('reload', name)
+      return registry.reload(name, ctx)
+    },
+    /**
+     * This plugin's own started sources, not every source the daemon is
+     * running. Names come from `listStarted`, so each is the key the registry
+     * started the source under rather than a live `contribution.name`.
+     */
+    async stopAll() {
+      for (const { name } of registry.listStarted()) {
+        if (registry.ownerOf(name) === pluginName) await registry.stop(name)
+      }
+    },
+    /**
+     * The `StartedSource` itself, which is why these two are bracketed
+     * alongside the four above rather than left forwarded with `status`:
+     * `started(name).stop()` and `started(name).reload(ctx)` are the refusals
+     * above reached through the handle instead of by name, and they run behind
+     * the registry, which keeps the source in its started map and the
+     * `hyp_sources_started` gauge ticked up, so the boot walk and `hyp status`
+     * go on reporting a source nothing is running. `listStarted` handed the
+     * whole set out without even needing the name.
+     *
+     * Filtered rather than refused: both members already answer "nothing
+     * started under that name", so a plugin reading its own is unaffected and
+     * one reading a neighbour's gets the answer it would get before the
+     * neighbour started.
+     *
+     * @param {string} name
+     */
+    started(name) {
+      return registry.ownerOf(name) === pluginName ? registry.started(name) : undefined
+    },
+    listStarted() {
+      return registry.listStarted().filter(({ name }) => registry.ownerOf(name) === pluginName)
+    },
+  }
+  /**
+   * The views this facade has already built, so repeated reads hand back the
+   * same object: a plugin that stores one in a `Set`, keys a `Map` by it, or
+   * compares two `list()` results with `===` or `indexOf` sees the stable
+   * identity the live contribution gave it. Weak and keyed by the
+   * contribution, so a view lives exactly as long as the source it stands for
+   * rather than pinning every source a long-lived daemon ever registered.
+   *
+   * @type {WeakMap<object, SourceContribution>}
+   */
+  const views = new WeakMap()
+  /** @param {SourceContribution | undefined} contribution */
+  function narrow(contribution) {
+    // An unknown name answers `undefined`, and a host registry is free to hand
+    // back whatever it holds. Only an object keys a `WeakMap`, and only an
+    // object has a `start` to reach.
+    if (contribution === null || typeof contribution !== 'object') return contribution
+    const existing = views.get(contribution)
+    if (existing !== undefined) return existing
+    const view = narrowContribution(pluginName, contribution)
+    views.set(contribution, view)
+    return view
+  }
+  // @ref LLP 0012#lifecycle-and-reload-context-invariant [constrained-by]: the kernel drives start, so no read hands a plugin a live start() it does not own
+  const reads = {
+    /** @param {string} name */
+    get(name) {
+      const contribution = registry.get(name)
+      return registry.ownerOf(name) === pluginName ? contribution : narrow(contribution)
+    },
+    list() {
+      return registry.list().map((contribution) => narrow(contribution))
+    },
+  }
+  // Non-writable and non-configurable, not merely assigned: `delete
+  // ctx.sources.register` took the own property away and the miss below then
+  // read through to the registry's own unbracketed `register`, which is the
+  // whole of issue #1944 again in one statement; deleting `registeringAs` too
+  // reached the registrar lever and recorded any plugin at all as the owner.
+  // A property the target holds non-configurably is one neither a plugin nor a
+  // later trap can take away, so the shadow over the members that carry the
+  // binding cannot be lifted. `enumerable` so `Object.keys`, a spread and
+  // `for...in` still see them, as the object this replaces answered.
+  const facade = Object.create(null)
+  /** @param {string} member @param {unknown} value */
+  const pin = (member, value) => {
+    Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  for (const [member, value] of Object.entries(members)) pin(member, value)
+  // Only where there is a binding to read, and only over a member the registry
+  // actually has: a host registry carrying neither is left reading as it did.
+  // `stopAll` is rebuilt out of `listStarted`, so it is shadowed only where
+  // that is there to rebuild it from. `get` is in the same block rather than
+  // narrowing unconditionally, because without `ownerOf` it cannot tell this
+  // plugin's own contribution from a neighbour's and would have to narrow both;
+  // `list` is there with it so the two members a plugin reads the registry
+  // through go on agreeing about which registries this facade brackets.
+  if (typeof registry?.ownerOf === 'function') {
+    const shadowable = {
+      start: typeof registry.start === 'function',
+      stop: typeof registry.stop === 'function',
+      reload: typeof registry.reload === 'function',
+      stopAll: typeof registry.stopAll === 'function' && typeof registry.listStarted === 'function',
+      started: typeof registry.started === 'function',
+      listStarted: typeof registry.listStarted === 'function',
+      get: typeof registry.get === 'function',
+      list: typeof registry.list === 'function',
+    }
+    for (const [member, value] of Object.entries({ ...lifecycle, ...reads })) {
+      if (shadowable[/** @type {keyof typeof shadowable} */ (member)]) pin(member, value)
+    }
+  }
+  return new Proxy(facade, {
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     * @param {unknown} receiver
+     */
+    get(target, prop, receiver) {
+      // Own first, so the bracketed members above are the only `register`,
+      // `registeringAs` and lifecycle members a plugin can reach, and none of
+      // them can be deleted to uncover the registry's.
+      if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver)
+      // The facade as the receiver, so a registry member reading its own state
+      // off `this` still finds it. A runtime with no source registry builds a
+      // context and fails on the call, the way the spread this replaces did.
+      return registry == null ? undefined : Reflect.get(registry, prop, receiver)
+    },
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     */
+    has(target, prop) {
+      return Object.hasOwn(target, prop) || (registry != null && Reflect.has(registry, prop))
+    },
+  })
+}
+
+/**
+ * The declared `SinkHandle` surface, which is the whole of what a narrowed
+ * handle answers for. `hypaware-plugin-kernel-types.d.ts` §Sinks declares
+ * `{ name, plugin, supports, sink }`; the kernel's own `ExtendedSinkHandle`
+ * adds `config`, `kind`, `encoder`, `blobStore` and the writer/destination
+ * pair, and none of those are the kernel's to pass on to a plugin that does
+ * not own the instance: `config` is the validated instance config with any
+ * inline credential in it, and `encoder` and `blobStore` are live objects
+ * belonging to two further plugins.
+ */
+const SINK_HANDLE_FIELDS = ['name', 'plugin', 'supports']
+
+/**
+ * The declared `SinkContribution` surface, minus `create`. Spelled out
+ * separately from the handle's list, which it happens to match today, because
+ * the two are different declarations and either may gain a field.
+ */
+const SINK_CONTRIBUTION_FIELDS = ['name', 'plugin', 'supports']
+
+/**
+ * A read-only view over a live object, answering only for `fields` (read
+ * through to the original) plus whatever `extra` supplies of this module's
+ * own. Shared by the two narrowings below, which differ only in their field
+ * list and in the members they replace.
+ *
+ * Read through rather than copied out, for the reason `narrowContribution`
+ * gives: a copy runs every accessor at the moment it is made, which puts one
+ * plugin's code inside another plugin's `list()` call.
+ *
+ * `supports` is the one field that is not a string. It is an array, and on a
+ * kernel-built handle it is the resolved tag list the sink driver and
+ * `hyp status` read, so handing it over by reference would let a neighbour
+ * edit what they read. It is copied and frozen once per view rather than per
+ * read: a kernel-built handle's tags are fixed at `instantiate`, so one copy
+ * cannot go stale, and a plugin walking a listing allocates nothing per read.
+ *
+ * @param {string[]} fields
+ * @param {Record<string, unknown>} source
+ * @param {Record<string, unknown>} extra
+ */
+function narrowView(fields, source, extra) {
+  /** @type {unknown} */
+  let tags
+  /** @param {string | symbol} prop */
+  const answers = (prop) =>
+    typeof prop === 'string' && (prop in extra || (fields.includes(prop) && Reflect.has(source, prop)))
+  /** @param {string | symbol} prop */
+  const read = (prop) => {
+    const key = /** @type {string} */ (prop)
+    if (key in extra) return extra[key]
+    // The source as the receiver, so an accessor reading a private field off
+    // `this` still finds it.
+    if (key !== 'supports') return Reflect.get(source, key, source)
+    if (tags === undefined) {
+      const value = Reflect.get(source, key, source)
+      tags = Object.freeze(Array.isArray(value) ? Array.from(value) : value)
+    }
+    return tags
+  }
+  // A null-prototype target holding nothing, so the view answers out of the
+  // traps alone and `Object.getPrototypeOf` reaches no class of the
+  // registering plugin's.
+  return new Proxy(Object.create(null), {
+    /** @param {object} _target @param {string | symbol} prop */
+    get(_target, prop) { return answers(prop) ? read(prop) : undefined },
+    /** @param {object} _target @param {string | symbol} prop */
+    has(_target, prop) { return answers(prop) },
+    ownKeys() {
+      return [...fields.filter((field) => Reflect.has(source, field)), ...Object.keys(extra)]
+    },
+    /** @param {object} _target @param {string | symbol} prop */
+    getOwnPropertyDescriptor(_target, prop) {
+      if (!answers(prop)) return undefined
+      // `configurable: true` because the target holds nothing: a proxy may not
+      // report a property the target does not carry as non-configurable.
+      return { value: read(prop), writable: false, enumerable: true, configurable: true }
+    },
+    set() { return false },
+    defineProperty() { return false },
+    deleteProperty() { return false },
+    setPrototypeOf() { return false },
+    // Left extensible deliberately, as `narrowContribution` is: a
+    // `preventExtensions` that landed would bind `ownKeys` to the empty target.
+    preventExtensions() { return false },
+  })
+}
+
+/**
+ * The name a refusal quotes, when the object will say. A hostile `name` must
+ * not throw out of the refusal refusing it, and a non-string names nothing.
+ *
+ * @param {Record<string, unknown>} source
+ */
+function shownName(source) {
+  try {
+    const declared = source.name
+    return typeof declared === 'string' ? declared : ''
+  } catch {
+    // A `name` that throws is the owning plugin's business. The refusal has to
+    // arrive as itself, not as whatever that accessor raised.
+    return ''
+  }
+}
+
+/**
+ * A read-only view of a sink handle, for the members of `ctx.sinks` that hand
+ * one to a plugin that does not own the instance.
+ *
+ * `sink` is the member this exists for. The live `Sink` is the object the sink
+ * driver calls: `exportBatch` ships caller-controlled rows to the owner's
+ * configured destination under the owner's credentials, off the driver, so the
+ * export is neither scheduled, spanned, cursor-advanced nor counted and neither
+ * `hyp sync`'s preview nor the usage-policy read at the shared export path
+ * (LLP 0070) sees it; `close()` stops the owner's exports while the driver
+ * keeps its handle; `reader()` is the whole of a queryable sink's data
+ * (issue #1961).
+ *
+ * The view carries a refusing `sink` rather than no `sink` at all, because the
+ * contract declares `get`/`list` answering with a `SinkHandle` and a plugin
+ * reading the shape it was promised should find one. Writes, defines, deletes
+ * and reparenting are refused with it: `handle.sink = mine` put the caller's
+ * object on what the driver calls next.
+ *
+ * @param {PluginName} pluginName The plugin the view is being handed to.
+ * @param {SinkHandle} handle
+ * @returns {SinkHandle}
+ */
+function narrowSinkHandle(pluginName, handle) {
+  const source = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (handle))
+  /** @param {string} member */
+  const refuse = (member) => async () => {
+    const shown = shownName(source)
+    getLogger('sinks').warn('sink.handle_member_denied', {
+      [Attr.COMPONENT]: 'sinks',
+      [Attr.OPERATION]: `sink.${member}`,
+      [Attr.ERROR_KIND]: 'sink_handle_member_denied',
+      [Attr.PLUGIN]: pluginName,
+      [Attr.SINK_INSTANCE]: shown,
+      status: 'failed',
+    })
+    throw new Error(
+      `SinkRegistry: sink ${shown === '' ? 'instance' : `'${shown}'`} is not owned by '${pluginName}', so the handle ` +
+      `it reached through get()/list() carries no live ${member}(): the kernel's driver exports on the configured schedule`
+    )
+  }
+  // The three members every `Sink` declares, each refusing. The optional rest
+  // (`reader`, `datasetDisposition`, `previewSourceHistory`,
+  // `replaySourceHistory`) are absent, which is a shape the contract already
+  // describes: a sink that does not implement them.
+  const sink = narrowView([], {}, {
+    exportBatch: refuse('exportBatch'),
+    flush: refuse('flush'),
+    close: refuse('close'),
+  })
+  return /** @type {SinkHandle} */ (narrowView(SINK_HANDLE_FIELDS, source, { sink }))
+}
+
+/**
+ * A read-only view of a sink contribution, for the members of `ctx.sinks` that
+ * hand one to a plugin that did not register it.
+ *
+ * `create(ctx)` is the reach: it is the owner's sink constructor, and a caller
+ * running it with a `SinkCreateContext` of its own gets a live `Sink` built
+ * out of the owner's code against config the caller chose, which is the
+ * `get`/`list` half of issue #1953 one registry along.
+ *
+ * @param {PluginName} pluginName
+ * @param {SinkContribution} contribution
+ * @returns {SinkContribution}
+ */
+function narrowSinkContribution(pluginName, contribution) {
+  const source = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (contribution))
+  /** @returns {Promise<never>} */
+  async function create() {
+    const shown = shownName(source)
+    getLogger('sinks').warn('sink.contribution_create_denied', {
+      [Attr.COMPONENT]: 'sinks',
+      [Attr.OPERATION]: 'sink.create',
+      [Attr.ERROR_KIND]: 'sink_contribution_create_denied',
+      [Attr.PLUGIN]: pluginName,
+      hyp_sink: shown,
+      status: 'failed',
+    })
+    throw new Error(
+      `SinkRegistry: a contribution reached through getContribution()/listContributions() carries no live create(), ` +
+      `so '${pluginName}' cannot build a sink from a contribution it did not register`
+    )
+  }
+  return /** @type {SinkContribution} */ (narrowView(SINK_CONTRIBUTION_FIELDS, source, { create }))
+}
+
+/**
+ * Per-plugin facade over the global sink registry. `ctx.sinks` was the
+ * registry itself, handed over with no facade at all, so every one of its
+ * members was a reach into a neighbour's configured export path: the live
+ * handle from `get`/`list`/`listHandles` (egress, denial, read, disclosure and
+ * substitution, all measured), the live contribution behind
+ * `getContribution`/`listContributions`, an `instantiate` that stands up an
+ * export target the config never declared, and a `closeAll` that stops
+ * everybody's (issue #1961).
+ *
+ * Sinks had no ownership key to bracket on. `SinkRegistry.register` validated
+ * `contribution.plugin` as a non-empty string with no registrar to check it
+ * against, so a plugin could register a contribution claiming a neighbour, and
+ * `handle.plugin` was that self-declared claim read once at `instantiate` -
+ * the #1541 shape exactly. So the binding is established first, the way
+ * `SourceRegistry` establishes it: `register` is bracketed with
+ * `registeringAs` and refuses a contribution naming anyone but its registrar,
+ * and `instantiate` records the instance's owner from the `ActivePlugin`
+ * record the kernel's materializer resolved out of the config row. `ownerOf`
+ * answers from that record, so nothing here brackets on a plugin-written
+ * property.
+ *
+ * What each member does:
+ *
+ * - `register` / `registeringAs` bracket on this plugin's name, as the sources
+ *   facade does, so the registrar is the kernel's observation and not a claim.
+ * - `get` narrows a handle whose instance this plugin does not own. The name
+ *   it is asked for is the key `ownerOf` answers on, so the plugin's own
+ *   handle comes back untouched.
+ * - `list` / `listHandles` narrow every entry the plugin does not own. Unlike
+ *   `SourceRegistry.list`, the key is readable from the entry: `handle.name`
+ *   is written by `instantiate` from the validated instance name, not by a
+ *   plugin. A host registry's handles are not this registry's, so the name
+ *   read off one is resolved back through `get` and has to answer with the
+ *   very handle it came from before it is trusted, which is the round trip
+ *   `src/core/plugin_doctor/dry_run.js` applies to a listing.
+ * - `getContribution` / `listContributions` narrow a contribution this plugin
+ *   did not register, so a neighbour's `create()` is not a live constructor.
+ *   The listing still enumerates every contribution, as it did.
+ * - `instantiate` refuses. Instance creation is driven by the kernel from
+ *   config (LLP 0014), and a plugin calling it puts a handle the driver then
+ *   exports on into the shared map under a name no config declared.
+ * - `closeAll` passes this plugin's name, so it closes the instances this
+ *   plugin owns and leaves a neighbour's running.
+ * - `ownerOf` is forwarded. It takes a name, answers a string, and moves
+ *   nothing; the owner it names is already on every handle and on the
+ *   `hyp status` sink lines.
+ *
+ * The read-through is the proxy over a null-prototype target that
+ * `createSourcesFacade` documents, for the reasons it gives there.
+ *
+ * @param {PluginName} pluginName
+ * @param {ExtendedSinkRegistry} registry
+ * @returns {ExtendedSinkRegistry}
+ * @ref LLP 0004#the-activation-context [implements]: `sinks` is one of the per-plugin registry facades
+ */
+function createSinksFacade(pluginName, registry) {
+  const members = {
+    /** @param {SinkContribution} contribution */
+    register(contribution) {
+      if (typeof registry.registeringAs !== 'function') {
+        registry.register(contribution)
+        return
+      }
+      registry.registeringAs(pluginName, () => { registry.register(contribution) })
+    },
+    /**
+     * Always the activating plugin's name, whatever is passed, as on the
+     * sources and capabilities facades. Delegation would otherwise hand a
+     * plugin the kernel's own lever for saying who is registering.
+     *
+     * @template T
+     * @param {PluginName} _plugin
+     * @param {() => T} fn
+     * @returns {T}
+     */
+    registeringAs(_plugin, fn) {
+      if (typeof registry.registeringAs !== 'function') return fn()
+      return registry.registeringAs(pluginName, fn)
+    },
+  }
+  /**
+   * The views this facade has already built, so repeated reads hand back the
+   * same object: a plugin that stores one in a `Set`, keys a `Map` by it, or
+   * compares two `list()` results with `===` sees the stable identity the live
+   * object gave it. Weak and keyed by the live object, so a view lives
+   * exactly as long as the sink it stands for rather than pinning every
+   * instance a long-running daemon ever materialized.
+   *
+   * @type {WeakMap<object, object>}
+   */
+  const views = new WeakMap()
+  /**
+   * @template T
+   * @param {T} source
+   * @param {(value: any) => object} build
+   * @returns {T}
+   */
+  function narrow(source, build) {
+    // An unknown name answers `undefined`, and a host registry is free to hand
+    // back whatever it holds. Only an object keys a `WeakMap`.
+    if (source === null || typeof source !== 'object') return source
+    const existing = views.get(source)
+    if (existing !== undefined) return /** @type {T} */ (existing)
+    const view = build(source)
+    views.set(source, view)
+    return /** @type {T} */ (view)
+  }
+  /** @param {SinkHandle} handle */
+  const ownsHandle = (handle) => {
+    // One read of `name`, resolved back through the registry: a handle that is
+    // not the one this registry answers with for the name it just claimed is
+    // not the handle keyed under it, whatever it says.
+    //
+    // Read through `shownName`, which is why that guard is shared rather than
+    // local to the refusals: a handle is a live object its owner still holds,
+    // so an owner that puts a throwing accessor on its own `name` would
+    // otherwise raise out of every neighbour's `list()`, which is the owner's
+    // code escaping into the neighbour's call that reading through instead of
+    // copying exists to prevent. A name that cannot be read owns nothing here
+    // and the entry is narrowed, which is the fail-closed answer.
+    if (handle === null || typeof handle !== 'object') return false
+    const name = shownName(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (handle)))
+    if (name === '') return false
+    return registry.ownerOf(name) === pluginName && registry.get(name) === handle
+  }
+  /** @param {SinkHandle[]} handles */
+  const narrowListing = (handles) =>
+    handles.map((handle) => (ownsHandle(handle) ? handle : narrow(handle, (h) => narrowSinkHandle(pluginName, h))))
+  /** @param {SinkContribution | undefined} contribution @param {string} plugin */
+  const narrowContributionFor = (contribution, plugin) =>
+    plugin === pluginName ? contribution : narrow(contribution, (c) => narrowSinkContribution(pluginName, c))
+  const reads = {
+    /** @param {string} name */
+    get(name) {
+      const handle = registry.get(name)
+      if (registry.ownerOf(name) === pluginName) return handle
+      return narrow(handle, (h) => narrowSinkHandle(pluginName, h))
+    },
+    list() { return narrowListing(registry.list()) },
+    listHandles() { return /** @type {ExtendedSinkHandle[]} */ (narrowListing(registry.listHandles())) },
+    /** @param {string} plugin @param {string} sinkName */
+    getContribution(plugin, sinkName) {
+      return narrowContributionFor(registry.getContribution(plugin, sinkName), plugin)
+    },
+    listContributions() {
+      return registry.listContributions().map((entry) => ({
+        ...entry,
+        contribution: /** @type {SinkContribution} */ (narrowContributionFor(entry.contribution, entry.plugin)),
+      }))
+    },
+    /**
+     * Instance creation is the kernel's, driven from `HypAwareV2Config.sinks`.
+     * A plugin reaching it registers a handle the sink driver then exports on,
+     * under a name no config declared and against a contribution it may not
+     * have registered.
+     *
+     * @returns {Promise<never>}
+     * @ref LLP 0014#sinks-are-export-targets-not-the-write-path [constrained-by]: instances are driven from config, so no plugin stands one up
+     */
+    async instantiate() {
+      getLogger('sinks').warn('sink.instantiate_denied', {
+        [Attr.COMPONENT]: 'sinks',
+        [Attr.OPERATION]: 'sink.instantiate',
+        [Attr.ERROR_KIND]: 'sink_instantiate_denied',
+        [Attr.PLUGIN]: pluginName,
+        status: 'failed',
+      })
+      throw new Error(
+        `SinkRegistry.instantiate: sink instance creation is driven by the kernel from config, not by '${pluginName}'`
+      )
+    },
+    /** This plugin's own instances, not every sink the daemon is exporting. */
+    async closeAll() {
+      await registry.closeAll(pluginName)
+    },
+  }
+  // Non-writable and non-configurable, not merely assigned: a deletable own
+  // property is one a plugin removes to uncover the registry's own member
+  // through the read-through below, which is issue #1946 in one statement.
+  const facade = Object.create(null)
+  /** @param {string} member @param {unknown} value */
+  const pin = (member, value) => {
+    Object.defineProperty(facade, member, { value, enumerable: true, writable: false, configurable: false })
+  }
+  for (const [member, value] of Object.entries(members)) pin(member, value)
+  // Only where there is a binding to read, and only over a member the registry
+  // actually has: a host registry carrying neither `ownerOf` nor the member is
+  // left reading as it did.
+  if (typeof registry?.ownerOf === 'function' && typeof registry.get === 'function') {
+    const shadowable = {
+      get: true,
+      list: typeof registry.list === 'function',
+      listHandles: typeof registry.listHandles === 'function',
+      getContribution: typeof registry.getContribution === 'function',
+      listContributions: typeof registry.listContributions === 'function',
+      instantiate: typeof registry.instantiate === 'function',
+      closeAll: typeof registry.closeAll === 'function',
+    }
+    for (const [member, value] of Object.entries(reads)) {
+      if (shadowable[/** @type {keyof typeof shadowable} */ (member)]) pin(member, value)
+    }
+  }
+  return new Proxy(facade, {
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     * @param {unknown} receiver
+     */
+    get(target, prop, receiver) {
+      // Own first, so the bracketed members above are the only ones a plugin
+      // can reach, and none of them can be deleted to uncover the registry's.
+      if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver)
+      // The facade as the receiver, so a registry member reading its own state
+      // off `this` still finds it.
+      return registry == null ? undefined : Reflect.get(registry, prop, receiver)
+    },
+    /**
+     * @param {Record<string | symbol, unknown>} target
+     * @param {string | symbol} prop
+     */
+    has(target, prop) {
+      return Object.hasOwn(target, prop) || (registry != null && Reflect.has(registry, prop))
     },
   })
 }
@@ -336,32 +1542,50 @@ function createSkillRegistry() {
   const items = []
   return {
     register(skill) {
-      if (!skill || typeof skill.name !== 'string' || skill.name.length === 0) {
+      // Read each field once and build the record out of what these lines
+      // checked. `skill` is the plugin's own object, so every re-read is a
+      // fresh question an accessor may answer differently: the `name` stored
+      // below was the fourth read, three after `isSafeContributionName`
+      // cleared one, so a traversal name could reach the record with nothing
+      // having validated it (issue #1552, as #1555 in the preset registry).
+      const name = skill?.name
+      const plugin = skill?.plugin
+      const clients = skill?.clients
+      const sourceDir = skill?.sourceDir
+      const projectLocal = skill?.projectLocal
+      if (typeof name !== 'string' || name.length === 0) {
         throw new TypeError('skills.register: name is required')
       }
       // @ref LLP 0003#principle [constrained-by]: name is interpolated into
       // `<skill_dir>/<name>`; reject traversal before it reaches the filesystem.
-      if (!isSafeContributionName(skill.name)) {
-        throw new TypeError(`skills.register '${skill.name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
+      if (!isSafeContributionName(name)) {
+        throw new TypeError(`skills.register '${name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
       }
-      if (typeof skill.plugin !== 'string' || skill.plugin.length === 0) {
-        throw new TypeError(`skills.register '${skill.name}': plugin is required`)
+      if (typeof plugin !== 'string' || plugin.length === 0) {
+        throw new TypeError(`skills.register '${name}': plugin is required`)
       }
-      if (!Array.isArray(skill.clients) || skill.clients.length === 0) {
-        throw new TypeError(`skills.register '${skill.name}': clients must be a non-empty array`)
+      if (!Array.isArray(clients) || clients.length === 0) {
+        throw new TypeError(`skills.register '${name}': clients must be a non-empty array`)
       }
-      if (typeof skill.sourceDir !== 'string' || skill.sourceDir.length === 0) {
-        throw new TypeError(`skills.register '${skill.name}': sourceDir is required`)
+      if (typeof sourceDir !== 'string' || sourceDir.length === 0) {
+        throw new TypeError(`skills.register '${name}': sourceDir is required`)
       }
       items.push({
-        name: skill.name,
-        plugin: skill.plugin,
-        clients: [...skill.clients],
-        sourceDir: skill.sourceDir,
-        ...(skill.projectLocal !== undefined ? { projectLocal: skill.projectLocal } : {}),
+        name,
+        plugin,
+        clients: [...clients],
+        sourceDir,
+        ...(projectLocal !== undefined ? { projectLocal } : {}),
       })
     },
-    list() { return items.slice() },
+    // A copy per entry, and of the `clients` array inside it, the way
+    // `capabilities.list()` already hands back fresh objects. `ctx.skills` is
+    // on the activation context, so `items.slice()` - a copy of the array,
+    // whose elements were the stored records - let a plugin calling `list()`
+    // inside its own `activate()` rewrite the record every later reader then
+    // read: the doctor's report, and the `<skill_dir>/<name>` an install
+    // joins (issue #1552).
+    list() { return items.map((item) => ({ ...item, clients: [...item.clients] })) },
   }
 }
 
@@ -379,31 +1603,38 @@ function createAgentRegistry() {
   const items = []
   return {
     register(agent) {
-      if (!agent || typeof agent.name !== 'string' || agent.name.length === 0) {
+      // Read once and store what was checked, for the reason on the skill
+      // registry above (issue #1552).
+      const name = agent?.name
+      const plugin = agent?.plugin
+      const clients = agent?.clients
+      const sourceFile = agent?.sourceFile
+      if (typeof name !== 'string' || name.length === 0) {
         throw new TypeError('agents.register: name is required')
       }
       // @ref LLP 0003#principle [constrained-by]: name is interpolated into
       // `<agent_dir>/<name>.md`; reject traversal before it reaches the filesystem.
-      if (!isSafeContributionName(agent.name)) {
-        throw new TypeError(`agents.register '${agent.name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
+      if (!isSafeContributionName(name)) {
+        throw new TypeError(`agents.register '${name}': name must be a safe basename (no '/', '\\\\', '..', or absolute path)`)
       }
-      if (typeof agent.plugin !== 'string' || agent.plugin.length === 0) {
-        throw new TypeError(`agents.register '${agent.name}': plugin is required`)
+      if (typeof plugin !== 'string' || plugin.length === 0) {
+        throw new TypeError(`agents.register '${name}': plugin is required`)
       }
-      if (!Array.isArray(agent.clients) || agent.clients.length === 0) {
-        throw new TypeError(`agents.register '${agent.name}': clients must be a non-empty array`)
+      if (!Array.isArray(clients) || clients.length === 0) {
+        throw new TypeError(`agents.register '${name}': clients must be a non-empty array`)
       }
-      if (typeof agent.sourceFile !== 'string' || agent.sourceFile.length === 0) {
-        throw new TypeError(`agents.register '${agent.name}': sourceFile is required`)
+      if (typeof sourceFile !== 'string' || sourceFile.length === 0) {
+        throw new TypeError(`agents.register '${name}': sourceFile is required`)
       }
       items.push({
-        name: agent.name,
-        plugin: agent.plugin,
-        clients: [...agent.clients],
-        sourceFile: agent.sourceFile,
+        name,
+        plugin,
+        clients: [...clients],
+        sourceFile,
       })
     },
-    list() { return items.slice() },
+    // Copies, for the reason on the skill registry above (issue #1552).
+    list() { return items.map((item) => ({ ...item, clients: [...item.clients] })) },
   }
 }
 

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { test } from 'node:test'
 import {
@@ -25,6 +25,7 @@ import {
 } from '../../src/core/product_telemetry/outbox.js'
 import {
   effectivePolicy,
+  safeDestination,
   writePolicy,
   productRoot
 } from '../../src/core/product_telemetry/policy.js'
@@ -38,6 +39,7 @@ import { createKernelRuntime } from '../../src/core/runtime/activation.js'
 import { createProductClient } from '../../src/core/product_telemetry/client.js'
 import { centralSeedPath } from '../../src/core/config/apply.js'
 import { productStatus, runTelemetry } from '../../src/core/product_telemetry/commands.js'
+import { readObservabilityEnv } from '../../src/core/observability/env.js'
 
 /** @param {any} t */
 function temp(t) {
@@ -295,6 +297,36 @@ test('queue rejects oversized, malformed and non-allowlisted batches without thr
   )
 })
 
+// The state root has one derivation, and this is what keeps it that way: a
+// nuance added to readObservabilityEnv, or a local copy reintroduced in
+// productRoot, fails here on whichever spelling of HYP_HOME diverges.
+test('the product telemetry root is the shared state root, however HYP_HOME is spelled', () => {
+  for (const env of [
+    { HYP_HOME: path.join(os.tmpdir(), 'hyp-root-absolute') },
+    {},
+    { HYP_HOME: path.join('relative', 'state') },
+    { HYP_HOME: '' }
+  ])
+    assert.equal(
+      productRoot(env),
+      path.join(readObservabilityEnv(env).stateDir, 'product-telemetry')
+    )
+  // The loop above still passes if both sides move together, so pin the
+  // default spelling itself.
+  assert.equal(
+    productRoot({}),
+    path.join(os.homedir(), '.hyp', 'hypaware', 'product-telemetry')
+  )
+  // And pin a set HYP_HOME too: the default pin covers only the unset branch,
+  // so a helper-side change to the set branch would pass both halves above.
+  // The relative spelling also fails on added normalization (a path.resolve
+  // would rewrite it), which an absolute pin cannot see.
+  assert.equal(
+    productRoot({ HYP_HOME: path.join('relative', 'state') }),
+    path.join('relative', 'state', 'hypaware', 'product-telemetry')
+  )
+})
+
 // The default has to be pinned through the CLI, not only through the policy
 // reader: a standalone installation has no queue to preview later.
 test('a standalone installation with no policy queues nothing and creates no telemetry state', async (t) => {
@@ -473,7 +505,7 @@ for (const broken of ['missing identity', 'invalid identity', 'wrong destination
   })
 }
 
-// The raw destination becomes the POST target's prefix, so shapes a parse alone
+// The serialized destination becomes the POST target's prefix, so shapes a parse
 // accepts still move `/v1/telemetry` off the path: a bare `?`/`#` turns the
 // receiver path into a query or fragment, and a doubled trailing slash survives
 // a single-slash strip.
@@ -540,6 +572,115 @@ test('a refused destination is described by its actual defect', (t) => {
     () => writePolicy(root, 'organization', { url: 'https://Example.Invalid/receiver', identityPath: remote.identityPath }),
     /the way the URL parser normalizes it/
   )
+})
+
+// Both producers refuse a url that spells itself differently from its parse, so
+// a saved policy carrying one was hand-edited or foreign-written. The read guard
+// still accepts it by its parse, so delivery must send to the parse: the raw
+// string resolves to the doubled slash the receiver will not route.
+test('a saved destination that does not round-trip is delivered and reported where the guard accepted it', async (t) => {
+  const home = temp(t)
+  const root = productRoot({ HYP_HOME: home })
+  const url = 'https://example.invalid/receiver\\'
+  const identityPath = path.join(home, 'identity.json')
+  const gatewayId = randomUUID()
+  fs.writeFileSync(
+    identityPath,
+    JSON.stringify({
+      central_url: url,
+      gateway_id: gatewayId,
+      jwt: `header.${Buffer.from(JSON.stringify({ org: 'org-a' })).toString('base64url')}.signature`
+    })
+  )
+  fs.mkdirSync(root, { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'policy.json'),
+    JSON.stringify({
+      version: 1,
+      mode: 'organization',
+      generation: randomUUID(),
+      url,
+      identity_path: identityPath,
+      enrollment: createHash('sha256')
+        .update(JSON.stringify([url, gatewayId, 'org-a']))
+        .digest('hex')
+    })
+  )
+  const effective = effectivePolicy(root)
+  assert.equal(effective.mode, 'organization')
+  createOutbox(root, { now: () => NOW }).append(batch(), /** @type {string} */ (effective.binding))
+  const seen = []
+  const fetchFn = /** @type {typeof fetch} */ (
+    async (requested, init) => {
+      seen.push(String(requested))
+      return init?.method === 'POST'
+        ? new Response(JSON.stringify({ status: 202, duplicate: false }), { status: 202 })
+        : capability()
+    }
+  )
+  await createDelivery(root, { fetchFn, now: () => NOW }).drain()
+  const target = safeDestination(url) + '/v1/telemetry'
+  assert.equal(target, 'https://example.invalid/receiver/v1/telemetry')
+  assert.deepEqual(seen, [target, target])
+  assert.equal(createOutbox(root, { now: () => NOW }).entries().length, 0)
+  // Status names one place with delivery: the backslash form is not somewhere
+  // the batch this pass just delivered was ever sent.
+  const reported = productStatus({ HYP_HOME: home }).organization_destination
+  assert.equal(reported, 'https://example.invalid/receiver')
+  assert.equal(target, reported + '/v1/telemetry')
+})
+
+// Both producers require the saved string to equal its own parse apart from
+// trailing slashes, so that is the whole difference a legitimate policy can
+// show. One unconditional rule covers those too: a reported destination is
+// always the one the POST target is built from, never sometimes the saved
+// spelling, so reading the line needs no knowledge of which case it hit.
+test('a producer-written destination is reported as delivery resolves it', (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  const remote = remoteEnrollment(home)
+  assert.equal(remote.identity.central_url, 'https://example.invalid/')
+  const automatic = productStatus(env)
+  assert.equal(automatic.policy, 'enrolled_organization')
+  assert.equal(automatic.organization_destination, 'https://example.invalid')
+  const explicit = writePolicy(root, 'organization', {
+    url: remote.identity.central_url,
+    identityPath: remote.identityPath
+  })
+  assert.equal(explicit.mode, 'organization')
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(root, 'policy.json'), 'utf8')).url,
+    'https://example.invalid/'
+  )
+  assert.equal(
+    productStatus(env).organization_destination,
+    'https://example.invalid'
+  )
+})
+
+// A saved url the guard resolves to no destination is reported as none: the
+// neighbouring reason says why collection is off, and a url this far outside
+// the contract can carry the credentials `writePolicy` already refuses to echo.
+test('a destination that resolves to nothing is reported as none', (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  fs.mkdirSync(root, { recursive: true })
+  fs.writeFileSync(
+    path.join(root, 'policy.json'),
+    JSON.stringify({
+      version: 1,
+      mode: 'organization',
+      generation: randomUUID(),
+      url: 'https://user:secret@example.invalid/receiver',
+      identity_path: path.join(home, 'missing.json'),
+      enrollment: 'a'.repeat(64)
+    })
+  )
+  const status = productStatus(env)
+  assert.equal(status.collection, 'off')
+  assert.equal(status.organization_destination, null)
 })
 
 // Local mode is a preview queue, not a network permission.
@@ -1055,4 +1196,65 @@ test('eligible delivery scans once and sends the oldest surviving batch', async 
   // One enumeration plus identity checks before unlinking three copies.
   assert.equal(queueReads, QUEUE_SLOTS + 3)
   assert.equal(queue.entries().length, 1)
+})
+
+// With telemetry off there is no queue directory, so the fixed slot sweep is
+// 160 failing opens on every `hyp status`. The reported status must not change
+// because they stopped happening.
+test('status reads no slot when the queue directory does not exist', async (t) => {
+  const home = temp(t)
+  const env = { HYP_HOME: home }
+  const root = productRoot(env)
+  const open = fs.openSync
+  let slotReads = 0
+  t.mock.method(fs, 'openSync', (...args) => {
+    if (String(args[0]).startsWith(path.join(root, 'queue-v1') + path.sep))
+      slotReads++
+    return Reflect.apply(open, fs, args)
+  })
+  assert.equal(fs.existsSync(path.join(root, 'queue-v1')), false)
+  let rendered = ''
+  await runTelemetry(
+    ['status'],
+    /** @type {any} */ ({
+      env,
+      stdout: { write: (/** @type {string} */ s) => (rendered += s) },
+      stderr: { write() {} }
+    })
+  )
+  // Byte-identical to the pre-guard rendering of the same rendered queue.
+  assert.equal(
+    rendered,
+    JSON.stringify(
+      {
+        collection: 'off',
+        policy: 'disabled',
+        organization_destination: null,
+        vendor_sharing: 'unavailable',
+        standalone_delivery: 'unavailable',
+        queue_bytes: 0,
+        queue_batches: 0,
+        oldest_age_seconds: 0,
+        dropped_lower_bound: 0,
+        delivery: null
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  assert.equal(JSON.stringify(productStatus(env), null, 2) + '\n', rendered)
+  assert.equal(slotReads, 0)
+
+  const policy = writePolicy(root, 'local')
+  const queue = createOutbox(root, { now: () => NOW })
+  assert(queue.append(batch(), /** @type {string} */ (policy.binding)))
+  const bytes = queue.entries()[0].bytes
+  slotReads = 0
+  const status = createOutbox(root, { now: () => NOW + 5000 }).status()
+  assert.equal(status.queue_batches, 1)
+  assert.equal(status.queue_bytes, bytes)
+  assert.equal(status.oldest_age_seconds, 5)
+  assert.equal(status.dropped_lower_bound, 0)
+  assert.equal(slotReads, QUEUE_SLOTS)
+  assert.equal(productStatus(env).collection, 'local')
 })

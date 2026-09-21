@@ -237,7 +237,7 @@ export const CORE_COMMAND_ARGS = {
     },
   },
   'report get': {
-    usage: 'hyp report get <kind> <period> <id> [path] [--output <file>] [--org <org>] [--remote <target>]',
+    usage: 'hyp report get <kind> <period> <id> [path] | <rec-id> [--output <file>] [--org <org>] [--remote <target>]',
     schema: {
       type: 'object',
       properties: {
@@ -253,6 +253,23 @@ export const CORE_COMMAND_ARGS = {
         remote: { type: 'string' },
       },
       positional: ['kind', 'period', 'id', 'path'],
+    },
+  },
+  'report fix': {
+    usage: 'hyp report fix [id] [--kind <kind>] [--period <period>] [--limit <n>] [--org <org>] [--remote <target>]',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        // The picker's filters, the listing's own: they narrow which reports
+        // the recommendations are drawn from when no id is given.
+        kind: { type: 'string' },
+        period: { type: 'string' },
+        limit: { type: 'string' },
+        org: { type: 'string' },
+        remote: { type: 'string' },
+      },
+      positional: ['id'],
     },
   },
   'report delete': {

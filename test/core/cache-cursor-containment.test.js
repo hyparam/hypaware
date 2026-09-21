@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 
 import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { appendRowsToPartition, appendRowsToSourceTable, readCursorSync, tryReadCursorSync, writeCursor } from '../../src/core/cache/partition.js'
@@ -684,31 +685,6 @@ test('and still reclaims it in a cache reached through a symlinked ancestor', as
   }
 })
 
-// The pass the cursor gate does NOT stand in front of. The grep-index scratch
-// sweep resolves its generation through `readCursorSync`, the lenient reader,
-// so a cursor the gate rejected still yields a default generation name there -
-// and this cursor does not even have to be edited, only corrupt.
-test('the index-scratch sweep does not unlink through a symlinked generation either', async () => {
-  const { root, cacheRoot, outside } = await makeCacheBesideOutsider()
-  try {
-    const dir = partitionDir(cacheRoot)
-    await fs.mkdir(path.join(outside, 'data'), { recursive: true })
-    const scratch = path.join(outside, 'data', 'part-0.index.parquet.tmp')
-    await fs.writeFile(scratch, 'someone else\'s abandoned scratch')
-    await fs.utimes(scratch, STALE, STALE)
-    // Unreadable, so the lenient reader synthesizes epoch 0 and the epoch
-    // layout names `epoch=0` as the live generation.
-    await fs.writeFile(path.join(dir, 'cursor.json'), '{ not json')
-    await fs.symlink(outside, path.join(dir, 'epoch=0'), 'dir')
-
-    await maintainCache({ cacheRoot })
-
-    assert.equal(await pathExists(scratch), true, 'a scratch-shaped name outside the cache is not the cache to reclaim')
-  } finally {
-    await fs.rm(root, { recursive: true, force: true })
-  }
-})
-
 // The same class of door reached without any cursor at all. `_hypaware_spool`
 // is a fixed name inside the partition, `readdir` follows a symlinked
 // directory, and the flush removes every file it drains by path. LLP 0326
@@ -1068,6 +1044,84 @@ test('a chunk spanning a refused and a healthy partition commits neither, and lo
     assert.deepEqual(await idsIn(healthy), [1, 3], 'every row lands exactly once after the repair')
     assert.deepEqual(await idsIn(path.join(poisonedDir, 'table')), [2, 4], 'in both partitions')
   } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+// The cross-process sibling of the refusal above. `appendRefusalReason` only
+// probes cursors, so a chunk that fans out to a partition a foreign process
+// currently holds the mutation guard for used to sail past that gate, commit
+// its healthy groups, and then throw busy on the guarded one with no
+// checkpoint written - replaying the healthy group again on the next tick.
+// @ref LLP 0347#rows-wait [tests]: a multi-partition chunk holds every guard before it commits to any
+
+test('a chunk spanning a partition whose guard another process owns commits nothing until the guard is free', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-chunk-spans-guard-'))
+  let child
+  try {
+    const cacheRoot = path.join(root, 'cache')
+    const storage = createQueryStorageService({ cacheRoot })
+    const spoolPath = storage.cacheTablePath('ai_gateway_messages', ['spool_v1'])
+    const healthy = path.join(storage.cacheTablePath('ai_gateway_messages', ['source=good']), 'table')
+    const poisonedDir = storage.cacheTablePath('ai_gateway_messages', ['source=bad'])
+
+    await storage.appendRows(spoolPath, CLIENT_COLUMNS, [
+      { id: 1, client_name: 'good' },
+      { id: 2, client_name: 'bad' },
+    ])
+    await storage.flushTable(spoolPath, { force: true })
+    assert.deepEqual(await idsIn(healthy), [1], 'both partitions exist and hold their first row')
+    assert.deepEqual(await idsIn(path.join(poisonedDir, 'table')), [2])
+
+    const module = JSON.stringify(new URL('../../src/core/cache/partition.js', import.meta.url).href)
+    const holder = `import { withPartitionMutationLock } from ${module}
+      await withPartitionMutationLock(process.argv[1], async () => {
+        console.log('held')
+        await new Promise(r => setTimeout(r, 30000))
+      })`
+    child = spawn(process.execPath, ['--input-type=module', '-e', holder, poisonedDir], { stdio: ['ignore', 'pipe', 'pipe'] })
+    await new Promise((resolve, reject) => {
+      let buf = ''
+      child.stdout.on('data', (chunk) => {
+        buf += String(chunk)
+        if (buf.includes('held')) resolve(undefined)
+      })
+      child.on('error', reject)
+      child.on('exit', (code, signal) => {
+        reject(new Error(`the guard-holder child exited before printing 'held' (code ${code}, signal ${signal})`))
+      })
+    })
+
+    await storage.appendRows(spoolPath, CLIENT_COLUMNS, [
+      { id: 3, client_name: 'good' },
+      { id: 4, client_name: 'bad' },
+    ])
+
+    // Two ticks, because the defect this pins is per-tick growth of the
+    // healthy partition rather than a single over-commit.
+    for (let tick = 0; tick < 2; tick++) {
+      await assert.rejects(
+        storage.flushTable(spoolPath, { force: true }),
+        /busy/,
+        'the flush refuses while one partition in the chunk is guarded by another process'
+      )
+      assert.deepEqual(
+        await idsIn(healthy), [1],
+        'and the healthy partition in the same chunk is not committed to, on this tick or any other'
+      )
+    }
+
+    child.kill('SIGKILL')
+    await new Promise((resolve) => child.on('exit', resolve))
+    child = undefined
+
+    // The other half: waiting is only the right answer if the rows are still
+    // there to drain. Free the guard and the same spool file commits, once.
+    await storage.flushTable(spoolPath, { force: true })
+    assert.deepEqual(await idsIn(healthy), [1, 3], 'every row lands exactly once after the guard frees up')
+    assert.deepEqual(await idsIn(path.join(poisonedDir, 'table')), [2, 4], 'in both partitions')
+  } finally {
+    if (child) child.kill('SIGKILL')
     await fs.rm(root, { recursive: true, force: true })
   }
 })

@@ -58,7 +58,7 @@ test('discoverBundledPlugins surfaces format-iceberg from the workspace', async 
   // allowlist or excludeSet changes, the discovery scan goes through
   // the allowlist branch.
   assert.ok(
-    !result.unknownDirs.some((dir) => dir.endsWith('format-iceberg')),
+    !result.unknown.some((m) => m.rootDir.endsWith('format-iceberg')),
     'expected format-iceberg to be on the allowlist, not the unknown directory list'
   )
 })

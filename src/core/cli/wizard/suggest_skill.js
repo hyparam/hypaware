@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * The wizard's closing offer: would you like HypAware to suggest a skill?
+ * The wizard's closing offer: suggest a new skill?
  * A yes runs `hyp ask` for the user, which gathers the evidence and starts
  * their AI client on it. A no names the verb and ends the run.
  *
@@ -81,14 +81,13 @@ export async function runWizardSuggestSkill(opts) {
         /** @type {string} */
         let answer
         try {
+          // A blank line separates the offer from whatever the step before
+          // it printed. The legacy prompt adds its own; the TUI does not.
+          opts.stdout.write('\n')
           answer = await confirm({
-            title: 'Would you like HypAware to suggest a skill?',
-            items: [
-              '  It reads your last 30 days of sessions for the one skill worth adding first,',
-              '  then starts your AI client on the evidence to explain and write it.',
-            ],
+            title: 'Suggest a new skill?',
             options: [
-              { value: 'yes', label: 'Yes, suggest one' },
+              { value: 'yes', label: 'Scan my logs and recommend a new skill' },
               { value: 'no', label: 'Not now' },
             ],
             default: 'yes',

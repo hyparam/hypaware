@@ -54,7 +54,9 @@ const STUB_PROVIDER = '@doctor/stub-provider'
  * Run the doctor only on plugin code you trust, same as installing it.
  *
  * Import or activation failures are captured (never thrown) so the
- * doctor can report them alongside the static checks.
+ * doctor can report them alongside the static checks, whatever the
+ * plugin threw: `describe`, which both catches render the value
+ * through, is total (hyparam/hypaware#1558).
  *
  * Note: the entrypoint is loaded with dynamic `import()`, which caches
  * by resolved URL. Each CLI invocation is a fresh process so this never
@@ -204,16 +206,14 @@ export async function dryRunActivate(manifest, rootDir, opts = {}) {
  * and none of them reads anything plugin-controlled. The three calls stay
  * routed through `listed`; what it still guards is on that function.
  *
- * `skills` and `agents` are contained but not verified. `skills.register` and
- * `agents.register` do build a registry-owned record out of the fields they
- * validated, but `list()` hands the elements of that array straight back
- * (`items.slice()` copies the array, not its entries) and `ctx.skills` and
- * `ctx.agents` are on the activation context, so a plugin that calls `list()`
- * inside its own `activate()` can install an accessor on the very record the
- * registry holds. Neither registry is keyed, so there is no key to resolve a
- * name back to and no divergence to detect here; the guard below can only stop
- * a throwing accessor costing the whole run, and closing the rest belongs in
- * those two registries (hyparam/hypaware#1552).
+ * `skills` and `agents` are contained rather than verified, and no longer need
+ * to be verified here. Both registries build a record out of fields they read
+ * once and validated, and `list()` hands back a copy of every record and of
+ * its `clients` array, so the objects reaching this snapshot are not the
+ * objects the registries hold and nothing a plugin does to them afterwards is
+ * visible to a later reader (hyparam/hypaware#1552). Neither registry is
+ * keyed, so there is still no key to resolve a name back to; what the guard
+ * below buys for these two is the containment, not a check.
  *
  * @param {ReturnType<typeof createKernelRuntime>} runtime
  * @param {ReturnType<typeof createCommandRegistry>} commandRegistry
@@ -239,11 +239,14 @@ function snapshotRegistry(runtime, commandRegistry, refused) {
       'sink',
       // Keyed by plugin and name together, so both halves have to be right.
       // `plugin` is taken off the registry's own wrapper rather than re-read
-      // off the contribution, which is the best this side can do: `register`
-      // builds the key from one read of `contribution.plugin` and the wrapper
-      // from the next one, so the two can differ under a drifting accessor
-      // (hyparam/hypaware#1553). A pair that misses is refused, which
-      // under-reports a real sink rather than reporting a false name.
+      // off the contribution, and that is exact: `register` reads
+      // `contribution.plugin` once and builds the key and the wrapper from
+      // that one read (hyparam/hypaware#1553, closed by #1561). `name` has no
+      // wrapper field to take, so it is read off the stored contribution here,
+      // later than the read the key was built from, and a drifting accessor
+      // can still answer with a name this registry never keyed. A pair that
+      // misses is refused, which under-reports a real sink rather than
+      // reporting a false name.
       (entry, name) => sinks.getContribution(entry.plugin, name),
       (entry) => entry.contribution
     ),
@@ -1080,11 +1083,51 @@ function emptySnapshot() {
   }
 }
 
-/** @param {unknown} err */
+/**
+ * The thrown value, rendered for the report.
+ *
+ * Total by construction: it is called from inside the two catches that make
+ * good on the containment `dryRunActivate` promises, so a throw here is not a
+ * worse message, it is the whole `hyp plugin doctor` run lost to the plugin it
+ * was diagnosing (hyparam/hypaware#1558). The value is the plugin's and so is
+ * every way of reading it: `String()` throws `TypeError` on a value with no
+ * `Object.prototype` (`throw Object.create(null)`) and rethrows whatever a
+ * hostile `toString` throws, `stack` and `message` are own accessors that
+ * throw just as easily on a genuine `Error`, and even `instanceof` walks
+ * `[[GetPrototypeOf]]`, which is a `Proxy` trap: a revoked `Proxy`, or one
+ * whose `getPrototypeOf` handler throws, makes the type test itself throw.
+ *
+ * So every read of the value, the `instanceof` included, runs inside a `try`
+ * and none has to succeed: an ordinary `Error` renders as the first three
+ * stack lines and an ordinary string as itself, an unreadable, non-string,
+ * or empty `stack` falls to `message` and then to the coercion (which
+ * renders a genuine `Error` as `name: message`), and a value that will not
+ * describe itself at all is named by its `typeof`, the one read that
+ * consults no prototype, runs no accessor and no trap, and so cannot throw.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
 function describe(err) {
-  if (err instanceof Error) {
-    const head = err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : err.message
-    return head
+  try {
+    if (err instanceof Error) {
+      const stack = err.stack
+      if (typeof stack === 'string' && stack !== '') return stack.split('\n').slice(0, 3).join('\n')
+      const message = err.message
+      if (typeof message === 'string') return message
+    }
+  } catch {
+    // Not the end of it: the coercion below renders a genuine `Error` as
+    // `name: message`, so it still gets its turn before the fallback, and a
+    // `Proxy` over a real `Error` whose `getPrototypeOf` trap throws still
+    // comes out as `name: message` there.
   }
-  return String(err)
+  try {
+    return String(err)
+  } catch {
+    // `typeof` consults no prototype and runs no accessor, so it answers for
+    // a prototype-less object and a `Symbol` alike. Naming the kind is little,
+    // but it is a report, where the throw left the operator none at all.
+    return `[unprintable ${typeof err} thrown: describing it threw too]`
+  }
 }

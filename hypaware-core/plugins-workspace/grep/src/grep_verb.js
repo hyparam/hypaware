@@ -1,19 +1,19 @@
 // @ts-check
 
-import { VerbUsageError } from '../cli/verb_errors.js'
-import { buildQuerySqlOutput } from '../query/format.js'
-import { renderLocalOnlyNotice } from '../query/verb.js'
+import { VerbUsageError } from '../../../../src/core/cli/verb_errors.js'
+import { buildQuerySqlOutput } from '../../../../src/core/query/format.js'
+import { renderLocalOnlyNotice } from '../../../../src/core/query/verb.js'
 // The matcher module is pulled in for its refusal kind alone, and imports
 // nothing beyond the allowlist below, so the boot-path deferral that keeps
-// hypgrep and the Iceberg store out of `hyp --help` is untouched.
-import { GrepQueryError } from './matcher.js'
-import { SEARCHABLE_COLUMNS } from './searchable_columns.js'
+// the Iceberg store out of `hyp --help` is untouched.
+import { GrepQueryError } from '../../../../src/core/search/matcher.js'
+import { SEARCHABLE_COLUMNS } from '../../../../src/core/search/searchable_columns.js'
 
 /**
- * @import { VerbOperationContext, VerbRegistration } from '../../../hypaware-plugin-kernel-types.js'
- * @import { ExtendedQueryStorageService } from '../../../src/core/cache/types.js'
- * @import { GrepSearchBackend, GrepSearchHit, GrepSearchResult } from '../../../src/core/search/types.js'
- * @import { LocalOnlyVisibilityReport } from '../../../src/core/query/types.js'
+ * @import { VerbOperationContext, VerbRegistration } from '../../../../hypaware-plugin-kernel-types.js'
+ * @import { ExtendedQueryStorageService } from '../../../../src/core/cache/types.js'
+ * @import { GrepSearchBackend, GrepSearchHit, GrepSearchResult } from '../../../../src/core/search/types.js'
+ * @import { LocalOnlyVisibilityReport } from '../../../../src/core/query/types.js'
  */
 
 /** The server's own defaults, mirrored so local and remote page the same. */
@@ -38,10 +38,13 @@ const MAX_LIMIT = 1000
  * server enforces its own visibility, not the caller's).
  *
  * @type {VerbRegistration}
- * @ref LLP 0264#verb [implements]: read-class core verb, tool grep_search, wire-compatible with the server so --remote works day one
+ * @ref LLP 0413#plugin [implements]: plugin-owned verb with the unchanged grep_search wire contract
  */
 export const queryGrepVerb = {
   name: 'query grep',
+  plugin: '@hypaware/grep',
+  category: 'explore-share',
+  audience: 'everyday',
   tool: 'grep_search',
   // The coverage clause is not decoration. An MCP caller sees only this
   // text, so without it zero hits are indistinguishable from "that text is
@@ -49,7 +52,7 @@ export const queryGrepVerb = {
   // @ref LLP 0264#shared [implements]: the allowlist stated at the one surface a machine caller reads, with the SQL escape hatch named
   summary:
     'Grep stored ai_gateway_messages: case-insensitive substring or regex, served from ' +
-    'hypgrep sidecar indexes where they exist plus a scan of the rest. Covers only these ' +
+    'direct scans of the local cache. Covers only these ' +
     `columns: ${[...SEARCHABLE_COLUMNS].join(', ')}. Every other column, including system ` +
     'prompts (system_text), tool definitions (tools), attributes, and raw frames, is NOT ' +
     'searched, so zero hits is not evidence the text is absent from those columns - read ' +
@@ -270,7 +273,7 @@ export const queryGrepVerb = {
  *
  * Loaded on demand, not at module scope: `registerCoreCommands` projects
  * every `CORE_VERBS` entry pre-boot so `hyp --help` can render, so a
- * top-level import would pull hypgrep, hyparquet and the Iceberg store into
+ * top-level import would pull hyparquet and the Iceberg store into
  * the front door of every `hyp` invocation (measured at ~16ms on
  * `hyp --help`, ~10%) for the one command that needs them. The remote stack
  * in `verb_command.js` is deferred for the same reason. Sitting in the

@@ -53,6 +53,48 @@ test('agents.register validates contribution shape', () => {
   })
 })
 
+test('a listed contribution is a copy, so writing to it cannot reach the registry', () => {
+  // `list()` used to be `items.slice()`: a copy of the array, whose elements
+  // were the records the registry holds. `ctx.skills` and `ctx.agents` are on
+  // the activation context, so a plugin calling `list()` inside its own
+  // `activate()` held the stored record and could rewrite the `name` that had
+  // just cleared `isSafeContributionName`, or push a client it never
+  // registered for onto the array that decides which homes an install writes
+  // into (hyparam/hypaware#1552).
+  const { kernel } = agentsKernelAndRegistry()
+  kernel.skills.register({ name: 'honest-skill', plugin: /** @type {any} */ ('p'), clients: ['claude'], sourceDir: '/abs/skill' })
+  kernel.agents.register({ name: 'honest-agent', plugin: /** @type {any} */ ('p'), clients: ['claude'], sourceFile: '/abs/a.md' })
+
+  for (const registry of [kernel.skills, kernel.agents]) {
+    const handed = registry.list()[0]
+    const validated = handed.name
+    Object.defineProperty(handed, 'name', { get: () => 'IMPOSTOR' })
+    handed.clients.push(/** @type {any} */ ('codex'))
+
+    assert.equal(registry.list()[0].name, validated)
+    assert.deepEqual(registry.list()[0].clients, ['claude'])
+    // Two listings do not share entries either, or one caller's write would
+    // still be another's read.
+    assert.notEqual(registry.list()[0], registry.list()[0])
+    assert.notEqual(registry.list()[0].clients, registry.list()[0].clients)
+  }
+})
+
+test('an honest registration lists exactly what it registered, every time', () => {
+  // The copies are only a fix while they are faithful: shape, values and
+  // ordering are what `hyp skills install`, attach and the doctor read.
+  const { kernel } = agentsKernelAndRegistry()
+  const skills = [
+    { name: 'first', plugin: /** @type {any} */ ('@hypaware/claude'), clients: /** @type {any} */ (['claude']), sourceDir: '/abs/first' },
+    { name: 'second', plugin: /** @type {any} */ ('@hypaware/codex'), clients: /** @type {any} */ (['all']), sourceDir: '/abs/second', projectLocal: true },
+  ]
+  for (const skill of skills) kernel.skills.register(skill)
+  kernel.agents.register({ name: 'analyst', plugin: /** @type {any} */ ('@hypaware/claude'), clients: ['claude'], sourceFile: '/abs/a.md' })
+
+  assert.deepEqual(kernel.skills.list(), skills)
+  assert.deepEqual(kernel.agents.list(), [{ name: 'analyst', plugin: '@hypaware/claude', clients: ['claude'], sourceFile: '/abs/a.md' }])
+})
+
 test('agents.register rejects path-traversal names', () => {
   const { kernel } = agentsKernelAndRegistry()
 

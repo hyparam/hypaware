@@ -51,6 +51,7 @@ import { runWizardExpressGate } from './express.js'
 import { runConfigurePhase } from './configure.js'
 import { guardWizardOutput } from './output_guard.js'
 import { wizardStepProgress } from './steps.js'
+import { offerWizardGithub, connectWizardGithub } from './github.js'
 
 /**
  * The `hyp init` wizard orchestrator: the fork -> join -> pick ->
@@ -1009,8 +1010,28 @@ async function runGuardedInitWizard(opts, guard) {
     })
   }
 
+  // @ref LLP 0411#offer [implements]: GitHub follows the upload offer and precedes the skill offer
+  const githubConfigured = (picked.config.plugins ?? [])
+    .some((plugin) => plugin.name === '@hypaware/github')
+  if (interactive && !cancelled && opts.finale?.dryRun !== true && !githubConfigured
+    && (await guard.checkpoint())) {
+    const answer = await offerWizardGithub({
+      stdout: opts.stdout, stderr: opts.stderr, stdin: opts.stdin, env: opts.env,
+      interactive: true,
+      ...opts.github,
+    })
+    if (answer === 'yes' && (await guard.checkpoint())) {
+      const config = await connectWizardGithub({
+        stdout: opts.stdout, stderr: opts.stderr, ctx: opts.ctx,
+        configPath: picked.configPath,
+        restartDaemon: finaleSummary?.daemonRestart.ok === true,
+      })
+      if (config) picked.config = config
+    }
+  }
+
   // The closing offer comes last, after whichever of the narration and the
-  // sync step this path ran: would you like HypAware to suggest a skill? A
+  // sync step this path ran: suggest a new skill? A
   // yes runs `hyp ask`, which starts the client in its own folder under
   // `HYP_HOME`, never in the directory `hyp init` was run from; that is
   // what lets setup make the offer instead of printing a question to type.

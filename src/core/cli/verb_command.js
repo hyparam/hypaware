@@ -51,10 +51,19 @@ const VERB_PROJECTION = Symbol('hypaware.verbProjection')
  *   own. `VerbRegistry.register` passes the name it validated and keyed by, so
  *   the command lands under the same string as the verb rather than under
  *   another read of an accessor free to answer differently.
+ * @param {Pick<VerbRegistration, 'operation' | 'render'>} [body] the two
+ *   functions to run, defaulting to the registration's own as read here.
+ *   `VerbRegistry.register` passes the pair it validated, for the reason it
+ *   passes the name: the registration is stored by reference and handed back
+ *   by `get()`/`getByTool()`/`list()`, so neither member can be what decides
+ *   whose code runs behind the command (issue #1983). A caller projecting a
+ *   verb with no registry behind it (`registerCoreCommands` pre-projecting
+ *   core's verbs so `hyp --help` renders before boot) still captures once,
+ *   here, rather than on every dispatch.
  * @returns {CommandRegistration}
  * @ref LLP 0034#verbs [implements]: one declaration → a CLI command and an MCP tool; the kernel owns both adapters so the flag set and the tool schema never drift
  */
-export function verbToCommand(verb, name = verb.name) {
+export function verbToCommand(verb, name = verb.name, body = { operation: verb.operation, render: verb.render }) {
   // One read each. The presence test and the value that lands in the command
   // were two reads of the same plugin property, so the registration built here
   // could carry a value nothing had tested, and a member that answered truthy
@@ -81,7 +90,7 @@ export function verbToCommand(verb, name = verb.name) {
     // all, which is what kept `graph neighbors` at one line of help.
     // @ref LLP 0214#d1 [implements]: verbs carry long help through the registration dispatch already renders
     ...(help !== undefined ? { help } : {}),
-    run: (argv, ctx) => runVerbCommand(verb, argv, ctx),
+    run: (argv, ctx) => runVerbCommand(verb, argv, ctx, body),
   }
   return markVerbProjection(command)
 }
@@ -124,9 +133,13 @@ export function isVerbProjection(command) {
  * @param {VerbRegistration} verb
  * @param {string[]} argv
  * @param {CommandRunContext} ctx
+ * @param {Pick<VerbRegistration, 'operation' | 'render'>} [body] the two
+ *   functions to run, defaulting to the registration's live members for a
+ *   caller that projected no body. Both are called **on** the registration, so
+ *   one written as a method of its own verb sees the `this` it saw before.
  * @returns {Promise<number>}
  */
-export async function runVerbCommand(verb, argv, ctx) {
+export async function runVerbCommand(verb, argv, ctx, body = verb) {
   if (argv[0] === '--help' || argv[0] === '-h') {
     ctx.stdout.write(usageForVerb(verb.name, verb.inputSchema) + '\n')
     return 0
@@ -176,7 +189,7 @@ export async function runVerbCommand(verb, argv, ctx) {
     result = remote.result
   } else {
     try {
-      result = await verb.operation(parsed.params, buildOperationContext(ctx, ctrl.controls.refresh))
+      result = await body.operation.call(verb, parsed.params, buildOperationContext(ctx, ctrl.controls.refresh))
     } catch (err) {
       ctx.stderr.write(`hyp ${verb.name}: ${err instanceof Error ? err.message : String(err)}\n`)
       // An operation refusing its own arguments exits like the codec's own
@@ -197,7 +210,7 @@ export async function runVerbCommand(verb, argv, ctx) {
   /** @type {VerbRenderResult} */
   let rendered
   try {
-    rendered = verb.render(result, ctrl.controls)
+    rendered = body.render.call(verb, result, ctrl.controls)
   } catch (err) {
     ctx.stderr.write(`hyp ${verb.name}: render failed: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1

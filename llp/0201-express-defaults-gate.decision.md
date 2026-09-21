@@ -14,6 +14,7 @@
 > accept-or-customize screens.
 
 **Extended-by:** [LLP 0396](./0396-combined-collection-and-sync.spec.md) (combined collection and sharing selection).
+**Extended-by:** LLP 0411 (GitHub collection requires a separate opt-in even on express setup).
 
 ## Context {#context}
 

@@ -406,6 +406,39 @@ test('runPurge sweeps the spool for a targeted purge too, and says nothing when 
   }
 })
 
+// A spool sweep failure alone (no cache-layer `localError`) still exits 1
+// (`swept.failed > 0`), so the JSON receipt must not claim the local side
+// `completed` while that holds - it would contradict the nonzero exit code.
+// @ref LLP 0253#purge-and-detach-sweep [tests]: an unremoved spool file is
+//   reported as an incomplete local purge, not a silently swallowed sweep
+test('runPurge reports local status incomplete when the capture spool sweep fails, even without a local purge error', async () => {
+  const cacheRoot = await makeTmpDir('cli-spool-fail')
+  const hypHome = await makeTmpDir('cli-spool-fail-home')
+  const spoolDir = claudeBodySpoolDir(hypHome)
+  try {
+    await seed(cacheRoot)
+    await fs.mkdir(spoolDir, { recursive: true })
+    await fs.writeFile(path.join(spoolDir, 'req-1.json'), '{"messages":["a raw prompt"]}')
+    // No write permission on the spool directory: the file cannot be
+    // unlinked, so the sweep counts it as failed rather than removed.
+    await fs.chmod(spoolDir, 0o500)
+
+    const { ctx, stdout, stderr } = makeCtx({ cacheRoot, hypHome })
+    const code = await runPurge(['--session', 's1', '--yes', '--json'], ctx)
+    assert.equal(code, 1)
+    const parsed = JSON.parse(stdout.text)
+    assert.equal(parsed.rowsDeleted, 2, 'the cache purge itself still succeeded and is still reported')
+    assert.equal(parsed.local.status, 'incomplete')
+    assert.equal(parsed.local.containment, 'incomplete')
+    assert.match(parsed.local.error, /1 capture spool file\(s\) could not be removed/)
+    assert.match(stderr.text, /could not be removed/)
+  } finally {
+    await fs.chmod(spoolDir, 0o700).catch(() => {})
+    await fs.rm(cacheRoot, { recursive: true, force: true })
+    await fs.rm(hypHome, { recursive: true, force: true })
+  }
+})
+
 test('runPurge subtree warns about resurrection when the dir still resolves full', async () => {
   const cacheRoot = await makeTmpDir('cli-warn')
   const hypHome = await makeTmpDir('cli-warn-home')
@@ -449,7 +482,7 @@ test('runPurge --ignored is durable: an ignored dir does not warn', async () => 
   }
 })
 
-test('runPurge --json emits machine-readable counts and resurrectable dirs', async () => {
+test('runPurge --json reports a session fence instead of a resurrection warning', async () => {
   const cacheRoot = await makeTmpDir('cli-json')
   const hypHome = await makeTmpDir('cli-json-home')
   try {
@@ -460,7 +493,7 @@ test('runPurge --json emits machine-readable counts and resurrectable dirs', asy
     const parsed = JSON.parse(stdout.text)
     assert.equal(parsed.rowsDeleted, 2)
     assert.equal(parsed.partitionsAffected, 1)
-    assert.deepEqual(parsed.resurrectable.sort(), [REPO_A, REPO_A_SUB].sort())
+    assert.deepEqual(parsed.resurrectable, [])
   } finally {
     await fs.rm(cacheRoot, { recursive: true, force: true })
     await fs.rm(hypHome, { recursive: true, force: true })

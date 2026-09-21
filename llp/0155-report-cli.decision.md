@@ -66,6 +66,12 @@ render-then-publish, and splitting those across two command namespaces would
 serve the implementation rather than the reader. The group help states the
 split.
 
+**Extended-by: [LLP 0414 #id-is-the-handle](./0414-a-recommendation-is-a-verb.decision.md#id-is-the-handle)**
+(2026-09-14). `hyp report fix <id>` joins the group as a fifth server-facing
+member: it resolves a server-minted recommendation id through the same target
+and credential path, fetches the recommendation page, and starts an attached
+client on it in the current directory.
+
 <a id="endpoint"></a>**The reports endpoint derives from the one registered
 target URL.** Sibling of `deriveIdentityBase` and `deriveMcpEndpoint`
 (LLP 0084): a registered URL whose path ends in `/v1/mcp` is treated as that

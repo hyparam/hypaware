@@ -26,6 +26,12 @@ export const HELPER_BASENAME = 'credential-helper.sh'
 const NODE_MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
 
 /**
+ * Bound on the shebang read. A shebang is one short line and the read is
+ * positional, so this never depends on the size of the file behind it.
+ */
+const SHEBANG_READ_LIMIT_BYTES = 256
+
+/**
  * Absolute path of the `hyp` executable to embed in the wrapper.
  * Desktop runs the wrapper outside any shell profile, so a bare `hyp`
  * on PATH is not a given; resolve the running CLI's entry script.
@@ -56,7 +62,13 @@ const NODE_MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
  * writing the rot silently.
  *
  * An explicit `HYPAWARE_BIN`/`HYP_BIN` is taken as given: it names a path the
- * operator chose, and second-guessing it would defeat the override.
+ * operator chose, and second-guessing it would defeat the override. Which copy
+ * is all that settles, though, and the wrapper is a command line rather than a
+ * path: so the answer also carries `runsUnderNode` for the caller to build
+ * that command line around, and the variable's name for a word about it to
+ * say which knob set it (issue #1811). Asked of every lane, because which lane
+ * found a path is not what decides how a command line runs it; the walk tests
+ * its own candidates, so in practice only an override answers no.
  *
  * `entry` defaults to the running CLI's own entry script and is a parameter
  * only so a test can present an ephemeral entrypoint: nothing short of a real
@@ -65,16 +77,33 @@ const NODE_MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
  *
  * @param {NodeJS.ProcessEnv} [env]
  * @param {string} [entry]
- * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string }}
+ * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string, overrideVar?: string, nodeRunnable: boolean }}
  */
 export function resolveHypBin(env = process.env, entry = process.argv[1]) {
-  const explicit = [env.HYPAWARE_BIN, env.HYP_BIN]
-    .find((value) => typeof value === 'string' && value.trim() !== '')
+  const found = locateHypBin(env, entry)
+  return { ...found, nodeRunnable: runsUnderNode(found.binPath) }
+}
+
+/**
+ * Which copy, on its own. Split out so the runnability question is answered
+ * once, for whichever exit here returns, rather than at four returns that
+ * could drift.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string | undefined} entry
+ * @returns {{ binPath: string, ephemeral: boolean, repointedFrom?: string, overrideVar?: string }}
+ */
+function locateHypBin(env, entry) {
+  const overrideVar = ['HYPAWARE_BIN', 'HYP_BIN']
+    .find((name) => typeof env[name] === 'string' && /** @type {string} */ (env[name]).trim() !== '')
   // Trimmed, because the emptiness test above is already the decision that
   // surrounding whitespace is not part of the value. Untrimmed, ` /opt/hyp`
   // is not absolute, so `path.resolve` would anchor it to whatever directory
   // this command ran in and bake that into the wrapper.
-  if (explicit !== undefined) return { binPath: path.resolve(explicit.trim()), ephemeral: false }
+  if (overrideVar !== undefined) {
+    const explicit = /** @type {string} */ (env[overrideVar])
+    return { binPath: path.resolve(explicit.trim()), ephemeral: false, overrideVar }
+  }
 
   const running = resolveEntryPath(entry)
   if (!isEphemeralBinPath(running, env)) return { binPath: running, ephemeral: false }
@@ -112,7 +141,13 @@ export function resolveHypBin(env = process.env, entry = process.argv[1]) {
  * of `.js`/`.mjs`/`.cjs` are listed because the question is what Node can run,
  * not what this package happens to name its entry today: pinning the check to
  * the current `bin` filename would turn a later rename into a silent return to
- * ephemeral wrappers, with every test still green.
+ * ephemeral wrappers, with every test still green. A file the extension cannot
+ * answer for is asked for its shebang rather than declined on its name
+ * (`hasNodeShebang`).
+ *
+ * On the override lane the same answer routes rather than rejects: the
+ * operator's copy is still what the wrapper runs, without an interpreter it
+ * was never going to survive (issue #1811).
  *
  * This is passed to the walk rather than applied to its answer, so a rejected
  * candidate costs the next `$PATH` entry and not the whole search - the
@@ -126,9 +161,61 @@ export function resolveHypBin(env = process.env, entry = process.argv[1]) {
  */
 function runsUnderNode(candidate) {
   try {
-    return NODE_MODULE_EXTENSIONS.has(path.extname(fs.realpathSync(candidate)))
+    const real = fs.realpathSync(candidate)
+    return NODE_MODULE_EXTENSIONS.has(path.extname(real)) || hasNodeShebang(real)
   } catch {
     return false
+  }
+}
+
+/**
+ * The same question, asked of a file the extension cannot answer for: a real
+ * JavaScript entry script that simply carries no extension, which is what a
+ * hand-rolled wrapper or a packaging that is not `npm install -g` leaves at
+ * the name an operator pins with `HYPAWARE_BIN`.
+ *
+ * Only worth asking since the answer stopped being a filter. On the `$PATH`
+ * walk a false negative cost the next candidate and nothing else; it now also
+ * decides whether `install-helper` drops the interpreter, so calling a node
+ * script unloadable takes the absolute interpreter off a wrapper that had one
+ * and worked, and rests it on Desktop's stripped environment carrying a
+ * `node` - the failure the interpreter is baked in to avoid.
+ *
+ * The shebang separates the two populations exactly, which is what makes it
+ * worth a read: pnpm's and yarn's global entries are `#!/bin/sh`, volta's
+ * shims are compiled binaries with no shebang at all, and asdf's are
+ * `#!/usr/bin/env bash`. What the test rests on is that none of them names
+ * `node`, not which of the three shapes any one manager happens to ship, so
+ * all of them keep the direct `exec` they need.
+ *
+ * Kind first, because `openSync` on a fifo blocks until a writer shows up and
+ * these paths are `$PATH` entries and operator-supplied values rather than
+ * ones this code chose. Reached only once the extension test has already said
+ * no, so the layout the walk exists to find never pays for it.
+ *
+ * @param {string} real
+ * @returns {boolean}
+ */
+function hasNodeShebang(real) {
+  let fd
+  try {
+    if (!fs.statSync(real).isFile()) return false
+    fd = fs.openSync(real, 'r')
+    const buf = Buffer.allocUnsafe(SHEBANG_READ_LIMIT_BYTES)
+    const read = fs.readSync(fd, buf, 0, SHEBANG_READ_LIMIT_BYTES, 0)
+    const first = buf.toString('utf8', 0, read).split('\n', 1)[0]
+    if (!first.startsWith('#!')) return false
+    // Every word, not just the first: `#!/usr/bin/env node` and
+    // `#!/usr/bin/env -S node --flags` both name the interpreter downstream of
+    // `env`, and this package's own entry script is spelled the first way.
+    return first.slice(2).trim().split(/\s+/).some((word) => {
+      const base = path.basename(word)
+      return base === 'node' || base === 'nodejs'
+    })
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
   }
 }
 

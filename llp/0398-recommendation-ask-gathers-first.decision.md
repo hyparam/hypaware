@@ -7,6 +7,7 @@
 **Date:** 2026-09-07
 **Extends:** LLP 0198 (#first-ask: one suggested question is answered from evidence HypAware gathers; #onboarding-list: that one question starts the client in a HypAware-owned directory rather than the caller's, so setup offers to run it instead of printing it)
 **Related:** LLP 0198 (#no-preauth: the launched session is still not pre-authorized), LLP 0140 (the server's report transcript, the same "recorded runs are evidence" stance), LLP 0359 (bounded scheduled work; the gather is bounded the same way)
+**Extended-by:** LLP 0414 (#run-where-typed: `hyp report fix` reuses the launch seams but starts in the caller's directory, since a fix is to a repository)
 
 > Extends [LLP 0198](./0198-setup-ends-on-a-question.decision.md). The
 > question list, the launch mechanics, and the empty-cache framing are
@@ -79,6 +80,100 @@ evidence: the request as the person makes it, the procedure the agent
 reconstructed each time, and what a finished run reported. The skill's
 trigger is the line, its steps are the commands, and its report is the
 ending.
+
+Two typings are the same line when they agree after normalizing: case
+folded, a leading filler ("okay", "now", "please", "can you") dropped,
+punctuation and runs of whitespace folded to one space, then the first
+36 characters. A person does not retype a request verbatim. The exact
+42-character prefix this replaces split "commit on appropriate branch
+and make a PR" from "okay commit on appropriate branch and make a PR"
+into 4 sessions on 2 days and 3 on 2, each under the cut, on a machine
+where the normalized key reads 7 sessions on 3 days; the same machine's
+733 sessions went from two candidates, a resume and a check, to four.
+The key is the grouping, not the display: each candidate is headed by a
+typing as the person wrote it.
+
+A typing that normalizes to nothing is not a candidate at all: typings
+with nothing left to group on would pool unrelated sessions into one
+candidate that outranks the real ones. A rule of dashes is such a
+typing.
+
+What the fold erases is a decision of its own, so the fold is written as
+what it keeps. ASCII that is not a letter, a digit or a space folds to a
+space, the General Punctuation block folds with it, and every other
+character is kept. A first version kept only `a-z0-9`, which erased a
+request typed in Cyrillic, CJK or Arabic to the empty key and so gave a
+person who types in such a script no candidate at all (hypaware #1884).
+Keeping those letters cannot be said as a letter class here: the engine
+compiles a `regexp_replace` pattern with `new RegExp(pattern, 'g')` and
+no `u` flag, where `\p` is an identity escape and `\p{L}` matches the
+four literal characters `p{L}`, so the class names the ranges it keeps
+instead. A raw-prefix fallback for the lines
+the fold empties was rejected: it brings back the split key this
+decision replaced, on the lines least able to afford it.
+
+One consequence is accepted. General Punctuation is folded so that a
+curly quote, an en dash and an ellipsis still fold the way their ASCII
+spellings do, but punctuation elsewhere above ASCII (an ideographic full
+stop, a guillemet, an Arabic question mark) is part of the key, so a
+request retyped with different punctuation of that kind reads as two
+lines rather than one.
+
+A second consequence was accepted and then closed. Keeping every script
+also keeps the symbols interleaved with those scripts, so a typing made
+only of non-ASCII symbols keys as itself rather than as nothing and was
+counted like any other line: a run of box-drawing rules, emoji,
+fullwidth punctuation, middle dots or U+0085 typed in 5 sessions on 3
+days took a slot in `candidates.md` and satisfied the record floor on
+its own, so the ask proceeded where it had correctly refused
+(hypaware #1894).
+
+<a id="a-request"></a>**A key with no letter and no decimal digit, in
+any script, is not a request.** That is the whole rule, and it is
+applied to the key rather than to the raw typing, so it reads what the
+fold left. It is not in the statement, because the engine cannot say it
+and an approximation of it would pick winners among scripts. `\p{L}` is
+not a letter class there for the same reason the fold names ranges:
+patterns compile with no `u` flag, so `\p` is an identity escape and
+`\p{L}` matches the four literal characters `p{L}`. That leaves code
+unit ranges, and letters, digits, symbols and punctuation are
+interleaved across the ranges the fold keeps, fullwidth `！` beside
+fullwidth `ｃ` and halfwidth katakana in one block, a middle dot beside
+the accented Latin letters in another. A range rule is therefore an
+approximation whose omissions stop a script from producing candidates at
+all, silently, which is the regression hypaware #1884 was filed to fix.
+`\p{L}` and `\p{Nd}` in JavaScript, under `u`, are exact over every
+script and approximate nothing, so the rule is read in JavaScript, over
+the rows the candidate statement returns. `\p{Nd}` and not `\p{N}`,
+because a circled or superscript digit is `No` rather than a decimal
+digit, and a run of `①②③` is symbols however it is spelled. Accepted
+with it: a key made only of combining marks, of letter-numbers
+(`\p{Nl}`, Roman numerals) or of a block Unicode classes as symbols
+(Braille patterns) is dropped too. None of those is a request a person
+types again, and the scripts they might stand in for all have `\p{L}`
+letters of their own, iteration and prolongation marks included.
+
+Reading it there rather than in the statement is also what keeps it off
+the per-row path: it is one test of at most `KEY_CHARS` characters
+against at most `CANDIDATES + 3` rows per ask, where a rule in the
+statement would run on every scanned row beside the fold. It is read
+before the cut to `CANDIDATES`, so a dropped run of symbols costs no
+candidate slot up to that headroom and spends none of the session
+statements' row budget, and before the record floor is decided, which is
+where the same drop closes the gate half: the floor reads the candidates
+and needs no rule of its own.
+
+Past that headroom the drop does cost something, and it is left
+costing it. The statement returns `CANDIDATES + 3` rows in session
+order, so what decides the cost is rank, not the 3 sessions on 3 days
+that qualifies a row: four distinct symbol-only runs typed in more
+sessions than the real lines leave four real lines where there were
+five, and eight leave none at all, which reads as the refusal the
+record floor prints. That is the conservative direction and it is what
+the ask did before the fold was widened, where the same record now
+yields five junk candidates and a gate that opens on them. Buying the
+last of it back means asking the statement for more rows on every ask,
+to pay for a shape no recorded machine has held.
 
 A first version measured four signals (reopened sessions, a repeated
 line, a request that should go to a worker, a recurring mistake) and
@@ -230,7 +325,7 @@ skips everything and starts straight on what was typed.
 have rooted a session in whatever directory `hyp init` was run from. With
 #run-directory that reason is gone: the client starts in the run
 directory wherever the ask was typed. So setup's last screen is now a
-question, "Would you like HypAware to suggest a skill?", and a yes runs
+question, "Suggest a new skill?", and a yes runs
 `hyp ask` as a child on the same terminal, the way LLP 0203 runs `hyp
 sync`. A no, a cancelled prompt, or a run that cannot prompt ends on one
 line naming the verb; an empty cache ends on the note that capture starts

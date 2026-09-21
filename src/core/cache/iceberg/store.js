@@ -349,22 +349,24 @@ const PURGE_DELETE_BATCH_SIZE = 5000
  * @ref LLP 0104 [implements]: cache-only row deletion via position-deletes; preserves part_id identity and the export watermark
  * @param {string} tablePath the Iceberg table directory
  * @param {(row: Record<string, unknown>) => boolean} predicate
- * @param {{ columns: string[] }} opts columns the predicate reads (intersected with the table schema)
+ * @param {{ columns: string[], beforeDelete?: () => Promise<void> }} opts columns the predicate reads (intersected with the table schema)
  * @returns {Promise<{ rowsDeleted: number, filesAffected: number, batchCount: number }>}
  */
 export async function deleteMatchingRows(tablePath, predicate, opts) {
   if (!tableExists(tablePath)) return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
   const { resolver, lister } = await getLocalIO()
   const url = tableUrlForDir(tablePath)
+  return deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns: opts.columns, beforeDelete: opts.beforeDelete })
+}
 
-  /** @type {TableMetadata} */
-  let metadata
-  try {
-    const loaded = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
-    metadata = loaded.metadata
-  } catch {
-    return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
-  }
+/**
+ * The same position-delete path for local cache and BlobStore archives.
+ * Unreadable metadata or data is a failed purge, never a zero-row success.
+ * @ref LLP 0417#erasure [implements]: logical deletion uses Iceberg positions; physical reclamation is separate
+ * @param {{ tableUrl: string, resolver: Resolver, lister: Lister, predicate: (row: Record<string, unknown>) => boolean, columns: string[], beforeDelete?: () => Promise<void> }} args
+ */
+export async function deleteMatchingRowsAtUrl({ tableUrl: url, resolver, lister, predicate, columns, beforeDelete }) {
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl: url, resolver, lister })
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) {
     return { rowsDeleted: 0, filesAffected: 0, batchCount: 0 }
   }
@@ -379,7 +381,7 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
   // still, so the per-file read below narrows this list again.
   const schema = currentSchema(metadata)
   const schemaColumns = new Set(schema?.fields.map((f) => f.name) ?? [])
-  const projected = opts.columns.filter((c) => schemaColumns.has(c))
+  const projected = columns.filter((c) => schemaColumns.has(c))
 
   const alreadyDeleted = await loadDeletedPositions(metadata, resolver, dataFileMap)
   const catalog = fileCatalog({ resolver, lister, conditionalCommits: true })
@@ -391,20 +393,22 @@ export async function deleteMatchingRows(tablePath, predicate, opts) {
   let batchCount = 0
 
   for (const [filePath] of dataFileMap) {
-    const positions = await scanFileForMatchingRows(
-      filePath, resolver, predicate, projected, alreadyDeleted.get(filePath)
-    )
-    if (positions.length === 0) continue
-    filesAffected++
-    pending.push(...positions.map((pos) => ({ file_path: filePath, pos })))
-    while (pending.length >= PURGE_DELETE_BATCH_SIZE) {
-      const batch = pending.splice(0, PURGE_DELETE_BATCH_SIZE)
-      await icebergDelete({ catalog, tableUrl: url, deletes: batch })
-      rowsDeleted += batch.length
-      batchCount++
+    let matched = false
+    for await (const pos of scanFileForMatchingRows(filePath, resolver, predicate, projected, alreadyDeleted.get(filePath))) {
+      matched = true
+      pending.push({ file_path: filePath, pos })
+      if (pending.length === PURGE_DELETE_BATCH_SIZE) {
+        await beforeDelete?.()
+        await icebergDelete({ catalog, tableUrl: url, deletes: pending })
+        rowsDeleted += pending.length
+        pending = []
+        batchCount++
+      }
     }
+    if (matched) filesAffected++
   }
   if (pending.length > 0) {
+    await beforeDelete?.()
     await icebergDelete({ catalog, tableUrl: url, deletes: pending })
     rowsDeleted += pending.length
     batchCount++
@@ -461,26 +465,26 @@ export async function physicalProjection(file, columns) {
  * @param {(row: Record<string, unknown>) => boolean} predicate
  * @param {string[]} columns projected columns the predicate needs
  * @param {Set<bigint>} [deletedPositions]
- * @returns {Promise<number[]>}
+ * @returns {AsyncGenerator<number>}
  */
-async function scanFileForMatchingRows(filePath, resolver, predicate, columns, deletedPositions) {
-  /** @type {number[]} */
-  const positions = []
-  try {
-    const file = await Promise.resolve(resolver.reader(filePath))
-    const readOpts = columns.length > 0
-      ? { file, ...await physicalProjection(file, columns) }
-      : { file }
-    const rows = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects(readOpts))
+async function* scanFileForMatchingRows(filePath, resolver, predicate, columns, deletedPositions) {
+  const file = await Promise.resolve(resolver.reader(filePath))
+  const projection = await physicalProjection(file, columns)
+  // Hyparquet decodes a whole column chunk for any slice within its row
+  // group. Align reads to groups so a fixed-size slice does not repeatedly
+  // decode the same chunk. Positions are still committed in bounded batches.
+  let start = 0
+  for (const group of projection.metadata.row_groups) {
+    const end = start + Number(group.num_rows)
+    const rows = /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({
+      file, ...projection, rowStart: start, rowEnd: end,
+    }))
     for (let i = 0; i < rows.length; i++) {
-      if (deletedPositions?.has(BigInt(i))) continue
-      if (predicate(rows[i])) positions.push(i)
+      const pos = start + i
+      if (!deletedPositions?.has(BigInt(pos)) && predicate(rows[i])) yield pos
     }
-  } catch {
-    // Unreadable file: skip rather than block the whole purge. The rows stay
-    // cached; a subsequent purge over a healthy file still removes them.
+    start = end
   }
-  return positions
 }
 
 /**
@@ -689,14 +693,17 @@ export async function* scanRowsFromTable(tablePath, columns, opts) {
  * @returns {AsyncGenerator<Record<string, unknown>>}
  */
 async function* scanResolvedRows(source, columns, where) {
-  if (source.schema && source.prepareScan && columns.every((name) => source.schema?.fields.some((field) => field.name === name))) {
+  if (source.schema && source.prepareScan) {
+    // @ref LLP 0417#performance [implements]: optional fence columns must not disable native scans
+    const physical = columns.filter(name => source.schema?.fields.some(field => field.name === name))
+    const missing = columns.filter(name => !physical.includes(name))
     // @ref LLP 0040#storage-api-extension [constrained-by]: seq/legacy policy is still checked at the row boundary
     const result = executePlan({
-      plan: { type: 'Scan', table: 'cache', hints: { columns, where } },
+      plan: { type: 'Scan', table: 'cache', hints: { columns: physical, where } },
       context: { tables: { cache: source } },
     })
     if (result.batches) {
-      const indices = columns.map((name) => result.columns.indexOf(name))
+      const indices = physical.map((name) => result.columns.indexOf(name))
       for await (const batch of result.batches()) {
         const count = selectedRowCount(batch.selection)
         for (let start = 0; start < count;) {
@@ -715,7 +722,8 @@ async function* scanResolvedRows(source, columns, where) {
           for (let i = 0; i < end - start; i++) {
             /** @type {Record<string, unknown>} */
             const row = {}
-            for (let j = 0; j < columns.length; j++) row[columns[j]] = valueAt(vectors[j], i)
+            for (let j = 0; j < physical.length; j++) row[physical[j]] = valueAt(vectors[j], i)
+            for (const name of missing) row[name] = undefined
             yield row
           }
           start = end
