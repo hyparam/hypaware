@@ -372,8 +372,9 @@ export function mergeRow(existing, incoming) {
     const precise = keys && typeof keys === 'object' && ('part_id' in keys || 'committed_at' in keys)
     const inferred = keys && typeof keys === 'object' && keys.inferred_call === true
     const ordered = keys && typeof keys === 'object' ? Object.fromEntries(Object.entries(keys).sort(([a], [b]) => compareStrings(a, b))) : keys
-    const quoted = row.source_dataset !== 'enrichment_committed' || (row.props && typeof row.props === 'object' && typeof row.props.evidence === 'string')
-    return `${precise ? '0' : '1'}${quoted ? '0' : '1'}${inferred ? '1' : '0'}:${row.source_dataset}:${JSON.stringify(ordered)}`
+    const evidence = row.props && typeof row.props === 'object' ? row.props.evidence : undefined
+    const quoted = row.source_dataset !== 'enrichment_committed' || typeof evidence === 'string'
+    return `${precise ? '0' : '1'}${quoted ? '0' : '1'}${inferred ? '1' : '0'}:${row.source_dataset}:${JSON.stringify(ordered)}:${stableJson(evidence)}`
   }
   const selectedRank = evidenceProvenance.get(existing) ?? evidenceRank(existing)
   const incomingRank = evidenceProvenance.get(incoming) ?? evidenceRank(incoming)

@@ -85,4 +85,10 @@ test('merged enrichment quote follows the selected source rather than the earlie
     assert.equal(result.props.evidence, 'Selected source quote')
     assert.equal(result.props.summary, 'z-session', 'other props retain their existing merge policy')
   }
+  const sameSource = { ...selected, props: { ...selected.props, evidence: 'Another valid quote from the same source' } }
+  const forward = structuredClone(selected)
+  const reverse = structuredClone(sameSource)
+  mergeRow(forward, sameSource)
+  mergeRow(reverse, selected)
+  assert.deepEqual(forward, reverse, 'equal locators choose the quote independently of source order')
 })
