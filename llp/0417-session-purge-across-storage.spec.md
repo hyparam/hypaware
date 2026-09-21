@@ -215,7 +215,11 @@ another rewrite of the new generation. Another purge marks the new generation.
 The retired-generation sweep reclaims the named directories, including data,
 all snapshots/metadata and sidecars. It preserves the existing cache reader
 safety model: at least 24 hours after admission and retirement, rather than
-archive-style active-reader leases. The shorter orphan grace never applies
+archive-style active-reader leases. A published generation whose retirement
+marker was lost to a crash between the cursor swap and the marker write gets
+the marker rewritten at sweep time, so its grace runs from a bound that later
+appends cannot move; a never-published generation keeps its own last write as
+its retirement. The shorter orphan grace never applies
 to these targets. Long-lived external readers beyond the retention window
 are not protected. Missing/corrupt cursors, invalid journals, unreadable
 metadata, explicit branch/tag pins and statistics sidefiles block reclamation;

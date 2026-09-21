@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import sync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cache/storage.js'
@@ -113,6 +114,30 @@ test('a corrupt exclusion fails capture closed', async t => {
   const [name] = await fs.readdir(directory)
   await fs.writeFile(path.join(directory, name), '{}')
   await assert.rejects(storage.appendRows(storage.cacheTablePath('events'), columns, [{ session_id: 'other' }]))
+})
+
+test('refresh re-reads a store written within the last second and memoizes an older one', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-stamp-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const store = createSessionPurgeStore(cacheRoot)
+  store.add('fresh')
+  const directory = path.join(cacheRoot, 'session-purges')
+  const opendir = sync.opendirSync
+  let reads = 0
+  sync.opendirSync = /** @type {typeof sync.opendirSync} */ (function (...args) {
+    reads++
+    return opendir.apply(sync, /** @type {any} */ (args))
+  })
+  try {
+    store.refresh()
+    assert.equal(reads, 1, 'a stamp the coarse clock may still be sitting on is re-read')
+    const old = new Date(Date.now() - 5000)
+    await fs.utimes(directory, old, old)
+    store.refresh()
+    store.refresh()
+    assert.equal(reads, 2, 'an aged stamp is read once and then memoized')
+  } finally { sync.opendirSync = opendir }
+  assert.equal(store.size, 1)
 })
 
 test('refresh ignores foreign filenames in the purge store but still fails closed on a malformed marker', async t => {

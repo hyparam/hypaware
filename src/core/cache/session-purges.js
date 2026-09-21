@@ -32,8 +32,10 @@ export function createSessionPurgeStore(cacheRoot) {
   let fingerprint = ''
   function refresh() {
     let stamp
+    let mtimeNs = 0n
     try {
       const stat = fs.statSync(directory, { bigint: true })
+      mtimeNs = stat.mtimeNs
       stamp = `${stat.mtimeNs}:${stat.ctimeNs}`
     } catch (error) {
       if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error
@@ -81,7 +83,11 @@ export function createSessionPurgeStore(cacheRoot) {
     sessions = byOrg
     graphNodes = graphByOrg
     storedBytes = bytes
-    fingerprint = stamp
+    // Directory timestamps come from the kernel's coarse clock, so a marker
+    // another process lands in the same tick as the last one leaves the stamp
+    // unchanged. A stamp younger than a second is not memoized: the next
+    // refresh re-reads the store until the clock has moved past the write.
+    fingerprint = Date.now() * 1e6 - Number(mtimeNs) < 1e9 ? '' : stamp
   }
   return {
     refresh,

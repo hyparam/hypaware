@@ -197,9 +197,6 @@ test('unpublished generation does not strand purge or retirement', async t => {
   await age(cacheRoot, id, [original])
   const old = new Date(Date.now() - CACHE_PURGE_GRACE_MS - 10000)
   await fs.utimes(abandoned, old, old)
-  // `abandoned` carries no `.retired` marker, so its retiredAt falls back to
-  // the partition cursor's mtime, not its own; age that too.
-  await fs.utimes(path.join(partition, 'cursor.json'), old, old)
   await maintainCache({ cacheRoot })
   await assert.rejects(fs.stat(abandoned), { code: 'ENOENT' })
   assert.equal((await cachePurgeCleanupStatus(cacheRoot, id)).status, 'completed')
@@ -336,7 +333,30 @@ for (const source of [false, true]) test(`buffered append rechecks under the gua
 // @ref LLP 0417#cache-reclamation [tests]: a missing `.retired` marker falls
 // back to the partition cursor's mtime, an upper bound on the true
 // retirement time, rather than the retired generation directory's own mtime
-test('a missing .retired marker falls back to the cursor mtime, not the stale generation directory mtime', async t => {
+test('an incremental export reports purge-fence drops separately from usage-policy drops', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cache-purge-export-drop-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [
+    { session_id: 'target', org: 'a', body: 'sensitive fixture' },
+    { session_id: 'neighbor', org: 'a', body: 'surviving neighbor' },
+  ])
+  await storage.flushTable(partition, { force: true })
+  createSessionPurgeStore(cacheRoot).add('target', 'a')
+  const { result, records } = await withLogRecords(async () => {
+    const exported = []
+    for await (const row of storage.readRowsSince(partition, { columns: ['body'] })) exported.push(row)
+    return exported
+  })
+  assert.deepEqual(result.map(row => row.dropped ?? row.row?.body), [true, 'surviving neighbor'])
+  const record = records.find(r => r.body === 'usage_policy.export_drop')
+  assert(record, 'the export record is emitted for purge-fence drops')
+  assert.equal(record.attributes.purged_row_count, 1)
+  assert.equal(record.attributes.dropped_row_count, 0)
+})
+
+test('a published generation that lost its .retired marker gets one now and is reclaimed a grace later, appends notwithstanding', async t => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cache-purge-retired-fallback-'))
   t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
   const storage = createQueryStorageService({ cacheRoot })
@@ -359,27 +379,31 @@ test('a missing .retired marker falls back to the cursor mtime, not the stale ge
   // (compactGeneration writes the cursor first): the marker never lands,
   // and the retired directory's own mtime is set far in the past to model
   // one that predates the swap by an unbounded amount.
-  await fs.rm(path.join(original, '.retired'))
+  const retiredMarker = path.join(original, '.retired')
+  await fs.rm(retiredMarker)
   await fs.utimes(original, new Date(0), new Date(0))
 
-  // Age the journal past the grace window so the next sweep would otherwise
-  // remove `original` with zero retirement grace once it falls back to the
-  // ancient generation directory mtime.
-  const jobFile = path.join(cacheRoot, '.purge-cleanup', `${id}.json`)
-  const job = JSON.parse(await fs.readFile(jobFile, 'utf8'))
-  job.requestedAt = Date.now() - CACHE_PURGE_GRACE_MS - 10000
-  await fs.writeFile(jobFile, JSON.stringify(job))
+  // Age the journal (only: `age` would also rewrite the marker) past the
+  // grace window, so the sweep would otherwise remove `original` with zero
+  // retirement grace once it trusted the ancient generation directory mtime.
+  await age(cacheRoot, id, [])
 
-  // The partition's cursor.json was rewritten by the swap and is still
-  // fresh, so the fallback reads retiredAt from it instead and the
-  // generation survives this sweep.
+  // The sweep cannot know when the swap happened, so it records now as the
+  // retirement and keeps the generation for a full grace from here.
+  const before = Date.now()
   await maintainCache({ cacheRoot })
   await fs.stat(original)
+  const recorded = Date.parse(await fs.readFile(retiredMarker, 'utf8'))
+  assert(recorded >= before && recorded <= Date.now(), 'the repaired marker carries the sweep time')
 
-  // Once the cursor itself ages past the grace window, the fallback
-  // retiredAt is old enough and the generation is reclaimed.
-  const old = new Date(Date.now() - CACHE_PURGE_GRACE_MS - 10000)
-  await fs.utimes(path.join(partition, 'cursor.json'), old, old)
+  // Appends keep rewriting the cursor; that must not postpone reclamation
+  // once the recorded retirement ages past the grace window.
+  await storage.appendRows(partition, columns, [{ session_id: 'later', org: 'a', body: 'after the crash' }])
+  await storage.flushTable(partition, { force: true })
+  await maintainCache({ cacheRoot })
+  await fs.stat(original)
+  await fs.writeFile(retiredMarker, new Date(Date.now() - CACHE_PURGE_GRACE_MS - 10000).toISOString())
   await maintainCache({ cacheRoot })
   await assert.rejects(fs.stat(original), { code: 'ENOENT' })
+  assert.equal((await cachePurgeCleanupStatus(cacheRoot, id)).status, 'completed')
 })

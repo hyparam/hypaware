@@ -396,6 +396,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const droppedCwdHashes = new Set()
       let droppedSourceRowCount = 0
       let droppedUnattributedRowCount = 0
+      let purgedRowCount = 0
       let scanned = 0
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { since, includeLegacy: opts.includeLegacy })) {
         if (scanned++ % 1024 === 0) sessionPurges.refresh()
@@ -405,6 +406,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         /** @type {SinkContinuation} */
         const after = { v: 1, seq: high.toString() }
         if (sessionPurges.has(row)) {
+          purgedRowCount += 1
           yield { after, dropped: true }
           continue
         }
@@ -479,12 +481,15 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       // Per-partition aggregate on the export read; cwds are hashed, never raw
       // paths in dev telemetry (LLP 0080 #telemetry). Emitted only when the scan
       // completes normally, so a corrupt-list throw reports no partial drop.
-      if (droppedRowCount > 0) {
+      if (droppedRowCount > 0 || purgedRowCount > 0) {
         logger.debug('usage_policy.export_drop', {
           [Attr.COMPONENT]: 'cache',
           [Attr.DATASET]: dataset,
           dropped_row_count: droppedRowCount,
           distinct_cwd_count: droppedCwdHashes.size,
+          // Purge-fence drops are not a usage-policy withholding; kept
+          // separate so neither count is read as the other.
+          ...(purgedRowCount > 0 ? { purged_row_count: purgedRowCount } : {}),
           ...(droppedSourceRowCount > 0 ? { dropped_source_row_count: droppedSourceRowCount } : {}),
           // Separate count so the fail-closed rule's over-withholding is
           // observable in the field, not inferred (LLP 0192 #consequences).

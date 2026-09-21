@@ -2692,15 +2692,21 @@ async function walkForRetired(dir, cacheRoot) {
             let retiredAt
             try { retiredAt = Date.parse(await fsPromises.readFile(retiredMarker, 'utf8')) } catch (error) {
               if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error
-              // `.retired` is written only after the cursor swap (see
-              // `compactGeneration`), so a crash between the swap and that
-              // write leaves this generation's own directory mtime from
-              // before the swap, potentially far older than the retirement
-              // it never got to record. The partition's cursor.json is
-              // rewritten by the swap itself, so its mtime is an upper bound
-              // on the true retirement time and can only delay removal, never
-              // let a crash skip the grace window.
-              retiredAt = (await fsPromises.stat(path.join(dir, 'cursor.json'))).mtimeMs
+              if (await isUncommittedCacheGeneration(full)) {
+                // Never published: no reader opened it, and the lock held
+                // here excludes its writer, so its last write is its mtime.
+                retiredAt = (await fsPromises.stat(full)).mtimeMs
+              } else {
+                // Published, but a crash between the cursor swap and the
+                // marker write (see `compactGeneration`) lost the retirement
+                // time. The directory's own mtime predates the swap by an
+                // unbounded amount, and the cursor is rewritten by every
+                // append, so neither bounds it. Record now as the retirement
+                // instead: an upper bound by construction that later appends
+                // cannot move, so the grace runs from here on the next ticks.
+                await fsPromises.writeFile(retiredMarker, new Date().toISOString(), 'utf8')
+                return
+              }
             }
             if (!Number.isFinite(retiredAt) || Date.now() - retiredAt < CACHE_PURGE_GRACE_MS) return
             if (!await isUncommittedCacheGeneration(full)) {
