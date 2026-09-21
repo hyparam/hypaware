@@ -27,6 +27,13 @@ export async function run({ harness, expect }) {
   const raw = JSON.parse(await fs.readFile(new URL('../fixtures/pi-session.json', import.meta.url), 'utf8'))
   raw.session.cwd = path.join(harness.tmpDir, 'project')
   raw.session.id = harness.devRunId
+  for (let i = 0; i < 80; i++) raw.entries.push({
+    type: 'message', id: `ordering-${i}`, parentId: raw.entries.at(-1).id,
+    timestamp: new Date(Date.UTC(2026, 8, 17, 10, 1, i)).toISOString(),
+    message: { role: 'user', content: `Ordering check ${i}` },
+  })
+  const expectedRows = raw.entries.length + 1 // the assistant has text and a tool call
+  const expectedIndices = [0, 1, 1, ...Array.from({ length: raw.entries.length - 2 }, (_, i) => i + 2)]
   /** @param {string} name @param {() => Promise<any>} fn */
   const step = (name, fn) => runRoot(`smoke.step.${name}`, { [Attr.DEV_RUN_ID]: harness.devRunId, [Attr.SMOKE_NAME]: harness.smokeName, [Attr.SMOKE_STEP]: name }, fn)
   /** @param {string[]} args */
@@ -66,26 +73,30 @@ export async function run({ harness, expect }) {
       const hooks = new Map()
       extension({ on(name, fn) { hooks.set(name, fn) }, registerCommand() {} })
       let entries = []
-      const context = { mode: 'print', sessionManager: { getSessionFile: () => '/fixture.jsonl', getHeader: () => raw.session, getLeafId: () => entries.at(-1)?.id ?? null, getEntry: id => entries.find(e => e.id === id) } }
+      const context = { mode: 'print', sessionManager: { getEntries: () => entries.slice(), getSessionFile: () => '/fixture.jsonl', getHeader: () => raw.session, getLeafId: () => entries.at(-1)?.id ?? null, getEntry: id => entries.find(e => e.id === id) } }
       hooks.get('session_start')({}, context)
+      entries = raw.entries.slice(0, 40)
+      hooks.get('turn_end')({}, context)
       entries = raw.entries
       hooks.get('turn_end')({}, context)
       await hooks.get('session_shutdown')({}, context)
-      const rows = await cli(['query', 'sql', `select * from ai_gateway_messages where session_id = '${harness.devRunId}'`, '--refresh', 'always', '--format', 'json'])
-      expect.that('live package writes all five parts', rows.length, v => v === 5)
+      const rows = await cli(['query', 'sql', `select * from ai_gateway_messages where session_id = '${harness.devRunId}' order by message_index, part_index`, '--refresh', 'always', '--format', 'json', '--max-bytes', '0'])
+      expect.that('live package writes every part', rows.length, v => v === expectedRows)
+      expect.that('live batches preserve transcript order', rows.map(row => row.message_index), indices => JSON.stringify(indices) === JSON.stringify(expectedIndices))
       expect.that('tool link present', rows, r => r.some(row => row.tool_name === 'read' && row.tool_call_id === 'call-1'))
     })
     await step('recover', async () => {
       await fs.writeFile(path.join(sessionsDir, 'session.jsonl'), [raw.session, ...raw.entries].map(e => JSON.stringify(e)).join('\n') + '\n')
       for (let i = 0; i < 2; i++) await cli(['backfill', 'pi', '--since', '2000-01-01T00:00:00Z', '--json'])
-      const rows = await cli(['query', 'sql', `select * from ai_gateway_messages where session_id = '${harness.devRunId}'`, '--refresh', 'always', '--format', 'json'])
-      expect.that('recovery converges without duplicates', rows.length, v => v === 5)
+      const rows = await cli(['query', 'sql', `select * from ai_gateway_messages where session_id = '${harness.devRunId}' order by message_index, part_index`, '--refresh', 'always', '--format', 'json', '--max-bytes', '0'])
+      expect.that('recovery converges without duplicates', rows.length, v => v === expectedRows)
+      expect.that('recovery preserves transcript order', rows.map(row => row.message_index), indices => JSON.stringify(indices) === JSON.stringify(expectedIndices))
       const usages = rows.map(r => typeof r.attributes === 'string' ? JSON.parse(r.attributes) : r.attributes).map(a => a?.usage).filter(Boolean)
       expect.that('usage counted once', usages.reduce((n, u) => n + u.total_tokens, 0), v => v === 23)
     })
     await step('privacy', async () => {
       await fs.writeFile(path.join(raw.session.cwd, '.hypignore'), 'ignore\n')
-      const response = await fetch(`${process.env.HYP_PI_ENDPOINT}/entries`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...raw, session: { ...raw.session, id: 'ignored' } }) })
+      const response = await fetch(`${process.env.HYP_PI_ENDPOINT}/entries`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...raw, entries: raw.entries.slice(0, 4), message_indices: [0, 1, 2, 3], session: { ...raw.session, id: 'ignored' } }) })
       expect.that('ignored directory dropped', response.status, v => v === 202)
       log.info('pi.smoke.privacy', { [Attr.DEV_RUN_ID]: harness.devRunId, status: 'ok' })
     })
@@ -98,7 +109,7 @@ export async function run({ harness, expect }) {
     })
     await obs.shutdown()
     const logs = await expect.logs()
-    expect.that('capture signal emitted', logs, values => values.some(e => e.body === 'pi.entries.recorded' && Number(e.attributes?.rows_written) === 5))
+    expect.that('capture signal emitted', logs, values => values.filter(e => e.body === 'pi.entries.recorded').reduce((sum, e) => sum + Number(e.attributes?.rows_written ?? 0), 0) === expectedRows)
     expect.that('recovery signal emitted', logs, values => values.some(e => e.body === 'pi.backfill.scan'))
     const traces = await expect.traces()
     expect.that('run-specific steps traced', traces.filter(t => String(t.name).startsWith('smoke.step.') && t.attributes?.[Attr.DEV_RUN_ID] === harness.devRunId).length, v => v === 6)

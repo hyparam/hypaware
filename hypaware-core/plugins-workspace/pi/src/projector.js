@@ -2,6 +2,7 @@
 
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { isPiMessageEntry } from '../../../../packages/pi-extension/index.js'
 import { isPlainObject, stringValue } from '../../../../src/core/util/index.js'
 
 /** @import { AiGatewayProjectedExchange, AiGatewayProjectedMessage, JsonObject } from '../../../../hypaware-plugin-kernel-types.js' */
@@ -38,12 +39,18 @@ export function projectPiEntries(raw, opts = {}) {
   if (!session || !Array.isArray(raw.entries)) return undefined
   /** @type {AiGatewayProjectedMessage[]} */
   const messages = []
-  for (const entry of raw.entries) {
-    if (!isPlainObject(entry) || !stringValue(entry.id) || !iso(entry.timestamp)) continue
+  let position = 0
+  for (let i = 0; i < raw.entries.length; i++) {
+    const entry = raw.entries[i]
+    if (!isPiMessageEntry(entry)) continue
     const parentFingerprint = opts.inherited?.get(String(entry.id))
     const inherited = parentFingerprint !== undefined && parentFingerprint === piEntryFingerprint(entry)
     const projected = projectEntry(session, entry, inherited)
-    if (projected) messages.push(projected)
+    if (projected) {
+      projected.message_index = Array.isArray(raw.message_indices) ? raw.message_indices[i] : position
+      messages.push(projected)
+      position++
+    }
   }
   if (!messages.length) return undefined
   return {

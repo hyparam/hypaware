@@ -69,6 +69,13 @@ when its per-hook work budget or the queue is exhausted. Limits and unavailable
 input surface through status/diagnostics.
 Very large entries can therefore require a later deliberate increase in limits.
 
+Session positions stay stable across batches, resume, branches and recovery.
+The extension counts a shallow history snapshot at startup and reconciles it
+after tree navigation; ordinary turns process only appended entries. It keeps
+two counters, with no persistent history index. Live capture stops above 100,000
+session entries. Protocol version 2 requires the matching HypAware adapter;
+old version-1 senders are refused and native recovery remains available.
+
 Baseline: Pi 0.85.1. The acceptance procedure in `docs/ACCEPTANCE.md` checks real
 Pi behavior when either adapter or upstream changes. This package does not
 install HypAware, start services or transmit directly to a cloud destination.

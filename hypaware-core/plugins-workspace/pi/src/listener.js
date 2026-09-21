@@ -28,7 +28,7 @@ export function createStartPiSource(deps) {
       const url = requestUrlOf(req)
       if (!url) return reject(req, res, 400, 'invalid_request')
       if (isControlPath(url.pathname)) { control(req, res, url); return }
-      if (req.method === 'GET' && url.pathname === '/') { send(res, 200, { name: 'hypaware/pi', version: 1 }); return }
+      if (req.method === 'GET' && url.pathname === '/') { send(res, 200, { name: 'hypaware/pi', version: 2 }); return }
       if (req.method !== 'POST' || url.pathname !== '/entries') return reject(req, res, 404, 'not_found')
       if ((req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') {
         state.rejected++
@@ -62,7 +62,9 @@ export function createStartPiSource(deps) {
           let raw
           try { raw = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { reject(req, res, 400, 'invalid_json'); return }
           const session = piSessionHeader(raw?.session)
-          if (raw?.version !== 1 || !session || !Array.isArray(raw.entries) || raw.entries.length > 64) {
+          if (raw?.version !== 2 || !session || !Array.isArray(raw.entries) || raw.entries.length > 64 ||
+              !Array.isArray(raw.message_indices) || raw.message_indices.length !== raw.entries.length ||
+              raw.message_indices.some(index => !Number.isInteger(index) || index < 0 || index > 2147483647)) {
             state.rejected++
             reject(req, res, 400, 'unsupported_batch')
             return

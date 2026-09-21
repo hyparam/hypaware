@@ -80,6 +80,19 @@ test('Pi rejects unsupported headers and partial assistant messages', () => {
   assert.equal(projectPiEntries(raw)?.messages.length, 1)
 })
 
+test('Shared projection honors explicit positions on every part and preserves the legacy default', () => {
+  const projection = projectPiEntries(copy())
+  assert.ok(projection)
+  for (const [i, message] of projection.messages.entries()) message.message_index = i + 70
+  assert.deepEqual(aiGatewayRowsFromProjectedExchange(projection).map(row => row.message_index), [70, 71, 71, 72, 73])
+  for (const message of projection.messages) delete message.message_index
+  assert.deepEqual(aiGatewayRowsFromProjectedExchange(projection).map(row => row.message_index), [0, 1, 1, 2, 3])
+  for (const invalid of [-1, 0.5, NaN, Infinity, 2147483648, null, '12']) {
+    projection.messages[0].message_index = /** @type {any} */ (invalid)
+    assert.throws(() => aiGatewayRowsFromProjectedExchange(projection), /message_index must be a nonnegative INT32/)
+  }
+})
+
 /** @param {string} root @param {any} raw @param {string} name */
 async function writeSession(root, raw, name) {
   const file = path.join(root, `${name}.jsonl`)
@@ -94,6 +107,28 @@ async function collect(provider, context) {
   for await (const entry of provider.run(context)) (entry.type === 'event' ? events : items).push(entry)
   return { items, events }
 }
+
+test('Pi recovery keeps session positions across batches, metadata and time filtering', async () => {
+  const root = await temp()
+  try {
+    const raw = copy()
+    raw.session.cwd = root
+    raw.entries = Array.from({ length: 150 }, (_, i) => ({
+      type: 'message', id: `order-${i}`, parentId: i ? `order-${i - 1}` : null,
+      timestamp: new Date(Date.UTC(2026, 8, 17, 10, 0, i)).toISOString(),
+      message: { role: 'user', content: `message ${i}` },
+    }))
+    raw.entries.splice(60, 0, { type: 'model_change', id: 'metadata', parentId: 'order-59', timestamp: raw.entries[59].timestamp })
+    await writeSession(root, raw, 'ordered')
+    const provider = createPiBackfillProvider({ env: { PI_CODING_AGENT_SESSION_DIR: root } })
+    const result = await collect(provider, { env: {}, log: silent, dryRun: true })
+    const rows = result.items.flatMap(item => aiGatewayRowsFromProjectedExchange(item.value))
+    assert.deepEqual(rows.map(row => row.message_index), Array.from({ length: 150 }, (_, i) => i))
+    const filtered = await collect(provider, { env: {}, log: silent, dryRun: true, since: raw.entries[100].timestamp })
+    const later = filtered.items.flatMap(item => aiGatewayRowsFromProjectedExchange(item.value))
+    assert.equal(later[0].message_index, 99)
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
 
 test('Pi recovery skips unchanged input, retries changed/partial input and honors dry-run/write failures', async () => {
   const root = await temp()
@@ -266,12 +301,15 @@ test('Pi listener records once, refuses browser requests and applies live policy
     const post = (body, route = '/entries', type = 'application/json') => fetch(endpoint + route, { method: 'POST', headers: { 'content-type': type }, body: JSON.stringify(body) })
     const raw = copy()
     raw.session.cwd = root
+    raw.message_indices = [0, 1, 2, 3]
     assert.equal((await post(raw)).status, 200)
     assert.equal(rows.length, 5)
     assert.equal((await post(raw)).status, 200)
     assert.equal(rows.length, 5)
     assert.equal((await post(raw, '/entries', 'text/plain')).status, 415)
-    assert.equal((await post({ ...raw, version: 2 })).status, 400)
+    assert.equal((await post({ ...raw, version: 1 })).status, 400)
+    assert.equal((await post({ ...raw, message_indices: undefined })).status, 400)
+    assert.equal((await post({ ...raw, message_indices: [0, 1, -1, 3] })).status, 400)
     await post({ session_id: raw.session.id }, '/_hypaware/ignore/session')
     assert.equal((await post(raw)).status, 202)
     raw.session.id = 'other'
@@ -291,7 +329,7 @@ test('Pi extension captures post-append deltas, suppresses duplicate instances a
   const raw = copy()
   let entries = []
   let persisted = true
-  const ctx = { mode: 'print', sessionManager: { getLeafId: () => entries.at(-1)?.id ?? null, getEntry: id => entries.find(e => e.id === id), getHeader: () => raw.session, getSessionFile: () => persisted ? '/session.jsonl' : undefined } }
+  const ctx = { mode: 'print', sessionManager: { getEntries: () => entries.slice(), getLeafId: () => entries.at(-1)?.id ?? null, getEntry: id => entries.find(e => e.id === id), getHeader: () => raw.session, getSessionFile: () => persisted ? '/session.jsonl' : undefined } }
   const emit = async name => { for (const fn of hooks.get(name) ?? []) await fn({}, ctx) }
   try {
     extension(api)
@@ -313,6 +351,77 @@ test('Pi extension captures post-append deltas, suppresses duplicate instances a
   } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
 })
 
+test('Pi live positions agree with recovery after resume, branching, dropped entries and a fork', async () => {
+  const originalFetch = globalThis.fetch
+  const sent = []
+  globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(String(init?.body))); return new Response('{}') }
+  const hooks = new Map()
+  const raw = copy()
+  raw.entries = []
+  /** @type {string | null} */
+  let head = null
+  let snapshots = 0
+  const entriesById = new Map()
+  const ctx = { mode: 'print', sessionManager: {
+    getEntries() { snapshots++; return raw.entries.slice() }, getLeafId: () => head,
+    getEntry: id => entriesById.get(id), getHeader: () => raw.session, getSessionFile: () => '/session.jsonl',
+  } }
+  const append = (type = 'message', content = 'text') => {
+    const entry = { type, id: `live-${raw.entries.length}`, parentId: head, timestamp: new Date(Date.UTC(2026, 8, 17, 10, 0, raw.entries.length)).toISOString(), message: { role: 'user', content } }
+    raw.entries.push(entry)
+    entriesById.set(entry.id, entry)
+    head = entry.id
+  }
+  try {
+    // Resume with history. The first transmitted message must not become 0.
+    for (let i = 0; i < 80; i++) append(i % 10 ? 'message' : 'model_change')
+    extension({ on(name, fn) { hooks.set(name, fn) }, registerCommand() {} })
+    hooks.get('session_start')({}, ctx)
+    for (let i = 0; i < 100; i++) { append(); hooks.get('turn_end')({}, ctx) }
+    assert.equal(snapshots, 1, 'ordinary turns never copy or scan session history')
+    hooks.get('session_before_tree')({}, ctx)
+    head = 'live-30'
+    append('branch_summary')
+    hooks.get('session_tree')({}, ctx)
+    assert.equal(snapshots, 2)
+    append('message', 'x'.repeat(600 * 1024))
+    hooks.get('turn_end')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    await hooks.get('session_shutdown')({}, ctx)
+    const recoveredProjection = projectPiEntries(raw)
+    assert.ok(recoveredProjection)
+    const recovered = aiGatewayRowsFromProjectedExchange(recoveredProjection)
+    const byId = new Map(recovered.map(row => [row.part_id, row.message_index]))
+    const live = sent.flatMap(batch => {
+      const projection = projectPiEntries(batch)
+      assert.ok(projection)
+      return aiGatewayRowsFromProjectedExchange(projection)
+    })
+    assert.ok(live.length > 64)
+    assert.equal(live[0].message_index, 72)
+    assert.equal(live.at(-1)?.message_index, recovered.at(-1)?.message_index)
+    for (const row of live) assert.equal(row.message_index, byId.get(row.part_id))
+    assert.equal(new Set(live.map(row => row.message_index)).size, live.length)
+    // Fork inherits a copied prefix, then adds new work in a new session.
+    const parent = new Map(raw.entries.map(entry => [entry.id, piEntryFingerprint(entry)]))
+    raw.entries = raw.entries.slice(0, 31)
+    raw.session.id = 'forked'
+    head = raw.entries.at(-1).id
+    hooks.get('session_start')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    await hooks.get('session_shutdown')({}, ctx)
+    const forkLiveProjection = projectPiEntries(sent.at(-1))
+    const forkRecoveryProjection = projectPiEntries(raw, { inherited: parent })
+    assert.ok(forkLiveProjection)
+    assert.ok(forkRecoveryProjection)
+    const forkLive = aiGatewayRowsFromProjectedExchange(forkLiveProjection)
+    const forkRecovered = aiGatewayRowsFromProjectedExchange(forkRecoveryProjection)
+    assert.equal(forkLive[0].message_index, forkRecovered.at(-1)?.message_index)
+  } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
+})
+
 test('Pi extension bounds encoding work under backpressure and rejects huge values before walking their tail', async () => {
   const originalFetch = globalThis.fetch
   const sent = []
@@ -324,7 +433,7 @@ test('Pi extension bounds encoding work under backpressure and rejects huge valu
   let entries = []
   let serializations = 0
   let tailVisits = 0
-  const ctx = { mode: 'print', sessionManager: { getLeafId: () => entries.at(-1)?.id ?? null, getEntry: id => entries.find(e => e.id === id), getHeader: () => raw.session, getSessionFile: () => '/session.jsonl' } }
+  const ctx = { mode: 'print', sessionManager: { getEntries: () => entries.slice(), getLeafId: () => entries.at(-1)?.id ?? null, getEntry: id => entries.find(e => e.id === id), getHeader: () => raw.session, getSessionFile: () => '/session.jsonl' } }
   try {
     extension({ on(name, fn) { hooks.set(name, fn) }, registerCommand() {} })
     hooks.get('session_start')({}, ctx)

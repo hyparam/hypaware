@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { isPiMessageEntry } from '../../../../packages/pi-extension/index.js'
 import { createUsagePolicyResolver } from '../../../../src/core/usage-policy/index.js'
 import { refreshSessionIgnores, sessionIgnoreLoadError } from '../../../../src/core/control/session_ignore_store.js'
 import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
@@ -81,6 +82,8 @@ export function createPiBackfillProvider(opts = {}) {
           let session
           let inherited = new Map()
           let batch = []
+          let positions = []
+          let nextMessage = 0
           let batchBytes = 0
           let entries = 0
           let skipped = false
@@ -121,23 +124,27 @@ export function createPiBackfillProvider(opts = {}) {
               continue
             }
             if (++entries > MAX_ENTRIES) throw new Error('entry_budget')
+            const messageIndex = nextMessage
+            if (isPiMessageEntry(entry)) nextMessage++
             const timestamp = Date.parse(entry.timestamp)
             if (window.sinceMs !== undefined && timestamp < window.sinceMs) continue
             if (window.untilMs !== undefined && timestamp > window.untilMs) continue
             if (batch.length && (batch.length >= 64 || batchBytes + bytes > MAX_LINE_BYTES)) {
               refreshSessionIgnores(opts.ignoredSessions)
               if (sessionIgnoreLoadError(opts.ignoredSessions) || opts.ignoredSessions?.has(String(session.id)) || resolver.resolve(String(session.cwd)).class === 'ignore') { skipped = true; dropped++; break }
-              const projection = projectPiEntries({ session, entries: batch }, { inherited })
+              const projection = projectPiEntries({ session, entries: batch, message_indices: positions }, { inherited })
               if (projection) yield projectedExchangeItem(projection, { client_name: 'pi', source_path: file, native_id: String(session.id) })
               batch = []
+              positions = []
               batchBytes = 0
             }
             batch.push(entry)
+            positions.push(messageIndex)
             batchBytes += bytes
           }
           refreshSessionIgnores(opts.ignoredSessions)
           if (session && !skipped && !sessionIgnoreLoadError(opts.ignoredSessions) && !opts.ignoredSessions?.has(String(session.id)) && resolver.resolve(String(session.cwd)).class !== 'ignore') {
-            const projection = projectPiEntries({ session, entries: batch }, { inherited })
+            const projection = projectPiEntries({ session, entries: batch, message_indices: positions }, { inherited })
             if (projection) yield projectedExchangeItem(projection, { client_name: 'pi', source_path: file, native_id: String(session.id) })
             if (!ctx.dryRun && ctx.itemsFailed === failures) fingerprints.set(file, fingerprint)
           }

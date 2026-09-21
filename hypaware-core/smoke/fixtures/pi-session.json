@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "session": { "type": "session", "version": 3, "id": "pi-fixture", "cwd": "/work/pi-fixture", "timestamp": "2026-09-17T10:00:00.000Z" },
   "entrypoint": "print",
   "entries": [

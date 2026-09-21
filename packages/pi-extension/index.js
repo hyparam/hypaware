@@ -6,12 +6,15 @@ const LEASE = Symbol.for('hypaware.pi-extension.v1')
 const MAX_BYTES = 512 * 1024
 const QUEUE_BYTES = 4 * 1024 * 1024
 const MAX_ENTRIES = 4096
+const MAX_SESSION_ENTRIES = 100000
 
 /** Pi supplies the API at runtime; no Pi runtime dependency is installed. @param {any} pi */
 export default function hypawarePi(pi) {
   const owner = {}
   const shared = /** @type {any} */ (globalThis)
   let leaf = null
+  let nextEntry = 0
+  let nextMessage = 0
   let enabled = false
   let stopping = false
   let endpoint = DEFAULT_ENDPOINT
@@ -44,8 +47,8 @@ export default function hypawarePi(pi) {
     }
   }
 
-  /** @param {any} session @param {any[]} entries @param {string} mode */
-  function enqueue(session, entries, mode) {
+  /** @param {any} session @param {any[]} entries @param {string} mode @param {number[]} positions */
+  function enqueue(session, entries, mode, positions) {
     if (!entries.length) return
     // Stop before walking payloads when the daemon cannot keep up. Encoding
     // also has a per-hook work budget, including entries too large to send.
@@ -54,24 +57,29 @@ export default function hypawarePi(pi) {
     const header = encodeJson(session, budget)
     if (!header) { drop(); return }
     const entrypoint = ['tui', 'print', 'json', 'rpc'].includes(mode) ? mode : 'unknown'
-    const prefix = `{"version":1,"session":${header},"entrypoint":"${entrypoint}","entries":[`
-    const overhead = Buffer.byteLength(prefix) + 2
+    const prefix = `{"version":2,"session":${header},"entrypoint":"${entrypoint}","entries":[`
+    // Reserve enough for 64 INT32 positions and the parallel-array framing.
+    const overhead = Buffer.byteLength(prefix) + 768
     let bytes = overhead
     /** @type {string[]} */
     let batch = []
+    /** @type {number[]} */
+    let batchPositions = []
     function flush() {
       if (!batch.length) return true
       if (queuedBytes + bytes > QUEUE_BYTES) { drop(); return false }
-      queue.push({ body: prefix + batch.join(',') + ']}', bytes })
+      const body = prefix + batch.join(',') + '],"message_indices":' + JSON.stringify(batchPositions) + '}'
+      queue.push({ body, bytes })
       queuedBytes += bytes
       batch = []
+      batchPositions = []
       bytes = overhead
       if (!sending) sending = drain().finally(() => { sending = undefined })
       return true
     }
-    for (const entry of entries) {
+    for (let index = 0; index < entries.length; index++) {
       if (budget.remaining <= 0 || queuedBytes > QUEUE_BYTES - MAX_BYTES) { drop(); break }
-      const encoded = encodeJson(entry, budget)
+      const encoded = encodeJson(entries[index], budget)
       if (!encoded) { drop(); continue }
       const size = Buffer.byteLength(encoded)
       if (overhead + size > MAX_BYTES) { drop(); continue }
@@ -80,6 +88,7 @@ export default function hypawarePi(pi) {
       }
       bytes += size + (batch.length ? 1 : 0)
       batch.push(encoded)
+      batchPositions.push(positions[index])
     }
     flush()
   }
@@ -87,6 +96,41 @@ export default function hypawarePi(pi) {
   function drop() {
     dropped++
     lastStatus = 'capture encoding or queue limit; session recovery will retry'
+  }
+
+  /** @param {any} ctx @param {any[]} entries */
+  function appended(ctx, entries) {
+    const positions = entries.map(entry => {
+      const index = nextMessage
+      if (isPiMessageEntry(entry)) nextMessage++
+      return index
+    })
+    nextEntry += entries.length
+    if (nextEntry > MAX_SESSION_ENTRIES) {
+      enabled = false
+      lastStatus = 'session entry limit; live capture disabled'
+      return
+    }
+    enqueue(ctx.sessionManager.getHeader(), entries, ctx.mode ?? 'unknown', positions)
+  }
+
+  // @ref LLP 0416#ordering: snapshots occur at startup/navigation, never each ordinary turn
+  /** @param {any} ctx @param {boolean} deliver */
+  function checkpoint(ctx, deliver) {
+    const entries = ctx.sessionManager.getEntries()
+    leaf = ctx.sessionManager.getLeafId()
+    if (entries.length > MAX_SESSION_ENTRIES || (deliver && entries.length < nextEntry)) {
+      enabled = false
+      lastStatus = 'session changed or exceeds entry limit; live capture disabled'
+      return
+    }
+    if (deliver && entries.length - nextEntry <= MAX_ENTRIES) appended(ctx, entries.slice(nextEntry))
+    else {
+      if (deliver) drop()
+      nextEntry = entries.length
+      nextMessage = 0
+      for (const entry of entries) if (isPiMessageEntry(entry)) nextMessage++
+    }
   }
 
   // @ref LLP 0416#capture: only read IDs after Pi appended completed entries
@@ -104,18 +148,17 @@ export default function hypawarePi(pi) {
       entries.push(entry)
       id = entry.parentId
     }
-    leaf = head
-    if (id && entries.length === MAX_ENTRIES) {
-      dropped++
-      lastStatus = 'entry traversal limit; session recovery will retry'
+    if (id !== leaf) {
+      checkpoint(ctx, true)
       return
     }
+    leaf = head
     // Moving to an earlier branch is not new work. Entries still dedupe in
     // the daemon if a later traversal crosses an already-recorded branch.
     entries.reverse()
     const session = sm.getHeader()
     if (!session || !sm.getSessionFile()) return
-    enqueue(session, entries, ctx.mode ?? 'unknown')
+    appended(ctx, entries)
   }
 
   pi.on('session_start', (_event, ctx) => {
@@ -132,14 +175,13 @@ export default function hypawarePi(pi) {
       enabled = false
       lastStatus = 'invalid HYP_PI_ENDPOINT; expected http://127.0.0.1:port'
     }
-    leaf = ctx.sessionManager.getLeafId()
+    if (enabled) checkpoint(ctx, false)
   })
   for (const event of ['turn_end', 'agent_end', 'agent_settled', 'session_compact']) pi.on(event, capture)
   pi.on('session_before_tree', capture)
   pi.on('session_tree', (event, ctx) => {
     if (!enabled || stopping || shared[LEASE] !== owner) return
-    if (event.summaryEntry) enqueue(ctx.sessionManager.getHeader(), [event.summaryEntry], ctx.mode ?? 'unknown')
-    leaf = ctx.sessionManager.getLeafId()
+    checkpoint(ctx, true)
   })
   pi.on('session_shutdown', async (event, ctx) => {
     if (shared[LEASE] !== owner) return
@@ -161,6 +203,16 @@ export default function hypawarePi(pi) {
       ctx.ui.notify(`HypAware: ${lastStatus}. Capture drops: ${dropped}.`, 'info')
     },
   })
+}
+
+/** Shared with recovery so metadata, invalid entries and pending output consume no position. @param {any} entry */
+export function isPiMessageEntry(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || !entry.id.trim() ||
+      typeof entry.timestamp !== 'string' || !Number.isFinite(Date.parse(entry.timestamp))) return false
+  if (['compaction', 'branch_summary', 'custom_message'].includes(entry.type)) return true
+  const message = entry.message
+  return entry.type === 'message' && !!message && typeof message === 'object' && !Array.isArray(message) &&
+    message.stopReason !== 'pending' && ['user', 'assistant', 'tool', 'system', 'toolResult', 'bashExecution'].includes(message.role)
 }
 
 /**

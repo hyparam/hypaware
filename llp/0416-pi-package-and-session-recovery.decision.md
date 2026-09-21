@@ -40,6 +40,37 @@ added to response usage: it may aggregate independently recorded child work.
 Compaction and branch-summary usage is additive once per new summary entry.
 Pi input is already net of cache and is not reduced a second time.
 
+## Session ordering {#ordering}
+
+`AiGatewayProjectedMessage.message_index` is an optional nonnegative INT32
+position override. The shared projector preserves it on every part of that
+message; omission keeps the existing exchange-array index for other adapters.
+This extends the producer contract, not the stored schema. Invalid explicit
+positions fail instead of silently falling back to a batch-relative index.
+
+Pi positions count projectable messages in native session append order across
+all branches, including summaries and copied fork context. Metadata and pending
+or invalid entries consume no position. Parent IDs separately describe the
+branch structure; branch depth is not a session-wide ordering key. The package
+and recovery share one entry-classification function. Recovery advances its
+counter before time filtering, so windows and batch boundaries do not renumber
+messages. A dropped live entry still consumes its position for later recovery.
+
+The extension keeps only entry and message counters. At startup it counts a
+shallow `getEntries()` snapshot once without serializing historical payloads.
+Ordinary capture uses bounded parent-link deltas. Navigation, discontinuities
+and traversal overflow use a fresh snapshot to reconcile the append tail;
+there is no persistent ID-to-position map. Snapshots are temporary O(N) arrays
+of references supplied by Pi, not copied payloads; sessions above 100,000
+entries disable live capture. Pi's API constructs its shallow array before
+that size check. Steady capture costs O(new entries), independent of history.
+
+Live protocol version 2 sends up to 64 parallel `message_indices` with each
+entry batch. The listener rejects version 1 and missing or invalid positions,
+leaving native recovery available rather than persisting scrambled ordering.
+This PR is unreleased; the change does not repair rows from earlier experimental
+version-1 captures already stored under the same identities.
+
 ## Bounds and policy {#bounds}
 
 The extension limits entry traversal, queued bytes and request size, sends
