@@ -377,6 +377,8 @@ export function mergeRow(existing, incoming) {
   }
   const selectedRank = evidenceProvenance.get(existing) ?? evidenceRank(existing)
   const incomingRank = evidenceProvenance.get(incoming) ?? evidenceRank(incoming)
+  const exemplar = incomingRank < selectedRank ? incoming : existing
+  const exemplarQuote = exemplar.props && typeof exemplar.props === 'object' ? /** @type {Record<string, unknown>} */ (exemplar.props).evidence : undefined
   evidenceProvenance.set(existing, selectedRank)
   if (incomingRank < selectedRank) {
     evidenceProvenance.set(existing, incomingRank)
@@ -406,6 +408,12 @@ export function mergeRow(existing, incoming) {
       }
     }
     existing.props = merged
+  }
+  // The quote and locator form one evidence record, independent of other props.
+  if (existing.source_dataset === 'enrichment_committed' && existing.props && typeof existing.props === 'object') {
+    const props = /** @type {Record<string, unknown>} */ (existing.props)
+    if (exemplarQuote === undefined) delete props.evidence
+    else props.evidence = exemplarQuote
   }
   if (incomingTime !== undefined && (existingTime === undefined || incomingTime < existingTime)) {
     existing.first_seen = incoming.first_seen

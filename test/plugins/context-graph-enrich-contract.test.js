@@ -29,6 +29,7 @@ const ROW = {
   confidence: 0.9,
   anchor_type: 'Session',
   anchor_key: 'conv-1',
+  source_dataset: 'ai_gateway_messages',
   source_keys: { message_id: ['m1', 'm2'] },
   committed_at: '2026-01-02T03:04:05Z',
 }
@@ -52,7 +53,7 @@ test('node rule maps item_type→type, item_id→key, folds confidence into prop
   assert.equal(built.props.confidence, 0.9)
   assert.equal(built.props.summary, 'Rate limit with Redis, not in-process.')
   assert.equal(built.firstSeen, '2026-01-02T03:04:05Z')
-  assert.deepEqual(built.sourceKeys, { item_id: ROW.item_id, item_type: ROW.item_type, anchor_type: ROW.anchor_type, anchor_key: ROW.anchor_key, committed_at: ROW.committed_at })
+  assert.deepEqual(built.sourceKeys, { item_id: ROW.item_id, item_type: ROW.item_type, anchor_type: ROW.anchor_type, anchor_key: ROW.anchor_key, committed_at: ROW.committed_at, source_dataset: ROW.source_dataset, source_keys: ROW.source_keys })
 })
 
 test('edge rule links the anchor (Session) to the enrichment node via produced', () => {

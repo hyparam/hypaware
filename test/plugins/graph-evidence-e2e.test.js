@@ -94,6 +94,31 @@ test('unmatched and ambiguous claim evidence fails closed; oversized transcripts
   assert.throws(() => buildTranscript([{ content_text: 'x'.repeat(2_000_001) }], cfg), /budget/)
 })
 
+test('same-batch claims for one item retain distinct evidence locators', async () => {
+  await fixture(async ({ registry, storage, sql }) => {
+    const prospects = [...collectProspectRows([{ anchorKey: 'review-session', rows: source,
+      candidates: [
+        { type: 'Decision', label: 'First claim', evidence: source[0].content_text },
+        { type: 'Decision', label: 'Second claim', evidence: quote },
+        { type: 'Decision', label: 'Repeated first claim', evidence: source[0].content_text },
+      ] }], cfg, at).values()]
+    const committed = prospects.map(p => routeDecision(p,
+      { type: 'Decision', label: String(p.label), summary: '', confidence: undefined },
+      { index: 1, decision: 'commit', item_key: 'shared-item' }, at).committed)
+    await storage.appendRows(enrichTablePath(storage, 'enrichment_committed'), [...COMMITTED_COLUMNS], committed)
+    await projectGraph({ query: registry, storage, contracts: [buildEnrichmentContract(kit)] })
+    const id = kit.nodeId('Decision', 'shared-item')
+    const graphRow = (await sql(`SELECT props FROM node WHERE node_id = '${id}'`)).rows[0]
+    const props = typeof graphRow.props === 'string' ? JSON.parse(graphRow.props) : graphRow.props
+    const evidence = await queryEvidence({ query: registry, storage, kind: 'node', id, includeLocalOnly: true })
+    assert.equal(evidence.length, 1)
+    assert.equal(evidence[0].content_text, props.evidence)
+    assert.deepEqual(await queryEvidence({ query: registry, storage, kind: 'node', id }), [])
+    await storage.appendRows(enrichTablePath(storage, 'enrichment_committed'), [...COMMITTED_COLUMNS], Array(16).fill(committed[0]))
+    assert.deepEqual(await queryEvidence({ query: registry, storage, kind: 'node', id, includeLocalOnly: true }), [], 'overflow refuses partial candidate matching')
+  })
+})
+
 test('explicit refresh repairs stale activity evidence, repeat refresh is stable, and direct dereference works', async () => {
   const tool = { ...source[0], part_type: 'tool_call', role: 'assistant', tool_name: 'exec', tool_args: 'text(await tools.exec_command({cmd:"cat /repo/a.js /repo/b.js"}))' }
   await fixture(async ({ registry, storage, sql }) => {

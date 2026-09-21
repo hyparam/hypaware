@@ -13,7 +13,7 @@ export const PROJECTOR_VERSION = 2
 export const PRODUCED_EDGE = 'produced'
 
 const SELECT_COMMITTED =
-  `SELECT item_id, item_type, label, props, confidence, anchor_type, anchor_key, source_keys, committed_at FROM ${COMMITTED_DATASET}`
+  `SELECT item_id, item_type, label, props, confidence, anchor_type, anchor_key, source_dataset, source_keys, committed_at FROM ${COMMITTED_DATASET}`
 
 /**
  * Build the enrichment projection contract. Projects ONLY committed
@@ -70,7 +70,7 @@ export function buildEnrichmentContract(kit) {
             label: str(r.label) || null,
             props,
             firstSeen: r.committed_at,
-            sourceKeys: { item_id: itemId, item_type: itemType, anchor_type: str(r.anchor_type), anchor_key: str(r.anchor_key), committed_at: r.committed_at instanceof Date ? r.committed_at.toISOString() : r.committed_at },
+            sourceKeys: { item_id: itemId, item_type: itemType, anchor_type: str(r.anchor_type), anchor_key: str(r.anchor_key), committed_at: r.committed_at instanceof Date ? r.committed_at.toISOString() : r.committed_at, source_dataset: str(r.source_dataset), source_keys: asObject(r.source_keys) },
           })
         },
       },
@@ -92,7 +92,7 @@ export function buildEnrichmentContract(kit) {
             dstType: itemType,
             dstKey: itemId,
             firstSeen: r.committed_at,
-            sourceKeys: { item_id: itemId, item_type: itemType, anchor_type: str(r.anchor_type), anchor_key: str(r.anchor_key), committed_at: r.committed_at instanceof Date ? r.committed_at.toISOString() : r.committed_at },
+            sourceKeys: { item_id: itemId, item_type: itemType, anchor_type: str(r.anchor_type), anchor_key: str(r.anchor_key), committed_at: r.committed_at instanceof Date ? r.committed_at.toISOString() : r.committed_at, source_dataset: str(r.source_dataset), source_keys: asObject(r.source_keys) },
           })
         },
       },

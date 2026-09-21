@@ -1,5 +1,7 @@
 // @ts-check
 
+import { isDeepStrictEqual } from 'node:util'
+
 import { executeQuerySql } from '../../../../src/core/query/sql.js'
 
 import { EDGE_DATASET, NODE_DATASET } from './datasets.js'
@@ -263,7 +265,18 @@ export async function queryEvidence({ query, storage, config, kind, id, callerCw
     }
     const columns = dataset === 'enrichment_committed' ? 'source_dataset, source_keys'
       : 'session_id, message_id, part_id, message_created_at, role, part_type, content_text, tool_name, tool_args'
-    rows = (await read(`SELECT ${columns} FROM ${dataset} WHERE ${clauses.join(' AND ')} LIMIT 2`)).rows
+    const committedKeys = dataset === 'enrichment_committed' ? jsonObject(sourceKeys.source_keys) : null
+    const maxRows = committedKeys ? 17 : 2
+    rows = (await read(`SELECT ${columns} FROM ${dataset} WHERE ${clauses.join(' AND ')} LIMIT ${maxRows}`)).rows
+    if (committedKeys) {
+      // A curator batch shares its commit time; original source keys distinguish
+      // up to 16 claims for the same item and anchor. Overflow stays ambiguous.
+      if (rows.length >= maxRows) return []
+      rows = rows.filter(candidate => candidate.source_dataset === sourceKeys.source_dataset
+        && isDeepStrictEqual(jsonObject(candidate.source_keys), committedKeys))
+      // Repeated commits to the same visible source resolve to one next hop.
+      rows = rows.slice(0, 1)
+    }
     if (rows.length !== 1) return []
     if (dataset === 'ai_gateway_messages') return rows
   }

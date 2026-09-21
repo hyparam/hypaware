@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import * as kit from '../../hypaware-core/plugins-workspace/context-graph/src/contract-kit.js'
 import { createAiGatewayGraphContract } from '../../hypaware-core/plugins-workspace/ai-gateway-graph/src/graph_contract.js'
 import { matchesPredicate, mergeRow } from '../../hypaware-core/plugins-workspace/context-graph/src/project.js'
+import { buildEnrichmentContract } from '../../hypaware-core/plugins-workspace/context-graph-enrich/src/contract.js'
 
 const base = { session_id: 'session', message_id: 'message', part_id: 'part', part_type: 'tool_call', cwd: '/repo', repo_root: '/repo' }
 /** @returns {any[]} */
@@ -65,5 +66,23 @@ test('observed activity provenance wins over inferred evidence in any merge orde
     assert.equal(result.source_keys.part_id, 'observed-part')
     assert.equal(result.source_keys.inferred_call, undefined)
     assert.equal(result.props.inferred_call, true, 'the relation still reports an inferred contribution')
+  }
+})
+
+test('merged enrichment quote follows the selected source rather than the earliest props', () => {
+  const rule = buildEnrichmentContract(kit).rules.find(r => r.kind === 'node')
+  assert.ok(rule)
+  /** @returns {any} */
+  const claim = (anchor, at, evidence) => rule.toRow({ item_type: 'Decision', item_id: 'shared-claim',
+    label: 'Shared claim', anchor_type: 'Session', anchor_key: anchor, committed_at: at,
+    props: { evidence, summary: anchor } })
+  const early = claim('z-session', '2026-09-20T00:00:00.000Z', 'Earlier source quote')
+  const selected = claim('a-session', '2026-09-21T00:00:00.000Z', 'Selected source quote')
+  for (const sequence of [[early, selected, early], [selected, early, early]]) {
+    const result = structuredClone(sequence[0])
+    for (const row of sequence.slice(1)) mergeRow(result, row)
+    assert.equal(result.source_keys.anchor_key, 'a-session')
+    assert.equal(result.props.evidence, 'Selected source quote')
+    assert.equal(result.props.summary, 'z-session', 'other props retain their existing merge policy')
   }
 })
