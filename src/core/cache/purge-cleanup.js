@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 import { atomicWriteJson } from '../util/fs_atomic.js'
 import { tryReadCursorSync } from './partition.js'
 
-/** @import { CachePurgeCleanupJob } from './types.js' */
+/** @import { CachePurgeCleanupJob } from '../../../src/core/cache/types.js' */
 export const CACHE_PURGE_GRACE_MS = 24 * 60 * 60 * 1000
 const generationName = /^(?:table(?:-[a-zA-Z0-9-]+)?|epoch=\d+)$/
 
@@ -54,7 +54,7 @@ export async function readCacheCleanup(cacheRoot, id) {
  */
 export async function queueCacheCleanup(cacheRoot, partitionDir) {
   const id = cacheCleanupId(cacheRoot, partitionDir)
-  await readCacheCleanup(cacheRoot, id)
+  const existing = await readCacheCleanup(cacheRoot, id)
   const generations = new Set()
   for (const entry of await fs.readdir(partitionDir, { withFileTypes: true })) {
     if (!generationName.test(entry.name)) continue
@@ -63,9 +63,19 @@ export async function queueCacheCleanup(cacheRoot, partitionDir) {
   }
   if (generations.size > 10000) throw new Error('cache cleanup generation limit exceeded')
   if (!generations.size) throw new Error('cache cleanup requires a managed generation')
-  const job = { version: 1, partition: relativePartition(cacheRoot, partitionDir), generations: [...generations], requestedAt: Date.now() }
+  // Keep the existing journal's requestedAt when one exists: retirement grace
+  // is additionally gated per generation by its own retirement time in
+  // maintenance.js, so an older requestedAt here never shortens a newly
+  // admitted generation's grace. Restarting it on every admission would keep
+  // forcing fresh generations while never reclaiming the old ones.
+  const job = { version: 1, partition: relativePartition(cacheRoot, partitionDir), generations: [...generations], requestedAt: existing?.requestedAt ?? Date.now() }
   if (Buffer.byteLength(JSON.stringify(job)) > 1024 * 1024) throw new Error('cache cleanup journal too large')
   await atomicWriteJson(journalPath(cacheRoot, id), job, { fsync: true, mode: 0o600, dirMode: 0o700 })
+  // The `.purge-cleanup` directory entry itself must be durable before delete
+  // commits, mirroring what createSessionPurgeStore().add does in
+  // session-purges.js for its own directory.
+  const handle = await fs.open(cacheRoot, 'r')
+  try { await handle.sync() } finally { await handle.close() }
   return id
 }
 

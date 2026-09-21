@@ -2692,7 +2692,15 @@ async function walkForRetired(dir, cacheRoot) {
             let retiredAt
             try { retiredAt = Date.parse(await fsPromises.readFile(retiredMarker, 'utf8')) } catch (error) {
               if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error
-              retiredAt = (await fsPromises.stat(full)).mtimeMs
+              // `.retired` is written only after the cursor swap (see
+              // `compactGeneration`), so a crash between the swap and that
+              // write leaves this generation's own directory mtime from
+              // before the swap, potentially far older than the retirement
+              // it never got to record. The partition's cursor.json is
+              // rewritten by the swap itself, so its mtime is an upper bound
+              // on the true retirement time and can only delay removal, never
+              // let a crash skip the grace window.
+              retiredAt = (await fsPromises.stat(path.join(dir, 'cursor.json'))).mtimeMs
             }
             if (!Number.isFinite(retiredAt) || Date.now() - retiredAt < CACHE_PURGE_GRACE_MS) return
             if (!await isUncommittedCacheGeneration(full)) {

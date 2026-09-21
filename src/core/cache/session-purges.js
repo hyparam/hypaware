@@ -13,7 +13,9 @@ const graphIdentifiers = ['node_id', 'src_id', 'dst_id']
 /**
  * Durable, additive session fences. null org means a local machine's session;
  * a string means exactly that server organization, including the empty org.
- * Refresh once per batch/scan, never once per row. An unreadable store fails
+ * Refresh once per batch/scan, never once per row. A directory entry whose
+ * name is not a 64-hex-char marker (a stray `.DS_Store`, an editor backup) is
+ * ignored; a marker-named file that fails to load or validate still fails
  * closed, and the explicit admission bound never evicts an older exclusion.
  * @ref LLP 0417#operation [implements]: deletion cannot be undone by replay or by unignoring capture
  * @param {string} cacheRoot
@@ -53,8 +55,10 @@ export function createSessionPurgeStore(cacheRoot) {
     try {
       let entry
       while ((entry = dir.readSync())) {
-        if (/\.tmp$/.test(entry.name)) continue
-        if (!/^[a-f0-9]{64}\.json$/.test(entry.name)) throw new Error('Invalid session purge marker')
+        // A foreign filename (not a 64-hex-char marker) is ignored, and does
+        // not count toward the byte/load limits below; a name that DOES match
+        // the marker shape is held to every existing check.
+        if (!/^[a-f0-9]{64}\.json$/.test(entry.name)) continue
         const file = path.join(directory, entry.name)
         const stat = fs.lstatSync(file)
         bytes += stat.size

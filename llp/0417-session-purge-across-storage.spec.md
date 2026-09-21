@@ -258,11 +258,13 @@ fences are checked on each row. This keeps filesystem polling out of per-row
 hot paths. Previously returned query results are not revoked.
 
 Durable journal writes sync the temporary file before rename, then sync the
-containing directory and ancestors before returning. Ancestors are synced on
-retries too, since a previous failed attempt can have created them. A directory
-sync failure rejects admission even when the renamed file is already visible;
-callers must not commit deletion on that failed admission. This adds bounded
-filesystem work by path depth to durable writes, with no retained directory set.
+containing directory before returning; admission then syncs the cache root so
+the journal directory's own entry is durable. The shared atomic writer syncs
+only the immediate parent: walking every ancestor to the filesystem root would
+tax every durable settings write and fail a published write on a traverse-only
+ancestor. A directory sync failure rejects admission even when the renamed file
+is already visible; callers must not commit deletion on that failed admission.
+This adds two directory syncs to an admission, with no retained directory set.
 
 Streaming storage reads always retain session scope columns and refresh the
 fence every 1024 rows, including the first row after asynchronous scan setup.
@@ -282,7 +284,11 @@ cursor and admit generations only while owning this guard; a rewrite holds it
 from its locked metadata read through destination publication. This extends
 LLP 0301's in-process cursor serialization to cooperating local processes.
 Storage appends recheck the session fence after acquiring the guard so buffered
-rows cannot land behind a completed purge.
+rows cannot land behind a completed purge. A flush chunk that fans out to more
+than one partition claims every partition's guard, in sorted order, before it
+commits to any of them: a guard another process holds must refuse the whole
+chunk, never a partition of it, or the checkpoint-free replay would commit the
+partitions ahead of the refusal a second time (LLP 0347).
 
 An atomic directory creation grants ownership. A single PID/nonce filename
 identifies the owner. Contention fails immediately for retry, with no polling

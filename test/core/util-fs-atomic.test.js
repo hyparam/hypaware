@@ -159,8 +159,8 @@ test('readFileIfExists/readJsonIfExists return null only for ENOENT', async () =
   }
 })
 
-// @ref LLP 0417#cache-reclamation [tests]: admission rejects failed directory durability and retries ancestors
-test('durable publication syncs file before rename and ancestors afterward, including retries', async t => {
+// @ref LLP 0417#cache-reclamation [tests]: admission rejects failed directory durability
+test('durable publication syncs file before rename and the immediate parent directory afterward, and a failing parent sync propagates', async t => {
   const dir = await makeTmpDir()
   t.after(() => fs.rm(dir, { recursive: true, force: true }))
   const target = path.join(dir, 'new', 'nested', 'journal.json')
@@ -186,20 +186,11 @@ test('durable publication syncs file before rename and ancestors afterward, incl
   }
   const options = { fsync: true, fs: /** @type {typeof fs} */ (io) }
   await assert.rejects(atomicWriteJson(target, { admitted: true }, options), /directory sync failure/)
-  assert.equal(events[0], 'file-sync')
-  assert.equal(events[1], 'rename')
-  assert.equal(events[2], `dir-sync:${path.dirname(target)}`)
+  assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
   assert.deepEqual(await fs.readdir(path.dirname(target)), ['journal.json'])
   failDirectory = false
   events.length = 0
   await atomicWriteJson(target, { admitted: true }, options)
-  assert.deepEqual(events.slice(0, 2), ['file-sync', 'rename'])
-  let directory = path.dirname(target)
-  let i = 2
-  for (;;) {
-    assert.equal(events[i++], `dir-sync:${directory}`)
-    if (path.dirname(directory) === directory) break
-    directory = path.dirname(directory)
-  }
-  assert.equal(events.length, i)
+  // Exactly one directory sync, of the immediate parent only, not every ancestor.
+  assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
 })

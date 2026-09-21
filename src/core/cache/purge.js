@@ -79,7 +79,15 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
         }
       }
       let queued = false
-      const beforeDelete = target.kind === 'session' ? async () => {
+      // `queueCacheCleanup` requires a managed generation (a `table*` or
+      // `epoch=N` child) to admit into; a legacy partition's live table is
+      // the partition directory itself (`tableDir === part.path`), which has
+      // no such child and would throw, aborting this partition's delete and
+      // every partition still to come. Skip admission for it rather than the
+      // whole purge: the row is still position-deleted, only the physical
+      // cleanup job is skipped, and unmanaged legacy tables are already
+      // documented as not certified erased.
+      const beforeDelete = target.kind === 'session' && tableDir !== part.path ? async () => {
         if (queued) return
         const id = await queueCacheCleanup(cacheRoot, part.path)
         cacheCleanup.add(id)

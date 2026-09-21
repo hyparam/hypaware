@@ -9,6 +9,7 @@ import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cac
 import { createSessionPurgeStore, sessionGraphNodeId } from '../../src/core/cache/session-purges.js'
 import { runPurge } from '../../src/core/commands/purge.js'
 import { appendRowsToTable, deleteMatchingRows, listLiveDataFiles, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
+import { cacheCleanupId } from '../../src/core/cache/purge-cleanup.js'
 
 /** @import { ColumnSpec, CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
 /** @type {ColumnSpec[]} */
@@ -112,6 +113,24 @@ test('a corrupt exclusion fails capture closed', async t => {
   const [name] = await fs.readdir(directory)
   await fs.writeFile(path.join(directory, name), '{}')
   await assert.rejects(storage.appendRows(storage.cacheTablePath('events'), columns, [{ session_id: 'other' }]))
+})
+
+test('refresh ignores foreign filenames in the purge store but still fails closed on a malformed marker', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-foreign-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { storage } = fixture(root)
+  createSessionPurgeStore(storage.cacheRoot).add('delete')
+  const directory = path.join(storage.cacheRoot, 'session-purges')
+  await fs.writeFile(path.join(directory, '.DS_Store'), 'not json')
+  await fs.writeFile(path.join(directory, 'notes.txt'), 'not json')
+  const fence = createSessionPurgeStore(storage.cacheRoot)
+  fence.refresh()
+  assert.equal(fence.size, 1)
+  assert.equal(fence.has({ session_id: 'delete' }), true)
+
+  const [name] = (await fs.readdir(directory)).filter(entry => /^[a-f0-9]{64}\.json$/.test(entry))
+  await fs.writeFile(path.join(directory, name), '{}')
+  assert.throws(() => createSessionPurgeStore(storage.cacheRoot).refresh())
 })
 
 test('a local failure does not strand the authorized remote purge', async t => {
@@ -273,6 +292,46 @@ test('purge covers retired epochs and graph identifiers without deleting other o
   for await (const row of scanRowsFromTable(resolveIcebergDir(graph))) nodes.push(row.node_id)
   assert.deepEqual(nodes, [id, 'shared'])
   assert.equal((await purgeCache({ cacheRoot: storage.cacheRoot, target: { kind: 'session', id: 'delete', org: 'a' } })).rowsDeleted, 0)
+})
+
+test('an unmanaged legacy partition does not abort a session purge over later managed partitions', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-legacy-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { storage } = fixture(root)
+  const cacheRoot = storage.cacheRoot
+
+  // Legacy layout: an Iceberg table living directly in the partition dir,
+  // with no cursor.json, exactly as discoverCachePartitions finds an
+  // unmigrated partition (see test/core/cache-migrate.test.js).
+  const legacyDir = path.join(cacheRoot, 'datasets', 'events', 'legacy_v1')
+  await fs.mkdir(legacyDir, { recursive: true })
+  await appendRowsToTable(legacyDir, columns, [
+    { session_id: 'delete', org: 'a', body: 'legacy secret' },
+    { session_id: 'keep', org: 'a', body: 'legacy neighbor' },
+  ])
+
+  // Managed partition, via the normal storage service.
+  const table = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(table, columns, [
+    { session_id: 'delete', org: 'a', body: 'managed secret' },
+    { session_id: 'keep', org: 'a', body: 'managed neighbor' },
+  ])
+  await storage.flushAll({ force: true })
+
+  const { purgeCache } = await import('../../src/core/cache/purge.js')
+  const result = await purgeCache({ cacheRoot, target: { kind: 'session', id: 'delete', org: 'a' } })
+
+  assert.equal(result.rowsDeleted, 2)
+  assert.equal(result.partitionsAffected, 2)
+  assert.deepEqual(result.cacheCleanup, [cacheCleanupId(cacheRoot, table)])
+
+  const legacyRows = []
+  for await (const row of scanRowsFromTable(legacyDir)) legacyRows.push(row.body)
+  assert.deepEqual(legacyRows, ['legacy neighbor'])
+
+  const managedRows = []
+  for await (const row of scanRowsFromTable(resolveIcebergDir(table))) managedRows.push(row.body)
+  assert.deepEqual(managedRows, ['managed neighbor'])
 })
 
 // @ref LLP 0417#operation [tests]: all storage streams refresh across first and subsequent fences

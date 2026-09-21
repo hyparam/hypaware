@@ -176,6 +176,13 @@ export async function runPurge(argv, ctx) {
   const retainedAliases = [...summary.retainedAliasCwds].sort()
 
   if (parsed.json) {
+    // A spool sweep failure alone (no `localError`) still exits 1 below, so
+    // the receipt must not claim `completed`/no `local` block while that
+    // holds: fold it into the same incomplete/error reporting as a local
+    // failure, preferring the local failure's own message when both apply.
+    const sweepError = swept.failed > 0 ? `${swept.failed} capture spool file(s) could not be removed` : undefined
+    const localIncomplete = Boolean(localError) || sweepError !== undefined
+    const localErrorMessage = localError ?? sweepError
     ctx.stdout.write(JSON.stringify({
       rowsDeleted: localError ? null : summary.rowsDeleted,
       partitionsAffected: localError ? null : summary.partitionsAffected,
@@ -183,11 +190,11 @@ export async function runPurge(argv, ctx) {
       retainedAliasRows: summary.retainedAliasRows,
       retainedAliasCwds: retainedAliases,
       spoolFilesRemoved: swept.filesRemoved,
-      ...(target.kind === 'session' ? { local: { status: localError ? 'incomplete' : 'completed',
-        containment: localError ? 'incomplete' : 'completed', physical_cleanup: { status: summary.cacheCleanup?.length ? 'incomplete' : 'not_implemented' },
+      ...(target.kind === 'session' ? { local: { status: localIncomplete ? 'incomplete' : 'completed',
+        containment: localIncomplete ? 'incomplete' : 'completed', physical_cleanup: { status: summary.cacheCleanup?.length ? 'incomplete' : 'not_implemented' },
         cache_cleanup: (summary.cacheCleanup ?? []).map(job_id => ({ job_id, scope: 'cache_generations', status: 'pending' })),
         retained: ['historical_snapshots', 'original_data_and_metadata_files', 'search_sidecars', 'derived_copies_without_session_lineage', 'native_transcripts_and_backups'],
-        ...(localError ? { error: localError } : {}) } } : localError ? { local: { status: 'incomplete', error: localError } } : {}),
+        ...(localErrorMessage ? { error: localErrorMessage } : {}) } } : localErrorMessage ? { local: { status: 'incomplete', error: localErrorMessage } } : {}),
       ...(remotes.size ? { remotes: Object.fromEntries(remoteResults) } : {}),
       ...(parsed.remote ? { remote: remoteResults.get(parsed.remote) } : {}),
     }) + '\n')

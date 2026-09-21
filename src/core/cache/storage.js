@@ -18,6 +18,7 @@ import {
   resolveSourceSegments,
   sanitizePathSegment,
   validateIcebergPartitionFields,
+  withPartitionMutationLocks,
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
@@ -187,12 +188,32 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       let totalBytes = 0
       const opts = { declaration, filterRows(/** @type {Record<string, unknown>[]} */ rows) {
         const kept = survivingRows(rows)
-        droppedCount += rows.length - kept.length
+        const removed = rows.length - kept.length
+        droppedCount += removed
+        purgedCount += removed
         return kept
       } }
-      for (const { segments, rows: groupRows } of groups.values()) {
-        const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
-        totalBytes += result.bytesWritten
+      // The cursor probe above only catches a refusal already on record; it
+      // says nothing about a partition a foreign process holds the mutation
+      // guard for right now. That guard is the second thing a multi-partition
+      // chunk must hold for every partition before it commits to any: claim
+      // every one, sorted, up front, so a guard that is busy on partition B
+      // unwinds the whole commit instead of leaving partition A committed
+      // with no checkpoint written to keep it from replaying.
+      // @ref LLP 0347#rows-wait [implements]: the whole chunk waits, so guard contention costs no partial commit to replay
+      if (groups.size > 1) {
+        const dirs = Array.from(groups.values(), ({ segments }) => cacheTablePath(cacheRoot, dataset, segments))
+        await withPartitionMutationLocks(dirs, async () => {
+          for (const { segments, rows: groupRows } of groups.values()) {
+            const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, { ...opts, mutationLockHeld: true })
+            totalBytes += result.bytesWritten
+          }
+        })
+      } else {
+        for (const { segments, rows: groupRows } of groups.values()) {
+          const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
+          totalBytes += result.bytesWritten
+        }
       }
       // Counted here rather than in the grouping loop above, because the
       // refusal at the gate can send this chunk back to the spool to be
@@ -206,14 +227,20 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           missing_fields: fields,
         })
       }
-      if (droppedCount > 0) {
+      // Rows removed by the session-purge fence are a normal, expected drop
+      // (a session purge with unflushed spool rows), not a validation
+      // problem, so they must not trip this warn or inflate the reported
+      // missing-field drop count; only the non-purge remainder does.
+      const validationDroppedCount = droppedCount - purgedCount
+      if (validationDroppedCount > 0) {
         logger.warn('cache.partition_validation_drops', {
           [Attr.DATASET]: dataset,
-          dropped_count: droppedCount,
+          dropped_count: validationDroppedCount,
           row_count: rows.length,
           missing_fields: Array.from(missingFieldCounts.entries())
             .map(([fields, count]) => `${fields}:${count}`)
             .join(';'),
+          ...(purgedCount > 0 ? { purged_count: purgedCount } : {}),
         })
       }
       return { bytesWritten: totalBytes, droppedCount }

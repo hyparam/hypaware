@@ -59,6 +59,23 @@ export function withPartitionMutationLock(partitionDir, fn) {
 }
 
 /**
+ * Hold the mutation locks of several partitions at once, claimed in sorted
+ * order so two multi-partition holders cannot deadlock in-process; the
+ * cross-process guard fails fast, so contention unwinds every claim.
+ * @ref LLP 0347#rows-wait [implements]: a multi-partition chunk claims every guard before it commits to any
+ * @template T
+ * @param {readonly string[]} partitionDirs
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export function withPartitionMutationLocks(partitionDirs, fn) {
+  const dirs = [...new Set(partitionDirs)].sort()
+  /** @param {number} index @returns {Promise<T>} */
+  const run = index => index === dirs.length ? fn() : withPartitionMutationLock(dirs[index], () => run(index + 1))
+  return run(0)
+}
+
+/**
  * A directory grants ownership; its single PID/nonce filename publishes the
  * owner. Never steal from a live process, however long its rewrite takes.
  * Recovery unlinks that exact dead owner's entry before rmdir: a competing
@@ -770,7 +787,7 @@ export function appendRefusalReason(partitionDir) {
  * @param {string[]} sourceSegments
  * @param {readonly ColumnSpec[]} columns
  * @param {Record<string, unknown>[]} rows
- * @param {{ declaration?: CachePartitioningDeclaration, filterRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[] }} [options]
+ * @param {{ declaration?: CachePartitioningDeclaration, filterRows?: (rows: Record<string, unknown>[]) => Record<string, unknown>[], mutationLockHeld?: boolean }} [options]
  * @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>}
  */
 export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments, columns, rows, options) {
@@ -778,12 +795,8 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
     return { tableUrl: '', appended: false, bytesWritten: 0 }
   }
   const partitionDir = cacheTablePath(cacheRoot, dataset, sourceSegments)
-  // @ref LLP 0027#re-settle-sweep [implements]: the sweep's gate is this
-  // count, so the write path is where it is maintained - maintenance reading
-  // the cursor is only cheap because nothing here forgets to tally. Rows
-  // arrive after the flush-time settle hook has run, so a marker still
-  // present is a genuinely unsettled row.
-  return withPartitionMutationLock(partitionDir, async () => {
+  /** @returns {Promise<{ tableUrl: string, appended: boolean, bytesWritten: number }>} */
+  const append = async () => {
     // Buffered rows must be checked again after waiting behind a purge.
     rows = options?.filterRows ? options.filterRows(rows) : rows
     if (!rows.length) return { tableUrl: '', appended: false, bytesWritten: 0 }
@@ -806,7 +819,19 @@ export async function appendRowsToSourceTable(cacheRoot, dataset, sourceSegments
       ...pendingFallbacksAfterAppend(cursor, mayHoldUncountedRows, fallbackAppended),
     })
     return result
-  })
+  }
+  // @ref LLP 0027#re-settle-sweep [implements]: the sweep's gate is this
+  // count, so the write path is where it is maintained - maintenance reading
+  // the cursor is only cheap because nothing here forgets to tally. Rows
+  // arrive after the flush-time settle hook has run, so a marker still
+  // present is a genuinely unsettled row.
+  //
+  // `mutationLockHeld` skips this: a multi-partition chunk in storage.js
+  // already claimed every guard, sorted, before committing to any of them
+  // (@ref LLP 0347#rows-wait), and claiming it again here would self-deadlock
+  // in-process.
+  if (options?.mutationLockHeld) return append()
+  return withPartitionMutationLock(partitionDir, append)
 }
 
 /**

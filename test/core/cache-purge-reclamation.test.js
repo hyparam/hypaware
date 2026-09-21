@@ -12,12 +12,36 @@ import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cac
 import { createSessionPurgeStore } from '../../src/core/cache/session-purges.js'
 import { purgeCache } from '../../src/core/cache/purge.js'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
-import { cachePurgeCleanupStatus, CACHE_PURGE_GRACE_MS } from '../../src/core/cache/purge-cleanup.js'
+import { cachePurgeCleanupStatus, CACHE_PURGE_GRACE_MS, queueCacheCleanup, readCacheCleanup } from '../../src/core/cache/purge-cleanup.js'
 import { appendRowsToTable, deleteMatchingRows, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 import { writeCursor, withPartitionMutationLock } from '../../src/core/cache/partition.js'
+import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
 
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
+
+/**
+ * Collect the log records emitted while `fn` runs, alongside its return
+ * value, then put the global logger provider slot back.
+ *
+ * @param {() => Promise<any>} fn
+ * @returns {Promise<{ result: any, records: any[] }>}
+ */
+async function withLogRecords(fn) {
+  /** @type {any[]} */
+  const records = []
+  const provider = new LoggerProvider({
+    resource: { attributes: { service_name: 'hypaware-test' } },
+    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { records.push(...batch) } }],
+  })
+  logs.setGlobalLoggerProvider(provider)
+  try {
+    const result = await fn()
+    return { result, records }
+  } finally {
+    await provider.shutdown()
+  }
+}
 const columns = /** @type {ColumnSpec[]} */ (['session_id', 'org', 'body'].map(name => ({ name, type: 'STRING', nullable: true })))
 /** @param {string} dir */
 async function rows(dir) {
@@ -128,6 +152,31 @@ test('empty output, pinned snapshot retry, and admission failure stay honest', a
 })
 
 
+test('queueCacheCleanup keeps an existing journal\'s requestedAt across repeated admissions', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cache-purge-requestedAt-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [{ session_id: 'target', org: 'a', body: 'row' }])
+  await storage.flushTable(partition, { force: true })
+  const id = await queueCacheCleanup(cacheRoot, partition)
+  const first = await readCacheCleanup(cacheRoot, id)
+  assert.ok(first)
+  // Rewrite the journal's requestedAt as if it were admitted well outside the
+  // 24h grace, the way a daily purge routine would find it on its next run.
+  const journalFile = path.join(cacheRoot, '.purge-cleanup', `${id}.json`)
+  const old = Date.now() - 48 * 60 * 60 * 1000
+  await fs.writeFile(journalFile, JSON.stringify({ ...first, requestedAt: old }))
+  // A later admission adds a new generation to the same partition.
+  await fs.mkdir(path.join(partition, 'table-second'))
+  const second = await queueCacheCleanup(cacheRoot, partition)
+  assert.equal(second, id, 'the same partition always maps to the same cleanup id')
+  const updated = await readCacheCleanup(cacheRoot, id)
+  assert.ok(updated)
+  assert.equal(updated?.requestedAt, old, 'requestedAt is preserved from the existing journal, not restarted')
+  assert.ok(updated?.generations.includes('table-second'), 'the refreshed journal still lists the current generations')
+})
+
 test('unpublished generation does not strand purge or retirement', async t => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-abandoned-'))
   t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
@@ -148,6 +197,9 @@ test('unpublished generation does not strand purge or retirement', async t => {
   await age(cacheRoot, id, [original])
   const old = new Date(Date.now() - CACHE_PURGE_GRACE_MS - 10000)
   await fs.utimes(abandoned, old, old)
+  // `abandoned` carries no `.retired` marker, so its retiredAt falls back to
+  // the partition cursor's mtime, not its own; age that too.
+  await fs.utimes(path.join(partition, 'cursor.json'), old, old)
   await maintainCache({ cacheRoot })
   await assert.rejects(fs.stat(abandoned), { code: 'ENOENT' })
   assert.equal((await cachePurgeCleanupStatus(cacheRoot, id)).status, 'completed')
@@ -264,9 +316,70 @@ for (const source of [false, true]) test(`buffered append rechecks under the gua
     return result
   })
   try {
-    if (source) assert.equal((await storage.flushAll({ force: true })).droppedCount, 1)
-    else await storage.appendRowsToPartition('events', ['source=unknown'], columns, input)
+    if (source) {
+      // A purge-fence drop is a normal, expected drop, not a validation
+      // problem: it must still count toward droppedCount (rows the spool
+      // will not see again), but it must not trip the
+      // cache.partition_validation_drops warn.
+      const { result, records } = await withLogRecords(() => storage.flushAll({ force: true }))
+      assert.equal(result.droppedCount, 1, 'the purge-fence drop is still counted in the total returned to the spool')
+      assert.ok(!records.some(record => record.body === 'cache.partition_validation_drops'),
+        'a purge-fence drop alone must not emit the validation-drops warn')
+    } else {
+      await storage.appendRowsToPartition('events', ['source=unknown'], columns, input)
+    }
   } finally { sync.mkdirSync = mkdir }
   assert(fenced, 'marker arrives after the storage precheck but before mutation')
   assert.deepEqual((await rows(resolveIcebergDir(partition))).map(row => row.session_id), ['keep'])
+})
+
+// @ref LLP 0417#cache-reclamation [tests]: a missing `.retired` marker falls
+// back to the partition cursor's mtime, an upper bound on the true
+// retirement time, rather than the retired generation directory's own mtime
+test('a missing .retired marker falls back to the cursor mtime, not the stale generation directory mtime', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cache-purge-retired-fallback-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [
+    { session_id: 'target', org: 'a', body: 'sensitive fixture' },
+    { session_id: 'neighbor', org: 'a', body: 'surviving neighbor' },
+  ])
+  await storage.flushTable(partition, { force: true })
+  const original = resolveIcebergDir(partition)
+
+  const purged = await purgeCache({ cacheRoot, target: { kind: 'session', id: 'target', org: 'a' } })
+  assert.equal(purged.rowsDeleted, 1)
+  const id = /** @type {string} */ (purged.cacheCleanup?.[0])
+  await maintainCache({ cacheRoot })
+  const current = resolveIcebergDir(partition)
+  assert.notEqual(current, original, 'the purge-admitted cleanup swaps to a fresh live generation immediately')
+
+  // Simulate a crash between the cursor swap and the `.retired` write
+  // (compactGeneration writes the cursor first): the marker never lands,
+  // and the retired directory's own mtime is set far in the past to model
+  // one that predates the swap by an unbounded amount.
+  await fs.rm(path.join(original, '.retired'))
+  await fs.utimes(original, new Date(0), new Date(0))
+
+  // Age the journal past the grace window so the next sweep would otherwise
+  // remove `original` with zero retirement grace once it falls back to the
+  // ancient generation directory mtime.
+  const jobFile = path.join(cacheRoot, '.purge-cleanup', `${id}.json`)
+  const job = JSON.parse(await fs.readFile(jobFile, 'utf8'))
+  job.requestedAt = Date.now() - CACHE_PURGE_GRACE_MS - 10000
+  await fs.writeFile(jobFile, JSON.stringify(job))
+
+  // The partition's cursor.json was rewritten by the swap and is still
+  // fresh, so the fallback reads retiredAt from it instead and the
+  // generation survives this sweep.
+  await maintainCache({ cacheRoot })
+  await fs.stat(original)
+
+  // Once the cursor itself ages past the grace window, the fallback
+  // retiredAt is old enough and the generation is reclaimed.
+  const old = new Date(Date.now() - CACHE_PURGE_GRACE_MS - 10000)
+  await fs.utimes(path.join(partition, 'cursor.json'), old, old)
+  await maintainCache({ cacheRoot })
+  await assert.rejects(fs.stat(original), { code: 'ENOENT' })
 })
