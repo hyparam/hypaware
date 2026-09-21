@@ -76,30 +76,8 @@ const SKILL_MARKER_RE = /^Base directory for this skill: (.+)/
  */
 const SLASH_COMMAND_RE = /^<command-name>\s*\/?([A-Za-z0-9:_-]+)\s*<\/command-name>/
 
-/**
- * The Codex skill-activation path pattern (LLP 0075 surface 4,
- * `dispatch_shell_read`): an `exec_command` shell read of
- * `.codex/skills/<name>/SKILL.md`. Unanchored (the path may sit anywhere in
- * the command string, e.g. after `sed -n '1,240p'`); the `.codex/skills/`
- * literal plus the `SKILL.md` suffix, combined with the `CODEX_READ_PROGRAMS`
- * gate below (MINOR 1), is the whole false-positive defense, so a Codex
- * session reading some other repo's `.claude/skills/...` tree (no shared
- * signal, LLP 0075 §no-shared-rule), a bare `.codex/skills/` listing (no
- * `SKILL.md`), or a non-read command merely naming the path (`echo`, `rm`,
- * `mv`, …) matches nothing.
- */
-const CODEX_SKILL_READ_RE = /[/~]\.codex\/skills\/([^/\s'"]+)\/SKILL\.md/
-
-/**
- * Read-like `argv[0]` programs whose `exec_command` naming a `.codex/skills/
- * <name>/SKILL.md` path counts as the "activation ≡ read" signal (LLP 0075
- * §read-is-activation). @ref LLP 0075#decision [constrained-by]: MINOR 1
- * fix: the path pattern alone is command-agnostic, so `echo` or `rm` naming
- * the same path minted a spurious activation; gating on a read tool's argv[0]
- * (reusing `programFrom`, the one command-string recipe) keeps non-read
- * commands from minting anything.
- */
-const CODEX_READ_PROGRAMS = new Set(['cat', 'sed', 'head', 'tail', 'less', 'more', 'bat', 'rg', 'grep', 'nl', 'cut', 'awk'])
+/** Read programs admitted by the concrete operand grammar in shellReadPaths. */
+const CODEX_READ_PROGRAMS = new Set(['cat', 'sed', 'head', 'tail', 'less', 'more', 'bat', 'rg', 'grep', 'nl'])
 
 /** Command wrappers whose own args precede the real `argv[0]`. */
 const WRAPPERS = new Set(['sudo', 'env', 'nohup', 'nice', 'time', 'command', 'stdbuf', 'timeout'])
@@ -265,34 +243,15 @@ export function skillFromSlash(contentText) {
 }
 
 /**
- * Extract the `Skill` node key from a Codex `exec_command` shell read of
- * `.codex/skills/<name>/SKILL.md` (LLP 0075 surface 4, Codex's only
- * activation trace: no marker, no `Skill` tool, no `<command-name>` tag).
- * Takes the already-resolved command string (`commandStringFrom('exec_command',
- * tool_args)`, the wire shape this repo's Codex fixtures pin is
- * `{"cmd": …}`, `command` as fallback), not raw `tool_args`, so the caller
- * shares the one command-string recipe with `programFrom`.
- *
- * @ref LLP 0075#decision [implements]: path-pattern match on the
- * `exec_command` SKILL.md read; read ≡ activation is an accepted ambiguity
- * (LLP 0075 §read-is-activation), which is why the caller stamps the
- * distinct `dispatch_shell_read` flag rather than one of Claude's richer
- * dispatch flags. MINOR 1 fix: the path match alone is command-agnostic
- * (`echo`/`rm`/`mv` naming the path would otherwise mint an activation too),
- * so this also gates on `programFrom` resolving a read-like `argv[0]`
- * (`CODEX_READ_PROGRAMS`); a non-read command naming the same path mints
- * nothing.
- *
+ * Infer a skill read only from a concrete operand in a recognized skill root.
+ * This remains the weaker dispatch_shell_read signal, not proof of activation.
  * @param {unknown} command
  * @returns {string | null}
+ * @ref LLP 0428#literal-actions [implements]: expand roots without treating quoted path mentions as reads.
  */
 export function skillFromCodexRead(command) {
   if (typeof command !== 'string') return null
-  const match = CODEX_SKILL_READ_RE.exec(command)
-  if (!match) return null
-  const program = programFrom(command)
-  if (!program || !CODEX_READ_PROGRAMS.has(program)) return null
-  return gateSkill(match[1])
+  return shellReadPaths(command).map(skillFromPath).find(Boolean) ?? null
 }
 
 /**
@@ -326,7 +285,7 @@ function gateSkill(name) {
  * @returns {string | null}
  */
 export function programFrom(command, depth = 0) {
-  if (typeof command !== 'string' || command.length === 0) return null
+  if (typeof command !== 'string' || command.length === 0 || command.length > MAX_ACTION_CHARS) return null
 
   // 1. First segment only: cut at the first pipeline/list connector. Quote-blind
   //    by design (only the segment head is consumed).
@@ -529,6 +488,7 @@ function basenameLower(tok) {
  */
 function parseMaybeJson(value) {
   if (typeof value !== 'string') return value
+  if (value.length > MAX_ACTION_CHARS) return null
   try {
     return JSON.parse(value)
   } catch {
@@ -545,4 +505,179 @@ function parseMaybeJson(value) {
  */
 function asString(value) {
   return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+// @ref LLP 0428#literal-actions [implements]: bounded, whole-input grammar, never eval.
+export const MAX_ACTION_CHARS = 65_536
+const MAX_ACTIONS = 32
+
+/**
+ * Recognize only complete sequences of direct awaited literal calls. This is
+ * deliberately not a JavaScript interpreter: control flow, variables, comments
+ * (except the exec pragma), templates and computed access all fail closed.
+ * @param {unknown} source
+ * @returns {{ tool_name: string, tool_args: unknown }[]}
+ */
+export function literalActions(source) {
+  if (typeof source !== 'string' || source.length > MAX_ACTION_CHARS) return []
+  const s = source.replace(/^\s*\/\/ @exec:[^\r\n]*\r?\n/, '')
+  let i = 0
+  const space = () => { while (/\s/.test(s[i] ?? '') && i < s.length) i++ }
+  const take = (token) => {
+    space()
+    if (!s.startsWith(token, i)) throw new Error('syntax')
+    i += token.length
+  }
+  const string = () => {
+    space()
+    const quote = s[i++]
+    if (quote !== '"' && quote !== "'") throw new Error('literal')
+    let value = ''
+    while (i < s.length) {
+      const ch = s[i++]
+      if (ch === quote) return value
+      if (ch === '\n' || ch === '\r') throw new Error('newline')
+      if (ch !== '\\') {
+        value += ch
+        continue
+      }
+      const esc = s[i++]
+      const escapes = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', '\\': '\\', '"': '"', "'": "'", '/': '/' }
+      if (esc === 'u') {
+        const hex = s.slice(i, i + 4)
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error('escape')
+        value += String.fromCharCode(parseInt(hex, 16))
+        i += 4
+      } else if (Object.hasOwn(escapes, esc)) value += escapes[esc]
+      else throw new Error('escape')
+    }
+    throw new Error('unterminated')
+  }
+  const scalar = () => {
+    space()
+    if (s[i] === '"' || s[i] === "'") return string()
+    const m = /^(?:true|false|null|-?\d+(?:\.\d+)?)/.exec(s.slice(i))
+    if (!m) throw new Error('scalar')
+    i += m[0].length
+    return JSON.parse(m[0])
+  }
+  const argument = () => {
+    space()
+    if (s[i] !== '{') return string()
+    take('{')
+    const obj = Object.create(null)
+    let count = 0
+    space()
+    while (s[i] !== '}') {
+      if (++count > 32) throw new Error('fields')
+      space()
+      let key
+      if (s[i] === '"' || s[i] === "'") key = string()
+      else {
+        const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(s.slice(i))
+        if (!m) throw new Error('key')
+        key = m[0]
+        i += key.length
+      }
+      if (Object.hasOwn(obj, key) || key === '__proto__') throw new Error('duplicate')
+      take(':')
+      obj[key] = scalar()
+      space()
+      if (s[i] !== ',') break
+      take(',')
+      space()
+    }
+    take('}')
+    return obj
+  }
+  try {
+    const calls = []
+    space()
+    while (i < s.length) {
+      if (calls.length >= MAX_ACTIONS) return []
+      const wrapped = s.startsWith('text', i)
+      if (wrapped) take('text(')
+      take('await')
+      if (!/\s/.test(s[i] ?? '')) return []
+      space()
+      take('tools.')
+      const m = /^(exec_command|apply_patch)\b/.exec(s.slice(i))
+      if (!m) return []
+      i += m[0].length
+      take('(')
+      const args = argument()
+      take(')')
+      if (wrapped) take(')')
+      calls.push({ tool_name: m[0], tool_args: args })
+      const end = i
+      space()
+      if (s[i] === ';') {
+        i++
+        space()
+      }
+      else if (i < s.length && !/[\r\n]/.test(s.slice(end, i))) return []
+    }
+    return calls
+  } catch { return [] }
+}
+
+/**
+ * Concrete operands of a small read-command grammar. Shell expansion and
+ * command lists are deliberately unsupported, including quoted examples of
+ * those constructs. Paths are bounded before tokenization and fan-out.
+ * @param {unknown} command
+ * @returns {string[]}
+ */
+export function shellReadPaths(command) {
+  if (typeof command !== 'string' || command.length > MAX_ACTION_CHARS || /[\0\n\r$`|;&<>()*?{}\\]/.test(command)) return []
+  const words = []
+  let end = 0
+  for (const match of command.matchAll(/'[^']*'|"[^"]*"|[^\s'"]+/g)) {
+    const gap = command.slice(end, match.index)
+    if (gap.trim() || (words.length && !gap)) return []
+    words.push(match[0])
+    if (words.length > 128) return []
+    end = match.index + match[0].length
+  }
+  if (command.slice(end).trim()) return []
+  const tokens = words.map(w => /^['"]/.test(w) ? w.slice(1, -1) : w)
+  const prog = path.basename(tokens.shift() ?? '')
+  if (!CODEX_READ_PROGRAMS.has(prog)) return []
+  if (prog === 'sed') {
+    if (tokens.shift() !== '-n' || !/^\d+(?:,\d+)?p$/.test(tokens.shift() ?? '')) return []
+  } else if (prog === 'rg' || prog === 'grep') {
+    while (/^-[nilF]+$/.test(tokens[0] ?? '')) tokens.shift()
+    if (!tokens.length || tokens[0].startsWith('-')) return []
+    tokens.shift() // pattern, never a file operand
+  } else {
+    while (tokens[0]?.startsWith('-')) {
+      const flag = tokens.shift()
+      if (flag === '--') break
+      if ((prog === 'head' || prog === 'tail') && (flag === '-n' || flag === '-c')) {
+        if (!/^\d+$/.test(tokens.shift() ?? '')) return []
+      } else if (!/^-[nbqv]+$/.test(flag ?? '')) return []
+    }
+  }
+  if (tokens.length > MAX_ACTIONS || tokens.some(t => !t || t.startsWith('-') || t.length > 4096)) return []
+  return tokens
+}
+
+/** @param {unknown} file @returns {string | null} */
+export function skillFromPath(file) {
+  if (typeof file !== 'string' || file.length > 4096) return null
+  const m = /(?:^|\/)\.(?:codex|agents)\/skills\/(?:\.system\/)?([^/]+)\/SKILL\.md$/.exec(file)
+    ?? /(?:^|\/)\.codex\/plugins\/cache\/[^/]+\/[^/]+\/[^/]+\/skills\/([^/]+)\/SKILL\.md$/.exec(file)
+  return m ? gateSkill(m[1]) : null
+}
+
+/** @param {unknown} input @returns {string[]} */
+export function patchPaths(input) {
+  if (typeof input !== 'string' || input.length > MAX_ACTION_CHARS || !input.startsWith('*** Begin Patch\n') || !input.trimEnd().endsWith('*** End Patch')) return []
+  const files = []
+  for (const line of input.split('\n')) {
+    const m = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/.exec(line)
+    if (m) files.push(m[1])
+    if (files.length > MAX_ACTIONS) return []
+  }
+  return files.filter(f => f.length <= 4096 && !/[\0$`]/.test(f))
 }

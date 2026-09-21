@@ -403,12 +403,12 @@ test('runCurateTick derefs the source with the shared content filter (T1/T2 pari
   // the T1 scan into the deref WHERE, so an excluded part (e.g. tool_result)
   // sharing a message_id with a kept text part is not re-admitted into the
   // curator excerpt. The fakeQuery ignores WHERE, so assert on the SQL itself.
-  const prospects = [prospectRow({ prospect_id: 'p1', label: 'X', source_keys: { message_id: ['m1'] } })]
+  const prospects = [prospectRow({ prospect_id: 'p1', label: 'X', evidence: 'source quote', source_keys: { message_id: ['m1'] } })]
   const { runtime, queries } = curateRuntime({ cfg: cfg(), prospects, decisions: [{ index: 1, decision: 'commit' }] })
 
   await runCurateTick(runtime)
 
-  const deref = queries.find((q) => /SELECT content_text FROM ai_gateway_messages/.test(q))
+  const deref = queries.find((q) => /SELECT content_text, message_id, part_id FROM ai_gateway_messages/.test(q))
   assert.ok(deref, 'curate tick derefs the source dataset by message id')
   assert.match(deref, /message_id IN \('m1'\)/)
   assert.match(deref, /content_text IS NOT NULL AND content_text <> ''/)

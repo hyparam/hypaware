@@ -1,5 +1,7 @@
 // @ts-check
 
+import { isDeepStrictEqual } from 'node:util'
+
 import { executeQuerySql } from '../../../../src/core/query/sql.js'
 
 import { EDGE_DATASET, NODE_DATASET } from './datasets.js'
@@ -69,17 +71,17 @@ export function traverse({ nodes, edges, seed, depth = 1, edgeTypes = [], direct
 
   // Forward (src→dst) and reverse (dst→src) adjacency, built only for the
   // directions we'll actually walk so a one-directional query does no extra work.
-  /** @type {Map<string, { to: string, edge_type: string, direction: 'out' | 'in' }[]>} */
+  /** @type {Map<string, { to: string, edge_type: string, direction: 'out' | 'in', row: GraphEdge }[]>} */
   const adjacency = new Map()
-  const link = (from, to, edge_type, dir) => {
+  const link = (from, to, edge_type, dir, row) => {
     let list = adjacency.get(from)
     if (!list) adjacency.set(from, (list = []))
-    list.push({ to, edge_type, direction: dir })
+    list.push({ to, edge_type, direction: dir, row })
   }
   for (const e of edges) {
     if (typeFilter && !typeFilter.has(e.edge_type)) continue
-    if (direction === 'out' || direction === 'both') link(e.src_id, e.dst_id, e.edge_type, 'out')
-    if (direction === 'in' || direction === 'both') link(e.dst_id, e.src_id, e.edge_type, 'in')
+    if (direction === 'out' || direction === 'both') link(e.src_id, e.dst_id, e.edge_type, 'out', e)
+    if (direction === 'in' || direction === 'both') link(e.dst_id, e.src_id, e.edge_type, 'in', e)
   }
 
   /** @type {Neighbor[]} */
@@ -97,7 +99,9 @@ export function traverse({ nodes, edges, seed, depth = 1, edgeTypes = [], direct
         if (visited.has(edge.to)) continue
         visited.add(edge.to)
         const node = byId.get(edge.to) ?? { node_id: edge.to, node_type: '?', natural_key: edge.to, label: null }
-        reached.push({ hop: hop + 1, edge_type: edge.edge_type, direction: edge.direction, from: id, node })
+        reached.push({ hop: hop + 1, edge_type: edge.edge_type, direction: edge.direction, from: id, node,
+          ...(edge.row.edge_id ? { edge_id: edge.row.edge_id, props: edge.row.props,
+            source_dataset: edge.row.source_dataset, source_keys: edge.row.source_keys } : {}) })
         next.push({ id: edge.to, hop: hop + 1 })
       }
     }
@@ -132,9 +136,9 @@ export function traverse({ nodes, edges, seed, depth = 1, edgeTypes = [], direct
  * @ref LLP 0105 [constrained-by]: hyp graph funnels through the same shared filter as hyp query; nothing is re-decided here
  */
 export async function queryNeighbors({ query, storage, config, seed, depth, edgeTypes, direction, limit, type, callerCwd, includeLocalOnly }) {
-  const visibility = { callerCwd: callerCwd ?? null, includeLocalOnly: includeLocalOnly === true }
-  const edges_ = await loadRows(query, storage, config, `SELECT src_id, dst_id, edge_type FROM ${EDGE_DATASET}`, visibility)
-  const nodes_ = await loadRows(query, storage, config, `SELECT node_id, node_type, natural_key, label FROM ${NODE_DATASET}`, visibility)
+  const visibility = { callerCwd: callerCwd ?? null, includeLocalOnly: includeLocalOnly === true, signal: AbortSignal.timeout(5000) }
+  const edges_ = await loadRows(query, storage, config, `SELECT edge_id, src_id, dst_id, edge_type, props, source_dataset, source_keys FROM ${EDGE_DATASET} LIMIT 100001`, visibility)
+  const nodes_ = await loadRows(query, storage, config, `SELECT node_id, node_type, natural_key, label FROM ${NODE_DATASET} LIMIT 100001`, visibility)
   const edgeRows = edges_.rows
   const nodeRows = nodes_.rows
   /** @type {LocalOnlyVisibilityReport} */
@@ -143,6 +147,10 @@ export async function queryNeighbors({ query, storage, config, seed, depth, edge
     filtered: nodes_.localOnly.filtered || edges_.localOnly.filtered,
     withheldRows: nodes_.localOnly.withheldRows + edges_.localOnly.withheldRows,
     suppressedRows: nodes_.localOnly.suppressedRows + edges_.localOnly.suppressedRows,
+  }
+
+  if (nodeRows.length > 100_000 || edgeRows.length > 100_000) {
+    return { ok: false, error: 'graph traversal exceeds the 100000-row read budget; use a narrower SQL query', localOnly }
   }
 
   // Fold by graph identity before handing clean arrays to the pure traversal.
@@ -171,7 +179,8 @@ export async function queryNeighbors({ query, storage, config, seed, depth, edge
   /** @type {Map<string, GraphEdge>} */
   const edgeById = new Map()
   for (const r of edgeRows) {
-    const edge = { src_id: String(r.src_id), dst_id: String(r.dst_id), edge_type: String(r.edge_type) }
+    const edge = { edge_id: String(r.edge_id), src_id: String(r.src_id), dst_id: String(r.dst_id), edge_type: String(r.edge_type),
+      props: jsonObject(r.props), source_dataset: String(r.source_dataset), source_keys: jsonObject(r.source_keys) }
     const id = `${edge.src_id}\0${edge.edge_type}\0${edge.dst_id}`
     if (!edgeById.has(id)) edgeById.set(id, edge)
   }
@@ -199,7 +208,7 @@ export async function queryNeighbors({ query, storage, config, seed, depth, edge
  * @param {ExtendedQueryStorageService} storage
  * @param {HypAwareV2Config | undefined} config
  * @param {string} sql
- * @param {{ callerCwd: string | null, includeLocalOnly: boolean }} visibility
+ * @param {{ callerCwd: string | null, includeLocalOnly: boolean, signal?: AbortSignal }} visibility
  * @returns {Promise<{ rows: Record<string, unknown>[], localOnly: LocalOnlyVisibilityReport }>}
  */
 async function loadRows(query, storage, config, sql, visibility) {
@@ -211,6 +220,73 @@ async function loadRows(query, storage, config, sql, visibility) {
     refresh: 'always',
     callerCwd: visibility.callerCwd,
     includeLocalOnly: visibility.includeLocalOnly,
+    signal: visibility.signal,
+    maxHeapBytes: 128 * 1024 * 1024,
   })
   return { rows: res.rows, localOnly: res.localOnly }
+}
+
+/**
+ * Dereference the published exemplar through at most two provenance hops.
+ * Visibility is applied at every hop; suppressed keys stop the walk. This is
+ * intentionally limited to the two built-in evidence contracts, not arbitrary
+ * SQL from source_keys. Return source rows, never a synthesized assertion.
+ * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, config?: HypAwareV2Config, kind: 'node' | 'edge', id: string, callerCwd?: string | null, includeLocalOnly?: boolean }} args
+ * @returns {Promise<Record<string, unknown>[]>}
+ * @ref LLP 0428#visibility [implements]: no implicit visibility override during evidence retrieval.
+ */
+export async function queryEvidence({ query, storage, config, kind, id, callerCwd, includeLocalOnly }) {
+  if (!['node', 'edge'].includes(kind) || id.length > 4096) throw new Error('invalid graph evidence identity')
+  const quote = value => `'${String(value).replace(/'/g, "''")}'`
+  const visibility = { callerCwd: callerCwd ?? null, includeLocalOnly: includeLocalOnly === true, signal: AbortSignal.timeout(5000) }
+  const read = sql => loadRows(query, storage, config, sql, visibility)
+  let rows = (await read(`SELECT source_dataset, source_keys FROM ${kind} WHERE ${kind}_id = ${quote(id)} LIMIT 2`)).rows
+  if (rows.length !== 1) return [] // stale duplicate exemplars need compaction
+  for (let hop = 0; hop < 2; hop++) {
+    const row = rows[0]
+    let keys = row.source_keys
+    if (typeof keys === 'string') {
+      if (keys.length > 16_384) return []
+      try { keys = JSON.parse(keys) } catch { return [] }
+    }
+    if (!keys || typeof keys !== 'object' || Array.isArray(keys)) return []
+    const sourceKeys = /** @type {Record<string, unknown>} */ (keys)
+    const dataset = row.source_dataset
+    let fields
+    if (dataset === 'enrichment_committed') fields = ['item_id', 'item_type', 'anchor_type', 'anchor_key', 'committed_at']
+    else if (dataset === 'ai_gateway_messages') fields = ['message_id', 'part_id']
+    else return []
+    const clauses = []
+    for (const field of fields) {
+      const raw = sourceKeys[field]
+      const value = Array.isArray(raw) && raw.length === 1 ? raw[0] : raw
+      if (typeof value !== 'string' || !value || value.length > 4096) return []
+      clauses.push(`${field} = ${quote(value)}`)
+    }
+    const columns = dataset === 'enrichment_committed' ? 'source_dataset, source_keys'
+      : 'session_id, message_id, part_id, message_created_at, role, part_type, content_text, tool_name, tool_args'
+    const committedKeys = dataset === 'enrichment_committed' ? jsonObject(sourceKeys.source_keys) : null
+    const maxRows = committedKeys ? 17 : 2
+    rows = (await read(`SELECT ${columns} FROM ${dataset} WHERE ${clauses.join(' AND ')} LIMIT ${maxRows}`)).rows
+    if (committedKeys) {
+      // A curator batch shares its commit time; original source keys distinguish
+      // up to 16 claims for the same item and anchor. Overflow stays ambiguous.
+      if (rows.length >= maxRows) return []
+      rows = rows.filter(candidate => candidate.source_dataset === sourceKeys.source_dataset
+        && isDeepStrictEqual(jsonObject(candidate.source_keys), committedKeys))
+      // Repeated commits to the same visible source resolve to one next hop.
+      rows = rows.slice(0, 1)
+    }
+    if (rows.length !== 1) return []
+    if (dataset === 'ai_gateway_messages') return rows
+  }
+  return []
+}
+
+/** @param {unknown} value @returns {Record<string, unknown> | null} */
+function jsonObject(value) {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value) } catch { return null }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value) ? /** @type {Record<string, unknown>} */ (value) : null
 }

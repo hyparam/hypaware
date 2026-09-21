@@ -101,6 +101,9 @@ export function createContractRegistry(opts = {}) {
           }
         }
       }
+      if (rule.toRows !== undefined && typeof rule.toRows !== 'function') {
+        throw new TypeError(`registerContract: ${at} toRows must be a function`)
+      }
       if (typeof rule.toRow !== 'function') {
         throw new TypeError(`registerContract: ${at} toRow must be a function`)
       }
