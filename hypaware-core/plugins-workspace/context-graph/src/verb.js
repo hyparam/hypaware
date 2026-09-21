@@ -209,6 +209,7 @@ function renderNeighbors(result) {
       shown = `${text} (${disambiguator(n.node)})`
       if (shownCounts.get(shown) > 1) shown = `${text} (${n.node.node_id})`
     }
+    if (n.props?.inferred_call === true) shown += ' (inferred call)'
     out.push(`  ${n.hop}  ${arrow.padEnd(18)} ${n.node.node_type.padEnd(8)} ${shown}`)
   }
   if (result.truncated) {

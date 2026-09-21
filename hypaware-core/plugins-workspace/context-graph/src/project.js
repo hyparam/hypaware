@@ -1,5 +1,7 @@
 // @ts-check
 
+import { compareStrings } from 'hypaware/core/util'
+
 import { Attr, withSpan } from '../../../../src/core/observability/index.js'
 import { executeQuerySql } from '../../../../src/core/query/sql.js'
 
@@ -56,11 +58,11 @@ export function resolveProjectionMaxHeapBytes() {
  * structurally converge for free. Idempotent: a second run with no new source
  * data writes zero rows.
  *
- * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, contracts: Contract[], config?: HypAwareV2Config, dryRun?: boolean, __executeSql?: (args: ExecuteSqlOptions) => Promise<ExecuteSqlResult> }} args
+ * @param {{ query: QueryRegistry, storage: ExtendedQueryStorageService, contracts: Contract[], config?: HypAwareV2Config, dryRun?: boolean, refresh?: boolean, __executeSql?: (args: ExecuteSqlOptions) => Promise<ExecuteSqlResult> }} args
  * @returns {Promise<{ nodes: number, edges: number, nodesWritten: number, edgesWritten: number }>}
  * @ref LLP 0023#contract-contribution [implements]: the engine runs every registered contract; adding a source is contributing one
  */
-export async function projectGraph({ query, storage, contracts, config, dryRun = false, __executeSql = executeQuerySql }) {
+export async function projectGraph({ query, storage, contracts, config, dryRun = false, refresh = false, __executeSql = executeQuerySql }) {
   // A dedicated finite budget for every projection scan: the shared scan below
   // fully materializes the source table, so it needs more than the 1 GiB
   // user-query default without stripping the guard (never 0). Resolved once and
@@ -72,6 +74,7 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
       [Attr.COMPONENT]: 'plugin',
       [Attr.OPERATION]: 'graph.project',
       dry_run: dryRun,
+      refresh,
       status: 'ok',
     },
     async (span) => {
@@ -92,14 +95,16 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
       const applyRules = (row, rules) => {
         for (const rule of rules) {
           if (rule.where && !matchesPredicate(rule.where, row)) continue
-          const built = rule.toRow(row)
+          const built = rule.toRows ? rule.toRows(row) : rule.toRow(row)
           if (!built) continue
-          const target = rule.kind === 'node' ? nodes : edges
-          const idKey = rule.kind === 'node' ? 'node_id' : 'edge_id'
-          const id = /** @type {string} */ (built[idKey])
-          const existing = target.get(id)
-          if (existing) mergeRow(existing, built)
-          else target.set(id, built)
+          for (const item of Array.isArray(built) ? built : [built]) {
+            const target = rule.kind === 'node' ? nodes : edges
+            const idKey = rule.kind === 'node' ? 'node_id' : 'edge_id'
+            const id = /** @type {string} */ (item[idKey])
+            const existing = target.get(id)
+            if (existing) mergeRow(existing, item)
+            else target.set(id, item)
+          }
         }
       }
 
@@ -190,6 +195,15 @@ export async function projectGraph({ query, storage, contracts, config, dryRun =
 
       if (dryRun) {
         return { nodes: nodeRows.length, edges: edgeRows.length, nodesWritten: 0, edgesWritten: 0 }
+      }
+
+      if (refresh) {
+        const { refreshGraphRows } = await import('./maintenance.js')
+        // Settle pending rows through the normal dedup reads before maintenance.
+        await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
+        await dedupExisting(edgeRows, 'edge_id', EDGE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
+        await refreshGraphRows(storage, NODE_DATASET, nodeRows)
+        await refreshGraphRows(storage, EDGE_DATASET, edgeRows)
       }
 
       const freshNodes = await dedupExisting(nodeRows, 'node_id', NODE_DATASET, query, storage, config, maxHeapBytes, __executeSql)
@@ -335,6 +349,9 @@ function isMissingDatasetError(err) {
  */
 const propsProvenance = new WeakMap()
 
+/** Selected exemplar rank, independent of subsequently merged props. @type {WeakMap<GraphRow, string>} */
+const evidenceProvenance = new WeakMap()
+
 /**
  * Merge a duplicate row into the accumulated one: keep the earliest
  * `first_seen` and union props. On a props key conflict the value from
@@ -349,6 +366,25 @@ const propsProvenance = new WeakMap()
  * @ref LLP 0023#merge-policy [implements]: order-independent merge shared by projection and compaction
  */
 export function mergeRow(existing, incoming) {
+  // @ref LLP 0428#claim-evidence [implements]: prefer precise observed evidence.
+  const evidenceRank = row => {
+    const keys = row.source_keys
+    const precise = keys && typeof keys === 'object' && ('part_id' in keys || 'committed_at' in keys)
+    const inferred = keys && typeof keys === 'object' && keys.inferred_call === true
+    const ordered = keys && typeof keys === 'object' ? Object.fromEntries(Object.entries(keys).sort(([a], [b]) => compareStrings(a, b))) : keys
+    const quoted = row.source_dataset !== 'enrichment_committed' || (row.props && typeof row.props === 'object' && typeof row.props.evidence === 'string')
+    return `${precise ? '0' : '1'}${quoted ? '0' : '1'}${inferred ? '1' : '0'}:${row.source_dataset}:${JSON.stringify(ordered)}`
+  }
+  const selectedRank = evidenceProvenance.get(existing) ?? evidenceRank(existing)
+  const incomingRank = evidenceProvenance.get(incoming) ?? evidenceRank(incoming)
+  evidenceProvenance.set(existing, selectedRank)
+  if (incomingRank < selectedRank) {
+    evidenceProvenance.set(existing, incomingRank)
+    existing.source_dataset = incoming.source_dataset
+    existing.source_keys = incoming.source_keys
+    existing.projector = incoming.projector
+    existing.projector_version = incoming.projector_version
+  }
   const existingTime = firstSeenTime(existing.first_seen)
   const incomingTime = firstSeenTime(incoming.first_seen)
   const ip = incoming.props

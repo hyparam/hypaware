@@ -130,6 +130,20 @@ export async function run({ harness, expect }) {
   const nodeCount3 = await sqlCount('node')
   expect.that('node count unchanged after compaction', nodeCount3, (v) => v === 7)
 
+  // A code-mode action exercises the same contract through plugin activation,
+  // persisted JSON arguments, CLI dispatch and query settlement.
+  await kernel.storage.appendRows(tablePath, [...AI_GATEWAY_SCHEMA_COLUMNS], [
+    fixtureRow({ message_id: 'm4', message_index: 3, role: 'assistant', part_type: 'tool_call', tool_name: 'exec', tool_call_id: 'tc4',
+      tool_args: 'text(await tools.exec_command({cmd:"cat /home/test/.agents/skills/review/SKILL.md"}))' }),
+  ])
+  await dispatchOk(['graph', 'project', '--refresh'], { kernel, registry, harness, expect, label: 'refresh_evidence' })
+  const evidenceRows = await runSql("select source_keys, props from edge where edge_type = 'ran'", { includeLocalOnly: true })
+  expect.that('wrapper skill edge retains precise inferred evidence', evidenceRows, (rows) => {
+    const keys = rows[0]?.source_keys
+    const source = typeof keys === 'string' ? JSON.parse(keys) : keys
+    return rows.length === 1 && source?.message_id === 'm4' && source?.part_id === 'm4#0' && source?.inferred_call === true
+  })
+
   // The internal signal: assert the projection path emitted its span with
   // the same counts the SQL assertions saw, per the log-driven-development
   // policy (a silent span break should fail this smoke, not pass it).
@@ -152,6 +166,7 @@ export async function run({ harness, expect }) {
       t.attributes?.nodes_written === 0 && t.attributes?.edges_written === 0
     )
   )
+  expect.that('traces: explicit evidence refresh ran', projectSpans, (rows) => rows.some(t => t.attributes?.refresh === true && t.attributes?.status === 'ok'))
   expect.that(
     'traces: graph.compact span emitted with nothing skipped',
     traces.filter((/** @type {any} */ t) => t.name === 'graph.compact'),

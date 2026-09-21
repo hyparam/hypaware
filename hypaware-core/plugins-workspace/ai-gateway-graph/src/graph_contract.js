@@ -3,7 +3,7 @@
 import path from 'node:path'
 
 import { keys } from './graph-keys.js'
-import { commandStringFrom, programFrom, skillFromCodexRead, skillFromMarker, skillFromSlash, skillFromToolArgs } from './tool_facets.js'
+import { commandStringFrom, programFrom, skillFromCodexRead, skillFromMarker, skillFromSlash, skillFromToolArgs, literalActions, shellReadPaths, patchPaths, skillFromPath, MAX_ACTION_CHARS } from './tool_facets.js'
 
 /**
  * @import { ContractRule, GraphKit, GraphKeys } from './types.js'
@@ -23,7 +23,7 @@ export const PROJECTOR = 'ai-gateway.t0'
  * `invoked` rules (LLP 0073 §additive-no-migration): provenance only, existing
  * rows and ids are untouched, there is no re-key and therefore no migration.
  */
-export const PROJECTOR_VERSION = 2
+export const PROJECTOR_VERSION = 3
 
 /** Tools whose args name a concrete file. */
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
@@ -451,6 +451,67 @@ export function createAiGatewayGraphContract(kit) {
     },
   ]
 
+  // @ref LLP 0428#literal-actions [implements]: decode once per source row,
+  // share bounded action expansion across the node/edge rule pairs.
+  let lastRow
+  let lastActions = []
+  const actionsFor = (row) => {
+    if (row === lastRow) return lastActions
+    const wrapped = row.tool_name === 'exec' || row.tool_name === 'functions.exec'
+    const inputs = wrapped ? literalActions(row.tool_args) : [row]
+    lastActions = inputs.map(action => ({ ...row, ...action, inferred: wrapped }))
+    lastRow = row
+    return lastActions
+  }
+  for (const rule of rules) {
+    const original = rule.toRow
+    const defaultTool = rule.where?.eq?.tool_name
+    const actionRule = ['File', 'touched', 'Program', 'invoked'].includes(rule.type)
+      || (['Skill', 'ran'].includes(rule.type) && rule.where?.eq?.tool_name === 'exec_command')
+    if (rule.columns) rule.columns = [...new Set([...rule.columns, 'session_id', 'message_id', 'part_id', ...(actionRule ? ['cwd', 'tool_name', 'tool_args'] : [])])]
+    else if (rule.sql) rule.sql = rule.sql.replace('SELECT attributes,', 'SELECT message_id, part_id, attributes,')
+    if (actionRule) rule.where = { eq: { part_type: 'tool_call' }, in: { tool_name: ['exec', 'functions.exec', 'exec_command', 'Bash', 'apply_patch', ...FILE_TOOLS] } }
+    rule.toRows = (row) => {
+      const results = []
+      for (const input of actionRule ? actionsFor(row) : [row]) {
+        const action = input.tool_name ? input : { ...input, tool_name: defaultTool }
+        let variants = [action]
+        if (rule.type === 'File' || rule.type === 'touched') {
+          let files = []
+          if (action.tool_name === 'exec_command' || action.tool_name === 'Bash') files = shellReadPaths(commandStringFrom(action.tool_name, action.tool_args))
+          else if (action.tool_name === 'apply_patch') files = patchPaths(action.tool_args)
+          else {
+            const file = filePathFrom(action.tool_name, action.tool_args)
+            if (file) files = [file]
+          }
+          const args = /** @type {Record<string, unknown> | null} */ (parseMaybeJson(action.tool_args))
+          const cwd = str(args?.workdir) ?? str(action.cwd)
+          variants = files.filter(file => file.length <= 4096).flatMap(file => {
+            const absolute = path.isAbsolute(file) ? file : cwd && path.isAbsolute(cwd) && !file.startsWith('~') ? path.resolve(cwd, file) : null
+            return absolute ? [{ ...action, tool_name: 'Read', tool_args: { file_path: absolute } }] : []
+          })
+        } else if (actionRule && (rule.type === 'Skill' || rule.type === 'ran')) {
+          if (action.tool_name !== 'exec_command') continue
+          variants = shellReadPaths(commandStringFrom(action.tool_name, action.tool_args))
+            .filter(file => skillFromPath(file))
+            .map(file => ({ ...action, tool_args: { cmd: `cat '${file}'` } }))
+        }
+        for (const variant of variants) {
+          const built = original(variant)
+          if (!built) continue
+          built.source_keys = { .../** @type {Record<string, unknown>} */ (built.source_keys), ...pruned({ session_id: row.message_id || row.part_id ? row.session_id : undefined, message_id: row.message_id, part_id: row.part_id }) }
+          if (action.inferred) {
+            built.props = { .../** @type {Record<string, unknown>} */ (built.props), inferred_call: true }
+            built.source_keys = { .../** @type {Record<string, unknown>} */ (built.source_keys), inferred_call: true }
+          }
+          results.push(built)
+        }
+      }
+      return results
+    }
+    rule.toRow = row => rule.toRows?.(row)[0] ?? null
+  }
+
   return {
     name: 'ai-gateway-t0',
     plugin: PLUGIN_NAME,
@@ -543,6 +604,7 @@ function filePathFrom(toolName, toolArgs) {
  */
 function parseMaybeJson(value) {
   if (typeof value !== 'string') return value
+  if (value.length > MAX_ACTION_CHARS) return null
   try {
     return JSON.parse(value)
   } catch {

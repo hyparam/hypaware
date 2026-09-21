@@ -23,7 +23,7 @@ export async function runGraphProject(argv, ctx) {
     ctx.stderr.write(`hyp graph project: ${parsed.error}\n`)
     return 2
   }
-  const { source, dryRun } = parsed
+  const { source, dryRun, refresh } = parsed
   try {
     const { registry } = requireGraphRuntime()
     const contracts = source
@@ -45,6 +45,7 @@ export async function runGraphProject(argv, ctx) {
       contracts,
       config: ctx.config,
       dryRun,
+      refresh,
     })
     if (dryRun) {
       ctx.stdout.write(`graph project (dry-run): ${r.nodes} node(s), ${r.edges} edge(s) would be projected\n`)
@@ -70,16 +71,19 @@ export async function runGraphProject(argv, ctx) {
  * for the same reason.
  *
  * @param {string[]} argv
- * @returns {{ ok: true, source: string | undefined, dryRun: boolean } | { ok: false, error: string }}
+ * @returns {{ ok: true, source: string | undefined, dryRun: boolean, refresh: boolean } | { ok: false, error: string }}
  */
 function parseProjectArgv(argv) {
   /** @type {string | undefined} */
   let source
   let dryRun = false
+  let refresh = false
 
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
-    if (token === '--dry-run') {
+    if (token === '--refresh') {
+      refresh = true
+    } else if (token === '--dry-run') {
       dryRun = true
     } else if (token === '--source') {
       const value = argv[i + 1]
@@ -99,7 +103,7 @@ function parseProjectArgv(argv) {
     }
   }
 
-  return { ok: true, source, dryRun }
+  return { ok: true, source, dryRun, refresh }
 }
 
 /**

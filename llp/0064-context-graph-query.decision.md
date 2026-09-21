@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-06-15
 **Related:** LLP 0015, LLP 0023
+**Extended-by:** LLP 0428 (precise evidence, bounded action derivation and explicit refresh)
 
 > `hyp graph neighbors <node>` walks the activity graph that
 > [LLP 0023](./0023-context-graph-projection.decision.md) projects: out to N hops

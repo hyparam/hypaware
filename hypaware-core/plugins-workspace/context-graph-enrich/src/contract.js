@@ -7,7 +7,7 @@ import { COMMITTED_DATASET, PLUGIN_NAME } from './datasets.js'
  */
 
 export const PROJECTOR = 'enrich.t2'
-export const PROJECTOR_VERSION = 1
+export const PROJECTOR_VERSION = 2
 
 /** Edge type linking a T0 activity node to the enrichment node it produced. */
 export const PRODUCED_EDGE = 'produced'
@@ -70,7 +70,7 @@ export function buildEnrichmentContract(kit) {
             label: str(r.label) || null,
             props,
             firstSeen: r.committed_at,
-            sourceKeys: asObject(r.source_keys),
+            sourceKeys: { item_id: itemId, item_type: itemType, anchor_type: str(r.anchor_type), anchor_key: str(r.anchor_key), committed_at: r.committed_at instanceof Date ? r.committed_at.toISOString() : r.committed_at },
           })
         },
       },
@@ -86,12 +86,13 @@ export function buildEnrichmentContract(kit) {
           if (!itemType || !itemId || !anchorType || !anchorKey) return null
           return buildEdge({
             type: PRODUCED_EDGE,
+            props: str(asObject(r.props).evidence) ? { evidence: str(asObject(r.props).evidence) } : undefined,
             srcType: anchorType,
             srcKey: anchorKey,
             dstType: itemType,
             dstKey: itemId,
             firstSeen: r.committed_at,
-            sourceKeys: asObject(r.source_keys),
+            sourceKeys: { item_id: itemId, item_type: itemType, anchor_type: str(r.anchor_type), anchor_key: str(r.anchor_key), committed_at: r.committed_at instanceof Date ? r.committed_at.toISOString() : r.committed_at },
           })
         },
       },

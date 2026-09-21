@@ -48,6 +48,8 @@ export interface ContractRule {
   /** Declarative filter; only valid with `columns`. */
   where?: RulePredicate
   toRow(row: Record<string, unknown>): GraphRow | null
+  /** Optional bounded fan-out; engine prefers this over toRow. */
+  toRows?(row: Record<string, unknown>): GraphRow[]
 }
 
 /**
@@ -155,6 +157,10 @@ export interface GraphNode {
 
 /** An edge as the traversal reads it: endpoints and relation type. */
 export interface GraphEdge {
+  edge_id?: string
+  props?: Record<string, unknown> | null
+  source_dataset?: string
+  source_keys?: Record<string, unknown> | null
   src_id: string
   dst_id: string
   edge_type: string
@@ -165,6 +171,10 @@ export type Direction = 'out' | 'in' | 'both'
 
 /** One reached node, tagged with how (and from where) the walk arrived. */
 export interface Neighbor {
+  edge_id?: string
+  props?: Record<string, unknown> | null
+  source_dataset?: string
+  source_keys?: Record<string, unknown> | null
   hop: number
   edge_type: string
   direction: 'out' | 'in'
