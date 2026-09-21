@@ -18,10 +18,12 @@ import {
   resolveSourceSegments,
   sanitizePathSegment,
   validateIcebergPartitionFields,
+  withPartitionMutationLocks,
 } from './partition.js'
 import { cacheTablePath, datasetForTablePath } from './paths.js'
 import { createCacheSpool, discoverSpoolTables, DEFAULT_SPOOL_BYTES_THRESHOLD } from './spool.js'
 import { INGEST_SEQ_COLUMN, INTERNAL_FIELDS } from './streaming-reader.js'
+import { createSessionPurgeStore, filterPurgedSessions } from './session-purges.js'
 
 import { createHash } from 'node:crypto'
 import path from 'node:path'
@@ -107,6 +109,12 @@ export function resolveIcebergDir(tablePath) {
 export function createQueryStorageService({ cacheRoot, getDeclaration, getSettleHook, usagePolicyResolver, sourceWithholdResolver }) {
   if (!cacheRoot) throw new Error('createQueryStorageService: cacheRoot is required')
   const logger = getLogger('cache')
+  const sessionPurges = createSessionPurgeStore(cacheRoot)
+  /** @param {Record<string, unknown>[]} rows */
+  function survivingRows(rows) {
+    sessionPurges.refresh()
+    return sessionPurges.size ? rows.filter((row) => !sessionPurges.has(row)) : rows
+  }
   const meter = getMeter('cache')
   const partitionDropCounter = meter.createCounter('hyp_partition_validation_drops', {
     description: 'Rows dropped due to missing required Iceberg partition fields',
@@ -114,6 +122,9 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
   const spool = createCacheSpool({
     cacheRoot,
     async appendChunk(tablePath, columns, rows) {
+      const beforePurge = rows.length
+      rows = survivingRows(rows)
+      let purgedCount = beforePurge - rows.length
       const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
       // @ref LLP 0027#decision: flush-time settlement: the owning dataset
       // may upgrade provisional (fallback) row identity and dedupe before
@@ -123,10 +134,13 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       if (settle) {
         rows = await settle(rows, { storage: service })
       }
+      const beforeSecondCheck = rows.length
+      rows = survivingRows(rows)
+      purgedCount += beforeSecondCheck - rows.length
       const declaration = getDeclaration?.(dataset)
       /** @type {Map<string, { segments: string[], rows: Record<string, unknown>[] }>} */
       const groups = new Map()
-      let droppedCount = 0
+      let droppedCount = purgedCount
       /** @type {Map<string, number>} */
       const missingFieldCounts = new Map()
       for (const row of rows) {
@@ -172,10 +186,34 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         }
       }
       let totalBytes = 0
-      const opts = declaration ? { declaration } : undefined
-      for (const { segments, rows: groupRows } of groups.values()) {
-        const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
-        totalBytes += result.bytesWritten
+      const opts = { declaration, filterRows(/** @type {Record<string, unknown>[]} */ rows) {
+        const kept = survivingRows(rows)
+        const removed = rows.length - kept.length
+        droppedCount += removed
+        purgedCount += removed
+        return kept
+      } }
+      // The cursor probe above only catches a refusal already on record; it
+      // says nothing about a partition a foreign process holds the mutation
+      // guard for right now. That guard is the second thing a multi-partition
+      // chunk must hold for every partition before it commits to any: claim
+      // every one, sorted, up front, so a guard that is busy on partition B
+      // unwinds the whole commit instead of leaving partition A committed
+      // with no checkpoint written to keep it from replaying.
+      // @ref LLP 0347#rows-wait [implements]: the whole chunk waits, so guard contention costs no partial commit to replay
+      if (groups.size > 1) {
+        const dirs = Array.from(groups.values(), ({ segments }) => cacheTablePath(cacheRoot, dataset, segments))
+        await withPartitionMutationLocks(dirs, async () => {
+          for (const { segments, rows: groupRows } of groups.values()) {
+            const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, { ...opts, mutationLockHeld: true })
+            totalBytes += result.bytesWritten
+          }
+        })
+      } else {
+        for (const { segments, rows: groupRows } of groups.values()) {
+          const result = await appendRowsToSourceTableImpl(cacheRoot, dataset, segments, columns, groupRows, opts)
+          totalBytes += result.bytesWritten
+        }
       }
       // Counted here rather than in the grouping loop above, because the
       // refusal at the gate can send this chunk back to the spool to be
@@ -189,14 +227,20 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           missing_fields: fields,
         })
       }
-      if (droppedCount > 0) {
+      // Rows removed by the session-purge fence are a normal, expected drop
+      // (a session purge with unflushed spool rows), not a validation
+      // problem, so they must not trip this warn or inflate the reported
+      // missing-field drop count; only the non-purge remainder does.
+      const validationDroppedCount = droppedCount - purgedCount
+      if (validationDroppedCount > 0) {
         logger.warn('cache.partition_validation_drops', {
           [Attr.DATASET]: dataset,
-          dropped_count: droppedCount,
+          dropped_count: validationDroppedCount,
           row_count: rows.length,
           missing_fields: Array.from(missingFieldCounts.entries())
             .map(([fields, count]) => `${fields}:${count}`)
             .join(';'),
+          ...(purgedCount > 0 ? { purged_count: purgedCount } : {}),
         })
       }
       return { bytesWritten: totalBytes, droppedCount }
@@ -223,7 +267,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           status: 'ok',
         },
         async (span) => {
-          const { bytesWritten, pendingBytes } = await spool.append(tablePath, columns, rows)
+          const { bytesWritten, pendingBytes } = await spool.append(tablePath, columns, survivingRows(rows))
           span.setAttribute('bytes_written', bytesWritten)
           span.setAttribute('pending_bytes', pendingBytes)
           span.setAttribute('spooled', true)
@@ -252,13 +296,19 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // `opts.since`: absent ⇒ byte-for-byte the pre-existing full scan, so every
     // current caller is untouched until it opts in. When set, the scan yields
     // only rows newer than the watermark (null-seq legacy rows always yielded).
+    // @ref LLP 0417#operation [implements]: scope survives the first fence; long streams refresh at bounded intervals
     async *readRows(tablePath, columns, opts) {
+      sessionPurges.refresh()
       const since = opts?.since !== undefined ? continuationToSeq(opts.since) : undefined
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
+      const scanColumns = projected ? [...new Set([...projected, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])] : projected
       const scanOpts = since !== undefined ? { since, includeLegacy: opts?.includeLegacy } : undefined
-      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, scanOpts)) {
+      let scanned = 0
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, scanOpts)) {
+        if (scanned++ % 1024 === 0) sessionPurges.refresh()
+        if (sessionPurges.has(row)) continue
         for (const f of INTERNAL_FIELDS) delete row[f]
-        yield row
+        yield projected ? projectRow(row, projected) : row
       }
     },
 
@@ -266,10 +316,15 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // the incremental read options prevents a pruning hint from being
     // confused with a predicate whose result callers rely on.
     async *readRowsWhere(tablePath, columns, whereIn) {
+      sessionPurges.refresh()
       const projected = columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
-      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), projected, { whereIn })) {
+      const scanColumns = projected ? [...new Set([...projected, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])] : projected
+      let scanned = 0
+      for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { whereIn })) {
+        if (scanned++ % 1024 === 0) sessionPurges.refresh()
+        if (sessionPurges.has(row)) continue
         for (const f of INTERNAL_FIELDS) delete row[f]
-        yield row
+        yield projected ? projectRow(row, projected) : row
       }
     },
 
@@ -283,6 +338,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // has a watermark it passes false (the backlog is already shipped), so the
     // one-time migration never re-exports on every tick (LLP 0040 §6 risk #1).
     async *readRowsSince(tablePath, opts = {}) {
+      sessionPurges.refresh()
       const since = continuationToSeq(opts.since)
       const dataset = datasetForTablePath(cacheRoot, tablePath) ?? 'unknown'
       const projected = opts.columns?.filter((c) => !INTERNAL_FIELDS.includes(c))
@@ -329,6 +385,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         if (forceAttribution) scanColumns.push(/** @type {string} */ (attributionColumn))
         if (forceEntrypoint) scanColumns.push(/** @type {string} */ (entrypointColumn))
       }
+      if (scanColumns) scanColumns = [...new Set([...scanColumns, 'session_id', 'org', 'node_id', 'src_id', 'dst_id'])]
       // Running high-water of REAL (non-null) seqs seen so far, seeded with the
       // incoming watermark. `after` is this monotonic max, so a null-seq legacy
       // row never advances the watermark and progress never regresses even when
@@ -339,12 +396,20 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       const droppedCwdHashes = new Set()
       let droppedSourceRowCount = 0
       let droppedUnattributedRowCount = 0
+      let purgedRowCount = 0
+      let scanned = 0
       for await (const row of scanRowsFromTable(resolveIcebergDir(tablePath), scanColumns, { since, includeLegacy: opts.includeLegacy })) {
+        if (scanned++ % 1024 === 0) sessionPurges.refresh()
         const seq = seqValue(row[INGEST_SEQ_COLUMN.name])
         if (seq !== null && seq > high) high = seq
         for (const f of INTERNAL_FIELDS) delete row[f]
         /** @type {SinkContinuation} */
         const after = { v: 1, seq: high.toString() }
+        if (sessionPurges.has(row)) {
+          purgedRowCount += 1
+          yield { after, dropped: true }
+          continue
+        }
         // @ref LLP 0070#enforce [implements]: per-row export filter, derived from the row's own `cwd` at export time (no cache-schema marker, retroactive over already-cached rows); `cwd` is forced into the scan above so a caller's `columns` projection can't bypass this filter
         // @ref LLP 0069#enforce [implements]: the export-seam half of the local-only directory withholding
         // @ref LLP 0070#incremental [constrained-by]: a withheld row is dropped from the payload but its `after` still advances the cursor across it (drop-but-advance)
@@ -408,17 +473,23 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
         if (forceCwd) delete row.cwd
         if (forceAttribution) delete row[/** @type {string} */ (attributionColumn)]
         if (forceEntrypoint) delete row[/** @type {string} */ (entrypointColumn)]
+        if (projected) for (const key of ['session_id', 'org', 'node_id', 'src_id', 'dst_id']) {
+          if (!projected.includes(key)) delete row[key]
+        }
         yield { row, after }
       }
       // Per-partition aggregate on the export read; cwds are hashed, never raw
       // paths in dev telemetry (LLP 0080 #telemetry). Emitted only when the scan
       // completes normally, so a corrupt-list throw reports no partial drop.
-      if (droppedRowCount > 0) {
+      if (droppedRowCount > 0 || purgedRowCount > 0) {
         logger.debug('usage_policy.export_drop', {
           [Attr.COMPONENT]: 'cache',
           [Attr.DATASET]: dataset,
           dropped_row_count: droppedRowCount,
           distinct_cwd_count: droppedCwdHashes.size,
+          // Purge-fence drops are not a usage-policy withholding; kept
+          // separate so neither count is read as the other.
+          ...(purgedRowCount > 0 ? { purged_row_count: purgedRowCount } : {}),
           ...(droppedSourceRowCount > 0 ? { dropped_source_row_count: droppedSourceRowCount } : {}),
           // Separate count so the fail-closed rule's over-withholding is
           // observable in the field, not inferred (LLP 0192 #consequences).
@@ -440,8 +511,9 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     },
 
     async dataSourceForTable(tablePath) {
-      const source = await dataSourceForTable(resolveIcebergDir(tablePath))
-      if (!source) return null
+      const unfiltered = await dataSourceForTable(resolveIcebergDir(tablePath))
+      if (!unfiltered) return null
+      const source = filterPurgedSessions(unfiltered, sessionPurges)
       const publicColumns = source.columns.filter((c) => !INTERNAL_FIELDS.includes(c))
       /** @type {ScannableDataSource} */
       const wrapped = {
@@ -551,7 +623,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
           status: 'ok',
         },
         async (span) => {
-          const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, rows)
+          const result = await appendRowsToPartitionImpl(cacheRoot, dataset, partitionSegments, columns, survivingRows(rows), { filterRows: survivingRows })
           span.setAttribute('bytes_written', result.bytesWritten)
           span.setAttribute('appended', result.appended)
         },
@@ -569,6 +641,7 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
     // rotates or advances flush progress, so it is safe alongside live capture.
     async *readSpooledRows(dataset, columns) {
       if (!dataset) return
+      sessionPurges.refresh()
       /** @type {string[]} */
       let tables = []
       try {
@@ -576,9 +649,12 @@ export function createQueryStorageService({ cacheRoot, getDeclaration, getSettle
       } catch {
         return
       }
+      let scanned = 0
       for (const tablePath of tables) {
         if (datasetForTablePath(cacheRoot, tablePath) !== dataset) continue
         for await (const row of spool.readSpooledRows(tablePath)) {
+          if (scanned++ % 1024 === 0) sessionPurges.refresh()
+          if (sessionPurges.has(row)) continue
           for (const f of INTERNAL_FIELDS) delete row[f]
           yield columns ? projectRow(row, columns) : row
         }

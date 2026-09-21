@@ -158,3 +158,39 @@ test('readFileIfExists/readJsonIfExists return null only for ENOENT', async () =
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
+
+// @ref LLP 0417#cache-reclamation [tests]: admission rejects failed directory durability
+test('durable publication syncs file before rename and the immediate parent directory afterward, and a failing parent sync propagates', async t => {
+  const dir = await makeTmpDir()
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const target = path.join(dir, 'new', 'nested', 'journal.json')
+  const events = []
+  let failDirectory = true
+  const io = { ...fs,
+    async rename(from, to) {
+      events.push('rename')
+      return fs.rename(from, to)
+    },
+    async open(file, flags, mode) {
+      const handle = await fs.open(file, flags, mode)
+      return {
+        writeFile: (data, encoding) => handle.writeFile(data, encoding),
+        async sync() {
+          events.push(flags === 'w' ? 'file-sync' : `dir-sync:${file}`)
+          if (flags === 'r' && failDirectory) throw new Error('injected directory sync failure')
+          await handle.sync()
+        },
+        async close() { await handle.close() },
+      }
+    },
+  }
+  const options = { fsync: true, fs: /** @type {typeof fs} */ (io) }
+  await assert.rejects(atomicWriteJson(target, { admitted: true }, options), /directory sync failure/)
+  assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
+  assert.deepEqual(await fs.readdir(path.dirname(target)), ['journal.json'])
+  failDirectory = false
+  events.length = 0
+  await atomicWriteJson(target, { admitted: true }, options)
+  // Exactly one directory sync, of the immediate parent only, not every ancestor.
+  assert.deepEqual(events, ['file-sync', 'rename', `dir-sync:${path.dirname(target)}`])
+})

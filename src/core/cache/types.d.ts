@@ -39,9 +39,19 @@ export interface PartitionCursor {
 // `all` is wholesale.
 export type PurgeTarget =
   | { kind: 'subtree'; path: string }
-  | { kind: 'session'; id: string }
+  | { kind: 'session'; id: string; org?: string }
   | { kind: 'ignored'; resolver: UsagePolicyResolver }
   | { kind: 'all' }
+
+// A durable cache cleanup admission: the partition (cache-relative) whose
+// listed generations must be rewritten and reclaimed, and when it was first
+// requested (kept across repeated admissions, so the grace never restarts).
+export interface CachePurgeCleanupJob {
+  version: number
+  partition: string
+  generations: string[]
+  requestedAt: number
+}
 
 // The result of a `hyp purge` run: how many rows were position-deleted, how
 // many partitions were touched, and the distinct absolute `cwd`s among the
@@ -64,6 +74,7 @@ export type PurgeTarget =
 // absent either: only the first reason is a verdict, and only the second is a
 // statement that the directory is gone.
 export interface PurgeSummary {
+  cacheCleanup?: string[]
   rowsDeleted: number
   partitionsAffected: number
   purgedCwds: string[]

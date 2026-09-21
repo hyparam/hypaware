@@ -12,6 +12,7 @@ import { urlToPath } from '../../src/core/cache/iceberg/resolver.js'
 import { deleteMatchingRows, listLiveDataFiles } from '../../src/core/cache/iceberg/store.js'
 import { appendRowsToSourceTable } from '../../src/core/cache/partition.js'
 import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cache/storage.js'
+import { createSessionPurgeStore } from '../../src/core/cache/session-purges.js'
 import { executeGrepSearch } from '../../hypaware-core/plugins-workspace/grep/src/grep_service.js'
 import { aiGatewayDatasetRegistration } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 
@@ -492,4 +493,32 @@ test('unreadable table metadata fails the search rather than answering zero', as
     if (name.endsWith('.metadata.json')) await fs.writeFile(path.join(metadataDir, name), '{ truncated')
   }
   await assert.rejects(() => grep(storage), 'a corrupt table raises, matching the SQL read path')
+})
+
+// @ref LLP 0417#operation [tests]: final fence removes already accumulated and just-accepted hits
+for (const abort of [false, true]) test(`grep rechecks undelivered hits after purge, abort=${abort}`, async t => {
+  const { cacheRoot, storage } = await makeCache([[
+    mkRow({ session_id: 'target', cwd: '/home/target', content_text: 'needle first' }),
+    mkRow({ session_id: 'target', cwd: '/home/target', content_text: 'needle second' }),
+  ], [mkRow({ session_id: 'keep', date: '2026-08-09', content_text: 'needle survivor' })]])
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const controller = new AbortController()
+  let matched = 0
+  const result = await grep(storage, {
+    includeLocalOnly: false, callerCwd: '/home/caller', signal: controller.signal,
+    usagePolicyResolver: {
+      resolve(cwd) {
+        if (cwd === '/home/target' && ++matched === 2) {
+          createSessionPurgeStore(cacheRoot).add('target')
+          if (abort) controller.abort()
+        }
+        return { class: 'full', governedBy: null, declared: null }
+      },
+      isIgnored: () => false,
+    },
+  })
+  assert.equal(matched, 2, 'purge occurs after a hit was already accumulated')
+  assert(!result.hits.some(hit => hit.sessionId === 'target'))
+  assert.equal(result.exhausted, false)
+  if (!abort) assert.deepEqual(result.hits.map(hit => hit.sessionId), ['keep'])
 })

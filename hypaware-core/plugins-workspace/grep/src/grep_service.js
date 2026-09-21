@@ -7,6 +7,7 @@ import { listLiveDataFiles } from '../../../../src/core/cache/iceberg/store.js'
 import { datasetForTablePath } from '../../../../src/core/cache/paths.js'
 import { discoverSpoolTables } from '../../../../src/core/cache/spool.js'
 import { resolveIcebergDir } from '../../../../src/core/cache/storage.js'
+import { createSessionPurgeStore } from '../../../../src/core/cache/session-purges.js'
 import { Attr, getLogger, withSpan } from '../../../../src/core/observability/index.js'
 import { settlePendingCacheForQuery } from '../../../../src/core/query/sql.js'
 import {
@@ -79,6 +80,8 @@ const UNKNOWN_DAY_SORT_KEY = '￿'
  */
 export async function executeGrepSearch(args) {
   const { storage, signal } = args
+  const purges = createSessionPurgeStore(storage.cacheRoot)
+  purges.refresh()
   const limit = args.limit
   // `limit` is validated here for the same reason the query is: this is the
   // wire shape a serving surface hands straight through, so an unchecked
@@ -105,7 +108,7 @@ export async function executeGrepSearch(args) {
     return true
   }
   /** @param {Record<string, unknown>} row */
-  const accept = (row) => chainPred(row) && dayPred(row) && matcher.rowTest(row)
+  const accept = (row) => !purges.has(row) && chainPred(row) && dayPred(row) && matcher.rowTest(row)
 
   /** @type {LocalOnlyVisibilityReport} */
   const localOnly = { callerClass: 'unknown', filtered: false, withheldRows: 0, suppressedRows: 0 }
@@ -289,6 +292,7 @@ export async function executeGrepSearch(args) {
             rowStart: groupStart,
             rowEnd: groupStart + groupRows,
           })
+          purges.refresh()
           for (let i = 0; i < rows.length; i++) {
             if (i % ABORT_CHECK_ROWS === 0) signal?.throwIfAborted()
             // Delete positions are file-absolute, so the group's own
@@ -338,6 +342,14 @@ export async function executeGrepSearch(args) {
         interrupted = true
       }
 
+      // @ref LLP 0417#operation [implements]: undelivered hits must honor purges, even on cancellation
+      purges.refresh()
+      let kept = 0
+      for (const hit of hits) {
+        if (purges.has({ session_id: hit.sessionId })) interrupted = true
+        else hits[kept++] = hit
+      }
+      hits.length = kept
       trimHits()
       const truncated = hits.length > limit
       if (truncated) hits.length = limit
