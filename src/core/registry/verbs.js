@@ -395,22 +395,24 @@ function commandAlreadyRegistered(registry, name) {
  * the same way {@link commandAlreadyRegistered} tolerates one without
  * `has`: the verb is still released from both maps, the stale CLI command
  * is the only thing left behind. One without `ownerOf`, or without the
- * `registeringAs` bracket that is the only thing that ever fills it,
- * retracts on the mark alone: the tolerance LLP 0420 #owner and LLP 0424
- * #unknown extend to a host's own injected registry, which records no
- * registrar for anything, so there is no binding to read. Both members are
- * tested, because {@link registerProjection} keys its own tolerance on the
- * bracket: against a registry answering an `ownerOf` nothing ever fills,
- * every plugin verb's projection reads ownerless while the verb registry
- * holds the plugin, and the check below would refuse every legitimate
- * release and leave its command behind.
+ * `registeringAs` bracket that is, in the registry `createCommandRegistry`
+ * builds, the only thing that ever fills it, retracts on the mark alone: the
+ * tolerance LLP 0420 #owner and LLP 0424 #unknown extend to a host's own
+ * injected registry, which records no registrar for anything, so there is no
+ * binding to read. Both members are tested, because {@link registerProjection}
+ * keys its own tolerance on the bracket: against a registry answering an
+ * `ownerOf` nothing ever fills, every plugin verb's projection reads
+ * ownerless while the verb registry holds the plugin, and the check below
+ * would refuse every legitimate release and leave its command behind. A host
+ * registry filling `ownerOf` some other way is the shape that premise does
+ * not cover (LLP 0427 #two-facts); no registry here is one, and neither
+ * member is on the declared `CommandRegistry` contract.
  *
  * The two tolerated branches warn, and so does the refusal. The caller's
- * prescribed
- * success check is `getByTool`, which the map deletion already satisfies,
- * so a half retraction reads as a win while `hyp <verb>` keeps routing at
- * the run closure of the verb the host just displaced. That is the silent
- * local-cache regression LLP 0264 §verb warns about, so it has to name
+ * prescribed success check is `getByTool`, which the map deletion already
+ * satisfies, so a half retraction reads as a win while `hyp <verb>` keeps
+ * routing at the run closure of the verb the host just displaced. That is the
+ * silent local-cache regression LLP 0264 §verb warns about, so it has to name
  * itself in the logs rather than only show up as a wrong answer.
  *
  * @param {(CommandRegistry & {

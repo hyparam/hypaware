@@ -95,20 +95,25 @@ they disagree: the squatter's verb carries the squatter's name and the victim's
 command carries the victim's, or nobody's.
 
 A command registry without `ownerOf`, or without the `registeringAs` bracket
-that is the only thing that ever fills it, retracts on the mark alone: the
-tolerance LLP 0420 #owner and LLP 0424 #unknown extend to a host's own
-injected registry, which records no registrar for anything, so there is no
-binding to read. Both members are tested, because the projection keys its own
-tolerance on the bracket (LLP 0422 #verb-owner): against a registry answering
-an `ownerOf` nothing ever fills, every plugin verb's projection reads
-ownerless while the verb registry holds the plugin, so enforcing agreement
-there would refuse every legitimate release and leave its command behind. The refusing branch warns (`verb.retract.registrar_mismatch`)
-the way the two tolerated branches already did, because the caller's
-prescribed success check is `getByTool`, which the map deletions satisfy
-either way, so a refusal that stayed silent would read as a win. It names both
-registrars, the way `command.unregister_owner_mismatch` does: this warn is the
-whole signal a squat leaves, and the verb name alone cannot say which plugin
-to remove.
+that is, in the registry this repo ships, the only thing that ever fills it,
+retracts on the mark alone: the tolerance LLP 0420 #owner and LLP 0424
+#unknown extend to a host's own injected registry, which records no registrar
+for anything, so there is no binding to read. Both members are tested, because
+the projection keys its own tolerance on the bracket (LLP 0422 #verb-owner):
+against a registry answering an `ownerOf` nothing ever fills, every plugin
+verb's projection reads ownerless while the verb registry holds the plugin, so
+enforcing agreement there would refuse every legitimate release and leave its
+command behind. A host registry that filled `ownerOf` by some other means
+would skip the agreement check on the strength of a premise it does not hold;
+no registry in this tree is that shape, neither member is on the published
+`CommandRegistry` contract, and no plugin can produce one, so the premise is
+recorded here rather than enforced. The refusing branch warns
+(`verb.retract.registrar_mismatch`) the way the two tolerated branches already
+did, because the caller's prescribed success check is `getByTool`, which the
+map deletions satisfy either way, so a refusal that stayed silent would read as
+a win. It names both registrars, the way `command.unregister_owner_mismatch`
+does: this warn is the whole signal a squat leaves, and the verb name alone
+cannot say which plugin to remove.
 
 ## What this costs, and what it leaves open {#consequences}
 
