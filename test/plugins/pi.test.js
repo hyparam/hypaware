@@ -9,7 +9,7 @@ import { once } from 'node:events'
 import test from 'node:test'
 import extension from '../../packages/pi-extension/index.js'
 import { projectPiEntries, piEntryFingerprint } from '../../hypaware-core/plugins-workspace/pi/src/projector.js'
-import { createPiBackfillProvider, piSessionsRoot, readPiLines } from '../../hypaware-core/plugins-workspace/pi/src/backfill.js'
+import { SESSION_IGNORE_REFRESH_MS, createPiBackfillProvider, piSessionsRoot, readPiLines } from '../../hypaware-core/plugins-workspace/pi/src/backfill.js'
 import { createStartPiSource } from '../../hypaware-core/plugins-workspace/pi/src/listener.js'
 import { attachPiPlugin, piPluginPath, PI_PLUGIN_MARKER } from '../../hypaware-core/plugins-workspace/pi/src/attach.js'
 import { validatePiConfig } from '../../hypaware-core/plugins-workspace/pi/src/config.js'
@@ -718,4 +718,59 @@ test('Pi capture health keeps an unresolved write failure visible alongside a sk
     assert.match(both, /version/i)
     assert.ok(both.length <= 200, `capture health stays inside the 200-char source-health bound, saw ${both.length}`)
   } finally { await source.stop(); await fs.rm(root, { recursive: true, force: true }) }
+})
+
+/** Counts full marker-store reloads, which is the blocking I/O the run budgets. */
+class CountingIgnoreSet extends SessionIgnoreSet {
+  load() {
+    this.loads = (this.loads ?? 0) + 1
+    return super.load()
+  }
+}
+
+test('Pi recovery reloads session exclusions on a bounded schedule, not once per flush', async t => {
+  const root = await temp()
+  try {
+    for (const name of ['a', 'b']) {
+      const raw = copy()
+      raw.session.id = `session-${name}`
+      raw.session.cwd = root
+      raw.entries = Array.from({ length: 256 }, (_, i) => ({
+        type: 'message', id: `${name}-${i}`, parentId: i ? `${name}-${i - 1}` : null,
+        timestamp: new Date(Date.UTC(2026, 8, 17, 10, 0, 0, i)).toISOString(),
+        message: { role: 'user', content: `message ${i}` },
+      }))
+      await writeSession(root, raw, name)
+    }
+    const stateDir = path.join(root, 'state')
+    const ignored = new CountingIgnoreSet(stateDir)
+    const provider = createPiBackfillProvider({ env: { PI_CODING_AGENT_SESSION_DIR: root }, ignoredSessions: ignored })
+    const ctx = { env: {}, log: silent, dryRun: true }
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+
+    ignored.loads = 0
+    const first = await collect(provider, ctx)
+    assert.ok(first.items.length >= 8, `the run must flush many batches, saw ${first.items.length}`)
+    assert.equal(ignored.loads, 1, 'reload count is per run, not per 64-entry flush')
+
+    // The reload stays load-bearing: a marker another process writes mid-run
+    // is honored at the first flush after the window elapses.
+    ignored.loads = 0
+    const seen = []
+    for await (const item of provider.run(/** @type {any} */ (ctx))) {
+      if (item.type === 'event') continue
+      seen.push(item)
+      if (seen.length === 1) {
+        new SessionIgnoreSet(stateDir).add('session-a')
+        t.mock.timers.tick(SESSION_IGNORE_REFRESH_MS)
+      }
+    }
+    assert.equal(seen.filter(item => item.value.session_id === 'session-a').length, 1,
+      'the flush after the window sees the new marker and stops the session')
+    assert.ok(seen.filter(item => item.value.session_id === 'session-b').length >= 4, 'unexcluded sessions still import')
+    assert.equal(ignored.loads, 2, 'one run-start reload plus the one the elapsed window earned')
+  } finally {
+    t.mock.timers.reset()
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })
