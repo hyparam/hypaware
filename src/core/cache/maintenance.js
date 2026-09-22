@@ -2754,6 +2754,7 @@ async function walkForRetired(dir, cacheRoot) {
   // journal costs no extra syscall, and because that listing predates this
   // pass's removals, the tick that reclaims the last generation still leaves
   // the journal for a status check to certify against.
+  // @ref LLP 0417#cache-reclamation [implements]: a finished journal is dropped one sweep after its last generation goes
   if (cleanup && !entries.some(entry => cleanup.generations.includes(entry.name))) {
     try { await withPartitionMutationLock(dir, () => finishCacheCleanup(cacheRoot, cacheCleanupId(cacheRoot, dir))) }
     catch { /* A busy partition or a failed unlink retries on the next tick. */ }

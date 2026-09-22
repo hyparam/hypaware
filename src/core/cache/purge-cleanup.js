@@ -54,11 +54,18 @@ export async function readCacheCleanup(cacheRoot, id) {
  */
 export async function queueCacheCleanup(cacheRoot, partitionDir) {
   const id = cacheCleanupId(cacheRoot, partitionDir)
-  // An unreadable journal (a crash mid-write, a hand edit) must not make every
-  // later purge of this partition throw at admission. The write below rebuilds
-  // it from the partition's own generations, which supersedes whatever could
-  // not be read, at the cost of restarting the grace.
-  const existing = await readCacheCleanup(cacheRoot, id).catch(() => null)
+  // A journal that fails to parse or fails its shape check (a crash mid-write,
+  // a hand edit) must not make every later purge of this partition throw at
+  // admission. The write below rebuilds it from the partition's own
+  // generations, which supersedes what could not be read, at the cost of
+  // restarting the grace. A journal that could not be read at all is not that
+  // case: it may still be readable on the next attempt with its grace clock
+  // and its generation list intact, so an I/O failure stays fail-closed rather
+  // than silently discarding outstanding cleanup work.
+  const existing = await readCacheCleanup(cacheRoot, id).catch(error => {
+    if (typeof (/** @type {NodeJS.ErrnoException} */ (error)?.code) === 'string') throw error
+    return null
+  })
   const generations = new Set()
   for (const entry of await fs.readdir(partitionDir, { withFileTypes: true })) {
     if (!generationName.test(entry.name)) continue

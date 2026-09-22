@@ -19,6 +19,7 @@ import { writeCursor, withPartitionMutationLock } from '../../src/core/cache/par
 import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
 
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
+/** @import { CachePurgeCleanupJob } from '../../src/core/cache/types.js' */
 
 /**
  * Collect the log records emitted while `fn` runs, alongside its return
@@ -475,4 +476,26 @@ test('a corrupt cleanup journal is re-admitted by the next purge instead of fail
   await age(cacheRoot, id, [original])
   await maintainCache({ cacheRoot })
   await assert.rejects(fs.stat(original), { code: 'ENOENT' }, 'the recovered journal reclaims like any other')
+})
+
+test('a journal that cannot be read at all fails admission closed instead of being discarded', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-journal-unreadable-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [{ session_id: 'target', org: 'a', body: 'synthetic sensitive' }])
+  await storage.flushTable(partition, { force: true })
+  const id = await queueCacheCleanup(cacheRoot, partition)
+  const journal = path.join(cacheRoot, '.purge-cleanup', `${id}.json`)
+  const admitted = /** @type {CachePurgeCleanupJob} */ (await readCacheCleanup(cacheRoot, id)).requestedAt
+  // An I/O failure is not a corrupt journal: the file is still there, still
+  // naming outstanding work, and a later attempt may read it. Rebuilding over
+  // it would restart a grace that is already running, so admission fails
+  // closed here even though an atomic rename could have replaced the file.
+  await fs.chmod(journal, 0o000)
+  await assert.rejects(queueCacheCleanup(cacheRoot, partition), { code: 'EACCES' })
+  await fs.chmod(journal, 0o600)
+  assert.equal(await queueCacheCleanup(cacheRoot, partition), id)
+  assert.equal(/** @type {CachePurgeCleanupJob} */ (await readCacheCleanup(cacheRoot, id)).requestedAt, admitted,
+    'the grace clock of the work that was already admitted survives')
 })

@@ -230,10 +230,13 @@ later sweep removes it under the partition mutation lock, so the journal
 directory stays proportional to outstanding cleanups rather than to the
 number of partitions ever purged. The sweep that reclaims the last named
 generation still leaves the journal behind, so a status check taken right
-after it certifies completion. An invalid journal blocks reclamation but not
-admission: the next purge of that partition rebuilds the journal from the
-partition's own generations, restarting its grace, rather than failing every
-later purge of it.
+after it certifies completion. An invalid journal blocks that partition's
+maintenance, its compaction and snapshot expiry included, but not admission:
+the next purge of that partition rebuilds the journal from the partition's own
+generations, restarting its grace, rather than failing every later purge of it.
+A journal that could not be read at all, as opposed to one that parses and
+fails its shape check, is not rebuilt: it may still be readable later with its
+grace clock intact, so admission fails closed on it.
 
 Status verifies each named generation is absent before reporting completion.
 It certifies those cache generations, not all session copies. Historical-only
