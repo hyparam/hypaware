@@ -17,6 +17,51 @@ import { compareStrings } from '../util/compare_strings.js'
  */
 
 /**
+ * The instance name each live handle was keyed under, written at the
+ * `handles.set` beside it so the record and the key are the same string.
+ *
+ * Weak and keyed by the handle, for the reason the `owners` map is bounded by
+ * the live instances: an entry goes when its handle does, so a long-running
+ * daemon holds one name per sink it is exporting rather than one per sink it
+ * ever materialized. Module-scoped rather than per-registry because identity
+ * is the key: a handle belongs to the one registry that built it, so no two
+ * registries can key the same object.
+ *
+ * @type {WeakMap<object, string>}
+ */
+const instanceNames = new WeakMap()
+
+/**
+ * The instance name this module keyed `handle` under: the string
+ * `instantiate` validated, out of the kernel's own record rather than off the
+ * handle. A handle is a live object its owner still holds through
+ * `ctx.sinks.get`, so `handle.instanceName` is a property that owner can
+ * replace with an accessor of its own, and the kernel's readers dereference it
+ * in loop bodies: `hyp status`, the daemon's per-tick `status.sinks` write
+ * and the sink driver's due check each raised the owner's error rather than
+ * naming the instance (issue #1976, the reader half of #1971).
+ *
+ * A handle this module did not build - a host registry's, a test double's -
+ * has no record here, so its own `instanceName` is read, guarded the way
+ * `shownName` guards the facade's `name` in
+ * `src/core/runtime/activation.js`: a name that cannot be read, or that is no
+ * longer a string, answers `''` rather than raising into the caller's loop.
+ *
+ * @param {ExtendedSinkHandle} handle
+ * @returns {string}
+ */
+export function sinkInstanceName(handle) {
+  const recorded = instanceNames.get(handle)
+  if (recorded !== undefined) return recorded
+  try {
+    const declared = handle?.instanceName
+    return typeof declared === 'string' ? declared : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
  * Build the kernel-side SinkRegistry. The contract surface
  * (`register`/`get`/`list`) matches `hypaware-plugin-kernel-types.d.ts
  * §Sinks` and is what a plugin reaches through the per-plugin `ctx.sinks`
@@ -383,6 +428,7 @@ export function createSinkRegistry() {
           ...(args.kind === 'blob' ? { writer: args.writerPlugin, destination: contributionPlugin, encoder: args.encoder } : {}),
         }
         handles.set(instanceName, handle)
+        instanceNames.set(handle, instanceName)
         recordOwner(instanceName, args.plugin)
         instruments.sinksRegistered.add(1, {
           [Attr.SINK_INSTANCE]: instanceName,
@@ -485,6 +531,7 @@ export function createSinkRegistry() {
           blobStore,
         }
         handles.set(instanceName, handle)
+        instanceNames.set(handle, instanceName)
         recordOwner(instanceName, args.plugin)
         instruments.sinksRegistered.add(1, {
           [Attr.SINK_INSTANCE]: instanceName,

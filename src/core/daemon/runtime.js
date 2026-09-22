@@ -25,6 +25,7 @@ import { bootKernel, resolveLayeredConfigForDaemon } from '../runtime/boot.js'
 import { clientAssetStateRoot } from '../runtime/client_asset_ledger.js'
 import { refreshClientAssets } from '../runtime/client_assets.js'
 import { createSinkDriver } from '../sinks/driver.js'
+import { sinkInstanceName } from '../registry/sinks.js'
 import { materializeSinks } from '../sinks/materialize.js'
 import { createBackfillSweepDriver } from './backfill_sweep.js'
 import { BOOT_FAILED_WARNING_PREFIX, recordFailedPlugins } from './boot_failure.js'
@@ -1866,14 +1867,21 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
   /** @type {SinkSnapshot[]} */
   const out = []
   for (const handle of runtime.sinks.listHandles()) {
-    const existing = sinkSnapshots.get(handle.instanceName) ?? {
-      instance: handle.instanceName,
+    // The registry's key, not the handle's own `instanceName`: this runs on
+    // every tick and outside the tick's `.catch`, so an owner's accessor on
+    // the name stopped the daemon's `status.sinks` write once a minute
+    // (issue #1976). `plugin` and `kind` below are the same kind of live
+    // property, still read off the handle, so that outage is narrowed here
+    // and not yet closed (issue #2059).
+    const instance = sinkInstanceName(handle)
+    const existing = sinkSnapshots.get(instance) ?? {
+      instance,
       plugin: handle.plugin,
       kind: handle.kind,
     }
     existing.plugin = handle.plugin
     existing.kind = handle.kind
-    sinkSnapshots.set(handle.instanceName, existing)
+    sinkSnapshots.set(instance, existing)
     out.push({ ...existing })
   }
   return out
@@ -1957,6 +1965,7 @@ function sleep(ms) {
 }
 
 export {
+  collectSinkSnapshots,
   pidFilePath,
   statusFilePath,
   resolveClientActionSeam,
