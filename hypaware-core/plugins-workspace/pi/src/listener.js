@@ -134,9 +134,10 @@ export function createStartPiSource(deps) {
     }
     return {
       async status() {
-        // A skewed lane never produces the accepted batch that clears
-        // `lastError`, so reporting the skew alone would hide a capture
-        // failure for the rest of the run.
+        // The two clear on different evidence: an interleaved current sender
+        // clears `lastError` while the skewed one keeps being refused, and a
+        // lane with no current sender never clears `lastError` at all. Either
+        // one reported alone would hide the other.
         const skewed = state.refusals >= SKEW_REFUSALS && now() - state.refusedAt <= SKEW_WINDOW_MS
         const reported = !skewed ? state.lastError
           : state.lastError ? `${state.lastError}; ${SKEW_ERROR}` : SKEW_ERROR
