@@ -19,6 +19,9 @@ const MAX_FILE_BYTES = 64 * 1024 * 1024
 const MAX_LINE_BYTES = 1024 * 1024
 const MAX_SWEEP_BYTES = 256 * 1024 * 1024
 
+/** Floor between mid-run marker-store reloads. */
+export const SESSION_IGNORE_REFRESH_MS = 1000
+
 /** @param {NodeJS.ProcessEnv} env */
 export function piSessionsRoot(env) {
   return path.resolve(env.PI_CODING_AGENT_SESSION_DIR ?? path.join(env.PI_CODING_AGENT_DIR ?? path.join(env.HOME ?? os.homedir(), '.pi', 'agent'), 'sessions'))
@@ -41,6 +44,23 @@ export function createPiBackfillProvider(opts = {}) {
     async *run(ctx) {
       refreshSessionIgnores(opts.ignoredSessions)
       if (sessionIgnoreLoadError(opts.ignoredSessions)) throw new Error('Pi session exclusions are unreadable')
+      let ignoresLoadedAtMs = Date.now()
+      // @ref LLP 0403#backfill [constrained-by]: an import in flight may use
+      //   its run-start snapshot, so a mid-run reload buys prompt opt-out
+      //   rather than meeting a contract. Each one is a synchronous directory
+      //   walk plus a stat, read and hash per marker, so a floor between them
+      //   keeps that cost off the daemon loop as entries and exclusions grow.
+      const refreshIgnoresThrottled = () => {
+        const now = Date.now()
+        const sinceMs = now - ignoresLoadedAtMs
+        // A backwards wall-clock step cannot prove the window, so reload.
+        if (sinceMs >= 0 && sinceMs < SESSION_IGNORE_REFRESH_MS) return
+        // Armed on the attempt: a failed load keeps capture off until a
+        // complete valid one, and retrying that per flush is the cost this
+        // floor exists to bound.
+        ignoresLoadedAtMs = now
+        refreshSessionIgnores(opts.ignoredSessions)
+      }
       const resolver = createUsagePolicyResolver({ localOnlyListPath: opts.localOnlyListPath })
       const root = piSessionsRoot(opts.env ?? ctx.env)
       const window = resolveWindow(ctx)
@@ -130,7 +150,7 @@ export function createPiBackfillProvider(opts = {}) {
             if (window.sinceMs !== undefined && timestamp < window.sinceMs) continue
             if (window.untilMs !== undefined && timestamp > window.untilMs) continue
             if (batch.length && (batch.length >= 64 || batchBytes + bytes > MAX_LINE_BYTES)) {
-              refreshSessionIgnores(opts.ignoredSessions)
+              refreshIgnoresThrottled()
               if (sessionIgnoreLoadError(opts.ignoredSessions) || opts.ignoredSessions?.has(String(session.id)) || resolver.resolve(String(session.cwd)).class === 'ignore') { skipped = true; dropped++; break }
               const projection = projectPiEntries({ session, entries: batch, message_indices: positions }, { inherited })
               if (projection) yield projectedExchangeItem(projection, { client_name: 'pi', source_path: file, native_id: String(session.id) })
@@ -142,7 +162,7 @@ export function createPiBackfillProvider(opts = {}) {
             positions.push(messageIndex)
             batchBytes += bytes
           }
-          refreshSessionIgnores(opts.ignoredSessions)
+          refreshIgnoresThrottled()
           if (session && !skipped && !sessionIgnoreLoadError(opts.ignoredSessions) && !opts.ignoredSessions?.has(String(session.id)) && resolver.resolve(String(session.cwd)).class !== 'ignore') {
             const projection = projectPiEntries({ session, entries: batch, message_indices: positions }, { inherited })
             if (projection) yield projectedExchangeItem(projection, { client_name: 'pi', source_path: file, native_id: String(session.id) })
