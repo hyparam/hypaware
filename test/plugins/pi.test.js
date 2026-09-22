@@ -427,6 +427,66 @@ test('Pi live positions agree with recovery after resume, branching, dropped ent
   } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
 })
 
+test('Pi live positions agree with recovery when the session_tree snapshot lags the leaf it names', async () => {
+  const originalFetch = globalThis.fetch
+  const sent = []
+  globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(String(init?.body))); return new Response('{}') }
+  const hooks = new Map()
+  const raw = copy()
+  raw.entries = []
+  /** @type {string | null} */
+  let head = null
+  // Pi's entry snapshot trails the leaf it reports: `getLeafId()` already
+  // names the navigation summary while `getEntries()` has not been rebuilt
+  // to hold it.
+  let lag = 0
+  const byId = new Map()
+  const ctx = { mode: 'print', sessionManager: {
+    getEntries: () => raw.entries.slice(0, raw.entries.length - lag), getLeafId: () => head,
+    getEntry: id => byId.get(id), getHeader: () => raw.session, getSessionFile: () => '/session.jsonl',
+  } }
+  const append = (type = 'message') => {
+    const entry = { type, id: `live-${raw.entries.length}`, parentId: head, timestamp: new Date(Date.UTC(2026, 8, 17, 10, 0, raw.entries.length)).toISOString(), message: { role: 'user', content: 'text' } }
+    raw.entries.push(entry)
+    byId.set(entry.id, entry)
+    head = entry.id
+  }
+  try {
+    extension({ on(name, fn) { hooks.set(name, fn) }, registerCommand() {} })
+    hooks.get('session_start')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    // Navigate. Pi appends the branch summary and makes it the leaf, but the
+    // snapshot this checkpoint reads still ends before it.
+    hooks.get('session_before_tree')({}, ctx)
+    head = 'live-0'
+    lag = 1
+    append('branch_summary')
+    hooks.get('session_tree')({}, ctx)
+    lag = 0
+    append()
+    hooks.get('turn_end')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    await hooks.get('session_shutdown')({}, ctx)
+    const recoveredProjection = projectPiEntries(raw)
+    assert.ok(recoveredProjection)
+    const recovered = aiGatewayRowsFromProjectedExchange(recoveredProjection)
+    const byPart = new Map(recovered.map(row => [row.part_id, row.message_index]))
+    const live = sent.flatMap(batch => {
+      const projection = projectPiEntries(batch)
+      assert.ok(projection)
+      return aiGatewayRowsFromProjectedExchange(projection)
+    })
+    // Live rows land first and dedupe by native message_id, so a position
+    // the lagging snapshot shifted here is never repaired by recovery.
+    assert.equal(live.length, recovered.length)
+    for (const row of live) assert.equal(row.message_index, byPart.get(row.part_id))
+  } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
+})
+
 test('Pi live positions survive a turn whose session file is transiently unavailable', async () => {
   const originalFetch = globalThis.fetch
   const sent = []
