@@ -87,6 +87,7 @@ test('Shared projection honors explicit positions on every part and preserves th
   assert.deepEqual(aiGatewayRowsFromProjectedExchange(projection).map(row => row.message_index), [70, 71, 71, 72, 73])
   for (const message of projection.messages) delete message.message_index
   assert.deepEqual(aiGatewayRowsFromProjectedExchange(projection).map(row => row.message_index), [0, 1, 1, 2, 3])
+  assert.equal(projectPiEntries({ ...copy(), message_indices: [0, 1] }), undefined)
   for (const invalid of [-1, 0.5, NaN, Infinity, 2147483648, null, '12']) {
     projection.messages[0].message_index = /** @type {any} */ (invalid)
     assert.throws(() => aiGatewayRowsFromProjectedExchange(projection), /message_index must be a nonnegative INT32/)
@@ -264,6 +265,10 @@ test('Pi package and managed attach are independently discoverable and marker-ow
     assert.equal(first.settingsPath, path.join(env.PI_CODING_AGENT_DIR, 'extensions/hypaware.js'))
     assert.ok((await fs.readFile(first.settingsPath, 'utf8')).includes(PI_PLUGIN_MARKER))
     assert.equal((await attachPiPlugin(opts)).changed, false)
+    const custom = await attachPiPlugin({ ...opts, endpoint: 'http://127.0.0.1:4399', env: { ...env, PI_CODING_AGENT_DIR: path.join(root, 'agent2') } })
+    const customBody = await fs.readFile(custom.settingsPath, 'utf8')
+    assert.ok(customBody.includes("DEFAULT_ENDPOINT = 'http://127.0.0.1:4399'"))
+    assert.equal(customBody.includes('http://127.0.0.1:4322'), false)
     const discovered = await discoverBundledPlugins()
     const catalog = buildPluginCatalog([...discovered.loaded, ...discovered.excluded])
     assert.equal(catalog.pickerDescriptors.get('pi')?.label, 'Pi')
@@ -419,6 +424,55 @@ test('Pi live positions agree with recovery after resume, branching, dropped ent
     const forkLive = aiGatewayRowsFromProjectedExchange(forkLiveProjection)
     const forkRecovered = aiGatewayRowsFromProjectedExchange(forkRecoveryProjection)
     assert.equal(forkLive[0].message_index, forkRecovered.at(-1)?.message_index)
+  } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
+})
+
+test('Pi live positions survive a turn whose session file is transiently unavailable', async () => {
+  const originalFetch = globalThis.fetch
+  const sent = []
+  globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(String(init?.body))); return new Response('{}') }
+  const hooks = new Map()
+  const raw = copy()
+  raw.entries = []
+  /** @type {string | null} */
+  let head = null
+  let persisted = true
+  const byId = new Map()
+  const ctx = { mode: 'print', sessionManager: {
+    getEntries: () => raw.entries.slice(), getLeafId: () => head, getEntry: id => byId.get(id),
+    getHeader: () => raw.session, getSessionFile: () => persisted ? '/session.jsonl' : undefined,
+  } }
+  const append = () => {
+    const entry = { type: 'message', id: `live-${raw.entries.length}`, parentId: head, timestamp: new Date(Date.UTC(2026, 8, 17, 10, 0, raw.entries.length)).toISOString(), message: { role: 'user', content: 'text' } }
+    raw.entries.push(entry)
+    byId.set(entry.id, entry)
+    head = entry.id
+  }
+  try {
+    extension({ on(name, fn) { hooks.set(name, fn) }, registerCommand() {} })
+    hooks.get('session_start')({}, ctx)
+    append()
+    hooks.get('turn_end')({}, ctx)
+    // The session file is momentarily unavailable. The checkpoint must not
+    // move past this turn, or its entry is never counted and every later
+    // position is short by one against recovery.
+    append()
+    persisted = false
+    hooks.get('turn_end')({}, ctx)
+    persisted = true
+    append()
+    hooks.get('turn_end')({}, ctx)
+    await hooks.get('session_shutdown')({}, ctx)
+    const recovered = projectPiEntries(raw)
+    assert.ok(recovered)
+    const byPart = new Map(aiGatewayRowsFromProjectedExchange(recovered).map(row => [row.part_id, row.message_index]))
+    const live = sent.flatMap(batch => {
+      const projection = projectPiEntries(batch)
+      assert.ok(projection)
+      return aiGatewayRowsFromProjectedExchange(projection)
+    })
+    assert.equal(live.length, 3)
+    for (const row of live) assert.equal(row.message_index, byPart.get(row.part_id))
   } finally { globalThis.fetch = originalFetch; delete globalThis[Symbol.for('hypaware.pi-extension.v1')] }
 })
 

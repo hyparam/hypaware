@@ -2145,7 +2145,12 @@ Pi config/session root and HypAware home; do not attach a personal install.
 5. Generate more than 64 messages across multiple turns, including metadata
    changes. Read them with `order by message_index, part_index` and verify
    session-wide ordering, including after recovery and a time-filtered import.
-   Fork, resume, navigate the tree and compact. Confirm copied history does
+   Fork, resume, navigate the tree and compact. Across each navigation and
+   compaction, compare the live-lane positions against the positions a later
+   `hyp backfill pi` derives for the same entries: they must agree. Only a
+   real Pi says whether the entry list the extension snapshots at
+   `session_tree` already holds the navigation summary, and a disagreement
+   is stored silently. Confirm copied history does
    not contribute additive usage, new child/summary work does, and missing or
    ignored parents produce the documented recovery diagnostic. Run an
    ephemeral `--no-session` turn and confirm it is not recorded.

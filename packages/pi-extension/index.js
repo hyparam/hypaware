@@ -152,12 +152,15 @@ export default function hypawarePi(pi) {
       checkpoint(ctx, true)
       return
     }
+    // Checkpoint only once this batch is actually deliverable. Advancing
+    // `leaf` past entries `appended` never counted would leave the position
+    // counters short and shift every later message index in the session.
+    const session = sm.getHeader()
+    if (!session || !sm.getSessionFile()) return
     leaf = head
     // Moving to an earlier branch is not new work. Entries still dedupe in
     // the daemon if a later traversal crosses an already-recorded branch.
     entries.reverse()
-    const session = sm.getHeader()
-    if (!session || !sm.getSessionFile()) return
     appended(ctx, entries)
   }
 

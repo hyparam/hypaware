@@ -37,6 +37,13 @@ export function projectPiEntries(raw, opts = {}) {
   if (!isPlainObject(raw)) return undefined
   const session = piSessionHeader(raw.session)
   if (!session || !Array.isArray(raw.entries)) return undefined
+  // @ref LLP 0416#ordering: a stated position that is not parallel to the
+  // entries would fall back to the batch-relative index the override exists
+  // to remove, so refuse the batch instead of storing scrambled order.
+  const stated = Array.isArray(raw.message_indices) && raw.message_indices.length === raw.entries.length
+    ? raw.message_indices
+    : undefined
+  if (raw.message_indices !== undefined && !stated) return undefined
   /** @type {AiGatewayProjectedMessage[]} */
   const messages = []
   let position = 0
@@ -47,7 +54,7 @@ export function projectPiEntries(raw, opts = {}) {
     const inherited = parentFingerprint !== undefined && parentFingerprint === piEntryFingerprint(entry)
     const projected = projectEntry(session, entry, inherited)
     if (projected) {
-      projected.message_index = Array.isArray(raw.message_indices) ? raw.message_indices[i] : position
+      projected.message_index = stated ? stated[i] : position
       messages.push(projected)
       position++
     }
