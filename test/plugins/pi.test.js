@@ -682,9 +682,10 @@ test('Pi live capture health surfaces a persistently version-skewed extension, n
 
     const accepted = copy()
     accepted.session.cwd = root
+    accepted.session.id = 'current-sender'
     accepted.message_indices = [0, 1, 2, 3]
     assert.equal((await post(JSON.stringify(accepted))).status, 200)
-    assert.equal((await health()).lastError, undefined, 'an accepted batch clears the skew report')
+    assert.match(String((await health()).lastError), /version/i, 'an accepted batch from another sender does not clear the skew report')
   } finally { await source.stop(); await fs.rm(root, { recursive: true, force: true }) }
 })
 
@@ -710,5 +711,62 @@ test('Pi capture health keeps an unresolved write failure visible alongside a sk
     assert.match(both, /pi_capture_failed/)
     assert.match(both, /version/i)
     assert.ok(both.length <= 200, `capture health stays inside the 200-char source-health bound, saw ${both.length}`)
+  } finally { await source.stop(); await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test('Pi capture health surfaces a skewed sender that a current-version sender is interleaved with', async () => {
+  const root = await temp()
+  const rows = []
+  const storage = { cacheTablePath: () => '/cache/pi', async discoverCachePartitions() { return [] }, async *readRows() {}, async *readSpooledRows() { yield* rows }, async appendRows(_p, _c, batch) { rows.push(...batch) } }
+  // The listener's self-clearing horizon for a version refusal.
+  const windowMs = 24 * 3_600_000
+  let clock = Date.parse('2026-09-22T00:00:00Z')
+  const source = await createStartPiSource({ now: () => clock })(/** @type {any} */ ({ config: { listen_port: 0 }, storage, log: silent }))
+  try {
+    const port = (await source.status?.())?.details?.listen_port
+    const post = (body, type = 'application/json') => fetch(`http://127.0.0.1:${port}/entries`, { method: 'POST', headers: { 'content-type': type }, body })
+    const health = async () => /** @type {any} */ (await source.status?.())
+    /** @param {(raw: any) => void} [mutate] */
+    const batch = (mutate = () => {}) => { const raw = copy(); raw.session.cwd = root; raw.message_indices = [0, 1, 2, 3]; mutate(raw); return JSON.stringify(raw) }
+    const current = n => batch(raw => { raw.session.id = `current-${n}` })
+    const v1 = () => batch(raw => { raw.version = 1 })
+    const past = 4
+
+    // Every shape failure a stray loopback probe produces, interleaved with the
+    // accepted traffic of a healthy extension, still reads as no skew at all.
+    for (let i = 0; i < past; i++) {
+      assert.equal((await post('not json at all')).status, 400)
+      assert.equal((await post(batch(raw => { raw.message_indices = [0, 1, 2, -1] }))).status, 400)
+      assert.equal((await post('{}')).status, 400)
+      assert.equal((await post(batch(raw => { raw.session.timestamp = 'not a date' }))).status, 400)
+      assert.equal((await post(`{"version":1,"pad":"${'x'.repeat(600 * 1024)}"}`)).status, 413)
+      assert.equal((await post(v1(), 'text/plain')).status, 415)
+      assert.equal((await post(current(i))).status, 200)
+    }
+    assert.equal((await health()).lastError, undefined, 'probes interleaved with accepted batches do not trip capture health')
+
+    // A pre-upgrade Pi process and a current one share the listener, so the
+    // accepted batches must not keep zeroing the skewed sender's refusals.
+    for (let i = 0; i < past; i++) {
+      assert.equal((await post(v1())).status, 400)
+      assert.equal((await post(current(100 + i))).status, 200)
+    }
+    assert.match(String((await health()).lastError), /version/i, 'an interleaved skewed sender surfaces in capture health')
+
+    // The skewed process restarts onto the shared extension file. Nothing says
+    // so in band, so the report clears on the recency horizon instead.
+    clock += windowMs - 3_600_000
+    assert.equal((await post(current(200))).status, 200)
+    assert.match(String((await health()).lastError), /version/i, 'the report holds while the last refusal is still recent')
+    clock += 2 * 3_600_000 // past the horizon
+    assert.equal((await health()).lastError, undefined, 'a repaired install stops warning on its own')
+
+    // Refusals a whole window apart are stray probes, not a chain, so they do
+    // not accumulate into a skew report.
+    for (let i = 0; i < past; i++) {
+      clock += windowMs + 1
+      assert.equal((await post(v1())).status, 400)
+      assert.equal((await health()).lastError, undefined, 'isolated version refusals a window apart do not accumulate')
+    }
   } finally { await source.stop(); await fs.rm(root, { recursive: true, force: true }) }
 })

@@ -68,13 +68,23 @@ that size check. Steady capture costs O(new entries), independent of history.
 Live protocol version 2 sends up to 64 parallel `message_indices` with each
 entry batch. The listener rejects version 1 and missing or invalid positions,
 leaving native recovery available rather than persisting scrambled ordering.
-Consecutive refusals of a declared unsupported version report in the source
+Repeated refusals of a declared unsupported version report in the source
 health an operator reads, because an extension too old to speak the live
 protocol never recovers on its own. A batch refused for its shape rather than
 its version stays a counter, because a stray loopback probe earns the same
-refusal and must not be reported as an extension version problem. This PR is
-unreleased; the change does not repair rows from earlier experimental
-version-1 captures already stored under the same identities.
+refusal and must not be reported as an extension version problem. An accepted
+batch does not clear that report: one shared extension file serves every Pi
+process, so the skew a listener actually sees is a pre-upgrade process
+interleaved with a current one, and an accepted batch proves a sender speaks
+version 2 rather than that the one that does not has stopped. Silence is the
+only evidence of repair the listener gets, so refusals count within a chain of
+at most the horizon LLP 0349#the-window states and the report self-clears that
+long after the last one, rather than being keyed per sender: identifying the
+sender would retain listener state keyed on request-supplied input, which
+#bounds does not admit.
+
+This PR is unreleased; the change does not repair rows from earlier
+experimental version-1 captures already stored under the same identities.
 
 ## Bounds and policy {#bounds}
 
