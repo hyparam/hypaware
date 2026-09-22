@@ -119,10 +119,14 @@ export async function runPurge(argv, ctx) {
 
   // A partition whose guard another process held was left alone and may still
   // hold the rows (LLP 0417 #cache-mutation-guard), so the run is incomplete
-  // however much of the rest of the cache it purged. Name them and fail.
+  // however much of the rest of the cache it purged. Name them and fail. Both
+  // remedies, because the same refusal covers a lock no writer will ever
+  // release: LLP 0417 #cache-mutation-guard has an empty or malformed lock fail
+  // closed until an operator removes it with every writer stopped, and a
+  // retry-only instruction would send that operator round forever.
   const skippedCount = summary.partitionsSkipped.length
   const skippedError = skippedCount > 0
-    ? `${skippedCount} cache partition${skippedCount === 1 ? '' : 's'} could not be purged and may still hold matching rows - retry after the writer finishes`
+    ? `${skippedCount} cache partition${skippedCount === 1 ? '' : 's'} could not be purged and may still hold matching rows - retry after the writer finishes, or stop every writer and remove an unverifiable lock by hand`
     : undefined
   if (skippedError) {
     ctx.stderr.write(`error: ${skippedError}:\n`)
