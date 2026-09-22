@@ -1868,8 +1868,11 @@ function collectSinkSnapshots({ runtime, sinkSnapshots }) {
   const out = []
   for (const handle of runtime.sinks.listHandles()) {
     // The registry's key, not the handle's own `instanceName`: this runs on
-    // every tick and outside the tick's `.catch`, so an owner's accessor
-    // stopped the daemon's `status.sinks` write once a minute (issue #1976).
+    // every tick and outside the tick's `.catch`, so an owner's accessor on
+    // the name stopped the daemon's `status.sinks` write once a minute
+    // (issue #1976). `plugin` and `kind` below are the same kind of live
+    // property, still read off the handle, so that outage is narrowed here
+    // and not yet closed (issue #2059).
     const instance = sinkInstanceName(handle)
     const existing = sinkSnapshots.get(instance) ?? {
       instance,

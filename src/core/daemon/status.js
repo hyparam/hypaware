@@ -1845,8 +1845,10 @@ export async function collectHypAwareStatus(opts = {}) {
   const handleByInstance = new Map()
   if (opts.runtime?.sinks) {
     // The registry's key, not the handle's own `instanceName`: nothing on
-    // this path catches, so an owner's accessor took `hyp status` down whole
-    // (issue #1976).
+    // this path catches, so an owner's accessor on the name took `hyp status`
+    // down whole (issue #1976). `plugin` and `kind` below are the same kind
+    // of live property, still read off the handle, so that outage is narrowed
+    // here and not yet closed (issue #2059).
     for (const handle of opts.runtime.sinks.listHandles()) {
       handleByInstance.set(sinkInstanceName(handle), { plugin: handle.plugin, kind: handle.kind })
     }

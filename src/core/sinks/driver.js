@@ -72,9 +72,14 @@ export function createSinkDriver(opts) {
     /** @type {TickReport['sinks']} */
     const sinks = []
     for (const handle of handles) {
-      // The registry's key, read once and carried through the export below.
-      // The handle's own `instanceName` ran the owner's code in the due
-      // check, ahead of any export, and took the whole tick (issue #1976).
+      // The registry's key, read once and carried through the export below,
+      // so the batch id, the outbox path, the span and every metric name the
+      // instance by the name `instantiate` validated rather than by a
+      // property its owner can replace (issue #1976).
+      //
+      // The name read only. `handle.config` on the next line is the same
+      // kind of live property, still read off the handle and still ahead of
+      // the due check, so a tick can still be lost to one (issue #2059).
       const instance = sinkInstanceName(handle)
       if (tickOpts.sinkInstance && instance !== tickOpts.sinkInstance) continue
       const schedule = typeof handle.config?.schedule === 'string' ? handle.config.schedule : '* * * * *'
