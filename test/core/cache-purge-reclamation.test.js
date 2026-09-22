@@ -612,3 +612,52 @@ test('the sweep keeps a journal it cannot read, the one unlink that never proves
   await maintainCache({ cacheRoot })
   assert.ok(await fs.stat(journal), 'a shape the reader refuses keeps the journal')
 })
+
+test('an unreadable journal store does not take the maintenance tick with it', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-journal-unreadable-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [{ session_id: 'target', org: 'a', body: 'synthetic sensitive' }])
+  await storage.flushTable(partition, { force: true })
+
+  // Not a directory, so `readdir` raises ENOTDIR rather than ENOENT. A
+  // journal that cannot be read is allowed to fail its own partition, and
+  // here it fails this one. What it must not do is reject `maintainCache`:
+  // the sweep is reclamation and runs last, after every partition report is
+  // already earned, and `hyp query maintain` does not catch a rejection, so
+  // rethrowing throws the report away instead of printing the failure in it.
+  await fs.writeFile(path.join(cacheRoot, '.purge-cleanup'), 'not a directory')
+  const maintained = await maintainCache({ cacheRoot })
+  assert.equal(maintained.partitions.length, 1, 'the tick reports rather than rejecting')
+  assert.match(maintained.partitions[0].errorMessage ?? '', /ENOTDIR/,
+    'and the partition the unreadable journal blocked says so in that report')
+})
+
+test('one journal whose partition path cannot be stat-ed does not strand the rest of the sweep', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-journal-enotdir-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const blocked = storage.cacheTablePath('blocked', ['source=unknown'])
+  const orphan = storage.cacheTablePath('orphan', ['source=unknown'])
+  for (const partition of [blocked, orphan]) {
+    await storage.appendRows(partition, columns, [{ session_id: 'target', org: 'a', body: 'synthetic sensitive' }])
+    await storage.flushTable(partition, { force: true })
+  }
+  const blockedId = await queueCacheCleanup(cacheRoot, blocked)
+  const orphanId = await queueCacheCleanup(cacheRoot, orphan)
+  await fs.rm(orphan, { recursive: true, force: true })
+
+  // A file where the dataset directory was: `lstat` on the partition under it
+  // raises ENOTDIR, not ENOENT. `readdir` order is stable, so a journal that
+  // rethrows does not strand its neighbours once - it strands whatever sorts
+  // behind it on every later tick too.
+  await fs.rm(path.dirname(blocked), { recursive: true, force: true })
+  await fs.writeFile(path.dirname(blocked), 'not a directory')
+
+  await sweepEvictedCacheCleanups(cacheRoot)
+  await assert.rejects(fs.stat(path.join(cacheRoot, '.purge-cleanup', `${orphanId}.json`)), { code: 'ENOENT' },
+    'the reachable orphan is still swept')
+  assert.ok(sync.existsSync(path.join(cacheRoot, '.purge-cleanup', `${blockedId}.json`)),
+    'the journal it could not place is kept for a later tick')
+})
