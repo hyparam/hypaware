@@ -484,14 +484,19 @@ export async function run({ harness, expect }) {
     const startSpans = traces.filter(
       (/** @type {any} */ t) => t.name === 'wizard.pick.start'
     )
-    // 10 bundled picker rows: claude, codex, cursor, opencode, claude-desktop,
-    // openclaw, hermes, raw-anthropic, raw-openai, otel.
+    // Derived from the manifests rather than restated as a literal: a
+    // hardcoded count drifts the moment a plugin adds or drops a picker row
+    // (issue #2075 - a bundled `pi` row shipped with no update here). Reads
+    // `contributes.picker` off the same loaded+excluded buckets
+    // `loadPickerCatalog` draws its descriptor map from, so it stays a check
+    // on the manifests rather than a rerun of the code under test.
+    const expectedSourcesAvailable = await totalPickerRowCount()
     expect.that(
-      'traces: wizard.pick.start span emitted with sources_available=10',
+      'traces: wizard.pick.start span emitted with sources_available matching the shipped picker row count',
       startSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
-        v.sources_available === 10
+        v.sources_available === expectedSourcesAvailable
     )
 
     const writeSpans = traces.filter(
@@ -661,6 +666,30 @@ async function composedRiders(picked) {
     }
   }
   return riders
+}
+
+/**
+ * Count every picker row the bundled workspace ships, across both the
+ * default-activated and excluded-from-default manifest buckets. Mirrors
+ * `loadPickerCatalog`'s discovery scope (`[...loaded, ...excluded]` in
+ * `src/core/cli/walkthrough.js`), since a row like `claude-desktop`'s stays
+ * a picker source (selectable, just not default-activated) even though its
+ * plugin sits in the excluded bucket.
+ *
+ * Reads `contributes.picker` off the manifests directly rather than calling
+ * `loadPickerCatalog` or `buildPluginCatalog`: an expectation built from the
+ * code under test would assert nothing (see `composedRiders` above for the
+ * same reasoning applied to riders).
+ *
+ * @returns {Promise<number>}
+ */
+async function totalPickerRowCount() {
+  const { loaded, excluded } = await discoverBundledPlugins()
+  let total = 0
+  for (const { manifest } of [...loaded, ...excluded]) {
+    total += manifest.contributes?.picker?.length ?? 0
+  }
+  return total
 }
 
 /**
