@@ -6,6 +6,7 @@
 **Author:** Phil / Claude
 **Date:** 2026-09-20
 **Extends:** LLP 0423#consequences (the bullet that decision recorded: `ctx.commands.unregister` was still forwarded unbracketed, so the owner check it landed on the verb facade had no twin on the command registry)
+**Extended-by:** LLP 0427 (#consequences: the `VERB_PROJECTION` forge held below as issue #1987 is closed by requiring the released verb's recorded registrar to agree with the command's)
 **Related:** LLP 0004, LLP 0009, LLP 0034, LLP 0130, LLP 0264, LLP 0420, LLP 0421, LLP 0422
 
 > `createCommandsFacade` pinned `register` and `registeringAs` and forwarded
@@ -120,6 +121,11 @@ no registrar for anything, so there is no binding to read.
   revisiting rather than the refusal above widening: the caller doing the
   deleting is the kernel, on the registry it owns, and nothing about the owner
   of the *name* is what it gets wrong. Held as issue #1987.
+  **Settled by [LLP 0427](./0427-verb-retraction-requires-registrar-agreement.decision.md):**
+  `retractCommand` requires the released verb's recorded registrar to agree
+  with the one the command registry recorded for the name, so the mark alone
+  no longer routes a deletion. This bullet records what this decision left
+  open and is no longer the current behavior.
 - **Groups are outside this decision.** `registerGroup` stays forwarded with
   no owner check, last write wins across owners, and the caller's group object
   is stored and handed back by reference through `getGroup` and `listGroups`

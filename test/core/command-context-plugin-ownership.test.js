@@ -911,3 +911,111 @@ test('a plugin cannot release a name nothing registered, and the kernel still re
   assert.equal(refusal(() => /** @type {any} */ (staged.ctxA.verbs).unregister('owner verb')), 'ACCEPTED')
   assert.equal(staged.registry.has('owner verb'), false, 'the kernel stopped retracting a released verb\'s command')
 })
+
+// The `VERB_PROJECTION` forge is the second spelling of issue #1980, held by
+// LLP 0424 #consequences as issue #1987: the mark is an enumerable symbol on a
+// record `ctx.commands.get` hands back live, so a plugin lifts it off a real
+// projection with `Object.getOwnPropertySymbols`, stamps it onto a record it
+// does not own, squats a verb of that name (no projection is made, the command
+// name is already taken) and releases it, and `retractCommand` deleted what
+// then read as its own projection. Retraction now also requires the released
+// verb's recorded registrar to agree with the command's (LLP 0427 #two-facts).
+
+/**
+ * Issue #1987's forge, run as `@fixture/squatter` against `victim`: lift the
+ * projection mark off a projection of B's own, stamp it onto the victim's
+ * stored record, squat a verb under the victim's name, and release it.
+ *
+ * @param {Awaited<ReturnType<typeof stage>>} staged
+ * @param {string} victim a registered command name the squatter does not own
+ */
+function forgeRelease(staged, victim) {
+  contributeVerb(staged.ctxB, 'squat probe', 'squat_probe')
+  const projection = /** @type {any} */ (staged.ctxB.commands.get('squat probe'))
+  const record = /** @type {any} */ (staged.ctxB.commands.get(victim))
+  for (const s of Object.getOwnPropertySymbols(projection)) record[s] = projection[s]
+  staged.ctxB.verbs.register(/** @type {any} */ ({
+    name: victim,
+    tool: 'squatted_tool',
+    summary: 'fixture squat',
+    inputSchema: { type: 'object', properties: {}, required: [], positional: [] },
+    async operation() { return { ok: true } },
+    render: () => ({ stdout: 'squatter\n' }),
+  }))
+  return refusal(() => /** @type {any} */ (staged.ctxB.verbs).unregister(victim))
+}
+
+test('a forged projection mark does not let a squatted verb\'s release delete a neighbour\'s command', async () => {
+  const staged = await stage()
+  /** @type {string[]} */
+  const ran = []
+  contributeCommand(staged, staged.ctxA, 'acme sync', async () => { ran.push('owner'); return 0 })
+
+  // The release itself is B's to make: B owns the squatted *verb*. What it
+  // must not take with it is the *command* A registered.
+  assert.equal(forgeRelease(staged, 'acme sync'), 'ACCEPTED')
+  assert.equal(staged.kernel.verbs.get('acme sync'), undefined, 'the squatted verb itself was not released')
+  assert.equal(staged.registry.has('acme sync'), true, 'the neighbour\'s command left the registry')
+  assert.equal(staged.registry.ownerOf('acme sync'), A, 'the neighbour\'s command changed owner')
+
+  const claimed = refusal(() => contributeCommand(staged, staged.ctxB, 'acme sync', async () => { ran.push('squatter'); return 0 }))
+  assert.match(String(claimed), /duplicate command name 'acme sync'/, 'the squatter claimed the neighbour\'s name')
+
+  const { code } = await invoke(staged, ['acme', 'sync'])
+  assert.equal(code, 0)
+  assert.deepEqual(ran, ['owner'], 'hyp acme sync stopped running the body A registered')
+})
+
+test('a forged projection mark does not let a squatted verb\'s release delete a core command', async () => {
+  const staged = await stage()
+
+  assert.equal(forgeRelease(staged, 'status'), 'ACCEPTED')
+  assert.equal(staged.registry.has('status'), true, 'hyp status left the registry')
+  assert.equal(staged.registry.ownerOf('status'), undefined, 'status stopped reading as a core command')
+
+  const claimed = refusal(() => contributeCommand(staged, staged.ctxB, 'status', async () => 0))
+  assert.match(String(claimed), /duplicate command name 'status'/, 'the squatter claimed hyp status')
+
+  const home = temporaryDirectory('hyp-forge-status-')
+  const { code, stdout } = await invoke(staged, ['status'], { ...process.env, HYP_HOME: home, HYP_CONFIG: '' })
+  assert.equal(code, 0)
+  assert.match(stdout, /^hypaware\n {2}overall:/, 'the core command core registered no longer runs')
+})
+
+test('a plugin releasing its own verb still retracts its projected command, aliases included', async () => {
+  const staged = await stage()
+  /** @type {string[]} */
+  const ran = []
+  staged.ctxA.verbs.register(/** @type {any} */ ({
+    name: 'owner verb',
+    tool: 'owner_verb',
+    aliases: ['ov'],
+    summary: 'fixture verb',
+    inputSchema: { type: 'object', properties: {}, required: [], positional: [] },
+    async operation() { ran.push('owner'); return { ok: true } },
+    render: () => ({ stdout: 'owner\n' }),
+  }))
+  const { code } = await invoke(staged, ['ov'])
+  assert.equal(code, 0)
+  assert.deepEqual(ran, ['owner'], 'the projected alias never dispatched')
+
+  // A silent regression here leaves stale commands behind: the release reads
+  // as a win either way, so the registry has to be asked directly.
+  assert.equal(refusal(() => /** @type {any} */ (staged.ctxA.verbs).unregister('owner verb')), 'ACCEPTED')
+  assert.equal(staged.registry.has('owner verb'), false, 'the owner\'s own release left its projected command behind')
+  assert.equal(staged.registry.has('ov'), false, 'the projected command\'s alias survived the release')
+  const gone = await invoke(staged, ['ov'])
+  assert.equal(gone.code, 2, 'the released alias still routed argv somewhere')
+})
+
+test('core retracting core still works, so a host displaces a kernel-shipped verb by taking the name back', async () => {
+  const staged = await stage()
+  // The displacement LLP 0264 #verb rests on drives the registry directly:
+  // both the core verb and the pre-boot projection it retracts are ownerless,
+  // which is core retracting core.
+  assert.equal(staged.registry.has('query sql'), true)
+  const verbs = /** @type {any} */ (staged.kernel.verbs)
+  verbs.unregister('query sql')
+  assert.equal(staged.kernel.verbs.getByTool('query_sql'), undefined, 'the tool slot was not released')
+  assert.equal(staged.registry.has('query sql'), false, 'the kernel stopped retracting its own pre-boot projection')
+})

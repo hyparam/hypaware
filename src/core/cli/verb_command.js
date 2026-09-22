@@ -32,10 +32,15 @@ import { VerbUsageError } from './verb_errors.js'
  * Enumerable is also what makes it copyable: unlike the `WeakSet`, which
  * nothing outside this file could add to, this mark can be lifted off any
  * projected command with `Object.getOwnPropertySymbols` and stamped onto
- * another object. That is accepted, not overlooked. The mark separates a
- * projection from a plugin command that happens to share the name, and the
- * only thing forging it buys a plugin is having its own command retracted
- * when that verb name is released. There is no privilege here to steal.
+ * another object. That was accepted on the premise that forging it buys
+ * nothing, and the premise was measured false (issue #1987): stamped onto
+ * a neighbour's record, reachable live through `ctx.commands.get`
+ * (LLP 0421 #shapes), it bought that command's deletion through a
+ * squatted verb's release, `hyp status` included. So the mark answers only
+ * *what* a command is, a projection rather than a plugin command sharing
+ * the name; *whose* projection it is, `retractCommand` settles by
+ * comparing the two registrars the kernel recorded, which no plugin write
+ * reaches (LLP 0427 #two-facts).
  */
 const VERB_PROJECTION = Symbol('hypaware.verbProjection')
 
@@ -110,9 +115,11 @@ function markVerbProjection(command) {
 }
 
 /**
- * Whether `command` is a CLI command this module projected from a verb,
- * and so the command a released verb name is entitled to retract. A
- * plugin's own command that merely shares the name is not.
+ * Whether `command` carries the mark of a CLI command this module projected
+ * from a verb. A plugin's own command that merely shares the name does not.
+ * Necessary for a released verb name to retract it, not sufficient: the mark
+ * is forgeable (see {@link VERB_PROJECTION}), so `retractCommand` also
+ * requires the recorded registrars to agree (LLP 0427 #two-facts).
  *
  * Total on a missing command, `null` included. The caller is
  * `VerbRegistry.unregister`, reading the command back out of a registry the
