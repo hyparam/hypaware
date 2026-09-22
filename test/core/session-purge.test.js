@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import sync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cache/storage.js'
 import { createSessionPurgeStore, sessionGraphNodeId } from '../../src/core/cache/session-purges.js'
 import { runPurge } from '../../src/core/commands/purge.js'
@@ -443,3 +444,42 @@ for (const existing of [false, true]) for (const method of ['rows', 'where', 'si
     }
   })
 }
+
+test('a busy partition mutation guard skips that partition and still purges the rest', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-busy-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { storage, ctx, output, error } = fixture(root)
+  const sources = ['a', 'b', 'c']
+  for (const source of sources) {
+    await storage.appendRowsToPartition('events', [`source=${source}`], columns, [
+      { session_id: 'delete', body: `secret ${source}` }, { session_id: 'keep', body: `neighbor ${source}` },
+    ])
+  }
+  // A live owner this process did not claim: claimPartitionMutation refuses on
+  // sight, with no polling and no waiter queue (LLP 0417 #cache-mutation-guard).
+  const busy = storage.cacheTablePath('events', ['source=a'])
+  const lock = path.join(path.dirname(busy), `.${path.basename(busy)}.mutation-lock`)
+  await fs.mkdir(lock, { recursive: true, mode: 0o700 })
+  await fs.writeFile(path.join(lock, `${process.pid}-${randomUUID()}`), '')
+  t.after(() => fs.rm(lock, { recursive: true, force: true }))
+
+  assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], ctx), 1)
+
+  /** @param {string} source */
+  const bodies = async source => {
+    const rows = []
+    for await (const row of scanRowsFromTable(resolveIcebergDir(storage.cacheTablePath('events', [`source=${source}`])))) rows.push(row.body)
+    return rows.sort()
+  }
+  assert.deepEqual(await bodies('a'), ['neighbor a', 'secret a'], 'the refused partition keeps its rows')
+  assert.deepEqual(await bodies('b'), ['neighbor b'], 'a partition behind the refusal is still purged')
+  assert.deepEqual(await bodies('c'), ['neighbor c'], 'a partition behind the refusal is still purged')
+
+  const receipt = JSON.parse(output())
+  assert.equal(receipt.rowsDeleted, 2)
+  assert.equal(receipt.partitionsAffected, 2)
+  assert.deepEqual(receipt.partitionsSkipped.map(entry => entry.partition), [busy])
+  assert.match(receipt.partitionsSkipped[0].error, /mutation busy/)
+  assert.equal(receipt.local.status, 'incomplete')
+  assert.match(error(), /1 cache partition could not be purged/)
+})

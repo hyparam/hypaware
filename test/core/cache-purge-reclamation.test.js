@@ -230,7 +230,11 @@ test('cross-process purge refuses an active rewrite, then reclaims its output on
     createSessionPurgeStore(cacheRoot).add('target', 'a')
     try {
       const result = await purgeCache({ cacheRoot, target: { kind: 'session', id: 'target', org: 'a' } })
-      console.log(JSON.stringify({ status: 'completed', result }))
+      // A refused guard is reported, not thrown: the run carries on through the
+      // partitions it can take. Completion is the empty skip list, never the
+      // absence of a throw.
+      const [skipped] = result.partitionsSkipped
+      console.log(JSON.stringify(skipped ? { status: 'incomplete', error: skipped.error } : { status: 'completed', result }))
     } catch (error) { console.log(JSON.stringify({ status: 'incomplete', error: error.message })) }
   `
   const runChild = () => JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', child, cacheRoot], { encoding: 'utf8', timeout: 10000 }))

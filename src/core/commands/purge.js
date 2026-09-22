@@ -86,7 +86,7 @@ export async function runPurge(argv, ctx) {
   }
 
   /** @type {PurgeSummary} */
-  let summary = { rowsDeleted: 0, partitionsAffected: 0, purgedCwds: [], retainedAliasRows: 0, retainedAliasCwds: [] }
+  let summary = { rowsDeleted: 0, partitionsAffected: 0, partitionsSkipped: [], purgedCwds: [], retainedAliasRows: 0, retainedAliasCwds: [] }
   let localError
   try {
     if (target.kind === 'session') {
@@ -115,6 +115,18 @@ export async function runPurge(argv, ctx) {
     localError = message
     ctx.stderr.write(`error: purge failed: ${message}\n`)
     if (!remotes.size) return 1
+  }
+
+  // A partition whose guard another process held was left alone and may still
+  // hold the rows (LLP 0417 #cache-mutation-guard), so the run is incomplete
+  // however much of the rest of the cache it purged. Name them and fail.
+  const skippedCount = summary.partitionsSkipped.length
+  const skippedError = skippedCount > 0
+    ? `${skippedCount} cache partition${skippedCount === 1 ? '' : 's'} could not be purged and may still hold matching rows - retry after the writer finishes`
+    : undefined
+  if (skippedError) {
+    ctx.stderr.write(`error: ${skippedError}:\n`)
+    for (const skipped of summary.partitionsSkipped) ctx.stderr.write(`  ${skipped.partition}: ${skipped.error}\n`)
   }
 
   // The capture spool, emptied whatever the target was. The files in it are
@@ -153,6 +165,9 @@ export async function runPurge(argv, ctx) {
     target_kind: target.kind,
     rows_deleted: summary.rowsDeleted,
     partitions_affected: summary.partitionsAffected,
+    // A count, not the paths: a partition path is a local path (LLP 0080
+    // #telemetry), and the operator gets the list on stderr.
+    partitions_skipped: skippedCount,
     // Counts and bytes only: a spooled body's filename is the client's, and
     // its content is a raw prompt.
     spool_files_removed: swept.filesRemoved,
@@ -161,7 +176,7 @@ export async function runPurge(argv, ctx) {
     // on stderr, so a smoke could assert the user-visible result without any
     // internal signal that the spelling predicate actually ran the branch.
     retained_alias_rows: summary.retainedAliasRows,
-    status: localError || remoteError || swept.failed > 0 ? 'incomplete' : 'ok',
+    status: localError || skippedError || remoteError || swept.failed > 0 ? 'incomplete' : 'ok',
   })
 
   // Resurrection warning (LLP 0104 §resurrection): any purged directory that
@@ -181,11 +196,12 @@ export async function runPurge(argv, ctx) {
     // holds: fold it into the same incomplete/error reporting as a local
     // failure, preferring the local failure's own message when both apply.
     const sweepError = swept.failed > 0 ? `${swept.failed} capture spool file(s) could not be removed` : undefined
-    const localIncomplete = Boolean(localError) || sweepError !== undefined
-    const localErrorMessage = localError ?? sweepError
+    const localIncomplete = Boolean(localError) || skippedError !== undefined || sweepError !== undefined
+    const localErrorMessage = localError ?? skippedError ?? sweepError
     ctx.stdout.write(JSON.stringify({
       rowsDeleted: localError ? null : summary.rowsDeleted,
       partitionsAffected: localError ? null : summary.partitionsAffected,
+      partitionsSkipped: localError ? null : summary.partitionsSkipped,
       resurrectable,
       retainedAliasRows: summary.retainedAliasRows,
       retainedAliasCwds: retainedAliases,
@@ -274,7 +290,7 @@ export async function runPurge(argv, ctx) {
     ctx.stderr.write("tip: mark them ignored first with 'hyp privacy set <path> ignore' so the purge is durable\n")
   }
 
-  return localError || remoteError || swept.failed > 0 ? 1 : 0
+  return localError || skippedError || remoteError || swept.failed > 0 ? 1 : 0
 }
 
 /**
