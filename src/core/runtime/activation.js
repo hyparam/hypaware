@@ -1128,8 +1128,9 @@ function frozenCopy(value, seen) {
  * the first read of the field and kept for the life of the view. Not per read,
  * so a plugin walking a listing allocates nothing per read; not at narrowing
  * time, so a `list()` that never reads the field runs no accessor of the
- * registrant's at all and the one a read does run is inside the caller's own
- * read. A copy goes stale if the registrant rewrites its own declaration
+ * registrant's at all, and the accessors a read does run (the field's own, and
+ * every one below it in the subtree the copy walks) run inside the caller's
+ * own read. A copy goes stale if the registrant rewrites its own declaration
  * afterwards, which is the trade `supports` already made: what a neighbour
  * reads of someone else's declaration decides nothing the kernel runs.
  *
