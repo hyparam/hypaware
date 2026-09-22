@@ -5,7 +5,7 @@ import { withSpinner } from '../cli/spinner.js'
 import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { Attr, getLogger } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { effectiveRemotes } from '../remote/builtin_remotes.js'
+import { effectiveRemotes, sameServer } from '../remote/builtin_remotes.js'
 import { previewPendingRows } from '../sinks/pending.js'
 import {
   SYNC_HELD_NO_DESTINATIONS_EXIT,
@@ -721,24 +721,16 @@ function describeDestination(handle, remotes) {
  * @returns {string}
  */
 function nameServer(url, remotes) {
-  /** @param {string} value */
-  const originOf = (value) => {
-    try {
-      return new URL(value).origin
-    } catch {
-      return null
+  for (const [name, target] of Object.entries(remotes ?? {})) {
+    if (typeof target?.url === 'string' && sameServer(target.url, url)) {
+      return `the '${name}' server`
     }
   }
-  const origin = originOf(url)
-  if (origin) {
-    for (const [name, target] of Object.entries(remotes ?? {})) {
-      if (typeof target?.url === 'string' && originOf(target.url) === origin) {
-        return `the '${name}' server`
-      }
-    }
+  try {
     return new URL(url).host
+  } catch {
+    return url
   }
-  return url
 }
 
 /**

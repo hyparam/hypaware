@@ -16,7 +16,7 @@
  * @type {Record<string, QueryRemoteTarget>}
  */
 export const BUILTIN_REMOTES = {
-  hyperparam: { url: 'https://hypaware.hyperparam.app' },
+  hyperparam: { url: 'https://api.hypaware.ai' },
 }
 
 /**
@@ -24,6 +24,62 @@ export const BUILTIN_REMOTES = {
  * `hyp remote login`) when the local config sets no `query.default_remote`.
  */
 export const BUILTIN_DEFAULT_REMOTE = 'hyperparam'
+
+/**
+ * Hosts a built-in target answered on before it moved, keyed by the old origin.
+ * An install that enrolled or logged in under one of these is connected to
+ * that built-in's server, not to a second server, so every "same server"
+ * comparison (the login gate, the seed match, purge dedup, sync naming) reads
+ * origins through this table. The server still answers on each alias, so a
+ * sink or credential saved under the old host keeps working as it is.
+ *
+ * @type {Record<string, string>}
+ */
+export const BUILTIN_ORIGIN_ALIASES = {
+  'https://hypaware.hyperparam.app': 'https://api.hypaware.ai',
+}
+
+/**
+ * The origin of `url`, read through {@link BUILTIN_ORIGIN_ALIASES}; null when
+ * `url` does not parse or has no origin.
+ *
+ * @param {string} url
+ * @returns {string | null}
+ */
+export function canonicalOrigin(url) {
+  const origin = originOf(url)
+  return origin === null ? null : BUILTIN_ORIGIN_ALIASES[origin] ?? origin
+}
+
+/**
+ * The origin of a URL, or null when it does not parse or has no origin to
+ * compare (an opaque origin such as `file:` serializes as the string 'null',
+ * which would otherwise read as a match between any two such URLs).
+ *
+ * @param {string} url
+ * @returns {string | null}
+ */
+export function originOf(url) {
+  try {
+    const origin = new URL(url).origin
+    return origin === 'null' ? null : origin
+  } catch {
+    return null
+  }
+}
+
+/**
+ * True when both URLs reach the same server: equal origins, or origins the
+ * alias table folds together. Two URLs without an origin are never the same server.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function sameServer(a, b) {
+  const origin = canonicalOrigin(a)
+  return origin !== null && origin === canonicalOrigin(b)
+}
 
 /**
  * The effective target registry: shipped built-ins with the user's

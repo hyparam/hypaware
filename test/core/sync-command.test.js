@@ -656,6 +656,20 @@ test('a sharing plan shows upload targets without counting the accompanying file
   assert.match(text, /mystery\s+@hypaware\/fake\n/)
 })
 
+test('a sharing plan names the built-in target for a sink saved under its previous host', async () => {
+  const hypHome = await makeHome('plan-alias')
+  const { ctx, stdout } = makeCtx({
+    hypHome,
+    sinks: [fakeSink('central', { url: 'https://hypaware.hyperparam.app' })],
+    tty: true,
+  })
+
+  await runSync(['--dry-run'], ctx)
+
+  assert.match(stdout.text, /central\s+the 'hyperparam' server\n/)
+  assert.doesNotMatch(stdout.text, /hypaware\.hyperparam\.app|api\.hypaware\.ai/)
+})
+
 test('sharing shows only upload progress and results but still writes the file copy', async () => {
   for (const copyFirst of [true, false]) {
     const hypHome = await makeHome('shared-copy')

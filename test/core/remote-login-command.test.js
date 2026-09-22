@@ -1160,7 +1160,7 @@ test('a missing target name resolves the default (built-in) target; a value flag
   const code = await runRemoteLogin(['--org', 'acme'], ctx, { login })
   assert.equal(code, 0)
   assert.ok(seen)
-  assert.match(seen.identityBase, /hypaware\.hyperparam\.app/)
+  assert.match(seen.identityBase, /api\.hypaware\.ai/)
   assert.equal(seen.org, 'acme')
   assert.match(out.join(''), /logged in to 'hyperparam' as org 'acme'/)
 })
@@ -1292,6 +1292,43 @@ test('the re-seed exit suppresses the durable hint under compact, like the enrol
   const code = await runRemoteLogin(['prod'], ctx, { login, compact: true })
   assert.equal(code, 0)
   assert.doesNotMatch(err.join(''), /hyp privacy set \[path\] local-only/)
+})
+
+test('a machine enrolled under the built-in target\'s previous host re-logs in as the same server: no leave, re-seeded, no second sink', async () => {
+  const hypHome = await tmpHome()
+  const { ctx, err } = await makeCtx({ hypHome })
+  // Enrolled by a login on a release whose built-in shipped the old host.
+  await writeCentralSeed(hypHome, 'https://hypaware.hyperparam.app')
+  let called = false
+  const login = /** @type {any} */ (async () => { called = true; return gatewaySession() })
+
+  const code = await runRemoteLogin([], ctx, { login })
+  assert.equal(code, 0)
+  assert.equal(called, true)
+  assert.doesNotMatch(err.join(''), /this machine is connected to/)
+  // A re-seed, not a second enrollment: the layer still names the one sink at
+  // the URL it saved, and the login-minted gateway landed in its identity.
+  const seed = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'config-control', 'seed.json'), 'utf8'))
+  assert.deepEqual(Object.keys(seed.sinks), ['central'])
+  assert.equal(seed.sinks.central.config.url, 'https://hypaware.hyperparam.app')
+  const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
+  assert.equal(persisted.jwt, 'gw-jwt')
+})
+
+test('a hand-joined sink at the built-in target\'s previous host is re-seeded, not joined by a second sink at the new host', async () => {
+  const hypHome = await tmpHome()
+  const { ctx } = await makeCtx({
+    hypHome,
+    sinks: { fwd: { plugin: '@hypaware/central', config: { url: 'https://hypaware.hyperparam.app', identity: {} } } },
+  })
+  const login = /** @type {any} */ (async () => gatewaySession())
+
+  const code = await runRemoteLogin([], ctx, { login })
+  assert.equal(code, 0)
+  // No enrollment happened (no central layer), and the existing sink got the gateway.
+  await assert.rejects(fs.access(path.join(hypHome, 'hypaware', 'config-control', 'seed.json')))
+  const persisted = JSON.parse(await fs.readFile(path.join(hypHome, 'hypaware', 'plugins', '@hypaware/central', 'identity.json'), 'utf8'))
+  assert.equal(persisted.jwt, 'gw-jwt')
 })
 
 /* --------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 import { centralLayerResolutionFailure } from '../config/apply.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
+import { originOf, sameServer } from './builtin_remotes.js'
 
 /**
  * Bridge from a login-minted gateway credential to the `central` forward
@@ -51,8 +52,7 @@ const CENTRAL_PLUGIN = '@hypaware/central'
  */
 export async function seedLoginGateway({ stateDir, configPath, targetUrl, gateway }) {
   const log = getLogger('remote')
-  const origin = originOf(targetUrl)
-  if (!origin) return []
+  if (!originOf(targetUrl)) return []
   const { effective } = await resolveLayeredConfigFromDisk({ stateRoot: stateDir, configPath })
   const sinks = effective?.sinks ?? {}
 
@@ -63,7 +63,9 @@ export async function seedLoginGateway({ stateDir, configPath, targetUrl, gatewa
     if (!entry || /** @type {any} */ (entry).plugin !== CENTRAL_PLUGIN) continue
     const config = /** @type {Record<string, any>} */ (/** @type {any} */ (entry).config ?? {})
     const centralUrl = typeof config.url === 'string' ? config.url : ''
-    if (originOf(centralUrl) !== origin) continue
+    // Same server, not same origin: a sink saved under a host the built-in
+    // target has since moved away from is this server's sink and is re-seeded.
+    if (!sameServer(centralUrl, targetUrl)) continue
     const persistedPath = typeof config.identity?.persisted_path === 'string'
       ? config.identity.persisted_path
       : path.join(stateDir, 'plugins', CENTRAL_PLUGIN, 'identity.json')
@@ -261,20 +263,5 @@ function writePersistedIdentity(filePath, identity) {
     fs.chmodSync(filePath, 0o600)
   } catch {
     // best effort: rename already replaced the file
-  }
-}
-
-/**
- * The URL's origin, or `null` when unparseable (an unparseable sink URL
- * simply never matches; the sink's own validation reports it).
- *
- * @param {string} url
- * @returns {string | null}
- */
-export function originOf(url) {
-  try {
-    return new URL(url).origin
-  } catch {
-    return null
   }
 }
