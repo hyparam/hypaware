@@ -234,9 +234,10 @@ after it certifies completion. An invalid journal blocks that partition's
 maintenance, its compaction and snapshot expiry included, but not admission:
 the next purge of that partition rebuilds the journal from the partition's own
 generations, restarting its grace, rather than failing every later purge of it.
-A journal that could not be read at all, as opposed to one that parses and
-fails its shape check, is not rebuilt: it may still be readable later with its
-grace clock intact, so admission fails closed on it.
+A journal whose bytes could not be fetched at all (an I/O or permission
+failure), as opposed to one whose content is unusable, is not rebuilt: it may
+still be readable later with its grace clock intact, so admission fails closed
+on it.
 
 Status verifies each named generation is absent before reporting completion.
 It certifies those cache generations, not all session copies. Historical-only

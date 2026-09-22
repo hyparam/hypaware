@@ -478,7 +478,7 @@ test('a corrupt cleanup journal is re-admitted by the next purge instead of fail
   await assert.rejects(fs.stat(original), { code: 'ENOENT' }, 'the recovered journal reclaims like any other')
 })
 
-test('a journal that cannot be read at all fails admission closed instead of being discarded', async t => {
+test('a journal that cannot be read at all fails admission closed instead of being discarded', { skip: process.getuid?.() === 0 && 'root reads through mode 000' }, async t => {
   const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-journal-unreadable-'))
   t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
   const storage = createQueryStorageService({ cacheRoot })
