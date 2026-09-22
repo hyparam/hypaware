@@ -11,7 +11,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { purgeCache } from '../cache/purge.js'
 import { createSessionPurgeStore } from '../cache/session-purges.js'
-import { canonicalOrigin, effectiveRemotes } from '../remote/builtin_remotes.js'
+import { BUILTIN_ORIGIN_ALIASES, effectiveRemotes } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, readCredentials, remoteTokenEnvVar, resolveAccessJwt } from '../remote/credentials.js'
 import { captureSpoolRoot, sweepCaptureSpool } from '../capture_spool.js'
 import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/index.js'
@@ -300,13 +300,20 @@ async function purgeRemotes(ctx, parsed, stateDir) {
       targets.set(name, remote.url)
     }
   }
-  // Dedup key: the MCP endpoint with its origin read through the built-in
-  // alias table, so a sink saved under a host the built-in target has since
-  // moved away from is the same target, purged once with that target's credential.
+  // Dedup key: the MCP endpoint (path and query kept, so two selectors on one
+  // server stay distinct) with its origin read through the built-in alias
+  // table, so a sink saved under a host the built-in target has since moved
+  // away from is the same target, purged once with that target's credential.
   /** @param {string} url */
   const endpointKey = (url) => {
-    const origin = canonicalOrigin(url)
-    return origin === null ? url : `${origin}${new URL(deriveMcpEndpoint(url)).pathname}`
+    /** @type {URL} */
+    let endpoint
+    try {
+      endpoint = new URL(deriveMcpEndpoint(url))
+    } catch {
+      return url
+    }
+    return `${BUILTIN_ORIGIN_ALIASES[endpoint.origin] ?? endpoint.origin}${endpoint.pathname}${endpoint.search}`
   }
   const endpoints = new Set([...targets.values()].map(endpointKey))
   const namesByEndpoint = new Map(Object.entries(registry).map(([name, remote]) => [endpointKey(remote.url), name]))
@@ -317,7 +324,10 @@ async function purgeRemotes(ctx, parsed, stateDir) {
     const url = sink.config.url
     const endpoint = endpointKey(url)
     if (endpoints.has(endpoint)) continue
-    targets.set(namesByEndpoint.get(endpoint) ?? `sink:${name}`, url)
+    // A sink the registry names is purged through that target, at the URL
+    // the target ships, so name, URL, and credential agree.
+    const named = namesByEndpoint.get(endpoint)
+    targets.set(named ?? `sink:${name}`, named ? registry[named].url : url)
     endpoints.add(endpoint)
   }
   return targets

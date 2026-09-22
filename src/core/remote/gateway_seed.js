@@ -7,7 +7,7 @@ import { Attr, getLogger } from '../observability/index.js'
 import { atomicWriteJsonSync } from '../util/fs_atomic.js'
 import { centralLayerResolutionFailure } from '../config/apply.js'
 import { resolveLayeredConfigFromDisk } from '../runtime/boot.js'
-import { sameServer } from './builtin_remotes.js'
+import { originOf, sameServer } from './builtin_remotes.js'
 
 /**
  * Bridge from a login-minted gateway credential to the `central` forward
@@ -263,20 +263,5 @@ function writePersistedIdentity(filePath, identity) {
     fs.chmodSync(filePath, 0o600)
   } catch {
     // best effort: rename already replaced the file
-  }
-}
-
-/**
- * The URL's origin, or `null` when unparseable (an unparseable sink URL
- * simply never matches; the sink's own validation reports it).
- *
- * @param {string} url
- * @returns {string | null}
- */
-export function originOf(url) {
-  try {
-    return new URL(url).origin
-  } catch {
-    return null
   }
 }

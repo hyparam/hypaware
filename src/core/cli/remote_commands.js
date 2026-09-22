@@ -9,7 +9,7 @@ import { parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { BUILTIN_REMOTES, effectiveDefaultRemote, sameServer } from '../remote/builtin_remotes.js'
+import { BUILTIN_REMOTES, effectiveDefaultRemote, originOf, sameServer } from '../remote/builtin_remotes.js'
 import {
   attachWithRefresh,
   deriveIdentityBase,
@@ -29,7 +29,6 @@ import { enrollCentralSink } from '../commands/central.js'
 import { DURABLE_HINT } from '../commands/local_only.js'
 import { withSpinner } from './spinner.js'
 import { formatFirstSyncDeadline, writeFirstSyncHoldMarker } from '../usage-policy/first_sync_hold.js'
-import { originOf } from '../remote/gateway_seed.js'
 import { readAllStdin } from './stdio.js'
 import { isPlainObject } from '../util/json_util.js'
 import { loginWithBrowser } from '../remote/oidc_login.js'

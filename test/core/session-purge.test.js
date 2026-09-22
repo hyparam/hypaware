@@ -295,6 +295,30 @@ test('a sink saved under the built-in target\'s previous host is the built-in ta
   assert.deepEqual(Object.keys(JSON.parse(output()).remotes), ['hyperparam'])
 })
 
+test('two targets on one server that differ only by a registered selector stay distinct purge targets', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-selectors-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { ctx, output } = fixture(root)
+  ctx.config = /** @type {any} */ ({
+    query: { remotes: { teamA: { url: 'https://hyp.internal/v1/mcp?org=a' }, teamB: { url: 'https://hyp.internal/v1/mcp?org=b' } } },
+    sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://hyp.internal' } } },
+  })
+  ctx.env.HYP_REMOTE_TOKEN_TEAMA = 'a'
+  ctx.env.HYP_REMOTE_TOKEN_TEAMB = 'b'
+  const oldFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = oldFetch })
+  /** @type {string[]} */
+  const urls = []
+  globalThis.fetch = async url => {
+    urls.push(String(url))
+    return Response.json({ status: 'completed', session_id: 'delete' })
+  }
+  // The sink names no selector, so it is a third target (without a credential).
+  assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], ctx), 1)
+  assert.deepEqual(Object.keys(JSON.parse(output()).remotes).sort(), ['sink:central', 'teamA', 'teamB'])
+  assert.deepEqual(urls.sort(), ['https://hyp.internal/v1/sessions/purge?org=a', 'https://hyp.internal/v1/sessions/purge?org=b'])
+})
+
 
 test('purge covers retired epochs and graph identifiers without deleting other orgs or shared nodes', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-retired-'))

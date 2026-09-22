@@ -41,25 +41,36 @@ export const BUILTIN_ORIGIN_ALIASES = {
 
 /**
  * The origin of `url`, read through {@link BUILTIN_ORIGIN_ALIASES}; null when
- * `url` does not parse.
+ * `url` does not parse or has no origin.
  *
  * @param {string} url
  * @returns {string | null}
  */
 export function canonicalOrigin(url) {
-  /** @type {string} */
-  let origin
+  const origin = originOf(url)
+  return origin === null ? null : BUILTIN_ORIGIN_ALIASES[origin] ?? origin
+}
+
+/**
+ * The origin of a URL, or null when it does not parse or has no origin to
+ * compare (an opaque origin such as `file:` serializes as the string 'null',
+ * which would otherwise read as a match between any two such URLs).
+ *
+ * @param {string} url
+ * @returns {string | null}
+ */
+export function originOf(url) {
   try {
-    origin = new URL(url).origin
+    const origin = new URL(url).origin
+    return origin === 'null' ? null : origin
   } catch {
     return null
   }
-  return BUILTIN_ORIGIN_ALIASES[origin] ?? origin
 }
 
 /**
  * True when both URLs reach the same server: equal origins, or origins the
- * alias table folds together. Two unparseable URLs are never the same server.
+ * alias table folds together. Two URLs without an origin are never the same server.
  *
  * @param {string} a
  * @param {string} b

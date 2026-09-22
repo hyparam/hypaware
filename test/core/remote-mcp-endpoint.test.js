@@ -95,6 +95,9 @@ test('sameServer folds the built-in target\'s previous host into its current one
   assert.equal(sameServer('https://hyp.internal/mcp', 'https://hyp.internal/'), true)
   assert.equal(sameServer('https://hyp.internal', 'https://elsewhere.example'), false)
   assert.equal(sameServer('not a url', 'not a url'), false)
+  // An opaque origin serializes as the string 'null'; it names no server.
+  assert.equal(canonicalOrigin('file:///x'), null)
+  assert.equal(sameServer('file:///x', 'blob:y'), false)
 })
 
 test('deriveMcpEndpoint: derive-from-base and back-compat forms', () => {
