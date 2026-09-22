@@ -548,7 +548,7 @@ test('Pi live capture health surfaces a persistently version-skewed extension, n
   const source = await createStartPiSource({})(/** @type {any} */ ({ config: { listen_port: 0 }, storage, log: silent }))
   try {
     const port = (await source.status?.())?.details?.listen_port
-    const post = body => fetch(`http://127.0.0.1:${port}/entries`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+    const post = (body, type = 'application/json') => fetch(`http://127.0.0.1:${port}/entries`, { method: 'POST', headers: { 'content-type': type }, body })
     const health = async () => /** @type {any} */ (await source.status?.())
     const v1 = () => { const raw = copy(); raw.session.cwd = root; raw.version = 1; raw.message_indices = [0, 1, 2, 3]; return JSON.stringify(raw) }
     const malformed = () => { const raw = copy(); raw.session.cwd = root; raw.message_indices = [0, 1, 2, -1]; return JSON.stringify(raw) }
@@ -560,6 +560,10 @@ test('Pi live capture health surfaces a persistently version-skewed extension, n
     assert.equal((await health()).lastError, undefined, 'non-JSON probes do not trip capture health')
     for (let i = 0; i < past; i++) assert.equal((await post(malformed())).status, 400)
     assert.equal((await health()).lastError, undefined, 'malformed batches from a current extension do not trip capture health')
+    for (let i = 0; i < past; i++) assert.equal((await post('{}')).status, 400)
+    assert.equal((await health()).lastError, undefined, 'a JSON probe declaring no version does not trip capture health')
+    for (let i = 0; i < past; i++) assert.equal((await post(v1(), 'text/plain')).status, 415)
+    assert.equal((await health()).lastError, undefined, 'a probe refused before its body is read does not trip capture health')
 
     for (let i = 0; i < past; i++) assert.equal((await post(v1())).status, 400)
     const skewed = await health()
