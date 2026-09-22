@@ -15,7 +15,7 @@ import { maintainCache } from '../../src/core/cache/maintenance.js'
 import { cacheCleanupId, cachePurgeCleanupStatus, CACHE_PURGE_GRACE_MS, queueCacheCleanup, readCacheCleanup, sweepEvictedCacheCleanups } from '../../src/core/cache/purge-cleanup.js'
 import { appendRowsToTable, deleteMatchingRows, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
-import { writeCursor, withPartitionMutationLock } from '../../src/core/cache/partition.js'
+import { isPartitionMutationBusy, writeCursor, withPartitionMutationLock } from '../../src/core/cache/partition.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
 import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
 
@@ -230,7 +230,11 @@ test('cross-process purge refuses an active rewrite, then reclaims its output on
     createSessionPurgeStore(cacheRoot).add('target', 'a')
     try {
       const result = await purgeCache({ cacheRoot, target: { kind: 'session', id: 'target', org: 'a' } })
-      console.log(JSON.stringify({ status: 'completed', result }))
+      // A refused guard is reported, not thrown: the run carries on through the
+      // partitions it can take. Completion is the empty skip list, never the
+      // absence of a throw.
+      const [skipped] = result.partitionsSkipped
+      console.log(JSON.stringify(skipped ? { status: 'incomplete', error: skipped.error } : { status: 'completed', result }))
     } catch (error) { console.log(JSON.stringify({ status: 'incomplete', error: error.message })) }
   `
   const runChild = () => JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', child, cacheRoot], { encoding: 'utf8', timeout: 10000 }))
@@ -292,6 +296,12 @@ test('mutation guard never expires a live owner, recovers a dead owner, and fail
   await withPartitionMutationLock(partition, async () => {})
   await fs.mkdir(guard)
   await assert.rejects(withPartitionMutationLock(partition, async () => assert.fail('must refuse')), /unverifiable/)
+  // The refusal is identified by its tag, never its wording. `purgeCache`
+  // absorbs exactly this failure per partition and rethrows every other, so a
+  // predicate that matched on the message would let an unrelated failure
+  // carrying that same text be recorded as a partition merely left for later.
+  await assert.rejects(withPartitionMutationLock(partition, async () => assert.fail('must refuse')), isPartitionMutationBusy)
+  assert.equal(isPartitionMutationBusy(new Error('cache partition mutation busy or lock unverifiable; retry after the writer finishes')), false)
 })
 
 for (const source of [false, true]) test(`buffered append rechecks under the guard, source=${source}`, async t => {

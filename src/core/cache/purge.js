@@ -4,11 +4,12 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 
 import { scopeGovernance } from '../usage-policy/matcher.js'
-import { discoverCachePartitions, readCursorSync, writeCursor, withPartitionMutationLock } from './partition.js'
+import { discoverCachePartitions, isPartitionMutationBusy, PARTITION_MUTATION_BUSY_ERROR_KIND, readCursorSync, writeCursor, withPartitionMutationLock } from './partition.js'
 import { deleteMatchingRows, scanRowsFromTable } from './iceberg/store.js'
 import { resolveIcebergDir } from './storage.js'
 import { queueCacheCleanup, isUncommittedCacheGeneration } from './purge-cleanup.js'
 import { sessionGraphNodeId } from './session-purges.js'
+import { Attr, getLogger } from '../observability/index.js'
 
 /**
  * @import { PurgeSummary, PurgeTarget } from '../../../src/core/cache/types.js'
@@ -46,6 +47,10 @@ import { sessionGraphNodeId } from './session-purges.js'
  * be `stat`ed at all, and only the first of those is a verdict the filesystem
  * actually gave (LLP 0104 §spellings).
  *
+ * A partition whose mutation guard another process holds is recorded in
+ * `partitionsSkipped` and the run continues; the caller owes the operator that
+ * list and a failure, because those partitions may still hold matching rows.
+ *
  * @ref LLP 0104 [implements]: the destructive verb's cache-only row removal, keyed off targets not marking events
  * @param {{ cacheRoot: string, target: PurgeTarget, onCleanupQueued?: (id: string) => Promise<void>, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
  *   `deps` injects the filesystem seam the subtree spelling predicate consults.
@@ -65,6 +70,8 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
   let rowsDeleted = 0
   let partitionsAffected = 0
   const cacheCleanup = new Set()
+  /** @type {{ partition: string, error: string }[]} */
+  const partitionsSkipped = []
 
   for (const part of partitions) {
     await withPartitionMutationLock(part.path, async () => {
@@ -82,11 +89,10 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
       // `queueCacheCleanup` requires a managed generation (a `table*` or
       // `epoch=N` child) to admit into; a legacy partition's live table is
       // the partition directory itself (`tableDir === part.path`), which has
-      // no such child and would throw, aborting this partition's delete and
-      // every partition still to come. Skip admission for it rather than the
-      // whole purge: the row is still position-deleted, only the physical
-      // cleanup job is skipped, and unmanaged legacy tables are already
-      // documented as not certified erased.
+      // no such child and would throw, aborting this partition's delete. Skip
+      // admission for it rather than the delete: the row is still
+      // position-deleted, only the physical cleanup job is skipped, and
+      // unmanaged legacy tables are already documented as not certified erased.
       const beforeDelete = target.kind === 'session' && tableDir !== part.path ? async () => {
         if (queued) return
         const id = await queueCacheCleanup(cacheRoot, part.path)
@@ -113,6 +119,26 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
         if (current === tableDir) await refreshCursorRowCount(part.path, tableDir)
       }
       if (affected) partitionsAffected++
+    }).catch(error => {
+      // A guard held elsewhere is later work, not a failed run: nothing was
+      // mutated under it, so that partition keeps its rows for a rerun. The
+      // guard refuses on sight (LLP 0417 #cache-mutation-guard: no polling, no
+      // waiter queue) and a daemon compaction holds one for as long as its
+      // rewrite takes, so rethrowing abandoned every partition behind this one
+      // in discovery order. Carrying on is what the flush path already does
+      // with its tables (LLP 0333 #every-table-before-failure). Any other
+      // failure still aborts the run.
+      if (!isPartitionMutationBusy(error)) throw error
+      partitionsSkipped.push({ partition: part.path, error: error.message })
+      // The dataset, never the partition path: a log is dev telemetry (LLP 0080
+      // #telemetry), and the path reaches the operator on the command's stderr.
+      getLogger('cache').warn('purge.partition_skipped', {
+        [Attr.COMPONENT]: 'cache-purge',
+        [Attr.OPERATION]: 'purge.partition',
+        [Attr.DATASET]: part.dataset,
+        [Attr.ERROR_KIND]: PARTITION_MUTATION_BUSY_ERROR_KIND,
+        status: 'skipped',
+      })
     })
   }
 
@@ -123,6 +149,7 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
     purgedCwds: [...purgedCwds],
     retainedAliasRows: retainedAliases.rows,
     retainedAliasCwds: [...retainedAliases.cwds],
+    partitionsSkipped,
   }
 }
 

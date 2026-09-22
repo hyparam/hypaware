@@ -34,6 +34,23 @@ const NUL_BYTE = String.fromCharCode(0)
 const partitionMutationLocks = new Map()
 
 /**
+ * `error_kind` of the refusal {@link claimPartitionMutation} raises when the
+ * guard is held or unverifiable. Tagged rather than left to message matching
+ * because it is the one failure a caller may absorb and retry later: nothing
+ * was mutated under a guard it never took.
+ */
+export const PARTITION_MUTATION_BUSY_ERROR_KIND = 'cache_partition_mutation_busy'
+
+/**
+ * Whether a thrown value is the mutation guard's contention refusal.
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+export function isPartitionMutationBusy(error) {
+  return /** @type {{ error_kind?: unknown } | null | undefined} */ (error)?.error_kind === PARTITION_MUTATION_BUSY_ERROR_KIND
+}
+
+/**
  * Serialize cursor-coupled mutations of one logical cache partition across
  * processes. Flush and maintenance run on independent daemon timers, but a
  * compaction cursor swap must not strand an append in the retired generation.
@@ -89,7 +106,10 @@ function claimPartitionMutation(partitionDir) {
   // Keep the guard outside a partition that retention may remove.
   const directory = path.join(path.dirname(partitionDir), `.${path.basename(partitionDir)}.mutation-lock`)
   const owner = `${process.pid}-${randomUUID()}`
-  const busy = () => new Error('cache partition mutation busy or lock unverifiable; retry after the writer finishes')
+  const busy = () => Object.assign(
+    new Error('cache partition mutation busy or lock unverifiable; retry after the writer finishes'),
+    { error_kind: PARTITION_MUTATION_BUSY_ERROR_KIND }
+  )
   fs.mkdirSync(path.dirname(partitionDir), { recursive: true })
   for (let attempt = 0; ; attempt++) {
     try {

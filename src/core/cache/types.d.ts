@@ -77,6 +77,13 @@ export interface PurgeSummary {
   cacheCleanup?: string[]
   rowsDeleted: number
   partitionsAffected: number
+  /**
+   * Partitions left untouched because another holder had their cross-process
+   * mutation guard, with the refusal each raised. They may still hold rows
+   * matching the target, so a caller owes the operator this list and a
+   * failure; a rerun after the writer finishes takes them.
+   */
+  partitionsSkipped: { partition: string, error: string }[]
   purgedCwds: string[]
   retainedAliasRows: number
   retainedAliasCwds: string[]
