@@ -204,7 +204,11 @@ export function createVerbRegistry(opts = {}) {
       // Read before the ledger entry is released below: the retraction at the
       // bottom compares this against the registrar the command registry
       // recorded, and after `owners.delete` the verb's own answer is gone.
-      const registrar = owners.get(name)
+      // Not named `registrar`: that is the bracket state this closure holds
+      // for `register` to read, and one identifier meaning both "the plugin
+      // currently registering" and "the plugin that registered this verb" is
+      // how the next line added here reads the wrong one.
+      const releasedBy = owners.get(name)
       // One read, so the tool slot released is the one just verified to hold
       // this verb. Reading `verb.tool` again for the delete let a verb pass the
       // identity check against its own slot and delete a *different* plugin's,
@@ -225,7 +229,7 @@ export function createVerbRegistry(opts = {}) {
       // command `retractCommand` takes back, which is the only thing holding
       // the closure it lives in.
       owners.delete(name)
-      retractCommand(commandRegistry, name, registrar)
+      retractCommand(commandRegistry, name, releasedBy)
     },
     get(name) {
       return byName.get(name)
@@ -390,25 +394,35 @@ function commandAlreadyRegistered(registry, name) {
  * and survives. Tolerates a command registry that predates `unregister`,
  * the same way {@link commandAlreadyRegistered} tolerates one without
  * `has`: the verb is still released from both maps, the stale CLI command
- * is the only thing left behind. One without `ownerOf` (a host's own,
- * injected) retracts on the mark alone, the tolerance LLP 0420 #owner and
- * LLP 0424 #unknown extend to the same registry: a host records no
- * registrar for anything, so there is no binding to read.
+ * is the only thing left behind. One without `ownerOf`, or without the
+ * `registeringAs` bracket that is the only thing that ever fills it,
+ * retracts on the mark alone: the tolerance LLP 0420 #owner and LLP 0424
+ * #unknown extend to a host's own injected registry, which records no
+ * registrar for anything, so there is no binding to read. Both members are
+ * tested, because {@link registerProjection} keys its own tolerance on the
+ * bracket: against a registry answering an `ownerOf` nothing ever fills,
+ * every plugin verb's projection reads ownerless while the verb registry
+ * holds the plugin, and the check below would refuse every legitimate
+ * release and leave its command behind.
  *
- * Every tolerated or refusing branch warns. The caller's prescribed
+ * The two tolerated branches warn, and so does the refusal. The caller's
+ * prescribed
  * success check is `getByTool`, which the map deletion already satisfies,
  * so a half retraction reads as a win while `hyp <verb>` keeps routing at
  * the run closure of the verb the host just displaced. That is the silent
  * local-cache regression LLP 0264 §verb warns about, so it has to name
  * itself in the logs rather than only show up as a wrong answer.
  *
- * @param {(CommandRegistry & { ownerOf?: (name: string) => PluginName | undefined }) | undefined} registry
+ * @param {(CommandRegistry & {
+ *   ownerOf?: (name: string) => PluginName | undefined,
+ *   registeringAs?: (plugin: PluginName, fn: () => void) => void,
+ * }) | undefined} registry
  * @param {string} name
- * @param {PluginName | undefined} registrar the plugin recorded as having
+ * @param {PluginName | undefined} releasedBy the plugin recorded as having
  *   registered the released verb, `undefined` for a core verb or a host
  *   driving this registry directly
  */
-function retractCommand(registry, name, registrar) {
+function retractCommand(registry, name, releasedBy) {
   if (!registry) return
   if (typeof registry.unregister !== 'function') {
     getLogger('verb-registry').warn('verb.retract.unsupported', {
@@ -435,15 +449,27 @@ function retractCommand(registry, name, registrar) {
   // inside a `registeringAs` bracket, so unlike the symbol on the record just
   // read, no plugin write can move a name from one answer to another.
   // @ref LLP 0427#two-facts [implements]: the mark says the command is a projection; agreement between the two kernel-recorded registrars says it is the released verb's own
+  // Held as values, so the guard below is the one the call runs under: a
+  // second read could answer differently on a host registry.
   const ownerOf = registry.ownerOf
-  if (typeof ownerOf === 'function' && ownerOf.call(registry, name) !== registrar) {
-    getLogger('verb-registry').warn('verb.retract.registrar_mismatch', {
-      [Attr.OPERATION]: 'verb.unregister',
-      [Attr.STATUS]: 'degraded',
-      [Attr.ERROR_KIND]: 'command_registrar_mismatch',
-      verb_name: name,
-    })
-    return
+  const bracket = registry.registeringAs
+  if (typeof ownerOf === 'function' && typeof bracket === 'function') {
+    const commandOwner = ownerOf.call(registry, name)
+    if (commandOwner !== releasedBy) {
+      // Both registrars, not just the name: this warn is the whole signal a
+      // squat leaves, and `verb_name` alone cannot say which plugin to
+      // remove. The same pair the facade's refusal records
+      // (`command.unregister_owner_mismatch`).
+      getLogger('verb-registry').warn('verb.retract.registrar_mismatch', {
+        [Attr.OPERATION]: 'verb.unregister',
+        [Attr.STATUS]: 'degraded',
+        [Attr.ERROR_KIND]: 'command_registrar_mismatch',
+        [Attr.PLUGIN]: releasedBy ?? '',
+        hyp_owner_plugin: commandOwner ?? '',
+        verb_name: name,
+      })
+      return
+    }
   }
   registry.unregister(name)
 }
