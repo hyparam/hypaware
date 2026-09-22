@@ -6,6 +6,7 @@
 **Author:** Kenny / Claude
 **Date:** 2026-07-28
 **Related:** LLP 0012, LLP 0083, LLP 0115, LLP 0130, LLP 0133, LLP 0151
+**Extended-by:** LLP 0429 (native rollout capture is the default; gateway routing is explicit opt-in)
 
 > Names a coverage fact that was already true in code and nowhere in the
 > product surface. Nothing about capture changes here; the picker copy, the

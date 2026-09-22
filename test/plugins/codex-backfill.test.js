@@ -13,6 +13,7 @@ import {
   aiGatewayBackfillMaterializer,
 } from '../../hypaware-core/plugins-workspace/ai-gateway/src/dataset.js'
 import { createCodexBackfillProvider } from '../../hypaware-core/plugins-workspace/codex/src/backfill.js'
+import { prepareAttach } from '../../hypaware-core/plugins-workspace/codex/src/toml-config.js'
 import { createUsagePolicyResolver } from '../../src/core/usage-policy/index.js'
 
 /**
@@ -227,6 +228,70 @@ test('provider advertises a stable contribution shape', async () => {
   assert.equal(provider.plugin, '@hypaware/codex')
   assert.deepEqual(provider.datasets, ['ai_gateway_messages'])
   assert.equal(typeof provider.run, 'function')
+  assert.equal(provider.sweep?.cron, '* * * * *')
+  assert.equal(createCodexBackfillProvider({ homeDir: '/tmp/nope', config: { backfill: { on_join: false } } }).sweep, undefined)
+})
+
+test('scheduled capture migrates the route, skips unchanged files, and retries failed consumption', async () => {
+  const env = await stageEnv()
+  try {
+    const doc = modernConversation('scheduled')
+    doc.meta.base_instructions = { text: 'native base instructions' }
+    const file = await writeModernRollout(env, 'rollout-scheduled.jsonl', doc)
+    const configPath = path.join(env.homeDir, '.codex', 'config.toml')
+    await fs.writeFile(configPath, prepareAttach('model_provider = "custom"\n', 4388, 'old').content)
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx, entries } = runContext()
+    ctx.sweep = true
+    const first = await collect(provider.run(ctx))
+    assert.equal(first.items.length, 1)
+    assert.equal(value(first.items[0]).system_text, 'native base instructions')
+    assert.equal(value(first.items[0]).tools, undefined)
+    assert.equal(await fs.readFile(configPath, 'utf8'), 'model_provider = "custom"\n')
+    assert.ok(entries.some((e) => e.message === 'codex.capture.route_released'))
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+    assert.equal(entries.at(-1)?.fields?.files_read, 0)
+    assert.equal(entries.at(-1)?.fields?.files_unchanged, 1)
+    await fs.appendFile(file, JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'new turn' }] } }) + '\n')
+    for await (const item of provider.run(ctx)) {
+      if (item.type !== 'event') ctx.itemsFailed = (ctx.itemsFailed ?? 0) + 1
+    }
+    assert.equal((await collect(provider.run(ctx))).items.length, 1, 'a failed materialization is retried')
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+    ctx.sweep = false
+    assert.equal((await collect(provider.run(ctx))).items.length, 1, 'manual import bypasses fingerprints')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('scheduled capture waits for delayed usage before committing an active assistant response', async () => {
+  const env = await stageEnv()
+  try {
+    const file = await writeModernRollout(env, 'rollout-active.jsonl', {
+      meta: { id: 'active', originator: 'codex-tui' },
+      items: [
+        { type: 'event_msg', payload: { type: 'task_started' } },
+        { payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] } },
+      ],
+    })
+    const provider = createCodexBackfillProvider({ homeDir: env.homeDir })
+    const { ctx } = runContext()
+    ctx.sweep = true
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+    await fs.appendFile(file, JSON.stringify({ type: 'event_msg', payload: {
+      type: 'token_count', info: { last_token_usage: { input_tokens: 20, cached_input_tokens: 5, output_tokens: 3 } },
+    } }) + '\n')
+    const { items } = await collect(provider.run(ctx))
+    assert.equal(items.length, 1)
+    const rows = await materialize(items[0])
+    const attrs = typeof rows[0].attributes === 'string' ? JSON.parse(rows[0].attributes) : rows[0].attributes
+    assert.equal(attrs.usage.input_tokens, 15)
+    assert.equal(attrs.usage.output_tokens, 3)
+    assert.equal((await collect(provider.run(ctx))).items.length, 0)
+  } finally {
+    await env.cleanup()
+  }
 })
 
 test('modern rollout projects into canonical ai_gateway_messages rows', async () => {

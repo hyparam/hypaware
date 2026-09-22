@@ -14,6 +14,8 @@ import {
   resolveWindow,
 } from '../../../../src/core/backfill/scan_util.js'
 import { redactRemoteUserinfo } from './git-remote.js'
+import { detach } from './settings.js'
+import { readBackfillPolicy } from '../../../../src/core/config/backfill_policy.js'
 import {
   copyNumberAlias,
   firstString,
@@ -97,6 +99,8 @@ const COMPONENT = 'plugin.codex.backfill'
  *   resolver?: UsagePolicyResolver,
  *   localOnlyListPath?: string,
  *   ignoredSessions?: Set<string>,
+ *   config?: JsonObject,
+ *   configPath?: string,
  * }} opts
  * @returns {BackfillContribution}
  */
@@ -106,6 +110,10 @@ export function createCodexBackfillProvider(opts) {
   const codexHome = opts.codexHome ?? defaultCodexHome(opts.homeDir)
   const sessionsDir = opts.sessionsDir ?? path.join(codexHome, 'sessions')
   const unsupportedLocations = opts.unsupportedLocations ?? defaultUnsupportedLocations(opts.homeDir)
+  const config = opts.config
+  const backfill = isPlainObject(config?.backfill) ? config.backfill : {}
+  /** @type {Map<string, { ino: number, size: number, mtimeMs: number }>} */
+  const fingerprints = new Map()
   // One `.hypignore` resolver per backfill run, holding its per-cwd cache for
   // the whole scan (LLP 0049 R6).
   // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
@@ -118,8 +126,24 @@ export function createCodexBackfillProvider(opts) {
     plugin: pluginName,
     datasets: [AI_GATEWAY_MESSAGES_DATASET],
     summary: 'Import local Codex session rollouts into ai_gateway_messages',
+    // @ref LLP 0429#sweep [implements]: ordinary capture rides the existing background queue, including Desktop
+    ...(readBackfillPolicy({ name: pluginName, config }).onJoin !== false ? { sweep: { cron: stringValue(backfill.sweep_cron) ?? '* * * * *' } } : {}),
     async *run(ctx) {
-      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, ignoredSessions: opts.ignoredSessions })
+      // Scheduled work is the daemon-only migration seam, including local
+      // installs without a fleet attach marker. Manual queries/imports never
+      // change client settings. Failure is retried by the next sweep.
+      // @ref LLP 0429#migration [implements]
+      if (ctx.sweep && !ctx.dryRun && config?.capture_mode !== 'gateway') {
+        const result = await detach({ configPath: opts.configPath ?? path.join(codexHome, 'config.toml') })
+        if (result.changed) ctx.log.info('codex.capture.route_released', {
+          component: COMPONENT, operation: 'capture.migrate', status: 'ok',
+          mode: 'transcript', restart_required: true,
+        })
+        if ('warning' in result && result.warning) ctx.log.warn('codex.capture.route_warning', {
+          component: COMPONENT, operation: 'capture.migrate', warning: result.warning,
+        })
+      }
+      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, fingerprints, ignoredSessions: opts.ignoredSessions })
     },
   }
 }
@@ -143,7 +167,7 @@ export function defaultCodexHome(homeDir) {
  *
  * @ref LLP 0141#unsupported-boundary [implements]: the boundary is one opaque directory, not a client, and the event has to say so
  */
-const CODEX_DESKTOP_COVERED_BY = 'gateway_live,codex_sessions_rollout'
+const CODEX_DESKTOP_COVERED_BY = 'codex_sessions_rollout'
 
 /**
  * Codex/ChatGPT app + browser storage we DETECT but never parse in V1.
@@ -186,6 +210,7 @@ function defaultUnsupportedLocations(homeDir) {
  *   clientName: string,
  *   resolver: UsagePolicyResolver,
  *   ignoredSessions?: Set<string>,
+ *   fingerprints: Map<string, { ino: number, size: number, mtimeMs: number }>,
  * }} args
  * @returns {AsyncGenerator<BackfillItem | BackfillEvent>}
  */
@@ -216,13 +241,32 @@ async function* runCodexBackfill(args) {
   let sessionsProjected = 0
   let sessionsIgnored = 0
   let messagesProjected = 0
+  let filesRead = 0
+  let filesUnchanged = 0
+  const files = await listRolloutFiles(sessionsDir)
+  const present = new Set(files)
+  for (const filePath of args.fingerprints.keys()) {
+    if (!present.has(filePath)) args.fingerprints.delete(filePath)
+  }
 
-  for (const filePath of await listRolloutFiles(sessionsDir)) {
+  for (const filePath of files) {
     if (ctx.signal?.aborted) break
     filesSeen += 1
     /** @type {CodexRolloutSession[]} */
     let sessions
+    let fingerprint
+    const failedBefore = ctx.itemsFailed ?? 0
     try {
+      if (ctx.sweep) {
+        const stat = await fs.stat(filePath)
+        fingerprint = { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs }
+        const prior = args.fingerprints.get(filePath)
+        if (prior && prior.ino === stat.ino && prior.size === stat.size && prior.mtimeMs === stat.mtimeMs) {
+          filesUnchanged += 1
+          continue
+        }
+      }
+      filesRead += 1
       sessions = await parseRolloutFile(filePath)
     } catch (err) {
       log.warn('codex.backfill.rollout_read_failed', {
@@ -271,7 +315,13 @@ async function* runCodexBackfill(args) {
 
       const exchange = projectedExchangeFromSession({
         session,
-        items: filterByWindow(session.items, window),
+        // Native lifecycle events delimit an unfinished model response. Do
+        // not persist its assistant row before a later token_count can stamp
+        // usage: durable dedupe would otherwise keep the usage-less version.
+        // @ref LLP 0429#content [implements]
+        items: filterByWindow(ctx.sweep && session.settledItemCount !== undefined
+          ? session.items.slice(0, session.settledItemCount)
+          : session.items, window),
         clientName,
       })
       if (!exchange) continue
@@ -295,12 +345,18 @@ async function* runCodexBackfill(args) {
         native_id: session.threadId,
       })
     }
+    // @ref LLP 0429#sweep [implements]: retry failed writes, and reread files changed during consumption on the next pass
+    if (ctx.sweep && !ctx.dryRun && fingerprint && (ctx.itemsFailed ?? 0) === failedBefore) {
+      args.fingerprints.set(filePath, fingerprint)
+    }
   }
 
   log.info('codex.backfill.scan_complete', {
     component: COMPONENT,
     operation: 'backfill.scan',
     files_seen: filesSeen,
+    files_read: filesRead,
+    files_unchanged: filesUnchanged,
     sessions_projected: sessionsProjected,
     sessions_ignored: sessionsIgnored,
     messages_projected: messagesProjected,
@@ -486,6 +542,8 @@ function parseJsonlRollout(text, filePath) {
   /** @type {CodexRolloutItem[]} */
   const items = []
   let sawRecord = false
+  let tracksLifecycle = false
+  let settledItemCount = 0
 
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
@@ -508,6 +566,7 @@ function parseJsonlRollout(text, filePath) {
     } else if (type === 'response_item' && payload) {
       items.push({ payload, timestampMs: timestampToMs(row.timestamp) })
     } else if (type === 'event_msg' && payload) {
+      if (payload.type === 'task_started') tracksLifecycle = true
       // The one event_msg we keep: token_count. It is NOT a message: it is a
       // turn-boundary marker carrying that turn's normalized usage. Its slot in
       // the items stream is preserved (so the projector can attribute it to the
@@ -515,12 +574,16 @@ function parseJsonlRollout(text, filePath) {
       const usageAttributes = codexUsageFromTokenCount(payload)
       if (usageAttributes) {
         items.push({ payload: { type: 'token_count' }, timestampMs: timestampToMs(row.timestamp), usageAttributes })
+        settledItemCount = items.length
       }
+      if (payload.type === 'task_complete' || payload.type === 'turn_aborted') settledItemCount = items.length
     }
   }
 
   if (!sawRecord) return undefined
-  return buildSession({ metaPayload: metaPayload ?? {}, turnPayloads, items, fallbackId: sessionIdFromPath(filePath) })
+  const session = buildSession({ metaPayload: metaPayload ?? {}, turnPayloads, items, fallbackId: sessionIdFromPath(filePath) })
+  if (tracksLifecycle) session.settledItemCount = settledItemCount
+  return session
 }
 
 /**
@@ -584,6 +647,9 @@ function buildSession(args) {
     parentThreadId: stringValue(metaPayload.parent_thread_id),
     model: firstTurnString(turnPayloads, 'model'),
     modelProvider: stringValue(metaPayload.model_provider),
+    systemText: isPlainObject(metaPayload.base_instructions)
+      ? stringValue(metaPayload.base_instructions.text)
+      : stringValue(metaPayload.base_instructions),
     source: stringValue(metaPayload.source),
     items,
   }
@@ -669,6 +735,8 @@ function projectedExchangeFromSession(args) {
   if (session.threadSource !== undefined) exchange.is_sidechain = session.threadSource === 'subagent'
   if (session.parentThreadId) exchange.parent_thread_id = session.parentThreadId
   if (session.model) exchange.model = session.model
+  // @ref LLP 0429#content [implements]: native base instructions are evidence; missing full tool definitions stay null
+  if (session.systemText) exchange.system_text = session.systemText
   return exchange
 }
 
@@ -892,4 +960,3 @@ function boolValue(value) {
 function firstBool(...values) {
   return values.find((value) => typeof value === 'boolean')
 }
-

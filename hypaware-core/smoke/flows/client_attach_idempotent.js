@@ -33,7 +33,7 @@ import { requireAiGatewayRuntime } from '../../plugins-workspace/ai-gateway/src/
  *  - Below the Claude Code version floor, attach refuses the switch:
  *    exit 1, the `claude update` hint on stderr, and the settings file
  *    byte-identical to before the attempt (LLP 0258 #version-floor).
- *  - Codex attach writes `model_provider = "hypaware"`, the
+ *  - Explicit Codex gateway-mode attach writes `model_provider = "hypaware"`, the
  *    `[model_providers.hypaware]` table with `base_url`,
  *    `wire_api = "responses"`, and `requires_openai_auth = true`.
  *  - `--json` output is structurally well-formed JSON, one object
@@ -159,7 +159,8 @@ export async function run({ harness, expect }) {
           .map((l) => ({
             manifest: l.manifest,
             rootDir: l.rootDir,
-            config: l.manifest.name === '@hypaware/ai-gateway' ? aiGatewayConfig : {},
+            config: l.manifest.name === '@hypaware/ai-gateway' ? aiGatewayConfig
+              : l.manifest.name === '@hypaware/codex' ? { capture_mode: 'gateway' } : undefined,
           }))
         return activatePlugins({
           plugins: entries,

@@ -12,7 +12,7 @@ import { createCodexBackfillProvider } from './backfill.js'
 import { CODEX_CONFIG_SECTION, validateCodexConfig } from './config.js'
 import { createCodexExchangeProjector } from './exchange-projector.js'
 import { createRolloutCwdResolver } from './rollout-cwd.js'
-import { attach, defaultConfigPath } from './settings.js'
+import { attach, detach, defaultConfigPath } from './settings.js'
 import { runCodexClassifyHook } from './classify_hook.js'
 
 /**
@@ -140,6 +140,7 @@ export async function activate(ctx) {
 
   const homeDir = ctx.env.HOME ?? os.homedir()
   const codexHome = resolveCodexHome(ctx)
+  const gatewayCapture = ctx.config?.capture_mode === 'gateway'
   // @ref LLP 0103 [implements]: thread the machine-local usage-policy list into
   // the capture-seam resolvers so a `--private` (machine-local `ignore`) dir
   // stops recording at capture, not just at the export seam. Without it the
@@ -177,6 +178,8 @@ export async function activate(ctx) {
       codexHome,
       clientName: CLIENT_NAME,
       pluginName: PLUGIN_NAME,
+      config: ctx.config,
+      configPath: resolveConfigPath(ctx),
       localOnlyListPath: localOnlyList,
     })
   )
@@ -186,9 +189,33 @@ export async function activate(ctx) {
   gateway.registerClient({
     name: CLIENT_NAME,
     defaultUpstream: UPSTREAM_NAME,
+    requiresEndpoint: gatewayCapture,
     /** @param {AiGatewayClientAttachContext} attachCtx */
     async attach(attachCtx) {
       const configPath = resolveConfigPath(ctx)
+
+      // @ref LLP 0429#default [implements]: capture reads rollouts; attach only releases the old managed inference route
+      if (!gatewayCapture) {
+        const result = attachCtx.dryRun ? { changed: false } : await detach({ configPath })
+        if ('warning' in result && result.warning) attachCtx.stderr?.write(result.warning + '\n')
+        logger.info('client.attach.write', {
+          hyp_plugin: PLUGIN_NAME, hyp_client: CLIENT_NAME,
+          config_path: configPath, mode: 'transcript', changed: result.changed,
+        })
+        if (attachCtx.json) {
+          attachCtx.stdout.write(JSON.stringify({
+            status: 'ok', action: 'attach', client: CLIENT_NAME,
+            mode: 'transcript', settings_path: configPath,
+            dry_run: attachCtx.dryRun === true, changed: result.changed,
+          }) + '\n')
+        } else {
+          attachCtx.stdout.write(attachCtx.dryRun
+            ? '(dry-run) Would enable Codex CLI and Desktop rollout capture and remove the managed gateway route.\n'
+            : 'Codex CLI and Desktop capture uses local rollout files; inference connects directly to your provider.\n')
+          attachCtx.stdout.write('  Full tool definitions are unavailable. Restart existing Codex clients after changing capture mode.\n')
+        }
+        return
+      }
 
       return withSpan(
         'client.attach',
@@ -559,6 +586,7 @@ function writeAttachOutput(attachCtx, fields) {
       dry_run: fields.dryRun,
       config_path: fields.configPath,
       changed: fields.changed,
+      mode: 'gateway',
     }
     if (fields.port !== undefined) {
       payload.port = fields.port
@@ -589,4 +617,3 @@ function writeAttachOutput(attachCtx, fields) {
     attachCtx.stdout.write(`  (previous model_provider was ${fields.prevValue})\n`)
   }
 }
-

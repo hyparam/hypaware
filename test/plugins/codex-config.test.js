@@ -17,6 +17,14 @@ test('validateCodexConfig accepts an empty / absent config', () => {
   assert.deepEqual(validateCodexConfig({}), { ok: true })
 })
 
+test('capture mode and sweep cadence are validated', () => {
+  for (const capture_mode of ['transcript', 'gateway']) {
+    assert.deepEqual(validateCodexConfig({ capture_mode, backfill: { sweep_cron: '* * * * *' } }), { ok: true })
+  }
+  assert.equal(validateCodexConfig({ capture_mode: 'proxy' }).ok, false)
+  assert.equal(validateCodexConfig({ backfill: { sweep_cron: 'nonsense' } }).ok, false)
+})
+
 test('validateCodexConfig accepts a full backfill block', () => {
   assert.deepEqual(
     validateCodexConfig({ backfill: { on_join: true, window_days: 30 } }),

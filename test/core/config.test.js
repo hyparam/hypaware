@@ -434,7 +434,7 @@ test('buildPluginCatalog extracts client descriptors from manifests', async () =
   assert.equal(codex?.skillDir, '.codex/skills')
   assert.equal(codex?.agentDir, undefined)
   assert.equal(codex?.attachProbe?.format, 'toml')
-  assert.deepEqual(codex?.requiredUpstreams, ['openai', 'chatgpt'])
+  assert.equal(codex?.requiredUpstreams, undefined)
 })
 
 test('buildPluginCatalog reads contributes.picker into pickerDescriptors, keyed by row name', () => {

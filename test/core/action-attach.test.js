@@ -73,6 +73,27 @@ const CODEX_DESCRIPTOR = {
   attachProbe: { format: 'toml', settings_file: '.codex/config.toml', marker_header: '[model_providers.hypaware]' },
 }
 
+test('Codex migration settles once without an endpoint and reopens when mode changes', async () => {
+  const handler = createAttachHandler()
+  const registration = { ...attachRegistration('codex', { prose: 'no JSON' }), requiresEndpoint: false }
+  const ctx = makeCtx({
+    plugins: [{ name: '@hypaware/codex', config: {} }],
+    descriptors: descriptorMap([CODEX_DESCRIPTOR]),
+    clients: clientsWith({ codex: registration }),
+  })
+  ctx.endpoint = undefined
+  const action = handler.desired(ctx)[0]
+  assert.ok(action)
+  assert.equal(handler.isCurrent?.(/** @type {any} */ ({ status: 'done' }), action, ctx), false)
+  const result = await handler.perform(action, ctx)
+  assert.equal(result.status, 'done')
+  const marker = /** @type {any} */ ({ status: 'done', ...result.detail })
+  assert.equal(marker.mode, 'transcript', 'mode is recorded even without a parsed report')
+  assert.equal(handler.isCurrent?.(marker, action, ctx), true)
+  ctx.config.plugins = [{ name: '@hypaware/codex', config: { capture_mode: 'gateway' } }]
+  assert.equal(handler.isCurrent?.(marker, action, ctx), false)
+})
+
 /**
  * A client descriptor with **no `attachProbe`**. perform() can attach it (it
  * only needs a live adapter), but the disk-driven reverse() has nothing to

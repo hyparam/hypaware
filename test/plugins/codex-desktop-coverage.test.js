@@ -101,7 +101,7 @@ test('the Codex app-container unsupported_location says what IS still captured',
     // queryable, and the explanation lives in LLP 0141 and the README.
     assert.equal(
       desktop?.attributes?.covered_by,
-      'gateway_live,codex_sessions_rollout',
+      'codex_sessions_rollout',
       'the event names which Codex Desktop capture routes DO work, so "unsupported" is not read as "Codex Desktop is unsupported"'
     )
 
@@ -111,7 +111,7 @@ test('the Codex app-container unsupported_location says what IS still captured',
         && e.fields?.location_kind === 'codex_desktop_app'
     )
     assert.ok(logged, 'the Codex app container is logged as well as evented')
-    assert.equal(logged?.fields?.covered_by, 'gateway_live,codex_sessions_rollout')
+    assert.equal(logged?.fields?.covered_by, 'codex_sessions_rollout')
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }

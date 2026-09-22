@@ -8,6 +8,41 @@ import path from 'node:path'
 
 import { createAiGatewayApi, createGatewayState } from '../../hypaware-core/plugins-workspace/ai-gateway/src/api.js'
 import { activate as activateCodex } from '../../hypaware-core/plugins-workspace/codex/src/index.js'
+import { prepareAttach } from '../../hypaware-core/plugins-workspace/codex/src/toml-config.js'
+
+for (const initial of [undefined, 'model_provider = "custom"\nmodel = "test"\n']) {
+  test(`default attach restores the provider without requiring a gateway (${initial ? 'upgrade' : 'fresh'})`, async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'hyp-codex-native-'))
+    try {
+      const configPath = path.join(home, '.codex', 'config.toml')
+      if (initial) {
+        await fs.mkdir(path.dirname(configPath), { recursive: true })
+        await fs.writeFile(configPath, prepareAttach(initial, 4388, 'old').content)
+      }
+      const state = createGatewayState()
+      const ctx = stubContext(createAiGatewayApi(state), home)
+      ctx.config = {}
+      await activateCodex(ctx)
+      const client = state.clients.get('codex')
+      assert.ok(client)
+      assert.equal(client.requiresEndpoint, false)
+      let stdout = ''
+      const attachCtx = /** @type {any} */ ({ json: true, stdout: { write: (/** @type {string} */ s) => { stdout += s } } })
+      await client.attach({ ...attachCtx, dryRun: true })
+      if (initial) assert.match(await fs.readFile(configPath, 'utf8'), /model_providers.hypaware/)
+      stdout = ''
+      await client.attach(attachCtx)
+      assert.equal(JSON.parse(stdout).mode, 'transcript')
+      if (initial) assert.equal(await fs.readFile(configPath, 'utf8'), 'model = "test"\nmodel_provider = "custom"\n')
+      else await assert.rejects(fs.access(configPath), { code: 'ENOENT' })
+      stdout = ''
+      await client.attach(attachCtx)
+      assert.equal(JSON.parse(stdout).changed, false)
+    } finally {
+      await fs.rm(home, { recursive: true, force: true })
+    }
+  })
+}
 
 /**
  * Attach writes one provider block, in both auth modes, permanently. Nothing
@@ -88,7 +123,7 @@ function stubContext(gateway, home) {
     env: { HOME: home, HYP_HOME: path.join(home, '.hypaware') },
     paths: { stateDir: path.join(home, '.hypaware/state/plugins/test') },
     plugin: { version: '0.0.0-test' },
-    config: {},
+    config: { capture_mode: 'gateway' },
     log: { debug() {}, info() {}, warn() {}, error() {} },
     configRegistry: { registerSection() {} },
     requireCapability: () => gateway,

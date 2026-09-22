@@ -50,9 +50,11 @@ test('claude picker summary discloses that a local port is opened', async () => 
   assert.doesNotMatch(summary, /gateway|proxy/i)
 })
 
-test('codex picker summary discloses the gateway config write and the skill install', async () => {
+test('codex picker discloses file capture, migration, and missing full definitions', async () => {
   const summary = await pickerSummary('codex', 'codex')
-  assert.match(summary, /edits Codex's config/i)
+  assert.match(summary, /local session files/i)
+  assert.match(summary, /Removes an old managed gateway route/i)
+  assert.match(summary, /Full tool definitions are unavailable/i)
   assert.match(summary, /local port/i)
   assert.match(summary, /skills/i)
 })

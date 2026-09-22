@@ -219,10 +219,14 @@ export function createAttachHandler(opts = {}) {
         detail.mode = 'otel'
         detail.settings_schema = CLAUDE_SETTINGS_MARKER_SCHEMA
       }
+      if (client === 'codex') {
+        const config = ctx.config.plugins?.find((p) => p.name === '@hypaware/codex')?.config
+        detail.mode = config?.capture_mode === 'gateway' ? 'gateway' : 'transcript'
+      }
       if (parsed) {
         if (typeof parsed.settings_path === 'string') detail.settings_path = parsed.settings_path
         if (typeof parsed.prev_value === 'string') detail.prev_value = parsed.prev_value
-        if (client !== 'claude' && typeof parsed.mode === 'string') detail.mode = parsed.mode
+        if (client !== 'claude' && client !== 'codex' && typeof parsed.mode === 'string') detail.mode = parsed.mode
       }
       // The undo record for the copies: reverse() removes exactly these paths,
       // so a user's own `hyp skills install` (which records no marker) survives
@@ -324,6 +328,12 @@ export function createAttachHandler(opts = {}) {
       // migration that releases the proxy settings and writes the OTEL block.
       // @ref LLP 0262#migration [implements]: attachment mode drift is a forward gap even when the gateway port did not move
       if (client === 'claude' && marker.mode !== 'otel') return false
+      // @ref LLP 0429#migration [implements]: a proxy-era Codex marker must release its route even at an unchanged port
+      if (client === 'codex') {
+        const config = ctx.config.plugins?.find((p) => p.name === '@hypaware/codex')?.config
+        const mode = config?.capture_mode === 'gateway' ? 'gateway' : 'transcript'
+        if (marker.mode !== mode) return false
+      }
       // Claude Code 2.1.257 rejects the legacy `_hypaware.managed.hooks`
       // marker even though endpoint, mode, and assets are otherwise current.
       // A missing schema token is therefore a forward gap that reaches the
