@@ -651,3 +651,64 @@ test('Pi listener releases admission even while a slow upload keeps its socket a
     assert.equal(response.status, 400)
   } finally { clearInterval(interval); socket.destroy(); await source.stop() }
 })
+
+test('Pi live capture health surfaces a persistently version-skewed extension, not a stray probe', async () => {
+  const root = await temp()
+  const rows = []
+  const storage = { cacheTablePath: () => '/cache/pi', async discoverCachePartitions() { return [] }, async *readRows() {}, async *readSpooledRows() { yield* rows }, async appendRows(_p, _c, batch) { rows.push(...batch) } }
+  const source = await createStartPiSource({})(/** @type {any} */ ({ config: { listen_port: 0 }, storage, log: silent }))
+  try {
+    const port = (await source.status?.())?.details?.listen_port
+    const post = (body, type = 'application/json') => fetch(`http://127.0.0.1:${port}/entries`, { method: 'POST', headers: { 'content-type': type }, body })
+    const health = async () => /** @type {any} */ (await source.status?.())
+    const v1 = () => { const raw = copy(); raw.session.cwd = root; raw.version = 1; raw.message_indices = [0, 1, 2, 3]; return JSON.stringify(raw) }
+    const malformed = () => { const raw = copy(); raw.session.cwd = root; raw.message_indices = [0, 1, 2, -1]; return JSON.stringify(raw) }
+    // Past the threshold, so the exclusions below assert the path is excluded
+    // rather than only that one refusal is under the bar.
+    const past = 4
+
+    for (let i = 0; i < past; i++) assert.equal((await post('not json at all')).status, 400)
+    assert.equal((await health()).lastError, undefined, 'non-JSON probes do not trip capture health')
+    for (let i = 0; i < past; i++) assert.equal((await post(malformed())).status, 400)
+    assert.equal((await health()).lastError, undefined, 'malformed batches from a current extension do not trip capture health')
+    for (let i = 0; i < past; i++) assert.equal((await post('{}')).status, 400)
+    assert.equal((await health()).lastError, undefined, 'a JSON probe declaring no version does not trip capture health')
+    for (let i = 0; i < past; i++) assert.equal((await post(v1(), 'text/plain')).status, 415)
+    assert.equal((await health()).lastError, undefined, 'a probe refused before its body is read does not trip capture health')
+
+    for (let i = 0; i < past; i++) assert.equal((await post(v1())).status, 400)
+    const skewed = await health()
+    assert.match(String(skewed.lastError), /version/i, 'consecutive version refusals surface in capture health')
+
+    const accepted = copy()
+    accepted.session.cwd = root
+    accepted.message_indices = [0, 1, 2, 3]
+    assert.equal((await post(JSON.stringify(accepted))).status, 200)
+    assert.equal((await health()).lastError, undefined, 'an accepted batch clears the skew report')
+  } finally { await source.stop(); await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test('Pi capture health keeps an unresolved write failure visible alongside a skew report', async () => {
+  const root = await temp()
+  const storage = { cacheTablePath: () => '/cache/pi', async discoverCachePartitions() { return [] }, async *readRows() {}, async *readSpooledRows() {}, async appendRows() { throw new Error('disk gone') } }
+  const source = await createStartPiSource({})(/** @type {any} */ ({ config: { listen_port: 0 }, storage, log: silent }))
+  try {
+    const port = (await source.status?.())?.details?.listen_port
+    const post = body => fetch(`http://127.0.0.1:${port}/entries`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+    const health = async () => /** @type {any} */ (await source.status?.())
+    const accepted = copy()
+    accepted.session.cwd = root
+    accepted.message_indices = [0, 1, 2, 3]
+    assert.equal((await post(JSON.stringify(accepted))).status, 500)
+    assert.equal((await health()).lastError, 'pi_capture_failed')
+
+    // A skewed lane never lands the accepted batch that would clear the write
+    // failure, so the skew report must not become the only thing reported.
+    const v1 = () => { const raw = copy(); raw.session.cwd = root; raw.version = 1; raw.message_indices = [0, 1, 2, 3]; return JSON.stringify(raw) }
+    for (let i = 0; i < 4; i++) assert.equal((await post(v1())).status, 400)
+    const both = String((await health()).lastError)
+    assert.match(both, /pi_capture_failed/)
+    assert.match(both, /version/i)
+    assert.ok(both.length <= 200, `capture health stays inside the 200-char source-health bound, saw ${both.length}`)
+  } finally { await source.stop(); await fs.rm(root, { recursive: true, force: true }) }
+})

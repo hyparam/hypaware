@@ -13,12 +13,22 @@ import { piSessionHeader, projectPiEntries } from './projector.js'
 
 /** @import { PluginActivationContext, StartedSource } from '../../../../hypaware-plugin-kernel-types.js' */
 
+/**
+ * Consecutive version refusals that read as a skewed extension rather than a
+ * stray probe: an extension too old to speak version 2 has every batch it will
+ * ever send refused the same way.
+ * @ref LLP 0416#ordering [implements]: a permanent live-lane refusal is reported, not only counted
+ */
+const SKEW_REFUSALS = 3
+
+const SKEW_ERROR = 'pi_unsupported_batch - the attached Pi extension keeps sending an unsupported batch version; live capture is refused, native session recovery still applies'
+
 /** @param {{ localOnlyListPath?: string, ignoredSessions?: Set<string> }} deps */
 export function createStartPiSource(deps) {
   /** @param {PluginActivationContext} ctx @returns {Promise<StartedSource>} */
   return async function startPiSource(ctx) {
     const ignored = deps.ignoredSessions ?? new Set()
-    const state = { batches: 0, rows: 0, skipped: 0, drops: 0, rejected: 0, lastError: /** @type {string | undefined} */ (undefined) }
+    const state = { batches: 0, rows: 0, skipped: 0, drops: 0, rejected: 0, refusals: 0, lastError: /** @type {string | undefined} */ (undefined) }
     let busy = false
     /** @type {Promise<void> | undefined} */
     let active
@@ -66,10 +76,16 @@ export function createStartPiSource(deps) {
               !Array.isArray(raw.message_indices) || raw.message_indices.length !== raw.entries.length ||
               raw.message_indices.some(index => !Number.isInteger(index) || index < 0 || index > 2147483647)) {
             state.rejected++
+            // Only a version this listener does not speak reads as a skewed
+            // extension. The same refusal covers every other shape failure,
+            // which a stray loopback probe produces too, and reporting those
+            // as a version problem points an operator at the wrong repair.
+            if (Number.isInteger(raw?.version) && raw.version !== 2) state.refusals++
             reject(req, res, 400, 'unsupported_batch')
             return
           }
           state.batches++
+          state.refusals = 0
           refreshSessionIgnores(ignored)
           const resolver = createUsagePolicyResolver({ localOnlyListPath: deps.localOnlyListPath })
           const reason = sessionIgnoreLoadError(ignored) || ignored.has(String(session.id)) ? 'session_ignored'
@@ -103,7 +119,12 @@ export function createStartPiSource(deps) {
     }
     return {
       async status() {
-        return { state: 'ready', rowsWritten: state.rows, lastError: sessionIgnoreLoadError(ignored) ?? state.lastError,
+        // A skewed lane never produces the accepted batch that clears
+        // `lastError`, so reporting the skew alone would hide a capture
+        // failure for the rest of the run.
+        const reported = state.refusals < SKEW_REFUSALS ? state.lastError
+          : state.lastError ? `${state.lastError}; ${SKEW_ERROR}` : SKEW_ERROR
+        return { state: 'ready', rowsWritten: state.rows, lastError: sessionIgnoreLoadError(ignored) ?? reported,
           details: { listen_host: bound.host, listen_port: bound.port, control_routes: [SESSION_IGNORE_ROUTE], batches_received: state.batches, rows_skipped: state.skipped, policy_drops: state.drops, rejected_requests: state.rejected, active_batches: busy ? 1 : 0 } }
       },
       async stop() {

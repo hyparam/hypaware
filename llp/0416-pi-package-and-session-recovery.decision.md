@@ -68,7 +68,12 @@ that size check. Steady capture costs O(new entries), independent of history.
 Live protocol version 2 sends up to 64 parallel `message_indices` with each
 entry batch. The listener rejects version 1 and missing or invalid positions,
 leaving native recovery available rather than persisting scrambled ordering.
-This PR is unreleased; the change does not repair rows from earlier experimental
+Consecutive refusals of a declared unsupported version report in the source
+health an operator reads, because an extension too old to speak the live
+protocol never recovers on its own. A batch refused for its shape rather than
+its version stays a counter, because a stray loopback probe earns the same
+refusal and must not be reported as an extension version problem. This PR is
+unreleased; the change does not repair rows from earlier experimental
 version-1 captures already stored under the same identities.
 
 ## Bounds and policy {#bounds}
