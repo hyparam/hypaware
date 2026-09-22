@@ -764,6 +764,11 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
 
   for (let i = 0; i < projection.messages.length; i++) {
     const message = projection.messages[i]
+    // @ref LLP 0416#ordering: incremental producers supply a stable session position
+    const messageIndex = message.message_index === undefined ? i : message.message_index
+    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > 2147483647) {
+      throw new RangeError('message_index must be a nonnegative INT32')
+    }
     const role = stringValue(message.role)
     if (!role) continue
     const content = normalizeContent(message.content)
@@ -809,7 +814,7 @@ export function aiGatewayRowsFromProjectedExchange(projection, opts = {}) {
       sessionId,
       conversationId,
       conversationStarted,
-      messageIndex: i,
+      messageIndex,
       tsStart,
       projection,
       identity,

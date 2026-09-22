@@ -194,6 +194,13 @@ Written acceptance procedures:
   independently, plus live hook delivery, WAL-committed recovery, replay
   stability, and that inherited Claude hooks are not misattributed. See
   `docs/ACCEPTANCE.md`.
+- `pi_tui_cli_capture`: opt-in/manual, needs a real Pi and a disposable Pi
+  config/session root. Proves TUI, print, JSON and RPC turns, native entry IDs
+  and token totals, the scheduled recovery sweep and its unchanged-file skip,
+  fork/compaction usage accounting, and that package install and managed
+  attach never both record. Not the hermetic `pi_capture` smoke, which POSTs a
+  fixture we wrote and so agrees with itself whatever upstream did. See
+  `docs/ACCEPTANCE.md`.
 
 Good acceptance smoke candidates (no written procedure yet):
 
@@ -316,6 +323,7 @@ hyp dev smoke source_optout_export_withhold
 hyp dev smoke github_local_only_withhold
 hyp dev smoke opencode_capture
 hyp dev smoke cursor_capture
+hyp dev smoke pi_capture
 hyp dev smoke github_local_capture
 hyp dev smoke otel_loopback_capture
 hyp dev smoke local_parquet_export

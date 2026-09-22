@@ -2415,6 +2415,12 @@ export interface AiGatewayProjectedExchange {
 export interface AiGatewayProjectedMessage {
   role: string
   content: string | JsonObject[]
+  /**
+   * Optional zero-based position in the session for incremental producers.
+   * Must be a nonnegative INT32. Omission preserves the exchange-array index.
+   * Positions must agree across replay, filtering and live/recovery batches.
+   */
+  message_index?: number
   message_id?: string
   previous_message_id?: string[]
   message_created_at?: string

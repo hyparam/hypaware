@@ -2118,6 +2118,57 @@ pass. The daemon retained bounded backlog and scheduled a retry for
 
 ---
 
+## `pi_tui_cli_capture`
+
+**Required when:** Pi extension, adapter, projection or recovery changes.
+Distinct from the hermetic `pi_capture` smoke, which step 1 runs: a fixture
+flow and this release gate must never be named the same thing in a release
+note.
+Record `pi --version`, HypAware version and package version. Use a disposable
+Pi config/session root and HypAware home; do not attach a personal install.
+
+1. Run `npm run smoke -- pi_capture` for the hermetic package-to-query path.
+2. Enable Pi in the disposable HypAware setup. Install the packaged extension
+   with `pi install /absolute/path/to/packages/pi-extension`, then verify an
+   ordinary TUI turn and `pi -p` turn with text and a tool call. Repeat using
+   `--mode json` and RPC. Check native entry IDs against recorded
+   `provider_uuid`, tool links, selected model and per-response token totals.
+3. Load a second extension which replaces an assistant message in
+   `message_end`. Confirm the final replacement and the later native entry ID
+   are captured, not the earlier message. A local fake provider can validate
+   this ordering without credentials; also run one real-provider turn to
+   check reported token shape.
+4. Stop the disposable daemon, generate a turn, restart, and wait for the
+   scheduled sweep. Run `hyp backfill pi` twice. Confirm recovery and replay
+   preserve message counts and token totals. Verify unchanged sweeps log zero
+   files read. Repeat with custom documented session/config roots.
+5. Generate more than 64 messages across multiple turns, including metadata
+   changes. Read them with `order by message_index, part_index` and verify
+   session-wide ordering, including after recovery and a time-filtered import.
+   Fork, resume, navigate the tree and compact. Across each navigation and
+   compaction, compare the live-lane positions against the positions a later
+   `hyp backfill pi` derives for the same entries: they must agree. Only a
+   real Pi says whether the entry list the extension snapshots at
+   `session_tree` already holds the navigation summary, and a disagreement
+   is stored silently. Confirm copied history does
+   not contribute additive usage, new child/summary work does, and missing or
+   ignored parents produce the documented recovery diagnostic. Run an
+   ephemeral `--no-session` turn and confirm it is not recorded.
+6. Exercise session ignore/unignore, an ignored directory and a local-only
+   directory through both lanes. Verify ignored data never persists and
+   local-only data remains local. Test simultaneous Pi sessions and a long
+   tool output; check bounded queue/listener behavior and recovery diagnostics.
+7. Reload, upgrade and remove the Pi package. Test managed attach twice and
+   marker-owned detach separately. When both installation methods exist,
+   verify only one instance delivers. Disabling Pi in HypAware must stop both
+   lanes. Removing only the Pi extension does not disable history recovery.
+
+**Pass condition:** real Pi behavior agrees with those checks. Record which
+modes/providers were actually exercised. A fixture-only run or isolated fake
+provider run does not establish the full real-client release gate.
+
+---
+
 ## Other candidates
 
 `CLAUDE.md` lists further acceptance candidates that have no written

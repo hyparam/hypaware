@@ -81,10 +81,10 @@ test('askableClients falls back to launchable clients only when the probe throws
     collectStatus: async () => { throw new Error('settings file unreadable') },
   })
   // The fallback is the real bundled-plugin launchable set (claude, codex,
-  // and opencode carry a `launch` block; claude-desktop and openclaw do not), so
+  // opencode, and pi carry a `launch` block; claude-desktop and openclaw do not), so
   // this also pins that the fallback is non-empty and never invents a
   // client the catalog does not know about.
-  assert.deepEqual([...clients].sort(), ['claude', 'codex', 'opencode'])
+  assert.deepEqual([...clients].sort(), ['claude', 'codex', 'opencode', 'pi'])
 })
 
 /* ---------------------------- exit-code contract ---------------------------- */
@@ -125,7 +125,7 @@ test('runAsk "<question>": the no-launcher hint names real clients, not a placeh
   const code = await runAsk(['which sessions touched the auth module'], ctx)
   assert.equal(code, 1)
   const text = stderr.text()
-  assert.match(text, /Attach one with `hyp client attach claude` \(or codex, opencode\)/)
+  assert.match(text, /Attach one with `hyp client attach claude` \(or codex, opencode, pi\)/)
   assert.doesNotMatch(text, /<client>/)
 })
 

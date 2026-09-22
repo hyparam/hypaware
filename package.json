@@ -65,6 +65,7 @@
     "bin/",
     "src/",
     "hypaware-core/",
+    "packages/pi-extension/",
     "types/",
     "hypaware-plugin-kernel-types.d.ts"
   ],

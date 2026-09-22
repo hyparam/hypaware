@@ -116,6 +116,15 @@ export function resolveClientSettingsPath(clientName, settingsFile, env, homeDir
   if (clientName === 'cursor') {
     return withinBase(clientName, settingsFile, homeDir, path.join(homeDir, settingsFile), field)
   }
+  // @ref LLP 0416#installation: Pi relocates its agent directory, not PI_HOME
+  if (clientName === 'pi') {
+    const parts = settingsFile.split('/')
+    const base = env?.PI_CODING_AGENT_DIR
+    if (base && parts[0] === '.pi' && parts[1] === 'agent') {
+      return withinBase(clientName, settingsFile, base, path.join(base, ...parts.slice(2)), field)
+    }
+    return withinBase(clientName, settingsFile, homeDir, path.join(homeDir, ...parts), field)
+  }
   const envKey = `${clientName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_HOME`
   const override = env?.[envKey]
   if (typeof override === 'string' && override.length > 0) {
