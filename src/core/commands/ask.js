@@ -170,16 +170,27 @@ async function cacheHasRows(ctx) {
 /**
  * The clients `hyp ask` may start: those HypAware is actually recording.
  *
- * Attachment is this command's analogue of the wizard's "picked" list
- * (`@ref LLP 0198#path-probe`): starting an unattached client would open
- * a session nothing captures, so the question it was started on would be
- * answered against data that excludes the asking. A status failure
- * degrades to every launchable client rather than to none, because a
- * probe that cannot read a settings file is not evidence of detachment.
+ * Attachment is this command's analogue of the wizard's "picked" list:
+ * starting an unattached client would open a session nothing captures, so
+ * the question it was started on would be answered against data that
+ * excludes the asking.
+ *
+ * A probe that throws answers neither way, and the only set to degrade to
+ * is every client carrying a `launch` block, attached or not, so falling
+ * through to it starts exactly the session the rule exists to prevent. An
+ * unreadable probe therefore starts nothing, and says why here: both
+ * callers' no-launcher line reads as "nothing is attached", a claim this
+ * path has no evidence for.
+ *
+ * The row probe above treats its own unknown the other way (LLP 0198
+ * #empty-cache) on the same cost argument: an offer made against a cache
+ * that turns out to be full costs nothing, where a launch HypAware turns
+ * out not to be recording costs the session itself.
  *
  * `collectStatus` defaults to the real status collector; tests inject a
  * stub to exercise the throw path without faking a filesystem failure.
  *
+ * @ref LLP 0198#path-probe [implements]: only an attached client is started, and a probe that cannot answer is not evidence of attachment
  * @param {CommandRunContext} ctx
  * @param {{ collectStatus?: typeof collectHypAwareStatus }} [options]
  * @returns {Promise<string[]>}
@@ -196,16 +207,16 @@ export async function askableClients(ctx, { collectStatus = collectHypAwareStatu
         storage: ctx.storage,
       },
     })
-    // A successful probe reporting zero attached clients is still
-    // evidence of detachment, not grounds to fall through: only a
-    // thrown probe (one that could not read a settings file) is unknown
-    // rather than a "no".
+    // A successful probe reporting zero attached clients is evidence of
+    // detachment, not an absent answer.
     return report.clients.filter((c) => c.attached).map((c) => c.name)
-  } catch {
-    // fall through to the unfiltered list
+  } catch (err) {
+    // No command prefix: one helper answers `hyp ask` and `hyp report fix`.
+    const detail = err instanceof Error ? err.message : String(err)
+    ctx.stderr.write(`hyp: could not read which clients are attached: ${detail}\n`)
+    ctx.stderr.write('  Starting nothing - a client HypAware is not recording would leave no trace of the session. Check it with `hyp status`.\n')
+    return []
   }
-  const descriptors = await buildWalkthroughClientDescriptorMap()
-  return [...descriptors.values()].filter((d) => d.launch).map((d) => d.name)
 }
 
 /**

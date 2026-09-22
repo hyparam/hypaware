@@ -7,19 +7,20 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { askableClients, runAsk } from '../../../src/core/commands/ask.js'
+import { buildWalkthroughClientDescriptorMap } from '../../../src/core/cli/walkthrough.js'
+import { resolveLaunchers } from '../../../src/core/cli/wizard/first_ask.js'
 
 /**
  * @import { CommandRunContext } from '../../../hypaware-plugin-kernel-types.js'
  */
 
 // `hyp ask` may only start a client HypAware is actually recording
-// (LLP 0198#path-probe). The bug this file pins: a status probe that
-// *succeeds* and reports zero attached clients is evidence of detachment,
-// not grounds to fall back to every launchable client on $PATH - only a
-// thrown probe (one that could not read a settings file) is unknown rather
-// than a "no". Before the fix, `askableClients` conflated the two by testing
-// `attached.length > 0` instead of branching on the try/catch itself.
-// @ref LLP 0198#path-probe [tests]: a successful zero-attached probe is a "no", not a fall-through
+// (LLP 0198#path-probe). Both ways of not getting a "yes" are pinned here:
+// a probe that succeeds reporting zero attached clients is evidence of
+// detachment, and a probe that throws is no evidence at all. Neither is
+// grounds to fall back to every launchable client on $PATH, so a launch is
+// only ever made on a positive answer.
+// @ref LLP 0198#path-probe [tests]: only an attached client is started, whichever way the probe answers
 
 function makeBuf() {
   /** @type {string[]} */
@@ -75,16 +76,38 @@ test('askableClients returns an empty list when the probe succeeds with nothing 
   assert.deepEqual(clients, [], 'a successful zero-attached probe must not fall through to the unfiltered list')
 })
 
-test('askableClients falls back to launchable clients only when the probe throws', async () => {
+test('askableClients starts nothing when the probe throws, rather than falling open to every launchable client', async () => {
+  const { ctx, stderr } = makeCtx()
+  const clients = await askableClients(ctx, {
+    collectStatus: async () => { throw new Error('settings file unreadable') },
+  })
+  assert.deepEqual(clients, [], 'an unreadable probe is not evidence that any client is attached')
+  // The caller's no-launcher line says "no attached client can be started
+  // here", which this path has no evidence for, so the reason is printed
+  // where it is known and names something to run.
+  assert.match(stderr.text(), /could not read which clients are attached: settings file unreadable/)
+  assert.match(stderr.text(), /hyp status/)
+})
+
+test('a thrown probe leaves no launcher, so both callers refuse instead of starting an unattached client', async () => {
   const { ctx } = makeCtx()
   const clients = await askableClients(ctx, {
     collectStatus: async () => { throw new Error('settings file unreadable') },
   })
-  // The fallback is the real bundled-plugin launchable set (claude, codex,
-  // and opencode carry a `launch` block; claude-desktop and openclaw do not), so
-  // this also pins that the fallback is non-empty and never invents a
-  // client the catalog does not know about.
-  assert.deepEqual([...clients].sort(), ['claude', 'codex', 'opencode'])
+  // Every launch binary resolves, so nothing but the empty client list can
+  // hold a launcher back: the fall-through used to hand `resolveLaunchers`
+  // the whole launchable set (claude, codex and opencode carry a `launch`
+  // block; claude-desktop and openclaw do not) and a client started. This is
+  // the seam `hyp ask` and `hyp report fix` both go through, so an empty
+  // result is the refusal in both.
+  const descriptors = await buildWalkthroughClientDescriptorMap()
+  const launchers = await resolveLaunchers({
+    clients,
+    descriptors,
+    env: {},
+    resolve: async () => '/usr/local/bin/stub',
+  })
+  assert.deepEqual(launchers, [], 'nothing is launchable when nothing was shown to be attached')
 })
 
 /* ---------------------------- exit-code contract ---------------------------- */
