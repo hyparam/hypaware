@@ -20,7 +20,7 @@ choices are locked; local additions remain yours to configure.
 | Client | Capture behavior |
 | --- | --- |
 | Claude Code (`claude`) | OTEL events and transient raw bodies, plus transcript recovery. Requires Claude Code 2.1.193 or newer; 2.1.214 adds full tool-decision detail. |
-| Codex (`codex`) | Gateway capture and local session-history import, covering CLI and Desktop. |
+| Codex (`codex`) | Scheduled import of the shared local session rollouts, covering CLI and Desktop. Gateway capture is an explicit `capture_mode` opt-in. |
 | OpenCode (`opencode`) | Managed global JavaScript plugin and bounded `opencode export` recovery for CLI and Desktop. |
 | Claude Desktop (`claude-desktop`) | Scheduled transcript import by default. Also enables the shared Claude integration. |
 | OpenClaw (`openclaw`) | Gateway routing plus a scheduled transcript recovery lane. |
@@ -48,8 +48,11 @@ then check `hyp query overview` or search for a distinctive phrase with
 
 Claude Code attach writes managed environment settings in
 `~/.claude/settings.json`; it uses telemetry and does not change the API base
-URL. Codex attach manages a provider entry in `~/.codex/config.toml`.
-OpenCode attach writes a managed global plugin file.
+URL. Codex attach removes any HypAware-managed provider entry from
+`~/.codex/config.toml`, so inference stays direct; the plugin's
+`capture_mode: "gateway"` makes attach write one instead. Restart running
+Codex clients after either change. OpenCode attach writes a managed global
+plugin file.
 
 Claude Desktop's default transcript path does not require account sign-in or
 managed inference preferences. Its shared Claude integration can also import

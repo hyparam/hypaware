@@ -112,6 +112,20 @@ test('the Codex app-container unsupported_location says what IS still captured',
     )
     assert.ok(logged, 'the Codex app container is logged as well as evented')
     assert.equal(logged?.fields?.covered_by, 'codex_sessions_rollout')
+
+    // Gateway mode runs the live route as well, so the token names both.
+    // The event states which routes DO capture the container, and that is
+    // capture-mode dependent: a fixed token would lie in one of the modes.
+    // @ref LLP 0141#unsupported-boundary [tests]: covered_by names every route that covers it
+    const gatewayEvents = await collectEvents(
+      createCodexBackfillProvider({ homeDir, config: { capture_mode: 'gateway' } }).run(runContext().ctx)
+    )
+    assert.equal(
+      gatewayEvents.find(
+        (e) => e.event === 'unsupported_location' && e.attributes?.location_kind === 'codex_desktop_app'
+      )?.attributes?.covered_by,
+      'gateway_live,codex_sessions_rollout'
+    )
   } finally {
     await fs.rm(homeDir, { recursive: true, force: true })
   }

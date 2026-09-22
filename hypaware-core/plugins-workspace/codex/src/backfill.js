@@ -109,7 +109,8 @@ export function createCodexBackfillProvider(opts) {
   const pluginName = opts.pluginName ?? DEFAULT_PLUGIN_NAME
   const codexHome = opts.codexHome ?? defaultCodexHome(opts.homeDir)
   const sessionsDir = opts.sessionsDir ?? path.join(codexHome, 'sessions')
-  const unsupportedLocations = opts.unsupportedLocations ?? defaultUnsupportedLocations(opts.homeDir)
+  const unsupportedLocations = opts.unsupportedLocations
+    ?? defaultUnsupportedLocations(opts.homeDir, opts.config?.capture_mode === 'gateway')
   const config = opts.config
   const backfill = isPlainObject(config?.backfill) ? config.backfill : {}
   /** @type {Map<string, { ino: number, size: number, mtimeMs: number }>} */
@@ -157,17 +158,19 @@ export function defaultCodexHome(homeDir) {
  * Which routes still capture Codex Desktop when HypAware declines to parse
  * the Codex Desktop app container. Named on the event itself because the
  * flag is otherwise read as a verdict on the client rather than on one
- * directory: Codex Desktop routes through the same gateway as the CLI and
- * writes the same rollout tree, so nothing is actually lost by leaving the
- * container alone.
+ * directory: Codex Desktop writes the same rollout tree as the CLI (and, in
+ * gateway mode, routes through the same gateway), so nothing is actually
+ * lost by leaving the container alone.
  *
- * Two short tokens, not prose, so the attribute stays queryable like every
+ * Short tokens, not prose, so the attribute stays queryable like every
  * other attribute on the event. The explanation lives where prose belongs:
  * LLP 0141 `#unsupported-boundary` and the README.
  *
  * @ref LLP 0141#unsupported-boundary [implements]: the boundary is one opaque directory, not a client, and the event has to say so
+ * @ref LLP 0429#content [constrained-by]: the default runs one route, so the token names one; `gateway_live` returns with gateway mode
  */
 const CODEX_DESKTOP_COVERED_BY = 'codex_sessions_rollout'
+const CODEX_DESKTOP_COVERED_BY_GATEWAY = `gateway_live,${CODEX_DESKTOP_COVERED_BY}`
 
 /**
  * Codex/ChatGPT app + browser storage we DETECT but never parse in V1.
@@ -181,16 +184,17 @@ const CODEX_DESKTOP_COVERED_BY = 'codex_sessions_rollout'
  * app's does not, and its flag stays bare on purpose.
  *
  * @param {string} homeDir
+ * @param {boolean} [gatewayCapture]  Gateway mode runs the live route too, so the token names it.
  * @returns {Array<{ kind: string, path: string, coveredBy?: string }>}
  */
-function defaultUnsupportedLocations(homeDir) {
+function defaultUnsupportedLocations(homeDir, gatewayCapture = false) {
   return [
     { kind: 'chatgpt_desktop_app', path: path.join(homeDir, 'Library', 'Application Support', 'ChatGPT') },
     { kind: 'chatgpt_desktop_app', path: path.join(homeDir, '.config', 'ChatGPT') },
     {
       kind: 'codex_desktop_app',
       path: path.join(homeDir, 'Library', 'Application Support', 'Codex'),
-      coveredBy: CODEX_DESKTOP_COVERED_BY,
+      coveredBy: gatewayCapture ? CODEX_DESKTOP_COVERED_BY_GATEWAY : CODEX_DESKTOP_COVERED_BY,
     },
   ]
 }

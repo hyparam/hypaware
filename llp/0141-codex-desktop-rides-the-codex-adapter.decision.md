@@ -92,6 +92,12 @@ from `~/.codex/sessions`. The `unsupported_location` event therefore carries
 a `covered_by` attribute naming both routes, so the flag cannot be read as
 "Codex Desktop is unsupported".
 
+> **Extended-by:** [LLP 0429](./0429-codex-capture-leaves-inference.spec.md).
+> Under the default capture mode the rollout route is the only one that runs,
+> so `covered_by` names `codex_sessions_rollout` alone. The boundary decision
+> is unchanged: the token still names every route that does cover the
+> container. `gateway_live` returns with `capture_mode: "gateway"`.
+
 ## Consequences
 
 - The picker gains no new row. Codex Desktop is not a separate pick, because

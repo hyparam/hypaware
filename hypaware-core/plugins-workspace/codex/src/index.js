@@ -196,25 +196,41 @@ export async function activate(ctx) {
 
       // @ref LLP 0429#default [implements]: capture reads rollouts; attach only releases the old managed inference route
       if (!gatewayCapture) {
-        const result = attachCtx.dryRun ? { changed: false } : await detach({ configPath })
-        if ('warning' in result && result.warning) attachCtx.stderr?.write(result.warning + '\n')
-        logger.info('client.attach.write', {
-          hyp_plugin: PLUGIN_NAME, hyp_client: CLIENT_NAME,
-          config_path: configPath, mode: 'transcript', changed: result.changed,
-        })
-        if (attachCtx.json) {
-          attachCtx.stdout.write(JSON.stringify({
-            status: 'ok', action: 'attach', client: CLIENT_NAME,
-            mode: 'transcript', settings_path: configPath,
-            dry_run: attachCtx.dryRun === true, changed: result.changed,
-          }) + '\n')
-        } else {
-          attachCtx.stdout.write(attachCtx.dryRun
-            ? '(dry-run) Would enable Codex CLI and Desktop rollout capture and remove the managed gateway route.\n'
-            : 'Codex CLI and Desktop capture uses local rollout files; inference connects directly to your provider.\n')
-          attachCtx.stdout.write('  Full tool definitions are unavailable. Restart existing Codex clients after changing capture mode.\n')
-        }
-        return
+        return withSpan(
+          'client.attach',
+          {
+            [Attr.PLUGIN]: PLUGIN_NAME,
+            [Attr.OPERATION]: 'client.attach',
+            client_name: CLIENT_NAME,
+            hyp_client: CLIENT_NAME,
+            dry_run: attachCtx.dryRun === true,
+          },
+          async (span) => {
+            const result = attachCtx.dryRun ? { changed: false } : await detach({ configPath })
+            if ('warning' in result && result.warning) attachCtx.stderr?.write(result.warning + '\n')
+            span.setAttribute('status', 'ok')
+            span.setAttribute('restored', result.changed === true)
+            logger.info('client.attach.write', {
+              hyp_plugin: PLUGIN_NAME, hyp_client: CLIENT_NAME,
+              config_path: configPath, mode: 'transcript', changed: result.changed,
+            })
+            if (attachCtx.json) {
+              attachCtx.stdout.write(JSON.stringify({
+                status: 'ok', action: 'attach', client: CLIENT_NAME,
+                mode: 'transcript', settings_path: configPath,
+                dry_run: attachCtx.dryRun === true, changed: result.changed,
+              }) + '\n')
+              return
+            }
+            // Transcript attach still reads and edits config.toml, so say
+            // which file: a dry-run that names no path cannot be inspected.
+            attachCtx.stdout.write(attachCtx.dryRun
+              ? `(dry-run) Would attach Codex via ${configPath}\n  Would capture Codex CLI and Desktop from their local rollout files and remove the managed gateway route.\n`
+              : `✓ Codex attached (${configPath})\n  Codex CLI and Desktop capture uses local rollout files; inference connects directly to your provider.\n`)
+            attachCtx.stdout.write('  Full tool definitions are unavailable. Restart existing Codex clients after changing capture mode.\n')
+          },
+          { component: 'plugin.codex' }
+        )
       }
 
       return withSpan(

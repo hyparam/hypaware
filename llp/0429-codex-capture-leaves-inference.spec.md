@@ -47,6 +47,11 @@ items. Leave `tools` absent; partial dynamic definitions cannot honestly stand
 in for the full submitted catalogue. Exact per-request context after compaction
 is not claimed.
 
+The Codex app container stays an unsupported location, and its
+`unsupported_location` event keeps naming every route that does cover it
+(LLP 0141 #unsupported-boundary). Under this default that is
+`codex_sessions_rollout` alone; `gateway_live` returns with gateway mode.
+
 For modern files carrying task lifecycle events, a scheduled import stops at
 the latest usage, completion or abort boundary. This avoids permanently
 committing an assistant row before its delayed token usage arrives. A crashed
