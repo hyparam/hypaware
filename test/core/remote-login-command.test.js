@@ -1160,7 +1160,7 @@ test('a missing target name resolves the default (built-in) target; a value flag
   const code = await runRemoteLogin(['--org', 'acme'], ctx, { login })
   assert.equal(code, 0)
   assert.ok(seen)
-  assert.match(seen.identityBase, /hypaware\.hyperparam\.app/)
+  assert.match(seen.identityBase, /api\.hypaware\.ai/)
   assert.equal(seen.org, 'acme')
   assert.match(out.join(''), /logged in to 'hyperparam' as org 'acme'/)
 })

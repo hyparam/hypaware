@@ -88,9 +88,9 @@ function lastMcpUrl(urls) {
 
 test('deriveMcpEndpoint: derive-from-base and back-compat forms', () => {
   // A base URL gets /v1/mcp appended.
-  assert.equal(deriveMcpEndpoint('https://hypaware.hyperparam.app'), 'https://hypaware.hyperparam.app/v1/mcp')
+  assert.equal(deriveMcpEndpoint('https://api.hypaware.ai'), 'https://api.hypaware.ai/v1/mcp')
   // A trailing slash on the base is normalized (no double slash).
-  assert.equal(deriveMcpEndpoint('https://hypaware.hyperparam.app/'), 'https://hypaware.hyperparam.app/v1/mcp')
+  assert.equal(deriveMcpEndpoint('https://api.hypaware.ai/'), 'https://api.hypaware.ai/v1/mcp')
   // A base with a port.
   assert.equal(deriveMcpEndpoint('https://host:8740'), 'https://host:8740/v1/mcp')
   // A base carrying a path prefix keeps the prefix.
@@ -302,7 +302,7 @@ test('the stdio proxy resolves the built-in target the verb path already accepts
   const { ctx } = verbCtx(hypHome, 'https://hyp.internal')
   ctx.stdin = Readable.from([JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n'])
   assert.equal(await runMcp(['--remote', 'hyperparam', '--org', '*'], ctx), 0)
-  assert.deepEqual(urls, ['https://hypaware.hyperparam.app/v1/mcp?org=*'])
+  assert.deepEqual(urls, ['https://api.hypaware.ai/v1/mcp?org=*'])
 })
 
 test('an empty org value is named as such even with no --remote', async () => {

@@ -268,7 +268,7 @@ test('a signed-in built-in remote is included without adding it to config', asyn
   t.after(() => { globalThis.fetch = oldFetch })
   let calls = 0
   globalThis.fetch = async url => {
-    assert.equal(String(url), 'https://hypaware.hyperparam.app/v1/sessions/purge')
+    assert.equal(String(url), 'https://api.hypaware.ai/v1/sessions/purge')
     calls++
     return Response.json({ status: 'completed', session_id: 'delete' })
   }

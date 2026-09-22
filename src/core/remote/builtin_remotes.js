@@ -16,7 +16,7 @@
  * @type {Record<string, QueryRemoteTarget>}
  */
 export const BUILTIN_REMOTES = {
-  hyperparam: { url: 'https://hypaware.hyperparam.app' },
+  hyperparam: { url: 'https://api.hypaware.ai' },
 }
 
 /**
