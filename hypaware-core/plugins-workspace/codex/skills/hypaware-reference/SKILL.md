@@ -91,9 +91,12 @@ curated HypAware registry.
   `hyp session status` reports which it is right now. Each resolves the
   session id itself (Claude and Codex) and fails closed rather than guessing.
   The opt-out survives restarts until explicitly unignored and is honored by
-  transcript backfill. Forks (`claude --fork-session`, `codex fork`) need a new
-  exclusion. Ignoring does not purge prior records; unignoring permits older
-  transcript content to be imported again.
+  transcript backfill. A Claude fork (`claude --fork-session`, `/branch`) is
+  closed automatically: the managed hook recognises the copied transcript and
+  ignores the new session id before its first exchange, and a fork of a fork
+  too. A Codex fork (`codex fork`) still needs a new exclusion. `hyp session
+  ignore` says which of the two it established. Ignoring does not purge prior
+  records; unignoring permits older transcript content to be imported again.
   The managed Claude SessionStart hook exports the ID to Bash commands in
   attached local Desktop Code sessions. Start or resume after upgrading so it
   runs. If `CLAUDE_CODE_SESSION_ID` is absent, use an explicitly verified Claude
