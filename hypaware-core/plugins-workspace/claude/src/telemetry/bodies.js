@@ -62,11 +62,18 @@ const removing = new Set()
  * `readFile` sees ENOENT for a file that was never legitimately missing, so
  * it counts as `missing` instead of `unparseable`, and `removing` (which
  * only arbitrates the *delete*) cannot catch it because by then the delete
- * has already settled. Sharing the read itself closes the race instead of
- * narrowing its window: every overlapping caller gets the exact same bytes
- * or the exact same rejection, decided once, before `removing` ever needs to
- * arbitrate anything. Entries leave the map once the read settles, so it
- * never outgrows the reads in flight.
+ * has already settled. Sharing the read removes that second `readFile`
+ * outright for every caller that overlaps the first: they all get the exact
+ * same bytes or the exact same rejection, decided once, before `removing`
+ * ever needs to arbitrate anything.
+ *
+ * What it does not do is make the whole path race-free. An entry is dropped
+ * as soon as its read settles, which is before the first caller's `unlink`
+ * is even issued, so a caller that arrives inside that gap finds no entry,
+ * reads for itself, and can still see ENOENT and count `missing`. That
+ * caller never overlapped the read, and the gap it has to land in is the
+ * `unlink`'s own duration rather than the whole read's. Entries leave the
+ * map once the read settles, so it never outgrows the reads in flight.
  * @type {Map<string, Promise<Buffer>>}
  */
 const reading = new Map()
