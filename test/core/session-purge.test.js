@@ -12,6 +12,9 @@ import { createSessionPurgeStore, sessionGraphNodeId } from '../../src/core/cach
 import { runPurge } from '../../src/core/commands/purge.js'
 import { appendRowsToTable, deleteMatchingRows, listLiveDataFiles, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { cacheCleanupId } from '../../src/core/cache/purge-cleanup.js'
+import { discoverCachePartitions, PARTITION_MUTATION_BUSY_ERROR_KIND } from '../../src/core/cache/partition.js'
+import { Attr } from '../../src/core/observability/attrs.js'
+import { withLogRecords } from '../helpers/log_records.js'
 
 /** @import { ColumnSpec, CommandRunContext } from '../../hypaware-plugin-kernel-types.js' */
 /** @type {ColumnSpec[]} */
@@ -482,4 +485,64 @@ test('a busy partition mutation guard skips that partition and still purges the 
   assert.match(receipt.partitionsSkipped[0].error, /mutation busy/)
   assert.equal(receipt.local.status, 'incomplete')
   assert.match(error(), /1 cache partition could not be purged/)
+})
+
+// Until hyparam/hypaware#2044 the skip list lived only in `purgeCache`'s
+// return value, so a non-busy throw discarded it and every operator channel
+// then reported zero partitions skipped over a run that skipped one.
+test('a non-busy failure after a busy skip still names the skipped partition', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-busy-then-error-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { storage, ctx, output, error } = fixture(root)
+  for (const source of ['a', 'b', 'c']) {
+    await storage.appendRowsToPartition('events', [`source=${source}`], columns, [
+      { session_id: 'delete', body: `secret ${source}` }, { session_id: 'keep', body: `neighbor ${source}` },
+    ])
+  }
+  await storage.flushAll({ force: true })
+
+  // Read the order the purge itself will walk, so the busy skip is recorded
+  // before the aborting failure whatever order the filesystem lists in.
+  const partitions = (await discoverCachePartitions(storage.cacheRoot)).map(part => part.path)
+  assert.equal(partitions.length, 3)
+  const busy = partitions[0]
+  const corrupt = partitions[partitions.length - 1]
+
+  // A live owner this process did not claim: the guard refuses on sight.
+  const lock = path.join(path.dirname(busy), `.${path.basename(busy)}.mutation-lock`)
+  await fs.mkdir(lock, { recursive: true, mode: 0o700 })
+  await fs.writeFile(path.join(lock, `${process.pid}-${randomUUID()}`), '')
+  t.after(() => fs.rm(lock, { recursive: true, force: true }))
+  // A published generation with no table metadata: not a busy guard, so it
+  // aborts the run.
+  const metadata = path.join(resolveIcebergDir(corrupt), 'metadata')
+  for (const name of await fs.readdir(metadata)) {
+    if (name.endsWith('.metadata.json')) await fs.rm(path.join(metadata, name))
+  }
+
+  const { result, records } = await withLogRecords(() => runPurge(['--session', 'delete', '--yes', '--json'], ctx))
+  assert.equal(result, 1, 'a failed purge still exits 1')
+  assert.match(error(), /purge failed: Purge found a published generation without table metadata/)
+  assert.match(error(), /1 cache partition could not be purged/)
+  assert.ok(error().includes(busy), 'the busy-skipped partition is named on stderr')
+
+  const receipt = JSON.parse(output())
+  assert.deepEqual(receipt.partitionsSkipped.map((/** @type {any} */ entry) => entry.partition), [busy])
+  assert.match(receipt.partitionsSkipped[0].error, /mutation busy/)
+  assert.equal(receipt.rowsDeleted, null, 'an aborted run reports no row total')
+  assert.equal(receipt.local.status, 'incomplete')
+  assert.match(receipt.local.error, /published generation without table metadata/)
+
+  const purgeResult = records.filter((/** @type {any} */ record) => record.body === 'purge.result')
+  assert.equal(purgeResult.length, 1)
+  assert.equal(purgeResult[0].attributes.partitions_skipped, 1)
+  // `incomplete` is off the fixed status set, so the attribute contract
+  // normalizes it (LLP 0021 #the-attribute-contract).
+  assert.equal(purgeResult[0].attributes.status, 'failed')
+  const skipWarn = records.filter((/** @type {any} */ record) => record.body === 'purge.partition_skipped')
+  assert.equal(skipWarn.length, 1)
+  assert.equal(skipWarn[0].attributes[Attr.ERROR_KIND], PARTITION_MUTATION_BUSY_ERROR_KIND)
+  for (const record of records) {
+    assert.ok(!JSON.stringify(record.attributes).includes(root), 'telemetry carries no local filesystem path')
+  }
 })

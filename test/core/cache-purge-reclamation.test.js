@@ -17,33 +17,11 @@ import { appendRowsToTable, deleteMatchingRows, scanRowsFromTable } from '../../
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 import { isPartitionMutationBusy, writeCursor, withPartitionMutationLock } from '../../src/core/cache/partition.js'
 import { createRetentionEnforcer } from '../../src/core/cache/retention.js'
-import { LoggerProvider, logs } from '../../src/core/observability/runtime.js'
+import { withLogRecords } from '../helpers/log_records.js'
 
 /** @import { ColumnSpec } from '../../hypaware-plugin-kernel-types.js' */
 /** @import { CachePurgeCleanupJob } from '../../src/core/cache/types.js' */
 
-/**
- * Collect the log records emitted while `fn` runs, alongside its return
- * value, then put the global logger provider slot back.
- *
- * @param {() => Promise<any>} fn
- * @returns {Promise<{ result: any, records: any[] }>}
- */
-async function withLogRecords(fn) {
-  /** @type {any[]} */
-  const records = []
-  const provider = new LoggerProvider({
-    resource: { attributes: { service_name: 'hypaware-test' } },
-    exporters: [{ exportBatch: (/** @type {any[]} */ batch) => { records.push(...batch) } }],
-  })
-  logs.setGlobalLoggerProvider(provider)
-  try {
-    const result = await fn()
-    return { result, records }
-  } finally {
-    await provider.shutdown()
-  }
-}
 const columns = /** @type {ColumnSpec[]} */ (['session_id', 'org', 'body'].map(name => ({ name, type: 'STRING', nullable: true })))
 /** @param {string} dir */
 async function rows(dir) {
