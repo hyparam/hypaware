@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { cacheCleanupId, readCacheCleanup, finishCacheCleanup, CACHE_PURGE_GRACE_MS, isUncommittedCacheGeneration } from './purge-cleanup.js'
+import { cacheCleanupId, readCacheCleanup, finishCacheCleanup, sweepEvictedCacheCleanups, CACHE_PURGE_GRACE_MS, isUncommittedCacheGeneration } from './purge-cleanup.js'
 
 import { parquetReadObjects } from 'hyparquet'
 import {
@@ -325,6 +325,9 @@ export async function maintainCache(opts) {
 
   if (!opts.dryRun) {
     await cleanRetiredEpochs(opts.cacheRoot)
+    // Walking `datasets/` cannot reach a journal whose partition retention
+    // removed, so the journal store is enumerated directly once a tick.
+    await sweepEvictedCacheCleanups(opts.cacheRoot)
   }
 
   return {
