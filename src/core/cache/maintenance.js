@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { cacheCleanupId, readCacheCleanup, CACHE_PURGE_GRACE_MS, isUncommittedCacheGeneration } from './purge-cleanup.js'
+import { cacheCleanupId, readCacheCleanup, finishCacheCleanup, CACHE_PURGE_GRACE_MS, isUncommittedCacheGeneration } from './purge-cleanup.js'
 
 import { parquetReadObjects } from 'hyparquet'
 import {
@@ -2746,6 +2746,17 @@ async function walkForRetired(dir, cacheRoot) {
     } else {
       await walkForRetired(full, cacheRoot)
     }
+  }
+
+  // A journal none of whose generations are still here is finished work, so
+  // `.purge-cleanup` tracks outstanding cleanups rather than every partition
+  // ever purged. The gate reads the listing already in hand: an unfinished
+  // journal costs no extra syscall, and because that listing predates this
+  // pass's removals, the tick that reclaims the last generation still leaves
+  // the journal for a status check to certify against.
+  if (cleanup && !entries.some(entry => cleanup.generations.includes(entry.name))) {
+    try { await withPartitionMutationLock(dir, () => finishCacheCleanup(cacheRoot, cacheCleanupId(cacheRoot, dir))) }
+    catch { /* A busy partition or a failed unlink retries on the next tick. */ }
   }
 }
 

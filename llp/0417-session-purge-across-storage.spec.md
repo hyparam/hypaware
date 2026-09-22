@@ -225,6 +225,16 @@ are not protected. Missing/corrupt cursors, invalid journals, unreadable
 metadata, explicit branch/tag pins and statistics sidefiles block reclamation;
 later maintenance retries. No fixed completion deadline is promised.
 
+A journal none of whose named generations remain is finished work, and a
+later sweep removes it under the partition mutation lock, so the journal
+directory stays proportional to outstanding cleanups rather than to the
+number of partitions ever purged. The sweep that reclaims the last named
+generation still leaves the journal behind, so a status check taken right
+after it certifies completion. An invalid journal blocks reclamation but not
+admission: the next purge of that partition rebuilds the journal from the
+partition's own generations, restarting its grace, rather than failing every
+later purge of it.
+
 Status verifies each named generation is absent before reporting completion.
 It certifies those cache generations, not all session copies. Historical-only
 copies in partitions with no matching live rows in any managed generation,

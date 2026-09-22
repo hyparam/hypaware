@@ -12,7 +12,7 @@ import { createQueryStorageService, resolveIcebergDir } from '../../src/core/cac
 import { createSessionPurgeStore } from '../../src/core/cache/session-purges.js'
 import { purgeCache } from '../../src/core/cache/purge.js'
 import { maintainCache } from '../../src/core/cache/maintenance.js'
-import { cachePurgeCleanupStatus, CACHE_PURGE_GRACE_MS, queueCacheCleanup, readCacheCleanup } from '../../src/core/cache/purge-cleanup.js'
+import { cacheCleanupId, cachePurgeCleanupStatus, CACHE_PURGE_GRACE_MS, queueCacheCleanup, readCacheCleanup } from '../../src/core/cache/purge-cleanup.js'
 import { appendRowsToTable, deleteMatchingRows, scanRowsFromTable } from '../../src/core/cache/iceberg/store.js'
 import { createLocalIcebergIO, tableUrlForDir } from '../../src/core/cache/iceberg/resolver.js'
 import { writeCursor, withPartitionMutationLock } from '../../src/core/cache/partition.js'
@@ -406,4 +406,73 @@ test('a published generation that lost its .retired marker gets one now and is r
   await maintainCache({ cacheRoot })
   await assert.rejects(fs.stat(original), { code: 'ENOENT' })
   assert.equal((await cachePurgeCleanupStatus(cacheRoot, id)).status, 'completed')
+})
+
+test('a cleanup journal is removed once every generation it named is reclaimed', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-journal-removal-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [
+    { session_id: 'target', org: 'a', body: 'synthetic sensitive' },
+    { session_id: 'keep', org: 'a', body: 'neighbor' },
+  ])
+  await storage.flushTable(partition, { force: true })
+  const original = resolveIcebergDir(partition)
+  const purged = await purgeCache({ cacheRoot, target: { kind: 'session', id: 'target', org: 'a' } })
+  const id = /** @type {string} */ (purged.cacheCleanup?.[0])
+  const journal = path.join(cacheRoot, '.purge-cleanup', `${id}.json`)
+  await maintainCache({ cacheRoot })
+  await fs.stat(journal)
+  await age(cacheRoot, id, [original])
+  await maintainCache({ cacheRoot })
+  await assert.rejects(fs.stat(original), { code: 'ENOENT' })
+  // The reclaiming tick still leaves the journal, so a status check right
+  // after it certifies completion against the generations it named.
+  assert.equal((await cachePurgeCleanupStatus(cacheRoot, id)).status, 'completed')
+  await maintainCache({ cacheRoot })
+  await assert.rejects(fs.stat(journal), { code: 'ENOENT' }, 'a finished journal does not outlive its work')
+  // A later purge of the same partition re-admits from scratch.
+  const second = await purgeCache({ cacheRoot, target: { kind: 'session', id: 'keep', org: 'a' } })
+  assert.deepEqual(second.cacheCleanup, [id])
+  await fs.stat(journal)
+  assert.equal((await cachePurgeCleanupStatus(cacheRoot, id)).stage, 'rewrite')
+})
+
+test('a corrupt cleanup journal is re-admitted by the next purge instead of failing it forever', async t => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'purge-journal-corrupt-'))
+  t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }))
+  const storage = createQueryStorageService({ cacheRoot })
+  const partition = storage.cacheTablePath('events', ['source=unknown'])
+  await storage.appendRows(partition, columns, [
+    { session_id: 'target', org: 'a', body: 'synthetic sensitive' },
+    { session_id: 'second', org: 'a', body: 'also sensitive' },
+    { session_id: 'keep', org: 'a', body: 'neighbor' },
+  ])
+  await storage.flushTable(partition, { force: true })
+  const original = resolveIcebergDir(partition)
+  const id = cacheCleanupId(cacheRoot, partition)
+  const journal = path.join(cacheRoot, '.purge-cleanup', `${id}.json`)
+  await fs.mkdir(path.dirname(journal), { recursive: true })
+  // A crash mid-write leaves a truncated journal; a hand edit leaves one that
+  // parses but fails the shape check. Neither may strand this partition.
+  for (const [session, content] of [
+    ['target', '{"version":1,"partition":"datasets/eve'],
+    ['second', JSON.stringify({ version: 1, partition: 'datasets/elsewhere', generations: [], requestedAt: -1 })],
+  ]) {
+    await fs.writeFile(journal, content)
+    const purged = await purgeCache({ cacheRoot, target: { kind: 'session', id: session, org: 'a' } })
+    assert.equal(purged.rowsDeleted, 1, 'the purge still deletes the matching row')
+    assert.deepEqual(purged.cacheCleanup, [id], 'the purge re-admits the partition it could not read')
+    const job = await readCacheCleanup(cacheRoot, id)
+    assert.ok(job)
+    assert(job.generations.includes(path.basename(original)), 'the journal is rebuilt from the partition\'s own generations')
+    assert(job.requestedAt > 0 && job.requestedAt <= Date.now())
+  }
+  assert.deepEqual((await rows(original)).map(row => row.session_id), ['keep'])
+  await maintainCache({ cacheRoot })
+  assert.deepEqual((await rows(resolveIcebergDir(partition))).map(row => row.session_id), ['keep'])
+  await age(cacheRoot, id, [original])
+  await maintainCache({ cacheRoot })
+  await assert.rejects(fs.stat(original), { code: 'ENOENT' }, 'the recovered journal reclaims like any other')
 })

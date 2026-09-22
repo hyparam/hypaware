@@ -54,7 +54,11 @@ export async function readCacheCleanup(cacheRoot, id) {
  */
 export async function queueCacheCleanup(cacheRoot, partitionDir) {
   const id = cacheCleanupId(cacheRoot, partitionDir)
-  const existing = await readCacheCleanup(cacheRoot, id)
+  // An unreadable journal (a crash mid-write, a hand edit) must not make every
+  // later purge of this partition throw at admission. The write below rebuilds
+  // it from the partition's own generations, which supersedes whatever could
+  // not be read, at the cost of restarting the grace.
+  const existing = await readCacheCleanup(cacheRoot, id).catch(() => null)
   const generations = new Set()
   for (const entry of await fs.readdir(partitionDir, { withFileTypes: true })) {
     if (!generationName.test(entry.name)) continue
@@ -79,6 +83,34 @@ export async function queueCacheCleanup(cacheRoot, partitionDir) {
   return id
 }
 
+/** @param {string} partition @param {string[]} generations */
+async function remainingGenerations(partition, generations) {
+  let remaining = 0
+  for (const name of generations) {
+    try {
+      await fs.lstat(path.join(partition, name))
+      remaining++
+    } catch (error) {
+      if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error
+    }
+  }
+  return remaining
+}
+
+/**
+ * Drop a journal whose admitted generations are all reclaimed. The re-read
+ * runs under the caller's partition mutation lock, so a purge that admitted
+ * concurrently keeps its admission; anything unreadable or still present
+ * retains the journal for a later tick.
+ * @param {string} cacheRoot @param {string} id
+ */
+export async function finishCacheCleanup(cacheRoot, id) {
+  const job = await readCacheCleanup(cacheRoot, id).catch(() => null)
+  if (!job) return
+  if (await remainingGenerations(path.join(cacheRoot, job.partition), job.generations)) return
+  await fs.rm(journalPath(cacheRoot, id), { force: true })
+}
+
 /**
  * Status verifies directory absence rather than inferring it from a cursor
  * swap. No content or filesystem paths leave this public status surface.
@@ -90,15 +122,7 @@ export async function cachePurgeCleanupStatus(cacheRoot, id) {
   const partition = path.join(cacheRoot, job.partition)
   const cursor = tryReadCursorSync(partition)
   const current = cursor?.tableDir ?? (cursor?.layout === 'source-table' ? 'table' : `epoch=${cursor?.epoch}`)
-  let remaining = 0
-  for (const name of job.generations) {
-    try {
-      await fs.lstat(path.join(partition, name))
-      remaining++
-    } catch (error) {
-      if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error
-    }
-  }
+  const remaining = await remainingGenerations(partition, job.generations)
   return { job_id: id, scope: 'cache_generations', status: remaining ? 'pending' : 'completed',
     stage: remaining ? (job.generations.includes(current) ? 'rewrite' : 'reclaim') : 'done', generations_remaining: remaining }
 }
