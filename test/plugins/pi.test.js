@@ -765,10 +765,24 @@ test('Pi recovery reloads session exclusions on a bounded schedule, not once per
         t.mock.timers.tick(SESSION_IGNORE_REFRESH_MS)
       }
     }
+    assert.ok(SESSION_IGNORE_REFRESH_MS <= 1000, 'the floor stays short enough for a mid-run opt-out to be prompt')
     assert.equal(seen.filter(item => item.value.session_id === 'session-a').length, 1,
       'the flush after the window sees the new marker and stops the session')
     assert.ok(seen.filter(item => item.value.session_id === 'session-b').length >= 4, 'unexcluded sessions still import')
     assert.equal(ignored.loads, 2, 'one run-start reload plus the one the elapsed window earned')
+
+    // A backwards wall-clock step cannot prove the window, so the next flush
+    // reloads. Suppressing instead would hold the stale snapshot until real
+    // time caught up with the anchor, which is the fail-open direction.
+    ignored.loads = 0
+    const stepped = []
+    for await (const item of provider.run(/** @type {any} */ (ctx))) {
+      if (item.type === 'event') continue
+      stepped.push(item)
+      if (stepped.length === 1) t.mock.timers.setTime(1_000)
+    }
+    assert.ok(stepped.length >= 4, `unexcluded sessions still import across the step, saw ${stepped.length}`)
+    assert.equal(ignored.loads, 2, 'the step reloads rather than waiting out a window that cannot elapse')
   } finally {
     t.mock.timers.reset()
     await fs.rm(root, { recursive: true, force: true })
