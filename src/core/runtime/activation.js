@@ -547,6 +547,15 @@ const VERB_FIELDS = [
 ]
 
 /**
+ * The two of those a view copies rather than reads through. `inputSchema` is
+ * what the argv codec parses a command line by and what `tools/list`
+ * advertises; `aliases` is the name list a projection claims. Handed through
+ * by reference, a plugin that registered no verb could edit a core verb's
+ * declaration (issue #1985).
+ */
+const VERB_GUARDED_FIELDS = ['inputSchema', 'aliases']
+
+/**
  * A read-only view of a verb registration, for the members of `ctx.verbs` that
  * hand one to a plugin that did not register it.
  *
@@ -594,7 +603,7 @@ function narrowVerb(pluginName, verb) {
     async operation() { throw refuse('operation') },
     /** @returns {never} */
     render() { throw refuse('render') },
-  }))
+  }, VERB_GUARDED_FIELDS))
 }
 
 /**
@@ -1057,6 +1066,52 @@ const SINK_HANDLE_FIELDS = ['name', 'plugin', 'supports']
 const SINK_CONTRIBUTION_FIELDS = ['name', 'plugin', 'supports']
 
 /**
+ * The one field on either of those a view copies rather than reads through.
+ * On a kernel-built handle it is the resolved tag list the sink driver and
+ * `hyp status` read, so handing it over by reference would let a neighbour
+ * edit what they read.
+ */
+const SINK_GUARDED_FIELDS = ['supports']
+
+/**
+ * A frozen structural copy of one field's value, for the fields a view hands
+ * over whole rather than a character at a time.
+ *
+ * Plain objects and arrays are copied and frozen all the way down, because a
+ * shallow copy of an `inputSchema` still hands `properties` and `required`
+ * over by reference and those are the objects a write lands in. Anything else
+ * (a primitive, a function, a class instance) is passed through unchanged: a
+ * structural copy of it would not be the thing it is, and freezing the
+ * original would be a write into the registrant's own object.
+ *
+ * `seen` carries the copies made so far, so a schema pointing back at itself
+ * costs one pass rather than a stack overflow.
+ *
+ * @param {unknown} value
+ * @param {WeakMap<object, unknown>} seen
+ * @returns {unknown}
+ */
+function frozenCopy(value, seen) {
+  if (value === null || typeof value !== 'object') return value
+  const already = seen.get(value)
+  if (already !== undefined) return already
+  if (Array.isArray(value)) {
+    /** @type {unknown[]} */
+    const copy = []
+    seen.set(value, copy)
+    for (const entry of value) copy.push(frozenCopy(entry, seen))
+    return Object.freeze(copy)
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) return value
+  /** @type {Record<string, unknown>} */
+  const copy = {}
+  seen.set(value, copy)
+  for (const [key, entry] of Object.entries(value)) copy[key] = frozenCopy(entry, seen)
+  return Object.freeze(copy)
+}
+
+/**
  * A read-only view over a live object, answering only for `fields` (read
  * through to the original) plus whatever `extra` supplies of this module's
  * own. Shared by the two narrowings below, which differ only in their field
@@ -1066,20 +1121,26 @@ const SINK_CONTRIBUTION_FIELDS = ['name', 'plugin', 'supports']
  * gives: a copy runs every accessor at the moment it is made, which puts one
  * plugin's code inside another plugin's `list()` call.
  *
- * `supports` is the one field that is not a string. It is an array, and on a
- * kernel-built handle it is the resolved tag list the sink driver and
- * `hyp status` read, so handing it over by reference would let a neighbour
- * edit what they read. It is copied and frozen once per view rather than per
- * read: a kernel-built handle's tags are fixed at `instantiate`, so one copy
- * cannot go stale, and a plugin walking a listing allocates nothing per read.
+ * `guarded` names the fields where reading through *is* the write channel,
+ * which is every field answering with something other than a string: the
+ * caller cannot rebind the member, and nothing stops it editing the object the
+ * member answered with (issue #1985). Those answer with a frozen copy, made on
+ * the first read of the field and kept for the life of the view. Not per read,
+ * so a plugin walking a listing allocates nothing per read; not at narrowing
+ * time, so a `list()` that never reads the field runs no accessor of the
+ * registrant's at all and the one a read does run is inside the caller's own
+ * read. A copy goes stale if the registrant rewrites its own declaration
+ * afterwards, which is the trade `supports` already made: what a neighbour
+ * reads of someone else's declaration decides nothing the kernel runs.
  *
  * @param {string[]} fields
  * @param {Record<string, unknown>} source
  * @param {Record<string, unknown>} extra
+ * @param {string[]} [guarded]
  */
-function narrowView(fields, source, extra) {
-  /** @type {unknown} */
-  let tags
+function narrowView(fields, source, extra, guarded = []) {
+  /** @type {Record<string, unknown> | undefined} */
+  let copies
   /** @param {string | symbol} prop */
   const answers = (prop) =>
     typeof prop === 'string' && (prop in extra || (fields.includes(prop) && Reflect.has(source, prop)))
@@ -1089,12 +1150,10 @@ function narrowView(fields, source, extra) {
     if (key in extra) return extra[key]
     // The source as the receiver, so an accessor reading a private field off
     // `this` still finds it.
-    if (key !== 'supports') return Reflect.get(source, key, source)
-    if (tags === undefined) {
-      const value = Reflect.get(source, key, source)
-      tags = Object.freeze(Array.isArray(value) ? Array.from(value) : value)
-    }
-    return tags
+    if (!guarded.includes(key)) return Reflect.get(source, key, source)
+    if (copies === undefined) copies = /** @type {Record<string, unknown>} */ (Object.create(null))
+    if (!(key in copies)) copies[key] = frozenCopy(Reflect.get(source, key, source), new WeakMap())
+    return copies[key]
   }
   // A null-prototype target holding nothing, so the view answers out of the
   // traps alone and `Object.getPrototypeOf` reaches no class of the
@@ -1191,7 +1250,7 @@ function narrowSinkHandle(pluginName, handle) {
     flush: refuse('flush'),
     close: refuse('close'),
   })
-  return /** @type {SinkHandle} */ (narrowView(SINK_HANDLE_FIELDS, source, { sink }))
+  return /** @type {SinkHandle} */ (narrowView(SINK_HANDLE_FIELDS, source, { sink }, SINK_GUARDED_FIELDS))
 }
 
 /**
@@ -1225,7 +1284,7 @@ function narrowSinkContribution(pluginName, contribution) {
       `so '${pluginName}' cannot build a sink from a contribution it did not register`
     )
   }
-  return /** @type {SinkContribution} */ (narrowView(SINK_CONTRIBUTION_FIELDS, source, { create }))
+  return /** @type {SinkContribution} */ (narrowView(SINK_CONTRIBUTION_FIELDS, source, { create }, SINK_GUARDED_FIELDS))
 }
 
 /**
