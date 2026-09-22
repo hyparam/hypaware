@@ -540,3 +540,31 @@ test('Pi listener releases admission even while a slow upload keeps its socket a
     assert.equal(response.status, 400)
   } finally { clearInterval(interval); socket.destroy(); await source.stop() }
 })
+
+test('Pi live capture health surfaces a persistently version-skewed extension, not a stray probe', async () => {
+  const root = await temp()
+  const rows = []
+  const storage = { cacheTablePath: () => '/cache/pi', async discoverCachePartitions() { return [] }, async *readRows() {}, async *readSpooledRows() { yield* rows }, async appendRows(_p, _c, batch) { rows.push(...batch) } }
+  const source = await createStartPiSource({})(/** @type {any} */ ({ config: { listen_port: 0 }, storage, log: silent }))
+  try {
+    const port = (await source.status?.())?.details?.listen_port
+    const post = body => fetch(`http://127.0.0.1:${port}/entries`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+    const health = async () => /** @type {any} */ (await source.status?.())
+    const v1 = () => { const raw = copy(); raw.session.cwd = root; raw.version = 1; return JSON.stringify(raw) }
+
+    assert.equal((await post('not json at all')).status, 400)
+    assert.equal((await health()).lastError, undefined, 'a non-JSON probe does not trip capture health')
+    assert.equal((await post(v1())).status, 400)
+    assert.equal((await health()).lastError, undefined, 'a single malformed batch does not trip capture health')
+
+    for (let i = 0; i < 4; i++) assert.equal((await post(v1())).status, 400)
+    const skewed = await health()
+    assert.match(String(skewed.lastError), /version/i, 'consecutive version refusals surface in capture health')
+
+    const accepted = copy()
+    accepted.session.cwd = root
+    accepted.message_indices = [0, 1, 2, 3]
+    assert.equal((await post(JSON.stringify(accepted))).status, 200)
+    assert.equal((await health()).lastError, undefined, 'an accepted batch clears the skew report')
+  } finally { await source.stop(); await fs.rm(root, { recursive: true, force: true }) }
+})
