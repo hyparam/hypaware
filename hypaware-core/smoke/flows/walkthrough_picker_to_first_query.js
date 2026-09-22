@@ -492,7 +492,7 @@ export async function run({ harness, expect }) {
     // the manifests rather than a rerun of the code under test.
     const expectedSourcesAvailable = await totalPickerRowCount()
     expect.that(
-      'traces: wizard.pick.start span emitted with sources_available matching the shipped picker row count',
+      `traces: wizard.pick.start span emitted with sources_available=${expectedSourcesAvailable} (the shipped picker row count)`,
       startSpans[0]?.attributes,
       (v) =>
         v !== undefined &&
