@@ -42,6 +42,29 @@ for (const initial of [undefined, 'model_provider = "custom"\nmodel = "test"\n']
       stdout = ''
       await client.attach(attachCtx)
       assert.equal(JSON.parse(stdout).changed, false)
+
+      // The prose always names config.toml (a dry run that names no path
+      // cannot be inspected, and two release smokes assert it), but promises
+      // the removal only when there is a managed route to remove. On a fresh
+      // install - the common case under the new default - nothing is written,
+      // so announcing a removal would describe work that never happens.
+      let prose = ''
+      const proseCtx = /** @type {any} */ ({
+        stdout: { write: (/** @type {string} */ s) => { prose += s } },
+        stderr: { write: () => {} },
+      })
+      await client.attach({ ...proseCtx, dryRun: true })
+      assert.match(prose, /^\(dry-run\) Would attach Codex via /)
+      assert.ok(prose.includes(configPath), 'the file the attach concerns is always named')
+      assert.equal(prose.includes('gateway route'), false, 'no route here, so none is promised')
+
+      // With a route present the removal is announced.
+      await fs.mkdir(path.dirname(configPath), { recursive: true })
+      await fs.writeFile(configPath, prepareAttach('model_provider = "custom"\n', 4388, 'old').content)
+      prose = ''
+      await client.attach({ ...proseCtx, dryRun: true })
+      assert.ok(prose.includes(configPath))
+      assert.match(prose, /Would remove the managed gateway route/)
     } finally {
       await fs.rm(home, { recursive: true, force: true })
     }

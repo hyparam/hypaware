@@ -115,6 +115,14 @@ export function createCodexBackfillProvider(opts) {
   const backfill = isPlainObject(config?.backfill) ? config.backfill : {}
   /** @type {Map<string, { ino: number, size: number, mtimeMs: number }>} */
   const fingerprints = new Map()
+  // How many sessions each file is still holding back, so `sessions_deferred`
+  // is a level rather than a one-tick edge: the fingerprint skip below returns
+  // a deferred file to the loop unread, and an operator reading the latest
+  // scan record would otherwise be told nothing is owed. Keyed and pruned
+  // exactly like `fingerprints`, and only holds files that defer something,
+  // so it is bounded by disk and normally empty.
+  /** @type {Map<string, number>} */
+  const deferrals = new Map()
   // One `.hypignore` resolver per backfill run, holding its per-cwd cache for
   // the whole scan (LLP 0049 R6).
   // @ref LLP 0103 [implements]: the machine-local list is the resolver's second
@@ -161,7 +169,7 @@ export function createCodexBackfillProvider(opts) {
           })
         }
       }
-      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, fingerprints, ignoredSessions: opts.ignoredSessions })
+      yield* runCodexBackfill({ ctx, codexHome, sessionsDir, unsupportedLocations, clientName, resolver, fingerprints, deferrals, ignoredSessions: opts.ignoredSessions })
     },
   }
 }
@@ -232,6 +240,7 @@ function defaultUnsupportedLocations(homeDir, gatewayCapture = false) {
  *   resolver: UsagePolicyResolver,
  *   ignoredSessions?: Set<string>,
  *   fingerprints: Map<string, { ino: number, size: number, mtimeMs: number }>,
+ *   deferrals: Map<string, number>,
  * }} args
  * @returns {AsyncGenerator<BackfillItem | BackfillEvent>}
  */
@@ -270,6 +279,9 @@ async function* runCodexBackfill(args) {
   for (const filePath of args.fingerprints.keys()) {
     if (!present.has(filePath)) args.fingerprints.delete(filePath)
   }
+  for (const filePath of args.deferrals.keys()) {
+    if (!present.has(filePath)) args.deferrals.delete(filePath)
+  }
 
   for (const filePath of files) {
     if (ctx.signal?.aborted) break
@@ -285,6 +297,8 @@ async function* runCodexBackfill(args) {
         const prior = args.fingerprints.get(filePath)
         if (prior && prior.ino === stat.ino && prior.size === stat.size && prior.mtimeMs === stat.mtimeMs) {
           filesUnchanged += 1
+          // Unread, but still owing whatever it owed when it was last read.
+          sessionsDeferred += args.deferrals.get(filePath) ?? 0
           continue
         }
       }
@@ -302,6 +316,7 @@ async function* runCodexBackfill(args) {
       continue
     }
 
+    let fileDeferred = 0
     for (const session of sessions) {
       // @ref LLP 0403#backfill [implements]: key on the container, not thread ID.
       if (args.ignoredSessions?.has(session.sessionId)) {
@@ -340,13 +355,14 @@ async function* runCodexBackfill(args) {
       // usage: durable dedupe would otherwise keep the usage-less version.
       // A suffix left unsettled by a crashed client is never revisited by the
       // sweep (the file stops changing, so its fingerprint keeps matching), so
-      // count it: the log line is the only thing that can tell an operator a
-      // manual import is owed.
+      // count it: the scan record is the only thing that can tell an operator a
+      // manual import is owed. Carried in `deferrals` so the count survives the
+      // fingerprint skip and reads as a standing level, not a one-tick edge.
       // @ref LLP 0429#content [implements]
       const settled = ctx.sweep && session.settledItemCount !== undefined
         ? session.items.slice(0, session.settledItemCount)
         : session.items
-      if (settled.length < session.items.length) sessionsDeferred += 1
+      if (settled.length < session.items.length) fileDeferred += 1
 
       const exchange = projectedExchangeFromSession({
         session,
@@ -373,6 +389,14 @@ async function* runCodexBackfill(args) {
         // session container it may belong to.
         native_id: session.threadId,
       })
+    }
+    sessionsDeferred += fileDeferred
+    // Remember what this file still owes, so the next tick's fingerprint skip
+    // can report it without re-reading. Deleted when it settles, so a file
+    // that finished is not counted forever.
+    if (ctx.sweep) {
+      if (fileDeferred > 0) args.deferrals.set(filePath, fileDeferred)
+      else args.deferrals.delete(filePath)
     }
     // @ref LLP 0429#sweep [implements]: retry failed writes, and reread files changed during consumption on the next pass
     if (ctx.sweep && !ctx.dryRun && fingerprint && (ctx.itemsFailed ?? 0) === failedBefore) {

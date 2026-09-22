@@ -114,12 +114,14 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
     report.clientActions.actions.filter((a) => a.kind === 'attach').map((a) => [a.requestKey, a])
   )
   assert.equal(attach.get('claude')?.state, 'pending')
-  // A transcript-mode codex writes no marker, so the reconciler will never
-  // leave one and `pending` would be permanent - the same #544 rule the
-  // probe-less descriptors get. Gateway mode does write one, so it is a real
-  // pending target; both halves are pinned so the gate cannot quietly invert.
-  // @ref LLP 0429#default [tests]: only gateway capture has a marker to wait for
-  assert.equal(attach.get('codex')?.state, 'n/a')
+  // A transcript-mode codex is a REAL pending attach target, not `n/a`: the
+  // settings block it declines to write is not the marker this surface reads.
+  // `desired()` names it (it declares an `attach_probe`), the attach removes
+  // the managed provider block and succeeds, and the reconciler's own `done`
+  // marker lands - so `pending` resolves. Reporting `n/a` here would say the
+  // reconciler is a no-op over exactly the migration this release performs.
+  // @ref LLP 0229#status-derives-by-the-same-gate [tests]: status names the target the reconciler names, and no other
+  assert.equal(attach.get('codex')?.state, 'pending')
 
   await fs.writeFile(seedPath, JSON.stringify({
     version: 2,
@@ -135,6 +137,9 @@ test('mixed done/failed/pending/n-a reads cleanly off the marker store + config'
   const gatewayAttach = new Map(
     (gatewayReport.clientActions?.actions ?? []).filter((a) => a.kind === 'attach').map((a) => [a.requestKey, a])
   )
+  // Both halves pinned at `pending`: `capture_mode` decides what the attach
+  // writes, never whether the reconciler has an attach to run. A gate that
+  // reads capture mode here would show one of these two as `n/a`.
   assert.equal(gatewayAttach.get('codex')?.state, 'pending')
 })
 

@@ -265,7 +265,9 @@ test('a config.toml the sweep cannot read is reported, and capture still runs', 
 // A suffix left unsettled by a crashed client is deferred to a manual import
 // (LLP 0429 #content), and the sweep never revisits it: the file stops
 // changing, so its fingerprint keeps matching. The scan record is therefore
-// the only thing that can tell an operator an import is owed.
+// the only thing that can tell an operator an import is owed - and it has to
+// keep saying so, because the very skip that strands the file is what would
+// otherwise reset the count to zero on the next tick.
 // @ref LLP 0429#content [tests]: deferral is visible, not silent
 test('a deferred unfinished response is counted in the scan record', async () => {
   const env = await stageEnv()
@@ -285,6 +287,34 @@ test('a deferred unfinished response is counted in the scan record', async () =>
     await collect(provider.run(ctx))
     const scan = entries.findLast((e) => e.message === 'codex.backfill.scan_complete')
     assert.equal(scan?.fields?.sessions_deferred, 1)
+
+    // It is a level, not an edge. The second tick skips the file on its
+    // unchanged fingerprint and must still report the debt: an operator who
+    // greps the latest scan record is the reader this signal exists for, and
+    // a one-tick edge tells them nothing is owed for as long as it is true.
+    const second = runContext()
+    second.ctx.sweep = true
+    await collect(provider.run(second.ctx))
+    const rescan = second.entries.findLast((e) => e.message === 'codex.backfill.scan_complete')
+    assert.equal(rescan?.fields?.files_unchanged, 1, 'the file really was skipped unread')
+    assert.equal(rescan?.fields?.files_read, 0)
+    assert.equal(rescan?.fields?.sessions_deferred, 1, 'and still reports what it owes')
+
+    // It clears when the client comes back and settles the turn, so the level
+    // cannot latch on forever.
+    await fs.appendFile(
+      path.join(env.sessionsDir, 'rollout-crashed.jsonl'),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }) + '\n'
+    )
+    const third = runContext()
+    third.ctx.sweep = true
+    await collect(provider.run(third.ctx))
+    assert.equal(
+      third.entries.findLast((e) => e.message === 'codex.backfill.scan_complete')?.fields?.sessions_deferred,
+      0,
+      'a settled turn stops being owed'
+    )
+
     // A fully settled file reports none, so the counter means what it says.
     const clean = await stageEnv()
     try {

@@ -152,7 +152,7 @@ test('a marker mode carrying terminal control bytes is stripped before it is pri
  * (`hyp client attach codex`) is a no-op that cannot clear it. That is the
  * wrong-negative LLP 0229 exists to stop.
  *
- * @ref LLP 0429#default [tests]: transcript capture writes no marker
+ * @ref LLP 0429#status [tests]: a probe whose marker this capture mode can never write is n/a, not missing
  * @ref LLP 0229#status-derives-by-the-same-gate [tests]: no marker to write means unattachable, not unattached
  */
 test('a transcript-mode codex is attach-n/a, and gateway mode still demands its marker', async () => {

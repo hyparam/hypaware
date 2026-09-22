@@ -223,10 +223,25 @@ export async function activate(ctx) {
               return
             }
             // Transcript attach still reads and edits config.toml, so say
-            // which file: a dry-run that names no path cannot be inspected.
+            // which file: a dry-run that names no path cannot be inspected,
+            // and the claude line above names its settings file the same way.
+            //
+            // But only promise the removal when there is something to remove.
+            // On a fresh install - the common case now that transcript is the
+            // default - there is no managed route, nothing is written, and the
+            // file need not even exist; announcing a removal there describes
+            // work that will not happen.
             attachCtx.stdout.write(attachCtx.dryRun
-              ? `(dry-run) Would attach Codex via ${configPath}\n  Would capture Codex CLI and Desktop from their local rollout files and remove the managed gateway route.\n`
-              : `✓ Codex attached (${configPath})\n  Codex CLI and Desktop capture uses local rollout files; inference connects directly to your provider.\n`)
+              ? `(dry-run) Would attach Codex via ${configPath}\n`
+              : `✓ Codex attached (${configPath})\n`)
+            if (result.changed) {
+              attachCtx.stdout.write(attachCtx.dryRun
+                ? '  Would remove the managed gateway route.\n'
+                : '  Removed the managed gateway route.\n')
+            }
+            attachCtx.stdout.write(attachCtx.dryRun
+              ? '  Would capture Codex CLI and Desktop from their local rollout files.\n'
+              : '  Codex CLI and Desktop capture uses local rollout files; inference connects directly to your provider.\n')
             attachCtx.stdout.write('  Full tool definitions are unavailable. Restart existing Codex clients after changing capture mode.\n')
           },
           { component: 'plugin.codex' }

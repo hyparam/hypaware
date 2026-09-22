@@ -71,10 +71,15 @@ export const CODEX_PLUGIN_NAME = '@hypaware/codex'
  * it. That is precisely the wrong-negative LLP 0229 exists to stop, so a
  * transcript-mode codex is *unattachable*, not *unattached*.
  *
+ * Note which marker that argument is about: the client's own settings block.
+ * The reconciler's action record is a different marker, and a transcript
+ * attach does earn one, so this must not be read as "there is no attach to
+ * run" (LLP 0429 #status).
+ *
  * @param {PluginConfigInstance[] | undefined} plugins  The config's plugin list
  * @returns {'gateway' | 'transcript'}
  * @ref LLP 0429#default [implements]: absent or `transcript` is file capture; only `gateway` selects the provider writer
- * @ref LLP 0229#status-derives-by-the-same-gate [constrained-by]: a client with no marker to write is n/a, not "not attached"
+ * @ref LLP 0229#keys-on-the-descriptor-not-the-probe-result [constrained-by]: the gate widens by one config key, still never by a probe result
  */
 export function readCodexCaptureMode(plugins) {
   const config = plugins?.find((entry) => entry.name === CODEX_PLUGIN_NAME)?.config

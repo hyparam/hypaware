@@ -73,6 +73,27 @@ Explicitly disabled automatic import does not trigger the sweep migration;
 manual attach still does. Running Codex clients must restart to reload their
 provider configuration. The migration log records this requirement.
 
+## Attach state on the status surface {#status}
+
+The client manifest keeps its `attach_probe` on the managed provider header in
+both modes, because it is the only thing that finds a block an earlier mode
+left behind. Under the default that probe can never succeed: the attach it
+would confirm is the one that *removes* the block. `hyp status` must therefore
+report a transcript-mode Codex as attach **n/a**, not **not attached** - the
+wrong negative LLP 0229 exists to stop, whose repair here is a command that
+can never clear the warning it prints.
+
+This extends [LLP 0229 #keys-on-the-descriptor-not-the-probe-result](./0229-status-derives-attach-state-by-the-desired-gate.decision.md#keys-on-the-descriptor-not-the-probe-result)
+by exactly one config key: `attachable` is derived from the descriptor's probe
+*and* the capture mode that decides whether a marker can exist, still never
+from a probe result. The probe itself keeps running, so a stranded marker
+still reaches `client_attached_not_configured`.
+
+The gate stops at `attachable`. Whether the reconciler has an attach to run is
+a different question with a different marker: the action record, which a
+transcript attach does earn, since it removes a real provider block and
+succeeds. That target stays `pending` until it runs, in both capture modes.
+
 ## Verification {#verification}
 
 Traditional tests cover fresh and existing configuration, dry-run, gateway

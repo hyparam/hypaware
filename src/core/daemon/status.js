@@ -2024,7 +2024,7 @@ export async function collectHypAwareStatus(opts = {}) {
     // `client_attached_not_configured` reads: suppressing the read would
     // strand that marker silently. Only the *verdict* narrows.
     // @ref LLP 0229#status-derives-by-the-same-gate [implements]: a probe-less client is unattachable, not unattached
-    // @ref LLP 0429#default [implements]: transcript capture writes no marker, so attach state is n/a rather than missing
+    // @ref LLP 0429#status [implements]: a probe whose marker this capture mode can never write is n/a, not missing
     const probe = descriptor.attachProbe
       ? await probeClientAttachFromDescriptor({ descriptor, homeDir, env })
       : { attached: false }
@@ -2868,9 +2868,19 @@ function buildClientActionsReport({ status, config, hasCentral, clientDescriptor
     // will ever appear and `pending` would be permanent (#544). Same shape as
     // the `readAttachPolicy` sharing above: status must not derive a target the
     // reconciler would never name.
+    //
+    // Codex does NOT reach this gate, even in transcript mode. The marker
+    // `attachWritesNoMarker` speaks about is the client's own settings block;
+    // the marker THIS surface reads is the reconciler's action record, and a
+    // transcript attach earns one: `desired()` gates only on `attachProbe`
+    // (which codex declares), `perform()` removes the managed provider block
+    // and returns `status: ok`, so the `done` marker lands. `pending` is
+    // transient here, exactly as for every other client. Calling it `n/a`
+    // would report "the reconciler is a no-op" over precisely the migration
+    // this release performs, recreating - inverted - the status/reconciler
+    // disagreement the paragraph above exists to forbid.
     // @ref LLP 0229#status-derives-by-the-same-gate [implements]: a probe-less attach target is n/a, never pending
-    // @ref LLP 0429#default [implements]: a transcript-mode codex writes no marker either, so `pending` would be permanent
-    const inert = !descriptor.attachProbe || attachWritesNoMarker(clientName, config)
+    const inert = !descriptor.attachProbe
     const raw = entry.config?.attach
     const hasBlock = !!raw && typeof raw === 'object' && !Array.isArray(raw)
     if (hasBlock) {
