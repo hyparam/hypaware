@@ -76,7 +76,11 @@ export function createStartPiSource(deps) {
               !Array.isArray(raw.message_indices) || raw.message_indices.length !== raw.entries.length ||
               raw.message_indices.some(index => !Number.isInteger(index) || index < 0 || index > 2147483647)) {
             state.rejected++
-            state.refusals++
+            // Only a version this listener does not speak reads as a skewed
+            // extension. The same refusal covers every other shape failure,
+            // which a stray loopback probe produces too, and reporting those
+            // as a version problem points an operator at the wrong repair.
+            if (Number.isInteger(raw?.version) && raw.version !== 2) state.refusals++
             reject(req, res, 400, 'unsupported_batch')
             return
           }
@@ -115,7 +119,11 @@ export function createStartPiSource(deps) {
     }
     return {
       async status() {
-        const reported = state.refusals >= SKEW_REFUSALS ? SKEW_ERROR : state.lastError
+        // A skewed lane never produces the accepted batch that clears
+        // `lastError`, so reporting the skew alone would hide a capture
+        // failure for the rest of the run.
+        const reported = state.refusals < SKEW_REFUSALS ? state.lastError
+          : state.lastError ? `${state.lastError}; ${SKEW_ERROR}` : SKEW_ERROR
         return { state: 'ready', rowsWritten: state.rows, lastError: sessionIgnoreLoadError(ignored) ?? reported,
           details: { listen_host: bound.host, listen_port: bound.port, control_routes: [SESSION_IGNORE_ROUTE], batches_received: state.batches, rows_skipped: state.skipped, policy_drops: state.drops, rejected_requests: state.rejected, active_batches: busy ? 1 : 0 } }
       },
