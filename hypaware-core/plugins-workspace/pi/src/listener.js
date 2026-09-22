@@ -60,7 +60,7 @@ export function createStartPiSource(deps) {
             }
           } finally { clearTimeout(deadline) }
           let raw
-          try { raw = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { reject(req, res, 400, 'invalid_json'); return }
+          try { raw = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { state.rejected++; reject(req, res, 400, 'invalid_json'); return }
           const session = piSessionHeader(raw?.session)
           if (raw?.version !== 2 || !session || !Array.isArray(raw.entries) || raw.entries.length > 64 ||
               !Array.isArray(raw.message_indices) || raw.message_indices.length !== raw.entries.length ||

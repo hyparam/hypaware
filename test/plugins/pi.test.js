@@ -315,6 +315,13 @@ test('Pi listener records once, refuses browser requests and applies live policy
     assert.equal((await post({ ...raw, version: 1 })).status, 400)
     assert.equal((await post({ ...raw, message_indices: undefined })).status, 400)
     assert.equal((await post({ ...raw, message_indices: [0, 1, -1, 3] })).status, 400)
+    const beforeGarbage = Number((await source.status?.())?.details?.rejected_requests)
+    const garbage = await fetch(endpoint + '/entries', { method: 'POST', headers: { 'content-type': 'application/json' }, body: 'not json at all' })
+    assert.equal(garbage.status, 400)
+    assert.match(await garbage.text(), /invalid_json/)
+    const afterGarbage = await source.status?.()
+    assert.equal(Number(afterGarbage?.details?.rejected_requests), beforeGarbage + 1)
+    assert.equal(afterGarbage?.lastError, undefined)
     await post({ session_id: raw.session.id }, '/_hypaware/ignore/session')
     assert.equal((await post(raw)).status, 202)
     raw.session.id = 'other'
