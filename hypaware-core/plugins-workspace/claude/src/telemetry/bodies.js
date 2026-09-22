@@ -54,6 +54,24 @@ const GAP_BLOCK_TYPES = new Set([
 const removing = new Set()
 
 /**
+ * In-flight `readFile`s of a spool file, keyed by absolute path, shared by
+ * every overlapping caller naming the same `body_ref`. Without this, two
+ * overlapping reads each issue their own `readFile`, and the one that
+ * resolves second can reach the filesystem only after the first has already
+ * read, classified, and (for an unparseable body) deleted the file: that
+ * `readFile` sees ENOENT for a file that was never legitimately missing, so
+ * it counts as `missing` instead of `unparseable`, and `removing` (which
+ * only arbitrates the *delete*) cannot catch it because by then the delete
+ * has already settled. Sharing the read itself closes the race instead of
+ * narrowing its window: every overlapping caller gets the exact same bytes
+ * or the exact same rejection, decided once, before `removing` ever needs to
+ * arbitrate anything. Entries leave the map once the read settles, so it
+ * never outgrows the reads in flight.
+ * @type {Map<string, Promise<Buffer>>}
+ */
+const reading = new Map()
+
+/**
  * Read the spooled body files a batch of events references.
  *
  * Only files inside the spool directory are touched: `body_ref` arrives
@@ -106,10 +124,28 @@ export async function loadSpooledBodies(events, opts) {
       refused.push(ref)
       continue
     }
+    // Claimed synchronously, before any `await`: whichever overlapping call
+    // for this `file` runs first creates and stores the read; a second call
+    // arriving before it resolves finds the same promise already in the map
+    // and reuses it instead of racing its own `readFile` against the first
+    // call's eventual `unlink`.
+    let pending = reading.get(file)
+    if (!pending) {
+      pending = fs.readFile(file)
+      reading.set(file, pending)
+      // A rejection (a missing file is the common case) is still handled by
+      // the caller below via its own `await pending`; this derived promise
+      // exists only for the cleanup side effect, so its own rejection is
+      // swallowed to avoid an unhandledRejection for a failure already
+      // being handled.
+      pending.finally(() => {
+        if (reading.get(file) === pending) reading.delete(file)
+      }).catch(() => {})
+    }
     /** @type {Buffer} */
     let raw
     try {
-      raw = await fs.readFile(file)
+      raw = await pending
     } catch {
       // Already projected, already evicted, or never written: the
       // content is recoverable from the transcript either way.
