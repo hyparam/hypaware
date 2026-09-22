@@ -77,9 +77,10 @@ export function createSinkDriver(opts) {
       // instance by the name `instantiate` validated rather than by a
       // property its owner can replace (issue #1976).
       //
-      // The name read only. `handle.config` on the next line is the same
-      // kind of live property, still read off the handle and still ahead of
-      // the due check, so a tick can still be lost to one (issue #2059).
+      // Only the name is fixed here. `handle.config` on the `schedule` line
+      // below is the same kind of live property, still read off the handle
+      // and still ahead of the due check, so a tick can still be lost to one
+      // (issue #2059).
       const instance = sinkInstanceName(handle)
       if (tickOpts.sinkInstance && instance !== tickOpts.sinkInstance) continue
       const schedule = typeof handle.config?.schedule === 'string' ? handle.config.schedule : '* * * * *'
