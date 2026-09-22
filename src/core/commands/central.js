@@ -16,6 +16,7 @@ import {
   readInstalledAssets,
 } from '../config/action_reconciler.js'
 import { originOf, readCentralEnrollment, seedLoginGateway } from '../remote/gateway_seed.js'
+import { sameServer } from '../remote/builtin_remotes.js'
 import { seedClientSyncStoreIfAbsent } from '../usage-policy/client_sync.js'
 import { buildClientDescriptorMap, detachClientViaCore } from './clients.js'
 import { runDaemonInstall } from './daemon.js'
@@ -219,13 +220,13 @@ export async function enrollCentralSink({ ctx, url, gateway, noDaemon, compact =
   if (unreadable) {
     throw new Error(`the central config layer (${unreadable.configPath}) cannot be read, so this machine's enrollment cannot be verified: ${unreadable.message}`)
   }
-  const elsewhere = connectedOrigins.find((o) => o !== targetOrigin)
+  const elsewhere = connectedOrigins.find((o) => !sameServer(o, url))
   if (elsewhere) return { provisioned: false, connectedElsewhere: elsewhere, daemonCode: 0 }
 
   // Only actually write the seed when no same-origin central sink exists yet
   // (a same-origin sink present means a racing same-server login already
   // provisioned it; fall through to identity-seeding it, which is idempotent).
-  if (targetOrigin === null || !connectedOrigins.includes(targetOrigin)) {
+  if (targetOrigin === null || !connectedOrigins.some((o) => sameServer(o, url))) {
     // `identity: {}` (not absent): the central plugin's own validator requires
     // an identity object (`central.identity is required`), but bootstrap_token
     // is optional, the login-minted gateway seeded into identity.json is the

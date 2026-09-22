@@ -32,6 +32,13 @@ This keeps the local-first default intact: a bare `hyp <verb>` still runs
 locally. The built-in only changes what a target *name* resolves to, never
 whether a plain command goes remote.
 
+> **Note (2026-09-22):** the built-in's host is now `https://api.hypaware.ai`;
+> `hypaware.hyperparam.app` remains an alias the server still answers on, and
+> `BUILTIN_ORIGIN_ALIASES` folds it into the built-in wherever the client asks
+> whether two URLs name the same server (the login gate, the seed match, purge
+> dedup, sync naming), so an install enrolled under the old host is not read
+> as connected elsewhere. The decision is unchanged, only the shipped value moved.
+
 > **Extended-by: [LLP 0084](./0084-mcp-endpoint-from-base.decision.md).** This
 > base URL is not the MCP endpoint; the client derives `<base>/v1/mcp` for the
 > actual tool calls (LLP 0033 originally documented the url as the full endpoint,

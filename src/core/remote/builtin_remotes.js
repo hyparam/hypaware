@@ -26,6 +26,51 @@ export const BUILTIN_REMOTES = {
 export const BUILTIN_DEFAULT_REMOTE = 'hyperparam'
 
 /**
+ * Hosts a built-in target answered on before it moved, keyed by the old origin.
+ * An install that enrolled or logged in under one of these is connected to
+ * that built-in's server, not to a second server, so every "same server"
+ * comparison (the login gate, the seed match, purge dedup, sync naming) reads
+ * origins through this table. The server still answers on each alias, so a
+ * sink or credential saved under the old host keeps working as it is.
+ *
+ * @type {Record<string, string>}
+ */
+export const BUILTIN_ORIGIN_ALIASES = {
+  'https://hypaware.hyperparam.app': 'https://api.hypaware.ai',
+}
+
+/**
+ * The origin of `url`, read through {@link BUILTIN_ORIGIN_ALIASES}; null when
+ * `url` does not parse.
+ *
+ * @param {string} url
+ * @returns {string | null}
+ */
+export function canonicalOrigin(url) {
+  /** @type {string} */
+  let origin
+  try {
+    origin = new URL(url).origin
+  } catch {
+    return null
+  }
+  return BUILTIN_ORIGIN_ALIASES[origin] ?? origin
+}
+
+/**
+ * True when both URLs reach the same server: equal origins, or origins the
+ * alias table folds together. Two unparseable URLs are never the same server.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function sameServer(a, b) {
+  const origin = canonicalOrigin(a)
+  return origin !== null && origin === canonicalOrigin(b)
+}
+
+/**
  * The effective target registry: shipped built-ins with the user's
  * `query.remotes` layered on top, so a user entry of the same name repoints
  * (or shadows) a built-in.

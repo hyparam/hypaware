@@ -9,7 +9,7 @@ import { parseCoreCommandArgv } from './command_args.js'
 import { hasAppliedCentralConfig } from '../config/apply.js'
 import { defaultConfigPath } from '../config/schema.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { BUILTIN_REMOTES, effectiveDefaultRemote } from '../remote/builtin_remotes.js'
+import { BUILTIN_REMOTES, effectiveDefaultRemote, sameServer } from '../remote/builtin_remotes.js'
 import {
   attachWithRefresh,
   deriveIdentityBase,
@@ -704,7 +704,9 @@ async function runBrowserLogin(name, { org, host, noBrowser, noForward, noDaemon
     return { exitCode: 2, reason: 'connected_elsewhere' }
   }
   const connectedOrigins = enrollment.origins
-  const alreadyEnrolled = targetOrigin !== null && connectedOrigins.includes(targetOrigin)
+  // Same server, not same origin: a machine enrolled under a host the built-in
+  // target has since moved away from is enrolled to this server (BUILTIN_ORIGIN_ALIASES).
+  const alreadyEnrolled = connectedOrigins.some((origin) => sameServer(origin, entry.url))
   if (!alreadyEnrolled && connectedOrigins.length > 0) {
     ctx.stderr.write(`hyp remote login: this machine is connected to ${connectedOrigins[0]}\n`)
     ctx.stderr.write("  disconnect first ('hyp leave'), then log in to the new server\n")

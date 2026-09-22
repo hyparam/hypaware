@@ -276,6 +276,25 @@ test('a signed-in built-in remote is included without adding it to config', asyn
   assert.equal(calls, 1)
 })
 
+test('a sink saved under the built-in target\'s previous host is the built-in target, purged once with its credential', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-alias-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const { ctx, output } = fixture(root)
+  ctx.config = /** @type {any} */ ({ sinks: { central: { plugin: '@hypaware/central', config: { url: 'https://hypaware.hyperparam.app' } } } })
+  ctx.env.HYP_REMOTE_TOKEN_HYPERPARAM = 'test-token'
+  const oldFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = oldFetch })
+  let calls = 0
+  globalThis.fetch = async url => {
+    assert.equal(String(url), 'https://api.hypaware.ai/v1/sessions/purge')
+    calls++
+    return Response.json({ status: 'completed', session_id: 'delete' })
+  }
+  assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], ctx), 0)
+  assert.equal(calls, 1)
+  assert.deepEqual(Object.keys(JSON.parse(output()).remotes), ['hyperparam'])
+})
+
 
 test('purge covers retired epochs and graph identifiers without deleting other orgs or shared nodes', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-retired-'))

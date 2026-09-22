@@ -11,7 +11,7 @@ import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
 import { purgeCache } from '../cache/purge.js'
 import { createSessionPurgeStore } from '../cache/session-purges.js'
-import { effectiveRemotes } from '../remote/builtin_remotes.js'
+import { canonicalOrigin, effectiveRemotes } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, readCredentials, remoteTokenEnvVar, resolveAccessJwt } from '../remote/credentials.js'
 import { captureSpoolRoot, sweepCaptureSpool } from '../capture_spool.js'
 import { createUsagePolicyResolver, localOnlyListPath } from '../usage-policy/index.js'
@@ -300,14 +300,22 @@ async function purgeRemotes(ctx, parsed, stateDir) {
       targets.set(name, remote.url)
     }
   }
-  const endpoints = new Set([...targets.values()].map(url => deriveMcpEndpoint(url)))
-  const namesByEndpoint = new Map(Object.entries(registry).map(([name, remote]) => [deriveMcpEndpoint(remote.url), name]))
+  // Dedup key: the MCP endpoint with its origin read through the built-in
+  // alias table, so a sink saved under a host the built-in target has since
+  // moved away from is the same target, purged once with that target's credential.
+  /** @param {string} url */
+  const endpointKey = (url) => {
+    const origin = canonicalOrigin(url)
+    return origin === null ? url : `${origin}${new URL(deriveMcpEndpoint(url)).pathname}`
+  }
+  const endpoints = new Set([...targets.values()].map(endpointKey))
+  const namesByEndpoint = new Map(Object.entries(registry).map(([name, remote]) => [endpointKey(remote.url), name]))
   // Enrollment may exist without a human login. Include it so missing
   // credentials become an explicit incomplete purge, never a local success.
   for (const [name, sink] of Object.entries(ctx.config?.sinks ?? {})) {
     if (!('plugin' in sink) || sink.plugin !== '@hypaware/central' || typeof sink.config?.url !== 'string') continue
     const url = sink.config.url
-    const endpoint = deriveMcpEndpoint(url)
+    const endpoint = endpointKey(url)
     if (endpoints.has(endpoint)) continue
     targets.set(namesByEndpoint.get(endpoint) ?? `sink:${name}`, url)
     endpoints.add(endpoint)

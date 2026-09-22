@@ -17,6 +17,7 @@ import { verbToCommand } from '../../src/core/cli/verb_command.js'
 import { runMcp } from '../../src/core/commands/mcp.js'
 import { runMcpProxy } from '../../src/core/mcp/proxy.js'
 import { deriveMcpEndpoint, writeSession, writeToken } from '../../src/core/remote/credentials.js'
+import { canonicalOrigin, sameServer } from '../../src/core/remote/builtin_remotes.js'
 
 const cmd = verbToCommand(querySqlVerb)
 
@@ -85,6 +86,16 @@ function verbCtx(hypHome, url) {
 function lastMcpUrl(urls) {
   return urls[urls.length - 1]
 }
+
+test('sameServer folds the built-in target\'s previous host into its current one', () => {
+  assert.equal(canonicalOrigin('https://hypaware.hyperparam.app/v1/mcp'), 'https://api.hypaware.ai')
+  assert.equal(canonicalOrigin('https://hyp.internal/mcp'), 'https://hyp.internal')
+  assert.equal(canonicalOrigin('not a url'), null)
+  assert.equal(sameServer('https://hypaware.hyperparam.app', 'https://api.hypaware.ai/v1/mcp'), true)
+  assert.equal(sameServer('https://hyp.internal/mcp', 'https://hyp.internal/'), true)
+  assert.equal(sameServer('https://hyp.internal', 'https://elsewhere.example'), false)
+  assert.equal(sameServer('not a url', 'not a url'), false)
+})
 
 test('deriveMcpEndpoint: derive-from-base and back-compat forms', () => {
   // A base URL gets /v1/mcp appended.
