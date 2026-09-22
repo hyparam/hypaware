@@ -50,6 +50,8 @@ import { Attr, getLogger } from '../observability/index.js'
  * A partition whose mutation guard another process holds is recorded in
  * `partitionsSkipped` and the run continues; the caller owes the operator that
  * list and a failure, because those partitions may still hold matching rows.
+ * A later non-busy failure still aborts the run, and carries the skips
+ * recorded so far out with it; read them back with {@link purgeSkipsFrom}.
  *
  * @ref LLP 0104 [implements]: the destructive verb's cache-only row removal, keyed off targets not marking events
  * @param {{ cacheRoot: string, target: PurgeTarget, onCleanupQueued?: (id: string) => Promise<void>, deps?: { realpathSync?: (p: string) => string, statSync?: (p: string) => { dev: number, ino: number } } }} args
@@ -128,7 +130,14 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
       // in discovery order. Carrying on is what the flush path already does
       // with its tables (LLP 0333 #every-table-before-failure). Any other
       // failure still aborts the run.
-      if (!isPartitionMutationBusy(error)) throw error
+      if (!isPartitionMutationBusy(error)) {
+        // The skip list is returned on completion alone, so this throw is
+        // about to discard its only copy. Carry it out on the error: those
+        // partitions may still hold matching rows, and the caller owes the
+        // operator that whether the run finished or not.
+        if (error instanceof Error) /** @type {{ partitionsSkipped?: { partition: string, error: string }[] }} */ (error).partitionsSkipped = partitionsSkipped
+        throw error
+      }
       partitionsSkipped.push({ partition: part.path, error: error.message })
       // The dataset, never the partition path: a log is dev telemetry (LLP 0080
       // #telemetry), and the path reaches the operator on the command's stderr.
@@ -151,6 +160,18 @@ export async function purgeCache({ cacheRoot, target, deps, onCleanupQueued }) {
     retainedAliasCwds: [...retainedAliases.cwds],
     partitionsSkipped,
   }
+}
+
+/**
+ * The busy-partition skips a {@link purgeCache} run had already recorded when
+ * a non-busy failure aborted it, empty for any other thrown value.
+ *
+ * @param {unknown} error
+ * @returns {{ partition: string, error: string }[]}
+ */
+export function purgeSkipsFrom(error) {
+  const skipped = /** @type {{ partitionsSkipped?: unknown } | null | undefined} */ (error)?.partitionsSkipped
+  return Array.isArray(skipped) ? skipped : []
 }
 
 /**

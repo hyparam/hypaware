@@ -9,7 +9,7 @@ import { parseCommandArgv, STRICT_SHORT_FLAGS } from '../cli/verb_codec.js'
 import { isTty } from '../cli/stdio.js'
 import { Attr, getLogger, withSpan } from '../observability/index.js'
 import { readObservabilityEnv } from '../observability/env.js'
-import { purgeCache } from '../cache/purge.js'
+import { purgeCache, purgeSkipsFrom } from '../cache/purge.js'
 import { createSessionPurgeStore } from '../cache/session-purges.js'
 import { BUILTIN_ORIGIN_ALIASES, effectiveRemotes } from '../remote/builtin_remotes.js'
 import { attachWithRefresh, deriveIdentityBase, deriveMcpEndpoint, readCredentials, remoteTokenEnvVar, resolveAccessJwt } from '../remote/credentials.js'
@@ -111,10 +111,19 @@ export async function runPurge(argv, ctx) {
       { component: 'cache' }
     )
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
+    // An Error may carry an empty message, and `localError` is what gates the
+    // success line, the receipt's nulls and the exit code below. Without the
+    // no-remotes early return to catch that run regardless, an empty message
+    // would read as no error at all: exit 0 over rows still on disk.
+    const thrown = err instanceof Error ? err.message : String(err)
+    const message = thrown || (err instanceof Error ? err.name : 'unknown error')
     localError = message
+    // The abort replaced the summary, so the skips it had already recorded
+    // reach the operator only from here. A skipped partition may still hold
+    // the rows the user asked to be gone, so the run below reports them and
+    // fails, exactly as a completed run with skips does.
+    summary = { ...summary, partitionsSkipped: purgeSkipsFrom(err) }
     ctx.stderr.write(`error: purge failed: ${message}\n`)
-    if (!remotes.size) return 1
   }
 
   // A partition whose guard another process held was left alone and may still
@@ -205,7 +214,9 @@ export async function runPurge(argv, ctx) {
     ctx.stdout.write(JSON.stringify({
       rowsDeleted: localError ? null : summary.rowsDeleted,
       partitionsAffected: localError ? null : summary.partitionsAffected,
-      partitionsSkipped: localError ? null : summary.partitionsSkipped,
+      // Not nulled with the counts above: a total from an aborted run is a
+      // number nobody finished computing, while a skip is one this run saw.
+      partitionsSkipped: summary.partitionsSkipped,
       resurrectable,
       retainedAliasRows: summary.retainedAliasRows,
       retainedAliasCwds: retainedAliases,
