@@ -111,7 +111,12 @@ export async function runPurge(argv, ctx) {
       { component: 'cache' }
     )
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
+    // An Error may carry an empty message, and `localError` is what gates the
+    // success line, the receipt's nulls and the exit code below. Without the
+    // no-remotes early return to catch that run regardless, an empty message
+    // would read as no error at all: exit 0 over rows still on disk.
+    const thrown = err instanceof Error ? err.message : String(err)
+    const message = thrown || (err instanceof Error ? err.name : 'unknown error')
     localError = message
     // The abort replaced the summary, so the skips it had already recorded
     // reach the operator only from here. A skipped partition may still hold

@@ -546,3 +546,46 @@ test('a non-busy failure after a busy skip still names the skipped partition', a
     assert.ok(!JSON.stringify(record.attributes).includes(root), 'telemetry carries no local filesystem path')
   }
 })
+
+// Dropping `runPurge`'s no-remotes early return (#2044) left `localError`'s
+// truthiness as the only thing between a failed local purge and the success
+// line, so an Error carrying an empty message read as a clean run: exit 0, a
+// `purged 0 rows` claim, and a receipt saying `completed`.
+test('a local failure with an empty error message still fails and claims nothing', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'session-purge-empty-message-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  /** @param {ReturnType<typeof fixture>} made */
+  const failing = (made) => {
+    made.ctx.storage = new Proxy(made.storage, {
+      get(target, key) {
+        if (key === 'flushAll') return async () => { throw new Error('') }
+        const value = Reflect.get(target, key)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    return made
+  }
+  const seed = async (/** @type {any} */ storage) => {
+    await storage.appendRowsToPartition('events', ['source=a'], columns, [{ session_id: 'delete', body: 'secret' }])
+    await storage.flushAll({ force: true })
+  }
+
+  const plain = failing(fixture(root))
+  await seed(plain.storage)
+  assert.equal(await runPurge(['--session', 'delete', '--yes'], plain.ctx), 1, 'a failed purge exits 1')
+  assert.doesNotMatch(plain.output(), /purged \d+ row/, 'nothing claims a completed deletion')
+  assert.match(plain.error(), /purge failed: \S/, 'the failure is still named on stderr')
+
+  const json = failing(fixture(path.join(root, 'json')))
+  await seed(json.storage)
+  assert.equal(await runPurge(['--session', 'delete', '--yes', '--json'], json.ctx), 1)
+  const receipt = JSON.parse(json.output())
+  assert.equal(receipt.rowsDeleted, null, 'an aborted run reports no row total')
+  assert.equal(receipt.local.status, 'incomplete')
+  assert.ok(receipt.local.error, 'the receipt names a failure even with no message to name it by')
+
+  // The point of the exit code: the row the user asked to be gone is still here.
+  const rows = []
+  for await (const row of scanRowsFromTable(resolveIcebergDir(json.storage.cacheTablePath('events', ['source=a'])))) rows.push(row.body)
+  assert.deepEqual(rows, ['secret'], 'targeted rows survived, so no channel may report success')
+})
