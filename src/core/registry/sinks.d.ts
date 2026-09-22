@@ -14,3 +14,11 @@ export type {
 } from '../../../hypaware-plugin-kernel-types.d.ts'
 
 export function createSinkRegistry(): import('./types.d.ts').ExtendedSinkRegistry
+
+/**
+ * The instance name the registry keyed `handle` under, out of the kernel's
+ * own record rather than off the handle, whose `instanceName` the owning
+ * plugin is free to replace. A handle this module did not build is read the
+ * way it always was, guarded: an unreadable or non-string name answers `''`.
+ */
+export function sinkInstanceName(handle: import('./types.d.ts').ExtendedSinkHandle): string

@@ -27,6 +27,7 @@ import { discoverBundledPlugins } from '../runtime/bundled.js'
 import { detectShadowedPlugins } from '../runtime/boot.js'
 import { buildPluginCatalog } from '../plugin_catalog.js'
 import { compareStrings } from '../util/compare_strings.js'
+import { sinkInstanceName } from '../registry/sinks.js'
 import { classifyClientProvenance } from '../cli/wizard/provenance.js'
 import { isEphemeralBinPath } from '../cli/global_install.js'
 import { describeSelfUpdate } from '../update/self_update.js'
@@ -1843,8 +1844,11 @@ export async function collectHypAwareStatus(opts = {}) {
   /** @type {Map<string, { plugin: string, kind: string }>} */
   const handleByInstance = new Map()
   if (opts.runtime?.sinks) {
+    // The registry's key, not the handle's own `instanceName`: nothing on
+    // this path catches, so an owner's accessor took `hyp status` down whole
+    // (issue #1976).
     for (const handle of opts.runtime.sinks.listHandles()) {
-      handleByInstance.set(handle.instanceName, { plugin: handle.plugin, kind: handle.kind })
+      handleByInstance.set(sinkInstanceName(handle), { plugin: handle.plugin, kind: handle.kind })
     }
   }
   if (config?.sinks) {
